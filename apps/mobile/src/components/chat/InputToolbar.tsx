@@ -15,7 +15,15 @@ import {
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { OptionSheet, ProviderIcon, Text, type OptionSheetItem } from '@/components/ui'
+import {
+  glassEdge,
+  glassFill,
+  glassFillStrong,
+  OptionSheet,
+  ProviderIcon,
+  Text,
+  type OptionSheetItem,
+} from '@/components/ui'
 
 import {
   SANDBOX_DEFAULT_VALUE,
@@ -382,9 +390,9 @@ const styles = StyleSheet.create((theme) => ({
   providerToggle: {
     flexDirection: 'row',
     borderRadius: theme.radius.full,
-    borderWidth: 1,
-    borderColor: theme.colors.border.subtle,
-    backgroundColor: theme.colors.surface[1],
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: glassEdge(theme.isDark),
+    backgroundColor: glassFill(theme.isDark),
     padding: theme.spacing[0.5],
   },
   providerSegment: {
@@ -396,7 +404,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
   },
   providerSegmentActive: {
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFillStrong(theme.isDark),
   },
   chip: {
     flexDirection: 'row',
@@ -406,7 +414,9 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 34,
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[1.5],
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: glassEdge(theme.isDark),
     borderRadius: theme.radius.full,
     // Chips shrink so a long mode label never pushes the send button off-row.
     flexShrink: 1,

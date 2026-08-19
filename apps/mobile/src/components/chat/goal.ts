@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 import type { ThreadGoal } from '@falcondeck/client-core'
 
 /** Status names as the daemon spells them, labelled as desktop labels them. */
@@ -60,4 +62,36 @@ export function goalSupportsBudget(provider: string): boolean {
 
 export function goalCanPause(goal: ThreadGoal, provider: string): boolean {
   return goalSupportsBudget(provider) && goal.status !== 'complete'
+}
+
+/**
+ * Elapsed wall-clock time since the goal started ("42s", "12m 05s",
+ * "1h 07m"), or null when the daemon didn't stamp a start.
+ */
+export function formatGoalElapsed(
+  startedAt: string | null | undefined,
+  nowMs: number = Date.now(),
+): string | null {
+  if (!startedAt) return null
+  const startMs = Date.parse(startedAt)
+  if (!Number.isFinite(startMs)) return null
+  const totalSeconds = Math.max(0, Math.floor((nowMs - startMs) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, '0')}s`
+  return `${seconds}s`
+}
+
+/** The elapsed label, re-rendered every second while the goal runs. */
+export function useGoalElapsedLabel(startedAt: string | null | undefined): string | null {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!startedAt) return
+    setNowMs(Date.now())
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [startedAt])
+  return formatGoalElapsed(startedAt, nowMs)
 }

@@ -26,6 +26,23 @@ import type {
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
+// Prefetch waits this long after the first snapshot before its first fetch:
+// users open a thread right after launch, and the prefetch must not compete
+// with (or queue ahead of) that foreground load.
+const RECENT_THREAD_PREFETCH_INITIAL_DELAY_MS = 1_000;
+// Foreground tail loads bump this counter for their duration. Prefetch polls
+// it between fetches and stands down while one is in flight, so a background
+// warm-up never delays the thread the user just opened.
+let activeForegroundDetailLoads = 0;
+const FOREGROUND_DETAIL_LOAD_POLL_MS = 200;
+
+const waitForForegroundDetailLoads = async () => {
+  while (activeForegroundDetailLoads > 0) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, FOREGROUND_DETAIL_LOAD_POLL_MS),
+    );
+  }
+};
 
 // Lets React paint once before send-side payload work continues. Image
 // attachments travel as base64 data URLs; encrypting and serialising those
@@ -330,6 +347,10 @@ export function useSessionActions() {
         return null;
       }
 
+      const trackForegroundLoad = !options?.older;
+      if (trackForegroundLoad) {
+        activeForegroundDetailLoads += 1;
+      }
       try {
         const detail = normalizeThreadDetail(
           await relay._callRpc<ThreadDetail>(
@@ -407,6 +428,10 @@ export function useSessionActions() {
             );
         }
         return null;
+      } finally {
+        if (trackForegroundLoad) {
+          activeForegroundDetailLoads -= 1;
+        }
       }
     },
     [],
@@ -434,11 +459,19 @@ export function useSessionActions() {
       )
       .slice(0, RECENT_THREAD_PREFETCH_LIMIT);
 
+    await new Promise((resolve) =>
+      setTimeout(resolve, RECENT_THREAD_PREFETCH_INITIAL_DELAY_MS),
+    );
+
     for (const thread of candidates) {
+      // Yield to any foreground load: prefetch must never queue ahead of the
+      // thread the user just opened, on the wire or on the daemon.
+      await waitForForegroundDetailLoads();
       // Re-check each iteration: a foreground load, cache write, or thread
       // selection may have populated (or taken over) this thread meanwhile.
       const current = useSessionStore.getState();
       if (current.threadItems[thread.id]?.length) continue;
+      if (current.selectedThreadId === thread.id) continue;
       try {
         const detail = normalizeThreadDetail(
           await relay._callRpc<ThreadDetail>(

@@ -1,5 +1,10 @@
 export { useRelayStore } from './relay-store'
 export {
+  logConnection,
+  openConnectionDebug,
+  useConnectionLogStore,
+} from './connection-log-store'
+export {
   persistSessionCacheNow,
   useSessionStore,
   useGroups,

@@ -116,6 +116,14 @@ describe('GoalSheet with a goal', () => {
     expect(textOf(r)).toContain('12k of 100k tokens')
   })
 
+  it('shows how long the goal has been running', () => {
+    const startedAt = new Date(Date.now() - 3_700_000).toISOString()
+    const r = renderComponent(
+      <GoalSheet goal={goal({ started_at: startedAt })} provider="codex" {...sheetDefaults} />,
+    )
+    expect(textOf(r)).toContain('Running for 1h 01m')
+  })
+
   it('offers Pause on Codex and Resume once paused', () => {
     const active = renderComponent(<GoalSheet goal={goal()} provider="codex" {...sheetDefaults} />)
     expect(textOf(active)).toContain('Pause')
@@ -129,7 +137,7 @@ describe('GoalSheet with a goal', () => {
   it('does not offer Pause on Claude', () => {
     const r = renderComponent(<GoalSheet goal={goal()} provider="claude" {...sheetDefaults} />)
     expect(textOf(r)).not.toContain('Pause')
-    expect(textOf(r)).toContain('Clear goal')
+    expect(textOf(r)).toContain('Stop goal')
   })
 
   it('pauses through the status callback, keeping the objective', async () => {
@@ -156,7 +164,7 @@ describe('GoalSheet with a goal', () => {
       />,
     )
     await act(async () => {
-      buttonLabelled(r, 'Clear goal').props.onPress()
+      buttonLabelled(r, 'Stop goal').props.onPress()
     })
     expect(onClearGoal).toHaveBeenCalled()
     expect(onClose).toHaveBeenCalled()
@@ -168,12 +176,17 @@ describe('GoalBanner', () => {
     expect(renderComponent(<GoalBanner goal={null} onPress={vi.fn()} />).toJSON()).toBeNull()
   })
 
-  it('shows the objective and status, and opens the sheet on press', () => {
+  it('shows the goal word and elapsed time, and opens the sheet on press', () => {
     const onPress = vi.fn()
-    const r = renderComponent(<GoalBanner goal={goal({ status: 'paused' })} onPress={onPress} />)
+    const startedAt = new Date(Date.now() - 65_000).toISOString()
+    const r = renderComponent(
+      <GoalBanner goal={goal({ started_at: startedAt })} onPress={onPress} />,
+    )
 
-    expect(textOf(r)).toContain('All tests pass and lint is clean')
-    expect(textOf(r)).toContain('Paused')
+    expect(textOf(r)).toContain('Goal')
+    expect(textOf(r)).toContain('1m 05s')
+    // The objective itself lives behind the tap, not in the bubble.
+    expect(textOf(r)).not.toContain('All tests pass and lint is clean')
 
     act(() => {
       r.root.findByType('Pressable' as never).props.onPress()
@@ -181,10 +194,25 @@ describe('GoalBanner', () => {
     expect(onPress).toHaveBeenCalled()
   })
 
+  it('falls back to the status label when the daemon stamped no start time', () => {
+    const r = renderComponent(<GoalBanner goal={goal({ status: 'paused' })} onPress={vi.fn()} />)
+    expect(textOf(r)).toContain('Paused')
+  })
+
   it('reads the whole goal out to VoiceOver in one label', () => {
     const r = renderComponent(<GoalBanner goal={goal()} onPress={vi.fn()} />)
     expect(r.root.findByType('Pressable' as never).props.accessibilityLabel).toBe(
       'Goal: All tests pass and lint is clean. Active.',
+    )
+  })
+
+  it('includes the running time in the VoiceOver label', () => {
+    const startedAt = new Date(Date.now() - 65_000).toISOString()
+    const r = renderComponent(
+      <GoalBanner goal={goal({ started_at: startedAt })} onPress={vi.fn()} />,
+    )
+    expect(r.root.findByType('Pressable' as never).props.accessibilityLabel).toBe(
+      'Goal: All tests pass and lint is clean, running for 1m 05s. Active.',
     )
   })
 })

@@ -29,6 +29,7 @@ import {
 
 import { Text } from "@/components/ui";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { MessageActions } from "./MessageActions";
 import { useExternalUrl } from "./useExternalUrl";
 
 type AssistantMessage = Extract<
@@ -414,6 +415,9 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
         <MemoryCitationBlock citation={item.memory_citation} />
       ) : null}
       <View style={styles.actions} accessible={false}>
+        {lifecycle === "complete" && item.text.trim() ? (
+          <MessageActions text={item.text} readAloudKey={item.id} />
+        ) : null}
         {lifecycle === "interrupted" ? (
           <View
             style={styles.status}

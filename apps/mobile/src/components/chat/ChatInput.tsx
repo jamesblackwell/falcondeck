@@ -7,7 +7,7 @@ import {
   useState,
   type RefObject,
 } from 'react'
-import { View, TextInput, Pressable } from 'react-native'
+import { View, TextInput, Pressable, useWindowDimensions } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Mic, Plus, Send, Square, Target } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -27,7 +27,14 @@ import {
   type SkillSummary,
 } from '@falcondeck/client-core'
 
-import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
+import {
+  GlassSurface,
+  glassEdge,
+  glassFill,
+  OptionSheet,
+  Text,
+  type OptionSheetItem,
+} from '@/components/ui'
 
 import {
   getPendingVoiceRecording,
@@ -95,6 +102,11 @@ interface ChatInputProps {
 
 const MIN_INPUT_HEIGHT = 48
 const MAX_INPUT_HEIGHT = 280
+// A tall draft (plus attachment previews and the footer) can grow the card
+// past the space left above the keyboard; once the message list has shrunk
+// to nothing the overflow — the send button — slides under the keyboard.
+// Cap growth to a fraction of the window so the composer always fits.
+const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.25
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
 const CONTROL_SIZE = 40
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
@@ -140,6 +152,14 @@ export const ChatInput = memo(function ChatInput({
   textInputRef,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
+  const { height: windowHeight } = useWindowDimensions()
+  const maxInputHeight = Math.max(
+    MIN_INPUT_HEIGHT,
+    Math.min(
+      MAX_INPUT_HEIGHT,
+      Math.round(windowHeight * MAX_INPUT_HEIGHT_WINDOW_FRACTION),
+    ),
+  )
   const [caretIndex, setCaretIndex] = useState(value.length)
   // An edit we handed to the host: where to put the caret once it echoes the
   // value back, and whether to send it. Keyed by that value so it lands on the
@@ -454,7 +474,11 @@ export const ChatInput = memo(function ChatInput({
 
   return (
     <View style={styles.container}>
-      <View style={styles.composer}>
+      <GlassSurface
+        radius={theme.radius['2xl']}
+        intensity={70}
+        contentStyle={styles.composer}
+      >
         {attachments.length > 0 ? (
           <View style={styles.attachmentSection}>
             <AttachmentPreviewList
@@ -473,7 +497,11 @@ export const ChatInput = memo(function ChatInput({
         ) : null}
         <TextInput
           ref={attachInput}
-          style={[styles.input, voiceProvider ? styles.inputHidden : null]}
+          style={[
+            styles.input,
+            voiceProvider ? styles.inputHidden : null,
+            { maxHeight: maxInputHeight },
+          ]}
           value={value}
           onChangeText={handleChangeText}
           onSelectionChange={(event) => {
@@ -530,7 +558,6 @@ export const ChatInput = memo(function ChatInput({
                       !supported && styles.skillItemDisabled,
                     ]}
                     onPress={() => handleInsertSkill(skill.alias)}
-                    disabled={!supported}
                   >
                     <View style={styles.skillItemBody}>
                       <View style={styles.skillHeading}>
@@ -693,7 +720,7 @@ export const ChatInput = memo(function ChatInput({
           </View>
         </View>
         )}
-      </View>
+      </GlassSurface>
       {openSheet === 'more' ? (
         <OptionSheet
           title="Add to prompt"
@@ -775,20 +802,14 @@ export const ChatInput = memo(function ChatInput({
 })
 
 const styles = StyleSheet.create((theme) => ({
+  // No plate behind the composer: it floats on the screen background so the
+  // glass panel is the only chrome at the bottom of the thread.
   container: {
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border.subtle,
-    backgroundColor: theme.colors.surface[1],
     paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
+    paddingTop: theme.spacing[2],
+    paddingBottom: theme.spacing[2],
   },
   composer: {
-    backgroundColor: theme.colors.surface[2],
-    borderRadius: theme.radius.xl,
-    borderCurve: 'continuous',
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    overflow: 'hidden',
     gap: theme.spacing[2],
     paddingTop: theme.spacing[3],
   },
@@ -816,16 +837,17 @@ const styles = StyleSheet.create((theme) => ({
   skillMenu: {
     marginHorizontal: theme.spacing[3],
     borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-    backgroundColor: theme.colors.surface[1],
+    borderCurve: 'continuous',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: glassEdge(theme.isDark),
+    backgroundColor: glassFill(theme.isDark),
     overflow: 'hidden',
   },
   skillItem: {
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: glassEdge(theme.isDark),
   },
   skillItemDisabled: {
     opacity: 0.6,
@@ -844,7 +866,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   skillAliasPill: {
     borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
     paddingHorizontal: theme.spacing[2],
     paddingVertical: theme.spacing[1],
   },
@@ -887,7 +909,9 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: glassEdge(theme.isDark),
   },
   attachButtonDisabled: {
     opacity: 0.6,
@@ -903,6 +927,8 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.accent.default,
   },
   sendInactive: {
-    backgroundColor: theme.colors.surface[3],
+    backgroundColor: glassFill(theme.isDark),
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: glassEdge(theme.isDark),
   },
 }))

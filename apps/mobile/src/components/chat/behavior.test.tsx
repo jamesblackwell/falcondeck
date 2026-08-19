@@ -118,7 +118,10 @@ describe("chat behavior components", () => {
     ).toHaveLength(0);
     expect(
       assistant.root.findAllByProps({ accessibilityLabel: "Copy response" }),
-    ).toHaveLength(0);
+    ).toHaveLength(2);
+    expect(
+      assistant.root.findAllByProps({ accessibilityLabel: "Read aloud" }),
+    ).toHaveLength(2);
     expect(textOf(userWithoutAttachment)).toContain("Second user text");
     expect(textOf(markdown)).toContain("Plain markdown text");
   });
@@ -157,7 +160,7 @@ describe("chat behavior components", () => {
     announce.mockRestore();
   });
 
-  it("keeps transcript copy controls out of complete and streaming responses", () => {
+  it("shows compact actions only for complete assistant responses", () => {
     const complete = renderComponent(
       <AssistantMessageBlock
         item={{
@@ -172,7 +175,10 @@ describe("chat behavior components", () => {
 
     expect(
       complete.root.findAllByProps({ accessibilityLabel: "Copy response" }),
-    ).toHaveLength(0);
+    ).toHaveLength(2);
+    expect(
+      complete.root.findAllByProps({ accessibilityLabel: "Read aloud" }),
+    ).toHaveLength(2);
 
     const streaming = renderComponent(
       <AssistantMessageBlock
@@ -187,6 +193,9 @@ describe("chat behavior components", () => {
     );
     expect(
       streaming.root.findAllByProps({ accessibilityLabel: "Copy response" }),
+    ).toHaveLength(0);
+    expect(
+      streaming.root.findAllByProps({ accessibilityLabel: "Read aloud" }),
     ).toHaveLength(0);
   });
 

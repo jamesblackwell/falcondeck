@@ -39,6 +39,7 @@ import type {
 } from "@falcondeck/client-core";
 import {
   filterProjectGroupsByExtensions,
+  isWorkspaceColorId,
   THREAD_TAGS_EXTENSION_ID,
 } from "@falcondeck/client-core";
 
@@ -74,12 +75,17 @@ interface SidebarViewProps {
   threadTagOptions?: readonly ThreadTag[];
   extensionSnapshot?: ExtensionSnapshot | null;
   extensionSidebarFilters?: readonly ExtensionSidebarFilterDefinition[];
-  /** Visible fallback for full-main-area extension panels not rendered on mobile v1. */
-  extensionPanelCount?: number;
+  workspaceColors?: Record<string, string>;
 }
 
-// Rotating one chevron rather than swapping two icons, so the open/close
-// toggle reads as a single continuous motion.
+function workspaceCatColor(
+  cat: Record<number, string>,
+  colorId: string | undefined,
+): string | undefined {
+  if (!isWorkspaceColorId(colorId)) return undefined;
+  return cat[Number(colorId.slice(4))];
+}
+
 const CHEVRON_TIMING = {
   duration: 150,
   easing: Easing.out(Easing.cubic),
@@ -178,7 +184,7 @@ export const SidebarView = memo(function SidebarView({
   threadTagOptions = [],
   extensionSnapshot,
   extensionSidebarFilters = [],
-  extensionPanelCount = 0,
+  workspaceColors,
 }: SidebarViewProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
@@ -414,6 +420,10 @@ export const SidebarView = memo(function SidebarView({
       }
 
       if (item.type === "workspace") {
+        const accent = workspaceCatColor(
+          theme.colors.cat,
+          workspaceColors?.[item.workspaceId],
+        );
         // Two sibling controls, not a button inside a button: nesting them made
         // VoiceOver read the row as one element and swallowed "new thread".
         return (
@@ -432,14 +442,14 @@ export const SidebarView = memo(function SidebarView({
                 workspaceId={item.workspaceId}
                 isOpen={item.isOpen}
                 size={theme.iconSize.xs}
-                color={theme.colors.fg.muted}
+                color={accent ?? theme.colors.fg.muted}
               />
               <Text
                 variant="label"
                 color="secondary"
                 weight="normal"
                 numberOfLines={1}
-                style={styles.workspaceName}
+                style={[styles.workspaceName, accent ? { color: accent } : null]}
               >
                 {item.workspaceName}
               </Text>
@@ -505,11 +515,13 @@ export const SidebarView = memo(function SidebarView({
       onSelectThread,
       openThreadOptions,
       selectedThreadId,
+      theme.colors.cat,
       theme.colors.fg.muted,
       theme.iconSize.xs,
       toggleWorkspaceCollapse,
       handleOverflowPress,
       threadTagsById,
+      workspaceColors,
       activeExtensionFilterCount,
       supportedExtensionFilters.length,
       theme.colors.accent.default,
@@ -558,16 +570,6 @@ export const SidebarView = memo(function SidebarView({
             New thread
           </Text>
         </Pressable>
-      ) : null}
-
-      {extensionPanelCount > 0 ? (
-        <View style={styles.extensionFallback} accessibilityRole="text">
-          <Text variant="caption" color="muted">
-            {extensionPanelCount === 1
-              ? "This extension provides a panel not yet supported here. Open it on desktop or web."
-              : `${extensionPanelCount} extensions provide panels not yet supported here. Open them on desktop or web.`}
-          </Text>
-        </View>
       ) : null}
 
       <View style={styles.list}>
@@ -703,17 +705,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   skeletonRow: {
     paddingLeft: theme.spacing[3],
-  },
-  extensionFallback: {
-    marginHorizontal: theme.spacing[3],
-    marginTop: theme.spacing[2],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
-    borderWidth: 1,
-    borderColor: theme.colors.border.subtle,
-    borderRadius: theme.radius.lg,
-    borderCurve: "continuous",
-    backgroundColor: theme.colors.surface[2],
   },
   header: {
     flexDirection: "row",

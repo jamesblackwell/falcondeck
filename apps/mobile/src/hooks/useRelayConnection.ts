@@ -24,6 +24,7 @@ import type {
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken, isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { realtimeAudioPlayer } from '@/lib/realtime-audio-player'
+import { logConnection } from '@/store/connection-log-store'
 import { persistSessionCacheNow, useRelayStore, useSessionStore } from '@/store'
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
@@ -648,6 +649,11 @@ export function useRelayConnection() {
       if (!isCurrent || !shouldReconnect) return
       const current = useRelayStore.getState()
       if (current._getSessionCrypto()) return
+      logConnection(
+        'info',
+        'Asking your Mac to republish the session key…',
+        'The encrypted channel needs it before anything can sync.',
+      )
       current._requestBootstrap()
       bootstrapRetryTimer = setTimeout(() => {
         bootstrapRetryTimer = null
@@ -700,6 +706,11 @@ export function useRelayConnection() {
 
       const delay = relayReconnectDelayMs(reconnectAttempt.current, Math.random(), 15_000)
       reconnectAttempt.current += 1
+      logConnection(
+        'warn',
+        'Connection dropped; reconnecting',
+        `Attempt ${reconnectAttempt.current} in ${Math.max(1, Math.round(delay / 1000))}s`,
+      )
       reconnectTimer.current = setTimeout(() => {
         reconnectTimer.current = null
         setReconnectGeneration((value) => value + 1)
@@ -724,6 +735,7 @@ export function useRelayConnection() {
         reconnectTimer.current = null
       }
       reconnectAttempt.current = 0
+      logConnection('info', 'App returned to the foreground; reconnecting right away.')
       setReconnectGeneration((value) => value + 1)
     })
 
@@ -761,6 +773,7 @@ export function useRelayConnection() {
             clearTimeout(connectTimeout)
             connectTimeout = null
           }
+          logConnection('success', 'Relay socket connected.')
           // The relay drops peers that stay silent for 45s.
           pingInterval = setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) {
@@ -811,6 +824,10 @@ export function useRelayConnection() {
                 )
               ) {
                 console.warn('Remote event backlog exceeded the safe limit; reconnecting for snapshot recovery')
+                logConnection(
+                  'warn',
+                  'Event backlog overflowed; reconnecting for snapshot recovery.',
+                )
                 socket.close()
                 return
               }
@@ -849,6 +866,10 @@ export function useRelayConnection() {
             case 'update':
               if (relayBacklogWouldOverflow(pendingRelayUpdates.current.length, 1)) {
                 console.warn('Remote event backlog exceeded the safe limit; reconnecting for snapshot recovery')
+                logConnection(
+                  'warn',
+                  'Event backlog overflowed; reconnecting for snapshot recovery.',
+                )
                 socket.close()
                 return
               }

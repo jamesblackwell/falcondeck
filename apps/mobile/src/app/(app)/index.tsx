@@ -12,7 +12,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { FlashList } from "@shopify/flash-list";
 import { ChevronLeft, MoreHorizontal, SquarePen } from "lucide-react-native";
 import { DrawerActions } from "@react-navigation/native";
-import { useNavigation, useRouter } from "expo-router";
+import { useNavigation } from "expo-router";
 import {
   composerProviderFor,
   composerSelectionFor,
@@ -53,6 +53,7 @@ import {
   useConversationItems,
   useSelectedWorkspace,
   useUIStore,
+  openConnectionDebug,
 } from "@/store";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { useInterruptTurn } from "@/hooks/useInterruptTurn";
@@ -86,6 +87,7 @@ import {
   OperationalNoticeBanner,
 } from "@/components/chat";
 import { ConnectionHeader, ThreadOptionsSheet } from "@/components/navigation";
+import { ConnectionDebugScreen } from "@/components/debug/ConnectionDebugScreen";
 import {
   pasteImageInputFromClipboard,
   pickImageInputFromCamera,
@@ -108,7 +110,6 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { theme } = useUnistyles();
   const navigation = useNavigation();
-  const router = useRouter();
 
   const presentation: ConversationPresentation = useConversationPresentation();
   const blocks = presentation.history_blocks;
@@ -356,9 +357,12 @@ export default function HomeScreen() {
         (e) => e.reasoning_effort,
       ) ?? [];
     if (supported.length > 0) return supported;
-    return resolvedModel?.default_reasoning_effort
-      ? [resolvedModel.default_reasoning_effort]
-      : ["medium"];
+    if (resolvedModel?.default_reasoning_effort)
+      return [resolvedModel.default_reasoning_effort];
+    // A resolved model that advertises no efforts has none (several OpenCode
+    // models cannot reason at all); only an unresolved model keeps the
+    // historic fallback.
+    return resolvedModel ? [] : ["medium"];
   }, [resolvedModel]);
   const isThreadRunning = selectedThread?.status === "running";
   const showThinking = shouldShowThinkingIndicator(
@@ -803,10 +807,6 @@ export default function HomeScreen() {
     navigation.dispatch(DrawerActions.openDrawer());
   }, [navigation]);
 
-  const handleOpenSettings = useCallback(() => {
-    router.push("/(app)/settings");
-  }, [router]);
-
   const handleOpenThreadOptions = useCallback(() => {
     setIsThreadOptionsOpen(true);
   }, []);
@@ -1203,7 +1203,7 @@ export default function HomeScreen() {
             connectionStatus={connectionStatus}
             isEncrypted={isEncrypted}
             machinePresence={machinePresence}
-            onPress={handleOpenSettings}
+            onPress={openConnectionDebug}
           />
         </View>
       </View>
@@ -1429,6 +1429,8 @@ export default function HomeScreen() {
           onClose={handleCloseThreadOptions}
         />
       ) : null}
+
+      <ConnectionDebugScreen />
     </KeyboardAvoidingView>
   );
 }

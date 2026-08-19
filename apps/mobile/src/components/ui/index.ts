@@ -15,3 +15,10 @@ export { NativeSheet } from './NativeSheet'
 export { SegmentedControl, type SegmentOption } from './SegmentedControl'
 export { ErrorBanner } from './ErrorBanner'
 export { SyncBanner } from './SyncBanner'
+export {
+  GlassSurface,
+  canBlur,
+  glassEdge,
+  glassFill,
+  glassFillStrong,
+} from './GlassSurface'

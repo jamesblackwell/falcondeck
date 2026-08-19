@@ -1,7 +1,7 @@
 import { memo, useCallback, useState } from 'react'
 import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Pause, Play, X } from 'lucide-react-native'
+import { Pause, Play, Square } from 'lucide-react-native'
 
 import type { AgentProvider, ThreadGoal } from '@falcondeck/client-core'
 
@@ -14,6 +14,7 @@ import {
   goalSupportsBudget,
   goalUsageLine,
   parseTokenBudget,
+  useGoalElapsedLabel,
 } from './goal'
 
 interface GoalSheetProps {
@@ -40,6 +41,7 @@ export const GoalSheet = memo(function GoalSheet({
   const [budget, setBudget] = useState('')
   const [isPending, setIsPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const elapsed = useGoalElapsedLabel(goal?.started_at ?? null)
 
   const run = useCallback(
     (action: Promise<void>) => {
@@ -73,6 +75,11 @@ export const GoalSheet = memo(function GoalSheet({
             <StatusPill status={goal.status} />
           </View>
           <Text color="primary">{goal.objective}</Text>
+          {elapsed ? (
+            <Text variant="caption" size="xs" color="muted" style={styles.elapsed}>
+              {goal.status === 'paused' ? 'Elapsed' : 'Running for'} {elapsed}
+            </Text>
+          ) : null}
           {goalUsageLine(goal) ? (
             <Text variant="caption" size="xs" color="muted">
               {goalUsageLine(goal)}
@@ -99,9 +106,9 @@ export const GoalSheet = memo(function GoalSheet({
             ) : null}
             <Button
               variant="outline"
-              label="Clear goal"
+              label="Stop goal"
               disabled={isPending}
-              icon={<X size={theme.iconSize.sm} color={theme.colors.danger.default} />}
+              icon={<Square size={theme.iconSize.sm} color={theme.colors.danger.default} />}
               onPress={() => run(onClearGoal())}
             />
           </View>
@@ -197,6 +204,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   error: {
     paddingTop: theme.spacing[2],
+  },
+  elapsed: {
+    fontVariant: ['tabular-nums'],
   },
   pill: {
     borderRadius: theme.radius.full,

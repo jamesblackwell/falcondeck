@@ -338,13 +338,4 @@ describe("SidebarView component", () => {
     expect(textOf(r)).toContain("Blocked thread");
     expect(textOf(r)).not.toContain("Done thread");
   });
-  it("shows a visible fallback for extension panels not supported on mobile", () => {
-    const r = renderComponent(
-      <SidebarView {...base} extensionPanelCount={1} />,
-    );
-
-    expect(textOf(r)).toContain(
-      "This extension provides a panel not yet supported here.",
-    );
-  });
 });

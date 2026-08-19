@@ -237,6 +237,9 @@ export function buildTheme(
   colorTheme: ColorThemeSetting,
 ) {
   return {
+    // Materials (blur tints, hairline highlights) can't be expressed as a flat
+    // palette entry, so components branch on the base mode.
+    isDark: base === 'dark',
     colors: COLOR_THEME_COLORS[colorTheme],
     spacing,
     radius,

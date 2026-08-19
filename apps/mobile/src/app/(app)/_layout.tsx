@@ -8,7 +8,6 @@ import { useUnistyles } from "react-native-unistyles";
 
 import {
   buildProjectGroups,
-  deriveExtensionPanels,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
 } from "@falcondeck/client-core";
@@ -43,10 +42,6 @@ export default function AppLayout() {
   );
   const extensionSidebarFilters = useMemo(
     () => deriveExtensionSidebarFilters(snapshot?.extensions),
-    [snapshot?.extensions],
-  );
-  const extensionPanelCount = useMemo(
-    () => deriveExtensionPanels(snapshot?.extensions).length,
     [snapshot?.extensions],
   );
 
@@ -95,13 +90,13 @@ export default function AppLayout() {
         threadTagOptions={threadTags.tags}
         extensionSnapshot={snapshot?.extensions}
         extensionSidebarFilters={extensionSidebarFilters}
-        extensionPanelCount={extensionPanelCount}
+        workspaceColors={snapshot?.preferences.workspace_colors}
       />
     ),
     [
       extensionSidebarFilters,
+      snapshot?.preferences.workspace_colors,
       snapshot?.extensions,
-      extensionPanelCount,
       groups,
       handleSelectThread,
       handleNewThread,

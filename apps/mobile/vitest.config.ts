@@ -23,6 +23,7 @@ export default defineConfig({
       'expo-audio': path.resolve(__dirname, 'src/test/__mocks__/expo-audio.ts'),
       'expo-speech-recognition': path.resolve(__dirname, 'src/test/__mocks__/expo-speech-recognition.ts'),
       'expo-sharing': path.resolve(__dirname, 'src/test/__mocks__/expo-sharing.ts'),
+      'expo-modules-core': path.resolve(__dirname, 'src/test/__mocks__/expo-modules-core.ts'),
       'react-native-unistyles': path.resolve(__dirname, 'src/test/__mocks__/react-native-unistyles.ts'),
       'react-native-reanimated': path.resolve(__dirname, 'src/test/__mocks__/react-native-reanimated.ts'),
       'react-native-audio-api': path.resolve(__dirname, 'src/test/__mocks__/react-native-audio-api.ts'),

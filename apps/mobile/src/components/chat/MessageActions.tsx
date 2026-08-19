@@ -1,8 +1,10 @@
-import { memo } from 'react'
-import { Check, CircleX, Copy } from 'lucide-react-native'
-import { useUnistyles } from 'react-native-unistyles'
+import { memo, useCallback, useSyncExternalStore } from 'react'
+import { View } from 'react-native'
+import { Check, CircleX, Copy, Square, Volume2 } from 'lucide-react-native'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { Button } from '@/components/ui'
+import { ActivityDiamond, Button } from '@/components/ui'
+import { readAloudPlayer } from '@/features/speech/readAloud'
 import { useClipboardCopy } from '@/hooks/useClipboardCopy'
 
 function copyTarget(accessibilityLabel: string) {
@@ -13,15 +15,26 @@ function copyTarget(accessibilityLabel: string) {
 export const MessageActions = memo(function MessageActions({
   text,
   accessibilityLabel = 'Copy response',
+  readAloudKey,
 }: {
   text: string
   accessibilityLabel?: string
+  readAloudKey?: string
 }) {
   const { theme } = useUnistyles()
   const target = copyTarget(accessibilityLabel)
   const successLabel = `${target[0]?.toUpperCase() ?? ''}${target.slice(1)} copied`
   const failureLabel = `Could not copy ${target}`
   const { copy, result } = useClipboardCopy(text, successLabel, failureLabel)
+  const subscribe = useCallback(
+    (listener: () => void) => readAloudPlayer.subscribe(readAloudKey ?? '', listener),
+    [readAloudKey],
+  )
+  const getSnapshot = useCallback(
+    () => readAloudKey ? readAloudPlayer.getSnapshot(readAloudKey) : 'idle' as const,
+    [readAloudKey],
+  )
+  const speechState = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
 
   if (!text.trim()) return null
 
@@ -38,14 +51,52 @@ export const MessageActions = memo(function MessageActions({
     <Copy size={theme.iconSize.xs} color={theme.colors.fg.muted} />
   )
 
+  const readAloudIcon = speechState === 'loading' ? (
+    <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+  ) : speechState === 'playing' ? (
+    <Square size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+  ) : speechState === 'error' ? (
+    <CircleX size={theme.iconSize.xs} color={theme.colors.danger.default} />
+  ) : (
+    <Volume2 size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+  )
+  const readAloudLabel = speechState === 'loading'
+    ? 'Stop preparing Read Aloud'
+    : speechState === 'playing'
+      ? 'Stop Read Aloud'
+      : speechState === 'error'
+        ? 'Read Aloud failed. Retry'
+        : 'Read aloud'
+
   return (
-    <Button
-      variant="ghost"
-      size="icon"
-      accessibilityLabel={currentAccessibilityLabel}
-      accessibilityLiveRegion="polite"
-      icon={icon}
-      onPress={() => { void copy() }}
-    />
+    <View style={styles.row} accessible={false}>
+      <Button
+        variant="ghost"
+        size="icon"
+        accessibilityLabel={currentAccessibilityLabel}
+        accessibilityLiveRegion="polite"
+        icon={icon}
+        onPress={() => { void copy() }}
+      />
+      {readAloudKey ? (
+        <Button
+          variant="ghost"
+          size="icon"
+          accessibilityLabel={readAloudLabel}
+          accessibilityLiveRegion="polite"
+          accessibilityState={{ busy: speechState === 'loading' }}
+          icon={readAloudIcon}
+          onPress={() => readAloudPlayer.toggle(readAloudKey, text)}
+        />
+      ) : null}
+    </View>
   )
 })
+
+const styles = StyleSheet.create((theme) => ({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[0],
+  },
+}))

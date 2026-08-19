@@ -66,7 +66,7 @@ export const ConnectionHeader = memo(function ConnectionHeader({
       onPress={onPress}
       accessibilityRole="button"
       accessibilityLabel={`Connection: ${state.label}`}
-      accessibilityHint="Opens settings"
+      accessibilityHint="Shows what the connection is doing"
       hitSlop={8}
     >
       <View style={[styles.dot, styles[state.tone]]} />

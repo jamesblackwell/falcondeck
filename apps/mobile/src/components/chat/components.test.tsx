@@ -574,7 +574,9 @@ describe('ChatInput component', () => {
 
     expect(style.height).toBeUndefined()
     expect(style.minHeight).toBe(48)
-    expect(style.maxHeight).toBe(280)
+    // Window height in the RN mock is 874; the cap is a quarter of it so the
+    // composer (attachments + input + send row) always clears the keyboard.
+    expect(style.maxHeight).toBe(219)
     expect(input.props.multiline).toBe(true)
     expect(input.props.scrollEnabled).toBeUndefined()
   })
@@ -768,5 +770,63 @@ describe('SessionListItem component', () => {
       />,
     )
     expect(textOf(r)).toContain('5h')
+  })
+
+  it('shows a green done dot for a completed thread', () => {
+    const r = renderComponent(
+      <SessionListItem
+        thread={thread({
+          id: 't1',
+          title: 'Done thread',
+          status: 'idle',
+          attention: {
+            level: 'none',
+            badge_label: null,
+            unread: false,
+            pending_approval_count: 0,
+            pending_question_count: 0,
+            last_agent_activity_seq: 10,
+            last_read_seq: 10,
+          },
+        })}
+        workspaceId="w1"
+        isSelected={false}
+        onSelectThread={vi.fn()}
+      />,
+    )
+    expect(r.root.findByProps({ accessibilityLabel: 'Done' })).toBeDefined()
+  })
+
+  it('does not show a done dot for unread, running, or never-run threads', () => {
+    const states = [
+      thread({
+        id: 't1',
+        status: 'idle',
+        attention: {
+          level: 'unread',
+          badge_label: null,
+          unread: true,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          last_agent_activity_seq: 10,
+          last_read_seq: 5,
+        },
+      }),
+      thread({ id: 't2', status: 'running' }),
+      thread({ id: 't3', status: 'idle' }),
+    ]
+    for (const t of states) {
+      const r = renderComponent(
+        <SessionListItem
+          thread={t}
+          workspaceId="w1"
+          isSelected={false}
+          onSelectThread={vi.fn()}
+        />,
+      )
+      expect(
+        r.root.findAllByProps({ accessibilityLabel: 'Done' }).length,
+      ).toBe(0)
+    }
   })
 })
