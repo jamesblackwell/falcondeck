@@ -114,8 +114,11 @@ describe("chat behavior components", () => {
     expect(textOf(user)).toContain("User text");
     expect(textOf(user)).toContain("evidence.png");
     expect(
-      user.root.findAllByProps({ accessibilityLabel: "Copy message" }),
-    ).toHaveLength(0);
+      user.root.findAllByProps({ accessibilityLabel: "Copy message" }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      user.root.findAllByProps({ accessibilityLabel: "Read aloud" }).length,
+    ).toBeGreaterThan(0);
     expect(
       assistant.root.findAllByProps({ accessibilityLabel: "Copy response" }),
     ).toHaveLength(2);
@@ -123,6 +126,16 @@ describe("chat behavior components", () => {
       assistant.root.findAllByProps({ accessibilityLabel: "Read aloud" }),
     ).toHaveLength(2);
     expect(textOf(userWithoutAttachment)).toContain("Second user text");
+    expect(
+      userWithoutAttachment.root.findAllByProps({
+        accessibilityLabel: "Copy message",
+      }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      userWithoutAttachment.root.findAllByProps({
+        accessibilityLabel: "Read aloud",
+      }).length,
+    ).toBeGreaterThan(0);
     expect(textOf(markdown)).toContain("Plain markdown text");
   });
 

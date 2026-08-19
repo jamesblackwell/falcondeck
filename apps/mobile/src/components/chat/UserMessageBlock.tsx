@@ -6,6 +6,7 @@ import type { ConversationItem } from "@falcondeck/client-core";
 
 import { AttachmentPreviewList } from "./AttachmentPreviewList";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { MessageActions } from "./MessageActions";
 type UserMessage = Extract<ConversationItem, { kind: "user_message" }>;
 
 interface UserMessageBlockProps {
@@ -21,6 +22,11 @@ export const UserMessageBlock = memo(function UserMessageBlock({
         <AttachmentPreviewList attachments={item.attachments} />
         <MarkdownRenderer text={item.text} interpretDirectives={false} />
       </View>
+      <MessageActions
+        text={item.text}
+        accessibilityLabel="Copy message"
+        readAloudKey={item.id}
+      />
     </View>
   );
 });
@@ -30,6 +36,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "flex-end",
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],
+    gap: theme.spacing[1],
   },
   bubble: {
     maxWidth: "80%",
