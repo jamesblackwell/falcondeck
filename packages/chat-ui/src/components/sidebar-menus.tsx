@@ -14,7 +14,8 @@ import {
   Trash2,
 } from 'lucide-react'
 
-import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
+import type { ThreadSummary, ThreadTag, WorkspaceColorId } from '@falcondeck/client-core'
+import { WORKSPACE_COLOR_IDS, workspaceColorCssVar } from '@falcondeck/client-core'
 import { Button, Input, cn } from '@falcondeck/ui'
 
 import { ThreadStageIcon } from './thread-stage-icon'
@@ -36,6 +37,16 @@ export type ThreadContextMenuState = {
   x: number
   y: number
 }
+
+const WORKSPACE_MENU_WIDTH_PX = 224
+const WORKSPACE_COLOR_SWATCH_SIZE_PX = 22
+const WORKSPACE_COLOR_GAP_PX = 6
+const WORKSPACE_COLOR_COLUMNS = 6
+const WORKSPACE_COLOR_ROWS = Math.ceil((WORKSPACE_COLOR_IDS.length + 1) / WORKSPACE_COLOR_COLUMNS)
+const WORKSPACE_COLOR_GRID_HEIGHT_PX =
+  WORKSPACE_COLOR_ROWS * WORKSPACE_COLOR_SWATCH_SIZE_PX +
+  (WORKSPACE_COLOR_ROWS - 1) * WORKSPACE_COLOR_GAP_PX
+const WORKSPACE_COLOR_SECTION_HEIGHT_PX = 28 + WORKSPACE_COLOR_GRID_HEIGHT_PX
 
 export type WorkspaceContextMenuState = {
   workspaceId: string
@@ -572,11 +583,15 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
 
 export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
+  selectedColor = null,
+  onSetColor,
   onRemove,
   menuRef,
 }: {
   target: WorkspaceContextMenuState | null
-  onRemove: () => void
+  selectedColor?: string | null
+  onSetColor?: (color: WorkspaceColorId | null) => void
+  onRemove?: () => void
   menuRef: React.RefObject<HTMLDivElement | null>
 }) {
   if (!target || typeof document === 'undefined') {
@@ -584,14 +599,19 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   }
 
   const projectLabel = target.path.split('/').pop() || target.path
+  const showColors = Boolean(onSetColor)
+  const showRemove = Boolean(onRemove)
   const menuHeight =
-    THREAD_MENU_VIEWPORT_PADDING_PX * 2 + THREAD_MENU_ROW_HEIGHT_PX
+    THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
+    (showColors ? WORKSPACE_COLOR_SECTION_HEIGHT_PX : 0) +
+    (showColors && showRemove ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
+    (showRemove ? THREAD_MENU_ROW_HEIGHT_PX : 0)
   const left = Math.max(
     THREAD_MENU_VIEWPORT_PADDING_PX,
     Math.min(
       target.x,
       window.innerWidth -
-        THREAD_MENU_WIDTH_PX -
+        WORKSPACE_MENU_WIDTH_PX -
         THREAD_MENU_VIEWPORT_PADDING_PX,
     ),
   )
@@ -608,15 +628,67 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
       ref={menuRef}
       role="menu"
       aria-label={`Actions for ${projectLabel}`}
-      className="fixed z-50 w-52 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+      className="fixed z-50 w-56 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
       style={{ left, top }}
     >
-      <ThreadMenuItem
-        icon={<Trash2 className="h-3.5 w-3.5" />}
-        label="Remove project"
-        destructive
-        onClick={onRemove}
-      />
+      {showColors ? (
+        <div className="px-1.5 pb-1 pt-1">
+          <p className="mb-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+            Color
+          </p>
+          <div className="grid grid-cols-6 gap-1.5">
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-label="Default"
+              aria-checked={!selectedColor}
+              onClick={() => onSetColor?.(null)}
+              className={cn(
+                'fd-focus flex h-[22px] w-[22px] items-center justify-center rounded-full border border-border-default',
+                !selectedColor
+                  ? 'ring-1 ring-fg-secondary ring-offset-1 ring-offset-surface-1'
+                  : 'hover:border-border-emphasis',
+              )}
+            >
+              <span className="h-2 w-2 rounded-full bg-fg-muted" />
+            </button>
+            {WORKSPACE_COLOR_IDS.map((color, index) => {
+              const selected = selectedColor === color
+              return (
+                <button
+                  key={color}
+                  type="button"
+                  role="menuitemradio"
+                  aria-label={`Color ${index + 1}`}
+                  aria-checked={selected}
+                  onClick={() => onSetColor?.(color)}
+                  className={cn(
+                    'fd-focus h-[22px] w-[22px] rounded-full',
+                    selected
+                      ? 'ring-1 ring-fg-secondary ring-offset-1 ring-offset-surface-1'
+                      : 'hover:opacity-90',
+                  )}
+                  style={{ backgroundColor: workspaceColorCssVar(color) }}
+                />
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
+      {showColors && showRemove ? (
+        <div
+          role="separator"
+          className="mx-2 my-1 border-t border-border-subtle"
+        />
+      ) : null}
+      {showRemove && onRemove ? (
+        <ThreadMenuItem
+          icon={<Trash2 className="h-3.5 w-3.5" />}
+          label="Remove project"
+          destructive
+          onClick={onRemove}
+        />
+      ) : null}
     </div>,
     document.body,
   )

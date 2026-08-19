@@ -24,6 +24,8 @@ import {
   PauseCircle,
   Radio,
   Search,
+  Square,
+  Volume2,
 } from "lucide-react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 
@@ -90,6 +92,7 @@ import {
   attachmentLabel,
   canRenderAttachmentImage,
 } from "./attachment-preview";
+import type { ReadAloudController } from "../lib/read-aloud";
 
 function UserAttachment({
   attachment,
@@ -507,8 +510,10 @@ function MemoryCitationSources({
 
 function AssistantMessage({
   item,
+  readAloud,
 }: {
   item: Extract<ConversationItem, { kind: "assistant_message" }>;
+  readAloud?: ReadAloudController;
 }) {
   const lifecycle = contentLifecycle(item);
   const isCommentary = item.phase === "commentary";
@@ -526,6 +531,8 @@ function AssistantMessage({
         : null;
   const failureDetail =
     lifecycle === "error" ? assistantFailureDetail(item) : null;
+  const canReadAloud =
+    lifecycle === "complete" && item.text.trim().length > 0 && readAloud;
   const TerminalStatusIcon = terminalStatus?.icon;
   return (
     <article
@@ -569,7 +576,7 @@ function AssistantMessage({
       {item.text.trim() || terminalStatus ? (
         <div className="mt-1 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
           {item.text.trim() ? (
-            <span className="opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
+            <span className="inline-flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
               <CopyButton
                 text={assistantMessageCopyText(
                   item.text,
@@ -577,6 +584,42 @@ function AssistantMessage({
                 )}
                 label="Copy response"
               />
+              {canReadAloud ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    readAloud.activeMessageId === item.id
+                      ? readAloud.stop()
+                      : readAloud.awaitingGestureMessageId === item.id
+                        ? readAloud.resume()
+                        : readAloud.play(item.id, item.text)
+                  }
+                  disabled={readAloud.loadingMessageId != null}
+                  aria-label={
+                    readAloud.activeMessageId === item.id
+                      ? "Stop reading response"
+                      : readAloud.awaitingGestureMessageId === item.id
+                        ? "Play response"
+                        : "Read response aloud"
+                  }
+                  title={
+                    readAloud.activeMessageId === item.id
+                      ? "Stop reading"
+                      : readAloud.awaitingGestureMessageId === item.id
+                        ? "Play"
+                        : "Read aloud"
+                  }
+                  className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-wait disabled:opacity-50"
+                >
+                  {readAloud.loadingMessageId === item.id ? (
+                    <ActivityDiamond size="xs" tone="current" />
+                  ) : readAloud.activeMessageId === item.id ? (
+                    <Square aria-hidden="true" className="h-3 w-3" />
+                  ) : (
+                    <Volume2 aria-hidden="true" className="h-3 w-3" />
+                  )}
+                </button>
+              ) : null}
             </span>
           ) : null}
           {terminalStatus && TerminalStatusIcon ? (
@@ -2999,6 +3042,7 @@ export const MessageCard = memo(function MessageCard({
   suppressReadOnlyDetail = false,
   thinkingDisplay = "auto",
   isStreamingReasoning = false,
+  readAloud,
 }: {
   item: ConversationItem;
   defaultOpen?: boolean;
@@ -3011,12 +3055,13 @@ export const MessageCard = memo(function MessageCard({
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
   ) => void;
+  readAloud?: ReadAloudController;
 }) {
   switch (item.kind) {
     case "user_message":
       return <UserMessage item={item} />;
     case "assistant_message":
-      return <AssistantMessage item={item} />;
+      return <AssistantMessage item={item} readAloud={readAloud} />;
     case "image":
       return <ImageMessage item={item} />;
     case "web_search":

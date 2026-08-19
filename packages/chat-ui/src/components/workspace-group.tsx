@@ -1,9 +1,10 @@
 import * as React from 'react'
 import { memo, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { ChevronRight, FolderClosed, Globe, SquarePen } from 'lucide-react'
+import { ChevronRight, FolderClosed, FolderOpen, Globe, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
+import { workspaceColorCssVar } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
 // Present when the workspace lives on an enrolled remote server rather than
@@ -20,6 +21,8 @@ export type WorkspaceGroupProps = {
   onSelect: () => void
   onNewThread?: () => void
   onOpenContextMenu?: (position: { x: number; y: number }) => void
+  /** Theme-backed categorical token, e.g. `cat-3`. */
+  color?: string | null
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement> &
     React.RefAttributes<HTMLDivElement>
   /** Controlled open state; omit to let the group own it. */
@@ -35,6 +38,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelect,
   onNewThread,
   onOpenContextMenu,
+  color,
   dragHandleProps,
   open,
   onOpenChange,
@@ -57,6 +61,8 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   const hostLabel = host
     ? `${host.name} · ${host.connected ? 'Connected' : 'Offline'}`
     : undefined
+  const folderColor = workspaceColorCssVar(color)
+  const FolderIcon = isOpen ? FolderOpen : FolderClosed
 
   return (
     <Collapsible.Root asChild open={isOpen} onOpenChange={handleOpenChange}>
@@ -104,7 +110,13 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
                   isOpen ? 'opacity-100 group-hover:opacity-0' : 'opacity-0',
                 )}
               >
-                <FolderClosed className="absolute inset-0 h-4 w-4 text-fg-muted" />
+                <FolderIcon
+                  className={cn(
+                    'absolute inset-0 h-4 w-4',
+                    folderColor ? null : 'text-fg-muted',
+                  )}
+                  style={folderColor ? { color: folderColor } : undefined}
+                />
                 {/* Remote workspaces get a small globe badge on the folder
                     instead of a separate icon or a second subtitle line. */}
                 {host ? (

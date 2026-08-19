@@ -1,11 +1,13 @@
 import * as Popover from '@radix-ui/react-popover'
-import { Pause, Play, Target, X } from 'lucide-react'
+import { Pause, Play, Square, Target } from 'lucide-react'
 import { useState } from 'react'
 
 import type { AgentProvider, ThreadGoal } from '@falcondeck/client-core'
 import { Button, Input, Textarea, cn } from '@falcondeck/ui'
 
-const GOAL_STATUS_LABELS: Record<string, string> = {
+import { useGoalElapsedLabel } from '../lib/goal-time'
+
+export const GOAL_STATUS_LABELS: Record<string, string> = {
   active: 'Active',
   paused: 'Paused',
   blocked: 'Blocked',
@@ -25,7 +27,8 @@ export type GoalPanelProps = {
   provider: AgentProvider
   /** Called once an action lands, so a host popover/menu can close itself. */
   onDone?: () => void
-  onSetGoal: (objective: string, tokenBudget: number | null) => Promise<void> | void
+  /** Set a new objective; hosts that only inspect a running goal omit it. */
+  onSetGoal?: (objective: string, tokenBudget: number | null) => Promise<void> | void
   onClearGoal: () => Promise<void> | void
   onSetGoalStatus?: (status: 'active' | 'paused') => Promise<void> | void
 }
@@ -55,6 +58,7 @@ export function GoalPanel({
 
   const supportsBudget = provider === 'codex'
   const statusLabel = goal ? GOAL_STATUS_LABELS[goal.status] ?? goal.status : null
+  const elapsed = useGoalElapsedLabel(goal?.started_at)
 
   async function run(action: () => Promise<void> | void) {
     setIsPending(true)
@@ -90,6 +94,11 @@ export function GoalPanel({
                   {statusLabel}
                 </span>
               </div>
+              {elapsed ? (
+                <p className="font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {goal.status === 'paused' ? 'Elapsed' : 'Running for'} {elapsed}
+                </p>
+              ) : null}
               {goal.token_budget != null || goal.tokens_used != null ? (
                 <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
                   {goal.tokens_used != null ? `${formatTokens(goal.tokens_used)} tokens used` : null}
@@ -132,7 +141,7 @@ export function GoalPanel({
                   className="text-danger"
                   onClick={() => void run(() => onClearGoal())}
                 >
-                  <X className="h-3.5 w-3.5" aria-hidden /> Clear goal
+                  <Square className="h-3.5 w-3.5" aria-hidden /> Stop goal
                 </Button>
               </div>
             </div>
@@ -142,7 +151,7 @@ export function GoalPanel({
               onSubmit={(event) => {
                 event.preventDefault()
                 const trimmed = objective.trim()
-                if (!trimmed) return
+                if (!trimmed || !onSetGoal) return
                 const parsedBudget = Number.parseInt(budget, 10)
                 void run(() =>
                   onSetGoal(
@@ -184,7 +193,11 @@ export function GoalPanel({
                 <p className="text-[length:var(--fd-text-xs)] text-danger">{error}</p>
               ) : null}
               <div className="flex justify-end">
-                <Button type="submit" size="sm" disabled={isPending || !objective.trim()}>
+                <Button
+                  type="submit"
+                  size="sm"
+                  disabled={isPending || !objective.trim() || !onSetGoal}
+                >
                   {isPending ? 'Setting…' : 'Set goal'}
                 </Button>
               </div>

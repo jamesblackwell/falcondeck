@@ -31,6 +31,7 @@ import { ActivityDiamond, EmptyState, cn } from "@falcondeck/ui";
 
 import { FileDiffProvider, type OpenFileDiff } from "../lib/file-diff-context";
 import { normalizeQuotedSelection } from "../lib/quoted-selection";
+import type { ReadAloudController } from "../lib/read-aloud";
 import { ConversationExportButton } from "./conversation-export-button";
 import {
   AGENT_STATUS_ROW_CLASS,
@@ -67,6 +68,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   isStreamingReasoning,
   retrySource,
   onRetryResponse,
+  readAloud,
 }: {
   block: ConversationRenderBlock;
   deferred: boolean;
@@ -80,6 +82,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   isStreamingReasoning: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: EditResendHandler;
+  readAloud?: ReadAloudController;
 }) {
   return (
     <div
@@ -102,6 +105,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
             block.item.kind === "assistant_message" ? retrySource : null
           }
           onRetryResponse={onRetryResponse}
+          readAloud={readAloud}
         />
       ) : block.kind === "work_session" ? (
         <WorkSessionCard
@@ -165,6 +169,7 @@ export const Conversation = memo(function Conversation({
   exportTitle = null,
   pinnedPlanId = null,
   onQuoteSelection,
+  readAloud,
 }: {
   threadKey?: string | null;
   items: ConversationItem[];
@@ -198,12 +203,16 @@ export const Conversation = memo(function Conversation({
   pinnedPlanId?: string | null;
   /** Adds selected user/assistant message text to the host composer. */
   onQuoteSelection?: (text: string) => void;
+  /** Shared playback controller for assistant-message Read Aloud actions. */
+  readAloud?: ReadAloudController;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
+  const readAloudRef = useRef(readAloud);
+  const readAloudThreadKeyRef = useRef<string | null>(threadKey);
   const lastRestoredThreadKeyRef = useRef<string | null>(null);
   const stickyToBottomRef = useRef(true);
   const wasSendingRef = useRef(isSending);
@@ -235,6 +244,19 @@ export const Conversation = memo(function Conversation({
   const [expansionMode, setExpansionMode] = useState<
     "default" | "expanded" | "collapsed"
   >("default");
+  useEffect(() => {
+    readAloudRef.current = readAloud;
+  }, [readAloud]);
+  useEffect(() => {
+    if (readAloudThreadKeyRef.current !== threadKey) readAloud?.stop();
+    readAloudThreadKeyRef.current = threadKey;
+  }, [readAloud, threadKey]);
+  useEffect(
+    () => () => {
+      readAloudRef.current?.stop();
+    },
+    [],
+  );
   const presentationRef = useRef<ReturnType<
     typeof deriveConversationPresentation
   > | null>(null);
@@ -736,11 +758,15 @@ export const Conversation = memo(function Conversation({
     if (!threadKey || isLoading) return;
 
     const content = contentRef.current;
-    if (!content || typeof ResizeObserver === "undefined") return;
+    const scroll = scrollRef.current;
+    if (!content || !scroll || typeof ResizeObserver === "undefined") return;
 
     // Resize callbacks are delivered after layout and before paint, so pin
     // synchronously here too — scheduling a frame would reintroduce the
     // paint-then-snap jitter for content that grows while streaming.
+    // Observe the viewport as well as the transcript: a growing composer
+    // shrinks clientHeight without changing content size, which would
+    // otherwise leave a follower looking at a gap above the tail.
     const observer = new ResizeObserver(() => {
       if (!stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
         persistScrollPosition();
@@ -750,6 +776,7 @@ export const Conversation = memo(function Conversation({
       pinToBottomNow();
     });
     observer.observe(content);
+    observer.observe(scroll);
 
     return () => {
       observer.disconnect();
@@ -906,6 +933,7 @@ export const Conversation = memo(function Conversation({
                       : null
                   }
                   onRetryResponse={onRetryResponse}
+                  readAloud={readAloud}
                 />
               ))}
 

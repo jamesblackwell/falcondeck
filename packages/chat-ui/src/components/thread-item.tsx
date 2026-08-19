@@ -35,8 +35,8 @@ export type ThreadItemProps = {
   }) => void
   nowTick?: number
   tags?: ThreadTag[]
-  /** Model the thread was started on; revealed on hover when the row has room. */
-  modelLabel?: string | null
+  /** Provider the thread runs on; revealed on hover when the row has room. */
+  providerLabel?: string | null
 }
 
 function timeAgo(dateStr: string) {
@@ -61,7 +61,7 @@ export const ThreadItem = memo(
     onRequestRename,
     nowTick = 0,
     tags = [],
-    modelLabel = null,
+    providerLabel = null,
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
@@ -73,7 +73,7 @@ export const ThreadItem = memo(
     return (
       <div
         className={cn(
-          // A container so the model label can bow out on a narrow sidebar
+          // A container so the provider label can bow out on a narrow sidebar
           // without the row measuring itself in JS.
           '@container group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
           'transition-colors duration-[var(--fd-duration-fast)]',
@@ -131,7 +131,14 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-info" />
             ) : null}
           </span>
-          <span className="fd-type-label min-w-0 flex-1 truncate text-fg-primary">
+          <span
+            className={cn(
+              "fd-type-label min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
+              isSelected
+                ? "text-fg-primary"
+                : "text-fg-secondary group-hover:text-fg-primary",
+            )}
+          >
             {thread.title}
           </span>
           {thread.origin?.kind === 'scheduled_task' ? (
@@ -182,14 +189,14 @@ export const ThreadItem = memo(
             />
           ) : null}
         </button>
-        {modelLabel ? (
+        {providerLabel ? (
           // Takes over the space the timestamp vacates on hover, and only once
           // the row is wide enough that the title is not paying for it.
           <span
-            data-testid="thread-model-label"
+            data-testid="thread-provider-label"
             className="fd-type-meta hidden max-w-[45%] shrink-0 truncate text-fg-muted @[15rem]:group-hover:block"
           >
-            {modelLabel}
+            {providerLabel}
           </span>
         ) : null}
         {wasInterrupted ? (
@@ -231,7 +238,7 @@ export const ThreadItem = memo(
     threadRenderEqual(prev.thread, next.thread) &&
     prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
-    prev.modelLabel === next.modelLabel &&
+    prev.providerLabel === next.providerLabel &&
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&

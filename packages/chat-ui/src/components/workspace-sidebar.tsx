@@ -13,7 +13,7 @@ import {
   compareThreads,
   filterProjectGroupsByExtensions,
   THREAD_TAGS_EXTENSION_ID,
-  threadModelLabel,
+  threadProviderLabel,
   threadPriorityRank,
 } from "@falcondeck/client-core";
 import type {
@@ -24,6 +24,7 @@ import type {
   ThreadSortMode,
   ThreadSummary,
   ThreadTag,
+  WorkspaceColorId,
 } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -32,6 +33,7 @@ import {
   Sidebar as SidebarShell,
   SidebarContent,
   SidebarHeader,
+  Tooltip,
   cn,
 } from "@falcondeck/ui";
 
@@ -103,11 +105,17 @@ export type WorkspaceSidebarProps = {
   onAddProject?: () => void;
   /** Opens the host's command palette from the sidebar header. */
   onSearch?: () => void;
-  /** Rendered shortcuts ("⌘N") appended to the header tooltips, when the host binds them. */
-  newThreadShortcut?: string;
-  addProjectShortcut?: string;
-  searchShortcut?: string;
+  /** Binding tokens ("⌘", "N") for header tooltips, when the host binds them. */
+  newThreadShortcut?: string[];
+  addProjectShortcut?: string[];
+  searchShortcut?: string[];
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void;
+  /** Theme-backed folder colors keyed by workspace id. */
+  workspaceColors?: Record<string, string>;
+  onWorkspaceColorChange?: (
+    workspaceId: string,
+    color: WorkspaceColorId | null,
+  ) => Promise<void> | void;
   /** How chats order within each project; also applies to the pinned list. */
   threadSort?: ThreadSortMode;
   /** Enables the sort menu on the Projects heading. */
@@ -379,7 +387,7 @@ const ThreadList = memo(function ThreadList({
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
           tags={threadTagsById?.[thread.id]}
-          modelLabel={threadModelLabel(group.workspace, thread)}
+          providerLabel={threadProviderLabel(group.workspace, thread)}
         />
       ))}
       {trailingSelected ? (
@@ -394,7 +402,7 @@ const ThreadList = memo(function ThreadList({
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
           tags={threadTagsById?.[trailingSelected.id]}
-          modelLabel={threadModelLabel(group.workspace, trailingSelected)}
+          providerLabel={threadProviderLabel(group.workspace, trailingSelected)}
         />
       ) : null}
       {hiddenCount > 0 || canCollapse ? (
@@ -434,7 +442,7 @@ type PinnedThreadEntry = {
   workspaceId: string;
   thread: ThreadSummary;
   /** Resolved where the workspace is still in hand; the row only has the id. */
-  modelLabel: string | null;
+  providerLabel: string | null;
 };
 
 const pinnedEntryKey = (entry: PinnedThreadEntry) =>
@@ -484,7 +492,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
         Pinned
       </h2>
       <div>
-        {entries.map(({ workspaceId, thread, modelLabel }) => (
+        {entries.map(({ workspaceId, thread, providerLabel }) => (
           <ThreadItem
             key={`${workspaceId}:${thread.id}`}
             thread={thread}
@@ -496,7 +504,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
             onRequestRename={onRequestRenameThread}
             nowTick={nowTick}
             tags={threadTagsById?.[thread.id]}
-            modelLabel={modelLabel}
+            providerLabel={providerLabel}
           />
         ))}
       </div>
@@ -524,6 +532,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   addProjectShortcut,
   searchShortcut,
   onRemoveWorkspace,
+  workspaceColors,
+  onWorkspaceColorChange,
   threadSort = "last_updated",
   onThreadSortChange,
   onWorkspaceOrderChange,
@@ -1218,7 +1228,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
-      if (!onRemoveWorkspace) return;
+      if (!onRemoveWorkspace && !onWorkspaceColorChange) return;
       setThreadContextMenu(null);
       setWorkspaceContextMenu({
         workspaceId,
@@ -1227,7 +1237,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         y: position.y,
       });
     },
-    [onRemoveWorkspace],
+    [onRemoveWorkspace, onWorkspaceColorChange],
+  );
+
+  const handleSetWorkspaceColor = useCallback(
+    (color: WorkspaceColorId | null) => {
+      if (!workspaceContextMenu || !onWorkspaceColorChange) return;
+      const { workspaceId } = workspaceContextMenu;
+      setWorkspaceContextMenu(null);
+      void onWorkspaceColorChange(workspaceId, color);
+    },
+    [onWorkspaceColorChange, workspaceContextMenu],
   );
 
   const openRemoveDialog = useCallback(() => {
@@ -1278,7 +1298,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           .map((thread) => ({
             workspaceId: group.workspace.id,
             thread,
-            modelLabel: threadModelLabel(group.workspace, thread),
+            providerLabel: threadProviderLabel(group.workspace, thread),
           })),
       ),
     [displayGroups],
@@ -1319,27 +1339,26 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const newThreadRow =
     onNewThread && newThreadWorkspaceId ? (
-      <button
-        type="button"
-        onClick={() => handleNewThread(newThreadWorkspaceId)}
-        title={
-          newThreadShortcut ? `New thread (${newThreadShortcut})` : "New thread"
-        }
-        className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
-      >
-        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
-          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
-        </span>
-        <span className="min-w-0 flex-1">New thread</span>
-        {newThreadShortcut ? (
-          <span
-            aria-hidden="true"
-            className="fd-readout shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted"
-          >
-            {newThreadShortcut}
+      <Tooltip label="New thread" shortcut={newThreadShortcut}>
+        <button
+          type="button"
+          onClick={() => handleNewThread(newThreadWorkspaceId)}
+          className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
+        >
+          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
+            <Plus aria-hidden="true" className="h-3.5 w-3.5" />
           </span>
-        ) : null}
-      </button>
+          <span className="min-w-0 flex-1">New thread</span>
+          {newThreadShortcut?.length ? (
+            <span
+              aria-hidden="true"
+              className="fd-readout shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted"
+            >
+              {newThreadShortcut.join("")}
+            </span>
+          ) : null}
+        </button>
+      </Tooltip>
     ) : null;
 
   const handleRenameSubmit = useCallback(
@@ -1513,17 +1532,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             {title}
           </span>
           {onSearch ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7"
-              onClick={onSearch}
-              title={searchShortcut ? `Search (${searchShortcut})` : "Search"}
-              aria-label="Search"
-            >
-              <Search aria-hidden="true" className="h-4 w-4" />
-            </Button>
+            <Tooltip label="Search" shortcut={searchShortcut}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={onSearch}
+                aria-label="Search"
+              >
+                <Search aria-hidden="true" className="h-4 w-4" />
+              </Button>
+            </Tooltip>
           ) : null}
         </div>
 
@@ -1617,27 +1637,24 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               ) : null}
               {/* Adding a project belongs beside the projects it adds to. */}
               {onAddProject ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={onAddProject}
-                  disabled={isAddingProject}
-                  title={
-                    addProjectShortcut
-                      ? `Add project (${addProjectShortcut})`
-                      : "Add project"
-                  }
-                  aria-label="Add project"
-                  aria-busy={isAddingProject}
-                >
-                  {isAddingProject ? (
-                    <ActivityDiamond size="md" />
-                  ) : (
-                    <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
-                  )}
-                </Button>
+                <Tooltip label="Add project" shortcut={addProjectShortcut}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={onAddProject}
+                    disabled={isAddingProject}
+                    aria-label="Add project"
+                    aria-busy={isAddingProject}
+                  >
+                    {isAddingProject ? (
+                      <ActivityDiamond size="md" />
+                    ) : (
+                      <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </Tooltip>
               ) : null}
             </div>
           </div>
@@ -1700,7 +1717,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                           : undefined
                       }
                       onOpenContextMenu={
-                        onRemoveWorkspace
+                        onRemoveWorkspace || onWorkspaceColorChange
                           ? (position) =>
                               handleOpenWorkspaceContextMenu(
                                 workspaceId,
@@ -1709,6 +1726,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                               )
                           : undefined
                       }
+                      color={workspaceColors?.[workspaceId] ?? null}
                       dragHandleProps={dragHandleProps}
                       open={!collapsedWorkspaces.has(workspaceId)}
                       onOpenChange={(open) =>
@@ -1816,7 +1834,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       <WorkspaceContextMenu
         menuRef={workspaceContextMenuRef}
         target={workspaceContextMenu}
-        onRemove={openRemoveDialog}
+        selectedColor={
+          workspaceContextMenu
+            ? (workspaceColors?.[workspaceContextMenu.workspaceId] ?? null)
+            : null
+        }
+        onSetColor={onWorkspaceColorChange ? handleSetWorkspaceColor : undefined}
+        onRemove={onRemoveWorkspace ? openRemoveDialog : undefined}
       />
       <RemoveWorkspaceDialog
         target={removeTarget}

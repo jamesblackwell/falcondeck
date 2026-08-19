@@ -43,7 +43,7 @@ import {
   providerSupportsSkill,
   resolveServiceTier,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, Button, cn } from "@falcondeck/ui";
+import { ActivityDiamond, Button, Tooltip, cn } from "@falcondeck/ui";
 
 import {
   ModelMenu,
@@ -170,11 +170,16 @@ export type PromptInputProps = {
   /** Opens one of the option menus in response to an app-level shortcut. */
   menuRequest?: ComposerMenuRequest | null;
   /**
-   * Rendered shortcut per option menu ("⌃⇧M"), surfaced in each chip's
-   * tooltip. Hosts own the bindings, so the labels arrive from above rather
-   * than being hardcoded here.
+   * Keycap tokens per option menu (["⌃", "⇧", "M"]), rendered as keycap
+   * badges in each menu header and surfaced in the chip's tooltip. Hosts own
+   * the bindings, so the labels arrive from above rather than being hardcoded
+   * here.
    */
-  menuShortcuts?: Partial<Record<ComposerMenu, string>>;
+  menuShortcuts?: Partial<Record<ComposerMenu, string[]>>;
+  /** Keycap tokens for Send, from the host keymap. */
+  sendShortcut?: string[];
+  /** Keycap tokens for Stop, from the host keymap. */
+  stopShortcut?: string[];
   disabled?: boolean;
   sendDisabled?: boolean;
   /** Visible explanation when content exists but the host cannot send it. */
@@ -222,7 +227,7 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
 const EMPTY_HANDOFF_PROVIDER_OPTIONS: ProviderOption[] = [];
 const EMPTY_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
 /** Stable default so an unset menuShortcuts never rebuilds optionMenuProps. */
-const NO_MENU_SHORTCUTS: Partial<Record<ComposerMenu, string>> = {};
+const NO_MENU_SHORTCUTS: Partial<Record<ComposerMenu, string[]>> = {};
 
 /** Keeps a disabled picker mounted when the host passes no handler for it. */
 const noopModeChange = () => {};
@@ -271,6 +276,8 @@ export const PromptInput = memo(function PromptInput({
   focusRequestKey = 0,
   menuRequest = null,
   menuShortcuts = NO_MENU_SHORTCUTS,
+  sendShortcut,
+  stopShortcut,
   disabled = false,
   sendDisabled = false,
   sendDisabledReason,
@@ -294,7 +301,6 @@ export const PromptInput = memo(function PromptInput({
   const [openOptionMenu, setOpenOptionMenu] = useState<ComposerMenu | null>(
     null,
   );
-  const optionMenuOpenedByShortcutRef = useRef(false);
   // Seeded from the mount-time request: the composer remounts on
   // conversation/provider switches while the request state lives above it, so
   // a stale key must read as already-handled or every remount would replay
@@ -425,7 +431,6 @@ export const PromptInput = memo(function PromptInput({
       model: models.length > 0,
     };
     if (!available[menuRequest.menu]) return;
-    optionMenuOpenedByShortcutRef.current = true;
     setOpenOptionMenu(menuRequest.menu);
   }, [
     capabilities.permission_modes,
@@ -441,6 +446,17 @@ export const PromptInput = memo(function PromptInput({
     showProviderSelector,
   ]);
 
+  // After a picker closes, Radix puts focus on the chip. The next keypress is
+  // then swallowed (Enter reopens the menu; typing goes nowhere). Put the
+  // caret back in the draft so the user can keep editing or send.
+  const restoreComposerFocus = useCallback((event?: Event) => {
+    event?.preventDefault();
+    textareaRef.current?.focus();
+  }, []);
+  const restoreComposerFocusSoon = useCallback(() => {
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
   const optionMenuProps = useCallback(
     (menu: ComposerMenu) => ({
       shortcutHint: menuShortcuts[menu],
@@ -449,19 +465,16 @@ export const PromptInput = memo(function PromptInput({
         setOpenOptionMenu((current) =>
           nextOpen ? menu : current === menu ? null : current,
         );
-        if (nextOpen) optionMenuOpenedByShortcutRef.current = false;
+        if (!nextOpen) restoreComposerFocusSoon();
       },
-      // Shortcut-opened menus hand focus back to the draft on close; Radix
-      // would restore it to the trigger chip, which is never where typing
-      // resumes. Pointer-opened menus keep the default restore.
-      onCloseAutoFocus: (event: Event) => {
-        if (!optionMenuOpenedByShortcutRef.current) return;
-        optionMenuOpenedByShortcutRef.current = false;
-        event.preventDefault();
-        textareaRef.current?.focus();
-      },
+      onCloseAutoFocus: restoreComposerFocus,
     }),
-    [menuShortcuts, openOptionMenu],
+    [
+      menuShortcuts,
+      openOptionMenu,
+      restoreComposerFocus,
+      restoreComposerFocusSoon,
+    ],
   );
 
   const activeSkill =
@@ -473,9 +486,6 @@ export const PromptInput = memo(function PromptInput({
           )
         ] ?? null)
       : null;
-  const activeSkillSupported = activeSkill
-    ? providerSupportsSkill(activeSkill, selectedProvider)
-    : false;
   const goalCommandActive = showGoalCommand && activeSkillIndex === 0;
 
   const updateSlashQuery = useCallback(
@@ -544,9 +554,11 @@ export const PromptInput = memo(function PromptInput({
       if (
         !hasCommandModifier &&
         (event.key === "Tab" || event.key === "Enter") &&
-        activeSkillSupported &&
         activeSkill
       ) {
+        // Accept the highlighted row regardless of provider support — the
+        // composer is an editor, and completing an unavailable skill still
+        // beats a dead Tab. The row keeps its "unavailable" hint.
         event.preventDefault();
         insertSkillAlias(activeSkill.alias);
         return;
@@ -839,16 +851,17 @@ export const PromptInput = memo(function PromptInput({
                 <span role="status" aria-live="polite" className="sr-only">
                   Recording voice input
                 </span>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={voice.onCancel}
-                  aria-label="Cancel voice input"
-                  title="Cancel voice input"
-                  className="h-9 w-9 shrink-0 rounded-full p-0"
-                >
-                  <X className="h-4 w-4" />
-                </Button>
+                <Tooltip label="Cancel">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={voice.onCancel}
+                    aria-label="Cancel voice input"
+                    className="h-9 w-9 shrink-0 rounded-full p-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </Tooltip>
                 <VoiceWaveform className="min-w-0 flex-1" />
                 <span
                   aria-hidden="true"
@@ -856,26 +869,28 @@ export const PromptInput = memo(function PromptInput({
                 >
                   {formatVoiceDuration(voice.seconds)}
                 </span>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={voice.onStop}
-                  aria-label="Stop recording"
-                  title="Stop and put the transcript in the composer"
-                  className="h-9 w-9 shrink-0 rounded-full p-0"
-                >
-                  <Square className="h-3.5 w-3.5 fill-current" />
-                </Button>
-                <Button
-                  type="button"
-                  onClick={voice.onStopAndSend}
-                  disabled={sendDisabled}
-                  aria-label="Transcribe and send"
-                  title="Transcribe and send"
-                  className="h-9 w-9 shrink-0 rounded-full p-0"
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
+                <Tooltip label="Stop">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={voice.onStop}
+                    aria-label="Stop recording"
+                    className="h-9 w-9 shrink-0 rounded-full p-0"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </Button>
+                </Tooltip>
+                <Tooltip label="Send" shortcut={sendShortcut}>
+                  <Button
+                    type="button"
+                    onClick={voice.onStopAndSend}
+                    disabled={sendDisabled}
+                    aria-label="Transcribe and send"
+                    className="h-9 w-9 shrink-0 rounded-full p-0"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                </Tooltip>
               </>
             ) : null}
             {voice.state === "transcribing" ? (
@@ -1241,6 +1256,10 @@ export const PromptInput = memo(function PromptInput({
                   modes={collaborationModes}
                   onValueChange={onCollaborationModeChange ?? noopModeChange}
                   disabled={disabled || !onCollaborationModeChange}
+                  onCloseAutoFocus={restoreComposerFocus}
+                  onOpenChange={(nextOpen) => {
+                    if (!nextOpen) restoreComposerFocusSoon();
+                  }}
                 />
               ) : null}
               {capabilities.permission_modes.length > 0 ? (
@@ -1317,50 +1336,62 @@ export const PromptInput = memo(function PromptInput({
                 on an empty composer: speaking into a half-written prompt is
                 as common as speaking a whole one. */}
             {onVoiceInput ? (
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={onVoiceInput}
-                disabled={disabled}
-                aria-label="Record voice input"
-                title="Record voice input"
-                className="h-9 w-9 rounded-full p-0"
-              >
-                <Mic className="h-4 w-4" />
-              </Button>
+              <Tooltip label="Voice input">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={onVoiceInput}
+                  disabled={disabled}
+                  aria-label="Record voice input"
+                  className="h-9 w-9 rounded-full p-0"
+                >
+                  <Mic className="h-4 w-4" />
+                </Button>
+              </Tooltip>
             ) : null}
             {showStop ? (
-              <Button
-                type="button"
-                onClick={onStop}
-                disabled={disabled || isStopping}
-                aria-label={isStopping ? "Stopping" : "Stop generating"}
-                title={isStopping ? "Stopping…" : "Stop"}
-                className="h-9 w-9 rounded-full p-0"
+              <Tooltip
+                label={isStopping ? "Stopping…" : "Stop"}
+                shortcut={isStopping ? undefined : stopShortcut}
               >
-                <Square className="h-3.5 w-3.5 fill-current" />
-              </Button>
+                <Button
+                  type="button"
+                  onClick={onStop}
+                  disabled={disabled || isStopping}
+                  aria-label={isStopping ? "Stopping" : "Stop generating"}
+                  className="h-9 w-9 rounded-full p-0"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+              </Tooltip>
             ) : (
-              <Button
-                type="button"
-                onClick={onSubmit}
-                disabled={!canSubmit}
-                aria-label={
-                  isPreparingAttachments ? "Preparing images" : "Send message"
+              <Tooltip
+                label={isPreparingAttachments ? "Preparing images" : "Send"}
+                shortcut={
+                  isPreparingAttachments ? undefined : sendShortcut
                 }
-                aria-describedby={
-                  sendDisabled && sendDisabledReason
-                    ? `${textareaId}-send-status`
-                    : undefined
-                }
-                className="h-9 w-9 rounded-full p-0"
               >
-                {isPreparingAttachments ? (
-                  <ActivityDiamond size="md" tone="current" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </Button>
+                <Button
+                  type="button"
+                  onClick={onSubmit}
+                  disabled={!canSubmit}
+                  aria-label={
+                    isPreparingAttachments ? "Preparing images" : "Send message"
+                  }
+                  aria-describedby={
+                    sendDisabled && sendDisabledReason
+                      ? `${textareaId}-send-status`
+                      : undefined
+                  }
+                  className="h-9 w-9 rounded-full p-0"
+                >
+                  {isPreparingAttachments ? (
+                    <ActivityDiamond size="md" tone="current" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                </Button>
+              </Tooltip>
             )}
           </div>
         </div>

@@ -7,10 +7,12 @@ export * from "./components/diff-lines";
 export * from "./components/conversation";
 export * from "./components/conversation-export-button";
 export * from "./lib/file-diff-context";
+export * from "./lib/goal-time";
 export * from "./lib/shiki";
 export * from "./lib/realtime-audio-player";
 export * from "./lib/tool-file-path";
 export * from "./lib/quoted-selection";
+export * from "./lib/read-aloud";
 export * from "./components/message";
 export * from "./components/operational-notice";
 export {
@@ -21,6 +23,7 @@ export {
   splitStreamingMarkdownBlocks,
 } from "./components/message-markdown";
 export * from "./components/goal-control";
+export * from "./components/goal-bubble";
 export * from "./components/composer-context-bar";
 export * from "./components/model-selector";
 export * from "./components/provider-icon";

@@ -1,11 +1,20 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { ArrowRight, Check, ChevronDown, ChevronLeft, Zap } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  Star,
+  Zap,
+} from "lucide-react";
 
 import {
   formatModelLabel,
   filterOptionsByQuery,
   SEARCHABLE_OPTION_THRESHOLD,
+  sortModelsByStarred,
+  toggleStarredModelId,
   type AgentProvider,
   type CollaborationModeSummary,
   type ModelSummary,
@@ -14,11 +23,18 @@ import {
 } from "@falcondeck/client-core";
 
 import {
+  readStoredStarredModelIds,
+  writeStoredStarredModelIds,
+} from "../lib/starred-models";
+
+import {
+  MenuHeader,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Tooltip,
   cn,
 } from "@falcondeck/ui";
 
@@ -34,21 +50,16 @@ export type MenuOpenProps = {
   onOpenChange?: (open: boolean) => void;
   /**
    * Forwarded to the Radix content so a host can redirect the close-time
-   * focus restore (for example back to the composer draft after a
-   * shortcut-opened menu). Call `event.preventDefault()` before refocusing.
+   * focus restore (for example back to the composer draft after picking an
+   * option). Call `event.preventDefault()` before refocusing.
    */
   onCloseAutoFocus?: (event: Event) => void;
   /**
-   * Rendered shortcut for the host binding that opens this picker ("⌃⇧M").
-   * Shown in the trigger tooltip so the chip teaches its own shortcut.
+   * Binding that opens this picker, as keycap tokens (["⌃", "⇧", "M"]).
+   * Rendered as keycaps in the menu header and in the trigger tooltip
+   * so the chip teaches its own shortcut.
    */
-  shortcutHint?: string;
-};
-
-/** Trigger tooltip that names the control and, when bound, its shortcut. */
-function triggerTitle(label: string, shortcutHint: string | undefined, reason?: string | null) {
-  if (reason) return reason;
-  return shortcutHint ? `${label} (${shortcutHint})` : label;
+  shortcutHint?: string[];
 }
 
 export function ProviderSelector({
@@ -78,16 +89,21 @@ export function ProviderSelector({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <SelectTrigger
-        variant="quiet"
-        disabled={disabled || providers.length === 0}
-        aria-label="Agent"
-        title={triggerTitle("Choose agent", shortcutHint)}
+      <Tooltip label="Choose agent" shortcut={shortcutHint}>
+        <SelectTrigger
+          variant="quiet"
+          disabled={disabled || providers.length === 0}
+          aria-label="Agent"
+        >
+          <ProviderIcon provider={value} />
+          <SelectValue placeholder="Agent" />
+        </SelectTrigger>
+      </Tooltip>
+      <SelectContent
+        label="Agent"
+        shortcutHint={shortcutHint}
+        onCloseAutoFocus={onCloseAutoFocus}
       >
-        <ProviderIcon provider={value} />
-        <SelectValue placeholder="Agent" />
-      </SelectTrigger>
-      <SelectContent onCloseAutoFocus={onCloseAutoFocus}>
         {providers.map((option) => (
           <SelectItem
             key={option.provider}
@@ -130,7 +146,7 @@ export function CollaborationModeSelector({
       <SelectTrigger variant="quiet" aria-label="Collaboration mode">
         <SelectValue placeholder="Mode" />
       </SelectTrigger>
-      <SelectContent onCloseAutoFocus={onCloseAutoFocus}>
+      <SelectContent label="Mode" onCloseAutoFocus={onCloseAutoFocus}>
         {modes.map((mode) => (
           <SelectItem key={mode.id} value={mode.id}>
             {mode.label}
@@ -199,8 +215,9 @@ export function ModelMenu({
   const menuId = useId();
   const [modelQuery, setModelQuery] = useState("");
   const [panel, setPanel] = useState<"model" | "handoff">("model");
+  const [starredIds, setStarredIds] = useState(readStoredStarredModelIds);
   const modelSearchable = models.length >= SEARCHABLE_OPTION_THRESHOLD;
-  const visibleModels = useMemo(
+  const filteredModels = useMemo(
     () =>
       modelSearchable
         ? filterOptionsByQuery(
@@ -211,6 +228,15 @@ export function ModelMenu({
         : models,
     [modelQuery, modelSearchable, models],
   );
+  const visibleModels = useMemo(
+    () => sortModelsByStarred(filteredModels, starredIds),
+    [filteredModels, starredIds],
+  );
+  const starredIdSet = useMemo(() => new Set(starredIds), [starredIds]);
+  let lastStarredIndex = -1;
+  for (let index = 0; index < visibleModels.length; index += 1) {
+    if (starredIdSet.has(visibleModels[index].id)) lastStarredIndex = index;
+  }
   const isFastOn = fastActive && fastTier !== null;
   const triggerLabel = selectedModel
     ? formatModelLabel(selectedModel.label)
@@ -278,6 +304,15 @@ export function ModelMenu({
   const activateRow = (rowId: string) => {
     const index = rows.findIndex((row) => row.id === rowId);
     if (index >= 0) setActiveIndex(index);
+  };
+
+  const handleToggleStar = (modelId: string) => {
+    const nextStarred = toggleStarredModelId(starredIds, modelId);
+    setStarredIds(nextStarred);
+    writeStoredStarredModelIds(nextStarred);
+    const nextVisible = sortModelsByStarred(filteredModels, nextStarred);
+    const nextIndex = nextVisible.findIndex((model) => model.id === modelId);
+    if (nextIndex >= 0) setActiveIndex(nextIndex);
   };
 
   // Open on the current model so the first Arrow keypress moves from where the
@@ -372,40 +407,41 @@ export function ModelMenu({
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          aria-label="Model"
-          aria-haspopup="menu"
-          aria-expanded={open}
-          title={triggerTitle("Choose model and reasoning", shortcutHint)}
-          disabled={disabled || models.length === 0}
-          className="fd-focus inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
-        >
-          {isFastOn ? (
-            <Zap
+      <Tooltip label="Choose model and reasoning" shortcut={shortcutHint}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            aria-label="Model"
+            aria-haspopup="menu"
+            aria-expanded={open}
+            disabled={disabled || models.length === 0}
+            className="fd-focus group inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
+          >
+            {isFastOn ? (
+              <Zap
+                aria-hidden="true"
+                className="h-3 w-3 shrink-0 text-accent"
+                fill="currentColor"
+              />
+            ) : null}
+            <span className="truncate">{triggerLabel}</span>
+            {effortLabel ? (
+              <span className="shrink-0 text-fg-muted">{effortLabel}</span>
+            ) : null}
+            <ChevronDown
               aria-hidden="true"
-              className="h-3 w-3 shrink-0 text-accent"
-              fill="currentColor"
+              className="h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)] group-data-[state=open]:rotate-180"
             />
-          ) : null}
-          <span className="truncate">{triggerLabel}</span>
-          {effortLabel ? (
-            <span className="shrink-0 text-fg-muted">{effortLabel}</span>
-          ) : null}
-          <ChevronDown
-            aria-hidden="true"
-            className="h-3 w-3 shrink-0 text-fg-muted"
-          />
-        </button>
-      </Popover.Trigger>
+          </button>
+        </Popover.Trigger>
+      </Tooltip>
       <Popover.Portal>
         <Popover.Content
           ref={contentRef}
           align="start"
           sideOffset={6}
           onCloseAutoFocus={onCloseAutoFocus}
-          className="z-50 w-[32rem] max-w-[calc(100vw-2rem)] rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+          className="fd-menu-pop z-50 w-[32rem] max-w-[calc(100vw-2rem)] rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
           {panel === "handoff" ? (
             <HandoffProviderPanel
@@ -421,9 +457,11 @@ export function ModelMenu({
             />
           ) : (
             <>
-              <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-                Model
-              </p>
+              <MenuHeader
+                label="Model"
+                shortcut={shortcutHint}
+                className="px-2.5 pb-1 pt-1.5"
+              />
               {modelSearchable ? (
                 <OptionFilterField
                   value={modelQuery}
@@ -440,37 +478,70 @@ export function ModelMenu({
                 }
                 className="max-h-56 overflow-y-auto"
               >
-                {visibleModels.map((model) => {
+                {visibleModels.map((model, index) => {
                   const isSelected = model.id === selectedModel?.id;
                   const isActive = activeRow?.id === model.id;
+                  const isStarred = starredIdSet.has(model.id);
+                  const label = formatModelLabel(model.label);
                   return (
-                    <button
-                      key={model.id}
-                      id={`${menuId}-${model.id}`}
-                      data-row-id={model.id}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={isSelected}
-                      onMouseEnter={() => activateRow(model.id)}
-                      onClick={() => {
-                        onModelChange(model.id);
-                        handleOpenChange(false);
-                      }}
-                      className={cn(
-                        "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active",
-                        isActive && "bg-interactive-hover",
-                      )}
-                    >
-                      <span className="min-w-0 flex-1 truncate">
-                        {formatModelLabel(model.label)}
-                      </span>
-                      {isSelected ? (
-                        <Check
+                    <div key={model.id}>
+                      <div
+                        data-row-id={model.id}
+                        onMouseEnter={() => activateRow(model.id)}
+                        className={cn(
+                          "group/model flex w-full items-center rounded-[var(--fd-radius-md)] transition-colors",
+                          isActive && "bg-interactive-hover",
+                        )}
+                      >
+                        <button
+                          id={`${menuId}-${model.id}`}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={isSelected}
+                          onClick={() => {
+                            onModelChange(model.id);
+                            handleOpenChange(false);
+                          }}
+                          className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary focus-visible:outline-none"
+                        >
+                          <span className="min-w-0 flex-1 truncate">{label}</span>
+                          {isSelected ? (
+                            <Check
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5 shrink-0"
+                            />
+                          ) : null}
+                        </button>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label={
+                            isStarred ? `Unstar ${label}` : `Star ${label}`
+                          }
+                          aria-pressed={isStarred}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => handleToggleStar(model.id)}
+                          className={cn(
+                            "mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] text-fg-muted opacity-0 transition-opacity hover:bg-interactive-active hover:text-fg-secondary focus-visible:opacity-100 focus-visible:outline-none group-hover/model:opacity-100 [@media(hover:none)]:opacity-100",
+                            (isStarred || isActive) && "opacity-100",
+                            isStarred && "text-accent hover:text-accent",
+                          )}
+                        >
+                          <Star
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5"
+                            fill={isStarred ? "currentColor" : "none"}
+                          />
+                        </button>
+                      </div>
+                      {index === lastStarredIndex &&
+                      lastStarredIndex < visibleModels.length - 1 ? (
+                        <div
                           aria-hidden="true"
-                          className="h-3.5 w-3.5 shrink-0"
+                          className="mx-2 my-1 border-t border-border-subtle"
                         />
                       ) : null}
-                    </button>
+                    </div>
                   );
                 })}
                 {visibleModels.length === 0 ? (
@@ -751,19 +822,27 @@ export function PermissionModeSelector({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <SelectTrigger
-        variant="quiet"
-        disabled={disabled || unavailable}
-        aria-label="Permission mode"
-        title={triggerTitle(
-          "Choose permission mode",
-          shortcutHint,
-          unavailable ? "This agent has no permission modes" : null,
-        )}
+      <Tooltip
+        label={
+          unavailable
+            ? "This agent has no permission modes"
+            : "Choose permission mode"
+        }
+        shortcut={unavailable ? undefined : shortcutHint}
       >
-        <SelectValue placeholder="Permissions" />
-      </SelectTrigger>
-      <SelectContent onCloseAutoFocus={onCloseAutoFocus}>
+        <SelectTrigger
+          variant="quiet"
+          disabled={disabled || unavailable}
+          aria-label="Permission mode"
+        >
+          <SelectValue placeholder="Permissions" />
+        </SelectTrigger>
+      </Tooltip>
+      <SelectContent
+        label="Permissions"
+        shortcutHint={shortcutHint}
+        onCloseAutoFocus={onCloseAutoFocus}
+      >
         {modes.map((mode) => (
           <SelectItem key={mode} value={mode}>
             {modeLabel(PERMISSION_MODE_LABELS, mode)}
@@ -803,19 +882,27 @@ export function SandboxSelector({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <SelectTrigger
-        variant="quiet"
-        disabled={disabled || unavailable}
-        aria-label="Sandbox mode"
-        title={triggerTitle(
-          "Choose sandbox mode",
-          shortcutHint,
-          unavailable ? "This agent has no sandbox modes" : null,
-        )}
+      <Tooltip
+        label={
+          unavailable
+            ? "This agent has no sandbox modes"
+            : "Choose sandbox mode"
+        }
+        shortcut={unavailable ? undefined : shortcutHint}
       >
-        <SelectValue placeholder="Sandbox" />
-      </SelectTrigger>
-      <SelectContent onCloseAutoFocus={onCloseAutoFocus}>
+        <SelectTrigger
+          variant="quiet"
+          disabled={disabled || unavailable}
+          aria-label="Sandbox mode"
+        >
+          <SelectValue placeholder="Sandbox" />
+        </SelectTrigger>
+      </Tooltip>
+      <SelectContent
+        label="Sandbox"
+        shortcutHint={shortcutHint}
+        onCloseAutoFocus={onCloseAutoFocus}
+      >
         <SelectItem value="default">Default sandbox</SelectItem>
         {modes
           .filter((mode) => mode !== "default")
