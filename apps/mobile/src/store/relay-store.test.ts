@@ -102,6 +102,25 @@ describe('relay-store', () => {
       expect(finished.syncDiagnostics.lastError).toBeNull()
       expect(finished.syncDiagnostics.lastSuccessAt).not.toBeNull()
     })
+
+    it('starts a reconnect run with fresh timers but remembers the last success', () => {
+      const store = useRelayStore.getState()
+      store._startSyncAttempt()
+      store._finishSync()
+      const lastSuccessAt = useRelayStore.getState().syncDiagnostics.lastSuccessAt
+
+      store._startSyncAttempt()
+      store._setSyncRetry('Your Mac disconnected while snapshot.current was running.', null)
+
+      store._resetSyncDiagnostics()
+      const diagnostics = useRelayStore.getState().syncDiagnostics
+      expect(diagnostics.attempt).toBe(0)
+      expect(diagnostics.startedAt).toBeNull()
+      expect(diagnostics.lastError).toBeNull()
+      expect(diagnostics.lastErrorAt).toBeNull()
+      expect(diagnostics.nextRetryAt).toBeNull()
+      expect(diagnostics.lastSuccessAt).toBe(lastSuccessAt)
+    })
   })
 
   describe('claimPairing', () => {

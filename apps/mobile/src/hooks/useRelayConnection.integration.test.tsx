@@ -783,4 +783,184 @@ describe('useRelayConnection session rotation', () => {
     })
     expect(useRelayStore.getState().isSyncing).toBe(false)
   })
+
+  it('keeps a transient snapshot failure out of the error toast and retries to success', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'flap-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useRelayStore.getState().setPairingCode('FLAP-RETRY')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+
+    const failure = 'Your Mac disconnected while snapshot.current was running.'
+    const callRpc = vi
+      .fn()
+      .mockRejectedValueOnce(new Error(failure))
+      .mockResolvedValue(snapshot())
+    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+
+    // The retry can land within the same flush, so observe the transient
+    // states through a subscription instead of sampling between awaits.
+    const seenToasts: (string | null)[] = []
+    const seenSyncErrors: (string | null)[] = []
+    const unsubscribe = useRelayStore.subscribe((state) => {
+      seenToasts.push(state.error)
+      seenSyncErrors.push(state.syncDiagnostics.lastError)
+    })
+
+    renderRelayConnection()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    const socket = TestWebSocket.instances[0]!
+    socket.readyState = TestWebSocket.OPEN
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 1,
+          history_truncated: false,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
+      await vi.waitFor(() => expect(callRpc).toHaveBeenCalledTimes(1))
+    })
+
+    // The retry lands and clears the diagnostics.
+    await act(async () => {
+      await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true), {
+        timeout: 3_000,
+      })
+    })
+    unsubscribe()
+
+    // The failure fed the sync banner's diagnostics, never the red toast.
+    expect(seenSyncErrors).toContain(failure)
+    expect(seenToasts.filter((toast) => toast !== null)).toEqual([])
+    expect(useRelayStore.getState().error).toBeNull()
+    expect(useRelayStore.getState().syncDiagnostics.lastError).toBeNull()
+    expect(useRelayStore.getState().isSyncing).toBe(false)
+  })
+
+  it('re-issues a snapshot deferred while the Mac was offline once presence recovers', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'deferred-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useRelayStore.getState().setPairingCode('DEFERRED')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+
+    const callRpc = vi.fn().mockResolvedValue(snapshot())
+    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+
+    renderRelayConnection()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    const socket = TestWebSocket.instances[0]!
+    socket.readyState = TestWebSocket.OPEN
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 1,
+          history_truncated: false,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
+      await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
+    })
+    expect(callRpc).toHaveBeenCalledTimes(1)
+
+    // History truncation demands a recovery snapshot, but the Mac is offline:
+    // the request must defer, keep the syncing state, and fire when the Mac
+    // comes back — not latch "Syncing…" forever.
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 2,
+          history_truncated: true,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: false,
+            daemon_rpc_ready: false,
+            last_seen_at: null,
+          },
+        }),
+      })
+    })
+    expect(callRpc).toHaveBeenCalledTimes(1)
+    expect(useRelayStore.getState().isSyncing).toBe(true)
+
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'presence',
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
+      await vi.waitFor(() => expect(callRpc).toHaveBeenCalledTimes(2))
+      await vi.waitFor(() => expect(useRelayStore.getState().isSyncing).toBe(false))
+    })
+    expect(useRelayStore.getState().error).toBeNull()
+  })
 })

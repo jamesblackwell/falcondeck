@@ -41,6 +41,13 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
     return <DeferredBanner key="link" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
   }
 
+  if (status.stage === 'offline') {
+    // "Offline" flaps: when the phone reconnects, the relay often discovers a
+    // dead daemon socket at that exact moment and the daemon takes seconds to
+    // return. Announcing it instantly turns every flap into a scary banner.
+    return <DeferredBanner key="offline" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
+  }
+
   return <SyncBannerContent status={status} />
 })
 

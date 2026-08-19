@@ -172,6 +172,12 @@ export function useRelayConnection() {
   const snapshotRaceOverflowed = useRef(false)
   const pendingSnapshotCursor = useRef<number | null>(null)
   const snapshotAfterCrypto = useRef(false)
+  // A snapshot request that arrived while the daemon was offline (or its RPC
+  // methods unregistered) is deferred, not dropped: the next presence update
+  // that shows the daemon back re-issues it. Without this, an ungated request
+  // (history truncation, post-bootstrap recovery) that hits the presence gate
+  // latches isSyncing with nothing scheduled to clear it.
+  const snapshotWaitingForDaemon = useRef(false)
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
 
   const checkpointPendingSnapshotCursor = useCallback((allowSnapshotRequestInFlight = false) => {
@@ -209,9 +215,11 @@ export function useRelayConnection() {
     if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
     const presence = relay.machinePresence
     if (!presence?.daemon_connected || presence.daemon_rpc_ready === false) {
+      snapshotWaitingForDaemon.current = true
       relay._setSyncing(true)
       return
     }
+    snapshotWaitingForDaemon.current = false
 
     const requestGeneration = snapshotRequestGeneration.current + 1
     snapshotRequestGeneration.current = requestGeneration
@@ -290,12 +298,18 @@ export function useRelayConnection() {
     } catch (e) {
       if (requestGeneration !== snapshotRequestGeneration.current) return
       const message = e instanceof Error ? e.message : 'Failed to load snapshot'
-      relay._setError(message)
+      // Sync failures are almost always a reconnect flap that the retry loop
+      // absorbs in seconds; they belong in the sync banner's diagnostics (via
+      // _setSyncRetry below), NOT the red error toast. Painting the toast here
+      // bombarded users with "Your Mac disconnected while snapshot.current was
+      // running" for outages that self-healed before they could read it.
       let nextRetryAt: number | null = null
-      // Retry while this launch still owes a fresh snapshot — including when a
-      // stale offline cache is on screen, otherwise one failed fetch strands
-      // the banner with nothing scheduled to clear it.
-      if (needsAuthoritativeSnapshot() && !snapshotRetryTimer.current) {
+      // Retry every failed snapshot the app decided it needed — including
+      // recovery fetches after the first sync (history truncation, parked-key
+      // eviction), otherwise one failure silently abandons the resync. When
+      // the daemon is genuinely offline, the retry lands in the presence gate
+      // above and waits for it instead of spinning.
+      if (!snapshotRetryTimer.current) {
         const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
         snapshotRetryAttempt.current += 1
         nextRetryAt = Date.now() + delay
@@ -334,8 +348,10 @@ export function useRelayConnection() {
       return
     }
     if (!payload.ok) {
+      // A reply landing after its 35s client timeout is diagnostics, not
+      // something the user can act on — keep it out of the error toast.
       const reason = payload.failure?.replace(/_/g, ' ') ?? 'no relay detail'
-      relay._setError(`Late remote response failed (${reason})`)
+      logConnection('warn', 'Late remote response failed', reason)
     }
   }, [])
 
@@ -494,7 +510,10 @@ export function useRelayConnection() {
           relay._persistSession()
         }
 
-        if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
+        if (
+          relay._getSessionCrypto() &&
+          (needsAuthoritativeSnapshot() || snapshotWaitingForDaemon.current)
+        ) {
           void requestSnapshot()
         }
 
@@ -601,6 +620,8 @@ export function useRelayConnection() {
     snapshotEventSeqs.clear()
     snapshotRaceOverflowed.current = false
     pendingSnapshotCursor.current = null
+    snapshotAfterCrypto.current = false
+    snapshotWaitingForDaemon.current = false
     snapshotRetryAttempt.current = 0
     if (snapshotRetryTimer.current) {
       clearTimeout(snapshotRetryTimer.current)
@@ -610,7 +631,10 @@ export function useRelayConnection() {
       clearTimeout(snapshotRefetchTimer.current)
       snapshotRefetchTimer.current = null
     }
-    relay._setSyncRetry(null, null)
+    // A fresh connection run starts with fresh sync timers; stale attempt
+    // counts and errors from the previous run otherwise defeat the sync
+    // banner's grace period on every warm reconnect.
+    relay._resetSyncDiagnostics()
     if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
       globalThis.cancelAnimationFrame(relayFlushFrame.current)
       relayFlushFrame.current = null
@@ -859,7 +883,10 @@ export function useRelayConnection() {
               }
               pendingRelayUpdates.current.push(...payload.updates)
               scheduleRelayFlush()
-              if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
+              if (
+                relay._getSessionCrypto() &&
+                (needsAuthoritativeSnapshot() || snapshotWaitingForDaemon.current)
+              ) {
                 void requestSnapshot()
               }
               break
@@ -934,7 +961,10 @@ export function useRelayConnection() {
               break
             case 'presence':
               relay._setMachinePresence(payload.presence)
-              if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
+              if (
+                relay._getSessionCrypto() &&
+                (needsAuthoritativeSnapshot() || snapshotWaitingForDaemon.current)
+              ) {
                 void requestSnapshot()
               }
               break
@@ -954,11 +984,13 @@ export function useRelayConnection() {
       .catch((error) => {
         if (!isCurrent) return
         const message = error instanceof Error ? error.message : 'Failed to connect to relay'
-        relay._setError(message)
         if (isInvalidSavedSessionError(message)) {
           void resetInvalidSavedSession(message)
           return
         }
+        // Reconnect handles it; the toast would flash on every retry of an
+        // outage the connecting banner is already narrating.
+        logConnection('error', 'Could not reach the relay', message)
         scheduleReconnect()
       })
 

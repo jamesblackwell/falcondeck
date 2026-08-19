@@ -123,6 +123,7 @@ interface RelayActions {
   _setSyncing: (isSyncing: boolean) => void
   _startSyncAttempt: () => void
   _setSyncRetry: (error: string | null, nextRetryAt: number | null) => void
+  _resetSyncDiagnostics: () => void
   _finishSync: () => void
   _getSocket: () => WebSocket | null
   _setSocket: (socket: WebSocket | null) => void
@@ -621,6 +622,14 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       },
     }))
   },
+  // Every connection run gets fresh sync timers. Without this, `startedAt`
+  // and `attempt` survive warm reconnects for the life of the app, so a sync
+  // hiccup from ten minutes ago makes the next routine reconnect skip the
+  // banner grace period and open on "Waiting 600s · attempt 9".
+  _resetSyncDiagnostics: () =>
+    set((state) => ({
+      syncDiagnostics: emptySyncDiagnostics(state.syncDiagnostics.lastSuccessAt),
+    })),
   _finishSync: () => {
     const now = Date.now()
     logConnection('success', 'Projects synced.')

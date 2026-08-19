@@ -77,6 +77,34 @@ describe('SyncBanner', () => {
     }
   })
 
+  it('rides out an offline flap in silence, then names it', () => {
+    vi.useFakeTimers()
+    try {
+      const offline = resolveSessionSyncStatus({
+        ...base,
+        daemonConnected: false,
+      })
+      const r = renderComponent(<SyncBanner status={offline} />)
+
+      // The relay reports the Mac offline for a few seconds whenever its
+      // stale daemon socket is discovered mid-reconnect; stay quiet until
+      // the outage outlives a routine flap.
+      expect(r.toJSON()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(5_999)
+      })
+      expect(r.toJSON()).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      expect(textOf(r)).toContain('Your Mac is offline')
+      cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps one clock across connecting and securing so a stall still surfaces', () => {
     vi.useFakeTimers()
     try {

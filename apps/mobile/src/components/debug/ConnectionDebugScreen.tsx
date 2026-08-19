@@ -23,10 +23,12 @@ import { Text } from '@/components/ui/Text'
 
 /**
  * Auto-show only after the busy period has lasted long enough that an ordinary
- * launch would have finished — otherwise every cold open flashes the overlay
- * for a split second.
+ * launch — and a routine reconnect flap, including the daemon's own relay
+ * reconnect after a network blip (its supervisor takes up to ~15s) — would
+ * have finished. Anything shorter shoves a full-screen diagnostic at the user
+ * for outages that heal themselves.
  */
-const AUTO_SHOW_DELAY_MS = 2_500
+const AUTO_SHOW_DELAY_MS = 20_000
 
 function formatClock(at: number): string {
   const d = new Date(at)
