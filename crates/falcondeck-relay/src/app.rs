@@ -36,6 +36,11 @@ const WS_SYNC_REPLAY_MAX_UPDATES: usize = 1_024;
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
+/// A daemon that drops usually reconnects within seconds (its supervisor
+/// retries on a 1-10s backoff). Calls arriving in this window after a
+/// disconnect are parked for re-dispatch instead of failing fast, so a
+/// client that was just told "connected" does not see a spurious error.
+const DAEMON_RECONNECT_GRACE_SECONDS: i64 = 20;
 /// An authoritative snapshot is the minimum RPC capability remote clients
 /// need before a connected daemon can be considered ready to sync.
 const REQUIRED_SYNC_RPC_METHOD: &str = "snapshot.current";
@@ -314,12 +319,19 @@ struct LiveSession {
     /// new calls while older owners remain as deterministic fallbacks.
     rpc_methods: HashMap<String, Vec<String>>,
     pending_rpc: HashMap<String, PendingRpc>,
+    /// When the most recent daemon peer disconnected. Used to park new RPC
+    /// calls during the reconnect grace window instead of failing them.
+    daemon_disconnected_at: Option<DateTime<Utc>>,
 }
 
 struct PendingRpc {
     method: String,
     requester_peer_id: String,
-    responder_peer_id: String,
+    /// Daemon peer currently serving the call; `None` while the call is
+    /// parked waiting for a daemon peer to (re)register the method.
+    responder_peer_id: Option<String>,
+    /// Retained so a parked call can be re-dispatched to a new daemon peer.
+    params: EncryptedEnvelope,
     expires_at: DateTime<Utc>,
 }
 
@@ -1304,6 +1316,14 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 removed_peer = live.peers.remove(peer_id).is_some();
+                if removed_peer
+                    && live
+                        .daemon_peer_ids
+                        .iter()
+                        .any(|daemon_peer_id| daemon_peer_id == peer_id)
+                {
+                    live.daemon_disconnected_at = Some(Utc::now());
+                }
                 live.daemon_peer_ids
                     .retain(|daemon_peer_id| daemon_peer_id != peer_id);
                 live.rpc_methods.retain(|_, owner_peer_ids| {
@@ -1326,42 +1346,60 @@ impl AppState {
                     live.pending_rpc.remove(&request_id);
                 }
 
-                let failed_request_ids = live
+                let orphaned_request_ids = live
                     .pending_rpc
                     .iter()
                     .filter_map(|(request_id, pending)| {
-                        if pending.responder_peer_id == peer_id {
+                        if pending.responder_peer_id.as_deref() == Some(peer_id) {
                             Some(request_id.clone())
                         } else {
                             None
                         }
                     })
                     .collect::<Vec<_>>();
-                for request_id in failed_request_ids {
-                    if let Some(pending) = live.pending_rpc.remove(&request_id)
-                        && let Some(requester) = live.peers.get(&pending.requester_peer_id)
-                    {
-                        warn!(
-                            session_id,
-                            request_id,
-                            method = %pending.method,
-                            responder_peer_id = peer_id,
-                            "relay rpc responder disconnected before replying"
-                        );
-                        deferred.push((
-                            pending.requester_peer_id.clone(),
-                            requester.tx.clone(),
-                            RelayServerMessage::RpcResult {
-                                request_id: strip_rpc_request_id_namespace(
-                                    &pending.requester_peer_id,
-                                    &request_id,
-                                ),
-                                ok: false,
-                                result: None,
-                                error: None,
-                                failure: Some(RelayRpcFailureCode::ResponderDisconnected),
-                            },
-                        ));
+                for request_id in orphaned_request_ids {
+                    // Overlapping daemon connections are routine during a
+                    // reconnect, and a lone daemon usually returns within
+                    // seconds — so hand the call to a surviving owner, or
+                    // park it for the next one to adopt, instead of failing
+                    // a request the client was just told would work. The
+                    // TTL sweep still fails calls no daemon ever picks up.
+                    let Some(method) = live
+                        .pending_rpc
+                        .get(&request_id)
+                        .map(|pending| pending.method.clone())
+                    else {
+                        continue;
+                    };
+                    let surviving_owner = live
+                        .rpc_owner(&method)
+                        .map(|(owner_peer_id, owner)| (owner_peer_id.to_owned(), owner.tx.clone()));
+                    let Some(pending) = live.pending_rpc.get_mut(&request_id) else {
+                        continue;
+                    };
+                    match surviving_owner {
+                        Some((owner_peer_id, owner_tx)) => {
+                            pending.responder_peer_id = Some(owner_peer_id.clone());
+                            deferred.push((
+                                owner_peer_id,
+                                owner_tx,
+                                RelayServerMessage::RpcRequest {
+                                    request_id,
+                                    method,
+                                    params: pending.params.clone(),
+                                },
+                            ));
+                        }
+                        None => {
+                            warn!(
+                                session_id,
+                                request_id,
+                                method,
+                                responder_peer_id = peer_id,
+                                "relay rpc responder disconnected; parking call for the next daemon peer"
+                            );
+                            pending.responder_peer_id = None;
+                        }
                     }
                 }
 
@@ -1666,6 +1704,7 @@ impl AppState {
     async fn register_rpc_method(&self, session_id: &str, peer_id: &str, method: String) {
         let mut ack = None;
         let mut readiness_changed = false;
+        let mut adopted = Vec::new();
         {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
@@ -1676,6 +1715,32 @@ impl AppState {
                 }
                 readiness_changed = was_ready != live.daemon_rpc_ready();
                 ack = live.peers.get(peer_id).map(|peer| peer.tx.clone());
+                // Calls parked while no daemon owned this method (responder
+                // vanished mid-flight or the daemon flapped) are adopted by
+                // the newly registered owner instead of waiting to expire.
+                if let Some(tx) = ack.as_ref() {
+                    let parked_request_ids = live
+                        .pending_rpc
+                        .iter()
+                        .filter(|(_, pending)| {
+                            pending.responder_peer_id.is_none() && pending.method == method
+                        })
+                        .map(|(request_id, _)| request_id.clone())
+                        .collect::<Vec<_>>();
+                    for request_id in parked_request_ids {
+                        if let Some(pending) = live.pending_rpc.get_mut(&request_id) {
+                            pending.responder_peer_id = Some(peer_id.to_string());
+                            adopted.push((
+                                tx.clone(),
+                                RelayServerMessage::RpcRequest {
+                                    request_id,
+                                    method: method.clone(),
+                                    params: pending.params.clone(),
+                                },
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -1686,6 +1751,9 @@ impl AppState {
                 &tx,
                 RelayServerMessage::RpcRegistered { method },
             );
+        }
+        for (tx, message) in adopted {
+            self.queue_message(session_id, peer_id, &tx, message);
         }
         if readiness_changed {
             self.broadcast_presence(session_id).await;
@@ -1736,6 +1804,7 @@ impl AppState {
     ) {
         let mut response = None;
         let mut target = None;
+        let mut parked = false;
         let mut expired = Vec::new();
         // Forwarded calls carry a peer-namespaced request id so identical
         // client-chosen ids from different devices cannot collide or route
@@ -1779,11 +1848,43 @@ impl AppState {
                         PendingRpc {
                             method: method.clone(),
                             requester_peer_id: peer_id.to_string(),
-                            responder_peer_id: owner_peer_id.clone(),
+                            responder_peer_id: Some(owner_peer_id.clone()),
+                            params: params.clone(),
                             expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
                         },
                     );
                     target = Some((owner_peer_id, owner_tx));
+                } else if !live.daemon_connected()
+                    && live.daemon_disconnected_at.is_some_and(|disconnected_at| {
+                        Utc::now().signed_duration_since(disconnected_at)
+                            <= Duration::seconds(DAEMON_RECONNECT_GRACE_SECONDS)
+                    })
+                {
+                    // The daemon was here moments ago and its supervisor
+                    // reconnects on a short backoff: park the call so the
+                    // reconnect flap resolves invisibly instead of erroring.
+                    // A registered-but-missing method on a *connected* daemon
+                    // stays a fast failure below — that is version skew, not
+                    // a flap. The TTL sweep fails parked calls if no daemon
+                    // returns in time.
+                    warn!(
+                        session_id,
+                        peer_id,
+                        request_id,
+                        method,
+                        "daemon just disconnected; parking relay rpc for its reconnect"
+                    );
+                    live.pending_rpc.insert(
+                        namespaced_request_id.clone(),
+                        PendingRpc {
+                            method: method.clone(),
+                            requester_peer_id: peer_id.to_string(),
+                            responder_peer_id: None,
+                            params: params.clone(),
+                            expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
+                        },
+                    );
+                    parked = true;
                 } else {
                     warn!(
                         session_id,
@@ -1811,6 +1912,7 @@ impl AppState {
         }
 
         self.notify_expired_rpcs(session_id, expired);
+        let dispatched = target.is_some();
         if let Some((owner_peer_id, tx)) = target {
             self.queue_message(
                 session_id,
@@ -1822,6 +1924,10 @@ impl AppState {
                     params,
                 },
             );
+        } else if let Some((requester_peer_id, tx, message)) = response {
+            self.queue_message(session_id, &requester_peer_id, &tx, message);
+        }
+        if dispatched || parked {
             // The websocket idle sweep is only a fallback and can run almost
             // ten seconds after the nominal deadline. Schedule a per-request
             // sweep so the relay's structured timeout reaches clients before
@@ -1835,8 +1941,6 @@ impl AppState {
                 .await;
                 state.sweep_expired_rpcs(&session_id).await;
             });
-        } else if let Some((requester_peer_id, tx, message)) = response {
-            self.queue_message(session_id, &requester_peer_id, &tx, message);
         }
     }
 
@@ -1898,12 +2002,12 @@ impl AppState {
                 // The daemon echoes the namespaced request id it received,
                 // so the pending entry is keyed by exactly that id.
                 if let Some(pending) = live.pending_rpc.remove(&request_id) {
-                    if pending.responder_peer_id != peer_id {
+                    if pending.responder_peer_id.as_deref() != Some(peer_id) {
                         warn!(
                             session_id,
                             request_id,
                             peer_id,
-                            owner_peer_id = %pending.responder_peer_id,
+                            owner_peer_id = pending.responder_peer_id.as_deref().unwrap_or("<parked>"),
                             "rejecting rpc result from non-owner daemon peer"
                         );
                         live.pending_rpc.insert(request_id.clone(), pending);

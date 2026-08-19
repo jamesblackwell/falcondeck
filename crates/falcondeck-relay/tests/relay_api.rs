@@ -774,6 +774,360 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
 }
 
 #[tokio::test]
+async fn in_flight_rpc_is_redispatched_to_a_surviving_owner_when_its_responder_drops() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let first_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let second_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut first_daemon_ws, _) = connect_async(first_daemon_url).await.unwrap();
+    let (mut second_daemon_ws, _) = connect_async(second_daemon_url).await.unwrap();
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    for socket in [
+        &mut first_daemon_ws,
+        &mut second_daemon_ws,
+        &mut client_ws,
+    ] {
+        assert!(matches!(
+            recv_server_message(socket).await,
+            RelayServerMessage::Ready { .. }
+        ));
+    }
+    for daemon in [&mut first_daemon_ws, &mut second_daemon_ws] {
+        send_client_message(
+            daemon,
+            &RelayClientMessage::RpcRegister {
+                method: "snapshot.current".to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_server_message(daemon).await,
+            RelayServerMessage::RpcRegistered { .. }
+        ));
+    }
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "failover".to_string(),
+            method: "snapshot.current".to_string(),
+            params: test_envelope("snapshot"),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut second_daemon_ws).await,
+        RelayServerMessage::RpcRequest { .. }
+    ));
+
+    // The owner vanishes before replying; the call must move to the
+    // surviving daemon peer instead of failing back to the client.
+    second_daemon_ws.close(None).await.unwrap();
+    let redispatched_request_id = match recv_server_message(&mut first_daemon_ws).await {
+        RelayServerMessage::RpcRequest {
+            request_id, method, ..
+        } => {
+            assert_eq!(method, "snapshot.current");
+            request_id
+        }
+        other => panic!("expected redispatched rpc request, got {other:?}"),
+    };
+    send_client_message(
+        &mut first_daemon_ws,
+        &RelayClientMessage::RpcResult {
+            request_id: redispatched_request_id,
+            ok: true,
+            result: Some(test_envelope("snapshot-result")),
+            error: None,
+        },
+    )
+    .await;
+    loop {
+        match recv_server_message(&mut client_ws).await {
+            RelayServerMessage::RpcResult {
+                request_id, ok, ..
+            } if request_id == "failover" => {
+                assert!(ok, "redispatched rpc must succeed, not fail");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn in_flight_rpc_parks_across_a_lone_daemon_reconnect() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut client_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "snapshot.current".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::RpcRegistered { .. }
+    ));
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "parked".to_string(),
+            method: "snapshot.current".to_string(),
+            params: test_envelope("snapshot"),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::RpcRequest { .. }
+    ));
+
+    // The lone daemon drops mid-call: the relay parks the request rather
+    // than failing it, because the daemon supervisor reconnects in seconds.
+    daemon_ws.close(None).await.unwrap();
+
+    let reconnected_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut reconnected_daemon_ws, _) = connect_async(reconnected_daemon_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut reconnected_daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    send_client_message(
+        &mut reconnected_daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "snapshot.current".to_string(),
+        },
+    )
+    .await;
+    // Registration adopts the parked call and delivers it to the new peer.
+    let adopted_request_id = loop {
+        match recv_server_message(&mut reconnected_daemon_ws).await {
+            RelayServerMessage::RpcRequest {
+                request_id, method, ..
+            } => {
+                assert_eq!(method, "snapshot.current");
+                break request_id;
+            }
+            RelayServerMessage::RpcRegistered { .. } => {}
+            other => panic!("expected adopted rpc request, got {other:?}"),
+        }
+    };
+    send_client_message(
+        &mut reconnected_daemon_ws,
+        &RelayClientMessage::RpcResult {
+            request_id: adopted_request_id,
+            ok: true,
+            result: Some(test_envelope("snapshot-result")),
+            error: None,
+        },
+    )
+    .await;
+    loop {
+        match recv_server_message(&mut client_ws).await {
+            RelayServerMessage::RpcResult {
+                request_id, ok, ..
+            } if request_id == "parked" => {
+                assert!(ok, "parked rpc must resolve once the daemon returns");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn rpc_called_during_the_daemon_reconnect_grace_window_is_parked() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut client_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "snapshot.current".to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::RpcRegistered { .. }
+    ));
+
+    // Daemon drops before any call is made; a call arriving moments later
+    // (the phone was just told "connected") parks instead of failing.
+    let seq_before_disconnect = server
+        .state
+        .session_updates(&claim.session_id, &claim.client_token, 0)
+        .await
+        .unwrap()
+        .next_seq;
+    daemon_ws.close(None).await.unwrap();
+    timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let next_seq = server
+                .state
+                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .await
+                .unwrap()
+                .next_seq;
+            if next_seq > seq_before_disconnect {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("relay should process the departing daemon peer");
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "grace-window".to_string(),
+            method: "snapshot.current".to_string(),
+            params: test_envelope("snapshot"),
+        },
+    )
+    .await;
+
+    let reconnected_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut reconnected_daemon_ws, _) = connect_async(reconnected_daemon_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut reconnected_daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    send_client_message(
+        &mut reconnected_daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "snapshot.current".to_string(),
+        },
+    )
+    .await;
+    let adopted_request_id = loop {
+        match recv_server_message(&mut reconnected_daemon_ws).await {
+            RelayServerMessage::RpcRequest { request_id, .. } => break request_id,
+            RelayServerMessage::RpcRegistered { .. } => {}
+            other => panic!("expected adopted rpc request, got {other:?}"),
+        }
+    };
+    send_client_message(
+        &mut reconnected_daemon_ws,
+        &RelayClientMessage::RpcResult {
+            request_id: adopted_request_id,
+            ok: true,
+            result: Some(test_envelope("snapshot-result")),
+            error: None,
+        },
+    )
+    .await;
+    loop {
+        match recv_server_message(&mut client_ws).await {
+            RelayServerMessage::RpcResult {
+                request_id, ok, ..
+            } if request_id == "grace-window" => {
+                assert!(ok, "grace-window rpc must resolve once the daemon returns");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
 async fn expired_pairings_cannot_be_claimed() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();

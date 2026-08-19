@@ -123,7 +123,11 @@ impl AppState {
         // long after the peer is gone, so track inbound traffic (pongs count)
         // and force a reconnect when the relay goes quiet for several
         // heartbeat intervals.
-        const INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
+        // Two full heartbeat cycles of silence plus slack: the relay answers
+        // every ping, so 35s of nothing inbound means the socket is gone.
+        // Kept tight because remote clients ride out the resulting outage —
+        // the longer this is, the longer a phone stares at a stale "offline".
+        const INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(35);
         let mut last_inbound = tokio::time::Instant::now();
         let mut events = self.subscribe();
         let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
