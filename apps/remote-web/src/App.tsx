@@ -64,6 +64,7 @@ import {
   relayReconnectDelayMs,
   selectedSkillsFromText,
   serviceTierForTurn,
+  speechSynthesisBlob,
   STANDARD_SERVICE_TIER,
   THREAD_DETAIL_OLDER_PAGE_LIMIT,
   THREAD_DETAIL_TAIL_LIMIT,
@@ -120,11 +121,13 @@ import {
   type ThreadSummary,
   type ThreadTag,
   type UpdatePreferencesPayload,
+  type WorkspaceColorId,
   optimisticallySetThreadStage,
   encryptedDaemonEventEnvelope,
 } from "@falcondeck/client-core";
 import {
   Conversation,
+  GoalBubble,
   GoalControl,
   InteractiveRequestBar,
   PlanBar,
@@ -138,6 +141,7 @@ import {
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
+  useReadAloud,
   useShipThread,
 } from "@falcondeck/chat-ui";
 import { useExtensionApps } from "@falcondeck/extension-sdk/app-host";
@@ -148,6 +152,7 @@ import {
   Button,
   PANEL_TRANSITION_MS,
   ToastProvider,
+  TooltipProvider,
   useToast,
   usePresence,
 } from "@falcondeck/ui";
@@ -263,6 +268,7 @@ function lastAgentItemId(items: ConversationItem[]) {
 export default function App() {
   return (
     <ToastProvider>
+      <TooltipProvider>
       <div className="flex h-[100dvh] flex-col overflow-hidden bg-surface-0">
         <aside
           aria-label="Alpha notice"
@@ -277,6 +283,7 @@ export default function App() {
           <RemoteApp />
         </div>
       </div>
+      </TooltipProvider>
     </ToastProvider>
   );
 }
@@ -2053,6 +2060,20 @@ function RemoteApp() {
       });
     },
     [],
+  );
+  const readAloud = useReadAloud(
+    useCallback(async (text: string) => {
+      const response = await callRpc<{
+        audio_base64: string;
+        mime_type: string;
+      }>("speech.synthesize", { text });
+      return speechSynthesisBlob(response);
+    }, [callRpc]),
+    useCallback(
+      (error: Error) =>
+        toast({ variant: "danger", title: "Read Aloud failed", description: error.message }),
+      [toast],
+    ),
   );
 
   useEffect(() => {
@@ -3862,7 +3883,8 @@ function RemoteApp() {
         selectedThreadId &&
         (!threadDetail ||
           threadDetail.workspace.id !== selectedWorkspaceId ||
-          threadDetail.thread.id !== selectedThreadId),
+          threadDetail.thread.id !== selectedThreadId ||
+          (threadDetail.is_partial && threadDetail.items.length === 0)),
       ),
     [selectedThreadId, selectedWorkspaceId, threadDetail],
   );
@@ -4101,6 +4123,35 @@ function RemoteApp() {
     [reportError, setSnapshot, submitQueuedAction],
   );
 
+  const handleWorkspaceColorChange = useCallback(
+    async (workspaceId: string, color: WorkspaceColorId | null) => {
+      const nextColors = {
+        ...(snapshot?.preferences.workspace_colors ?? {}),
+      };
+      if (color) nextColors[workspaceId] = color;
+      else delete nextColors[workspaceId];
+      try {
+        const preferences = normalizePreferences(
+          await submitQueuedAction("preferences.update", {
+            workspace_colors: nextColors,
+          }),
+        );
+        setSnapshot((current) =>
+          current ? { ...current, preferences } : current,
+        );
+      } catch (error) {
+        reportError(error, "Failed to save project color");
+        throw error;
+      }
+    },
+    [
+      reportError,
+      setSnapshot,
+      snapshot?.preferences.workspace_colors,
+      submitQueuedAction,
+    ],
+  );
+
   useEffect(() => {
     if (!showProjects) return;
 
@@ -4309,6 +4360,8 @@ function RemoteApp() {
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
+                workspaceColors={snapshot?.preferences.workspace_colors}
+                onWorkspaceColorChange={handleWorkspaceColorChange}
                 topNavigation={extensionPanelNavigation}
                 title="Projects"
                 errors={error ? [error] : []}
@@ -4366,6 +4419,8 @@ function RemoteApp() {
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
+          workspaceColors={snapshot?.preferences.workspace_colors}
+          onWorkspaceColorChange={handleWorkspaceColorChange}
           topNavigation={extensionPanelNavigation}
           title="Projects"
           errors={error ? [error] : []}
@@ -4461,6 +4516,7 @@ function RemoteApp() {
                       : undefined
                   }
                   pinnedPlanId={pinnedPlan?.itemId ?? null}
+                  readAloud={readAloud}
                 />
               </div>
 
@@ -4490,6 +4546,14 @@ function RemoteApp() {
                       void handleEditQueuedTurn(queuedId, text)
                     }
                     getAttachmentPreviewUrl={handleQueuedTurnAttachmentPreview}
+                  />
+                ) : null}
+                {selectedThread?.goal && activeCapabilities.supports_goals ? (
+                  <GoalBubble
+                    goal={selectedThread.goal}
+                    provider={activeProvider}
+                    onClearGoal={handleClearGoal}
+                    onSetGoalStatus={handleSetGoalStatus}
                   />
                 ) : null}
                 <PromptInput
