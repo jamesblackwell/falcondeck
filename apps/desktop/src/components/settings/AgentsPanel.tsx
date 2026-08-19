@@ -49,6 +49,14 @@ const BUILT_IN_AGENTS = [
 
 const RECOMMENDED_AGENTS = [
   {
+    id: 'cursor',
+    label: 'Cursor',
+    detail: 'Cursor\'s agent CLI through its built-in ACP server',
+    command: ['cursor-agent', 'acp'],
+    transport: undefined,
+    installCommand: 'curl -fsSL https://cursor.com/install | bash',
+  },
+  {
     id: 'opencode',
     label: 'OpenCode',
     detail: 'Native steering with automatic fallback to its built-in ACP server',

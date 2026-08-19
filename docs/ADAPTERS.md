@@ -385,3 +385,39 @@ and the runner accepting further model APIs (widen `RUNNER_MODEL_APIS`; probe
 by prompting one model per API and reading the server error log). When adding a new request field or endpoint to the transport, add it
 to the `CONTRACT_*` tables in the same change — an assumption that is not in
 those tables is one the attach-time check cannot defend.
+
+## Cursor
+
+Cursor's agent CLI (`cursor-agent`) ships a built-in ACP server behind its
+`acp` subcommand, so it rides the generic ACP tier. Install and authenticate
+per Cursor's docs (`curl -fsSL https://cursor.com/install | bash`, then
+`cursor-agent login`; verify with `cursor-agent status`). Then choose
+**Settings → Agents → Recommended → Configure Cursor**, which writes the
+equivalent of:
+
+```json
+{
+  "providers": {
+    "cursor": {
+      "label": "Cursor",
+      "command": ["cursor-agent", "acp"]
+    }
+  }
+}
+```
+
+One adapter quirk: Cursor does not advertise its model catalog over ACP, so
+`advertised_models` falls back to probing `cursor-agent --list-models` once
+per agent process (mirroring the spawn environment). Variant ids are exposed
+verbatim — they encode effort and service tiers (`gpt-5.6-sol-medium`,
+`composer-2.5-fast`) and are sent back to the session unchanged on selection.
+Session model selection uses the standard ACP `session/set_config_option` /
+`session/set_model` path, and failures there are non-fatal (the turn
+continues with the CLI's own default model). **Known limitation:** Cursor
+builds have existed that ignore ACP runtime model switching entirely and only
+honor a `cursor-agent --model <id>` startup flag (the mechanism bb uses); on
+such builds a picker selection is logged as a daemon warning but the turn
+runs the CLI default. If that is observed on a current build, the fix is
+launch-flag selection at spawn time — a per-thread-process design decision,
+not a parser tweak. If a future Cursor build starts advertising models over
+ACP, the protocol catalog wins and the CLI probe never runs.

@@ -734,9 +734,17 @@ pub struct AcpRuntime {
     session_modes: Mutex<HashMap<String, SessionModeState>>,
     /// Config option ids and categories for each live ACP session.
     session_configurations: Mutex<HashMap<String, AcpSessionConfiguration>>,
+    /// Effort ids each session currently accepts. OpenCode publishes these
+    /// per selected model, so they change with every model switch and a stale
+    /// value must not be sent back.
+    session_reasoning_efforts: Mutex<HashMap<String, Vec<String>>>,
     /// Model catalog learned from session/new. ACP initialize commonly has no
     /// model list, so this is intentionally separate from initialize_result.
     discovered_models: Mutex<Vec<ModelSummary>>,
+    /// Whether the cursor CLI model probe already ran for this process. Cursor
+    /// does not advertise models over ACP, so the catalog falls back to
+    /// `cursor-agent --list-models`; the flag keeps that to one run.
+    cli_models_probed: AtomicBool,
     /// Permission-like modes learned from ACP config options. Grok also has a
     /// documented provider-specific fallback when it does not advertise them.
     discovered_permission_modes: Mutex<Vec<String>>,
@@ -1163,6 +1171,114 @@ fn is_reasoning_mode_block(modes: &Value) -> bool {
     looks_like_reasoning(&options)
 }
 
+/// Runs `cursor-agent --list-models` for the cursor provider, which publishes
+/// its model catalog through the CLI instead of ACP. The probe mirrors the
+/// spawn environment of the agent process itself (login-shell PATH plus the
+/// provider's env overrides) so the binary that answers is the one
+/// FalconDeck launches. Failures are non-fatal: the model picker simply
+/// stays empty until ACP advertises models.
+async fn probe_cursor_cli_models(config: &AcpProviderConfig) -> Vec<ModelSummary> {
+    let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
+    let mut command = Command::new(&executable);
+    apply_provider_environment(&mut command, &executable, &config.env).await;
+    // Colorized ids would fail the model-line parse or, worse, round-trip
+    // escape bytes into session model selection. Force plain output and
+    // strip defensively anyway.
+    command.env("NO_COLOR", "1");
+    command.arg("--list-models");
+    let output = match timeout(ACP_SETUP_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => output,
+        Ok(Ok(output)) => {
+            tracing::info!(
+                provider = %config.id,
+                code = output.status.code(),
+                "cursor model list probe failed; leaving the model catalog to ACP"
+            );
+            return Vec::new();
+        }
+        Ok(Err(error)) => {
+            tracing::info!(provider = %config.id, %error, "cursor model list probe could not run");
+            return Vec::new();
+        }
+        Err(_) => {
+            tracing::info!(provider = %config.id, "cursor model list probe timed out");
+            return Vec::new();
+        }
+    };
+    parse_cursor_cli_models(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parses `cursor-agent --list-models` output: one `id - Display Name` line
+/// per model, optionally annotated `(default)`, `(current)`, or `(NO ZDR)`.
+/// Ids are kept verbatim — they encode effort and service variants
+/// (`gpt-5.6-sol-medium`, `composer-2.5-fast`) that must round-trip to the
+/// CLI unchanged when a session model is selected.
+fn parse_cursor_cli_models(stdout: &str) -> Vec<ModelSummary> {
+    let mut models: Vec<ModelSummary> = Vec::new();
+    let mut default_index: Option<usize> = None;
+    for line in stdout.lines() {
+        let trimmed = strip_ansi(line.trim());
+        let Some((id, name)) = trimmed.split_once(" - ") else {
+            continue;
+        };
+        let id = id.trim();
+        if id.is_empty() || id.split_whitespace().count() > 1 {
+            continue;
+        }
+        // Annotations trail the display name as `(...)` segments — `(default)`,
+        // `(current)`, `(NO ZDR)`, or combined `(current, default)`. They are
+        // stripped from the label; a segment containing "default" marks the
+        // catalog default.
+        let (base, annotations) = match name.split_once('(') {
+            Some((base, rest)) => (base.trim(), rest),
+            None => (name.trim(), ""),
+        };
+        let is_default = annotations.contains("default");
+        // The CLI lists its default model first; an explicit annotation wins.
+        if is_default || default_index.is_none() {
+            default_index = Some(models.len());
+        }
+        models.push(ModelSummary {
+            id: id.to_string(),
+            label: if base.is_empty() { id.to_string() } else { base.to_string() },
+            is_default: false,
+            default_reasoning_effort: None,
+            supported_reasoning_efforts: Vec::new(),
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+        });
+    }
+    if let Some(index) = default_index
+        && let Some(model) = models.get_mut(index)
+    {
+        model.is_default = true;
+    }
+    dedupe_models(models)
+}
+
+/// Removes ANSI escape sequences. cursor-agent honors FORCE_COLOR /
+/// CLICOLOR_FORCE even with piped stdout, so `--list-models` can arrive
+/// colorized despite `NO_COLOR=1`.
+fn strip_ansi(line: &str) -> String {
+    let mut cleaned = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            cleaned.push(c);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for inner in chars.by_ref() {
+            if inner.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    cleaned
+}
+
 async fn apply_provider_environment(
     command: &mut Command,
     executable: &str,
@@ -1233,7 +1349,9 @@ impl AcpRuntime {
             stderr_tail: Mutex::new(VecDeque::new()),
             session_modes: Mutex::new(HashMap::new()),
             session_configurations: Mutex::new(HashMap::new()),
+            session_reasoning_efforts: Mutex::new(HashMap::new()),
             discovered_models: Mutex::new(Vec::new()),
+            cli_models_probed: AtomicBool::new(false),
             discovered_permission_modes: Mutex::new(Vec::new()),
             discovered_collaboration_modes: Mutex::new(Vec::new()),
             discovery_gate: Mutex::new(()),
@@ -1384,9 +1502,30 @@ impl AcpRuntime {
             return discovered;
         }
         let init = self.initialize_result.lock().await;
-        init.as_ref()
-            .map(parse_initialize_models)
-            .unwrap_or_default()
+        if let Some(models) = init.as_ref().map(parse_initialize_models)
+            && !models.is_empty()
+        {
+            return models;
+        }
+        drop(init);
+        // Cursor publishes no model catalog over ACP. Probe its CLI directly
+        // until a probe succeeds; raw variant ids are exposed verbatim because
+        // session model selection sends the id back exactly as chosen.
+        if self.config.id.eq_ignore_ascii_case("cursor")
+            && !self.cli_models_probed.load(Ordering::Acquire)
+        {
+            let models = probe_cursor_cli_models(&self.config).await;
+            if !models.is_empty() {
+                // Latch only on success: a probe that ran before login
+                // completed stays retriable on later calls. Two concurrent
+                // callers may both probe — the invocation is idempotent,
+                // read-only, and timeout-bounded.
+                self.cli_models_probed.store(true, Ordering::Release);
+                *self.discovered_models.lock().await = models.clone();
+                return models;
+            }
+        }
+        Vec::new()
     }
 
     pub async fn advertised_collaboration_modes(&self) -> Vec<CollaborationModeSummary> {
@@ -2965,6 +3104,57 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_cli_model_lines_parse_with_verbatim_variant_ids() {
+        let models = parse_cursor_cli_models(
+            "Cursor Agent models:\n\
+             auto - Auto (default)\n\
+             gpt-5.6-sol-medium - GPT-5.6 Sol (NO ZDR)\n\
+             composer-2.5-fast - Composer 2.5 Fast (current)\n",
+        );
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["auto", "gpt-5.6-sol-medium", "composer-2.5-fast"]);
+        assert_eq!(models[0].label, "Auto");
+        assert_eq!(models[1].label, "GPT-5.6 Sol");
+        assert_eq!(models[2].label, "Composer 2.5 Fast");
+        assert!(models[0].is_default);
+        assert!(!models.iter().skip(1).any(|model| model.is_default));
+    }
+
+    #[test]
+    fn cursor_cli_model_list_without_annotation_defaults_to_first() {
+        let models = parse_cursor_cli_models("a-model - A Model\nb-model - B Model\n");
+        assert!(models[0].is_default);
+        assert!(!models[1].is_default);
+    }
+
+    #[test]
+    fn cursor_cli_combined_annotation_marks_and_strips() {
+        let models = parse_cursor_cli_models(
+            "auto - Auto\ncomposer-2-fast - Composer 2 Fast (current, default)\n",
+        );
+        assert_eq!(models[1].label, "Composer 2 Fast");
+        assert!(!models[0].is_default);
+        assert!(models[1].is_default);
+    }
+
+    #[test]
+    fn cursor_cli_model_list_strips_ansi_escapes() {
+        let models = parse_cursor_cli_models(
+            "\x1b[36mauto\x1b[0m - \x1b[1mAuto\x1b[0m (default)\n",
+        );
+        assert_eq!(models[0].id, "auto");
+        assert_eq!(models[0].label, "Auto");
+        assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn cursor_cli_model_list_ignores_headers_and_noise() {
+        assert!(parse_cursor_cli_models("Welcome to Cursor Agent\n\nno separator\n").is_empty());
+        // An id containing spaces is not a model line.
+        assert!(parse_cursor_cli_models("not an id - Label\n").is_empty());
+    }
 
     #[test]
     fn error_data_text_accepts_the_shapes_adapters_actually_send() {

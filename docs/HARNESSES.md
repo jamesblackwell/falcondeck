@@ -30,10 +30,12 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, opencode, gemini, and pi. Each entry declares its npm package
+   claude, opencode, gemini, pi, and cursor. Each entry declares its npm package
    (for latest-version lookups), upgrade command, and optional auth probe.
    Adding a harness means adding one struct — the panel, RPC, and per-host
-   probing pick it up automatically.
+   probing pick it up automatically. Cursor ships via its own install script
+   (no npm package, so no latest-version check) and its `--version` prints a
+   bare commit hash, which the version parser treats as "no version".
 2. **`providers.json` ACP entries**: overlaid on the curated list (matching
    ids switch to `kind: acp` and probe the configured command), and appended
    as new entries otherwise. Local overviews only: ACP commands are

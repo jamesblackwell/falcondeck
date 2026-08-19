@@ -118,6 +118,18 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         auth_probe: None,
         builtin: false,
     },
+    KnownHarness {
+        id: "cursor",
+        label: "Cursor",
+        bin: "cursor-agent",
+        // Distributed through Cursor's install script, not npm, so there is
+        // no registry latest to check; `cursor-agent --version` also prints a
+        // bare commit hash, which parse_version leaves as no version.
+        npm_package: None,
+        upgrade_command: Some("curl -fsSL https://cursor.com/install | bash"),
+        auth_probe: Some(&["status"]),
+        builtin: false,
+    },
 ];
 
 impl KnownHarness {
