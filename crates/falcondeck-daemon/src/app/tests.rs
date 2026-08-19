@@ -127,6 +127,66 @@ async fn replaces_repeated_operational_conditions_instead_of_appending() {
 }
 
 #[tokio::test]
+async fn keeps_mcp_startup_failures_out_of_every_transcript() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    for server in ["cloudflare-api", "clarity", "cloudflare-api"] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "error",
+            json!({
+                "threadId": "thread-1",
+                "message": format!(
+                    "{server} failed to start: The {server} MCP server is not logged in."
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    {
+        let workspaces = app.inner.workspaces.lock().await;
+        let items = &workspaces["workspace-1"].threads["thread-1"].items;
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, ConversationItem::Service { .. })),
+            "connector startup failures must not become transcript items"
+        );
+    }
+
+    let snapshot = app.snapshot().await;
+    let mut keys = snapshot
+        .operational_conditions
+        .iter()
+        .map(|condition| condition.key.as_str())
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(keys, ["mcp_startup:clarity", "mcp_startup:cloudflare-api"]);
+    assert!(
+        snapshot
+            .operational_conditions
+            .iter()
+            .all(|condition| condition.level == falcondeck_core::ServiceLevel::Warning)
+    );
+}
+
+#[tokio::test]
 async fn removes_operational_condition_after_recovery() {
     let app = AppState::new("test".to_string(), HashMap::new());
     app.upsert_operational_condition(
@@ -838,6 +898,8 @@ fn parses_thread_goal_notifications() {
     assert_eq!(goal.status, "active");
     assert_eq!(goal.token_budget, Some(500000));
     assert_eq!(goal.tokens_used, Some(12000));
+    // The provider never reports a start time; the daemon stamps it.
+    assert_eq!(goal.started_at, None);
     assert!(crate::codex::parse_thread_goal(&json!({ "threadId": "t" })).is_none());
 }
 
@@ -2031,16 +2093,12 @@ fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
         created_at: Utc::now(),
     });
 
-    assert!(super::conversation_helpers::should_generate_ai_thread_title(
-        &thread
-    ));
+    assert!(super::conversation_helpers::should_generate_ai_thread_title(&thread));
 
     // An idle thread that never ran still needs agent output: a prompt the
     // provider rejected is not worth a utility-model call.
     thread.summary.status = ThreadStatus::Idle;
-    assert!(!super::conversation_helpers::should_generate_ai_thread_title(
-        &thread
-    ));
+    assert!(!super::conversation_helpers::should_generate_ai_thread_title(&thread));
 }
 
 #[tokio::test]
@@ -2659,6 +2717,7 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
                 last_agent_activity_seq: 7,
                 variant: None,
                 agent: ThreadAgentParams::default(),
+                goal: None,
                 queued_requests: Vec::new(),
             }],
         }],
@@ -2713,6 +2772,135 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
 }
 
 #[tokio::test]
+async fn transcript_replay_does_not_flip_a_read_thread_unread() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-replay");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    // A native OpenCode thread restored fully read: read seq level with the
+    // last agent activity. The global sequence counter restarts at 1 on boot
+    // and climbs with every event anywhere in the daemon; simulate a busy
+    // daemon whose counter sits far above the thread's own seqs.
+    let persisted = PersistedAppState {
+        workspaces: vec![super::PersistedWorkspaceState {
+            path: workspace_path.to_string_lossy().to_string(),
+            id: Some("workspace-replay".to_string()),
+            current_thread_id: Some("thread-1".to_string()),
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::OPENCODE),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: vec![super::PersistedThreadState {
+                thread_id: "thread-1".to_string(),
+                updated_at: Some(Utc::now()),
+                provider: Some(AgentProvider::OPENCODE),
+                native_session_id: Some("ses_native".to_string()),
+                provider_transport: Some("native".to_string()),
+                handoff_from: None,
+                origin: None,
+                title: Some("Read thread".to_string()),
+                manual_title: false,
+                ai_title_generated: false,
+                status: Some(ThreadStatus::Idle),
+                last_error: None,
+                last_read_seq: 7,
+                last_agent_activity_seq: 7,
+                variant: None,
+                agent: ThreadAgentParams::default(),
+                goal: None,
+                queued_requests: Vec::new(),
+            }],
+        }],
+        remote: None,
+    };
+
+    tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .await
+        .unwrap();
+
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+    app.restore_local_state().await.unwrap();
+    app.inner
+        .sequence
+        .store(40_000, std::sync::atomic::Ordering::Relaxed);
+
+    // Hydration replays the stored transcript: history recovery, not new
+    // agent output. It must not stamp the global sequence into the thread.
+    app.replay_conversation_item(
+        "workspace-replay",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "opencode-msg_1".to_string(),
+            text: "Recovered reply".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    app.replay_conversation_item(
+        "workspace-replay",
+        "thread-1",
+        ConversationItem::Reasoning {
+            id: "opencode-msg_2".to_string(),
+            summary: None,
+            content: "Recovered thinking".to_string(),
+            lifecycle: ContentLifecycle::Complete,
+            duration_ms: None,
+            created_at: Utc::now(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+
+    let replayed = app
+        .thread_summary("workspace-replay", "thread-1")
+        .await
+        .unwrap();
+    assert!(!replayed.attention.unread);
+    assert_eq!(replayed.attention.last_agent_activity_seq, 7);
+    assert_eq!(replayed.attention.last_read_seq, 7);
+
+    // Live output is still attention: a streamed assistant item must flip
+    // the thread unread with a seq the client can then mark read.
+    app.push_conversation_item(
+        "workspace-replay",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "opencode-msg_live".to_string(),
+            text: "Fresh reply".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+
+    let live = app
+        .thread_summary("workspace-replay", "thread-1")
+        .await
+        .unwrap();
+    assert!(live.attention.unread);
+    assert!(live.attention.last_agent_activity_seq > 7);
+}
+
+#[tokio::test]
 async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-a");
@@ -2746,6 +2934,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 last_agent_activity_seq: 7,
                 variant: None,
                 agent: ThreadAgentParams::default(),
+                goal: None,
                 queued_requests: Vec::new(),
             }],
         }],
@@ -2950,6 +3139,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_agent_activity_seq: 0,
                     variant: None,
                     agent: ThreadAgentParams::default(),
+                    goal: None,
                     queued_requests: Vec::new(),
                 }],
             },
@@ -2982,6 +3172,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_agent_activity_seq: 3,
                     variant: None,
                     agent: ThreadAgentParams::default(),
+                    goal: None,
                     queued_requests: Vec::new(),
                 }],
             },

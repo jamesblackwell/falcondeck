@@ -256,6 +256,7 @@ impl AppState {
                     &workspace_id,
                     &thread_id,
                     &messages,
+                    true,
                 )
                 .await
                 {
@@ -458,7 +459,7 @@ pub(super) async fn start_opencode_turn(
                     }
                 }
             };
-            project_messages(&app, &workspace_id, &thread_id, &current_messages).await
+            project_messages(&app, &workspace_id, &thread_id, &current_messages, false).await
         }
         .await;
         let (status, error, settlement) = match outcome {
@@ -1109,11 +1110,34 @@ fn tool_state_output(state: &Value) -> Option<String> {
     })
 }
 
+/// Projects one stored message item into a thread. Live end-of-turn
+/// projection is new agent output and must advance the attention sequence;
+/// hydration replay is history recovery and must not, or every restored
+/// thread reads as unread forever — the stamp uses the daemon's global event
+/// counter, which always climbs past anything a client has marked read.
+async fn push_projected_item(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    item: ConversationItem,
+    update_existing: bool,
+    replay: bool,
+) -> Result<(), DaemonError> {
+    if replay {
+        app.replay_conversation_item(workspace_id, thread_id, item, update_existing)
+            .await
+    } else {
+        app.push_conversation_item(workspace_id, thread_id, item, update_existing)
+            .await
+    }
+}
+
 async fn project_messages(
     app: &AppState,
     workspace_id: &str,
     thread_id: &str,
     messages: &[Value],
+    replay: bool,
 ) -> Result<(), DaemonError> {
     let mut provider_error = None;
     for message in messages {
@@ -1124,7 +1148,8 @@ async fn project_messages(
         if message.get("type").and_then(Value::as_str) == Some("user") {
             let text = message.get("text").and_then(Value::as_str).unwrap_or("");
             if !text.is_empty() {
-                app.push_conversation_item(
+                push_projected_item(
+                    app,
                     workspace_id,
                     thread_id,
                     ConversationItem::UserMessage {
@@ -1136,6 +1161,7 @@ async fn project_messages(
                         created_at: Utc::now(),
                     },
                     true,
+                    replay,
                 )
                 .await?;
             }
@@ -1158,7 +1184,8 @@ async fn project_messages(
                 Some("text") => {
                     let text = content.get("text").and_then(Value::as_str).unwrap_or("");
                     if !text.is_empty() {
-                        app.push_conversation_item(
+                        push_projected_item(
+                            app,
                             workspace_id,
                             thread_id,
                             ConversationItem::AssistantMessage {
@@ -1172,6 +1199,7 @@ async fn project_messages(
                                 created_at: Utc::now(),
                             },
                             true,
+                            replay,
                         )
                         .await?;
                     }
@@ -1179,7 +1207,8 @@ async fn project_messages(
                 Some("reasoning") => {
                     let text = content.get("text").and_then(Value::as_str).unwrap_or("");
                     if !text.is_empty() {
-                        app.push_conversation_item(
+                        push_projected_item(
+                            app,
                             workspace_id,
                             thread_id,
                             ConversationItem::Reasoning {
@@ -1191,6 +1220,7 @@ async fn project_messages(
                                 created_at: Utc::now(),
                             },
                             true,
+                            replay,
                         )
                         .await?;
                     }
@@ -1217,7 +1247,8 @@ async fn project_messages(
                         .unwrap_or_else(|| name.to_string());
                     let display =
                         tool_display_metadata(&title, name, status, None, output.as_deref());
-                    app.push_conversation_item(
+                    push_projected_item(
+                        app,
                         workspace_id,
                         thread_id,
                         ConversationItem::ToolCall {
@@ -1235,6 +1266,7 @@ async fn project_messages(
                             completed_at: (status != "in_progress").then(Utc::now),
                         },
                         true,
+                        replay,
                     )
                     .await?;
                 }
@@ -1248,7 +1280,8 @@ async fn project_messages(
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| error.to_string());
-            app.push_conversation_item(
+            push_projected_item(
+                app,
                 workspace_id,
                 thread_id,
                 ConversationItem::Service {
@@ -1258,6 +1291,7 @@ async fn project_messages(
                     created_at: Utc::now(),
                 },
                 true,
+                replay,
             )
             .await?;
             provider_error = Some(message_text);

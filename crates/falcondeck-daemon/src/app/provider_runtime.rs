@@ -122,6 +122,9 @@ impl ProviderRuntime {
             Self::Codex => AgentCapabilitySummary::codex(),
             Self::Claude => AgentCapabilitySummary::claude(),
             Self::Acp(provider) => {
+                if provider.as_str().eq_ignore_ascii_case("grok") {
+                    return crate::acp::grok_placeholder_capabilities();
+                }
                 let mut capabilities = AgentCapabilitySummary::acp_minimal();
                 capabilities.supports_images = crate::acp::acp_supports_images(
                     provider.as_str(),
@@ -146,9 +149,8 @@ impl ProviderRuntime {
                     "sandbox": spec.sandbox_mode,
                     "approvalPolicy": spec.approval_policy
                 });
-                if let Some(instructions) = app
-                    .agent_context_instructions(&AgentProvider::CODEX)
-                    .await
+                if let Some(instructions) =
+                    app.agent_context_instructions(&AgentProvider::CODEX).await
                 {
                     params["developerInstructions"] = json!(instructions);
                 }
@@ -363,9 +365,7 @@ impl ProviderRuntime {
                         Some(spec.thread_id),
                     )
                     .await;
-                let agent_context = app
-                    .agent_context_instructions(&AgentProvider::CLAUDE)
-                    .await;
+                let agent_context = app.agent_context_instructions(&AgentProvider::CLAUDE).await;
                 let spawn = runtime
                     .spawn_turn(
                         spec.thread_id,

@@ -7,8 +7,8 @@ use falcondeck_core::{
     ConversationFileChange, ConversationImage, ConversationItem, ConversationMemoryCitation,
     ConversationWebSearch, InteractiveQuestion, InteractiveQuestionOption,
     InteractiveResponsePayload, MemoryCitationEntry, PlanApprovalOutcome, ServiceLevel, ThreadPlan,
-    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolCallDisplay, ToolCommandAction,
-    ThreadStatus, ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem,
+    ThreadStatus, ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolCallDisplay,
+    ToolCommandAction, ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem,
     ToolProviderOutputSummary, ToolTestSummary, TurnInputItem, WebSearchActionKind,
 };
 use futures_util::future::join_all;
@@ -1394,9 +1394,7 @@ pub(super) fn settle_content_items(
     let mut updated = Vec::new();
     for item in items {
         let lifecycle = match item {
-            ConversationItem::AssistantMessage {
-                lifecycle, ..
-            } => {
+            ConversationItem::AssistantMessage { lifecycle, .. } => {
                 let settled = settled_progress_lifecycle(terminal);
                 if matches!(
                     lifecycle,

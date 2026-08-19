@@ -246,6 +246,89 @@ impl AppState {
         Ok(session)
     }
 
+    /// Kick off a background Codex goal refresh for a thread, deduplicated
+    /// per (workspace, thread). `thread.detail` used to await this inline:
+    /// `thread/goal/get` has no deadline of its own and the app-server often
+    /// defers it while a turn is streaming, so every open of a goal-less
+    /// Codex thread could stall the response for many seconds. Clients see
+    /// the goal arrive via `ThreadUpdated` when (and if) it changes.
+    pub(super) fn schedule_codex_goal_refresh(&self, workspace_id: &str, thread_id: &str) {
+        let key = (workspace_id.to_string(), thread_id.to_string());
+        if !self
+            .inner
+            .codex_goal_refreshes_in_flight
+            .lock()
+            .expect("codex goal refresh set poisoned")
+            .insert(key.clone())
+        {
+            return;
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = app.refresh_codex_thread_goal(&key.0, &key.1).await {
+                tracing::debug!(
+                    workspace_id = %key.0,
+                    thread_id = %key.1,
+                    %error,
+                    "could not refresh Codex thread goal"
+                );
+            }
+            app.inner
+                .codex_goal_refreshes_in_flight
+                .lock()
+                .expect("codex goal refresh set poisoned")
+                .remove(&key);
+        });
+    }
+
+    async fn refresh_codex_thread_goal(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<(), DaemonError> {
+        let session = self
+            .resume_codex_thread_if_needed(workspace_id, thread_id)
+            .await?;
+        // Bounded control request: a wedged app-server must not hold the
+        // dedup slot hostage forever.
+        let result = session
+            .send_control_request(
+                "thread/goal/get",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+            .await?;
+        let mut goal = crate::codex::parse_thread_goal(&result);
+        let mut changed = false;
+        self.with_thread_mut(workspace_id, thread_id, |thread| {
+            // The provider refresh carries no start time; the daemon's stamp
+            // (persisted across restarts) must survive it, or every client's
+            // elapsed clock resets on the first `thread.detail`.
+            if let Some(goal) = goal.as_mut() {
+                if goal.started_at.is_none() {
+                    goal.started_at = thread
+                        .goal
+                        .as_ref()
+                        .and_then(|existing| existing.started_at)
+                        .or_else(|| Some(Utc::now()));
+                }
+            }
+            if thread.goal != goal {
+                thread.goal = goal;
+                changed = true;
+            }
+        })
+        .await?;
+        if changed {
+            let thread = self.thread_summary(workspace_id, thread_id).await?;
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+        Ok(())
+    }
+
     pub(super) async fn claude_runtime_for(
         &self,
         workspace_id: &str,
@@ -1181,8 +1264,36 @@ impl AppState {
         &self,
         workspace_id: &str,
         thread_id: &str,
+        item: ConversationItem,
+        update_existing: bool,
+    ) -> Result<(), DaemonError> {
+        self.upsert_conversation_item(workspace_id, thread_id, item, update_existing, true)
+            .await
+    }
+
+    /// Replays a stored transcript item into a thread. Replay is history
+    /// recovery, not new agent output: it must not advance
+    /// `last_agent_activity_seq`, or every hydrated thread would read as
+    /// unread — and keep re-reading as unread, since the global sequence the
+    /// stamp uses keeps climbing past anything a client could mark read.
+    pub(super) async fn replay_conversation_item(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        item: ConversationItem,
+        update_existing: bool,
+    ) -> Result<(), DaemonError> {
+        self.upsert_conversation_item(workspace_id, thread_id, item, update_existing, false)
+            .await
+    }
+
+    async fn upsert_conversation_item(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
         mut item: ConversationItem,
         update_existing: bool,
+        track_attention: bool,
     ) -> Result<(), DaemonError> {
         sanitize_conversation_item(&mut item);
         let mut workspaces = self.inner.workspaces.lock().await;
@@ -1210,7 +1321,7 @@ impl AppState {
 
         if update_existing && let Some(index) = existing_index {
             thread.items[index] = item.clone();
-            let track_attention = marks_agent_activity(&item);
+            let track_attention = track_attention && marks_agent_activity(&item);
             if track_attention {
                 thread.summary.attention.last_agent_activity_seq = thread
                     .summary
@@ -1232,11 +1343,12 @@ impl AppState {
                     Some(thread_id.to_string()),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
-                // Deferred: this path runs per streamed chunk, and a full
-                // persist per chunk backs the agent's stdout pipe up until the
-                // CLI wedges mid-turn.
-                self.schedule_persist();
             }
+            // Deferred: this path runs per streamed chunk, and a full
+            // persist per chunk backs the agent's stdout pipe up until the
+            // CLI wedges mid-turn. Replayed history still schedules one —
+            // the recovered transcript should survive a restart.
+            self.schedule_persist();
             return Ok(());
         }
 
@@ -1257,7 +1369,7 @@ impl AppState {
             _ => {}
         }
         thread.items.push(item.clone());
-        let track_attention = marks_agent_activity(&item);
+        let track_attention = track_attention && marks_agent_activity(&item);
         if track_attention {
             thread.summary.attention.last_agent_activity_seq = thread
                 .summary
@@ -1283,9 +1395,10 @@ impl AppState {
                 Some(thread_id.to_string()),
                 UnifiedEvent::ThreadUpdated { thread },
             );
-            // Deferred for the same reason as the update path above.
-            self.schedule_persist();
         }
+        // Deferred for the same reason as the update path above; replayed
+        // history persists too, just without an attention-level bump.
+        self.schedule_persist();
         if wants_title {
             self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id.to_string())
                 .await;

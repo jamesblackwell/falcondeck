@@ -46,6 +46,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "speech.status",
     "speech.models",
     "speech.transcribe",
+    "speech.synthesize",
     "interactive.respond",
     "approval.respond",
     "thread.start",
@@ -79,6 +80,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "connectors.update",
     "providers.read",
     "providers.update",
+    "providers.usage",
     "harnesses.read",
     "harnesses.refresh",
     "harnesses.upgrade",
@@ -188,6 +190,10 @@ impl AppState {
         let mut last_bootstrap_publish: Option<tokio::time::Instant> = None;
         let mut last_bootstrap_refusal: Option<tokio::time::Instant> = None;
         let mut client_supports_event_batches = false;
+        // Concurrent RPC results funnel through this outbox so the select
+        // loop stays the only writer to the socket while request handling
+        // itself runs on per-RPC tasks.
+        let (rpc_outbox, mut rpc_outbox_rx) = mpsc::unbounded_channel::<RelayClientMessage>();
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -259,6 +265,11 @@ impl AppState {
                         }
                     }
                 }
+                rpc_message = rpc_outbox_rx.recv() => {
+                    if let Some(message) = rpc_message {
+                        send_relay_message(&mut writer, &message).await?;
+                    }
+                }
                 message = reader.next() => {
                     match message {
                         Some(Ok(Message::Text(text))) => {
@@ -275,7 +286,21 @@ impl AppState {
                             };
                             match parsed {
                                 RelayServerMessage::RpcRequest { request_id, method, params } => {
-                                    self.handle_remote_rpc(&mut writer, &pairing.data_key, request_id, method, params).await?;
+                                    // Handled on its own task: awaiting inline
+                                    // serialized every RPC behind the slowest
+                                    // in-flight call (and stalled event
+                                    // forwarding) for all paired devices.
+                                    let app = self.clone();
+                                    let data_key = pairing.data_key;
+                                    let outbox = rpc_outbox.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(error) = app
+                                            .handle_remote_rpc(&outbox, &data_key, request_id, method, params)
+                                            .await
+                                        {
+                                            tracing::warn!(%error, "remote rpc handling failed");
+                                        }
+                                    });
                                 }
                                 RelayServerMessage::ActionRequested { action, payload } => {
                                     self.handle_queued_remote_action(&mut writer, &pairing.data_key, action.action_id, action.action_type, payload).await?;
@@ -494,13 +519,12 @@ impl AppState {
         .await
     }
 
-    async fn send_remote_rpc_result(
+    fn remote_rpc_result_message(
         &self,
-        writer: &mut RelayWriter,
         data_key: &[u8; 32],
         request_id: String,
         rpc_result: Result<Value, String>,
-    ) -> Result<(), String> {
+    ) -> Result<RelayClientMessage, String> {
         let (ok, result, error) = match rpc_result {
             Ok(value) => (
                 true,
@@ -519,16 +543,47 @@ impl AppState {
                 ),
             ),
         };
-        send_relay_message(
-            writer,
-            &RelayClientMessage::RpcResult {
-                request_id,
-                ok,
-                result,
-                error,
-            },
-        )
-        .await
+        Ok(RelayClientMessage::RpcResult {
+            request_id,
+            ok,
+            result,
+            error,
+        })
+    }
+
+    /// Serves one relay RPC off the bridge loop. Called from a dedicated
+    /// task (see the `RpcRequest` arm in `connect_remote_session`) so one
+    /// slow method — a `thread.detail` waiting on a busy app-server, a long
+    /// transcription — cannot head-of-line block every other device's RPCs
+    /// and the event stream. The encrypted result is funneled through the
+    /// bridge outbox so socket writes stay serialized on the loop.
+    async fn handle_remote_rpc(
+        &self,
+        outbox: &mpsc::UnboundedSender<RelayClientMessage>,
+        data_key: &[u8; 32],
+        request_id: String,
+        method: String,
+        params: EncryptedEnvelope,
+    ) -> Result<(), String> {
+        let params: Value = match decrypt_json(data_key, &params) {
+            Ok(params) => params,
+            Err(error) => {
+                tracing::warn!("failed to decrypt remote rpc payload: {error}");
+                let message = self.remote_rpc_result_message(
+                    data_key,
+                    request_id,
+                    Err("invalid remote rpc payload".to_string()),
+                )?;
+                return outbox
+                    .send(message)
+                    .map_err(|error| format!("rpc outbox closed: {error}"));
+            }
+        };
+        let rpc_result = self.dispatch_remote_rpc(&method, params).await;
+        let message = self.remote_rpc_result_message(data_key, request_id, rpc_result)?;
+        outbox
+            .send(message)
+            .map_err(|error| format!("rpc outbox closed: {error}"))
     }
 
     async fn send_remote_action_failure(
@@ -609,33 +664,6 @@ impl AppState {
             .ok_or_else(|| "workspace not found".to_string())
     }
 
-    async fn handle_remote_rpc(
-        &self,
-        writer: &mut RelayWriter,
-        data_key: &[u8; 32],
-        request_id: String,
-        method: String,
-        params: EncryptedEnvelope,
-    ) -> Result<(), String> {
-        let params: Value = match decrypt_json(data_key, &params) {
-            Ok(params) => params,
-            Err(error) => {
-                tracing::warn!("failed to decrypt remote rpc payload: {error}");
-                self.send_remote_rpc_result(
-                    writer,
-                    data_key,
-                    request_id,
-                    Err("invalid remote rpc payload".to_string()),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
-        let rpc_result = self.dispatch_remote_rpc(&method, params).await;
-        self.send_remote_rpc_result(writer, data_key, request_id, rpc_result)
-            .await
-    }
-
     /// Serves one decrypted remote RPC call. Kept free of transport concerns
     /// so a test can assert every method in [`REMOTE_RPC_METHODS`] actually
     /// dispatches: a method registered with the relay but missing an arm here
@@ -695,6 +723,19 @@ impl AppState {
                     )
                     .map_err(|error| format!("failed to serialize transcription: {error}"))
                 }
+                "speech.synthesize" => {
+                    let request =
+                        serde_json::from_value::<super::SpeechSynthesisRequest>(params.clone())
+                            .map_err(|error| {
+                                format!("invalid speech synthesis payload: {error}")
+                            })?;
+                    serde_json::to_value(
+                        self.synthesize_speech(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize speech audio: {error}"))
+                }
                 "providers.read" => {
                     let state_dir = self
                         .state_dir()
@@ -718,6 +759,8 @@ impl AppState {
                 }
                 "harnesses.read" => serde_json::to_value(self.harnesses_overview().await)
                     .map_err(|error| format!("failed to serialize harnesses: {error}")),
+                "providers.usage" => serde_json::to_value(self.provider_usage_overview().await)
+                    .map_err(|error| format!("failed to serialize provider usage: {error}")),
                 "harnesses.refresh" => {
                     let request = serde_json::from_value::<falcondeck_core::HarnessRefreshRequest>(
                         params.clone(),

@@ -13,10 +13,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 /// Rotated once it would otherwise grow without bound. A single generation of
 /// history is enough to cover "it wedged, I restarted, what happened before?".
@@ -82,15 +82,17 @@ pub fn init(state_path: &Path) -> Option<PathBuf> {
     let filter = std::env::var("FALCONDECK_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
         .unwrap_or_else(|_| DEFAULT_FILTER.to_string());
-    let env_filter = EnvFilter::try_new(&filter)
-        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let env_filter = EnvFilter::try_new(&filter).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
     let path = log_path_for_state(state_path);
     let file = match open_log_file(&path) {
         Ok(file) => Some(file),
         Err(error) => {
             // Never fail startup over logging; stderr still works.
-            eprintln!("falcondeck: could not open log file {}: {error}", path.display());
+            eprintln!(
+                "falcondeck: could not open log file {}: {error}",
+                path.display()
+            );
             None
         }
     };

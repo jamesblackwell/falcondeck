@@ -328,6 +328,11 @@ pub(super) async fn connect_workspace_internal(
                 // omits the standard tier; Claude reports nothing)
                 // come back from the last persisted selections.
                 thread.summary.agent.merge_missing_from(&state.agent);
+                // Neither provider's records carry the goal; the persisted
+                // one is the recall. Codex refresher updates replace it.
+                if thread.summary.goal.is_none() {
+                    thread.summary.goal = state.goal.clone();
+                }
             }
             (thread.summary.id.clone(), {
                 let hydrated_title = thread.summary.title.clone();
@@ -462,21 +467,29 @@ pub(super) async fn connect_workspace_internal(
     Ok(summary)
 }
 
-/// Keeps threads that are mid-turn when their workspace reconnects.
+/// Keeps threads that a workspace reconnect must not throw away.
 ///
-/// The hydrated view is rebuilt from provider session files and the daemon's
-/// persisted state, neither of which knows about a turn that started since.
-/// Letting it win would replace a live thread with a stale copy — most
-/// visibly, one still marked as stopped by the last shutdown.
+/// The rebuilt view comes from provider session files and the daemon's
+/// persisted summaries. Neither knows about a turn that started since, and
+/// persisted ACP/Grok summaries have no transcript — that lives in the
+/// agent's session store and is replayed into memory when the thread is
+/// opened. Letting the rebuilt copy win would replace a live turn with a
+/// stale stopped thread, or wipe a just-replayed ACP transcript and leave
+/// the runtime's session mapping pointing at an empty conversation.
 fn carry_over_live_threads(
     hydrated: &mut HashMap<String, ManagedThread>,
     previous: HashMap<String, ManagedThread>,
 ) {
     for (thread_id, thread) in previous {
-        if matches!(
+        let keep_live = matches!(
             thread.summary.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
-        ) {
+        );
+        let keep_replayed_transcript = hydrated
+            .get(&thread_id)
+            .is_some_and(|rebuilt| rebuilt.items.is_empty())
+            && !thread.items.is_empty();
+        if keep_live || keep_replayed_transcript {
             hydrated.insert(thread_id, thread);
         }
     }
@@ -2581,7 +2594,14 @@ pub(super) async fn set_thread_goal(
     // thread/goal/updated notifications as usage accrues.
     app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
         match (&objective, &mut thread.goal) {
-            (Some(objective), _) => {
+            (Some(objective), existing) => {
+                // A changed objective is a new goal and restarts the clock;
+                // re-setting the same one keeps the original start time.
+                let started_at = existing
+                    .as_ref()
+                    .filter(|goal| goal.objective == *objective)
+                    .and_then(|goal| goal.started_at)
+                    .or_else(|| Some(Utc::now()));
                 thread.goal = Some(ThreadGoal {
                     objective: objective.clone(),
                     status: request
@@ -2591,6 +2611,7 @@ pub(super) async fn set_thread_goal(
                     token_budget: request.token_budget,
                     tokens_used: None,
                     time_used_seconds: None,
+                    started_at,
                 });
             }
             (None, Some(goal)) => {
@@ -3550,7 +3571,7 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
-    let should_refresh_codex_goal = {
+    let (needs_codex_resume, should_refresh_codex_goal) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(&request.workspace_id)
@@ -3559,53 +3580,31 @@ pub(super) async fn thread_detail(
             .threads
             .get(&request.thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        thread.summary.provider == AgentProvider::CODEX
-            && (thread.requires_resume || thread.summary.goal.is_none())
+        let is_codex = thread.summary.provider == AgentProvider::CODEX;
+        // A restored Codex thread has an empty transcript until resumed, and
+        // the resume response is where the items come from — so an empty
+        // Codex thread must pay that round trip before the window is built.
+        // A thread that already holds items must not: its goal enrichment
+        // runs in the background instead of gating the response.
+        (
+            is_codex && thread.requires_resume && thread.items.is_empty(),
+            is_codex && (thread.requires_resume || thread.summary.goal.is_none()),
+        )
     };
-    if should_refresh_codex_goal {
-        match app
+    if needs_codex_resume
+        && let Err(error) = app
             .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
             .await
-        {
-            Ok(session) => match session
-                .send_request("thread/goal/get", json!({ "threadId": request.thread_id }))
-                .await
-            {
-                Ok(result) => {
-                    let goal = crate::codex::parse_thread_goal(&result);
-                    let mut changed = false;
-                    app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
-                        if thread.goal != goal {
-                            thread.goal = goal;
-                            changed = true;
-                        }
-                    })
-                    .await?;
-                    if changed {
-                        let thread = app
-                            .thread_summary(&request.workspace_id, &request.thread_id)
-                            .await?;
-                        app.emit(
-                            Some(request.workspace_id.clone()),
-                            Some(request.thread_id.clone()),
-                            UnifiedEvent::ThreadUpdated { thread },
-                        );
-                    }
-                }
-                Err(error) => tracing::debug!(
-                    workspace_id = %request.workspace_id,
-                    thread_id = %request.thread_id,
-                    %error,
-                    "could not refresh Codex thread goal"
-                ),
-            },
-            Err(error) => tracing::debug!(
-                workspace_id = %request.workspace_id,
-                thread_id = %request.thread_id,
-                %error,
-                "could not resume Codex thread for goal refresh"
-            ),
-        }
+    {
+        tracing::debug!(
+            workspace_id = %request.workspace_id,
+            thread_id = %request.thread_id,
+            %error,
+            "could not resume Codex thread before detail"
+        );
+    }
+    if should_refresh_codex_goal {
+        app.schedule_codex_goal_refresh(&request.workspace_id, &request.thread_id);
     }
     let workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
@@ -3622,10 +3621,10 @@ pub(super) async fn thread_detail(
     // A restored ACP thread carries only its summary; the transcript lives in
     // the agent's session store. Kick off a background session/load replay so
     // opening the thread fills it in instead of showing an empty conversation.
-    let needs_native_hydration = thread.items.is_empty()
-        && thread.summary.native_session_id.is_some()
-        && thread.summary.provider_transport.as_deref() == Some("native")
-        && !matches!(thread.summary.status, ThreadStatus::Running);
+    // A native OpenCode thread can also hold a partial transcript (a turn
+    // whose end-of-turn projection never completed), so rehydrate whenever the
+    // transcript is not known-synced — not only when it is empty.
+    let needs_native_hydration = native_opencode_transcript_needs_hydration(thread);
     let needs_acp_hydration = thread.items.is_empty()
         && thread.summary.native_session_id.is_some()
         && thread.summary.provider != AgentProvider::CODEX
@@ -3638,6 +3637,12 @@ pub(super) async fn thread_detail(
     } else if needs_acp_hydration {
         app.schedule_acp_thread_hydration(&request.workspace_id, &request.thread_id);
     }
+    let acp_hydrating = app
+        .inner
+        .acp_hydrations_started
+        .lock()
+        .expect("acp hydration set poisoned")
+        .contains(&(request.workspace_id.clone(), request.thread_id.clone()));
     let items = with_renderable_attachment_previews_for_items(detail.items).await;
 
     Ok(ThreadDetail {
@@ -3647,8 +3652,27 @@ pub(super) async fn thread_detail(
         has_older: detail.has_older,
         oldest_item_id: detail.oldest_item_id,
         newest_item_id: detail.newest_item_id,
-        is_partial: detail.is_partial,
+        // session/load replay fills items after this response; treat an
+        // in-flight hydration as a partial window so clients keep the
+        // loading state instead of rendering a brand-new empty conversation.
+        is_partial: detail.is_partial || acp_hydrating || needs_native_hydration,
     })
+}
+
+/// Whether a native OpenCode thread's transcript must be rehydrated from the
+/// agent's session storage on open: an empty transcript (restored thread) or
+/// one that is not known-synced (a turn whose end-of-turn projection never
+/// completed leaves a partial prefix that must not be shown as complete).
+fn native_opencode_transcript_needs_hydration(thread: &ManagedThread) -> bool {
+    thread.summary.native_session_id.is_some()
+        && thread.summary.provider_transport.as_deref() == Some("native")
+        && !matches!(thread.summary.status, ThreadStatus::Running)
+        // A waiting thread with a live turn monitor belongs to that monitor;
+        // a waiting thread restored after a daemon crash (no monitor) must
+        // still hydrate, so key off the monitor flag rather than the status.
+        && !(thread.summary.status == ThreadStatus::WaitingForInput
+            && thread.opencode_turn_in_flight)
+        && (thread.items.is_empty() || !thread.native_transcript_synced)
 }
 
 /// Projects stale transient tools using the containing thread's terminal
@@ -4102,6 +4126,45 @@ mod tests {
     }
 
     #[test]
+    fn native_opencode_partial_transcript_stays_eligible_for_hydration() {
+        let native_thread = |status: ThreadStatus| {
+            let mut thread = managed_thread("ses_native", status);
+            thread.summary.native_session_id = Some("ses_native".to_string());
+            thread.summary.provider_transport = Some("native".to_string());
+            thread
+        };
+        // A restored thread: empty transcript.
+        let mut restored = native_thread(ThreadStatus::Idle);
+        restored.items.clear();
+        assert!(native_opencode_transcript_needs_hydration(&restored));
+        // A partial transcript from a turn whose projection never completed:
+        // items exist, but the transcript is not known-synced.
+        let mut partial = native_thread(ThreadStatus::Error);
+        partial.native_transcript_synced = false;
+        assert!(native_opencode_transcript_needs_hydration(&partial));
+        // A synced transcript is left alone.
+        let mut synced = native_thread(ThreadStatus::Idle);
+        synced.native_transcript_synced = true;
+        assert!(!native_opencode_transcript_needs_hydration(&synced));
+        // A live turn hydrates nothing; the turn monitor owns the transcript.
+        // WaitingForInput set by that monitor is live, but the persisted
+        // status also survives a daemon crash with no monitor — such a
+        // restored thread must still hydrate.
+        let mut running = native_thread(ThreadStatus::Running);
+        running.native_transcript_synced = false;
+        assert!(!native_opencode_transcript_needs_hydration(&running));
+        let mut waiting_live = native_thread(ThreadStatus::WaitingForInput);
+        waiting_live.native_transcript_synced = false;
+        waiting_live.opencode_turn_in_flight = true;
+        assert!(!native_opencode_transcript_needs_hydration(&waiting_live));
+        let mut waiting_restored = native_thread(ThreadStatus::WaitingForInput);
+        waiting_restored.items.clear();
+        assert!(native_opencode_transcript_needs_hydration(
+            &waiting_restored
+        ));
+    }
+
+    #[test]
     fn reconnecting_a_workspace_keeps_threads_that_are_mid_turn() {
         // The hydrated view is what a restart-time reconnect rebuilds: the
         // last turn recorded as interrupted by shutdown.
@@ -4146,6 +4209,29 @@ mod tests {
         assert!(!hydrated.contains_key("finished"));
     }
 
+    #[test]
+    fn reconnecting_a_workspace_keeps_a_replayed_acp_transcript() {
+        let mut hydrated = HashMap::from([("grok-thread".to_string(), {
+            let mut restored = managed_thread("grok-thread", ThreadStatus::Idle);
+            restored.items.clear();
+            restored
+        })]);
+        let previous = HashMap::from([("grok-thread".to_string(), {
+            let mut replayed = managed_thread("grok-thread", ThreadStatus::Idle);
+            replayed.items = vec![assistant_message("replayed-after-load")];
+            replayed
+        })]);
+
+        carry_over_live_threads(&mut hydrated, previous);
+
+        assert_eq!(hydrated["grok-thread"].items.len(), 1);
+        assert!(matches!(
+            &hydrated["grok-thread"].items[0],
+            ConversationItem::AssistantMessage { text, .. }
+                if text == "message replayed-after-load"
+        ));
+    }
+
     fn persisted_thread(thread_id: &str, session_id: Option<&str>) -> PersistedThreadState {
         PersistedThreadState {
             thread_id: thread_id.to_string(),
@@ -4165,6 +4251,7 @@ mod tests {
             variant: None,
             agent: ThreadAgentParams::default(),
             queued_requests: Vec::new(),
+            goal: None,
         }
     }
 

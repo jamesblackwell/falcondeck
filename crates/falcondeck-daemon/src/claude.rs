@@ -23,7 +23,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::agent_binary::preferred_command_path;
-use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
+use crate::agent_binary::{
+    missing_binary_message, resolve_agent_binary, strip_terminal_advertising_env,
+};
 use crate::app::agent_helpers::claude_image_reference;
 use crate::app::agent_helpers::{
     append_claude_text_delta, claude_tool_result_image_items, extract_claude_assistant_message_id,
@@ -267,6 +269,7 @@ impl ClaudeRuntime {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
 
         if let Some(existing_session_id) = session_id {
             command.arg("--resume").arg(existing_session_id);

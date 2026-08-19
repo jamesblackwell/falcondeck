@@ -33,6 +33,7 @@ use falcondeck_core::{
 use crate::acp_protocol::AcpSessionUpdateKind;
 use crate::agent_binary::{
     desktop_login_shell_environment, preferred_command_path_with_environment, resolve_agent_binary,
+    strip_terminal_advertising_env,
 };
 use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::error::DaemonError;
@@ -61,6 +62,74 @@ pub const MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES: usize = 10_000_000;
 /// images may still be dropped at runtime with an `image_dropped` notice.
 pub fn acp_supports_images(provider: &str, advertised: bool) -> bool {
     advertised || provider.eq_ignore_ascii_case("grok")
+}
+
+/// Grok session permission modes. The adapter does not advertise these on
+/// `session/new`; FalconDeck maps them onto `_meta.yoloMode` / `_meta.autoMode`.
+pub fn grok_placeholder_permission_modes() -> Vec<String> {
+    vec![
+        "default".to_string(),
+        "auto".to_string(),
+        "always-approve".to_string(),
+    ]
+}
+
+/// Capabilities a new-thread Grok composer can use before `grok agent stdio`
+/// has finished starting. Live handshake still replaces this entry.
+pub fn grok_placeholder_capabilities() -> falcondeck_core::AgentCapabilitySummary {
+    falcondeck_core::AgentCapabilitySummary {
+        supports_images: true,
+        permission_modes: grok_placeholder_permission_modes(),
+        ..falcondeck_core::AgentCapabilitySummary::acp_minimal()
+    }
+}
+
+/// Built-in Grok catalog so the composer is not empty while ACP hydrates.
+/// `initialize` / `session/new` replace this with the live list when they
+/// answer; custom models from `~/.grok/config.toml` appear at that point.
+pub fn grok_placeholder_models() -> Vec<ModelSummary> {
+    fn effort(id: &str, description: &str) -> ReasoningEffortSummary {
+        ReasoningEffortSummary {
+            reasoning_effort: id.to_string(),
+            description: description.to_string(),
+        }
+    }
+    fn model(
+        id: &str,
+        label: &str,
+        is_default: bool,
+        default_effort: &str,
+        efforts: Vec<ReasoningEffortSummary>,
+    ) -> ModelSummary {
+        ModelSummary {
+            id: id.to_string(),
+            label: label.to_string(),
+            is_default,
+            default_reasoning_effort: Some(default_effort.to_string()),
+            supported_reasoning_efforts: efforts,
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+        }
+    }
+    let high_medium_low = || {
+        vec![
+            effort(
+                "high",
+                "Higher implementation quality with extensive reasoning",
+            ),
+            effort(
+                "medium",
+                "Balanced effort with standard implementation and testing",
+            ),
+            effort("low", "Quick, fast implementations"),
+        ]
+    };
+    let mut grok_46_efforts = vec![effort("xhigh", "Highest effort and reasoning level")];
+    grok_46_efforts.extend(high_medium_low());
+    vec![
+        model("grok-4.6", "Grok 4.6", true, "high", grok_46_efforts),
+        model("grok-4.5", "Grok 4.5", false, "high", high_medium_low()),
+    ]
 }
 
 /// Whether a provider is known to have builds with a vendor interjection
@@ -926,17 +995,61 @@ fn dedupe_models(models: impl IntoIterator<Item = ModelSummary>) -> Vec<ModelSum
 }
 
 fn parse_initialize_models(init: &Value) -> Vec<ModelSummary> {
-    let entries = init.get("models").and_then(Value::as_array).or_else(|| {
-        init.pointer("/agentCapabilities/models")
-            .and_then(Value::as_array)
-    });
     let current = init.get("currentModelId").and_then(Value::as_str);
-    dedupe_models(
-        entries
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| model_summary(entry, current, &[])),
-    )
+    if let Some(models) = init.get("models") {
+        if let Some(entries) = models.as_array() {
+            return dedupe_models(
+                entries
+                    .iter()
+                    .filter_map(|entry| model_summary(entry, current, &[])),
+            );
+        }
+        if models.is_object() {
+            return parse_session_metadata(&json!({ "models": models })).models;
+        }
+    }
+    if let Some(entries) = init
+        .pointer("/agentCapabilities/models")
+        .and_then(Value::as_array)
+    {
+        return dedupe_models(
+            entries
+                .iter()
+                .filter_map(|entry| model_summary(entry, current, &[])),
+        );
+    }
+    // Grok 1.0+ publishes the same catalog session/new later returns, nested
+    // under `_meta.modelState`. Without this, a new-thread composer stays on
+    // a placeholder picker until a discovery session finishes — and that
+    // session often times out while Grok loads plugins and MCP servers.
+    if let Some(state) = init.pointer("/_meta/modelState") {
+        return parse_session_metadata(&json!({ "models": state })).models;
+    }
+    Vec::new()
+}
+
+/// Grok-only `session/new` `_meta`. The adapter ignores top-level `modelId`
+/// and only honors `_meta.modelId` at session creation; permission modes map
+/// onto `_meta.yoloMode` / `_meta.autoMode`.
+fn grok_session_new_meta(model_id: Option<&str>, permission_mode: Option<&str>) -> Option<Value> {
+    let mut meta = serde_json::Map::new();
+    if let Some(model_id) = model_id.map(str::trim).filter(|id| !id.is_empty()) {
+        meta.insert("modelId".to_string(), json!(model_id));
+    }
+    match permission_mode {
+        Some(mode) if is_blanket_approval_mode(mode) => {
+            meta.insert("yoloMode".to_string(), json!(true));
+        }
+        Some(mode) if mode.eq_ignore_ascii_case("auto") => {
+            meta.insert("autoMode".to_string(), json!(true));
+        }
+        _ => {}
+    }
+    if meta.is_empty() {
+        None
+    } else {
+        Some(Value::Object(meta))
+    }
 }
 
 /// ACP method capabilities use `{}` in the current v1 schema, while older
@@ -1240,7 +1353,11 @@ fn parse_cursor_cli_models(stdout: &str) -> Vec<ModelSummary> {
         }
         models.push(ModelSummary {
             id: id.to_string(),
-            label: if base.is_empty() { id.to_string() } else { base.to_string() },
+            label: if base.is_empty() {
+                id.to_string()
+            } else {
+                base.to_string()
+            },
             is_default: false,
             default_reasoning_effort: None,
             supported_reasoning_efforts: Vec::new(),
@@ -1304,6 +1421,7 @@ impl AcpRuntime {
         let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
         let mut command = Command::new(&executable);
         apply_provider_environment(&mut command, &executable, &config.env).await;
+        strip_terminal_advertising_env(&mut command);
         command
             .args(&config.command[1..])
             .current_dir(workspace_path)
@@ -1409,7 +1527,11 @@ impl AcpRuntime {
                 ACP_PROTOCOL_VERSION
             )));
         }
+        let init_models = parse_initialize_models(&init);
         *runtime.initialize_result.lock().await = Some(init);
+        if !init_models.is_empty() {
+            *runtime.discovered_models.lock().await = init_models;
+        }
         if acp_may_support_interject(runtime.provider.as_str()) {
             let outcome = runtime
                 .request_with_timeout(
@@ -1467,15 +1589,7 @@ impl AcpRuntime {
         let permission_modes = if discovered_permission_modes.is_empty()
             && self.provider.as_str().eq_ignore_ascii_case("grok")
         {
-            // Grok documents these session-level controls but its ACP
-            // session/new response currently only exposes model/reasoning
-            // meta-options. The daemon translates the choice to Grok's
-            // `_meta.yoloMode`/`_meta.autoMode` fields when creating a session.
-            vec![
-                "default".to_string(),
-                "auto".to_string(),
-                "always-approve".to_string(),
-            ]
+            grok_placeholder_permission_modes()
         } else {
             discovered_permission_modes
         };
@@ -1621,6 +1735,16 @@ impl AcpRuntime {
                 .await
                 .insert(session_id.to_string(), parsed.configuration);
         }
+        if !parsed.reasoning_efforts.is_empty() {
+            self.session_reasoning_efforts.lock().await.insert(
+                session_id.to_string(),
+                parsed
+                    .reasoning_efforts
+                    .iter()
+                    .map(|effort| effort.reasoning_effort.clone())
+                    .collect(),
+            );
+        }
         if let Some(modes) = result.get("modes")
             && !is_reasoning_mode_block(modes)
         {
@@ -1757,6 +1881,7 @@ impl AcpRuntime {
         permission_mode: Option<&str>,
         builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
         agent_context: Option<&str>,
+        model_id: Option<&str>,
     ) -> Result<String, DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
@@ -1799,16 +1924,10 @@ impl AcpRuntime {
         if let Some(instructions) = agent_context.map(str::trim).filter(|text| !text.is_empty()) {
             params["instructions"] = json!(instructions);
         }
-        if self.provider.as_str().eq_ignore_ascii_case("grok") {
-            match permission_mode {
-                Some(mode) if is_blanket_approval_mode(mode) => {
-                    params["_meta"] = json!({ "yoloMode": true });
-                }
-                Some(mode) if mode.eq_ignore_ascii_case("auto") => {
-                    params["_meta"] = json!({ "autoMode": true });
-                }
-                _ => {}
-            }
+        if self.provider.as_str().eq_ignore_ascii_case("grok")
+            && let Some(meta) = grok_session_new_meta(model_id, permission_mode)
+        {
+            params["_meta"] = meta;
         }
         let result = self
             .request_with_timeout("session/new", params, ACP_SESSION_START_TIMEOUT)
@@ -1904,6 +2023,17 @@ impl AcpRuntime {
     /// The ACP session id currently registered for a thread, if any.
     pub async fn session_for_thread(&self, thread_id: &str) -> Option<String> {
         self.sessions.lock().await.get(thread_id).cloned()
+    }
+
+    /// Drops a thread's session mapping so `session/load` can replay again.
+    ///
+    /// Used when a restore registered the session but the in-memory transcript
+    /// was lost (a workspace rebuild after replay) or never landed.
+    pub async fn forget_session(&self, thread_id: &str) {
+        let session_id = self.sessions.lock().await.remove(thread_id);
+        if let Some(session_id) = session_id {
+            self.threads_by_session.lock().await.remove(&session_id);
+        }
     }
 
     /// Records the modes block from a session/new or session/load response.
@@ -2022,11 +2152,39 @@ impl AcpRuntime {
                 .await?;
             }
         }
+        // OpenCode only publishes its effort option once a model that has
+        // reasoning variants is selected, and the set_config_option response
+        // above carries it. Re-read rather than reuse the snapshot taken
+        // before the model switch, or the effort is silently dropped.
+        let configuration = self
+            .session_configurations
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or(configuration);
         if let Some(reasoning_effort) = reasoning_effort
             && let Some(config_id) = configuration.reasoning_config_id.as_deref()
         {
-            self.set_config_option(session_id, config_id, reasoning_effort)
-                .await?;
+            let supported = self
+                .session_reasoning_efforts
+                .lock()
+                .await
+                .get(session_id)
+                .cloned()
+                .unwrap_or_default();
+            // Efforts are per model: a thread carrying `medium` onto a model
+            // that only offers low/high/max would fail the whole turn.
+            if supported.is_empty() || supported.iter().any(|effort| effort == reasoning_effort) {
+                self.set_config_option(session_id, config_id, reasoning_effort)
+                    .await?;
+            } else {
+                tracing::info!(
+                    provider = %self.config.id,
+                    %reasoning_effort,
+                    "session does not offer this reasoning effort; keeping its current level"
+                );
+            }
         }
         if let Some(collaboration_mode) = collaboration_mode {
             if let Some(config_id) = configuration.collaboration_config_id.as_deref() {
@@ -3141,9 +3299,8 @@ mod tests {
 
     #[test]
     fn cursor_cli_model_list_strips_ansi_escapes() {
-        let models = parse_cursor_cli_models(
-            "\x1b[36mauto\x1b[0m - \x1b[1mAuto\x1b[0m (default)\n",
-        );
+        let models =
+            parse_cursor_cli_models("\x1b[36mauto\x1b[0m - \x1b[1mAuto\x1b[0m (default)\n");
         assert_eq!(models[0].id, "auto");
         assert_eq!(models[0].label, "Auto");
         assert!(models[0].is_default);
@@ -3347,7 +3504,15 @@ mod tests {
     async fn a_steer_cancels_the_prompt_and_continues_the_same_turn() {
         let (runtime, mut events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
+            .ensure_session(
+                "thread-steer",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);
@@ -3402,7 +3567,15 @@ mod tests {
     async fn a_steer_without_an_active_turn_is_stale() {
         let (runtime, _events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
+            .ensure_session(
+                "thread-steer",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("fixture session should start");
 
@@ -3419,7 +3592,15 @@ mod tests {
     async fn an_interrupt_ends_a_steered_turn_instead_of_continuing_it() {
         let (runtime, mut events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
+            .ensure_session(
+                "thread-steer",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);
@@ -3496,7 +3677,15 @@ mod tests {
     async fn grok_plan_mode_reverse_request_is_approved_without_cancelling_the_turn() {
         let (runtime, mut events) = plan_approval_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-1", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
+            .ensure_session(
+                "thread-1",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                None,
+                None,
+                None,
+            )
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);
@@ -3681,6 +3870,101 @@ mod tests {
             parsed.configuration.collaboration_config_id.as_deref(),
             Some("mode")
         );
+    }
+
+    #[test]
+    fn grok_placeholder_catalog_is_selectable_before_acp_connects() {
+        let models = grok_placeholder_models();
+        assert_eq!(models[0].id, "grok-4.6");
+        assert!(models[0].is_default);
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            models[0]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["xhigh", "high", "medium", "low"]
+        );
+        assert_eq!(models[1].id, "grok-4.5");
+        let capabilities = grok_placeholder_capabilities();
+        assert!(capabilities.supports_images);
+        assert_eq!(
+            capabilities.permission_modes,
+            grok_placeholder_permission_modes()
+        );
+    }
+
+    #[test]
+    fn grok_initialize_model_state_populates_the_catalog() {
+        let models = parse_initialize_models(&json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true },
+            "_meta": {
+                "modelState": {
+                    "currentModelId": "grok-4.6",
+                    "availableModels": [
+                        {
+                            "modelId": "grok-4.6",
+                            "name": "Grok 4.6",
+                            "_meta": {
+                                "reasoningEffort": "high",
+                                "reasoningEfforts": [
+                                    { "id": "xhigh", "label": "Extra High Effort" },
+                                    { "id": "high", "label": "High Effort" },
+                                    { "id": "medium", "label": "Medium Effort" },
+                                    { "id": "low", "label": "Low Effort" }
+                                ]
+                            }
+                        },
+                        {
+                            "modelId": "grok-4.5",
+                            "name": "Grok 4.5",
+                            "_meta": {
+                                "reasoningEffort": "high",
+                                "reasoningEfforts": [
+                                    { "id": "high", "label": "High Effort" },
+                                    { "id": "medium", "label": "Medium Effort" },
+                                    { "id": "low", "label": "Low Effort" }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "grok-4.6");
+        assert!(models[0].is_default);
+        assert_eq!(
+            models[0]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["xhigh", "high", "medium", "low"]
+        );
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(models[1].id, "grok-4.5");
+        assert!(!models[1].is_default);
+    }
+
+    #[test]
+    fn grok_session_new_meta_sends_model_id_at_creation() {
+        assert_eq!(
+            grok_session_new_meta(Some("grok-4.5"), None),
+            Some(json!({ "modelId": "grok-4.5" }))
+        );
+        assert_eq!(
+            grok_session_new_meta(Some("grok-4.5"), Some("always-approve")),
+            Some(json!({ "modelId": "grok-4.5", "yoloMode": true }))
+        );
+        assert_eq!(
+            grok_session_new_meta(None, Some("auto")),
+            Some(json!({ "autoMode": true }))
+        );
+        assert_eq!(grok_session_new_meta(Some("  "), None), None);
+        assert_eq!(grok_session_new_meta(None, None), None);
     }
 
     #[test]

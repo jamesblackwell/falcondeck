@@ -7,8 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationFileChange, ConversationItem,
-    InteractiveRequest, InteractiveRequestKind, PlanApprovalOutcome, ServiceLevel, ThreadStatus,
-    ThreadTokenUsage, TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
+    InteractiveRequest, InteractiveRequestKind, ModelSummary, PlanApprovalOutcome, ServiceLevel,
+    ThreadStatus, ThreadTokenUsage, TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -48,6 +48,7 @@ impl AppState {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
         tokio::spawn(async move {
+            app.seed_grok_placeholder_catalog(&workspace_id).await;
             for config in app.fresh_acp_provider_configs() {
                 if config.id.eq_ignore_ascii_case("opencode")
                     && super::opencode_threads::requested_native_transport(&config)
@@ -80,6 +81,47 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// Fills an empty Grok catalog before ACP connect so the composer is
+    /// usable while `grok agent stdio` starts. Live handshake replaces it.
+    async fn seed_grok_placeholder_catalog(&self, workspace_id: &str) {
+        let changed = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(agent) = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("grok"))
+            else {
+                return;
+            };
+            let mut changed = false;
+            if agent.models.is_empty() {
+                agent.models = crate::acp::grok_placeholder_models();
+                changed = true;
+            }
+            if agent.capabilities.permission_modes.is_empty() {
+                agent.capabilities.permission_modes =
+                    crate::acp::grok_placeholder_permission_modes();
+                agent.capabilities.supports_images = true;
+                changed = true;
+            }
+            changed
+        };
+        if !changed {
+            return;
+        }
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
     }
 
     /// Rehydrates a restored ACP thread's transcript in the background.
@@ -149,10 +191,26 @@ impl AppState {
                         return;
                     }
                 };
-                // A live session for this thread means the transcript is already
-                // authoritative in memory; replaying it would duplicate history.
+                // A live session is only authoritative when the transcript is
+                // already in memory. After a restart the desktop can open the
+                // thread (and session/load) before workspace reconnect rebuilds
+                // from persisted summaries; that wipe leaves the mapping in
+                // place and an empty conversation. Drop the mapping so
+                // session/load can replay again.
                 if runtime.session_for_thread(&thread_id).await.is_some() {
-                    return;
+                    if !app.acp_thread_items_empty(&workspace_id, &thread_id).await {
+                        return;
+                    }
+                    let already_reloaded = !app
+                        .inner
+                        .acp_hydration_reloads
+                        .lock()
+                        .expect("acp hydration reload set poisoned")
+                        .insert((workspace_id.clone(), thread_id.clone()));
+                    if already_reloaded {
+                        return;
+                    }
+                    runtime.forget_session(&thread_id).await;
                 }
                 let builtin_control = app
                     .builtin_control_spec(&provider, &cwd, Some(&thread_id))
@@ -168,6 +226,21 @@ impl AppState {
                         "ACP thread hydration failed; transcript stays empty until next prompt"
                     );
                     return;
+                }
+                // session/load returns after the agent finishes sending
+                // replay notifications; the event pump may still be applying
+                // them. Wait for those items before settling, or we record an
+                // empty transcript and skip later retries.
+                let item_count = app
+                    .wait_for_acp_replay_items(&workspace_id, &thread_id)
+                    .await;
+                if item_count == 0 {
+                    tracing::info!(
+                        provider = %provider,
+                        thread = %thread_id,
+                        session = %native_session,
+                        "ACP thread hydration finished with no replayed items"
+                    );
                 }
                 // The replay has no turn end: settle the streamed lifecycles and
                 // reset the runtime's accumulators so the next real turn starts
@@ -199,6 +272,33 @@ impl AppState {
                 .expect("acp hydration set poisoned")
                 .remove(&(workspace_id, thread_id));
         });
+    }
+
+    async fn acp_thread_items_empty(&self, workspace_id: &str, thread_id: &str) -> bool {
+        let workspaces = self.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .is_none_or(|thread| thread.items.is_empty())
+    }
+
+    async fn wait_for_acp_replay_items(&self, workspace_id: &str, thread_id: &str) -> usize {
+        for _ in 0..50 {
+            let count = {
+                let workspaces = self.inner.workspaces.lock().await;
+                workspaces
+                    .get(workspace_id)
+                    .and_then(|workspace| workspace.threads.get(thread_id))
+                    .map(|thread| thread.items.len())
+                    .unwrap_or(0)
+            };
+            if count > 0 {
+                return count;
+            }
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        0
     }
 
     /// Returns the live ACP runtime for a provider in a workspace, spawning
@@ -277,6 +377,13 @@ impl AppState {
         let builtin_control = self
             .builtin_control_spec(provider, &workspace_path, None)
             .await;
+        // Grok (and similar) already advertise a catalog on initialize.
+        // Publish it before the discovery session so a new-thread composer
+        // can pick a model while plugins/MCP are still loading.
+        if !runtime.advertised_models().await.is_empty() {
+            self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
+                .await;
+        }
         if let Err(error) = runtime
             .ensure_workspace_metadata(&workspace_path, builtin_control.as_ref())
             .await
@@ -382,7 +489,12 @@ impl AppState {
             {
                 Some(index) => &mut workspace.summary.agents[index],
                 None => {
-                    let mut placeholder = falcondeck_core::AgentCapabilitySummary::acp_minimal();
+                    let grok = provider.as_str().eq_ignore_ascii_case("grok");
+                    let mut placeholder = if grok {
+                        crate::acp::grok_placeholder_capabilities()
+                    } else {
+                        falcondeck_core::AgentCapabilitySummary::acp_minimal()
+                    };
                     placeholder.supports_images = crate::acp::acp_supports_images(
                         provider.as_str(),
                         placeholder.supports_images,
@@ -397,7 +509,11 @@ impl AppState {
                                 status: falcondeck_core::AccountStatus::Unknown,
                                 label: format!("{} not started", runtime.config.label),
                             },
-                            models: Vec::new(),
+                            models: if grok {
+                                crate::acp::grok_placeholder_models()
+                            } else {
+                                Vec::new()
+                            },
                             collaboration_modes: Vec::new(),
                             skills: Vec::new(),
                             capabilities: placeholder,
@@ -411,7 +527,7 @@ impl AppState {
             };
             agent.capabilities = capabilities;
             if !models.is_empty() {
-                agent.models = models;
+                agent.models = merged_models(provider, &agent.models, models);
             }
             if !collaboration_modes.is_empty() {
                 agent.collaboration_modes = collaboration_modes;
@@ -1190,6 +1306,40 @@ impl AppState {
     }
 }
 
+/// Reconciles an ACP session's model catalog with what the workspace already
+/// advertises.
+///
+/// An ACP session publishes one effort list, which belongs to whichever model
+/// the session is on, and FalconDeck attaches it to every model in the same
+/// response. OpenCode instead describes effort levels per model (its
+/// *variants*), published straight from the provider catalog, so its richer
+/// list must survive a later session-derived refresh.
+fn merged_models(
+    provider: &AgentProvider,
+    existing: &[ModelSummary],
+    discovered: Vec<ModelSummary>,
+) -> Vec<ModelSummary> {
+    if !provider.as_str().eq_ignore_ascii_case("opencode") {
+        return discovered;
+    }
+    discovered
+        .into_iter()
+        .map(|mut model| {
+            if let Some(catalog) = existing.iter().find(|candidate| {
+                candidate.id == model.id && !candidate.supported_reasoning_efforts.is_empty()
+            }) {
+                model
+                    .supported_reasoning_efforts
+                    .clone_from(&catalog.supported_reasoning_efforts);
+                model
+                    .default_reasoning_effort
+                    .clone_from(&catalog.default_reasoning_effort);
+            }
+            model
+        })
+        .collect()
+}
+
 fn latest_user_message_contains_echo(items: &[ConversationItem], echoed_text: &str) -> bool {
     if echoed_text.is_empty() {
         return false;
@@ -1596,6 +1746,7 @@ async fn run_acp_turn_startup(
             requested_permission_mode.as_deref(),
             builtin_control.as_ref(),
             agent_context.as_deref(),
+            requested_model_id.as_deref(),
         )
         .await;
     let session_id = match first_start {
@@ -1642,6 +1793,7 @@ async fn run_acp_turn_startup(
                     requested_permission_mode.as_deref(),
                     builtin_control.as_ref(),
                     agent_context.as_deref(),
+                    requested_model_id.as_deref(),
                 )
                 .await
             {
@@ -1682,6 +1834,8 @@ async fn run_acp_turn_startup(
                     .find(|agent| &agent.provider == provider)
             })
             .is_some_and(|agent| {
+                let discovered_models =
+                    merged_models(provider, &agent.models, discovered_models.clone());
                 let models_changed =
                     !discovered_models.is_empty() && agent.models != discovered_models;
                 let collaboration_modes_changed = !discovered_collaboration_modes.is_empty()

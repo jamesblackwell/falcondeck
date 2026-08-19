@@ -22,6 +22,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::agent_binary::strip_terminal_advertising_env;
 use crate::error::DaemonError;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
@@ -177,6 +178,7 @@ impl OpenCodeRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        strip_terminal_advertising_env(&mut command);
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
                 "failed to start OpenCode server '{}': {error}",

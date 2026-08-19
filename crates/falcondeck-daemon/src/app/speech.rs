@@ -5,11 +5,12 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     task::spawn_blocking,
-    time::{Duration, timeout},
+    time::{Duration, Instant, timeout},
 };
 
 use super::AppState;
@@ -22,6 +23,7 @@ const KEYRING_SERVICE: &str = "com.falcondeck.daemon.speech";
 #[cfg(not(test))]
 const KEYRING_ACCOUNT: &str = "openrouter-api-key";
 const OPENROUTER_TRANSCRIPTIONS_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
+const OPENROUTER_SPEECH_URL: &str = "https://openrouter.ai/api/v1/audio/speech";
 const OPENROUTER_MODELS_URL: &str =
     "https://openrouter.ai/api/v1/models?output_modalities=transcription";
 // Base64 audio is encrypted and base64-encoded again by the relay protocol.
@@ -32,6 +34,18 @@ const SPEECH_STORAGE: &str = "daemon_secret_store";
 // one-shot Keychain migration surfaces the daemon error, not a relay timeout.
 const SPEECH_SECRET_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
+// Remote clients have a roughly 30-second relay RPC budget. Keep this below
+// it so cancellation reaches OpenRouter before the client gives up.
+const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(25);
+const READ_ALOUD_MODEL: &str = "x-ai/grok-voice-tts-1.0";
+const READ_ALOUD_VOICE: &str = "Eve";
+// Grok Voice accepts up to 15,000 characters. Keeping the relay payload below
+// its encrypted WebSocket limit also makes cancellation feel immediate.
+const MAX_READ_ALOUD_CHARS: usize = 8_000;
+// Wall-clock budget for the whole fallback chain. Without it, several slow
+// models can each consume the full request timeout and hold the client for
+// minutes before the error surfaces.
+const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(20);
 const FALLBACK_MODELS: [&str; 4] = [
     "openai/whisper-large-v3-turbo",
     "deepgram/nova-3",
@@ -63,6 +77,17 @@ pub struct SpeechTranscriptionRequest {
 pub struct SpeechTranscriptionResponse {
     pub text: String,
     pub model: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SpeechSynthesisRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpeechSynthesisResponse {
+    pub audio_base64: String,
+    pub mime_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -195,8 +220,12 @@ impl AppState {
                 DaemonError::Process(format!("failed to create transcription client: {error}"))
             })?;
         let mut last_error = "Transcription failed".to_string();
+        let fallback_deadline = Instant::now() + FALLBACK_TIME_BUDGET;
 
         for model in models {
+            if Instant::now() > fallback_deadline {
+                break;
+            }
             let mut payload = json!({
                 "model": model,
                 "input_audio": { "data": request.audio_base64, "format": request.format },
@@ -247,6 +276,94 @@ impl AppState {
         }
 
         Err(DaemonError::Process(last_error))
+    }
+
+    pub async fn synthesize_speech(
+        &self,
+        request: SpeechSynthesisRequest,
+    ) -> Result<SpeechSynthesisResponse, DaemonError> {
+        let text = request.text.trim();
+        if text.is_empty() || text.chars().count() > MAX_READ_ALOUD_CHARS {
+            return Err(DaemonError::BadRequest(format!(
+                "read aloud text must be between 1 and {MAX_READ_ALOUD_CHARS} characters"
+            )));
+        }
+        let api_key = self.openrouter_key_cached().await?.ok_or_else(|| {
+            DaemonError::BadRequest(
+                "OpenRouter is not configured on the connected desktop".to_string(),
+            )
+        })?;
+        let response = reqwest::Client::builder()
+            .timeout(SYNTHESIS_TIMEOUT)
+            .build()
+            .map_err(|error| {
+                DaemonError::Process(format!("failed to create speech client: {error}"))
+            })?
+            .post(OPENROUTER_SPEECH_URL)
+            .bearer_auth(api_key)
+            .header("X-Title", "FalconDeck")
+            .json(&json!({
+                "model": READ_ALOUD_MODEL,
+                "input": text,
+                "voice": READ_ALOUD_VOICE,
+                "response_format": "mp3"
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                DaemonError::Process(format!("OpenRouter speech request failed: {error}"))
+            })?;
+        let status = response.status();
+        let mime_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .filter(|value| value.starts_with("audio/"))
+            .unwrap_or("audio/mpeg")
+            .to_string();
+        if !status.is_success() {
+            let body = response.bytes().await.map_err(|error| {
+                DaemonError::Process(format!(
+                    "failed to read OpenRouter speech error response: {error}"
+                ))
+            })?;
+            let error = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            return Err(DaemonError::Process(speech_synthesis_error(
+                status.as_u16(),
+                &error,
+            )));
+        }
+        // TTS uses a chunked raw-audio response. Some providers close the
+        // transfer immediately after the final frame, which Reqwest reports
+        // as a body-decoding error despite usable audio already arriving.
+        // Preserve those bytes so playback can proceed; only fail when no
+        // audio reached us at all.
+        let mut stream = response.bytes_stream();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(chunk) => body.extend_from_slice(&chunk),
+                Err(error) if body.is_empty() => {
+                    return Err(DaemonError::Process(format!(
+                        "OpenRouter speech stream ended before audio arrived: {error}"
+                    )));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, bytes = body.len(), "OpenRouter speech stream ended after audio");
+                    break;
+                }
+            }
+        }
+        if body.is_empty() {
+            return Err(DaemonError::Process(
+                "OpenRouter returned empty speech audio".to_string(),
+            ));
+        }
+        Ok(SpeechSynthesisResponse {
+            audio_base64: STANDARD.encode(body),
+            mime_type,
+        })
     }
 }
 
@@ -320,6 +437,16 @@ fn transcription_error(status: u16, body: &Value) -> String {
         429 => "OpenRouter is rate limited; the recording is still safe on the phone".to_string(),
         _ => openrouter_error_message(body)
             .unwrap_or_else(|| format!("OpenRouter transcription failed ({status})")),
+    }
+}
+
+fn speech_synthesis_error(status: u16, body: &Value) -> String {
+    match status {
+        401 => "The OpenRouter API key was rejected".to_string(),
+        402 => "The OpenRouter account needs credit to read responses aloud".to_string(),
+        429 => "OpenRouter is rate limited; try Read Aloud again shortly".to_string(),
+        _ => openrouter_error_message(body)
+            .unwrap_or_else(|| format!("OpenRouter speech synthesis failed ({status})")),
     }
 }
 
@@ -480,10 +607,7 @@ mod tests {
 
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
-        assert_eq!(
-            fallback_models("openai/whisper-large-v3-turbo").len(),
-            4
-        );
+        assert_eq!(fallback_models("openai/whisper-large-v3-turbo").len(), 4);
     }
 
     #[test]
@@ -494,6 +618,16 @@ mod tests {
     #[test]
     fn bad_request_tries_another_transcription_model() {
         assert!(should_try_fallback(400));
+    }
+
+    #[test]
+    fn fallback_budget_stays_shorter_than_one_request_timeout() {
+        assert!(FALLBACK_TIME_BUDGET < TRANSCRIPTION_TIMEOUT);
+    }
+
+    #[test]
+    fn synthesis_timeout_fits_within_the_remote_rpc_budget() {
+        assert!(SYNTHESIS_TIMEOUT < Duration::from_secs(30));
     }
 
     #[test]

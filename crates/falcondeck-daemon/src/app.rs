@@ -174,11 +174,20 @@ struct InnerState {
     persist_pending: AtomicBool,
     /// Agent control service: settings, automations, runs and audit.
     control: crate::control::ControlService,
-    /// Threads whose ACP transcript rehydration has been kicked off this
-    /// daemon run, keyed by (workspace_id, thread_id). One attempt per run:
-    /// a session the agent can no longer load would otherwise respawn a
-    /// replay on every open of the thread.
+    /// Threads whose ACP transcript rehydration is currently in flight, keyed
+    /// by (workspace_id, thread_id). The entry is removed when the attempt
+    /// finishes so a later open can retry if the transcript is still empty.
     acp_hydrations_started: StdMutex<HashSet<(String, String)>>,
+    /// Threads that already forced a second `session/load` this daemon run
+    /// after a registered session had no transcript. One retry is enough to
+    /// recover from a workspace rebuild wiping a replay; looping would respawn
+    /// the agent on every open of a session that truly has nothing to replay.
+    acp_hydration_reloads: StdMutex<HashSet<(String, String)>>,
+    /// Threads with a background Codex goal refresh in flight, keyed by
+    /// (workspace_id, thread_id). `thread.detail` triggers the refresh but
+    /// returns without waiting on it; the set collapses concurrent opens of
+    /// the same thread into one app-server round trip.
+    codex_goal_refreshes_in_flight: StdMutex<HashSet<(String, String)>>,
 }
 
 struct ManagedWorkspace {
@@ -311,6 +320,13 @@ impl AppState {
                 // before the first connect refreshes the agent entry.
                 capabilities.supports_images =
                     crate::acp::acp_supports_images(&config.id, capabilities.supports_images);
+                if config.id.eq_ignore_ascii_case("grok") {
+                    // Same idea as Claude's hardcoded catalog: Grok's ACP
+                    // process takes long enough to start that a new-thread
+                    // composer would otherwise sit on a greyed picker.
+                    capabilities = crate::acp::grok_placeholder_capabilities();
+                    models = crate::acp::grok_placeholder_models();
+                }
                 if config.id.eq_ignore_ascii_case("opencode")
                     && crate::app::opencode_threads::requested_native_transport(config)
                 {
@@ -456,6 +472,10 @@ struct PersistedThreadState {
     /// Accepted user messages which have not crossed the provider boundary.
     #[serde(default)]
     queued_requests: Vec<QueuedTurnRequest>,
+    /// Goal attached to the thread. Codex re-fetches it from the session on
+    /// demand; Claude has no goal record, so persistence is its only recall.
+    #[serde(default)]
+    goal: Option<falcondeck_core::ThreadGoal>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -601,6 +621,8 @@ impl AppState {
                 shutting_down: AtomicBool::new(false),
                 persist_pending: AtomicBool::new(false),
                 acp_hydrations_started: StdMutex::new(HashSet::new()),
+                acp_hydration_reloads: StdMutex::new(HashSet::new()),
+                codex_goal_refreshes_in_flight: StdMutex::new(HashSet::new()),
             }),
         }
     }
@@ -707,7 +729,10 @@ impl AppState {
     /// Evaluated at every spawn boundary alongside
     /// [`Self::builtin_control_spec`] so setting changes apply on the next
     /// turn (Claude) or next process start (Codex, ACP).
-    async fn agent_context_enabled(&self, provider: &AgentProvider) -> Option<AgentControlSettings> {
+    async fn agent_context_enabled(
+        &self,
+        provider: &AgentProvider,
+    ) -> Option<AgentControlSettings> {
         let settings = self.inner.control.settings_snapshot().await;
         self.inner
             .control
@@ -721,10 +746,7 @@ impl AppState {
 
     /// The short always-on instruction append for one provider spawn, or
     /// `None` when agent context injection is disabled.
-    pub async fn agent_context_instructions(
-        &self,
-        provider: &AgentProvider,
-    ) -> Option<String> {
+    pub async fn agent_context_instructions(&self, provider: &AgentProvider) -> Option<String> {
         self.agent_context_enabled(provider).await?;
         let staged = crate::agent_context::stage_skill(&self.inner.state_path);
         if let Err(error) = &staged {
@@ -1014,7 +1036,7 @@ impl AppState {
                 is_pinned: persisted_workspace
                     .pinned_thread_ids
                     .contains(&state.thread_id),
-                goal: None,
+                goal: state.goal.clone(),
                 queued_turns: Vec::new(),
                 variant: state.variant.clone(),
             };
@@ -2038,6 +2060,7 @@ impl AppState {
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
                     variant: thread.summary.variant.clone(),
                     agent: thread.summary.agent.clone(),
+                    goal: thread.summary.goal.clone(),
                     queued_requests: thread
                         .dispatching_request
                         .iter()

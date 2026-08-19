@@ -165,6 +165,22 @@ pub fn preferred_command_path(executable: &str) -> Option<OsString> {
     )
 }
 
+/// Removes env vars that advertise an attached Warp terminal from a
+/// daemon-spawned harness process. Harness children have no controlling
+/// terminal, but they inherit these vars when the daemon is launched from
+/// Warp. Terminal-aware hook plugins (e.g. claude-code-warp) then believe
+/// they can deliver notifications; with no tty they fall back to printing
+/// hook JSON on stdout, which Codex rejects as invalid Stop hook output on
+/// every turn. Stripping the vars makes those hooks take their headless
+/// path and exit cleanly.
+pub fn strip_terminal_advertising_env(command: &mut TokioCommand) {
+    command.env_remove("WARP_CLI_AGENT_PROTOCOL_VERSION");
+    command.env_remove("WARP_CLIENT_VERSION");
+    if env::var_os("TERM_PROGRAM").as_deref() == Some(OsStr::new("WarpTerminal")) {
+        command.env_remove("TERM_PROGRAM");
+    }
+}
+
 /// Environment added by the user's interactive login shell when FalconDeck is
 /// running as a packaged macOS app. Terminal-launched daemons already inherit
 /// this environment and avoid the extra shell startup.

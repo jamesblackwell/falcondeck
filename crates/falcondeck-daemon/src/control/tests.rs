@@ -863,10 +863,7 @@ async fn settings_update_toggles_agent_context_injection() {
         )
         .await;
     assert!(response.ok);
-    assert_eq!(
-        response.data.unwrap()["inject_agent_context"],
-        json!(false)
-    );
+    assert_eq!(response.data.unwrap()["inject_agent_context"], json!(false));
     assert!(!service.settings_snapshot().await.inject_agent_context);
 }
 

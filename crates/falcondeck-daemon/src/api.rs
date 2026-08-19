@@ -234,6 +234,7 @@ pub fn router(state: AppState) -> Router {
             "/api/speech/transcribe",
             post(speech_transcribe).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
+        .route("/api/speech/synthesize", post(speech_synthesize))
         .route("/api/extensions", get(extensions))
         .route(
             "/api/extensions/{extension_id}",
@@ -337,6 +338,13 @@ async fn speech_transcribe(
     Json(request): Json<crate::app::SpeechTranscriptionRequest>,
 ) -> Result<Json<crate::app::SpeechTranscriptionResponse>, DaemonError> {
     Ok(Json(state.transcribe_speech(request).await?))
+}
+
+async fn speech_synthesize(
+    State(state): State<AppState>,
+    Json(request): Json<crate::app::SpeechSynthesisRequest>,
+) -> Result<Json<crate::app::SpeechSynthesisResponse>, DaemonError> {
+    Ok(Json(state.synthesize_speech(request).await?))
 }
 
 async fn extensions(State(state): State<AppState>) -> Json<falcondeck_core::ExtensionSnapshot> {

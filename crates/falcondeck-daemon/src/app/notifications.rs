@@ -5,6 +5,23 @@ use falcondeck_core::{
     RealtimeAudioChunk, ThreadTokenUsage, TokenUsageBreakdown, ToolCallDetail, ToolLifecycle,
 };
 
+/// Recognizes a provider diagnostic that is really "one configured MCP server
+/// did not come up". Codex reports these once per server on every session, so
+/// left alone they land as a durable red card per server in every new
+/// transcript. They describe the workspace's environment, not the
+/// conversation, so the name lets the caller key one replaceable workspace
+/// condition instead.
+fn mcp_startup_failure_server(message: &str) -> Option<&str> {
+    let name = message.split_once(" failed to start:")?.0.trim();
+    if name.is_empty() || name.contains(char::is_whitespace) {
+        return None;
+    }
+    message
+        .contains("MCP")
+        .then_some(name)
+        .or_else(|| message.contains(" mcp ").then_some(name))
+}
+
 fn emit_scoped_diagnostic(
     app: &AppState,
     workspace_id: &str,
@@ -14,6 +31,17 @@ fn emit_scoped_diagnostic(
     message: String,
     source: Option<String>,
 ) -> Result<(), DaemonError> {
+    // A dead MCP server never blocks the turn, so it stays out of the
+    // transcript and out of the error tier no matter which scope reported it.
+    if let Some(server) = mcp_startup_failure_server(&message) {
+        return app.upsert_operational_condition(
+            workspace_id.to_string(),
+            format!("mcp_startup:{server}"),
+            ServiceLevel::Warning,
+            message,
+            source,
+        );
+    }
     if let Some(thread_id) = thread_id {
         app.emit_conversation_diagnostic(
             workspace_id.to_string(),
@@ -493,8 +521,19 @@ pub(super) async fn ingest_notification(
         }
         "thread/goal/updated" => {
             if let Some(thread_id) = extract_thread_id(&params) {
-                let goal = parse_thread_goal(&params);
+                let mut goal = parse_thread_goal(&params);
                 app.with_thread_mut(workspace_id, &thread_id, |thread| {
+                    // The provider refines objective/usage but has no notion
+                    // of when the goal started; that stamp is ours to keep.
+                    if let Some(goal) = goal.as_mut() {
+                        if goal.started_at.is_none() {
+                            goal.started_at = thread
+                                .goal
+                                .as_ref()
+                                .and_then(|existing| existing.started_at)
+                                .or_else(|| Some(Utc::now()));
+                        }
+                    }
                     thread.goal = goal.clone();
                 })
                 .await?;
@@ -1747,7 +1786,7 @@ pub(super) async fn ingest_notification(
                 app.upsert_operational_condition(
                     workspace_id.to_string(),
                     condition_key,
-                    ServiceLevel::Error,
+                    ServiceLevel::Warning,
                     message,
                     Some(method.to_string()),
                 )?;

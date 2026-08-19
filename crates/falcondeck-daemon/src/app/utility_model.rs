@@ -17,7 +17,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::AppState;
-use crate::agent_binary::preferred_command_path;
+use crate::agent_binary::{preferred_command_path, strip_terminal_advertising_env};
 
 /// A provider that is configured, authenticated, and worth trying.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +139,7 @@ impl AppState {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
         let output = timeout(run_timeout, command.output()).await.ok()?.ok()?;
         if !output.status.success() {
             return None;
@@ -183,6 +184,7 @@ impl AppState {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
         let output = timeout(run_timeout, command.output()).await.ok()?.ok()?;
         if !output.status.success() {
             let _ = fs::remove_file(&output_path).await;
@@ -214,6 +216,7 @@ impl AppState {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
         let output = timeout(run_timeout, command.output()).await.ok()?.ok()?;
         if !output.status.success() {
             return None;
@@ -250,6 +253,7 @@ impl AppState {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
         let output = timeout(run_timeout, command.output()).await.ok()?.ok()?;
         if !output.status.success() {
             return None;

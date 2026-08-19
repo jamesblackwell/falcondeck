@@ -14,7 +14,7 @@ use std::sync::Mutex;
 
 use falcondeck_core::{
     AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
-    UpdatePreferencesRequest, crypto::verify_pairing_public_key_bundle,
+    UpdatePreferencesRequest, crypto::verify_pairing_public_key_bundle, normalize_workspace_colors,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -187,6 +187,13 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         }
     }
 
+    if let Some(workspace_colors) = value.get("workspace_colors").and_then(Value::as_object) {
+        preferences.workspace_colors =
+            normalize_workspace_colors(workspace_colors.iter().filter_map(
+                |(workspace_id, color)| Some((workspace_id.clone(), color.as_str()?.to_string())),
+            ));
+    }
+
     if let Some(conversation) = value.get("conversation") {
         if let Some(mode) = extract_string(conversation, &["tool_details_mode"]) {
             preferences.conversation.tool_details_mode = parse_tool_details_mode(&mode);
@@ -319,6 +326,10 @@ pub(super) fn apply_preferences_patch(
                 }
                 ordered
             });
+    }
+
+    if let Some(workspace_colors) = request.workspace_colors {
+        preferences.workspace_colors = normalize_workspace_colors(workspace_colors);
     }
 
     if let Some(conversation) = request.conversation {
@@ -917,6 +928,11 @@ mod tests {
         let preferences = merge_preferences_from_value(json!({
             "version": 3,
             "workspace_order": ["workspace-b", "workspace-a", "workspace-b", "  "],
+            "workspace_colors": {
+                "workspace-b": "cat-3",
+                "workspace-a": "red",
+                " ": "cat-1"
+            },
             "conversation": {
                 "tool_details_mode": "compact",
                 "group_read_only_tools": false,
@@ -939,6 +955,14 @@ mod tests {
 
         assert_eq!(preferences.version, 3);
         assert_eq!(preferences.workspace_order, ["workspace-b", "workspace-a"]);
+        assert_eq!(
+            preferences
+                .workspace_colors
+                .get("workspace-b")
+                .map(String::as_str),
+            Some("cat-3")
+        );
+        assert!(preferences.workspace_colors.get("workspace-a").is_none());
         assert_eq!(
             preferences.conversation.tool_details_mode,
             ToolDetailsMode::Compact

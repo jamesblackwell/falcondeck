@@ -25,7 +25,10 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::agent_binary::{missing_binary_message, preferred_command_path, resolve_agent_binary};
+use crate::agent_binary::{
+    missing_binary_message, preferred_command_path, resolve_agent_binary,
+    strip_terminal_advertising_env,
+};
 use crate::skills::canonical_skill_alias;
 use crate::{
     app::{
@@ -226,6 +229,7 @@ impl CodexSession {
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
+        strip_terminal_advertising_env(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| {
@@ -1456,6 +1460,7 @@ pub fn parse_thread_goal(value: &Value) -> Option<falcondeck_core::ThreadGoal> {
         token_budget: goal.get("tokenBudget").and_then(Value::as_i64),
         tokens_used: goal.get("tokensUsed").and_then(Value::as_i64),
         time_used_seconds: goal.get("timeUsedSeconds").and_then(Value::as_i64),
+        started_at: None,
     })
 }
 
