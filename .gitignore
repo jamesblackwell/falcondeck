@@ -17,6 +17,8 @@ apps/desktop/src-tauri/binaries/deno-*
 /var
 *.tsbuildinfo
 **/.git
+__pycache__/
+*.py[cod]
 /ops/ansible/inventory/local
 /ops/ansible/group_vars/*.local.yml
 /ops/ansible/*.vault.yml

@@ -1,6 +1,6 @@
 ---
 name: just-say-no-to-process-porn
-description: Keep coding agents focused on requested implementation. Use when work drifts into unnecessary audits, ceremonies, gates, reports, evidence bundles, repetitive inspection, or other process that does not advance the outcome.
+description: "Keep agents focused on requested code and tests. Use when work drifts into unnecessary audits, ceremonies, gates, or process."
 ---
 
 # Just Say No to Process Porn

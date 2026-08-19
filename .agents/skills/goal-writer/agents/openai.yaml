@@ -1,0 +1,4 @@
+interface:
+  display_name: "Goal Writer"
+  short_description: "Turn rough objectives into verifiable agent goals."
+  default_prompt: "Turn this objective into a verifiable agent goal:"
