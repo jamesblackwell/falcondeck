@@ -24,6 +24,7 @@ import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
 import { AutomationsView } from "./AutomationsView";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
+import { UsagePanel } from "./settings/UsagePanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
 
 export type SettingsViewProps = {
@@ -111,6 +112,8 @@ export function SettingsView(props: SettingsViewProps) {
               hosts={props.hosts}
               onToast={props.onToast}
             />
+          ) : activeSection === "usage" ? (
+            <UsagePanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "connectors" ? (
             <ConnectorsPanel
               baseUrl={props.baseUrl}

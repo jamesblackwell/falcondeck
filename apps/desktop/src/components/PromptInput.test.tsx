@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PromptInput } from "@falcondeck/chat-ui";
+import { TooltipProvider } from "@falcondeck/ui";
 
 const noop = vi.fn();
 const imageCapableAgent = {
@@ -1168,6 +1169,23 @@ describe("PromptInput", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows a Send tooltip with the host shortcut as keycaps", async () => {
+    render(
+      <TooltipProvider delayDuration={0}>
+        <PromptInput
+          {...promptInputProps}
+          value="Hello"
+          sendShortcut={["↵"]}
+        />
+      </TooltipProvider>,
+    );
+
+    fireEvent.pointerMove(screen.getByRole("button", { name: "Send message" }));
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Send");
+    expect(tooltip.querySelector("kbd")).toHaveTextContent("↵");
+  });
+
   describe("composer menu shortcuts", () => {
     const models = [
       {
@@ -1234,9 +1252,33 @@ describe("PromptInput", () => {
 
       fireEvent.keyDown(document, { key: "Enter" });
       expect(onModelChange).toHaveBeenCalledWith("sonnet");
-      await waitFor(() =>
-        expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument(),
+      await waitFor(() => {
+        expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("textbox", { name: "Message composer" }),
+        ).toHaveFocus();
+      });
+    });
+
+    it("returns focus to the draft after choosing a model with the pointer", async () => {
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={models}
+          selectedModelId="opus"
+        />,
       );
+
+      fireEvent.click(screen.getByRole("button", { name: "Model" }));
+      fireEvent.click(
+        await screen.findByRole("menuitemradio", { name: "sonnet 5" }),
+      );
+      await waitFor(() => {
+        expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("textbox", { name: "Message composer" }),
+        ).toHaveFocus();
+      });
     });
 
     it("wraps around the ends of the row list", async () => {

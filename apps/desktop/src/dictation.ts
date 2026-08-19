@@ -164,8 +164,6 @@ export function useDesktopDictation(baseUrl: string | null): void {
         config: {
           ...settings,
           enabled: settings.enabled && providerReady,
-          provider:
-            settings.provider === "open_router" ? "open_router" : "system",
           daemonUrl: baseUrl,
         },
       }).catch(() => {
@@ -203,6 +201,7 @@ export async function readDictationAudioDevices(): Promise<
 export async function requestDictationPermission(
   permission: DictationPermission,
 ): Promise<void> {
+  if (!isTauriDesktop()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("request_dictation_permission", { permission });
 }

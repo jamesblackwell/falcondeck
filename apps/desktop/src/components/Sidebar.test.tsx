@@ -161,6 +161,32 @@ describe("DesktopSidebar", () => {
     expect(onOpenActivity).toHaveBeenCalledOnce();
   });
 
+  it("renders Extensions directly beneath Activity", () => {
+    const onOpenExtensions = vi.fn();
+    renderSidebar({
+      onOpenActivity: vi.fn(),
+      onOpenExtensions,
+      extensionsOpen: true,
+      enabledExtensionCount: 2,
+      onOpenScheduled: vi.fn(),
+    });
+
+    const activity = screen.getByRole("button", { name: "Activity" });
+    const extensions = screen.getByRole("button", { name: "Extensions" });
+    const scheduled = screen.getByRole("button", { name: "Scheduled" });
+    expect(activity.compareDocumentPosition(extensions)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(extensions.compareDocumentPosition(scheduled)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(extensions).toHaveAttribute("aria-current", "page");
+    expect(extensions).toHaveTextContent("2");
+
+    fireEvent.click(extensions);
+    expect(onOpenExtensions).toHaveBeenCalledOnce();
+  });
+
   it("detaches Activity from the row without opening the takeover", () => {
     const onOpenActivity = vi.fn();
     const onPopOutActivity = vi.fn();
@@ -1479,6 +1505,27 @@ describe("DesktopSidebar", () => {
     });
   });
 
+  it("sets a project folder color from the right-click menu", async () => {
+    const onWorkspaceColorChange = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({
+      onWorkspaceColorChange,
+      workspaceColors: { "workspace-1": "cat-2" },
+    });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.getByRole("menuitemradio", { name: "Color 2" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Color 5" }));
+    expect(onWorkspaceColorChange).toHaveBeenCalledWith("workspace-1", "cat-5");
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Default" }));
+    expect(onWorkspaceColorChange).toHaveBeenCalledWith("workspace-1", null);
+  });
+
   it("focuses the context menu and moves through it with the arrow keys", async () => {
     renderSidebar();
 
@@ -1514,47 +1561,39 @@ describe("DesktopSidebar", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
   });
 
-  it("keeps the thread's model on the row, revealed on hover once the row is wide", () => {
+  it("keeps the thread's provider on the row, revealed on hover once the row is wide", () => {
     renderSidebar({
       groups: [
         {
           workspace: workspace({
-            models: [
+            agents: [
               {
-                id: "gpt-5-codex",
-                label: "GPT-5 Codex",
-                is_default: true,
-                default_reasoning_effort: null,
-                supported_reasoning_efforts: [],
+                provider: "opencode",
+                label: "OpenCode",
+                account: { status: "ready", label: "ready" },
+                models: [],
+                collaboration_modes: [],
               },
             ],
           }),
-          threads: [
-            thread({
-              agent: {
-                model_id: "gpt-5-codex",
-                reasoning_effort: null,
-                collaboration_mode_id: null,
-                approval_policy: null,
-                service_tier: null,
-              },
-            }),
-          ],
+          threads: [thread({ provider: "opencode" })],
         },
       ],
     });
 
-    const label = screen.getByTestId("thread-model-label");
-    expect(label).toHaveTextContent("gpt-5 codex");
+    const label = screen.getByTestId("thread-provider-label");
+    expect(label).toHaveTextContent("OpenCode");
     // Hidden until the row is both hovered and wide enough for it.
     expect(label.className).toContain("hidden");
     expect(label.className).toContain("@[15rem]:group-hover:block");
   });
 
-  it("shows no model on a thread that never pinned one", () => {
+  it("title-cases a provider the workspace has not advertised yet", () => {
     renderSidebar();
 
-    expect(screen.queryByTestId("thread-model-label")).not.toBeInTheDocument();
+    expect(screen.getByTestId("thread-provider-label")).toHaveTextContent(
+      "Codex",
+    );
   });
 
   it("leaves the project menu out when removal is unavailable", () => {

@@ -1,0 +1,311 @@
+import { useCallback, useEffect, useState } from 'react'
+
+import { ProviderIcon } from '@falcondeck/chat-ui'
+import {
+  ActivityDiamond,
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@falcondeck/ui'
+import type {
+  ProviderUsage,
+  ProviderUsageOverview,
+  ProviderUsageWindow,
+} from '@falcondeck/client-core'
+import { RefreshCw } from 'lucide-react'
+
+export type UsagePanelProps = {
+  baseUrl: string | null
+  onToast: (toast: {
+    variant: 'success' | 'danger' | 'warning' | 'default'
+    title: string
+    description?: string
+  }) => void
+}
+
+type ProviderConfig = {
+  key: keyof ProviderUsageOverview
+  /** Provider id understood by `ProviderIcon` and provider marks. */
+  providerId: string
+  name: string
+  signInHint: string
+  expiredHint: string
+}
+
+const PROVIDERS: ProviderConfig[] = [
+  {
+    key: 'codex',
+    providerId: 'codex',
+    name: 'Codex',
+    signInHint: 'Run `codex login` to sign in and see your usage.',
+    expiredHint: 'Your Codex session expired. Run `codex`, then reload usage.',
+  },
+  {
+    key: 'claude_code',
+    providerId: 'claude',
+    name: 'Claude Code',
+    signInHint: 'Run `claude` to sign in and see your usage.',
+    expiredHint: 'Your Claude session expired. Run `claude`, then reload usage.',
+  },
+]
+
+function barColorClass(usedPercent: number): string {
+  if (usedPercent >= 95) return 'bg-danger'
+  if (usedPercent >= 80) return 'bg-warning'
+  return 'bg-accent'
+}
+
+function formatReset(resetsAt: string | null): string | null {
+  if (!resetsAt) return null
+  const reset = new Date(resetsAt)
+  if (Number.isNaN(reset.getTime())) return null
+  const diffMs = reset.getTime() - Date.now()
+  if (diffMs <= 0) return 'Resetting now'
+
+  const diffMinutes = Math.round(diffMs / 60_000)
+  if (diffMinutes < 60) return `Resets in ${diffMinutes} min`
+
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) {
+    const minutes = diffMinutes % 60
+    return minutes > 0 ? `Resets in ${diffHours} hr ${minutes} min` : `Resets in ${diffHours} hr`
+  }
+
+  const withinWeek = diffMs < 7 * 24 * 60 * 60_000
+  const formatted = reset.toLocaleString(undefined, {
+    weekday: withinWeek ? 'short' : undefined,
+    month: withinWeek ? undefined : 'short',
+    day: withinWeek ? undefined : 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  return `Resets ${formatted}`
+}
+
+function usageWindowValue(window: ProviderUsageWindow): string {
+  if (!window.cost) return `${window.used_percent}% used`
+  const used = window.cost.used_usd_cents / 100
+  const limit = window.cost.limit_usd_cents / 100
+  return `$${used.toFixed(2)} / $${limit % 1 === 0 ? limit.toFixed(0) : limit.toFixed(2)}`
+}
+
+function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
+  const reset = formatReset(window.resets_at)
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-[length:var(--fd-text-sm)] text-fg-primary">{window.label}</span>
+        <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted">
+          {usageWindowValue(window)}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label={window.label}
+        aria-valuenow={window.used_percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        className="h-1.5 w-full overflow-hidden rounded-[var(--fd-radius-full)] bg-surface-3"
+      >
+        <div
+          className={`h-full rounded-[var(--fd-radius-full)] ${barColorClass(window.used_percent)}`}
+          style={{ width: `${Math.max(window.used_percent, 2)}%` }}
+        />
+      </div>
+      {reset ? (
+        <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{reset}</p>
+      ) : null}
+    </div>
+  )
+}
+
+function UsageBody({
+  config,
+  usage,
+}: {
+  config: ProviderConfig
+  usage: ProviderUsage | undefined
+}) {
+  if (!usage) {
+    return (
+      <p className="text-[length:var(--fd-text-sm)] text-fg-muted">Reading usage…</p>
+    )
+  }
+  switch (usage.status) {
+    case 'ok':
+      if (usage.windows.length === 0) {
+        return (
+          <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+            No usage limits reported for this plan.
+          </p>
+        )
+      }
+      return (
+        <div className="space-y-3">
+          {usage.windows.map((window) => (
+            <UsageWindowRow key={window.label} window={window} />
+          ))}
+        </div>
+      )
+    case 'unauthenticated':
+      return (
+        <p className="text-[length:var(--fd-text-sm)] text-fg-muted">{config.signInHint}</p>
+      )
+    case 'expired':
+      return (
+        <p className="text-[length:var(--fd-text-sm)] text-fg-muted">{config.expiredHint}</p>
+      )
+    case 'error':
+      return (
+        <p className="text-[length:var(--fd-text-sm)] text-fg-muted">{usage.message}</p>
+      )
+    default:
+      return null
+  }
+}
+
+export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
+  const [overview, setOverview] = useState<ProviderUsageOverview | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(false)
+
+  const fetchOverview = useCallback(
+    async (mode: 'initial' | 'refresh') => {
+      if (!baseUrl) return
+      if (mode === 'refresh') setIsLoading(true)
+      try {
+        const response = await fetch(`${baseUrl}/api/provider-usage`)
+        if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+        setOverview((await response.json()) as ProviderUsageOverview)
+        setLoadError(null)
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause)
+        if (mode === 'refresh') {
+          onToast({
+            variant: 'danger',
+            title: 'Could not reload usage',
+            description: message,
+          })
+        } else {
+          setLoadError(message)
+        }
+      } finally {
+        if (mode === 'refresh') setIsLoading(false)
+      }
+    },
+    [baseUrl, onToast],
+  )
+
+  useEffect(() => {
+    void fetchOverview('initial')
+  }, [fetchOverview])
+
+  const visibleProviders = PROVIDERS.filter(
+    (config) => overview?.[config.key]?.status !== 'not_installed',
+  )
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Usage</h1>
+        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
+          How much of your Codex and Claude Code subscriptions you&apos;ve used on this Mac.
+          Credentials stay with each CLI — FalconDeck only reads the numbers.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle>Subscription limits</CardTitle>
+            <CardDescription>
+              Session windows roll over every few hours; weekly limits reset with your plan.
+            </CardDescription>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!baseUrl || isLoading}
+            onClick={() => void fetchOverview('refresh')}
+          >
+            {isLoading ? (
+              <ActivityDiamond size="md" tone="current" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
+            Reload
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {loadError ? (
+            <div className="flex items-center gap-3 px-2 py-4">
+              <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+              <Button size="sm" variant="secondary" onClick={() => void fetchOverview('initial')}>
+                Retry
+              </Button>
+            </div>
+          ) : !overview ? (
+            <div className="flex items-center justify-center gap-2 px-2 py-10 text-[length:var(--fd-text-sm)] text-fg-muted">
+              <ActivityDiamond size="md" />
+              Reading usage…
+            </div>
+          ) : visibleProviders.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
+              <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+                No supported harnesses detected yet. Install Codex or Claude Code to see
+                subscription usage.
+              </p>
+            </div>
+          ) : (
+            visibleProviders.map((config) => {
+              const usage = overview[config.key]
+              // Error payloads still carry the locally-known plan and account,
+              // so an outage does not blank which subscription this is.
+              const planLabel =
+                usage?.status === 'ok' || usage?.status === 'error'
+                  ? (usage.plan_label ?? null)
+                  : null
+              const accountEmail =
+                usage?.status === 'ok' || usage?.status === 'error'
+                  ? (usage.account_email ?? null)
+                  : null
+              return (
+                <div
+                  key={config.key}
+                  className="rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3"
+                >
+                  <div className="flex items-center gap-3">
+                    <ProviderIcon
+                      provider={config.providerId}
+                      className="h-4 w-4 text-fg-muted"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                          {config.name}
+                        </span>
+                        {planLabel ? <Badge variant="default">{planLabel}</Badge> : null}
+                      </div>
+                      {accountEmail ? (
+                        <p className="mt-0.5 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                          {accountEmail}
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="mt-3 space-y-3">
+                    <UsageBody config={config} usage={usage} />
+                  </div>
+                </div>
+              )
+            })
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}

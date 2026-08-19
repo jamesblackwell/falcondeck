@@ -1,5 +1,11 @@
 import { memo } from "react";
-import { Activity, Clock3, PanelsTopLeft, Settings } from "lucide-react";
+import {
+  Activity,
+  Blocks,
+  Clock3,
+  PanelsTopLeft,
+  Settings,
+} from "lucide-react";
 
 import {
   ExtensionPanelNavigation,
@@ -7,9 +13,9 @@ import {
   type WorkspaceSidebarProps,
 } from "@falcondeck/chat-ui";
 import type { ExtensionPanelDefinition } from "@falcondeck/client-core";
-import { cn } from "@falcondeck/ui";
+import { cn, Tooltip } from "@falcondeck/ui";
 
-import { shortcutHint, shortcutTitle, useShortcutSettings } from "../shortcuts";
+import { shortcutHintTokens, useShortcutSettings } from "../shortcuts";
 
 export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenSettings?: () => void;
@@ -22,6 +28,9 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   activityOpen?: boolean;
   activityCount?: number;
   activityHasFailure?: boolean;
+  onOpenExtensions?: () => void;
+  extensionsOpen?: boolean;
+  enabledExtensionCount?: number;
   extensionPanels?: readonly ExtensionPanelDefinition[];
   activeExtensionPanelKey?: string | null;
   onOpenExtensionPanel?: (panelKey: string) => void;
@@ -38,6 +47,9 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   activityOpen = false,
   activityCount = 0,
   activityHasFailure = false,
+  onOpenExtensions,
+  extensionsOpen = false,
+  enabledExtensionCount = 0,
   extensionPanels = [],
   activeExtensionPanelKey = null,
   onOpenExtensionPanel,
@@ -47,35 +59,46 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   return (
     <WorkspaceSidebar
       {...props}
-      newThreadShortcut={shortcutHint("newThread", shortcutSettings) ?? undefined}
-      addProjectShortcut={shortcutHint("openProject", shortcutSettings) ?? undefined}
-      searchShortcut={shortcutHint("commandPalette", shortcutSettings) ?? undefined}
+      newThreadShortcut={shortcutHintTokens("newThread", shortcutSettings)}
+      addProjectShortcut={shortcutHintTokens(
+        "openProject",
+        shortcutSettings,
+      )}
+      searchShortcut={shortcutHintTokens(
+        "commandPalette",
+        shortcutSettings,
+      )}
       headerClassName="min-h-12 justify-center gap-1 pb-1 pl-20 pr-3 pt-1"
       topNavigation={
-        onOpenScheduled || onOpenActivity || extensionPanels.length > 0 ? (
+        onOpenScheduled ||
+        onOpenActivity ||
+        onOpenExtensions ||
+        extensionPanels.length > 0 ? (
           <>
             {onOpenActivity ? (
               // The detach action rides on the row rather than taking a line
               // of its own: it swaps in for the count on hover, the way a
               // native list reveals row actions.
               <div className="group relative">
-                <button
-                  type="button"
-                  onClick={onOpenActivity}
-                  className={cn(
-                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                    activityOpen
-                      ? "bg-surface-3 text-fg-primary"
-                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                  )}
-                  aria-current={activityOpen ? "page" : undefined}
-                  aria-label="Activity"
-                  title={shortcutTitle(
-                    "Activity — attention queue across projects",
+                <Tooltip
+                  label="Activity"
+                  shortcut={shortcutHintTokens(
                     "openActivity",
                     shortcutSettings,
                   )}
                 >
+                  <button
+                    type="button"
+                    onClick={onOpenActivity}
+                    className={cn(
+                      "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                      activityOpen
+                        ? "bg-surface-3 text-fg-primary"
+                        : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+                    )}
+                    aria-current={activityOpen ? "page" : undefined}
+                    aria-label="Activity"
+                  >
                   <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
                   <span className="min-w-0 flex-1">Activity</span>
                   {activityCount > 0 ? (
@@ -92,19 +115,45 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                       {activityCount}
                     </span>
                   ) : null}
-                </button>
-                {onPopOutActivity ? (
-                  <button
-                    type="button"
-                    onClick={onPopOutActivity}
-                    className="fd-focus absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary focus-visible:opacity-100 group-hover:opacity-100"
-                    aria-label="Open Activity in a new window"
-                    title="Open Activity in a new window"
-                  >
-                    <PanelsTopLeft aria-hidden="true" className="h-3.5 w-3.5" />
                   </button>
+                </Tooltip>
+                {onPopOutActivity ? (
+                  <Tooltip label="Open in a new window">
+                    <button
+                      type="button"
+                      onClick={onPopOutActivity}
+                      className="fd-focus absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary focus-visible:opacity-100 group-hover:opacity-100"
+                      aria-label="Open Activity in a new window"
+                    >
+                      <PanelsTopLeft aria-hidden="true" className="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
                 ) : null}
               </div>
+            ) : null}
+            {onOpenExtensions ? (
+              <Tooltip label="Extensions">
+                <button
+                  type="button"
+                  onClick={onOpenExtensions}
+                  className={cn(
+                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                    extensionsOpen
+                      ? "bg-surface-3 text-fg-primary"
+                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+                  )}
+                  aria-current={extensionsOpen ? "page" : undefined}
+                  aria-label="Extensions"
+                >
+                  <Blocks aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1">Extensions</span>
+                  {enabledExtensionCount > 0 ? (
+                    <span className="text-[length:var(--fd-text-2xs)] tabular-nums text-fg-muted">
+                      {enabledExtensionCount}
+                    </span>
+                  ) : null}
+                </button>
+              </Tooltip>
             ) : null}
             {onOpenScheduled ? (
               <button
@@ -142,21 +191,25 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       }
       footer={
         onOpenSettings ? (
-          <button
-            type="button"
-            onClick={onOpenSettings}
-            className={cn(
-              "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-              settingsOpen
-                ? "bg-surface-3 text-fg-primary"
-                : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-            )}
-            aria-current={settingsOpen ? "page" : undefined}
-            title={shortcutTitle("Settings", "openSettings", shortcutSettings)}
+          <Tooltip
+            label="Settings"
+            shortcut={shortcutHintTokens("openSettings", shortcutSettings)}
           >
-            <Settings aria-hidden="true" className="h-4 w-4 shrink-0" />
-            <span>Settings</span>
-          </button>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className={cn(
+                "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                settingsOpen
+                  ? "bg-surface-3 text-fg-primary"
+                  : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+              )}
+              aria-current={settingsOpen ? "page" : undefined}
+            >
+              <Settings aria-hidden="true" className="h-4 w-4 shrink-0" />
+              <span>Settings</span>
+            </button>
+          </Tooltip>
         ) : null
       }
     />

@@ -4,6 +4,34 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Conversation } from "@falcondeck/chat-ui";
 
+function captureResizeObservers() {
+  const callbacks: ResizeObserverCallback[] = [];
+  const OriginalResizeObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback: ResizeObserverCallback) {
+      callbacks.push(callback);
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+  return {
+    flush() {
+      act(() => {
+        for (const callback of callbacks) {
+          callback([], {} as ResizeObserver);
+        }
+      });
+    },
+    restore() {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    },
+    get length() {
+      return callbacks.length;
+    },
+  };
+}
+
 describe("Conversation empty state", () => {
   it("offers selected assistant text as composer context", () => {
     const onQuoteSelection = vi.fn();
@@ -562,6 +590,79 @@ describe("Conversation empty state", () => {
     }
 
     expect(transcript.scrollTop).toBe(100);
+  });
+
+  it("stays pinned to the bottom when the viewport shrinks while following", () => {
+    const observers = captureResizeObservers();
+    const item = {
+      kind: "user_message" as const,
+      id: "user-1",
+      text: "Earlier message",
+      attachments: [],
+      created_at: "2026-08-08T12:00:00Z",
+    };
+    try {
+      render(
+        <Conversation threadKey="thread-1" items={[item]} isThinking />,
+      );
+      const transcript = screen.getByRole("log", { name: "Conversation" });
+      let clientHeight = 500;
+      Object.defineProperty(transcript, "scrollHeight", {
+        configurable: true,
+        get: () => 1_000,
+      });
+      Object.defineProperty(transcript, "clientHeight", {
+        configurable: true,
+        get: () => clientHeight,
+      });
+      // Already at the tail: 1000 - 500.
+      transcript.scrollTop = 500;
+      fireEvent.scroll(transcript);
+
+      // Composer grew; the transcript viewport lost 80px.
+      clientHeight = 420;
+      expect(observers.length).toBeGreaterThan(0);
+      observers.flush();
+
+      expect(transcript.scrollTop).toBe(580);
+    } finally {
+      observers.restore();
+    }
+  });
+
+  it("keeps a reader's place when the viewport shrinks away from the tail", () => {
+    const observers = captureResizeObservers();
+    const item = {
+      kind: "user_message" as const,
+      id: "user-1",
+      text: "Earlier message",
+      attachments: [],
+      created_at: "2026-08-08T12:00:00Z",
+    };
+    try {
+      render(
+        <Conversation threadKey="thread-1" items={[item]} isThinking />,
+      );
+      const transcript = screen.getByRole("log", { name: "Conversation" });
+      let clientHeight = 500;
+      Object.defineProperty(transcript, "scrollHeight", {
+        configurable: true,
+        get: () => 1_000,
+      });
+      Object.defineProperty(transcript, "clientHeight", {
+        configurable: true,
+        get: () => clientHeight,
+      });
+      transcript.scrollTop = 100;
+      fireEvent.scroll(transcript);
+
+      clientHeight = 420;
+      observers.flush();
+
+      expect(transcript.scrollTop).toBe(100);
+    } finally {
+      observers.restore();
+    }
   });
 
   it("copies a complete assistant response from a keyboard-accessible action", async () => {

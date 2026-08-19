@@ -7,6 +7,54 @@ import type { ExtensionSnapshot } from "@falcondeck/client-core";
 import { ExtensionsPanel } from "./ExtensionsPanel";
 
 describe("ExtensionsPanel compatibility fallback", () => {
+  it("filters installed extensions and keeps enabled entries first", () => {
+    const extension = (id: string, name: string, enabled: boolean) => ({
+      id,
+      name,
+      version: "1.0.0",
+      source: "bundled",
+      bundled: true,
+      enabled,
+      status: enabled ? ("active" as const) : ("disabled" as const),
+      contributes: {
+        threadMenuActions: [],
+        threadDecorations: [],
+        sidebarFilters: [],
+      },
+      permissions: [],
+    });
+    const extensions: ExtensionSnapshot = {
+      catalog: [
+        extension("example.disabled", "Disabled helper", false),
+        extension("example.enabled", "Enabled helper", true),
+      ],
+      views: [],
+    };
+
+    render(
+      <ExtensionsPanel
+        extensions={extensions}
+        onSetEnabled={vi.fn()}
+        onSetPermission={vi.fn()}
+      />,
+    );
+
+    const enabled = screen.getByText("Enabled helper");
+    const disabled = screen.getByText("Disabled helper");
+    expect(enabled.compareDocumentPosition(disabled)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(
+      screen.getAllByTitle("Built and maintained by FalconDeck"),
+    ).toHaveLength(2);
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "disabled" },
+    });
+    expect(screen.queryByText("Enabled helper")).not.toBeInTheDocument();
+    expect(screen.getByText("Disabled helper")).toBeInTheDocument();
+  });
+
   it("keeps newer contribution kinds visible to an older client", () => {
     const extensions: ExtensionSnapshot = {
       catalog: [
@@ -41,6 +89,7 @@ describe("ExtensionsPanel compatibility fallback", () => {
     );
 
     expect(screen.getByRole("status").textContent).toContain("statusBarItems");
+    expect(screen.queryByText("Official")).not.toBeInTheDocument();
   });
 
   it("shows denied-by-default grants and routes explicit approval", async () => {

@@ -45,6 +45,7 @@ import {
   resolveServiceTier,
   selectedSkillsFromText,
   serviceTierForTurn,
+  speechSynthesisBlob,
   STANDARD_SERVICE_TIER,
   THREAD_DETAIL_OLDER_PAGE_LIMIT,
   THREAD_DETAIL_TAIL_LIMIT,
@@ -81,6 +82,7 @@ import {
   type ThreadTag,
   type TurnInputItem,
   type UpdatePreferencesPayload,
+  type WorkspaceColorId,
 } from "@falcondeck/client-core";
 import {
   ComposerContextBar,
@@ -91,6 +93,7 @@ import {
   useShipThread,
   composePromptWithQuotedSelections,
   normalizeQuotedSelection,
+  useReadAloud,
   type ComposerMenuRequest,
   type QuotedSelection,
 } from "@falcondeck/chat-ui";
@@ -102,6 +105,7 @@ import {
   DEFAULT_APPEARANCE,
   FONT_SCALE_OPTIONS,
   ToastProvider,
+  TooltipProvider,
   getAppearance,
   updateAppearance,
   useToast,
@@ -156,6 +160,7 @@ import {
   resolveThreadModelId,
 } from "./utils";
 import { DesktopConversationPane } from "./components/DesktopConversationPane";
+import { ExtensionsPanel } from "./components/settings/ExtensionsPanel";
 import { useVoiceRecorder } from "./hooks/useVoiceRecorder";
 import { DesktopSidebar } from "./components/Sidebar";
 import { DesktopShell } from "./components/DesktopShell";
@@ -180,7 +185,6 @@ import {
   commandForEvent,
   getShortcutSettings,
   isEditableTarget,
-  shortcutHint,
   shortcutHintTokens,
   useShortcutSettings,
 } from "./shortcuts";
@@ -250,7 +254,9 @@ const CommandPalette = lazy(() =>
 export default function App() {
   return (
     <ToastProvider>
-      <AppInner />
+      <TooltipProvider>
+        <AppInner />
+      </TooltipProvider>
     </ToastProvider>
   );
 }
@@ -282,6 +288,33 @@ function AppInner() {
     gitRefreshTrigger,
   } = useDaemonConnection({ externalSnapshots: hostSnapshots });
   useDesktopDictation(baseUrl);
+  const readAloud = useReadAloud(
+    useCallback(async (text: string) => {
+      if (!baseUrl) throw new Error("FalconDeck is not connected to its daemon");
+      const response = await fetch(`${baseUrl}/api/speech/synthesize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const payload = (await response.json().catch(() => null)) as {
+        audio_base64?: string;
+        mime_type?: string;
+        error?: string;
+      } | null;
+      if (!response.ok || !payload?.audio_base64) {
+        throw new Error(payload?.error ?? "Could not prepare Read Aloud audio");
+      }
+      return speechSynthesisBlob({
+        audio_base64: payload.audio_base64,
+        mime_type: payload.mime_type ?? "audio/mpeg",
+      });
+    }, [baseUrl]),
+    useCallback(
+      (error: Error) =>
+        toast({ variant: "danger", title: "Read Aloud failed", description: error.message }),
+      [toast],
+    ),
+  );
   const updater = useAppUpdater();
   // First-run onboarding: device-local flag, eligible only once per launch so
   // the Settings → General rerun control takes effect on the next start, not
@@ -332,11 +365,11 @@ function AppInner() {
   );
   const composerMenuShortcuts = useMemo(
     () => ({
-      provider: shortcutHint("openHarnessMenu", shortcutSettings) ?? undefined,
+      provider: shortcutHintTokens("openHarnessMenu", shortcutSettings),
       permissions:
-        shortcutHint("openPermissionMenu", shortcutSettings) ?? undefined,
-      sandbox: shortcutHint("openSandboxMenu", shortcutSettings) ?? undefined,
-      model: shortcutHint("openModelMenu", shortcutSettings) ?? undefined,
+        shortcutHintTokens("openPermissionMenu", shortcutSettings),
+      sandbox: shortcutHintTokens("openSandboxMenu", shortcutSettings),
+      model: shortcutHintTokens("openModelMenu", shortcutSettings),
     }),
     [shortcutSettings],
   );
@@ -395,6 +428,7 @@ function AppInner() {
   const resumePromptSettledRef = useRef(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
+  const [isExtensionsOpen, setIsExtensionsOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
@@ -723,6 +757,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
   }, []);
 
   const addQuotedSelection = useCallback(
@@ -862,13 +897,14 @@ function AppInner() {
   useEffect(() => {
     if (
       activeExtensionPanelKey &&
-      (isActivityOpen || isScheduledOpen || isSettingsOpen)
+      (isActivityOpen || isScheduledOpen || isExtensionsOpen || isSettingsOpen)
     ) {
       setActiveExtensionPanelKey(null);
     }
   }, [
     activeExtensionPanelKey,
     isActivityOpen,
+    isExtensionsOpen,
     isScheduledOpen,
     isSettingsOpen,
   ]);
@@ -2949,6 +2985,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
@@ -2962,6 +2999,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
@@ -2975,6 +3013,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(null);
@@ -3471,12 +3510,45 @@ function AppInner() {
     [api, setSnapshot, toast],
   );
 
+  const handleWorkspaceColorChange = useCallback(
+    async (workspaceId: string, color: WorkspaceColorId | null) => {
+      if (!api)
+        throw new Error("FalconDeck is still connecting to the local daemon.");
+      const nextColors = {
+        ...(viewSnapshot?.preferences.workspace_colors ?? {}),
+      };
+      if (color) nextColors[workspaceId] = color;
+      else delete nextColors[workspaceId];
+      try {
+        const preferences = await api.updatePreferences({
+          workspace_colors: nextColors,
+        });
+        setSnapshot((current) =>
+          current ? { ...current, preferences } : current,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to save project color";
+        toast({
+          variant: "danger",
+          title: "Failed to save project color",
+          description: message,
+        });
+        throw error;
+      }
+    },
+    [api, setSnapshot, toast, viewSnapshot?.preferences.workspace_colors],
+  );
+
   const handleOpenSettings = useCallback(() => {
     setSettingsSection("general");
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3486,6 +3558,7 @@ function AppInner() {
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3493,6 +3566,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
     setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3500,6 +3574,15 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsActivityOpen(true);
+    setIsExtensionsOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenExtensions = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+    setIsExtensionsOpen(true);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3533,6 +3616,7 @@ function AppInner() {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
     setActiveExtensionPanelKey(panelKey);
   }, []);
 
@@ -4577,7 +4661,8 @@ function AppInner() {
     selectedThreadId &&
     (!threadDetail ||
       threadDetail.workspace.id !== selectedWorkspaceId ||
-      threadDetail.thread.id !== selectedThreadId),
+      threadDetail.thread.id !== selectedThreadId ||
+      (threadDetail.is_partial && threadDetail.items.length === 0)),
   );
   const isPreparingSelectedHandoff =
     handoffPendingThreadKey === conversationKey;
@@ -4692,7 +4777,11 @@ function AppInner() {
   // room for the user's draft and makes all project states surface the same
   // way. The key prevents snapshot refreshes from repeating the toast.
   useEffect(() => {
-    if (!selectedWorkspace || !sendBlockReason) {
+    if (
+      !selectedWorkspace ||
+      !sendBlockReason ||
+      selectedWorkspace.status === "connecting"
+    ) {
       announcedProjectReadinessRef.current = null;
       return;
     }
@@ -4714,11 +4803,9 @@ function AppInner() {
           ? "warning"
           : "default";
     const title =
-      selectedWorkspace.status === "connecting"
-        ? "Project reconnecting"
-        : selectedWorkspace.status === "needs_auth"
-          ? "Authentication needed"
-          : "Project not ready";
+      selectedWorkspace.status === "needs_auth"
+        ? "Authentication needed"
+        : "Project not ready";
 
     toast({ variant, title, description: sendBlockReason });
   }, [activeProvider, selectedWorkspace, sendBlockReason, toast]);
@@ -4766,6 +4853,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
       setSelectedThreadId(next.id);
     },
@@ -4782,6 +4870,7 @@ function AppInner() {
       setIsSettingsOpen(false);
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
       setSelectedThreadId(entry.threadId);
     },
@@ -4826,6 +4915,7 @@ function AppInner() {
           setIsSettingsOpen(true);
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
+          setIsExtensionsOpen(false);
           break;
         case "openActivity":
           handleOpenActivity();
@@ -4887,6 +4977,7 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
+          setIsExtensionsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
         case "openProjectMenu":
@@ -4894,6 +4985,7 @@ function AppInner() {
             setIsSettingsOpen(false);
             setIsScheduledOpen(false);
             setIsActivityOpen(false);
+            setIsExtensionsOpen(false);
             setProjectMenuRequestKey((current) => current + 1);
           }
           break;
@@ -4912,6 +5004,7 @@ function AppInner() {
           setIsSettingsOpen(false);
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
+          setIsExtensionsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
           break;
         }
@@ -5008,9 +5101,11 @@ function AppInner() {
     ? "core.activity"
     : isScheduledOpen
       ? "core.scheduled"
-      : isSettingsOpen
-        ? "core.settings"
-        : activeExtensionPanelKey;
+      : isExtensionsOpen
+        ? "core.extensions"
+        : isSettingsOpen
+          ? "core.settings"
+          : activeExtensionPanelKey;
 
   return (
     <>
@@ -5053,6 +5148,8 @@ function AppInner() {
             threadSort={threadSort}
             onThreadSortChange={handleThreadSortChange}
             onWorkspaceOrderChange={handleWorkspaceOrderChange}
+            workspaceColors={viewSnapshot?.preferences.workspace_colors}
+            onWorkspaceColorChange={handleWorkspaceColorChange}
             collapsedWorkspaceIds={collapsedWorkspaceIds}
             onWorkspaceCollapsedChange={handleWorkspaceCollapsedChange}
             isAddingProject={isAddingProject}
@@ -5071,6 +5168,13 @@ function AppInner() {
               activityCounts.ready
             }
             activityHasFailure={activityCounts.failed > 0}
+            onOpenExtensions={handleOpenExtensions}
+            extensionsOpen={isExtensionsOpen}
+            enabledExtensionCount={
+              snapshot?.extensions.catalog.filter(
+                (extension) => extension.enabled,
+              ).length ?? 0
+            }
             scheduledAttention={[
               ...(snapshot?.scheduled_tasks ?? []),
               ...remoteHosts.hosts.flatMap(
@@ -5144,12 +5248,26 @@ function AppInner() {
                     onOpenThread={(workspaceId, threadId) => {
                       setIsScheduledOpen(false);
                       setIsActivityOpen(false);
+                      setIsExtensionsOpen(false);
                       setSelectedWorkspaceId(workspaceId);
                       setSelectedThreadId(threadId);
                     }}
                     onToast={toast}
                   />
                 </Suspense>
+              ),
+              "core.extensions": (
+                <section className="h-full min-h-0 overflow-y-auto bg-surface-1 px-8 py-10">
+                  <div className="mx-auto w-full max-w-4xl">
+                    <ExtensionsPanel
+                      extensions={
+                        snapshot?.extensions ?? { catalog: [], views: [] }
+                      }
+                      onSetEnabled={handleSetExtensionEnabled}
+                      onSetPermission={handleSetExtensionPermission}
+                    />
+                  </div>
+                </section>
               ),
               "core.settings": (
                 <Suspense fallback={loadingThreadState}>
@@ -5328,6 +5446,7 @@ function AppInner() {
               quotedSelections={quotedSelections}
               onQuoteSelection={addQuotedSelection}
               onRemoveQuotedSelection={removeQuotedSelection}
+              readAloud={readAloud}
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
@@ -5364,6 +5483,11 @@ function AppInner() {
                 focusRequestKey: composerFocusRequestKey,
                 menuRequest: composerMenuRequest,
                 menuShortcuts: composerMenuShortcuts,
+                sendShortcut: shortcutHintTokens(
+                  "sendMessage",
+                  shortcutSettings,
+                ),
+                stopShortcut: shortcutHintTokens("stopTurn", shortcutSettings),
                 onStop: handleStopCallback,
                 onPickImages: handlePickImages,
                 onRemoveAttachment: handleRemoveAttachment,
@@ -5407,10 +5531,10 @@ function AppInner() {
                     selectedWorkspace={selectedWorkspace}
                     onSelectWorkspace={handleNewThreadProjectChange}
                     projectMenuRequestKey={projectMenuRequestKey}
-                    projectShortcutLabel={
-                      shortcutHint("openProjectMenu", shortcutSettings) ??
-                      undefined
-                    }
+                    projectShortcut={shortcutHintTokens(
+                      "openProjectMenu",
+                      shortcutSettings,
+                    )}
                     selectedIsolation={selectedIsolation}
                     onIsolationChange={setSelectedIsolation}
                     branches={branches}
@@ -5454,6 +5578,7 @@ function AppInner() {
                   setIsSettingsOpen(true);
                   setIsScheduledOpen(false);
                   setIsActivityOpen(false);
+                  setIsExtensionsOpen(false);
                 },
                 // Goals live in the composer's plus menu, not the header.
                 goal:

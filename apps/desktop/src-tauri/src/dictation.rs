@@ -26,6 +26,26 @@ static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT_TRANSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_OPENROUTER_TRANSCRIPTION: AtomicU64 = AtomicU64::new(0);
 
+static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(OPENROUTER_TRANSCRIPTION_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+});
+
+/// Mirrors `FDEventKind` in `dictation_events.h`; a unit test asserts the two
+/// definitions stay in sync.
+mod event_kind {
+    pub const RECORDING: i32 = 0;
+    pub const PROCESSING: i32 = 1;
+    pub const COMPLETED: i32 = 2;
+    pub const FAILED: i32 = 3;
+    pub const CANCELLED: i32 = 4;
+    pub const AUDIO_READY: i32 = 5;
+    pub const FAILED_RETAINED: i32 = 6;
+    pub const AUDIO_LEVEL: i32 = 7;
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DictationShortcut {
@@ -129,6 +149,7 @@ unsafe extern "C" {
         input_device_id: *const std::ffi::c_char,
     );
     fn fd_dictation_audio_devices_json() -> *mut std::ffi::c_char;
+    fn fd_dictation_temp_directory() -> *mut std::ffi::c_char;
     fn fd_dictation_free_string(value: *mut std::ffi::c_char);
     fn fd_dictation_request_microphone_permission();
     fn fd_dictation_request_speech_permission();
@@ -448,12 +469,36 @@ fn emit_failure(app: &AppHandle, message: String, retained_audio: bool) {
     );
 }
 
+/// The directory the native side records into. `NSTemporaryDirectory()` can
+/// differ from `$TMPDIR`/`std::env::temp_dir()` (for example under sandboxed
+/// launches), so ask the source of truth instead of guessing.
+#[cfg(target_os = "macos")]
+fn dictation_temp_dir() -> PathBuf {
+    unsafe {
+        let value = fd_dictation_temp_directory();
+        if !value.is_null() {
+            let raw = CStr::from_ptr(value).to_string_lossy().into_owned();
+            fd_dictation_free_string(value);
+            let trimmed = raw.trim_end_matches('/');
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+    }
+    std::env::temp_dir()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dictation_temp_dir() -> PathBuf {
+    std::env::temp_dir()
+}
+
 fn validate_recording_path(path: &Path) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    if path.parent() != Some(std::env::temp_dir().as_path())
+    if path.parent() != Some(dictation_temp_dir().as_path())
         || !file_name.starts_with("falcondeck-dictation-")
         || path.extension().and_then(|value| value.to_str()) != Some("m4a")
     {
@@ -487,11 +532,7 @@ async fn transcribe_openrouter(
     let audio = tokio::fs::read(&path)
         .await
         .map_err(|error| format!("Could not read the retained recording: {error}"))?;
-    let client = reqwest::Client::builder()
-        .timeout(OPENROUTER_TRANSCRIPTION_TIMEOUT)
-        .build()
-        .map_err(|error| format!("Could not prepare OpenRouter transcription: {error}"))?;
-    let response = client
+    let response = OPENROUTER_CLIENT
         .post(format!("{daemon_url}/api/speech/transcribe"))
         .json(&TranscriptionRequest {
             audio_base64: STANDARD.encode(audio),
@@ -594,7 +635,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             .into_owned()
     };
     match kind {
-        0 => {
+        event_kind::RECORDING => {
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
             show_overlay(&app);
             emit_event(
@@ -607,7 +648,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 },
             );
         }
-        1 => emit_event(
+        event_kind::PROCESSING => emit_event(
             &app,
             DictationEvent {
                 state: "transcribing",
@@ -616,7 +657,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 retained_audio: true,
             },
         ),
-        2 => {
+        event_kind::COMPLETED => {
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -629,8 +670,8 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             );
             hide_overlay_after(app, generation, Duration::from_millis(900));
         }
-        3 => emit_failure(&app, payload, false),
-        4 => {
+        event_kind::FAILED => emit_failure(&app, payload, false),
+        event_kind::CANCELLED => {
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -643,7 +684,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             );
             hide_overlay_after(app, generation, Duration::from_millis(650));
         }
-        5 => {
+        event_kind::AUDIO_READY => {
             let path = PathBuf::from(payload);
             let transcription_id = NEXT_TRANSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
             if ACTIVE_OPENROUTER_TRANSCRIPTION
@@ -669,8 +710,8 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 }
             });
         }
-        6 => emit_failure(&app, payload, true),
-        7 => {
+        event_kind::FAILED_RETAINED => emit_failure(&app, payload, true),
+        event_kind::AUDIO_LEVEL => {
             if let Some(level) = parse_audio_level(&payload) {
                 let _ = app.emit_to(DICTATION_WINDOW_LABEL, DICTATION_LEVEL_EVENT, level);
             }
@@ -685,6 +726,27 @@ mod tests {
         dictation_audio_devices, parse_audio_level, permission_label, validate_local_daemon_url,
         validate_recording_path,
     };
+
+    #[test]
+    fn event_kinds_match_shared_native_header() {
+        let header = include_str!("dictation_events.h");
+        let expected = [
+            ("Recording", super::event_kind::RECORDING),
+            ("Processing", super::event_kind::PROCESSING),
+            ("Completed", super::event_kind::COMPLETED),
+            ("Failed", super::event_kind::FAILED),
+            ("Cancelled", super::event_kind::CANCELLED),
+            ("AudioReady", super::event_kind::AUDIO_READY),
+            ("FailedRetained", super::event_kind::FAILED_RETAINED),
+            ("AudioLevel", super::event_kind::AUDIO_LEVEL),
+        ];
+        for (name, value) in expected {
+            assert!(
+                header.contains(&format!("FDEvent{name} = {value}")),
+                "FDEvent{name} = {value} is missing or mismatched in dictation_events.h"
+            );
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

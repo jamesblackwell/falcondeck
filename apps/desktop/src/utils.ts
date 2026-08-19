@@ -46,7 +46,12 @@ export function reasoningOptions(
   )
   const options = model?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
   if (options.length > 0) return options
-  return model?.default_reasoning_effort ? [model.default_reasoning_effort] : ['medium']
+  if (model?.default_reasoning_effort) return [model.default_reasoning_effort]
+  // A resolved model that advertises no efforts has none: several OpenCode
+  // models cannot reason at all, and a lone synthetic "medium" reads as a
+  // picker that lost its other choices. Only an unresolved model (a catalog
+  // still loading) keeps the historic fallback.
+  return model ? [] : ['medium']
 }
 
 export function defaultReasoningEffort(

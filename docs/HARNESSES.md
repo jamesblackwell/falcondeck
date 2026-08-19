@@ -63,6 +63,28 @@ the binding test there fails to compile if the two drift apart.
 Per AGENTS.md, protocol changes start in `falcondeck-core` and
 `client-core`; the daemon and all clients read the same shapes.
 
+## Subscription usage
+
+`GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
+subscription usage snapshots for Codex and Claude Code, surfaced in
+Settings → Usage. Types live in `falcondeck-core` (`ProviderUsageOverview`)
+and `client-core`; the daemon implementation is
+`crates/falcondeck-daemon/src/app/provider_usage.rs`.
+
+- Codex reads `~/.codex/auth.json` (`CODEX_HOME` respected) and calls the
+  ChatGPT usage endpoint with the CLI's own token. API-key logins report
+  "no subscription usage limits" instead of numbers.
+- Claude Code reads the CLI's keychain entry (macOS) or
+  `~/.claude/.credentials.json` and calls the Anthropic OAuth usage
+  endpoint. Expired tokens report `expired` — the daemon never refreshes
+  another tool's credentials, because rotating the CLI's refresh token
+  breaks its next run.
+- Each provider resolves independently (`ok` / `not_installed` /
+  `unauthenticated` / `expired` / `error`), so one failing never blanks the
+  other. Errors still carry the locally-known plan and account.
+- Local machine only: usage reads the daemon host's credential stores, so
+  the endpoint ignores SSH-host scoping.
+
 ## Probing
 
 - **Local:** binaries resolve through `agent_binary.rs` (configured path →

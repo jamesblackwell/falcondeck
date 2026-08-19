@@ -14,8 +14,11 @@ type DictationEvent = {
   retainedAudio: boolean;
 };
 
+// The window is created hidden and only shown alongside a real event, but if
+// a frame ever renders before the first event arrives, "Transcribing" is the
+// honest placeholder rather than a fake "Listening".
 const INITIAL_EVENT: DictationEvent = {
-  state: "recording",
+  state: "transcribing",
   retainedAudio: false,
 };
 

@@ -95,6 +95,24 @@ describe('desktop selection utils', () => {
     expect(selected).toBe('gpt-5.4')
   })
 
+  it('offers no effort picker for a model that advertises none', () => {
+    const selectedWorkspace = workspace({
+      models: [
+        {
+          id: 'opencode/text-only',
+          label: 'Text Only',
+          is_default: true,
+          default_reasoning_effort: null,
+          supported_reasoning_efforts: [],
+        },
+      ],
+    })
+
+    expect(reasoningOptions(null, selectedWorkspace)).toEqual([])
+    // A catalog that has not loaded yet keeps the historic fallback.
+    expect(reasoningOptions(null, workspace({ models: [] }))).toEqual(['medium'])
+  })
+
   it('keeps the full supported reasoning order from codex metadata', () => {
     const selectedWorkspace = workspace({
       models: [

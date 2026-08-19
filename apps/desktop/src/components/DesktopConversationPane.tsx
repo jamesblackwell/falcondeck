@@ -24,6 +24,7 @@ import {
   QueuedTurns,
   type OpenFileDiff,
   type QuotedSelection,
+  type ReadAloudController,
 } from "@falcondeck/chat-ui";
 import { CollapseRegion, useLastPresent } from "@falcondeck/ui";
 
@@ -83,6 +84,7 @@ type DesktopConversationPaneProps = {
   quotedSelections?: readonly QuotedSelection[];
   onQuoteSelection?: (text: string) => void;
   onRemoveQuotedSelection?: (selectionId: string) => void;
+  readAloud?: ReadAloudController;
 };
 
 const NO_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
@@ -132,6 +134,7 @@ export function DesktopConversationPane({
   quotedSelections = NO_QUOTED_SELECTIONS,
   onQuoteSelection,
   onRemoveQuotedSelection,
+  readAloud,
 }: DesktopConversationPaneProps) {
   // The live plan is pinned above the composer instead of scrolling away with
   // the rest of the turn; the transcript skips the same item.
@@ -210,6 +213,7 @@ export function DesktopConversationPane({
         onRetryResponse={onRetryResponse}
         pinnedPlanId={pinnedPlan?.itemId ?? null}
         onQuoteSelection={onQuoteSelection}
+        readAloud={readAloud}
       />
       {pinnedPlan ? (
         <PlanBar plan={pinnedPlan.plan} threadKey={selectedThreadId} />

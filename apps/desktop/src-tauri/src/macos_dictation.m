@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <Speech/Speech.h>
+#import "dictation_events.h"
 #include <math.h>
 #include <string.h>
 
@@ -23,22 +24,13 @@ typedef NS_ENUM(NSInteger, FDProvider) {
   FDProviderOpenRouter = 1,
 };
 
-typedef NS_ENUM(int32_t, FDEventKind) {
-  FDEventRecording = 0,
-  FDEventProcessing = 1,
-  FDEventCompleted = 2,
-  FDEventFailed = 3,
-  FDEventCancelled = 4,
-  FDEventAudioReady = 5,
-  FDEventFailedRetained = 6,
-  FDEventAudioLevel = 7,
-};
-
 static const CGKeyCode FDRightCommandKeyCode = 54;
 static const CGKeyCode FDFunctionKeyCode = 63;
 static const CGKeyCode FDEscapeKeyCode = 53;
 static NSString *const FDRetainedRecordingPathKey =
     @"falcondeck.dictation.retained-recording-path";
+static NSString *const FDRetainedRecordingProviderKey =
+    @"falcondeck.dictation.retained-recording-provider";
 
 static void FDEmit(FDEventKind kind, NSString *payload) {
   fd_dictation_emit((int32_t)kind, (payload ?: @"").UTF8String);
@@ -56,6 +48,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
+// Provider used for the retained recording; -1 when unknown (no recording,
+// or a recording that predates this field).
+@property(nonatomic) NSInteger retainedProvider;
 @property(nonatomic) FDShortcut shortcut;
 @property(nonatomic) FDShortcut recordingShortcut;
 @property(nonatomic) FDActivationMode activationMode;
@@ -77,6 +72,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 - (void)transcribeSystemRecording:(NSURL *)url API_AVAILABLE(macos(10.15));
 - (void)startAudioLevelMeter;
 - (void)stopAudioLevelMeter;
+- (void)setRetainedRecordingURL:(NSURL *)url provider:(FDProvider)provider;
+- (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
+- (void)surfaceRetainedRecordingIfNeeded;
 - (void)capturePasteTarget;
 @end
 
@@ -121,6 +119,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (retainedPath.length > 0 &&
       [NSFileManager.defaultManager fileExistsAtPath:retainedPath]) {
     self.recordingURL = [NSURL fileURLWithPath:retainedPath];
+    NSNumber *storedProvider =
+        [NSUserDefaults.standardUserDefaults objectForKey:FDRetainedRecordingProviderKey];
+    self.retainedProvider = storedProvider ? storedProvider.integerValue : -1;
   } else {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:FDRetainedRecordingPathKey];
   }
@@ -141,13 +142,18 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (self.enabled) [self installEventTapIfNeeded];
 }
 
-- (void)setRetainedRecordingURL:(NSURL *)url {
+- (void)setRetainedRecordingURL:(NSURL *)url provider:(FDProvider)provider {
   self.recordingURL = url;
   if (url) {
     [NSUserDefaults.standardUserDefaults setObject:url.path
                                             forKey:FDRetainedRecordingPathKey];
+    [NSUserDefaults.standardUserDefaults setObject:@(provider)
+                                            forKey:FDRetainedRecordingProviderKey];
+    self.retainedProvider = provider;
   } else {
     [NSUserDefaults.standardUserDefaults removeObjectForKey:FDRetainedRecordingPathKey];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:FDRetainedRecordingProviderKey];
+    self.retainedProvider = -1;
   }
 }
 
@@ -169,6 +175,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
   if (enabled) {
     [self installEventTapIfNeeded];
+    [self surfaceRetainedRecordingIfNeeded];
   } else if (self.recording) {
     [self cancelRecording];
   }
@@ -403,7 +410,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
   self.captureSession = session;
   self.audioFileOutput = output;
-  [self setRetainedRecordingURL:url];
+  [self setRetainedRecordingURL:url provider:self.provider];
   self.cancelling = NO;
   self.recordingShortcut = self.shortcut;
   self.recordingProvider = self.provider;
@@ -449,7 +456,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     NSURL *url = self.recordingURL ?: outputFileURL;
     if (self.cancelling) {
       if (url) [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-      [self setRetainedRecordingURL:nil];
+      [self setRetainedRecordingURL:nil provider:0];
       self.cancelling = NO;
       FDEmit(FDEventCancelled, @"");
       return;
@@ -474,6 +481,16 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       FDEmit(FDEventAudioReady, url.path);
     }
   });
+}
+
+// Clears the in-flight speech task when the completing callback still owns
+// the current generation. Returns NO when a discard or newer request already
+// superseded this transcription.
+- (BOOL)claimSpeechCompletion:(NSUInteger)generation {
+  if (generation != self.speechGeneration) return NO;
+  self.speechTask = nil;
+  self.speechRecognizer = nil;
+  return YES;
 }
 
 - (void)transcribeSystemRecording:(NSURL *)url {
@@ -501,10 +518,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     if (!result.final) {
       if (error) {
         dispatch_async(dispatch_get_main_queue(), ^{
-          if (generation != self.speechGeneration) return;
-          self.speechTask = nil;
-          self.speechRecognizer = nil;
-          FDEmit(FDEventFailedRetained, error.localizedDescription ?: @"Apple Speech could not transcribe the recording.");
+          if (![self claimSpeechCompletion:generation]) return;
+          FDEmit(FDEventFailedRetained,
+                 error.localizedDescription
+                     ?: @"Apple Speech could not transcribe the recording.");
         });
       }
       return;
@@ -512,9 +529,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     NSString *text = [result.bestTranscription.formattedString
         stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (generation != self.speechGeneration) return;
-      self.speechTask = nil;
-      self.speechRecognizer = nil;
+      if (![self claimSpeechCompletion:generation]) return;
       if (text.length < 3) {
         FDEmit(FDEventFailedRetained,
                error.localizedDescription ?: @"No speech was detected. Your recording has been retained.");
@@ -526,7 +541,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
         return;
       }
       [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
-      [self setRetainedRecordingURL:nil];
+      [self setRetainedRecordingURL:nil provider:0];
       FDEmit(FDEventCompleted, text);
     });
   }];
@@ -631,15 +646,19 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     FDEmit(FDEventFailed, @"There is no retained recording to retry.");
     return;
   }
+  // Retry with the provider that recorded the audio; only legacy recordings
+  // without a stored provider fall back to the current setting.
+  FDProvider provider =
+      self.retainedProvider >= 0 ? (FDProvider)self.retainedProvider : self.provider;
   if (@available(macOS 10.15, *)) {
-    if (self.provider == FDProviderSystem && self.speechTask) {
+    if (provider == FDProviderSystem && self.speechTask) {
       FDEmit(FDEventFailedRetained,
              @"This recording is already being transcribed.");
       return;
     }
   }
   FDEmit(FDEventProcessing, @"");
-  if (self.provider == FDProviderSystem) {
+  if (provider == FDProviderSystem) {
     if (@available(macOS 10.15, *)) {
       [self transcribeSystemRecording:url];
     } else {
@@ -664,13 +683,28 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
   if (self.recordingURL) {
     [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
-    [self setRetainedRecordingURL:nil];
+    [self setRetainedRecordingURL:nil provider:0];
   }
   FDEmit(FDEventCancelled, @"");
 }
 
 - (void)markLastRecordingCompleted {
-  [self setRetainedRecordingURL:nil];
+  [self setRetainedRecordingURL:nil provider:0];
+}
+
+// A recording restored from a previous session (or left over from a failed
+// transcription) otherwise blocks every new recording invisibly. Surface it
+// whenever dictation is (re-)enabled and the controller is idle.
+- (void)surfaceRetainedRecordingIfNeeded {
+  if (!self.enabled || self.recording || self.stopping) return;
+  if (@available(macOS 10.15, *)) {
+    if (self.speechTask) return;
+  }
+  NSURL *url = self.recordingURL;
+  if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) return;
+  FDEmit(FDEventFailedRetained,
+         @"A recording is waiting to be transcribed. Retry or discard it from "
+         @"the dictation overlay.");
 }
 
 - (void)shutdown {
@@ -737,6 +771,11 @@ char *fd_dictation_audio_devices_json(void) {
         : @"[]";
     return strdup(json.UTF8String ?: "[]");
   }
+}
+
+char *fd_dictation_temp_directory(void) {
+  NSString *directory = NSTemporaryDirectory() ?: @"/tmp";
+  return strdup(directory.UTF8String ?: "/tmp");
 }
 
 void fd_dictation_free_string(char *value) {
