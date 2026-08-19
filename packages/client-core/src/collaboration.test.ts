@@ -5,6 +5,7 @@ import {
   imageAttachmentSendBlockReason,
   NO_AGENT_CAPABILITIES,
   threadAgentCapabilities,
+  threadProviderLabel,
 } from './collaboration'
 
 describe('permission defaults', () => {
@@ -41,6 +42,42 @@ describe('thread transport capabilities', () => {
         provider_transport: 'acp',
       } as any).supports_steering,
     ).toBe(true)
+  })
+})
+
+describe('thread provider labels', () => {
+  it('prefers the workspace agent name over the raw provider id', () => {
+    expect(
+      threadProviderLabel(
+        {
+          agents: [
+            {
+              provider: 'opencode',
+              label: 'OpenCode',
+            },
+            {
+              provider: 'grok',
+              label: 'Grok',
+            },
+          ],
+        } as any,
+        { provider: 'opencode' } as any,
+      ),
+    ).toBe('OpenCode')
+    expect(
+      threadProviderLabel(
+        {
+          agents: [{ provider: 'grok', label: 'Grok' }],
+        } as any,
+        { provider: 'grok' } as any,
+      ),
+    ).toBe('Grok')
+  })
+
+  it('title-cases a provider the workspace has not advertised', () => {
+    expect(
+      threadProviderLabel({ agents: [] } as any, { provider: 'codex' } as any),
+    ).toBe('Codex')
   })
 })
 

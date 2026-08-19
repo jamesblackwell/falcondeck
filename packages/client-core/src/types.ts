@@ -57,6 +57,55 @@ export type AccountSummary = {
   label: string;
 };
 
+/** USD-cent spend figures for a usage-metered plan window. */
+export type ProviderUsageCost = {
+  used_usd_cents: number;
+  limit_usd_cents: number;
+};
+
+/**
+ * One usage window in a provider subscription snapshot, e.g. the rolling
+ * five-hour session limit or the weekly limit.
+ */
+export type ProviderUsageWindow = {
+  label: string;
+  /** Used share of the window, normalized to 0-100. */
+  used_percent: number;
+  /** ISO-8601 timestamp when the window resets, when the provider reports one. */
+  resets_at: string | null;
+  /** Optional spend figures for usage-metered plans (USD cents). */
+  cost?: ProviderUsageCost | null;
+};
+
+/**
+ * Live usage snapshot for one provider subscription. Discriminated on
+ * `status` so clients can render the windows, a sign-in hint, or an error
+ * without inventing placeholder numbers.
+ */
+export type ProviderUsage =
+  | {
+      status: "ok";
+      account_email: string | null;
+      plan_label: string | null;
+      windows: ProviderUsageWindow[];
+    }
+  | { status: "not_installed" }
+  | { status: "unauthenticated" }
+  | { status: "expired" }
+  | {
+      status: "error";
+      message: string;
+      /** Plan/account known from local auth state before the call, if any. */
+      plan_label?: string | null;
+      account_email?: string | null;
+    };
+
+/** Response for the provider usage endpoints; each provider resolves independently. */
+export type ProviderUsageOverview = {
+  codex: ProviderUsage;
+  claude_code: ProviderUsage;
+};
+
 export type AgentCapabilitySummary = {
   supports_review: boolean;
   supports_goals: boolean;
@@ -86,9 +135,15 @@ export type ClaudeSkillTranslation = {
   prompt_reference_path?: string | null;
 };
 
+export type OpenCodeSkillTranslation = {
+  /** Inline `$name` mention OpenCode expands by loading the SKILL.md. */
+  native_name?: string | null;
+};
+
 export type SkillProviderTranslations = {
   codex?: CodexSkillTranslation | null;
   claude?: ClaudeSkillTranslation | null;
+  opencode?: OpenCodeSkillTranslation | null;
 };
 
 export type SkillSummary = {
@@ -195,6 +250,8 @@ export type ThreadGoal = {
   token_budget?: number | null;
   tokens_used?: number | null;
   time_used_seconds?: number | null;
+  /** RFC 3339 timestamp of when the goal was started (daemon-stamped). */
+  started_at?: string | null;
 };
 
 export type ToolDetailsMode =
@@ -249,6 +306,11 @@ export type FalconDeckPreferences = {
   version: number;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
+  /**
+   * Sidebar folder colors keyed by workspace id. Values are categorical
+   * tokens (`cat-1`…`cat-12`) so they retint with the active theme.
+   */
+  workspace_colors?: Record<string, string>;
   conversation: ConversationPreferences;
   notifications: NotificationPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
@@ -275,6 +337,7 @@ export type UpdateUtilityModelPreferences = {
 
 export type UpdatePreferencesPayload = {
   workspace_order?: string[] | null;
+  workspace_colors?: Record<string, string> | null;
   conversation?: UpdateConversationPreferences | null;
   notifications?: UpdateNotificationPreferences | null;
   utility_models?: UpdateUtilityModelPreferences | null;

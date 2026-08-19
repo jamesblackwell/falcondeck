@@ -10,6 +10,8 @@ pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,6 +54,9 @@ pub struct FalconDeckPreferences {
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
+    /// Sidebar folder colors keyed by workspace id (`cat-1` through `cat-12`).
+    #[serde(default)]
+    pub workspace_colors: BTreeMap<String, String>,
     /// Conversation and thread display preferences.
     #[serde(default)]
     pub conversation: ConversationPreferences,
@@ -68,11 +73,49 @@ impl Default for FalconDeckPreferences {
         Self {
             version: default_preferences_version(),
             workspace_order: Vec::new(),
+            workspace_colors: BTreeMap::new(),
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
         }
     }
+}
+
+/// True when `value` is one of the twelve theme-backed sidebar color tokens.
+pub fn is_workspace_color_id(value: &str) -> bool {
+    matches!(
+        value,
+        "cat-1"
+            | "cat-2"
+            | "cat-3"
+            | "cat-4"
+            | "cat-5"
+            | "cat-6"
+            | "cat-7"
+            | "cat-8"
+            | "cat-9"
+            | "cat-10"
+            | "cat-11"
+            | "cat-12"
+    )
+}
+
+/// Drops blank workspace ids and unknown color tokens from a preference map.
+pub fn normalize_workspace_colors(
+    raw: impl IntoIterator<Item = (String, String)>,
+) -> BTreeMap<String, String> {
+    let mut colors = BTreeMap::new();
+    for (workspace_id, color) in raw {
+        let workspace_id = workspace_id.trim();
+        let color = color.trim();
+        if workspace_id.is_empty() || !is_workspace_color_id(color) {
+            continue;
+        }
+        colors
+            .entry(workspace_id.to_string())
+            .or_insert_with(|| color.to_string());
+    }
+    colors
 }
 
 /// Models used for FalconDeck's own background work — currently thread
@@ -248,6 +291,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,
+    /// Optional replacement map of workspace id → categorical color token.
+    #[serde(default)]
+    pub workspace_colors: Option<BTreeMap<String, String>>,
     /// Optional conversation preference updates.
     #[serde(default)]
     pub conversation: Option<ConversationPreferencesPatch>,
@@ -3193,6 +3239,10 @@ pub struct ThreadGoal {
     /// Wall-clock seconds spent on the goal, when reported.
     #[serde(default)]
     pub time_used_seconds: Option<i64>,
+    /// When the goal was started. Providers do not report this; the daemon
+    /// stamps it so clients can show elapsed time regardless of harness.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 fn default_goal_status() -> String {

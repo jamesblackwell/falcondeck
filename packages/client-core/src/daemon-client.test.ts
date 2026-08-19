@@ -1,9 +1,43 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createDaemonApiClient } from "./daemon-client";
+import type { ProviderUsageOverview } from "./types";
 
 describe("createDaemonApiClient sendTurn", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  it("reads provider usage from the daemon usage endpoint", async () => {
+    const overview: ProviderUsageOverview = {
+      codex: {
+        status: "ok",
+        account_email: "dev@example.com",
+        plan_label: "Pro",
+        windows: [
+          {
+            label: "Current session",
+            used_percent: 12,
+            resets_at: "2026-08-18T22:00:00.000Z",
+          },
+        ],
+      },
+      claude_code: { status: "unauthenticated" },
+    };
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify(overview), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient("http://daemon.test").providerUsage();
+
+    expect(result).toEqual(overview);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/provider-usage",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+  });
 
   it("saves speech credentials only to the daemon credential endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(

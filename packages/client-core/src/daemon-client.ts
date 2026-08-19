@@ -29,6 +29,7 @@ import type {
   ScheduledTaskSummary,
   SnapshotRequest,
   SpeechCredentialStatus,
+  ProviderUsageOverview,
   SelectedSkillReference,
   FalconDeckPreferences,
   ThreadDetail,
@@ -164,6 +165,11 @@ export function createDaemonApiClient(baseUrl: string) {
     async speechCredentialStatus() {
       return parseJson<SpeechCredentialStatus>(
         await fetch(`${baseUrl}/api/speech/openrouter-key`),
+      );
+    },
+    async providerUsage() {
+      return parseJson<ProviderUsageOverview>(
+        await fetch(`${baseUrl}/api/provider-usage`),
       );
     },
     async saveSpeechCredential(apiKey: string) {

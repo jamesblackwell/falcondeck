@@ -1,4 +1,5 @@
 import { normalizeControlStateChanged } from "./control";
+import { normalizeWorkspaceColors } from "./workspace-colors";
 import type {
   AccountSummary,
   AgentCapabilitySummary,
@@ -336,6 +337,7 @@ const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   workspace_order: [],
+  workspace_colors: {},
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
   utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
@@ -2115,6 +2117,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         ? raw.version
         : 1,
     workspace_order: workspaceOrder,
+    workspace_colors: normalizeWorkspaceColors(raw.workspace_colors),
     conversation: {
       tool_details_mode: toolDetailsMode,
       auto_expand: {

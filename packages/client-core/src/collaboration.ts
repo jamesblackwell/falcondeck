@@ -157,21 +157,17 @@ export function formatModelLabel(label: string) {
 }
 
 /**
- * Display label for the model a thread runs on, for places that only hold a
- * `model_id` (the sidebar rows). Resolves against the workspace's advertised
- * models so it reads like the picker ("opus 4.5"); an id the workspace no
- * longer advertises still shows, because a stale name beats a blank.
+ * Display name for the provider a thread runs on (sidebar hover). Uses the
+ * workspace agent's advertised label so it reads like the picker ("Codex",
+ * "OpenCode"); an unknown id still title-cases rather than going blank.
  */
-export function threadModelLabel(
+export function threadProviderLabel(
   workspace: WorkspaceSummary | null | undefined,
   thread: ThreadSummary,
 ): string | null {
-  const modelId = thread.agent?.model_id;
-  if (!modelId) return null;
-  const model = workspaceModels(workspace, thread.provider).find(
-    (entry) => entry.id === modelId,
-  );
-  return formatModelLabel(model?.label ?? modelId);
+  const provider = thread.provider;
+  if (!provider) return null;
+  return workspaceProviderLabel(workspace, provider);
 }
 
 /**

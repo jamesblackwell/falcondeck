@@ -170,6 +170,74 @@ export function workspaceOperationalConditions(
     });
 }
 
+/**
+ * One notice row. Conditions that differ only by which subject failed — five
+ * MCP servers that each could not start — collapse into a single row so the
+ * surface reports "5 MCP servers…" instead of stacking five cards.
+ */
+export type OperationalConditionGroup = {
+  /** Stable across renders so a group can be dismissed as a unit. */
+  id: string;
+  level: OperationalCondition["level"];
+  /** Family shared by every member, or the lone member's key. */
+  family: string;
+  summary: string | null;
+  conditions: OperationalCondition[];
+};
+
+const GROUPED_FAMILIES: Record<
+  string,
+  ((count: number) => string) | undefined
+> = {
+  mcp_startup: (count) =>
+    count === 1
+      ? "1 MCP server could not start"
+      : `${count} MCP servers could not start`,
+  mcp_auth: (count) =>
+    count === 1
+      ? "1 MCP server needs sign-in"
+      : `${count} MCP servers need sign-in`,
+};
+
+function conditionFamily(condition: OperationalCondition): string {
+  const separator = condition.key.indexOf(":");
+  return separator === -1 ? condition.key : condition.key.slice(0, separator);
+}
+
+/** Folds same-family conditions into one row, preserving the input order. */
+export function groupOperationalConditions(
+  conditions: readonly OperationalCondition[],
+): OperationalConditionGroup[] {
+  const groups: OperationalConditionGroup[] = [];
+  const byFamily = new Map<string, OperationalConditionGroup>();
+  for (const condition of conditions) {
+    const family = conditionFamily(condition);
+    const groupable = family in GROUPED_FAMILIES;
+    const existing = groupable ? byFamily.get(family) : undefined;
+    if (existing) {
+      existing.conditions.push(condition);
+      continue;
+    }
+    const group: OperationalConditionGroup = {
+      id: condition.id,
+      level: condition.level,
+      family,
+      summary: null,
+      conditions: [condition],
+    };
+    groups.push(group);
+    if (groupable) byFamily.set(family, group);
+  }
+  for (const group of groups) {
+    const label = GROUPED_FAMILIES[group.family];
+    group.summary =
+      label && group.conditions.length > 1
+        ? label(group.conditions.length)
+        : null;
+  }
+  return groups;
+}
+
 function upsertWorkspace(
   workspaces: DaemonSnapshot["workspaces"],
   nextWorkspace: DaemonSnapshot["workspaces"][number],

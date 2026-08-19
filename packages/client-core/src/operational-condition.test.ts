@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeDaemonSnapshot } from "./normalization";
 import {
   applySnapshotEvent,
+  groupOperationalConditions,
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
 } from "./snapshot";
@@ -110,5 +111,24 @@ describe("operational conditions", () => {
 
     expect(cleared?.operational_conditions).toEqual([]);
     expect(cleared?.service_notices).toEqual([]);
+  });
+
+  it("folds one family into a counted group and leaves the rest alone", () => {
+    const groups = groupOperationalConditions([
+      condition("a", "codex_connection", "error", "2026-08-13T10:03:00Z"),
+      condition("b", "mcp_startup:clarity", "warning", "2026-08-13T10:02:00Z"),
+      condition("c", "mcp_startup:cloudflare-api", "warning", "2026-08-13T10:01:00Z"),
+      condition("d", "mcp_auth:linear", "warning", "2026-08-13T10:00:00Z"),
+    ]);
+
+    expect(groups.map((group) => [group.family, group.conditions.length])).toEqual([
+      ["codex_connection", 1],
+      ["mcp_startup", 2],
+      ["mcp_auth", 1],
+    ]);
+    expect(groups[1]?.summary).toBe("2 MCP servers could not start");
+    // A family of one reads better as its own message than as a count.
+    expect(groups[0]?.summary).toBeNull();
+    expect(groups[2]?.summary).toBeNull();
   });
 });
