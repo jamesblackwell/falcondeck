@@ -4,6 +4,8 @@ import { isTauriDesktop } from "./api";
 
 const DICTATION_STORAGE_KEY = "falcondeck.desktop.dictation.v1";
 const DICTATION_SETTINGS_EVENT = "falcondeck:dictation-settings-changed";
+const FAST_TRANSCRIPTION_MODEL = "openai/whisper-large-v3-turbo";
+const LEGACY_TRANSCRIPTION_MODEL = "openai/gpt-transcribe";
 
 export type DictationShortcut = "right_command" | "left_function";
 export type DictationActivation = "hold" | "toggle";
@@ -51,7 +53,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   activation: "hold",
   provider: "system",
   inputDeviceId: null,
-  model: "openai/gpt-transcribe",
+  model: FAST_TRANSCRIPTION_MODEL,
 };
 
 function isDictationShortcut(value: unknown): value is DictationShortcut {
@@ -88,7 +90,9 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
         ? candidate.inputDeviceId
         : null,
     model:
-      typeof candidate.model === "string" && candidate.model.trim()
+      typeof candidate.model === "string" &&
+      candidate.model.trim() &&
+      candidate.model.trim() !== LEGACY_TRANSCRIPTION_MODEL
         ? candidate.model.trim()
         : DEFAULT_DICTATION_SETTINGS.model,
   };

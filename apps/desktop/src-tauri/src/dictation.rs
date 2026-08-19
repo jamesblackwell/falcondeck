@@ -79,7 +79,7 @@ impl Default for DictationConfiguration {
             provider: DictationProvider::System,
             input_device_id: None,
             daemon_url: None,
-            model: "openai/gpt-transcribe".to_string(),
+            model: "openai/whisper-large-v3-turbo".to_string(),
         }
     }
 }

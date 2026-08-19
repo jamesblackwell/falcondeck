@@ -45,6 +45,15 @@ describe("dictation settings", () => {
     });
   });
 
+  it("migrates the original default to the faster transcription model", () => {
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        model: "openai/gpt-transcribe",
+      }).model,
+    ).toBe(DEFAULT_DICTATION_SETTINGS.model);
+  });
+
   it("updates subscribers in the same window", () => {
     const { result } = renderHook(() => useDictationSettings());
     act(() => {
