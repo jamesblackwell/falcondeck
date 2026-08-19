@@ -24,6 +24,7 @@ import {
   Text,
   type OptionSheetItem,
 } from '@/components/ui'
+import { triggerComposerSelectionHaptic } from '@/lib/haptics'
 
 import {
   SANDBOX_DEFAULT_VALUE,
@@ -112,6 +113,7 @@ export const InputToolbar = memo(function InputToolbar({
 
   const openModelSheet = useCallback(() => {
     if (disabled) return
+    triggerComposerSelectionHaptic()
 
     setSheet({
       title: 'Model',
@@ -134,6 +136,7 @@ export const InputToolbar = memo(function InputToolbar({
 
   const openEffortSheet = useCallback(() => {
     if (disabled) return
+    triggerComposerSelectionHaptic()
 
     setSheet({
       title: 'Reasoning effort',
@@ -153,6 +156,7 @@ export const InputToolbar = memo(function InputToolbar({
 
   const openPermissionSheet = useCallback(() => {
     if (disabled || !onSelectPermissionMode) return
+    triggerComposerSelectionHaptic()
 
     setSheet({
       title: 'Permissions',
@@ -169,6 +173,7 @@ export const InputToolbar = memo(function InputToolbar({
 
   const openSandboxSheet = useCallback(() => {
     if (disabled || !onSelectSandboxMode) return
+    triggerComposerSelectionHaptic()
 
     setSheet({
       title: 'Sandbox',

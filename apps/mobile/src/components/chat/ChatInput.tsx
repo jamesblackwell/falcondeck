@@ -41,6 +41,7 @@ import {
   getSpeechSettings,
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
+import { triggerComposerSelectionHaptic } from '@/lib/haptics'
 
 import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { InputToolbar } from './InputToolbar'
@@ -348,6 +349,7 @@ export const ChatInput = memo(function ChatInput({
   const handleInsertSkill = useCallback(
     (alias: string) => {
       if (!slashQuery) return
+      triggerComposerSelectionHaptic()
 
       const nextValue = `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
       const nextCaret = slashQuery.rangeStart + alias.length + 1
@@ -367,6 +369,7 @@ export const ChatInput = memo(function ChatInput({
 
   const handleGoalCommand = useCallback(() => {
     if (!slashQuery || !onGoalCommand) return
+    triggerComposerSelectionHaptic()
     const nextValue = `${value.slice(0, slashQuery.rangeStart)}${value.slice(slashQuery.rangeEnd)}`
     const nextCaret = slashQuery.rangeStart
     pendingEditRef.current = {
@@ -621,7 +624,10 @@ export const ChatInput = memo(function ChatInput({
                   styles.attachButton,
                   disabled ? styles.attachButtonDisabled : null,
                 ]}
-                onPress={() => setOpenSheet('more')}
+                onPress={() => {
+                  triggerComposerSelectionHaptic()
+                  setOpenSheet('more')
+                }}
                 disabled={disabled}
                 accessibilityRole="button"
                 accessibilityLabel="Add to prompt"

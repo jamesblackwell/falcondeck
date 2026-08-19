@@ -16,3 +16,25 @@ export function triggerThreadSelectionHaptic() {
 export function triggerAgentCompletionHaptic() {
   runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light))
 }
+
+export function triggerThreadArchiveHaptic() {
+  runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium))
+}
+
+export function triggerThreadArchiveFailedHaptic() {
+  runWhenActive(() =>
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+  )
+}
+
+export function triggerComposerSelectionHaptic() {
+  runWhenActive(() => Haptics.selectionAsync())
+}
+
+export function triggerComposerTapHaptic() {
+  runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light))
+}
+
+export function triggerComposerStopHaptic() {
+  runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium))
+}

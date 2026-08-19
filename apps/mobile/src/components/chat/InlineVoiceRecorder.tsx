@@ -29,6 +29,11 @@ import {
   getDesktopSpeechStatus,
   transcribeWithDesktopOpenRouter,
 } from '@/features/speech/openRouterTranscription'
+import {
+  triggerComposerSelectionHaptic,
+  triggerComposerStopHaptic,
+  triggerComposerTapHaptic,
+} from '@/lib/haptics'
 
 import { VoiceWaveform } from './VoiceWaveform'
 
@@ -347,6 +352,11 @@ export function InlineVoiceRecorder({
 
   const stopRecording = useCallback(async (submit: boolean) => {
     submitOnFinishRef.current = submit
+    if (submit) {
+      triggerComposerTapHaptic()
+    } else {
+      triggerComposerStopHaptic()
+    }
     if (provider === 'on-device') {
       ExpoSpeechRecognitionModule.stop()
       setState('transcribing')
@@ -372,6 +382,7 @@ export function InlineVoiceRecorder({
   }, [provider, recorder, transcribeCloud])
 
   const cancel = useCallback(() => {
+    triggerComposerTapHaptic()
     cancelledRef.current = true
     if (
       provider === 'on-device' &&
@@ -393,6 +404,7 @@ export function InlineVoiceRecorder({
   }, [onClose, provider, recorder, state])
 
   const retry = useCallback(async () => {
+    triggerComposerTapHaptic()
     submitOnFinishRef.current = false
     if (recordingUri) {
       if (recordingProvider === 'on-device') {
@@ -434,6 +446,7 @@ export function InlineVoiceRecorder({
   ])
 
   const discardAndRecord = useCallback(() => {
+    triggerComposerTapHaptic()
     removeRecording(recordingUri)
     clearPendingVoiceRecording()
     setRecordingUri(null)
@@ -443,6 +456,7 @@ export function InlineVoiceRecorder({
   }, [begin, initialProvider, recordingUri])
 
   const openSpeechSettings = useCallback(() => {
+    triggerComposerSelectionHaptic()
     onClose()
     router.push('/(app)/settings/speech' as Href)
   }, [onClose, router])
