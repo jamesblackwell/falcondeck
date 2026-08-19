@@ -18,7 +18,6 @@ import {
   composerSelectionFor,
   conversationRenderBlockType,
   defaultProvider,
-  encryptJson,
   imageAttachmentSendBlockReason,
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
@@ -57,10 +56,8 @@ import {
 } from "@/store";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { useInterruptTurn } from "@/hooks/useInterruptTurn";
-import {
-  consumeAutoReadSuppression,
-  useThreadActions,
-} from "@/hooks/useThreadActions";
+import { useAutoMarkThreadRead } from "@/hooks/useAutoMarkThreadRead";
+import { useThreadActions } from "@/hooks/useThreadActions";
 import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
@@ -164,7 +161,6 @@ export default function HomeScreen() {
     isEncrypted,
     hasSyncedOnce,
     machinePresence,
-    relayUrl,
     sessionId,
   } = useRelayStore(
     useShallow((s) => ({
@@ -173,7 +169,6 @@ export default function HomeScreen() {
       isEncrypted: s.isEncrypted,
       hasSyncedOnce: s.hasSyncedOnce,
       machinePresence: s.machinePresence,
-      relayUrl: s.relayUrl,
       sessionId: s.sessionId,
     })),
   );
@@ -259,11 +254,6 @@ export default function HomeScreen() {
   const [isThreadOptionsOpen, setIsThreadOptionsOpen] = useState(false);
   const selectionSeedRef = useRef<string | null>(null);
   const composerInputRef = useRef<TextInput>(null);
-  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastSentReadSeqRef = useRef<{
-    threadId: string;
-    readSeq: number;
-  } | null>(null);
   const retrySourcesRef = useRef<ReturnType<
     typeof reuseRetrySourcesByAssistantId
   > | null>(null);
@@ -1060,85 +1050,12 @@ export default function HomeScreen() {
     resetScrollState();
   }, [resetScrollState, selectedThreadId]);
 
-  useEffect(() => {
-    // The cleanup below cancels any pending debounce whenever the deps change
-    // (or the screen unmounts), so an early return — switching threads,
-    // backgrounding, losing encryption — can never let a stale timer mark the
-    // previous thread read with captured values.
-    if (
-      appState !== "active" ||
-      !workspace ||
-      !selectedThread ||
-      !sessionId ||
-      !isEncrypted
-    )
-      return;
-
-    const readSeq = selectedThread.attention.last_agent_activity_seq;
-    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return;
-
-    // A thread the user just marked unread is skipped until they leave it or
-    // the agent posts something new. On release the dedupe below has to go too
-    // — it still holds this exact seq from when the thread was last read, and
-    // would otherwise keep the auto-read from ever firing again.
-    const suppression = consumeAutoReadSuppression(selectedThread.id, readSeq);
-    if (suppression === "suppress") return;
-    if (suppression === "released") lastSentReadSeqRef.current = null;
-
-    // Streamed events refire this effect long before the summary reflects the
-    // send, so suppress duplicates locally and debounce the action itself.
-    const lastSent = lastSentReadSeqRef.current;
-    if (
-      lastSent &&
-      lastSent.threadId === selectedThread.id &&
-      lastSent.readSeq >= readSeq
-    )
-      return;
-
-    const workspaceId = workspace.id;
-    const threadId = selectedThread.id;
-
-    markReadTimerRef.current = setTimeout(() => {
-      markReadTimerRef.current = null;
-      const relay = useRelayStore.getState();
-      const clientToken = relay._getClientToken();
-      const sessionCrypto = relay._getSessionCrypto();
-      if (!clientToken || !sessionCrypto) return;
-
-      lastSentReadSeqRef.current = { threadId, readSeq };
-      void encryptJson(sessionCrypto.dataKey, {
-        workspace_id: workspaceId,
-        thread_id: threadId,
-        read_seq: readSeq,
-      })
-        .then((payload) =>
-          fetch(
-            `${relayUrl.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/actions`,
-            {
-              method: "POST",
-              headers: {
-                authorization: `Bearer ${clientToken}`,
-                "content-type": "application/json",
-              },
-              body: JSON.stringify({
-                idempotency_key:
-                  globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
-                action_type: "thread.mark_read",
-                payload,
-              }),
-            },
-          ),
-        )
-        .catch(() => {});
-    }, 1_000);
-
-    return () => {
-      if (markReadTimerRef.current) {
-        clearTimeout(markReadTimerRef.current);
-        markReadTimerRef.current = null;
-      }
-    };
-  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace]);
+  useAutoMarkThreadRead({
+    appState,
+    isEncrypted,
+    workspaceId: workspace?.id,
+    thread: selectedThread,
+  });
 
   return (
     <KeyboardAvoidingView

@@ -1,8 +1,8 @@
 import { useCallback } from 'react'
 
-import type { ThreadSummary } from '@falcondeck/client-core'
+import { normalizeThreadSummary, type ThreadSummary } from '@falcondeck/client-core'
 
-import { useRelayStore } from '@/store'
+import { useRelayStore, useSessionStore } from '@/store'
 
 /**
  * "Mark unread" and the auto-mark-read effect on the conversation screen pull
@@ -88,22 +88,38 @@ export function useThreadActions() {
     [],
   )
 
+  const markThreadRead = useCallback(
+    async (workspaceId: string, threadId: string, readSeq: number) => {
+      const relay = useRelayStore.getState()
+      const thread = normalizeThreadSummary(
+        await relay._callRpc<ThreadSummary>(
+          'thread.mark_read',
+          { workspace_id: workspaceId, thread_id: threadId, read_seq: readSeq },
+          { requestIdPrefix: 'mobile-thread' },
+        ),
+      )
+      useSessionStore.getState().applyThreadSummary(thread)
+      return thread
+    },
+    [],
+  )
+
   const markThreadUnread = useCallback(
     async (workspaceId: string, threadId: string, activitySeq: number) => {
       const relay = useRelayStore.getState()
       suppressAutoMarkRead(threadId, activitySeq)
       try {
-        const thread = (await relay._callRpc(
-          'thread.mark_unread',
-          { workspace_id: workspaceId, thread_id: threadId },
-          { requestIdPrefix: 'mobile-thread' },
-        )) as ThreadSummary | undefined
+        const thread = normalizeThreadSummary(
+          await relay._callRpc<ThreadSummary>(
+            'thread.mark_unread',
+            { workspace_id: workspaceId, thread_id: threadId },
+            { requestIdPrefix: 'mobile-thread' },
+          ),
+        )
         // Re-pin the suppression to the seq the daemon actually settled on, so
         // activity that arrived mid-flight still releases it.
-        suppressAutoMarkRead(
-          threadId,
-          thread?.attention?.last_agent_activity_seq ?? activitySeq,
-        )
+        suppressAutoMarkRead(threadId, thread.attention.last_agent_activity_seq)
+        useSessionStore.getState().applyThreadSummary(thread)
         relay._setError(null)
       } catch (e) {
         clearAutoMarkReadSuppression()
@@ -267,6 +283,7 @@ export function useThreadActions() {
     archiveThread,
     renameThread,
     setThreadPinned,
+    markThreadRead,
     markThreadUnread,
     setThreadMode,
     setThreadGoal,

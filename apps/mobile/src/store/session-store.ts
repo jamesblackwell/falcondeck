@@ -30,6 +30,7 @@ import {
   type ThinkingDisplay,
   type ThreadDetail,
   type ThreadHandle,
+  type ThreadSummary,
 } from '@falcondeck/client-core';
 
 import { clearMobileSessionCache, persistMobileSessionCache } from '@/storage/mobile-session-cache';
@@ -70,6 +71,7 @@ interface SessionActions {
   selectWorkspace: (workspaceId: string) => void;
   selectNewThread: (workspaceId: string) => void;
   applyThreadHandle: (handle: ThreadHandle) => void;
+  applyThreadSummary: (thread: ThreadSummary) => void;
   setThreadDetail: (
     detail: ThreadDetail | null,
     options?: { mergeMode?: ThreadDetailMergeMode },
@@ -459,6 +461,27 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           }
         : state.snapshot,
     }));
+    persistStateCache(get());
+  },
+
+  applyThreadSummary: (thread) => {
+    set((state) => {
+      if (!state.snapshot?.threads.some((entry) => entry.id === thread.id)) {
+        return state;
+      }
+      return {
+        snapshot: {
+          ...state.snapshot,
+          threads: state.snapshot.threads.map((entry) =>
+            entry.id === thread.id ? thread : entry,
+          ),
+        },
+        threadDetail:
+          state.threadDetail?.thread.id === thread.id
+            ? { ...state.threadDetail, thread }
+            : state.threadDetail,
+      };
+    });
     persistStateCache(get());
   },
 

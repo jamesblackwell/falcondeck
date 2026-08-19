@@ -137,6 +137,65 @@ describe('session-store', () => {
       expect(state.snapshot?.workspaces[0]?.current_thread_id).toBe('t2')
     })
 
+    it('applies a mark-read summary in place without reordering threads', () => {
+      const unreadThread = thread({
+        id: 't1',
+        attention: {
+          ...thread().attention,
+          level: 'unread',
+          unread: true,
+          last_agent_activity_seq: 7,
+          last_read_seq: 0,
+        },
+      })
+      const other = thread({ id: 't2', title: 'Other' })
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({ threads: [unreadThread, other] })),
+      )
+      useSessionStore.getState().setThreadDetail(threadDetail({ thread: unreadThread }))
+
+      const readThread = {
+        ...unreadThread,
+        attention: {
+          ...unreadThread.attention,
+          level: 'none' as const,
+          unread: false,
+          last_read_seq: 7,
+        },
+      }
+      useSessionStore.getState().applyThreadSummary(readThread)
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2'])
+      expect(state.snapshot?.threads[0]?.attention).toMatchObject({
+        unread: false,
+        last_read_seq: 7,
+      })
+      expect(state.threadDetail?.thread.attention.unread).toBe(false)
+    })
+
+    it('does not resurrect an archived thread from a mark-read summary', () => {
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({ threads: [thread({ id: 'visible' })] })),
+      )
+
+      useSessionStore.getState().applyThreadSummary(
+        thread({
+          id: 'archived',
+          is_archived: true,
+          attention: {
+            ...thread().attention,
+            unread: false,
+            last_read_seq: 4,
+          },
+        }),
+      )
+
+      expect(useSessionStore.getState().snapshot?.threads.map((entry) => entry.id)).toEqual([
+        'visible',
+      ])
+    })
+
     it('sets both workspace and thread when selecting a thread', () => {
       const { selectThread } = useSessionStore.getState()
       selectThread('w1', 't1')
