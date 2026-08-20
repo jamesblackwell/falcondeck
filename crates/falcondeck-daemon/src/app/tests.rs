@@ -2772,6 +2772,72 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
 }
 
 #[tokio::test]
+async fn restore_seeds_sequence_counter_past_persisted_attention_seqs() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-seed");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    // A thread carried over from a long-lived previous boot whose counter
+    // reached 200_000. If this boot's counter restarted at 1, new activity
+    // here would stamp max(200_000, tiny) and never move, and a mark-read
+    // stamped with a tiny this-boot seq could never catch 200_000 — the
+    // thread read as unread forever (or never read as unread again).
+    let persisted = PersistedAppState {
+        workspaces: vec![super::PersistedWorkspaceState {
+            path: workspace_path.to_string_lossy().to_string(),
+            id: Some("workspace-seed".to_string()),
+            current_thread_id: Some("thread-1".to_string()),
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::CLAUDE),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: vec![super::PersistedThreadState {
+                thread_id: "thread-1".to_string(),
+                updated_at: Some(Utc::now()),
+                provider: Some(AgentProvider::CLAUDE),
+                native_session_id: None,
+                provider_transport: None,
+                handoff_from: None,
+                origin: None,
+                title: Some("Old boot thread".to_string()),
+                manual_title: false,
+                ai_title_generated: false,
+                status: Some(ThreadStatus::Idle),
+                last_error: None,
+                last_read_seq: 150_000,
+                last_agent_activity_seq: 200_000,
+                variant: None,
+                agent: ThreadAgentParams::default(),
+                goal: None,
+                queued_requests: Vec::new(),
+            }],
+        }],
+        remote: None,
+    };
+
+    tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .await
+        .unwrap();
+
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([(AgentProvider::CLAUDE, "missing-claude".to_string())]),
+        PathBuf::from(&state_path),
+    );
+    app.restore_local_state().await.unwrap();
+
+    let next_seq = app
+        .inner
+        .sequence
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        next_seq > 200_000,
+        "sequence counter must be seeded past every persisted attention seq, got {next_seq}"
+    );
+}
+
+#[tokio::test]
 async fn transcript_replay_does_not_flip_a_read_thread_unread() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-replay");

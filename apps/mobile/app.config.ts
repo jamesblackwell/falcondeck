@@ -12,6 +12,15 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   runtimeVersion: {
     policy: 'appVersion',
   },
+  updates: {
+    url: 'https://u.expo.dev/14208bcf-41e5-478e-b88c-386745568d6a',
+    checkAutomatically: 'ON_LOAD',
+    // Hold the splash up to 3s while a pending OTA downloads, so a fix ships
+    // on the FIRST cold launch. At 0 the update only applies on the *second*
+    // cold launch, which kept devices on stale bundles for days and made
+    // every OTA fix look broken. Requires a native rebuild to take effect.
+    fallbackToCacheTimeout: 3000,
+  },
   icon: './assets/icon.png',
   splash: {
     image: './assets/splash.png',
@@ -21,6 +30,11 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     bundleIdentifier: 'com.falcondeck.mobile',
     supportsTablet: true,
+    // Keeps Read Aloud playback running when the device is locked or the app
+    // is backgrounded, like a music player. Requires a native rebuild.
+    infoPlist: {
+      UIBackgroundModes: ['audio'],
+    },
     config: {
       usesNonExemptEncryption: false,
     },

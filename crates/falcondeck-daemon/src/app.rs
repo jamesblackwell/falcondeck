@@ -832,6 +832,23 @@ impl AppState {
         persist_preferences(&self.inner.preferences_path, &preferences).await?;
 
         let persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        // Attention seqs are stamped from this counter but persist across
+        // restarts, so a counter that restarts at 1 makes cross-boot values
+        // incomparable: a mark-read written with a small this-boot seq can
+        // never catch an activity seq from the previous boot (the thread reads
+        // as unread forever), and new activity in an already-read thread never
+        // climbs past its old stamp (the thread never reads as unread again).
+        // Seed the counter past everything ever persisted so both eras compare.
+        let max_persisted_seq = persisted
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.thread_states.iter())
+            .map(|thread| thread.last_read_seq.max(thread.last_agent_activity_seq))
+            .max()
+            .unwrap_or(0);
+        self.inner
+            .sequence
+            .fetch_max(max_persisted_seq.saturating_add(1), Ordering::Relaxed);
         {
             let mut saved_workspaces = self.inner.saved_workspaces.lock().await;
             saved_workspaces.clear();

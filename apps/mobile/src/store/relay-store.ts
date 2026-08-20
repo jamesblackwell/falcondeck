@@ -713,6 +713,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         _pendingRpc.delete(requestId)
+        // Fire-and-forget callers swallow rejections, so the debug overlay is
+        // the only place a silently dying RPC (mark-read, prefetch) shows up.
+        logConnection('warn', `${method} timed out waiting for your Mac`)
         reject(new Error(`Timed out waiting for ${method}`))
       }, options?.timeoutMs ?? RELAY_RPC_TIMEOUT_MS)
 
@@ -754,12 +757,16 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       }
 
       if (!payload.error) {
-        pending.reject(new Error(relayRpcFailureMessage(payload.failure, pending.method)))
+        const message = relayRpcFailureMessage(payload.failure, pending.method)
+        logConnection('warn', message)
+        pending.reject(new Error(message))
         return true
       }
 
       const decrypted = await get()._decryptJson<unknown>(payload.error)
-      pending.reject(new Error(encryptedRpcErrorMessage(decrypted)))
+      const message = encryptedRpcErrorMessage(decrypted)
+      logConnection('warn', `${pending.method} failed: ${message}`)
+      pending.reject(new Error(message))
       return true
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(`Failed to process ${pending.method} response`))
