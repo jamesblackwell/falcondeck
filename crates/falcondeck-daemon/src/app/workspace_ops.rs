@@ -380,6 +380,10 @@ pub(super) async fn connect_workspace_internal(
             .unwrap_or_default();
         let mut threads = hydrated_threads;
         carry_over_live_threads(&mut threads, previous_threads);
+        // The session only starts supervising its own exit once it is about
+        // to become the workspace's authoritative handle. Until this point
+        // its RAII lease cleans it up if workspace restore is cancelled.
+        let codex_session = codex_session.map(|session| session.activate());
         workspaces.insert(
             workspace_id.clone(),
             ManagedWorkspace {
@@ -3311,7 +3315,7 @@ pub(super) async fn collaboration_modes(
 
 pub(super) async fn load_codex_provider_skills(
     _app: &AppState,
-    session: &Arc<CodexSession>,
+    session: &CodexSession,
 ) -> Result<Vec<SkillSummary>, DaemonError> {
     let value = session
         .send_request("skills/list", json!({ "limit": 200 }))
@@ -3498,7 +3502,7 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
         workspace.summary.path.clone()
     };
 
-    let bootstrap = match CodexSession::connect(
+    let bootstrap = match CodexSession::reconnect(
         workspace_id.to_string(),
         workspace_path,
         app.provider_bin(&AgentProvider::CODEX),
@@ -3534,13 +3538,13 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
     };
     if let Some(outcome) = stale {
         drop(workspaces);
-        let _ = session.shutdown().await;
+        drop(session);
         return outcome;
     }
     let workspace = workspaces
         .get_mut(workspace_id)
         .expect("workspace checked above");
-    workspace.codex_session = Some(session);
+    workspace.codex_session = Some(session.activate());
     let codex_skills = workspace
         .summary
         .agents

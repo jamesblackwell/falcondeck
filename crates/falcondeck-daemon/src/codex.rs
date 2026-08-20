@@ -57,7 +57,7 @@ use session_file::{
 use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
 
 pub struct CodexBootstrap {
-    pub session: Arc<CodexSession>,
+    pub session: PendingCodexSession,
     pub account: AccountSummary,
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
@@ -191,6 +191,14 @@ pub struct CodexSession {
     /// Set before an intentional shutdown so the stdout reader does not treat
     /// the exit as a crash and schedule a reconnect.
     expected_exit: AtomicBool,
+    /// Reconnects are armed only after this session is installed in AppState.
+    /// Bootstrap candidates are owned by their caller and must never start
+    /// competing supervisors when they fail or are cancelled.
+    reconnect_on_exit: AtomicBool,
+    /// A session is one-shot, so at most one reconnect task may be requested
+    /// for its terminal exit. This closes the race between activation and an
+    /// already-observed EOF without adding a workspace-level state machine.
+    reconnect_scheduled: AtomicBool,
     /// The wrapper CLI and every process it launches live in this group. The
     /// Homebrew `codex` entry point is a Node script which spawns the native
     /// app-server, so killing only `Child` leaves the real server orphaned.
@@ -198,36 +206,47 @@ pub struct CodexSession {
     state: AppState,
 }
 
-/// Owns a just-spawned app-server until bootstrap succeeds. Async cancellation
-/// drops this guard, which is the path taken by the workspace restore timeout;
-/// it must synchronously stop the process tree because no async cleanup future
-/// is polled after cancellation.
-struct CodexBootstrapGuard {
-    session: Arc<CodexSession>,
-    armed: bool,
+/// Owns a bootstrapped app-server until the caller installs it in AppState.
+/// This spans both app-server bootstrap and the rest of workspace restore, so
+/// cancelling either phase cannot leave an unattached process tree behind.
+pub struct PendingCodexSession {
+    session: Option<Arc<CodexSession>>,
 }
 
-impl CodexBootstrapGuard {
+impl PendingCodexSession {
     fn new(session: Arc<CodexSession>) -> Self {
         Self {
-            session,
-            armed: true,
+            session: Some(session),
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    pub fn activate(mut self) -> Arc<CodexSession> {
+        let session = self
+            .session
+            .take()
+            .expect("pending Codex session already activated");
+        session.enable_reconnect_on_exit();
+        session
     }
 }
 
-impl Drop for CodexBootstrapGuard {
+impl std::ops::Deref for PendingCodexSession {
+    type Target = CodexSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.session
+            .as_deref()
+            .expect("pending Codex session already activated")
+    }
+}
+
+impl Drop for PendingCodexSession {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
+        if let Some(session) = self.session.take() {
+            session.expected_exit.store(true, Ordering::Release);
+            session.closed.store(true, Ordering::Release);
+            session.terminate_process_tree();
         }
-        self.session.expected_exit.store(true, Ordering::Release);
-        self.session.closed.store(true, Ordering::Release);
-        self.session.terminate_process_tree();
     }
 }
 
@@ -346,10 +365,12 @@ impl CodexSession {
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             expected_exit: AtomicBool::new(false),
+            reconnect_on_exit: AtomicBool::new(false),
+            reconnect_scheduled: AtomicBool::new(false),
             process_group_id,
             state: state.clone(),
         });
-        let mut bootstrap_guard = CodexBootstrapGuard::new(Arc::clone(&session));
+        let pending_session = PendingCodexSession::new(Arc::clone(&session));
 
         {
             let session = Arc::clone(&session);
@@ -376,7 +397,7 @@ impl CodexSession {
         }
 
         // Any bootstrap failure or cancellation tears the freshly spawned
-        // process group down through `bootstrap_guard`.
+        // process group down through `pending_session`.
         let bootstrap_result = async {
             session
                 .send_control_request(
@@ -464,15 +485,11 @@ impl CodexSession {
 
         let (account, models, collaboration_modes, threads) = match bootstrap_result {
             Ok(bootstrap) => bootstrap,
-            Err(error) => {
-                let _ = session.shutdown().await;
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
 
-        bootstrap_guard.disarm();
         Ok(CodexBootstrap {
-            session,
+            session: pending_session,
             account,
             models,
             collaboration_modes,
@@ -535,6 +552,28 @@ impl CodexSession {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn enable_reconnect_on_exit(&self) {
+        self.reconnect_on_exit.store(true, Ordering::Release);
+        if self.is_closed() {
+            self.schedule_reconnect_once();
+        }
+    }
+
+    fn schedule_reconnect_once(&self) {
+        if !self.reconnect_on_exit.load(Ordering::Acquire)
+            || self.expected_exit.load(Ordering::Acquire)
+            || self.state.is_shutting_down()
+            || self
+                .reconnect_scheduled
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return;
+        }
+        self.state
+            .schedule_codex_reconnect(self.workspace_id.clone());
     }
 
     fn disconnected_error(&self) -> DaemonError {
@@ -803,10 +842,7 @@ impl CodexSession {
 
         let _ = self.child.lock().await.wait().await;
 
-        if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down() {
-            self.state
-                .schedule_codex_reconnect(self.workspace_id.clone());
-        }
+        self.schedule_reconnect_once();
     }
 }
 
@@ -1549,6 +1585,53 @@ mod tests {
             .unwrap();
 
         assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_unattached_session_terminates_its_process_group() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            directory.path().join("state.json"),
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let session = Arc::new(CodexSession {
+            workspace_id: "workspace-1".to_string(),
+            workspace_path: directory.path().to_string_lossy().to_string(),
+            stdin: Mutex::new(stdin),
+            child: Mutex::new(child),
+            next_id: AtomicU64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            expected_exit: AtomicBool::new(false),
+            reconnect_on_exit: AtomicBool::new(false),
+            reconnect_scheduled: AtomicBool::new(false),
+            process_group_id: Some(process_group_id),
+            state,
+        });
+
+        drop(PendingCodexSession::new(Arc::clone(&session)));
+        let status = timeout(Duration::from_secs(2), session.child.lock().await.wait())
+            .await
+            .expect("dropping the unattached lease should stop the process")
+            .unwrap();
+
+        assert!(!status.success());
+        assert!(session.is_closed());
+        assert!(session.expected_exit.load(Ordering::Acquire));
+        assert!(!session.reconnect_scheduled.load(Ordering::Acquire));
     }
 
     #[test]
