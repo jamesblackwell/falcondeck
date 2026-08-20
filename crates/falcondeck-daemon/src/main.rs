@@ -28,10 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // The built-in MCP stdio server for agent control: proxies the running
-    // daemon's control API over newline-delimited JSON-RPC.
-    if std::env::args().skip(1).any(|arg| arg == "mcp") {
-        std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
+    // The desktop shell embeds this crate and calls the same dispatcher. A
+    // built-in connector must never fall through into GUI/daemon startup.
+    let first_arg = std::env::args_os().nth(1);
+    if let Some(helper) = falcondeck_daemon::stdio_helper::from_first_arg(first_arg.as_deref()) {
+        std::process::exit(falcondeck_daemon::stdio_helper::run(helper).await);
     }
 
     let port = std::env::args()

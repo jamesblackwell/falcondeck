@@ -558,13 +558,14 @@ pub fn run() {
     // HTTP client, so this must precede the early-exit branch below.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    // The embedded daemon injects its built-in MCP connector with this very
-    // executable as the command, so the desktop binary must serve `mcp`
-    // exactly like `falcondeck-daemon mcp` does instead of opening a window.
-    if std::env::args().len() == 2 && std::env::args().nth(1).as_deref() == Some("mcp") {
-        tauri::async_runtime::block_on(async {
-            std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
-        });
+    // The embedded daemon injects built-in connectors with this executable as
+    // their command. Dispatch every reserved helper before constructing Tauri
+    // so an omitted helper branch can never recursively launch desktop apps.
+    let first_arg = std::env::args_os().nth(1);
+    if let Some(helper) = falcondeck_daemon::stdio_helper::from_first_arg(first_arg.as_deref()) {
+        let exit_code =
+            tauri::async_runtime::block_on(falcondeck_daemon::stdio_helper::run(helper));
+        std::process::exit(exit_code);
     }
 
     let app = tauri::Builder::default()
