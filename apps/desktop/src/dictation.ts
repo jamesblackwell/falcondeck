@@ -2,10 +2,17 @@ import { useEffect, useState } from "react";
 
 import { isTauriDesktop } from "./api";
 
-const DICTATION_STORAGE_KEY = "falcondeck.desktop.dictation.v1";
+const DICTATION_STORAGE_KEY = "falcondeck.desktop.dictation.v2";
+const LEGACY_DICTATION_STORAGE_KEY = "falcondeck.desktop.dictation.v1";
 const DICTATION_SETTINGS_EVENT = "falcondeck:dictation-settings-changed";
-const FAST_TRANSCRIPTION_MODEL = "openai/whisper-large-v3-turbo";
-const LEGACY_TRANSCRIPTION_MODEL = "openai/gpt-transcribe";
+const DEFAULT_TRANSCRIPTION_MODEL = "openai/gpt-4o-mini-transcribe";
+// Models that were shipped as the default at some point. Found under the v1
+// storage key they represent our old choice, not the user's, so the one-time
+// v2 migration upgrades them; picked explicitly in v2 they stick.
+const SUPERSEDED_DEFAULT_MODELS = [
+  "openai/whisper-large-v3-turbo",
+  "openai/gpt-transcribe",
+];
 
 export type DictationShortcut = "right_command" | "left_function";
 export type DictationActivation = "hold" | "toggle";
@@ -56,7 +63,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   activation: "hold",
   provider: "system",
   inputDeviceId: null,
-  model: FAST_TRANSCRIPTION_MODEL,
+  model: DEFAULT_TRANSCRIPTION_MODEL,
   repasteShortcutEnabled: true,
 };
 
@@ -94,9 +101,7 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
         ? candidate.inputDeviceId
         : null,
     model:
-      typeof candidate.model === "string" &&
-      candidate.model.trim() &&
-      candidate.model.trim() !== LEGACY_TRANSCRIPTION_MODEL
+      typeof candidate.model === "string" && candidate.model.trim()
         ? candidate.model.trim()
         : DEFAULT_DICTATION_SETTINGS.model,
     repasteShortcutEnabled:
@@ -110,9 +115,15 @@ export function readDictationSettings(): DictationSettings {
   if (typeof window === "undefined") return DEFAULT_DICTATION_SETTINGS;
   try {
     const raw = window.localStorage.getItem(DICTATION_STORAGE_KEY);
-    return raw
-      ? normalizeDictationSettings(JSON.parse(raw) as unknown)
-      : DEFAULT_DICTATION_SETTINGS;
+    if (raw) return normalizeDictationSettings(JSON.parse(raw) as unknown);
+    const legacyRaw = window.localStorage.getItem(LEGACY_DICTATION_STORAGE_KEY);
+    if (!legacyRaw) return DEFAULT_DICTATION_SETTINGS;
+    const migrated = normalizeDictationSettings(
+      JSON.parse(legacyRaw) as unknown,
+    );
+    return SUPERSEDED_DEFAULT_MODELS.includes(migrated.model)
+      ? { ...migrated, model: DEFAULT_TRANSCRIPTION_MODEL }
+      : migrated;
   } catch {
     return DEFAULT_DICTATION_SETTINGS;
   }

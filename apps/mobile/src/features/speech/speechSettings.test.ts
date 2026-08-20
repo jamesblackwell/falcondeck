@@ -42,6 +42,22 @@ describe('speech settings', () => {
     expect(getSpeechSettings().model).toBe(DEFAULT_OPENROUTER_STT_MODEL)
   })
 
+  it('upgrades the old whisper default from v1 but keeps deliberate picks', () => {
+    setJson('fd.speechSettings.v1', {
+      provider: 'openrouter',
+      model: 'openai/whisper-large-v3-turbo',
+      language: 'en',
+    })
+    const migrated = getSpeechSettings()
+    expect(migrated.model).toBe(DEFAULT_OPENROUTER_STT_MODEL)
+    expect(migrated.language).toBe('en')
+
+    // A model picked explicitly (stored under v2) sticks, even if it was once
+    // a shipped default.
+    updateSpeechSettings({ model: 'openai/whisper-large-v3-turbo' })
+    expect(getSpeechSettings().model).toBe('openai/whisper-large-v3-turbo')
+  })
+
   it('keeps a failed recording available for a later retry', () => {
     const pending = setPendingVoiceRecording('file:///voice.m4a', 'openrouter')
     expect(getPendingVoiceRecording()).toEqual(pending)

@@ -51,11 +51,14 @@ const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(20);
 // should fail in seconds, while a legitimately long transcription may not.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
+// Ordered by measured accuracy-per-second on real dictation audio
+// (Aug 2026 benchmark: gpt-4o-mini and nova-3 tied for accuracy at ~1s and
+// ~0.8s; whisper-turbo and parakeet are the fast safety nets).
 const FALLBACK_MODELS: [&str; 4] = [
-    "openai/whisper-large-v3-turbo",
-    "deepgram/nova-3",
-    "openai/gpt-transcribe",
     "openai/gpt-4o-mini-transcribe",
+    "deepgram/nova-3",
+    "openai/whisper-large-v3-turbo",
+    "nvidia/parakeet-tdt-0.6b-v3",
 ];
 
 /// One client for every OpenRouter call. Reusing the pool skips the DNS +
@@ -416,27 +419,34 @@ fn decoded_base64_len(value: &str) -> Result<usize, DaemonError> {
         .map_err(|_| DaemonError::BadRequest("audio is not valid base64".to_string()))
 }
 
+/// ":nitro" is OpenRouter's throughput-first routing variant: the same model
+/// served by its fastest provider. Models already carrying a variant suffix
+/// (":free", ":floor", …) are left alone.
+fn with_nitro(model: &str) -> Option<String> {
+    (!model.is_empty() && !model.contains(':')).then(|| format!("{model}:nitro"))
+}
+
 fn fallback_models(preferred: &str) -> Vec<String> {
     let preferred = preferred.trim();
-    // ":nitro" is OpenRouter's throughput-first routing variant: the same
-    // model served by its fastest provider. Try it before the plain id; a
-    // rejected variant fails fast with a 4xx and the plain model runs next.
-    let nitro = (!preferred.is_empty() && !preferred.contains(':'))
-        .then(|| format!("{preferred}:nitro"));
-    nitro
-        .into_iter()
-        .chain(std::iter::once(preferred.to_string()))
-        .chain(FALLBACK_MODELS.iter().map(|model| (*model).to_string()))
-        .filter(|model| !model.is_empty())
-        .fold(Vec::new(), |mut models, model| {
-            if !models.contains(&model) {
+    let mut models: Vec<String> = Vec::new();
+    {
+        let mut add = |model: String| {
+            if !model.is_empty() && !models.contains(&model) {
                 models.push(model);
             }
-            models
-        })
-        .into_iter()
-        .take(5)
-        .collect()
+        };
+        if let Some(nitro) = with_nitro(preferred) {
+            add(nitro);
+        }
+        // The plain preferred model is the safety net for a rejected variant;
+        // the fallbacks run nitro-only to keep the chain short.
+        add(preferred.to_string());
+        for fallback in FALLBACK_MODELS {
+            add(with_nitro(fallback).unwrap_or_else(|| fallback.to_string()));
+        }
+    }
+    models.truncate(6);
+    models
 }
 
 fn should_try_fallback(status: u16) -> bool {
@@ -623,15 +633,27 @@ mod tests {
 
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
-        let models = fallback_models("openai/whisper-large-v3-turbo");
+        let models = fallback_models("openai/gpt-4o-mini-transcribe");
         assert_eq!(
-            models[..2],
+            models,
             [
-                "openai/whisper-large-v3-turbo:nitro".to_string(),
-                "openai/whisper-large-v3-turbo".to_string(),
+                "openai/gpt-4o-mini-transcribe:nitro",
+                "openai/gpt-4o-mini-transcribe",
+                "deepgram/nova-3:nitro",
+                "openai/whisper-large-v3-turbo:nitro",
+                "nvidia/parakeet-tdt-0.6b-v3:nitro",
             ]
         );
-        assert_eq!(models.len(), 5);
+    }
+
+    #[test]
+    fn fallback_models_apply_nitro_to_every_entry() {
+        let models = fallback_models("mistralai/voxtral-mini-transcribe");
+        assert_eq!(models[0], "mistralai/voxtral-mini-transcribe:nitro");
+        assert_eq!(models[1], "mistralai/voxtral-mini-transcribe");
+        // Every fallback rides the throughput-first variant too.
+        assert!(models[2..].iter().all(|model| model.ends_with(":nitro")));
+        assert_eq!(models.len(), 6);
     }
 
     #[test]

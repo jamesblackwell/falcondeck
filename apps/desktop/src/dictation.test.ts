@@ -45,13 +45,42 @@ describe("dictation settings", () => {
     });
   });
 
-  it("migrates the original default to the faster transcription model", () => {
-    expect(
-      normalizeDictationSettings({
+  it("upgrades old default models found under the v1 storage key", () => {
+    window.localStorage.setItem(
+      "falcondeck.desktop.dictation.v1",
+      JSON.stringify({
         ...DEFAULT_DICTATION_SETTINGS,
-        model: "openai/gpt-transcribe",
-      }).model,
-    ).toBe(DEFAULT_DICTATION_SETTINGS.model);
+        model: "openai/whisper-large-v3-turbo",
+        shortcut: "left_function",
+      }),
+    );
+    const migrated = readDictationSettings();
+    expect(migrated.model).toBe(DEFAULT_DICTATION_SETTINGS.model);
+    // Other choices survive the migration untouched.
+    expect(migrated.shortcut).toBe("left_function");
+  });
+
+  it("keeps a model picked explicitly under the v2 storage key", () => {
+    writeDictationSettings({
+      ...DEFAULT_DICTATION_SETTINGS,
+      model: "openai/whisper-large-v3-turbo",
+    });
+    expect(readDictationSettings().model).toBe(
+      "openai/whisper-large-v3-turbo",
+    );
+  });
+
+  it("preserves a deliberately chosen v1 model through the migration", () => {
+    window.localStorage.setItem(
+      "falcondeck.desktop.dictation.v1",
+      JSON.stringify({
+        ...DEFAULT_DICTATION_SETTINGS,
+        model: "mistralai/voxtral-mini-transcribe",
+      }),
+    );
+    expect(readDictationSettings().model).toBe(
+      "mistralai/voxtral-mini-transcribe",
+    );
   });
 
   it("enables the transcript re-paste shortcut for settings saved before it existed", () => {

@@ -1,11 +1,17 @@
 import { getJson, removeKey, setJson } from '@/storage/mmkv'
 
-const SPEECH_SETTINGS_KEY = 'fd.speechSettings.v1'
+const SPEECH_SETTINGS_KEY = 'fd.speechSettings.v2'
+const LEGACY_SPEECH_SETTINGS_KEY = 'fd.speechSettings.v1'
 const PENDING_RECORDING_KEY = 'fd.pendingVoiceRecording.v1'
 
-export const DEFAULT_OPENROUTER_STT_MODEL =
-  'openai/whisper-large-v3-turbo'
-const LEGACY_OPENROUTER_STT_MODEL = 'openai/gpt-transcribe'
+export const DEFAULT_OPENROUTER_STT_MODEL = 'openai/gpt-4o-mini-transcribe'
+// Models that were shipped as the default at some point. Found under the v1
+// storage key they represent our old choice, not the user's, so the one-time
+// v2 migration upgrades them; picked explicitly in v2 they stick.
+const SUPERSEDED_DEFAULT_STT_MODELS = [
+  'openai/whisper-large-v3-turbo',
+  'openai/gpt-transcribe',
+]
 
 export type SpeechProvider = 'on-device' | 'openrouter'
 
@@ -27,18 +33,16 @@ const DEFAULT_SETTINGS: SpeechSettings = {
   language: null,
 }
 
-export function getSpeechSettings(): SpeechSettings {
-  const stored = getJson<Partial<SpeechSettings>>(SPEECH_SETTINGS_KEY)
-  if (!stored) return DEFAULT_SETTINGS
+function normalizeSpeechSettings(
+  stored: Partial<SpeechSettings>,
+): SpeechSettings {
   return {
     provider:
       stored.provider === 'on-device' || stored.provider === 'openrouter'
         ? stored.provider
         : null,
     model:
-      typeof stored.model === 'string' &&
-      stored.model.trim() &&
-      stored.model.trim() !== LEGACY_OPENROUTER_STT_MODEL
+      typeof stored.model === 'string' && stored.model.trim()
         ? stored.model.trim()
         : DEFAULT_OPENROUTER_STT_MODEL,
     language:
@@ -46,6 +50,17 @@ export function getSpeechSettings(): SpeechSettings {
         ? stored.language.trim()
         : null,
   }
+}
+
+export function getSpeechSettings(): SpeechSettings {
+  const stored = getJson<Partial<SpeechSettings>>(SPEECH_SETTINGS_KEY)
+  if (stored) return normalizeSpeechSettings(stored)
+  const legacy = getJson<Partial<SpeechSettings>>(LEGACY_SPEECH_SETTINGS_KEY)
+  if (!legacy) return DEFAULT_SETTINGS
+  const migrated = normalizeSpeechSettings(legacy)
+  return SUPERSEDED_DEFAULT_STT_MODELS.includes(migrated.model)
+    ? { ...migrated, model: DEFAULT_OPENROUTER_STT_MODEL }
+    : migrated
 }
 
 export function updateSpeechSettings(
@@ -58,6 +73,7 @@ export function updateSpeechSettings(
 
 export function resetSpeechSettings(): void {
   removeKey(SPEECH_SETTINGS_KEY)
+  removeKey(LEGACY_SPEECH_SETTINGS_KEY)
 }
 
 export function getPendingVoiceRecording(): PendingVoiceRecording | null {
