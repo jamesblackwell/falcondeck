@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufRead, BufReader as StdBufReader},
+    io::{BufRead, BufReader as StdBufReader, Read},
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -68,12 +68,6 @@ pub struct CodexProviderMetadata {
     pub account: AccountSummary,
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
-}
-
-struct ParsedThreadRecord {
-    summary: ThreadSummary,
-    session_path: Option<String>,
-    title_is_provider_preview: bool,
 }
 
 pub struct HydratedThread {
@@ -197,7 +191,60 @@ pub struct CodexSession {
     /// Set before an intentional shutdown so the stdout reader does not treat
     /// the exit as a crash and schedule a reconnect.
     expected_exit: AtomicBool,
+    /// The wrapper CLI and every process it launches live in this group. The
+    /// Homebrew `codex` entry point is a Node script which spawns the native
+    /// app-server, so killing only `Child` leaves the real server orphaned.
+    process_group_id: Option<u32>,
     state: AppState,
+}
+
+/// Owns a just-spawned app-server until bootstrap succeeds. Async cancellation
+/// drops this guard, which is the path taken by the workspace restore timeout;
+/// it must synchronously stop the process tree because no async cleanup future
+/// is polled after cancellation.
+struct CodexBootstrapGuard {
+    session: Arc<CodexSession>,
+    armed: bool,
+}
+
+impl CodexBootstrapGuard {
+    fn new(session: Arc<CodexSession>) -> Self {
+        Self {
+            session,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CodexBootstrapGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.session.expected_exit.store(true, Ordering::Release);
+        self.session.closed.store(true, Ordering::Release);
+        self.session.terminate_process_tree();
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
+    let process_group_id = libc::pid_t::try_from(process_group_id)
+        .map_err(|_| std::io::Error::other("process group id is out of range"))?;
+    let result = unsafe { libc::kill(-process_group_id, libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 impl CodexSession {
@@ -206,6 +253,28 @@ impl CodexSession {
         workspace_path: String,
         codex_bin: String,
         state: AppState,
+    ) -> Result<CodexBootstrap, DaemonError> {
+        Self::connect_inner(workspace_id, workspace_path, codex_bin, state, true).await
+    }
+
+    /// Reconnects the live control plane without re-listing history that the
+    /// daemon already holds. Reconnect used to rebuild and then discard up to
+    /// 100 transcripts on every attempt.
+    pub async fn reconnect(
+        workspace_id: String,
+        workspace_path: String,
+        codex_bin: String,
+        state: AppState,
+    ) -> Result<CodexBootstrap, DaemonError> {
+        Self::connect_inner(workspace_id, workspace_path, codex_bin, state, false).await
+    }
+
+    async fn connect_inner(
+        workspace_id: String,
+        workspace_path: String,
+        codex_bin: String,
+        state: AppState,
+        list_threads: bool,
     ) -> Result<CodexBootstrap, DaemonError> {
         let resolved = resolve_agent_binary("codex", &codex_bin);
         let mut command = Command::new(&resolved.executable);
@@ -226,6 +295,11 @@ impl CodexSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Give the wrapper and its native child their own process group. This
+        // lets shutdown and cancellation terminate the complete tree without
+        // signalling the desktop process that spawned it.
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(path) = preferred_command_path(&resolved.executable) {
             command.env("PATH", path);
         }
@@ -244,6 +318,11 @@ impl CodexSession {
                 }
                 DaemonError::Process(format!("failed to start codex app-server: {error}"))
             })?;
+
+        #[cfg(unix)]
+        let process_group_id = child.id();
+        #[cfg(not(unix))]
+        let process_group_id = None;
 
         let stdin = child
             .stdin
@@ -267,8 +346,10 @@ impl CodexSession {
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             expected_exit: AtomicBool::new(false),
+            process_group_id,
             state: state.clone(),
         });
+        let mut bootstrap_guard = CodexBootstrapGuard::new(Arc::clone(&session));
 
         {
             let session = Arc::clone(&session);
@@ -294,9 +375,8 @@ impl CodexSession {
             });
         }
 
-        // Any bootstrap failure must tear the freshly spawned app-server back
-        // down; returning early would orphan the process (until the daemon
-        // itself exits and kill_on_drop reaps it).
+        // Any bootstrap failure or cancellation tears the freshly spawned
+        // process group down through `bootstrap_guard`.
         let bootstrap_result = async {
             session
                 .send_control_request(
@@ -351,68 +431,32 @@ impl CodexSession {
                     Vec::new()
                 }
             };
-            let threads_value = session
-                .send_control_request(
-                    "thread/list",
-                    json!({
-                        "limit": 100,
-                        "sourceKinds": [
-                            "cli",
-                            "vscode",
-                            "appServer",
-                            "subAgentReview",
-                            "subAgentCompact",
-                            "subAgentThreadSpawn",
-                            "unknown"
-                        ]
-                    }),
-                )
-                .await?;
-            let thread_records = parse_threads(&workspace_id, &workspace_path, &threads_value);
-            let mut threads = Vec::with_capacity(thread_records.len());
-            for record in thread_records {
-                let ParsedThreadRecord {
-                    summary,
-                    session_path,
-                    title_is_provider_preview,
-                } = record;
-                let (summary, items) = match session.read_thread(&summary.id).await {
-                    Ok(value) => {
-                        let mut items = hydrate_thread_items(&value);
-                        if let Some(path) =
-                            extract_thread_session_path(&value).or(session_path.clone())
-                        {
-                            if items.is_empty() {
-                                items =
-                                    hydrate_thread_items_from_session_file(&path, &workspace_path);
-                            } else {
-                                supplement_thread_items_with_session_tool_calls(
-                                    &mut items,
-                                    &path,
-                                    &workspace_path,
-                                );
-                            }
-                        }
-                        (hydrate_thread_summary(summary, &value, &items), items)
-                    }
-                    Err(error) => {
-                        warn!("failed to read codex thread {}: {error}", summary.id);
-                        let items = session_path
-                            .as_deref()
-                            .map(|path| {
-                                hydrate_thread_items_from_session_file(path, &workspace_path)
-                            })
-                            .unwrap_or_default();
-                        let summary = hydrate_thread_summary(summary, &Value::Null, &items);
-                        (summary, items)
-                    }
-                };
-                threads.push(HydratedThread {
-                    summary,
-                    items,
-                    title_is_provider_preview,
-                });
-            }
+            // The list already contains everything the sidebar and snapshots
+            // need. Transcripts are resumed lazily when a thread is opened;
+            // eagerly issuing 100 sequential thread/read calls made daemon
+            // readiness proportional to the user's entire Codex history.
+            let threads = if list_threads {
+                let threads_value = session
+                    .send_control_request(
+                        "thread/list",
+                        json!({
+                            "limit": 100,
+                            "sourceKinds": [
+                                "cli",
+                                "vscode",
+                                "appServer",
+                                "subAgentReview",
+                                "subAgentCompact",
+                                "subAgentThreadSpawn",
+                                "unknown"
+                            ]
+                        }),
+                    )
+                    .await?;
+                parse_threads(&workspace_id, &workspace_path, &threads_value)
+            } else {
+                Vec::new()
+            };
 
             Ok::<_, DaemonError>((account, models, collaboration_modes, threads))
         }
@@ -426,6 +470,7 @@ impl CodexSession {
             }
         };
 
+        bootstrap_guard.disarm();
         Ok(CodexBootstrap {
             session,
             account,
@@ -456,7 +501,7 @@ impl CodexSession {
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         self.expected_exit.store(true, Ordering::Release);
-        self.closed.store(true, Ordering::Release);
+        let was_closed = self.closed.swap(true, Ordering::AcqRel);
         {
             let pending = std::mem::take(&mut *self.pending.lock().await);
             for (_, tx) in pending {
@@ -465,10 +510,27 @@ impl CodexSession {
                 )));
             }
         }
+        // Signal before awaiting the child lock: the stdout task may already
+        // hold that lock while waiting for the wrapper to exit.
+        if !was_closed {
+            self.terminate_process_tree();
+        }
         let mut child = self.child.lock().await;
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(2), child.wait()).await;
         Ok(())
+    }
+
+    fn terminate_process_tree(&self) {
+        #[cfg(unix)]
+        if let Some(process_group_id) = self.process_group_id {
+            let _ = kill_process_group(process_group_id);
+        }
+
+        #[cfg(not(unix))]
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
     }
 
     pub fn is_closed(&self) -> bool {
@@ -573,11 +635,6 @@ impl CodexSession {
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok(())
-    }
-
-    pub async fn read_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
-        self.send_control_request("thread/read", json!({ "threadId": thread_id }))
-            .await
     }
 
     pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
@@ -1471,6 +1528,29 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_process_group_can_be_terminated_as_one_unit() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id().unwrap();
+
+        kill_process_group(process_group_id).unwrap();
+        let status = timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("isolated process group should stop promptly")
+            .unwrap();
+
+        assert!(!status.success());
+    }
+
     #[test]
     fn prefers_account_identity_over_requires_auth_flag() {
         let account = parse_account(&json!({
@@ -1633,6 +1713,11 @@ mod tests {
         );
 
         assert_eq!(threads.len(), 1);
+        assert!(threads[0].items.is_empty());
+        assert_eq!(
+            threads[0].summary.native_session_id.as_deref(),
+            Some("thread-1")
+        );
         assert_eq!(
             threads[0].summary.agent.model_id.as_deref(),
             Some("gpt-5.4")

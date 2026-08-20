@@ -117,7 +117,7 @@ pub(super) fn parse_threads(
     workspace_id: &str,
     workspace_path: &str,
     value: &Value,
-) -> Vec<ParsedThreadRecord> {
+) -> Vec<HydratedThread> {
     let entries = extract_thread_entries(value);
     let now = Utc::now();
 
@@ -132,9 +132,9 @@ pub(super) fn parse_threads(
             let id = extract_thread_id(entry)?;
             let preview = extract_string(entry, &["preview"]);
             let provider_title = extract_thread_title(entry);
-            Some(ParsedThreadRecord {
+            Some(HydratedThread {
                 summary: ThreadSummary {
-                    id,
+                    id: id.clone(),
                     workspace_id: workspace_id.to_string(),
                     title: provider_title
                         .clone()
@@ -142,7 +142,7 @@ pub(super) fn parse_threads(
                         .map(|title| truncate_preview(&title))
                         .unwrap_or_else(|| "Untitled thread".to_string()),
                     provider: AgentProvider::CODEX,
-                    native_session_id: None,
+                    native_session_id: Some(id),
                     provider_transport: None,
                     handoff_from: None,
                     origin: None,
@@ -192,7 +192,7 @@ pub(super) fn parse_threads(
                     queued_turns: Vec::new(),
                     variant: None,
                 },
-                session_path: extract_string(entry, &["path"]),
+                items: Vec::new(),
                 title_is_provider_preview: provider_title.is_none() && preview.is_some(),
             })
         })

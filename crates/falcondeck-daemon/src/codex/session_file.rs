@@ -1,5 +1,60 @@
 use super::*;
 
+const MAX_SESSION_LINE_BYTES: usize = 512_000;
+
+/// Visits newline-delimited records without ever allocating more than the
+/// accepted line limit. `BufRead::lines` only reports a line's size after it
+/// has built the complete `String`; real Codex rollouts contain individual
+/// image/tool records tens of megabytes long.
+fn visit_bounded_lines<R: BufRead>(
+    reader: &mut R,
+    mut visit: impl FnMut(&[u8]) -> bool,
+) -> std::io::Result<()> {
+    let mut line = Vec::with_capacity(8 * 1024);
+    let mut over_limit = false;
+
+    loop {
+        let (consumed, line_complete, reached_eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline = available.iter().position(|byte| *byte == b'\n');
+                let segment_end = newline.unwrap_or(available.len());
+                if !over_limit {
+                    if line.len().saturating_add(segment_end) <= MAX_SESSION_LINE_BYTES {
+                        line.extend_from_slice(&available[..segment_end]);
+                    } else {
+                        line.clear();
+                        over_limit = true;
+                    }
+                }
+                (
+                    newline.map_or(available.len(), |index| index + 1),
+                    newline.is_some(),
+                    false,
+                )
+            }
+        };
+
+        if reached_eof {
+            if !over_limit && !line.is_empty() {
+                let _ = visit(&line);
+            }
+            return Ok(());
+        }
+
+        reader.consume(consumed);
+        if line_complete {
+            if !over_limit && !visit(&line) {
+                return Ok(());
+            }
+            line.clear();
+            over_limit = false;
+        }
+    }
+}
+
 pub(super) fn hydrate_thread_items_from_session_file(
     session_path: &str,
     workspace_path: &str,
@@ -8,16 +63,24 @@ pub(super) fn hydrate_thread_items_from_session_file(
         Ok(file) => file,
         Err(_) => return Vec::new(),
     };
+    // Read a stable snapshot. Without `take`, a rollout that is still being
+    // appended can keep a restore scan chasing a moving EOF indefinitely.
+    let snapshot_len = file
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(u64::MAX);
+    if snapshot_len == 0 {
+        return Vec::new();
+    }
+    let mut reader = StdBufReader::new(file.take(snapshot_len));
     let mut items: Vec<SessionHydratedItem> = Vec::new();
     let mut tool_calls_by_call_id: HashMap<String, usize> = HashMap::new();
     let mut matches_workspace = false;
+    let mut rejected_workspace = false;
 
-    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
-        if line.len() > 512_000 {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
+    let _ = visit_bounded_lines(&mut reader, |line| {
+        let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            return true;
         };
         let entry_type = value
             .get("type")
@@ -29,19 +92,20 @@ pub(super) fn hydrate_thread_items_from_session_file(
         {
             matches_workspace = cwd == workspace_path;
             if !matches_workspace {
-                return Vec::new();
+                rejected_workspace = true;
+                return false;
             }
         }
 
         if !matches_workspace {
-            continue;
+            return true;
         }
 
         if let Some((call_id, output, completed_at)) = session_tool_call_output(&value) {
             if let Some(index) = tool_calls_by_call_id.get(&call_id).copied() {
                 apply_session_tool_call_output(&mut items[index].item, output, completed_at);
             }
-            continue;
+            return true;
         }
 
         if let Some(item) = build_session_hydrated_item_from_entry(&value) {
@@ -50,6 +114,11 @@ pub(super) fn hydrate_thread_items_from_session_file(
             }
             items.push(item);
         }
+        true
+    });
+
+    if rejected_workspace {
+        return Vec::new();
     }
 
     let mut conversation_items = items
@@ -323,4 +392,40 @@ fn should_keep_session_hydrated_item(
 
 fn normalized_session_message(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn bounded_line_reader_discards_oversized_records_and_continues() {
+        let mut input = vec![b'x'; MAX_SESSION_LINE_BYTES + 1];
+        input.extend_from_slice(b"\nkept\nlast");
+        let mut reader = Cursor::new(input);
+        let mut visited = Vec::new();
+
+        visit_bounded_lines(&mut reader, |line| {
+            visited.push(String::from_utf8(line.to_vec()).unwrap());
+            true
+        })
+        .unwrap();
+
+        assert_eq!(visited, ["kept", "last"]);
+    }
+
+    #[test]
+    fn bounded_line_reader_honors_early_stop() {
+        let mut reader = Cursor::new(b"first\nsecond\nthird\n".to_vec());
+        let mut visited = Vec::new();
+
+        visit_bounded_lines(&mut reader, |line| {
+            visited.push(String::from_utf8(line.to_vec()).unwrap());
+            false
+        })
+        .unwrap();
+
+        assert_eq!(visited, ["first"]);
+    }
 }
