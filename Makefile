@@ -398,25 +398,28 @@ desktop-install: desktop-brand-assets
 			echo "Expected app bundle not found at $(DESKTOP_BUNDLE_APP)"; \
 			exit 1; \
 		fi; \
-		echo "Installing FalconDeck.app to $(APPLICATIONS_APP)"; \
-		rm -rf "$(APPLICATIONS_APP)"; \
-		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
 		if command -v codesign >/dev/null 2>&1; then \
 			signing_identity="$${FALCONDECK_LOCAL_CODESIGN_IDENTITY:--}"; \
-			bundled_deno="$(APPLICATIONS_APP)/Contents/MacOS/deno"; \
+			bundled_deno="$(DESKTOP_BUNDLE_APP)/Contents/MacOS/deno"; \
 			if [ -f "$$bundled_deno" ]; then \
 				echo "Signing bundled Deno sidecar before the app bundle"; \
 				codesign --force --sign "$$signing_identity" "$$bundled_deno"; \
 			fi; \
 			if [ "$$signing_identity" = "-" ]; then \
-				bundle_identifier=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$(APPLICATIONS_APP)/Contents/Info.plist"); \
+				bundle_identifier=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$(DESKTOP_BUNDLE_APP)/Contents/Info.plist"); \
 				local_requirement="=designated => identifier \"$$bundle_identifier\""; \
 				echo "Warning: using an identifier-only ad-hoc signature for local development"; \
-				codesign --force --sign - --requirements "$$local_requirement" "$(APPLICATIONS_APP)"; \
+				codesign --force --sign - --requirements "$$local_requirement" "$(DESKTOP_BUNDLE_APP)"; \
 			else \
 				echo "Signing FalconDeck.app with local identity $$signing_identity"; \
-				codesign --force --sign "$$signing_identity" "$(APPLICATIONS_APP)"; \
+				codesign --force --sign "$$signing_identity" "$(DESKTOP_BUNDLE_APP)"; \
 			fi; \
+			codesign --verify --deep --strict "$(DESKTOP_BUNDLE_APP)"; \
+		fi; \
+		echo "Installing FalconDeck.app to $(APPLICATIONS_APP)"; \
+		rm -rf "$(APPLICATIONS_APP)"; \
+		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
+		if command -v codesign >/dev/null 2>&1; then \
 			codesign --verify --deep --strict "$(APPLICATIONS_APP)"; \
 		fi; \
 		echo "Installed $(APPLICATIONS_APP)"; \
