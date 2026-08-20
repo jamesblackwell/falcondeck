@@ -7,6 +7,7 @@ import {
   applyEventToThreadDetail,
   applySnapshotEvent,
   claimHostPairing,
+  isDaemonRpcReady,
   normalizeDaemonSnapshot,
   normalizeThreadDetail,
   normalizeThreadHandle,
@@ -251,12 +252,18 @@ export class HostConnection {
         this.status = status
         if (status === 'encrypted') {
           this.lastError = null
-          void this.refreshSnapshot().catch(() => {})
+          if (isDaemonRpcReady(this.presence)) {
+            void this.refreshSnapshot().catch(() => {})
+          }
         }
         this.onChange()
       },
       onPresence: (presence) => {
+        const becameReady = !isDaemonRpcReady(this.presence) && isDaemonRpcReady(presence)
         this.presence = presence
+        if (becameReady && this.status === 'encrypted' && !this.snapshot) {
+          void this.refreshSnapshot().catch(() => {})
+        }
         this.onChange()
       },
       onEvents: (events) => this.applyEventsWithSnapshotBarrier(events),

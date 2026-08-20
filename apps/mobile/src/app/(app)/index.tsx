@@ -20,6 +20,7 @@ import {
   defaultProvider,
   imageAttachmentSendBlockReason,
   operationalConditionDismissalKey,
+  isDaemonRpcReady,
   workspaceOperationalConditions,
   orderedInteractiveRequestQueue,
   providerForThread,
@@ -173,6 +174,7 @@ export default function HomeScreen() {
     })),
   );
   const syncStatus = useSessionSyncStatus();
+  const daemonRpcReady = isDaemonRpcReady(machinePresence);
   const {
     attachments,
     draft,
@@ -985,7 +987,7 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted) {
+    if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted || !daemonRpcReady) {
       setDetailLoadingThreadId(null);
       setIsLoadingOlder(false);
       useSessionStore.getState().setThreadDetail(null);
@@ -1028,6 +1030,7 @@ export default function HomeScreen() {
       if (snapTimer) clearTimeout(snapTimer);
     };
   }, [
+    daemonRpcReady,
     isEncrypted,
     loadThreadDetail,
     scrollToBottomIfFollowing,
@@ -1039,9 +1042,9 @@ export default function HomeScreen() {
   // the session is encrypted and synced, so tapping between them renders from
   // cache instantly instead of "Loading thread…".
   useEffect(() => {
-    if (!isEncrypted || !hasSyncedOnce) return;
+    if (!isEncrypted || !hasSyncedOnce || !daemonRpcReady) return;
     void prefetchRecentThreadDetails();
-  }, [hasSyncedOnce, isEncrypted, prefetchRecentThreadDetails]);
+  }, [daemonRpcReady, hasSyncedOnce, isEncrypted, prefetchRecentThreadDetails]);
 
   // Opening a thread starts at the bottom of the cached items via the list's
   // startRenderingFromBottom (the detail-load effect snaps past any newer

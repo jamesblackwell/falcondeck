@@ -36,6 +36,7 @@ import {
   generateBoxKeyPair,
   generateUserItemId,
   imageAttachmentSendBlockReason,
+  isDaemonRpcReady,
   identityPublicKeyToBase64,
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
@@ -624,7 +625,7 @@ function RemoteApp() {
   const isEncrypted = relayConnected && hasSessionKey;
   const desktopOnline = machinePresence?.daemon_connected ?? false;
   const daemonPresenceKnown = machinePresence !== null;
-  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline;
+  const daemonRpcReady = isDaemonRpcReady(machinePresence);
   const selectedThreadItems = useMemo(
     () =>
       selectedThreadId
@@ -2092,7 +2093,8 @@ function RemoteApp() {
       !selectedWorkspaceId ||
       !selectedThreadId ||
       !relayConnected ||
-      !hasSessionKey
+      !hasSessionKey ||
+      !daemonRpcReady
     ) {
       setThreadDetail(null);
       return;
@@ -2134,6 +2136,7 @@ function RemoteApp() {
     };
   }, [
     callRpc,
+    daemonRpcReady,
     hasSessionKey,
     relayConnected,
     selectedThreadId,
@@ -2204,7 +2207,7 @@ function RemoteApp() {
   ]);
 
   useEffect(() => {
-    if (!relayConnected || !hasSessionKey || snapshot) return;
+    if (!relayConnected || !hasSessionKey || !daemonRpcReady || snapshot) return;
 
     let cancelled = false;
     let retryTimer: number | null = null;
@@ -2279,6 +2282,7 @@ function RemoteApp() {
     };
   }, [
     callRpc,
+    daemonRpcReady,
     hasSessionKey,
     relayConnected,
     sessionId,

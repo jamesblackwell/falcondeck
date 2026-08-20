@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Alert, ScrollView } from 'react-native'
 import { useRouter } from 'expo-router'
+import { isDaemonRpcReady } from '@falcondeck/client-core'
 
 import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/settings'
 import { useRelayStore } from '@/store'
@@ -35,7 +36,7 @@ export default function ConnectionsSettingsScreen() {
   const [isDisconnecting, setIsDisconnecting] = useState(false)
   const desktopOnline = presence?.daemon_connected ?? false
   const daemonPresenceKnown = presence !== null
-  const daemonRpcReady = presence?.daemon_rpc_ready ?? desktopOnline
+  const daemonRpcReady = isDaemonRpcReady(presence)
 
   const disconnectAndPair = async () => {
     if (isDisconnecting) return

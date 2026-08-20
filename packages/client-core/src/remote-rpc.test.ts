@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest'
 
-import { RELAY_RPC_TIMEOUT_MS, relayRpcFailureMessage } from './remote-rpc'
+import { isDaemonRpcReady, RELAY_RPC_TIMEOUT_MS, relayRpcFailureMessage } from './remote-rpc'
+
+describe('isDaemonRpcReady', () => {
+  it('waits for an explicitly unready registry even when the daemon socket is online', () => {
+    expect(isDaemonRpcReady({
+      session_id: 'session-1',
+      daemon_connected: true,
+      daemon_rpc_ready: false,
+      last_seen_at: null,
+    })).toBe(false)
+  })
+
+  it('falls back to daemon presence for legacy relays', () => {
+    expect(isDaemonRpcReady({
+      session_id: 'session-1',
+      daemon_connected: true,
+      last_seen_at: null,
+    })).toBe(true)
+  })
+})
 
 describe('relayRpcFailureMessage', () => {
   it('waits long enough to receive the relay-owned 30 second timeout', () => {
@@ -9,19 +28,31 @@ describe('relayRpcFailureMessage', () => {
 
   it('names an unavailable method and the automatic recovery', () => {
     expect(relayRpcFailureMessage('method_unavailable', 'snapshot.current')).toBe(
-      'Your Mac is connected, but snapshot.current is not registered. FalconDeck will retry automatically.',
+      'Desktop is connected, but sync is not ready yet. FalconDeck will retry automatically.',
     )
   })
 
   it('does not promise automatic retries for one-shot remote actions', () => {
     expect(relayRpcFailureMessage('method_unavailable', 'thread.detail')).toBe(
-      'Your Mac is connected, but thread.detail is not registered. Try again in a moment.',
+      'Desktop is connected, but that action is not ready yet. Try again in a moment.',
+    )
+  })
+
+  it('blames the desktop hop when the responder leaves the relay', () => {
+    expect(relayRpcFailureMessage('responder_disconnected', 'snapshot.current')).toBe(
+      'Desktop disconnected from the relay.',
+    )
+  })
+
+  it('keeps a timeout generic because either hop can stall', () => {
+    expect(relayRpcFailureMessage('timed_out', 'snapshot.current')).toBe(
+      'Timed out waiting for a response.',
     )
   })
 
   it('does not collapse missing relay detail into a generic action error', () => {
     expect(relayRpcFailureMessage(undefined, 'thread.detail')).toBe(
-      'Remote thread.detail failed without details.',
+      'The request failed without details.',
     )
   })
 })

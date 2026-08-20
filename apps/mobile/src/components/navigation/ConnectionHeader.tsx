@@ -2,7 +2,9 @@ import { memo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet } from 'react-native-unistyles'
 
-import type { MachinePresence } from '@falcondeck/client-core'
+import { isDaemonRpcReady, type MachinePresence } from '@falcondeck/client-core'
+
+import { CONNECTION_COPY } from '@/lib/connection-copy'
 
 interface ConnectionHeaderProps {
   connectionStatus: string
@@ -12,12 +14,12 @@ interface ConnectionHeaderProps {
 }
 
 export function connectionLabel(status: string): string {
-  if (status === 'encrypted') return 'Connected'
-  if (status === 'connected') return 'Securing session…'
-  if (status === 'connecting') return 'Connecting…'
-  if (status === 'disconnected') return 'Disconnected'
-  if (status === 'claiming') return 'Pairing…'
-  return 'Not connected'
+  if (status === 'encrypted') return CONNECTION_COPY.connected
+  if (status === 'connected') return CONNECTION_COPY.securing
+  if (status === 'connecting') return CONNECTION_COPY.connecting
+  if (status === 'disconnected') return CONNECTION_COPY.reconnecting
+  if (status === 'claiming') return CONNECTION_COPY.pairingShort
+  return CONNECTION_COPY.notConnected
 }
 
 export type ConnectionTone = 'connected' | 'repairing' | 'disconnected'
@@ -32,10 +34,10 @@ export function connectionState(
   const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
-    if (!daemonPresenceKnown) return { tone: 'repairing', label: 'Checking your Mac…' }
-    if (!desktopOnline) return { tone: 'disconnected', label: 'Your Mac is offline' }
-    if (!daemonRpcReady) return { tone: 'repairing', label: 'Sync repairing' }
-    return { tone: 'connected', label: 'Connected' }
+    if (!daemonPresenceKnown) return { tone: 'repairing', label: CONNECTION_COPY.checkingDesktop }
+    if (!desktopOnline) return { tone: 'disconnected', label: CONNECTION_COPY.desktopOffline }
+    if (!daemonRpcReady) return { tone: 'repairing', label: CONNECTION_COPY.repairing }
+    return { tone: 'connected', label: CONNECTION_COPY.connected }
   }
 
   return {
@@ -51,7 +53,7 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   onPress,
 }: ConnectionHeaderProps) {
   const desktopOnline = machinePresence?.daemon_connected ?? false
-  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline
+  const daemonRpcReady = isDaemonRpcReady(machinePresence)
   const state = connectionState(
     connectionStatus,
     isEncrypted,

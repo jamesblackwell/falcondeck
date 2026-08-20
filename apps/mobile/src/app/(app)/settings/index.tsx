@@ -3,7 +3,7 @@ import { useRouter, type Href } from 'expo-router'
 import { Bell, Info, MessageSquareText, Mic, MonitorCog, Palette } from 'lucide-react-native'
 import { useUnistyles } from 'react-native-unistyles'
 
-import { normalizePreferences } from '@falcondeck/client-core'
+import { isDaemonRpcReady, normalizePreferences } from '@falcondeck/client-core'
 
 import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/settings'
 import { useRelayStore, useSessionStore } from '@/store'
@@ -38,7 +38,7 @@ export default function SettingsScreen() {
   const normalized = normalizePreferences(preferences)
   const desktopOnline = machinePresence?.daemon_connected ?? false
   const daemonPresenceKnown = machinePresence !== null
-  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline
+  const daemonRpcReady = isDaemonRpcReady(machinePresence)
   const appearanceValue = themeMode === 'system'
     ? 'System'
     : themeMode === 'light' ? 'Light' : 'Dark'

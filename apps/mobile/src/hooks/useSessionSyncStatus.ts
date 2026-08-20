@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { isDaemonRpcReady } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore } from '@/store'
 import { resolveSessionSyncStatus, type SessionSyncStatus } from '@/lib/session-status'
@@ -20,7 +21,7 @@ export function useSessionSyncStatus(): SessionSyncStatus {
   const daemonPresenceKnown = machinePresence !== null
   // Older relays omit readiness. Preserve their transport-only behaviour
   // until the relay upgrade reaches the device.
-  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? daemonConnected
+  const daemonRpcReady = isDaemonRpcReady(machinePresence)
 
   // Memoised so the banner's memo() actually holds: the resolver returns a
   // fresh object every call and this hook runs on every parent render.
