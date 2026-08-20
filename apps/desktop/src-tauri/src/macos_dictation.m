@@ -186,8 +186,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (enabled) {
     [self installEventTapIfNeeded];
     [self surfaceRetainedRecordingIfNeeded];
-  } else if (self.recording) {
-    [self cancelRecording];
+  } else {
+    // Stop routing every system-wide keystroke through the callback while
+    // dictation is off; re-enabling re-arms the existing tap.
+    if (self.eventTap) CGEventTapEnable(self.eventTap, false);
+    if (self.recording) [self cancelRecording];
   }
 }
 
@@ -409,11 +412,16 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [session addInput:input];
   [session addOutput:output];
   [session commitConfiguration];
+  // Speech models resample to 16 kHz mono internally, so recording above
+  // that only inflates the file. 32 kbps AAC yields identical transcripts
+  // while cutting the OpenRouter upload several-fold versus the previous
+  // 44.1 kHz high-quality encode — and the 8 MiB cap now covers far longer
+  // takes.
   output.audioSettings = @{
     AVFormatIDKey : @(kAudioFormatMPEG4AAC),
-    AVSampleRateKey : @44100,
+    AVSampleRateKey : @16000,
     AVNumberOfChannelsKey : @1,
-    AVEncoderAudioQualityKey : @(AVAudioQualityHigh),
+    AVEncoderBitRateKey : @32000,
   };
   if (![[AVCaptureAudioFileOutput availableOutputFileTypes]
           containsObject:AVFileTypeAppleM4A]) {
@@ -570,6 +578,12 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   request.shouldReportPartialResults = NO;
   request.taskHint = SFSpeechRecognitionTaskHintDictation;
   if (@available(macOS 13.0, *)) request.addsPunctuation = YES;
+  // On-device recognition skips the server round-trip whenever the language
+  // model is installed locally (and is the only mode that works offline).
+  // Locales without local support keep using the server path.
+  if (recognizer.supportsOnDeviceRecognition) {
+    request.requiresOnDeviceRecognition = YES;
+  }
   self.speechRecognizer = recognizer;
   self.speechTask = [recognizer recognitionTaskWithRequest:request
                                              resultHandler:^(SFSpeechRecognitionResult *result,

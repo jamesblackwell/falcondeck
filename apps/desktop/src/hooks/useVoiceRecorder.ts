@@ -255,10 +255,14 @@ export function useVoiceRecorder({
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mimeType = preferredMimeType();
-      const recorder = new MediaRecorder(
-        stream,
-        mimeType ? { mimeType } : undefined,
-      );
+      // Transcription models resample to 16 kHz mono; 32 kbps speech audio
+      // transcribes identically while keeping uploads several-fold smaller.
+      // Bitrate is a hint per the MediaRecorder spec, so unsupported values
+      // degrade instead of throwing.
+      const recorder = new MediaRecorder(stream, {
+        ...(mimeType ? { mimeType } : {}),
+        audioBitsPerSecond: 32_000,
+      });
       streamRef.current = stream;
       recorderRef.current = recorder;
       chunksRef.current = [];

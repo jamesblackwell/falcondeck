@@ -1,4 +1,4 @@
-use std::sync::Mutex as StdMutex;
+use std::sync::{LazyLock, Mutex as StdMutex};
 #[cfg(test)]
 use std::sync::OnceLock;
 #[cfg(not(test))]
@@ -46,12 +46,27 @@ const MAX_READ_ALOUD_CHARS: usize = 8_000;
 // models can each consume the full request timeout and hold the client for
 // minutes before the error surfaces.
 const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(20);
+// How long a connection attempt to OpenRouter may take before the fallback
+// chain moves on. Distinct from the per-request timeout: a stalled network
+// should fail in seconds, while a legitimately long transcription may not.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 const FALLBACK_MODELS: [&str; 4] = [
     "openai/whisper-large-v3-turbo",
     "deepgram/nova-3",
     "openai/gpt-transcribe",
     "openai/gpt-4o-mini-transcribe",
 ];
+
+/// One client for every OpenRouter call. Reusing the pool skips the DNS +
+/// TCP + TLS handshake on each dictation after the first; timeouts are set
+/// per request because transcription and synthesis have different budgets.
+static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+});
 
 #[derive(Debug, Deserialize)]
 pub struct SaveSpeechCredentialRequest {
@@ -105,13 +120,9 @@ pub(super) struct SpeechCredentialCache {
 
 impl AppState {
     pub async fn speech_models(&self) -> Result<Vec<SpeechModel>, DaemonError> {
-        let response = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|error| {
-                DaemonError::Process(format!("failed to create model client: {error}"))
-            })?
+        let response = OPENROUTER_CLIENT
             .get(OPENROUTER_MODELS_URL)
+            .timeout(MODEL_LIST_TIMEOUT)
             .send()
             .await
             .map_err(|error| {
@@ -213,12 +224,23 @@ impl AppState {
             )
         })?;
         let models = fallback_models(&request.model);
-        let client = reqwest::Client::builder()
-            .timeout(TRANSCRIPTION_TIMEOUT)
-            .build()
-            .map_err(|error| {
-                DaemonError::Process(format!("failed to create transcription client: {error}"))
-            })?;
+        // Built once: the payload embeds the (potentially multi-megabyte)
+        // base64 audio, so only the model id is swapped between attempts.
+        let mut payload = json!({
+            "model": "",
+            "input_audio": { "data": "", "format": request.format },
+            "temperature": 0
+        });
+        // Moved rather than passed through json!, which would copy the
+        // multi-megabyte base64 string into the payload.
+        payload["input_audio"]["data"] = Value::String(request.audio_base64);
+        if let Some(language) = request
+            .language
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            payload["language"] = Value::String(language.to_string());
+        }
         let mut last_error = "Transcription failed".to_string();
         let fallback_deadline = Instant::now() + FALLBACK_TIME_BUDGET;
 
@@ -226,22 +248,12 @@ impl AppState {
             if Instant::now() > fallback_deadline {
                 break;
             }
-            let mut payload = json!({
-                "model": model,
-                "input_audio": { "data": request.audio_base64, "format": request.format },
-                "temperature": 0
-            });
-            if let Some(language) = request
-                .language
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
-                payload["language"] = Value::String(language.to_string());
-            }
-            let response = match client
+            payload["model"] = Value::String(model.clone());
+            let response = match OPENROUTER_CLIENT
                 .post(OPENROUTER_TRANSCRIPTIONS_URL)
                 .bearer_auth(&api_key)
                 .header("X-Title", "FalconDeck")
+                .timeout(TRANSCRIPTION_TIMEOUT)
                 .json(&payload)
                 .send()
                 .await
@@ -293,15 +305,11 @@ impl AppState {
                 "OpenRouter is not configured on the connected desktop".to_string(),
             )
         })?;
-        let response = reqwest::Client::builder()
-            .timeout(SYNTHESIS_TIMEOUT)
-            .build()
-            .map_err(|error| {
-                DaemonError::Process(format!("failed to create speech client: {error}"))
-            })?
+        let response = OPENROUTER_CLIENT
             .post(OPENROUTER_SPEECH_URL)
             .bearer_auth(api_key)
             .header("X-Title", "FalconDeck")
+            .timeout(SYNTHESIS_TIMEOUT)
             .json(&json!({
                 "model": READ_ALOUD_MODEL,
                 "input": text,

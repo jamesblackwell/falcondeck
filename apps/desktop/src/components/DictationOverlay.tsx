@@ -48,6 +48,10 @@ function LiveWaveform() {
       "(prefers-reduced-motion: reduce)",
     ).matches;
     const samples: number[] = [];
+    // Bars only change when a sample lands (every SAMPLE_INTERVAL_MS) or the
+    // canvas resizes; skipping the identical frames in between keeps the
+    // always-running overlay cheap.
+    let needsRedraw = true;
 
     const resize = () => {
       const bounds = canvas.getBoundingClientRect();
@@ -58,6 +62,7 @@ function LiveWaveform() {
       canvas.width = Math.max(1, Math.round(width * scale));
       canvas.height = Math.max(1, Math.round(height * scale));
       context.setTransform(scale, 0, 0, scale, 0, 0);
+      needsRedraw = true;
     };
 
     const resizeObserver = new ResizeObserver(resize);
@@ -71,7 +76,15 @@ function LiveWaveform() {
         samples.push(Math.max(0.025, displayedLevel));
         if (samples.length > MAX_SAMPLES) samples.shift();
         lastSampleAt = timestamp;
+        needsRedraw = true;
       }
+      if (!needsRedraw) {
+        if (!reduceMotion) {
+          animationFrame = window.requestAnimationFrame(draw);
+        }
+        return;
+      }
+      needsRedraw = false;
 
       context.clearRect(0, 0, width, height);
       const slotWidth = 6;
