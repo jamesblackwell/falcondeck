@@ -8,7 +8,7 @@ import {
   SANS_FONT_OPTIONS,
   THEME_OPTIONS,
   updateAppearance,
-  useAppearance,
+  usePersistedAppearance,
   type ColorThemeOption,
   type ColorThemeSetting,
   type DarkColorThemeSetting,
@@ -124,7 +124,7 @@ function ColorThemePicker({
  * onboarding can offer appearance without exposing every display setting.
  */
 export function ThemeControls() {
-  const appearance = useAppearance()
+  const appearance = usePersistedAppearance()
 
   return (
     <div className="space-y-6">
@@ -181,7 +181,7 @@ export function ThemeControls() {
  * remote web preferences modal can embed it.
  */
 export function AppearanceControls() {
-  const appearance = useAppearance()
+  const appearance = usePersistedAppearance()
 
   return (
     <div className="space-y-6">

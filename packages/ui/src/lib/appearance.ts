@@ -424,8 +424,20 @@ function applyAppearance(settings: AppearanceSettings) {
 /* --- Tiny external store so any component can read/update settings --- */
 
 let current: AppearanceSettings = { ...DEFAULT_APPEARANCE }
+/**
+ * A theme being tried on — applied to the document but never persisted, so
+ * escaping the picker leaves the saved settings untouched.
+ */
+let preview: Partial<AppearanceSettings> | null = null
 let initialized = false
 const listeners = new Set<() => void>()
+
+/** Settings as the document currently renders them: saved, plus any preview. */
+let effective: AppearanceSettings = current
+
+function recomputeEffective() {
+  effective = preview ? normalizeAppearance({ ...current, ...preview }) : current
+}
 
 function notify() {
   for (const listener of listeners) listener()
@@ -440,12 +452,13 @@ export function initAppearance(): AppearanceSettings {
   if (initialized) return current
   initialized = true
   current = loadAppearance()
-  applyAppearance(current)
+  recomputeEffective()
+  applyAppearance(effective)
 
   const media = darkMediaQuery()
   const onSystemChange = () => {
-    if (current.theme === 'system') {
-      applyAppearance(current)
+    if (effective.theme === 'system') {
+      applyAppearance(effective)
       notify()
     }
   }
@@ -455,15 +468,54 @@ export function initAppearance(): AppearanceSettings {
   return current
 }
 
+/** What the document is showing — the preview while one is active. */
 export function getAppearance(): AppearanceSettings {
+  return effective
+}
+
+/** What is saved, ignoring any preview. Use for "currently selected" marks. */
+export function getPersistedAppearance(): AppearanceSettings {
   return current
 }
 
 export function updateAppearance(patch: Partial<AppearanceSettings>) {
+  preview = null
   current = normalizeAppearance({ ...current, ...patch })
+  recomputeEffective()
   saveAppearance(current)
-  applyAppearance(current)
+  applyAppearance(effective)
   notify()
+}
+
+/**
+ * Apply `patch` to the document without saving it; pass null to drop back to
+ * the persisted settings. Lets a picker show the real thing under the cursor
+ * and commit only on selection.
+ */
+export function previewAppearance(patch: Partial<AppearanceSettings> | null) {
+  const next = patch && Object.keys(patch).length > 0 ? patch : null
+  if (!next && !preview) return
+  preview = next
+  const previous = effective
+  recomputeEffective()
+  // Arrowing through a list re-enters this for every row; skipping the
+  // no-op writes keeps the document (and Shiki, which re-tokenizes on theme)
+  // from churning when neighbouring rows resolve to the same appearance.
+  if (previous !== effective && !sameAppearance(previous, effective)) {
+    applyAppearance(effective)
+    notify()
+  }
+}
+
+function sameAppearance(a: AppearanceSettings, b: AppearanceSettings): boolean {
+  return (
+    a.theme === b.theme &&
+    a.lightColorTheme === b.lightColorTheme &&
+    a.darkColorTheme === b.darkColorTheme &&
+    a.sansFont === b.sansFont &&
+    a.monoFont === b.monoFont &&
+    a.fontScale === b.fontScale
+  )
 }
 
 /**
@@ -476,7 +528,16 @@ export function subscribeAppearance(listener: () => void) {
   return () => listeners.delete(listener)
 }
 
-/** Reactive hook over the appearance store. */
+/** Reactive hook over the appearance store, preview included. */
 export function useAppearance(): AppearanceSettings {
   return useSyncExternalStore(subscribeAppearance, getAppearance, getAppearance)
+}
+
+/** Reactive hook over the saved settings, unaffected by an active preview. */
+export function usePersistedAppearance(): AppearanceSettings {
+  return useSyncExternalStore(
+    subscribeAppearance,
+    getPersistedAppearance,
+    getPersistedAppearance,
+  )
 }
