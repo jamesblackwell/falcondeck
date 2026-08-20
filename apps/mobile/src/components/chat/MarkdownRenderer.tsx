@@ -904,7 +904,7 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   paragraph: {
-    lineHeight: theme.fontSize.base * theme.lineHeight.relaxed,
+    lineHeight: theme.fontSize.base * theme.lineHeight.prose,
   },
   heading1: {
     fontSize: theme.fontSize["2xl"],
@@ -996,7 +996,7 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   listMarker: {
-    lineHeight: theme.fontSize.base * theme.lineHeight.relaxed,
+    lineHeight: theme.fontSize.base * theme.lineHeight.prose,
     minWidth: 24,
   },
   listMarkerOrdered: {

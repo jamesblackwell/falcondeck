@@ -35,6 +35,7 @@
   --leading-tight: var(--fd-leading-tight);
   --leading-normal: var(--fd-leading-normal);
   --leading-relaxed: var(--fd-leading-relaxed);
+  --leading-prose: var(--fd-leading-prose);
   --leading-code: var(--fd-leading-code);
 
   --tracking-tight: var(--fd-tracking-tight);
@@ -241,6 +242,11 @@
   --fd-leading-tight: 1.25;
   --fd-leading-normal: 1.5;
   --fd-leading-relaxed: 1.65;
+  /* Reading text sets looser than UI text. A transcript is read in long
+     passages rather than scanned a label at a time, and at the transcript's
+     measure the tighter leading packs lines close enough that the eye loses
+     its place returning to the left edge. */
+  --fd-leading-prose: 1.78;
   /* Code sets tighter than prose: monospace lines are short and scanned
      vertically, so prose leading leaves a block looking loose. */
   --fd-leading-code: 1.55;

@@ -771,6 +771,11 @@ export const lineHeight = {
   tight: 1.25,
   normal: 1.5,
   relaxed: 1.65,
+  // Reading text sets looser than UI text. A transcript is read in long
+  // passages rather than scanned a label at a time, and the tighter leading
+  // packs lines close enough that the eye loses its place returning to the
+  // left edge. Matches --fd-leading-prose on the desktop client.
+  prose: 1.78,
   // Code sets tighter than prose: monospace lines are short and scanned
   // vertically, so prose leading leaves a block looking loose and unstructured.
   code: 1.55,

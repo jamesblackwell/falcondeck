@@ -262,7 +262,7 @@ const markdownComponents = {
     );
   },
   p({ children }: { children?: React.ReactNode }) {
-    return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>;
+    return <p className="mb-3 last:mb-0 leading-prose">{children}</p>;
   },
   ul({ children }: { children?: React.ReactNode }) {
     return (
@@ -279,7 +279,7 @@ const markdownComponents = {
     );
   },
   li({ children }: { children?: React.ReactNode }) {
-    return <li className="leading-relaxed">{children}</li>;
+    return <li className="leading-prose">{children}</li>;
   },
   /* Headings carry roughly twice as much space above as below, so a heading
      binds to the prose it introduces and the gap reads as a section break
