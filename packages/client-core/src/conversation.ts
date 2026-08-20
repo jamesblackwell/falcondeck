@@ -1676,11 +1676,61 @@ export function formatWorkDuration(
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function deriveConversationPresentation(
+/** Reasoning is strictly serial: once any later item exists in the transcript,
+    that thought has finished, whatever lifecycle the provider last reported.
+    Providers do not reliably send a terminal update for a reasoning item
+    before starting the next one, and a stale "streaming" leaves an earlier
+    "Thinking…" pulsing forever beside the genuinely live indicator. Settled
+    copies are cached per source item so memoized rows keep their identity
+    across derivations. */
+const settledReasoningCache = new WeakMap<
+  Extract<ConversationItem, { kind: "reasoning" }>,
+  Extract<ConversationItem, { kind: "reasoning" }>
+>();
+
+function settleFinishedReasoning(
   items: ConversationItem[],
+  isStreaming: boolean,
+): ConversationItem[] {
+  let settled: ConversationItem[] | null = null;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]!;
+    if (item.kind !== "reasoning") continue;
+    const lifecycle = contentLifecycle(item);
+    if (lifecycle !== "pending" && lifecycle !== "streaming") continue;
+    // Only the trailing thought of a live turn can still be arriving.
+    if (isStreaming && index === items.length - 1) continue;
+    let copy = settledReasoningCache.get(item);
+    if (!copy) {
+      // Best-effort duration from the next item's start when the provider
+      // never reported one, so the settled row can still say "· 12s".
+      const start = Date.parse(item.created_at);
+      const nextStart = Date.parse(items[index + 1]?.created_at ?? "");
+      const elapsed = nextStart - start;
+      copy = {
+        ...item,
+        lifecycle: "complete",
+        duration_ms:
+          item.duration_ms ??
+          (Number.isFinite(elapsed) && elapsed > 0 ? elapsed : null),
+      };
+      settledReasoningCache.set(item, copy);
+    }
+    settled ??= [...items];
+    settled[index] = copy;
+  }
+  return settled ?? items;
+}
+
+export function deriveConversationPresentation(
+  itemsInput: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
   options: ConversationPresentationOptions = {},
 ): ConversationPresentation {
+  const items = settleFinishedReasoning(
+    itemsInput,
+    options.is_streaming === true,
+  );
   const preferences = normalizePreferences(preferencesInput);
   const historyBlocks: ConversationHistoryBlock[] = [];
   const liveActivityGroups: ConversationLiveActivityGroup[] = [];
