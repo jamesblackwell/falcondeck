@@ -1507,7 +1507,7 @@ function RemoteApp() {
       .catch((error) => {
         if (!isCurrent) return;
         const message =
-          error instanceof Error ? error.message : "Failed to connect to relay";
+          error instanceof Error ? error.message : "Could not reach the relay";
         setError(message);
         if (isInvalidSavedSessionError(message)) {
           abandonInvalidSavedSession(message);
@@ -2029,7 +2029,7 @@ function RemoteApp() {
     ) => {
       const socket = socketRef.current;
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        throw new Error("Remote connection is not ready");
+        throw new Error("Relay connection is not ready yet");
       }
       const sc = sessionCryptoRef.current;
       if (!sc) throw new Error("Encrypted relay session is not ready");

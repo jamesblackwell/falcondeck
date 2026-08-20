@@ -263,7 +263,7 @@ export class RemoteHostClient {
   async rpc<T = unknown>(method: string, params: Record<string, unknown>): Promise<T> {
     const socket = this.socket
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error('Remote connection is not ready')
+      throw new Error('Relay connection is not ready yet')
     }
     const crypto = this.sessionCrypto
     if (!crypto) throw new Error('Encrypted relay session is not ready')
