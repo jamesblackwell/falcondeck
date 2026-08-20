@@ -54,6 +54,18 @@ describe("dictation settings", () => {
     ).toBe(DEFAULT_DICTATION_SETTINGS.model);
   });
 
+  it("enables the transcript re-paste shortcut for settings saved before it existed", () => {
+    expect(
+      normalizeDictationSettings({ enabled: true }).repasteShortcutEnabled,
+    ).toBe(true);
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        repasteShortcutEnabled: false,
+      }).repasteShortcutEnabled,
+    ).toBe(false);
+  });
+
   it("updates subscribers in the same window", () => {
     const { result } = renderHook(() => useDictationSettings());
     act(() => {

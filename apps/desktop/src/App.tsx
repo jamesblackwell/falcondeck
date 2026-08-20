@@ -189,7 +189,7 @@ import {
   useShortcutSettings,
 } from "./shortcuts";
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
-import { useDesktopDictation } from "./dictation";
+import { useDesktopDictation, useDictationSettings } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
 import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
@@ -759,6 +759,70 @@ function AppInner() {
     setIsActivityOpen(false);
     setIsExtensionsOpen(false);
   }, []);
+
+  // System-wide dictation aimed at FalconDeck itself arrives here instead of
+  // through a native paste, which is unreliable against the webview. Also the
+  // insertion path for the Cmd+Shift+V transcript re-paste.
+  const insertDictationText = useCallback(
+    (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const active = document.activeElement;
+      const editable =
+        active instanceof HTMLTextAreaElement ||
+        (active instanceof HTMLInputElement && !active.readOnly) ||
+        (active instanceof HTMLElement && active.isContentEditable);
+      // execCommand fires the input events React needs to keep controlled
+      // fields in sync and honors the live caret in the focused field.
+      if (editable && document.execCommand("insertText", false, trimmed)) {
+        return;
+      }
+      handleVoiceTranscript(trimmed, { submit: false });
+    },
+    [handleVoiceTranscript],
+  );
+  const insertDictationTextRef = useRef(insertDictationText);
+  useLayoutEffect(() => {
+    insertDictationTextRef.current = insertDictationText;
+  }, [insertDictationText]);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      void listen<string>("falcondeck://dictation-insert", (event) =>
+        insertDictationTextRef.current(event.payload),
+      ).then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const dictationSettings = useDictationSettings();
+  useEffect(() => {
+    if (!isTauriDesktop() || !dictationSettings.repasteShortcutEnabled) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.metaKey || !event.shiftKey || event.altKey || event.ctrlKey) {
+        return;
+      }
+      if (event.key.toLowerCase() !== "v") return;
+      event.preventDefault();
+      void import("@tauri-apps/api/core").then(({ invoke }) =>
+        invoke<string | null>("last_dictation_transcript").then((text) => {
+          if (text) insertDictationTextRef.current(text);
+        }),
+      );
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [dictationSettings.repasteShortcutEnabled]);
 
   const addQuotedSelection = useCallback(
     (text: string) => {

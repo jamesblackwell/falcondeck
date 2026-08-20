@@ -332,6 +332,38 @@ export function DictationSetup({
             </div>
           </div>
 
+          <button
+            type="button"
+            aria-pressed={settings.repasteShortcutEnabled}
+            onClick={() =>
+              updateSettings({
+                repasteShortcutEnabled: !settings.repasteShortcutEnabled,
+              })
+            }
+            className={cn(
+              "fd-focus flex w-full items-center justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors",
+              settings.repasteShortcutEnabled
+                ? "border-accent/40 bg-accent-dim"
+                : "border-border-subtle bg-surface-2 hover:bg-surface-3",
+            )}
+          >
+            <span>
+              <span className="block text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                Re-paste last transcript with ⌘⇧V
+              </span>
+              <span className="mt-1 block text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                If a transcript missed the composer — say the cursor moved —
+                press ⌘⇧V inside FalconDeck to insert it again.
+              </span>
+            </span>
+            <Badge
+              variant={settings.repasteShortcutEnabled ? "success" : "default"}
+              dot
+            >
+              {settings.repasteShortcutEnabled ? "On" : "Off"}
+            </Badge>
+          </button>
+
           <div className="space-y-2">
             <label
               htmlFor="dictation-microphone"

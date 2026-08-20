@@ -14,8 +14,10 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 const DICTATION_WINDOW_LABEL: &str = "dictation";
+const MAIN_WINDOW_LABEL: &str = "main";
 const DICTATION_EVENT: &str = "falcondeck://dictation-state";
 const DICTATION_LEVEL_EVENT: &str = "falcondeck://dictation-level";
+const DICTATION_INSERT_EVENT: &str = "falcondeck://dictation-insert";
 const MAX_RECORDING_BYTES: u64 = 8 * 1024 * 1024;
 const OPENROUTER_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(75);
 
@@ -25,6 +27,9 @@ static CONFIG: LazyLock<RwLock<DictationConfiguration>> =
 static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT_TRANSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_OPENROUTER_TRANSCRIPTION: AtomicU64 = AtomicU64::new(0);
+// The most recent transcript, kept so the writer can re-insert it (Cmd+Shift+V
+// in the app) or copy it after a failed paste. Session-scoped on purpose.
+static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
 
 static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
@@ -44,6 +49,8 @@ mod event_kind {
     pub const AUDIO_READY: i32 = 5;
     pub const FAILED_RETAINED: i32 = 6;
     pub const AUDIO_LEVEL: i32 = 7;
+    pub const SELF_INSERT: i32 = 8;
+    pub const PASTE_FAILED: i32 = 9;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -163,6 +170,7 @@ unsafe extern "C" {
     fn fd_dictation_retry();
     fn fd_dictation_discard();
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
+    fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
     fn fd_dictation_shutdown();
@@ -393,6 +401,32 @@ pub fn discard_dictation() {
 }
 
 #[tauri::command]
+pub fn last_dictation_transcript() -> Option<String> {
+    LAST_TRANSCRIPT.read().ok().and_then(|last| last.clone())
+}
+
+#[tauri::command]
+pub fn copy_dictation_transcript() -> Result<(), String> {
+    let text = last_dictation_transcript()
+        .ok_or_else(|| "There is no transcript to copy yet.".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        let c_text = CString::new(text)
+            .map_err(|_| "The transcript contained unsupported text.".to_string())?;
+        if unsafe { fd_dictation_copy_text(c_text.as_ptr()) } {
+            Ok(())
+        } else {
+            Err("FalconDeck could not write to the clipboard.".to_string())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        Err("Dictation clipboard copy is currently available on macOS only.".to_string())
+    }
+}
+
+#[tauri::command]
 pub fn open_dictation_accessibility_settings() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -456,17 +490,37 @@ fn emit_event(app: &AppHandle, event: DictationEvent) {
 }
 
 fn emit_failure(app: &AppHandle, message: String, retained_audio: bool) {
+    emit_failure_with_transcript(app, message, retained_audio, None);
+}
+
+/// A failure that still produced a transcript surfaces it so the overlay can
+/// offer a clipboard copy instead of losing the words.
+fn emit_failure_with_transcript(
+    app: &AppHandle,
+    message: String,
+    retained_audio: bool,
+    transcript: Option<String>,
+) {
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
     show_overlay(app);
     emit_event(
         app,
         DictationEvent {
             state: "failed",
-            text: None,
+            text: transcript,
             error: Some(message),
             retained_audio,
         },
     );
+}
+
+fn remember_transcript(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Ok(mut last) = LAST_TRANSCRIPT.write() {
+        *last = Some(text.to_string());
+    }
 }
 
 /// The directory the native side records into. `NSTemporaryDirectory()` can
@@ -562,6 +616,7 @@ async fn transcribe_openrouter(
     if text.chars().count() < 3 {
         return Err("No speech was detected. Your recording has been retained.".to_string());
     }
+    remember_transcript(&text);
 
     let finish_app = app.clone();
     app.run_on_main_thread(move || {
@@ -589,11 +644,12 @@ async fn transcribe_openrouter(
         #[cfg(not(target_os = "macos"))]
         let pasted = false;
         if !pasted {
-            emit_failure(
+            emit_failure_with_transcript(
                 &finish_app,
-                "The transcript is ready, but FalconDeck could not paste it. Your recording has been retained."
+                "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
                     .to_string(),
                 true,
+                Some(text.clone()),
             );
             return;
         }
@@ -658,6 +714,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             },
         ),
         event_kind::COMPLETED => {
+            remember_transcript(&payload);
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -711,6 +768,23 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             });
         }
         event_kind::FAILED_RETAINED => emit_failure(&app, payload, true),
+        // The paste target is FalconDeck itself: native paste is unreliable
+        // against the webview, so the transcript goes straight to the frontend
+        // for a deterministic composer insertion.
+        event_kind::SELF_INSERT => {
+            remember_transcript(&payload);
+            let _ = app.emit_to(MAIN_WINDOW_LABEL, DICTATION_INSERT_EVENT, payload);
+        }
+        event_kind::PASTE_FAILED => {
+            remember_transcript(&payload);
+            emit_failure_with_transcript(
+                &app,
+                "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
+                    .to_string(),
+                true,
+                Some(payload),
+            );
+        }
         event_kind::AUDIO_LEVEL => {
             if let Some(level) = parse_audio_level(&payload) {
                 let _ = app.emit_to(DICTATION_WINDOW_LABEL, DICTATION_LEVEL_EVENT, level);
@@ -739,6 +813,8 @@ mod tests {
             ("AudioReady", super::event_kind::AUDIO_READY),
             ("FailedRetained", super::event_kind::FAILED_RETAINED),
             ("AudioLevel", super::event_kind::AUDIO_LEVEL),
+            ("SelfInsert", super::event_kind::SELF_INSERT),
+            ("PasteFailed", super::event_kind::PASTE_FAILED),
         ];
         for (name, value) in expected {
             assert!(

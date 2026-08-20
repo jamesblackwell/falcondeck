@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { Check, Mic, RotateCcw, Trash2, X } from "lucide-react";
+import { Check, Copy, Mic, RotateCcw, Trash2, X } from "lucide-react";
 
 type DictationState =
   "recording" | "transcribing" | "completed" | "failed" | "cancelled";
@@ -130,6 +130,11 @@ function LiveWaveform() {
 
 export function DictationOverlay() {
   const [event, setEvent] = useState<DictationEvent>(INITIAL_EVENT);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    setCopied(false);
+  }, [event]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | undefined;
@@ -182,6 +187,11 @@ export function DictationOverlay() {
                 <p className="mt-0.5 line-clamp-2 text-[length:var(--fd-text-xs)] text-fg-muted">
                   {event.error}
                 </p>
+                {event.text ? (
+                  <p className="mt-1.5 line-clamp-3 rounded-[var(--fd-radius-md)] bg-surface-2 px-2 py-1.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
+                    “{event.text}”
+                  </p>
+                ) : null}
                 {event.retainedAudio ? (
                   <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
                     Your recording is safe until you retry or discard it.
@@ -190,10 +200,33 @@ export function DictationOverlay() {
               </div>
             </div>
             <div className="mt-3 flex justify-end gap-2">
-              {event.retainedAudio ? (
+              {event.text ? (
                 <button
                   type="button"
                   className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
+                  onClick={() =>
+                    void invoke("copy_dictation_transcript").then(
+                      () => setCopied(true),
+                      () => setCopied(false),
+                    )
+                  }
+                >
+                  {copied ? (
+                    <Check aria-hidden="true" className="h-4 w-4" />
+                  ) : (
+                    <Copy aria-hidden="true" className="h-4 w-4" />
+                  )}
+                  {copied ? "Copied" : "Copy transcript"}
+                </button>
+              ) : null}
+              {event.retainedAudio ? (
+                <button
+                  type="button"
+                  className={
+                    event.text
+                      ? "fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
+                      : "fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
+                  }
                   onClick={() => void invoke("retry_dictation")}
                 >
                   <RotateCcw aria-hidden="true" className="h-4 w-4" />

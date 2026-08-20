@@ -20,6 +20,9 @@ export type DictationSettings = {
   provider: DictationProvider;
   inputDeviceId: string | null;
   model: string;
+  // Cmd+Shift+V inside FalconDeck re-inserts the last transcript, for when a
+  // paste landed nowhere because the caret had moved.
+  repasteShortcutEnabled: boolean;
 };
 
 export type DictationAudioDevice = {
@@ -54,6 +57,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   provider: "system",
   inputDeviceId: null,
   model: FAST_TRANSCRIPTION_MODEL,
+  repasteShortcutEnabled: true,
 };
 
 function isDictationShortcut(value: unknown): value is DictationShortcut {
@@ -95,6 +99,10 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
       candidate.model.trim() !== LEGACY_TRANSCRIPTION_MODEL
         ? candidate.model.trim()
         : DEFAULT_DICTATION_SETTINGS.model,
+    repasteShortcutEnabled:
+      typeof candidate.repasteShortcutEnabled === "boolean"
+        ? candidate.repasteShortcutEnabled
+        : DEFAULT_DICTATION_SETTINGS.repasteShortcutEnabled,
   };
 }
 

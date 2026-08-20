@@ -625,6 +625,8 @@ pub fn run() {
             dictation::cancel_dictation,
             dictation::retry_dictation,
             dictation::discard_dictation,
+            dictation::last_dictation_transcript,
+            dictation::copy_dictation_transcript,
             dictation::open_dictation_accessibility_settings
         ])
         .build(tauri::generate_context!())

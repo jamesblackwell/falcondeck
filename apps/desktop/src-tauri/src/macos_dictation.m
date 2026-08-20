@@ -59,6 +59,11 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic, copy) NSString *inputDeviceID;
 @property(nonatomic, strong) AVCaptureSession *captureSession;
 @property(nonatomic, strong) AVCaptureAudioFileOutput *audioFileOutput;
+// Serializes the blocking AVCaptureSession start/stop calls off the main
+// thread so the overlay can appear before the microphone is warm.
+@property(nonatomic, strong) dispatch_queue_t sessionQueue;
+// YES once startRecordingToOutputFileURL has been issued for this session.
+@property(nonatomic) BOOL fileOutputActive;
 @property(nonatomic, strong) dispatch_source_t audioLevelTimer;
 @property(nonatomic, strong) NSURL *recordingURL;
 @property(nonatomic, strong) SFSpeechRecognizer *speechRecognizer
@@ -73,6 +78,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 - (void)startAudioLevelMeter;
 - (void)stopAudioLevelMeter;
 - (void)setRetainedRecordingURL:(NSURL *)url provider:(FDProvider)provider;
+- (void)sessionDidFinishStarting:(AVCaptureSession *)session
+                          output:(AVCaptureAudioFileOutput *)output
+                             url:(NSURL *)url;
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
 - (void)surfaceRetainedRecordingIfNeeded;
 - (void)capturePasteTarget;
@@ -114,6 +122,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 - (instancetype)init {
   self = [super init];
   if (!self) return nil;
+  self.sessionQueue = dispatch_queue_create(
+      "com.falcondeck.dictation.session", DISPATCH_QUEUE_SERIAL);
   NSString *retainedPath =
       [NSUserDefaults.standardUserDefaults stringForKey:FDRetainedRecordingPathKey];
   if (retainedPath.length > 0 &&
@@ -262,7 +272,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.modifierGeneration += 1;
     if (self.activationMode == FDActivationModeHold) {
       NSUInteger generation = self.modifierGeneration;
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 180 * NSEC_PER_MSEC),
+      // Short chord grace: long enough that most Right-Command shortcuts are
+      // recognized as chords first, short enough that dictation feels instant.
+      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
                      dispatch_get_main_queue(), ^{
         if (self.enabled && self.modifierDown &&
             !self.modifierUsedInChord &&
@@ -415,12 +427,55 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.recordingShortcut = self.shortcut;
   self.recordingProvider = self.provider;
   self.recording = YES;
-  [session startRunning];
+  self.fileOutputActive = NO;
+  // Surface the overlay before the microphone is warm: -startRunning blocks
+  // for hundreds of milliseconds and previously gated all recording feedback.
+  FDEmit(FDEventRecording, @"");
+  __weak FDDictationController *weakSelf = self;
+  dispatch_async(self.sessionQueue, ^{
+    [session startRunning];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf sessionDidFinishStarting:session output:output url:url];
+    });
+  });
+}
+
+// Runs on the main thread once -startRunning returns. The writer may have
+// released the shortcut, cancelled, or been superseded while the microphone
+// was warming up.
+- (void)sessionDidFinishStarting:(AVCaptureSession *)session
+                          output:(AVCaptureAudioFileOutput *)output
+                             url:(NSURL *)url {
+  if (session != self.captureSession) {
+    dispatch_async(self.sessionQueue, ^{ [session stopRunning]; });
+    return;
+  }
+  if (!self.recording || !session.running) {
+    BOOL wasCancelled = self.cancelling;
+    BOOL wasStopped = self.stopping && !wasCancelled;
+    dispatch_async(self.sessionQueue, ^{ [session stopRunning]; });
+    self.captureSession = nil;
+    self.audioFileOutput = nil;
+    self.recording = NO;
+    self.stopping = NO;
+    self.cancelling = NO;
+    [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+    [self setRetainedRecordingURL:nil provider:0];
+    if (wasCancelled) {
+      FDEmit(FDEventCancelled, @"");
+    } else if (wasStopped) {
+      FDEmit(FDEventFailed,
+             @"The recording stopped before the microphone was ready. Hold the shortcut a little longer.");
+    } else {
+      FDEmit(FDEventFailed, @"FalconDeck could not start the microphone.");
+    }
+    return;
+  }
   [output startRecordingToOutputFileURL:url
                          outputFileType:AVFileTypeAppleM4A
                       recordingDelegate:self];
+  self.fileOutputActive = YES;
   [self startAudioLevelMeter];
-  FDEmit(FDEventRecording, @"");
 }
 
 - (void)stopRecording {
@@ -448,10 +503,14 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   (void)output;
   (void)connections;
   dispatch_async(dispatch_get_main_queue(), ^{
-    [self.captureSession stopRunning];
+    AVCaptureSession *finishedSession = self.captureSession;
+    if (finishedSession) {
+      dispatch_async(self.sessionQueue, ^{ [finishedSession stopRunning]; });
+    }
     [self stopAudioLevelMeter];
     self.captureSession = nil;
     self.audioFileOutput = nil;
+    self.fileOutputActive = NO;
     self.stopping = NO;
     NSURL *url = self.recordingURL ?: outputFileURL;
     if (self.cancelling) {
@@ -536,8 +595,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
         return;
       }
       if (![self pasteText:text]) {
-        FDEmit(FDEventFailedRetained,
-               @"The transcript is ready, but FalconDeck could not paste it. Your recording has been retained.");
+        // Carries the transcript so the overlay can offer a clipboard copy.
+        FDEmit(FDEventPasteFailed, text);
         return;
       }
       [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
@@ -551,6 +610,15 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (!AXIsProcessTrusted() || text.length == 0) return NO;
   pid_t targetProcessIdentifier = self.pasteTargetProcessIdentifier;
   if (targetProcessIdentifier <= 0) return NO;
+
+  // Pasting into FalconDeck itself via Accessibility or a synthetic Cmd+V is
+  // unreliable: WebKit's AX proxy reports success against the React-controlled
+  // composer without the state actually updating. Hand the transcript to the
+  // webview instead, which inserts it deterministically.
+  if (targetProcessIdentifier == NSProcessInfo.processInfo.processIdentifier) {
+    FDEmit(FDEventSelfInsert, text);
+    return YES;
+  }
 
   // Most editable controls, including WebKit textareas, support replacing the
   // selected text through Accessibility. This is the safest insertion path:
@@ -878,6 +946,21 @@ bool fd_dictation_paste_text(const char *utf8_text) {
   if (!utf8_text) return false;
   NSString *text = [NSString stringWithUTF8String:utf8_text];
   return [[FDDictationController sharedController] pasteText:text];
+}
+
+bool fd_dictation_copy_text(const char *utf8_text) {
+  if (!utf8_text) return false;
+  NSString *text = [NSString stringWithUTF8String:utf8_text];
+  if (text.length == 0) return false;
+  __block bool copied = false;
+  void (^copy)(void) = ^{
+    NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+    [pasteboard clearContents];
+    copied = [pasteboard setString:text forType:NSPasteboardTypeString];
+  };
+  if (NSThread.isMainThread) copy();
+  else dispatch_sync(dispatch_get_main_queue(), copy);
+  return copied;
 }
 
 void fd_dictation_mark_completed(void) {
