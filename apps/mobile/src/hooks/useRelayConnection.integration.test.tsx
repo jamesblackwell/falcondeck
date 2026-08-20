@@ -171,7 +171,7 @@ describe('useRelayConnection session rotation', () => {
     // The pairing store closes immediately when it adopts new credentials,
     // and the hook cleanup defensively closes its captured socket again.
     expect(oldSocket.close).toHaveBeenCalled()
-    expect(failPendingRpcs).toHaveBeenCalledWith('Remote connection closed')
+    expect(failPendingRpcs).toHaveBeenCalledWith('Relay connection closed')
     expect(newSocket.url).toContain('session_id=session-2')
     expect(newSocket.url).toContain('ticket=ticket-session-2')
     expect(fetchMock).toHaveBeenCalledWith(
@@ -812,7 +812,7 @@ describe('useRelayConnection session rotation', () => {
     })
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
 
-    const failure = 'Your Mac disconnected while snapshot.current was running.'
+    const failure = 'Desktop disconnected from the relay.'
     const callRpc = vi
       .fn()
       .mockRejectedValueOnce(new Error(failure))
@@ -868,7 +868,7 @@ describe('useRelayConnection session rotation', () => {
     expect(useRelayStore.getState().isSyncing).toBe(false)
   })
 
-  it('re-issues a snapshot deferred while the Mac was offline once presence recovers', async () => {
+  it('re-issues a snapshot deferred while desktop was offline once presence recovers', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
       if (url.endsWith('/v1/pairings/challenge')) {
@@ -924,8 +924,8 @@ describe('useRelayConnection session rotation', () => {
     })
     expect(callRpc).toHaveBeenCalledTimes(1)
 
-    // History truncation demands a recovery snapshot, but the Mac is offline:
-    // the request must defer, keep the syncing state, and fire when the Mac
+    // History truncation demands a recovery snapshot, but desktop is offline:
+    // the request must defer, keep the syncing state, and fire when desktop
     // comes back — not latch "Syncing…" forever.
     await act(async () => {
       socket.onmessage?.({

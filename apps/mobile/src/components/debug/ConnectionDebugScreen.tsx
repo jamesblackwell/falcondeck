@@ -162,15 +162,11 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
               <Text variant="heading" size="md" weight="semibold">
                 {status.isBusy ? status.label : 'Connection restored'}
               </Text>
-              {status.isBusy && status.detail ? (
-                <Text variant="caption" size="xs" color="muted">
-                  {status.detail}
-                </Text>
-              ) : (
+              {!status.isBusy ? (
                 <Text variant="caption" size="xs" color="muted">
                   Session is live and synced.
                 </Text>
-              )}
+              ) : null}
             </View>
             {status.isBusy ? (
               <ActivityDiamond
@@ -213,8 +209,7 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
                 color="muted"
                 style={styles.recoveryCopy}
               >
-                FalconDeck will continue automatically as soon as the relay is
-                ready.
+                FalconDeck will keep trying automatically.
               </Text>
             </View>
           ) : null}

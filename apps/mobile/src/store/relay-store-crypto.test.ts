@@ -79,7 +79,7 @@ describe('relay-store crypto operations', () => {
       const request = useRelayStore.getState()._callRpc('snapshot.current', {})
       await vi.waitFor(() => expect(sent).toHaveLength(1))
       const rejection = expect(request).rejects.toThrow(
-        'Your Mac is connected, but snapshot.current is not registered',
+        'Desktop is connected, but sync is not ready yet',
       )
       await useRelayStore.getState()._handleRpcResult({
         type: 'rpc-result',
@@ -310,7 +310,7 @@ describe('relay-store crypto operations', () => {
       await restoreKeylessSession()
       useRelayStore.setState({
         _sendMessage: () => {
-          throw new Error('Remote connection is not ready')
+          throw new Error('Not connected to the relay')
         },
       })
 

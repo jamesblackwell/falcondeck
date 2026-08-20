@@ -21,6 +21,7 @@ import type {
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
+import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken, isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { realtimeAudioPlayer } from '@/lib/realtime-audio-player'
@@ -297,8 +298,8 @@ export function useRelayConnection() {
       // Sync failures are almost always a reconnect flap that the retry loop
       // absorbs in seconds; they belong in the sync banner's diagnostics (via
       // _setSyncRetry below), NOT the red error toast. Painting the toast here
-      // bombarded users with "Your Mac disconnected while snapshot.current was
-      // running" for outages that self-healed before they could read it.
+      // bombarded users with "Desktop disconnected from the relay" for
+      // outages that self-healed before they could read it.
       let nextRetryAt: number | null = null
       // Retry every failed snapshot the app decided it needed — including
       // recovery fetches after the first sync (history truncation, parked-key
@@ -306,7 +307,7 @@ export function useRelayConnection() {
       // the daemon is genuinely offline, the retry lands in the presence gate
       // above and waits for it instead of spinning.
       if (!snapshotRetryTimer.current) {
-        const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
+        const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 15_000)
         snapshotRetryAttempt.current += 1
         nextRetryAt = Date.now() + delay
         snapshotRetryTimer.current = setTimeout(() => {
@@ -671,7 +672,7 @@ export function useRelayConnection() {
       if (current._getSessionCrypto()) return
       logConnection(
         'info',
-        'Asking your Mac to republish the session key…',
+        'Asking desktop to republish the session key…',
         'The encrypted channel needs it before anything can sync.',
       )
       current._requestBootstrap()
@@ -691,7 +692,7 @@ export function useRelayConnection() {
       relay._setConnectionStatus('disconnected')
       relay._setMachinePresence(null)
       relay._setSocket(null)
-      relay._failPendingRpcs('Remote connection dropped')
+      relay._failPendingRpcs(RELAY_TRANSPORT_ERRORS.dropped)
       pendingEncrypted.current = []
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null
@@ -724,7 +725,7 @@ export function useRelayConnection() {
         relayFlushTimeout.current = null
       }
 
-      const delay = relayReconnectDelayMs(reconnectAttempt.current, Math.random(), 15_000)
+      const delay = relayReconnectDelayMs(reconnectAttempt.current, Math.random(), 20_000)
       reconnectAttempt.current += 1
       logConnection(
         'warn',
@@ -972,7 +973,7 @@ export function useRelayConnection() {
       })
       .catch((error) => {
         if (!isCurrent) return
-        const message = error instanceof Error ? error.message : 'Failed to connect to relay'
+        const message = error instanceof Error ? error.message : 'Could not reach the relay'
         if (isInvalidSavedSessionError(message)) {
           void resetInvalidSavedSession(message)
           return
@@ -991,7 +992,7 @@ export function useRelayConnection() {
       clearSocketTimers()
       activeSocket?.close()
       relay._setSocket(null)
-      relay._failPendingRpcs('Remote connection closed')
+      relay._failPendingRpcs(RELAY_TRANSPORT_ERRORS.closed)
       pendingEncrypted.current = []
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null

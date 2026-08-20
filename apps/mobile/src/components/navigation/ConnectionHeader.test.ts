@@ -21,8 +21,8 @@ describe('ConnectionHeader logic', () => {
       expect(connectionLabel('connecting')).toBe('Connecting…')
     })
 
-    it('returns "Disconnected" for disconnected status', () => {
-      expect(connectionLabel('disconnected')).toBe('Disconnected')
+    it('returns "Reconnecting to relay…" for disconnected status', () => {
+      expect(connectionLabel('disconnected')).toBe('Reconnecting to relay…')
     })
 
     it('returns "Pairing…" for claiming status', () => {
@@ -46,28 +46,28 @@ describe('ConnectionHeader logic', () => {
     it('returns desktop offline warning when relay is ready but desktop is offline', () => {
       expect(connectionState('encrypted', true, false)).toEqual({
         tone: 'disconnected',
-        label: 'Your Mac is offline',
+        label: 'Waiting for desktop…',
       })
     })
 
     it('returns a warning while the daemon RPC registry is repairing', () => {
       expect(connectionState('encrypted', true, true, false)).toEqual({
         tone: 'repairing',
-        label: 'Sync repairing',
+        label: 'Repairing sync…',
       })
     })
 
     it('waits for presence rather than claiming the desktop is offline', () => {
       expect(connectionState('encrypted', true, false, false, false)).toEqual({
         tone: 'repairing',
-        label: 'Checking your Mac…',
+        label: 'Checking desktop…',
       })
     })
 
     it('returns danger when disconnected and not encrypted', () => {
       expect(connectionState('disconnected', false, false)).toEqual({
         tone: 'disconnected',
-        label: 'Disconnected',
+        label: 'Reconnecting to relay…',
       })
     })
 
@@ -85,7 +85,7 @@ describe('ConnectionHeader logic', () => {
     it('keeps disconnected state when the transport is no longer encrypted', () => {
       expect(connectionState('disconnected', false, true)).toEqual({
         tone: 'disconnected',
-        label: 'Disconnected',
+        label: 'Reconnecting to relay…',
       })
     })
   })
@@ -96,19 +96,23 @@ describe('ConnectionHeader logic', () => {
     })
 
     it('returns false when daemon_connected is false', () => {
-      expect(desktopOnline({
-        session_id: 's1',
-        daemon_connected: false,
-        last_seen_at: null,
-      })).toBe(false)
+      expect(
+        desktopOnline({
+          session_id: 's1',
+          daemon_connected: false,
+          last_seen_at: null,
+        }),
+      ).toBe(false)
     })
 
     it('returns true when daemon_connected is true', () => {
-      expect(desktopOnline({
-        session_id: 's1',
-        daemon_connected: true,
-        last_seen_at: '2026-03-16T10:00:00Z',
-      })).toBe(true)
+      expect(
+        desktopOnline({
+          session_id: 's1',
+          daemon_connected: true,
+          last_seen_at: '2026-03-16T10:00:00Z',
+        }),
+      ).toBe(true)
     })
   })
 })

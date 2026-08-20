@@ -34,18 +34,16 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
     return <DelayedSyncBanner status={status} />
   }
 
-  if (status.stage === 'connecting' || status.stage === 'securing') {
-    // One key across both stages: the clock starts when the phase does, so
-    // connecting → securing does not restart the countdown and a stall in
-    // either stage still surfaces on time.
-    return <DeferredBanner key="link" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
-  }
-
-  if (status.stage === 'offline') {
-    // "Offline" flaps: when the phone reconnects, the relay often discovers a
-    // dead daemon socket at that exact moment and the daemon takes seconds to
-    // return. Announcing it instantly turns every flap into a scary banner.
-    return <DeferredBanner key="offline" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
+  if (
+    status.stage === 'connecting' ||
+    status.stage === 'securing' ||
+    status.stage === 'offline' ||
+    status.stage === 'repairing'
+  ) {
+    // One clock covers the ordinary reconnect path. Relay and daemon state can
+    // move through several labels during a single flap; remounting the timer at
+    // every transition either hid a real outage too long or flashed warnings.
+    return <DeferredBanner key="recovery" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
   }
 
   return <SyncBannerContent status={status} />

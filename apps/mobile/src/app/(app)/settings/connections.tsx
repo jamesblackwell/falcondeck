@@ -4,6 +4,7 @@ import { useRouter } from 'expo-router'
 import { isDaemonRpcReady } from '@falcondeck/client-core'
 
 import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/settings'
+import { CONNECTION_COPY } from '@/lib/connection-copy'
 import { useRelayStore } from '@/store'
 
 function connectionSummary(
@@ -14,15 +15,15 @@ function connectionSummary(
   daemonPresenceKnown: boolean,
 ) {
   if (status === 'encrypted' && encrypted) {
-    if (!daemonPresenceKnown) return 'Checking your Mac…'
-    if (!desktopOnline) return 'Your Mac is offline'
-    return daemonRpcReady ? 'Connected' : 'Repairing sync…'
+    if (!daemonPresenceKnown) return CONNECTION_COPY.checkingDesktop
+    if (!desktopOnline) return CONNECTION_COPY.desktopOffline
+    return daemonRpcReady ? CONNECTION_COPY.connected : CONNECTION_COPY.repairing
   }
-  if (status === 'connected') return 'Securing session…'
-  if (status === 'connecting') return 'Connecting…'
-  if (status === 'disconnected') return 'Waiting to reconnect'
-  if (status === 'claiming') return 'Pairing…'
-  return 'Not connected'
+  if (status === 'connected') return CONNECTION_COPY.securing
+  if (status === 'connecting') return CONNECTION_COPY.connecting
+  if (status === 'disconnected') return CONNECTION_COPY.reconnecting
+  if (status === 'claiming') return CONNECTION_COPY.pairingShort
+  return CONNECTION_COPY.notConnected
 }
 
 export default function ConnectionsSettingsScreen() {
@@ -85,12 +86,12 @@ export default function ConnectionsSettingsScreen() {
           label="Data sync"
           value={
             !daemonPresenceKnown
-              ? 'Checking your Mac…'
+              ? CONNECTION_COPY.checkingDesktop
               : !desktopOnline
-                ? 'Your Mac is offline'
+                ? CONNECTION_COPY.desktopOffline
                 : daemonRpcReady
                   ? 'Ready'
-                  : 'Reconnecting…'
+                  : CONNECTION_COPY.repairing
           }
         />
         <SettingsRow label="Relay" value={relayUrl} copyable />

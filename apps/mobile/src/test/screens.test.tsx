@@ -189,7 +189,7 @@ describe('mobile app screens', () => {
     const renderer = renderComponent(<PairScreen />)
 
     expect(textOf(renderer)).toContain('Connect to your desktop agent')
-    expect(textOf(renderer)).toContain('Waiting for your Mac…')
+    expect(textOf(renderer)).toContain('Waiting for desktop…')
     expect(textOf(renderer)).toContain('Bad pairing code')
     expect(routerMock.replace).not.toHaveBeenCalled()
   })
@@ -281,7 +281,6 @@ describe('mobile app screens', () => {
 
     const details = renderComponent(<ConnectionsSettingsScreen />)
     expect(textOf(details)).toContain('Repairing sync…')
-    expect(textOf(details)).toContain('Reconnecting…')
   })
 
   it('uses the native stack header for settings', () => {

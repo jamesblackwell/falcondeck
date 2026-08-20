@@ -110,7 +110,7 @@ describe('relay-store', () => {
       const lastSuccessAt = useRelayStore.getState().syncDiagnostics.lastSuccessAt
 
       store._startSyncAttempt()
-      store._setSyncRetry('Your Mac disconnected while snapshot.current was running.', null)
+      store._setSyncRetry('Desktop disconnected from the relay.', null)
 
       store._resetSyncDiagnostics()
       const diagnostics = useRelayStore.getState().syncDiagnostics

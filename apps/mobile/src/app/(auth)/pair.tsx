@@ -13,19 +13,22 @@ import { useRouter } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import { useRelayStore } from '@/store'
+import { CONNECTION_COPY } from '@/lib/connection-copy'
 import { parsePairingQr } from '@/features/pairing/parsePairingQr'
 import { DEMO_PAIRING_CODE } from '@/features/demo/demoData'
 import { enterDemoMode } from '@/features/demo/enterDemoMode'
 import { ActivityDiamond, Text, Button, Input } from '@/components/ui'
 
 function connectionLabel(status: string, desktopOnline: boolean) {
-  if (status === 'claiming') return 'Claiming pairing…'
-  if (status === 'connecting') return 'Connecting to relay…'
+  if (status === 'claiming') return CONNECTION_COPY.claiming
+  if (status === 'connecting') return CONNECTION_COPY.connectingToRelay
   if (status === 'connected') {
-    return desktopOnline ? 'Securing session…' : 'Waiting for your Mac…'
+    return desktopOnline
+      ? CONNECTION_COPY.securing
+      : CONNECTION_COPY.waitingForDesktop
   }
-  if (status === 'disconnected') return 'Reconnecting…'
-  return 'Connecting…'
+  if (status === 'disconnected') return CONNECTION_COPY.reconnecting
+  return CONNECTION_COPY.connecting
 }
 
 export default function PairScreen() {
@@ -191,8 +194,8 @@ export default function PairScreen() {
                 </Text>
                 <Text variant="caption" color="muted" style={styles.connectingBody}>
                   {desktopOnline
-                    ? 'Your desktop is finishing the encrypted handshake for this device.'
-                    : 'Keep FalconDeck open on your desktop while it finishes pairing.'}
+                    ? CONNECTION_COPY.securingDetail
+                    : CONNECTION_COPY.waitingForDesktopDetail}
                 </Text>
                 {error ? (
                   <Text variant="caption" color="danger" style={styles.error}>
@@ -202,7 +205,7 @@ export default function PairScreen() {
                 {securingTooLong && !error ? (
                   <Text variant="caption" color="danger" style={styles.error}>
                     This is taking longer than expected. Check that FalconDeck
-                    is running on your desktop, or start over to pair again.
+                    is running on your computer, or start over to pair again.
                   </Text>
                 ) : null}
                 <Button

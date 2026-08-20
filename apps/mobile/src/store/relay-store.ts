@@ -43,6 +43,7 @@ import {
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
+import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken } from '@/lib/push-notifications'
 import { getJson, setJson, removeKey } from '@/storage/mmkv'
@@ -567,8 +568,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       logConnection(
         presence.daemon_connected ? 'success' : 'warn',
         presence.daemon_connected
-          ? 'Your Mac is connected to the relay.'
-          : 'Your Mac is not connected to the relay.',
+          ? 'Desktop is connected to the relay.'
+          : 'Desktop is not connected to the relay.',
       )
     }
   },
@@ -584,7 +585,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _setSyncing: (isSyncing) => set({ isSyncing }),
   _startSyncAttempt: () => {
     const attempt = get().syncDiagnostics.attempt + 1
-    logConnection('info', `Fetching project list from your Mac (attempt ${attempt})`)
+    logConnection('info', `Fetching project list (attempt ${attempt})`)
     set((state) => {
       const now = Date.now()
       return {
@@ -693,7 +694,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _sendMessage: (message) => {
     /* v8 ignore start — requires live WebSocket, tested via E2E */
     if (_socket?.readyState !== WebSocket.OPEN) {
-      throw new Error('Remote connection is not ready')
+      throw new Error(RELAY_TRANSPORT_ERRORS.notReady)
     }
     _socket.send(JSON.stringify(message))
     /* v8 ignore stop */
@@ -715,7 +716,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         _pendingRpc.delete(requestId)
         // Fire-and-forget callers swallow rejections, so the debug overlay is
         // the only place a silently dying RPC (mark-read, prefetch) shows up.
-        logConnection('warn', `${method} timed out waiting for your Mac`)
+        logConnection('warn', `${method} timed out waiting for a response`)
         reject(new Error(`Timed out waiting for ${method}`))
       }, options?.timeoutMs ?? RELAY_RPC_TIMEOUT_MS)
 

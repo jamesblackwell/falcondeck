@@ -6,6 +6,7 @@ import { useUnistyles } from 'react-native-unistyles'
 import { isDaemonRpcReady, normalizePreferences } from '@falcondeck/client-core'
 
 import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/settings'
+import { CONNECTION_COPY } from '@/lib/connection-copy'
 import { useRelayStore, useSessionStore } from '@/store'
 import { useAppearanceStore } from '@/theme/appearance'
 
@@ -17,14 +18,14 @@ function connectionLabel(
   daemonPresenceKnown: boolean,
 ) {
   if (status === 'encrypted' && encrypted) {
-    if (!daemonPresenceKnown) return 'Checking…'
-    if (!desktopOnline) return 'Offline'
-    return daemonRpcReady ? 'Connected' : 'Repairing'
+    if (!daemonPresenceKnown) return CONNECTION_COPY.checkingDesktop
+    if (!desktopOnline) return CONNECTION_COPY.desktopOffline
+    return daemonRpcReady ? CONNECTION_COPY.connected : CONNECTION_COPY.repairing
   }
-  if (status === 'connected') return 'Securing…'
-  if (status === 'connecting') return 'Connecting…'
-  if (status === 'disconnected') return 'Reconnecting…'
-  return 'Not connected'
+  if (status === 'connected') return CONNECTION_COPY.securing
+  if (status === 'connecting') return CONNECTION_COPY.connecting
+  if (status === 'disconnected') return CONNECTION_COPY.reconnecting
+  return CONNECTION_COPY.notConnected
 }
 
 export default function SettingsScreen() {

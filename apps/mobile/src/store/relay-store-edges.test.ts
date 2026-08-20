@@ -244,7 +244,7 @@ describe('relay-store edge cases', () => {
     it('throws a clear error when no socket is set', () => {
       expect(() => {
         useRelayStore.getState()._sendMessage({ type: 'ping' })
-      }).toThrow('Remote connection is not ready')
+      }).toThrow('Not connected to the relay')
     })
 
     it('_getSocket returns null when not connected', () => {

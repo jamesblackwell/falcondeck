@@ -99,6 +99,7 @@ import {
   triggerAgentCompletionHaptic,
   triggerThreadSelectionHaptic,
 } from "@/lib/haptics";
+import { CONNECTION_COPY } from "@/lib/connection-copy";
 import { sessionSendBlockReason } from "@/lib/session-status";
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
@@ -1303,7 +1304,7 @@ export default function HomeScreen() {
             isSubmitting
               ? undefined
               : !isEncrypted
-                ? (sessionSendBlockReason(syncStatus) ?? "Reconnect to send")
+                ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
                 : (attachmentSendBlockReason ?? undefined)
           }
           attachments={attachments}

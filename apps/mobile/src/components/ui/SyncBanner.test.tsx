@@ -149,6 +149,35 @@ describe('SyncBanner', () => {
     }
   })
 
+  it('keeps the recovery grace across offline and RPC repair states', () => {
+    vi.useFakeTimers()
+    try {
+      const r = renderComponent(
+        <SyncBanner status={resolveSessionSyncStatus({ ...base, daemonConnected: false })} />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(4_000)
+      })
+
+      act(() => {
+        r.update(
+          <SyncBanner
+            status={resolveSessionSyncStatus({ ...base, daemonRpcReady: false })}
+          />,
+        )
+      })
+      expect(r.toJSON()).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(2_000)
+      })
+      expect(textOf(r)).toContain('Repairing sync…')
+      cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('announces itself politely to VoiceOver', () => {
     const now = Date.now()
     const r = renderComponent(
