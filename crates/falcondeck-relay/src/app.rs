@@ -347,6 +347,14 @@ impl LiveSession {
             .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
     }
 
+    fn daemon_reconnect_grace_active(&self, now: DateTime<Utc>) -> bool {
+        !self.daemon_connected()
+            && self.daemon_disconnected_at.is_some_and(|disconnected_at| {
+                now.signed_duration_since(disconnected_at)
+                    <= Duration::seconds(DAEMON_RECONNECT_GRACE_SECONDS)
+            })
+    }
+
     fn rpc_owner(&self, method: &str) -> Option<(&str, &PeerHandle)> {
         self.rpc_methods
             .get(method)?
@@ -1410,7 +1418,7 @@ impl AppState {
                     }
                 }
 
-                if live.peers.is_empty() {
+                if live.peers.is_empty() && !live.daemon_reconnect_grace_active(Utc::now()) {
                     store.live_sessions.remove(session_id);
                 }
             }
@@ -1861,12 +1869,7 @@ impl AppState {
                         },
                     );
                     target = Some((owner_peer_id, owner_tx));
-                } else if !live.daemon_connected()
-                    && live.daemon_disconnected_at.is_some_and(|disconnected_at| {
-                        Utc::now().signed_duration_since(disconnected_at)
-                            <= Duration::seconds(DAEMON_RECONNECT_GRACE_SECONDS)
-                    })
-                {
+                } else if live.daemon_reconnect_grace_active(Utc::now()) {
                     // The daemon was here moments ago and its supervisor
                     // reconnects on a short backoff: park the call so the
                     // reconnect flap resolves invisibly instead of erroring.
@@ -3080,6 +3083,9 @@ impl AppState {
             store
                 .push_dedupe
                 .retain(|_, last| *last + dedupe_window > now);
+            store.live_sessions.retain(|_, live| {
+                !live.peers.is_empty() || live.daemon_reconnect_grace_active(now)
+            });
             let live_session_ids = store.live_sessions.keys().cloned().collect();
             prune_state(
                 &mut store.data,
@@ -3691,7 +3697,7 @@ fn generate_pairing_code(state: &PersistedState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use falcondeck_core::{
         EncryptedEnvelope, EncryptionVariant, MachinePresence, RelayUpdate, RelayUpdateBody,
         RelayUpdatesResponse, SyncCursor,
@@ -3715,6 +3721,20 @@ mod tests {
             },
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn empty_live_session_survives_only_the_daemon_reconnect_grace() {
+        let now = Utc::now();
+        let mut live = LiveSession {
+            daemon_disconnected_at: Some(now - Duration::seconds(1)),
+            ..LiveSession::default()
+        };
+
+        assert!(live.daemon_reconnect_grace_active(now));
+
+        live.daemon_disconnected_at = Some(now - Duration::seconds(21));
+        assert!(!live.daemon_reconnect_grace_active(now));
     }
 
     #[test]
