@@ -29,6 +29,9 @@ REMOTE_NPM := npm --workspace apps/remote-web
 SITE_NPM := npm --workspace apps/site
 ROOT_NPM := npm
 CARGO := cargo
+PROJECT_CARGO := $(shell if command -v rustup >/dev/null 2>&1; then rustup which cargo; else command -v cargo; fi)
+PROJECT_RUSTC := $(shell if command -v rustup >/dev/null 2>&1; then rustup which rustc; else command -v rustc; fi)
+PROJECT_RUSTDOC := $(shell if command -v rustup >/dev/null 2>&1; then rustup which rustdoc; else command -v rustdoc; fi)
 DAEMON_PORT ?= 4123
 OPENCODE_MODEL ?= default
 OPENCODE_TRANSPORT ?= auto
@@ -81,14 +84,14 @@ FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true)
 # the final link of the desktop binary sit on "607/608" for minutes and defeats
 # incremental reuse. Local installs override both (parallel codegen, no LTO);
 # distribution builds keep the fully-optimized release profile.
-DESKTOP_INSTALL_CARGO_ENV = CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+DESKTOP_INSTALL_CARGO_ENV = RUSTC="$(PROJECT_RUSTC)" RUSTDOC="$(PROJECT_RUSTDOC)" CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build
-TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --bundles app --config src-tauri/tauri.local.conf.json
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --runner "$(PROJECT_CARGO)" --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/release/bundle/macos/FalconDeck.app
 else
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build --target $(DESKTOP_TAURI_TARGET)
-TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --target $(DESKTOP_TAURI_TARGET) --bundles app --config src-tauri/tauri.local.conf.json
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --runner "$(PROJECT_CARGO)" --target $(DESKTOP_TAURI_TARGET) --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/$(DESKTOP_TAURI_TARGET)/release/bundle/macos/FalconDeck.app
 endif
 APPLICATIONS_APP := /Applications/FalconDeck.app
