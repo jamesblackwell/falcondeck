@@ -92,6 +92,16 @@ describe('useDaemonConnection thread restoration', () => {
     mocks.sockets = []
   })
 
+  it('opens the local daemon even when remote relay status is slow', async () => {
+    mocks.remoteStatus.mockImplementation(() => new Promise(() => {}))
+
+    const { result } = renderHook(() => useDaemonConnection())
+
+    await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+    expect(result.current.snapshot).not.toBeNull()
+    expect(result.current.remoteStatus).toBeNull()
+  })
+
   it('waits for workspace hydration before fetching a restored thread detail', async () => {
     const { result } = renderHook(() => useDaemonConnection())
 

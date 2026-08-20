@@ -16,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
     sync::{broadcast, mpsc},
-    time::Duration,
+    time::{Duration, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -113,8 +113,13 @@ impl AppState {
             .await
             .map_err(|error| format!("failed to issue relay websocket ticket: {error}"))?;
         let ws_url = relay_ws_url(&relay_url, &session_id, &ws_ticket.ticket);
-        let (socket, _) = connect_async(&ws_url)
+        let (socket, _) = timeout(Duration::from_secs(20), connect_async(&ws_url))
             .await
+            .map_err(|_| {
+                RemoteBridgeError::Transient(
+                    "relay websocket connection timed out; retrying".to_string(),
+                )
+            })?
             .map_err(|error| format!("failed to connect daemon relay websocket: {error}"))?;
         let (mut writer, mut reader) = socket.split();
 
@@ -375,6 +380,7 @@ impl AppState {
                 session_id
             ))
             .bearer_auth(daemon_token)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .map_err(|error| {

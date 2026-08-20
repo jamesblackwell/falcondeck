@@ -35,6 +35,7 @@ import {
   type PersistedRemoteSession,
 } from './remote-session'
 import { RELAY_RPC_TIMEOUT_MS, relayRpcFailureMessage } from './remote-rpc'
+import { fetchWithTimeout, WEBSOCKET_CONNECT_TIMEOUT_MS } from './transport-timeout'
 import type {
   ClaimPairingRequest,
   ClaimPairingResponse,
@@ -116,7 +117,7 @@ export async function claimHostPairing(options: {
 
   // Claims are challenge-bound: fetch a single-use challenge and prove
   // possession of the identity secret key by signing it.
-  const challengeResponse = await fetch(`${relayBase}/v1/pairings/challenge`, {
+  const challengeResponse = await fetchWithTimeout(`${relayBase}/v1/pairings/challenge`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ pairing_code: pairingCode } satisfies PairingChallengeRequest),
@@ -125,7 +126,7 @@ export async function claimHostPairing(options: {
   const challenge = (await challengeResponse.json()) as PairingChallengeResponse
   if (!challenge.challenge) throw new Error('Relay challenge response is missing a challenge')
 
-  const claimResponse = await fetch(`${relayBase}/v1/pairings/claim`, {
+  const claimResponse = await fetchWithTimeout(`${relayBase}/v1/pairings/claim`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -188,6 +189,7 @@ export class RemoteHostClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private pingInterval: ReturnType<typeof setInterval> | null = null
   private backoffResetTimer: ReturnType<typeof setTimeout> | null = null
+  private connectTimeout: ReturnType<typeof setTimeout> | null = null
   private bootstrapRetryInterval: ReturnType<typeof setInterval> | null = null
   private pendingUpdates: RelayUpdate[] = []
   private parkedEncryptedUpdates: RelayUpdate[] = []
@@ -318,6 +320,10 @@ export class RemoteHostClient {
   }
 
   private clearTimers() {
+    if (this.connectTimeout !== null) {
+      clearTimeout(this.connectTimeout)
+      this.connectTimeout = null
+    }
     if (this.pingInterval !== null) {
       clearInterval(this.pingInterval)
       this.pingInterval = null
@@ -350,7 +356,7 @@ export class RemoteHostClient {
     this.setStatus('connecting')
     this.setPresence(null)
 
-    void fetch(
+    void fetchWithTimeout(
       `${relayHttpBase(relayUrl)}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`,
       { method: 'POST', headers: { authorization: `Bearer ${clientToken}` } },
     )
@@ -364,9 +370,20 @@ export class RemoteHostClient {
           `${relayWsBase(relayUrl)}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
         )
         this.socket = socket
+        this.connectTimeout = setTimeout(() => {
+          this.connectTimeout = null
+          if (generation === this.generation && socket.readyState === WebSocket.CONNECTING) {
+            this.callbacks.onError?.('Relay connection timed out; retrying')
+            this.scheduleReconnect()
+          }
+        }, WEBSOCKET_CONNECT_TIMEOUT_MS)
 
         socket.onopen = () => {
           if (generation !== this.generation) return
+          if (this.connectTimeout !== null) {
+            clearTimeout(this.connectTimeout)
+            this.connectTimeout = null
+          }
           // The relay drops peers that stay silent for 45s.
           this.pingInterval = setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) this.send({ type: 'ping' })
@@ -401,7 +418,7 @@ export class RemoteHostClient {
       })
       .catch((error: unknown) => {
         if (generation !== this.generation || !this.running) return
-        const message = error instanceof Error ? error.message : 'Failed to connect to relay'
+        const message = error instanceof Error ? error.message : 'Could not reach the relay'
         this.callbacks.onError?.(message)
         if (isInvalidRemoteSessionError(message)) {
           this.abandonInvalidSession(message)

@@ -10,6 +10,7 @@ import {
   relayBacklogWouldOverflow,
   relayReconnectDelayMs,
   resolveRelayTruncationCursor,
+  WEBSOCKET_CONNECT_TIMEOUT_MS,
 } from '@falcondeck/client-core'
 import type {
   DaemonSnapshot,
@@ -36,10 +37,6 @@ const MAX_PENDING_SNAPSHOT_EVENTS = 2_000
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 const SNAPSHOT_REFETCH_DELAY_MS = 1_000
-// A WebSocket stuck in CONNECTING never fires close on some platforms; give
-// the handshake a hard deadline so the UI cannot park at "Connecting…".
-const RELAY_CONNECT_TIMEOUT_MS = 20_000
-
 /**
  * iOS kills the relay socket when the app backgrounds; waiting for the dead
  * socket to error plus the backoff delay makes resume feel slow. When the app
@@ -788,7 +785,7 @@ export function useRelayConnection() {
             // close() on a CONNECTING socket fires onclose → scheduleReconnect.
             socket.close()
           }
-        }, RELAY_CONNECT_TIMEOUT_MS)
+        }, WEBSOCKET_CONNECT_TIMEOUT_MS)
 
         socket.onopen = () => {
           if (!isCurrent) return

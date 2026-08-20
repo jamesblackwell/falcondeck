@@ -31,6 +31,7 @@ import {
   THREAD_TAGS_EXTENSION_ID,
   deriveIdentityKeyPair,
   encryptJson,
+  fetchWithTimeout,
   filesToImageInputs,
   generateBoxKeyPair,
   generateUserItemId,
@@ -54,6 +55,7 @@ import {
   relayBacklogWouldOverflow,
   relayRpcFailureMessage,
   RELAY_RPC_TIMEOUT_MS,
+  WEBSOCKET_CONNECT_TIMEOUT_MS,
   reconcileSnapshotSelection,
   resolvePersistedMode,
   resolvePermissionMode,
@@ -1217,6 +1219,7 @@ function RemoteApp() {
     let socket: WebSocket | null = null;
     let pingInterval: number | null = null;
     let backoffResetTimer: number | null = null;
+    let connectTimeout: number | null = null;
     socketRef.current = null;
     pendingEncryptedUpdatesRef.current = [];
     evictedWhileParkedRef.current = false;
@@ -1239,12 +1242,17 @@ function RemoteApp() {
         window.clearTimeout(backoffResetTimer);
         backoffResetTimer = null;
       }
+      if (connectTimeout !== null) {
+        window.clearTimeout(connectTimeout);
+        connectTimeout = null;
+      }
     };
 
     const scheduleReconnect = () => {
       clearSocketTimers();
       if (!isCurrent) return;
       if (suppressReconnectRef.current) return;
+      if (reconnectTimerRef.current !== null) return;
       setConnectionStatus("disconnected");
       setMachinePresence(null);
       for (const [reqId, pending] of pendingRpc.current.entries()) {
@@ -1260,7 +1268,6 @@ function RemoteApp() {
       pendingSnapshotOverflowedRef.current = false;
       pendingSnapshotCursorRef.current = null;
       pendingRelayUpdatesRef.current = [];
-      relayFlushGenerationRef.current += 1;
       cancelRelayFlush();
       if (sessionId && clientToken) {
         const delay = relayReconnectDelayMs(reconnectAttemptRef.current);
@@ -1277,7 +1284,7 @@ function RemoteApp() {
       setError(message);
     };
 
-    void fetch(
+    void fetchWithTimeout(
       `${relayUrl.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`,
       {
         method: "POST",
@@ -1303,9 +1310,21 @@ function RemoteApp() {
           `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
         );
         socketRef.current = socket;
+        connectTimeout = window.setTimeout(() => {
+          connectTimeout = null;
+          if (isCurrent && socket?.readyState === WebSocket.CONNECTING) {
+            setError("Relay connection timed out; retrying");
+            socket.close();
+            scheduleReconnect();
+          }
+        }, WEBSOCKET_CONNECT_TIMEOUT_MS);
 
         socket.onopen = () => {
           if (!isCurrent || !socket) return;
+          if (connectTimeout !== null) {
+            window.clearTimeout(connectTimeout);
+            connectTimeout = null;
+          }
           const openSocket = socket;
           // The relay drops peers that stay silent for 45s.
           pingInterval = window.setInterval(() => {
@@ -2298,7 +2317,7 @@ function RemoteApp() {
 
     // Claims are challenge-bound: fetch a single-use challenge and prove
     // possession of the identity secret key by signing it.
-    const challengeResponse = await fetch(
+    const challengeResponse = await fetchWithTimeout(
       `${relayBase}/v1/pairings/challenge`,
       {
         method: "POST",
@@ -2324,7 +2343,7 @@ function RemoteApp() {
       return;
     }
 
-    const response = await fetch(`${relayBase}/v1/pairings/claim`, {
+    const response = await fetchWithTimeout(`${relayBase}/v1/pairings/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({

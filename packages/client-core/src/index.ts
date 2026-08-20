@@ -9,6 +9,7 @@ export * from "./crypto";
 export * from "./snapshot";
 export * from "./remote-session";
 export * from "./remote-rpc";
+export * from "./transport-timeout";
 export * from "./remote-host-client";
 export * from "./collaboration";
 export * from "./composer-persistence";

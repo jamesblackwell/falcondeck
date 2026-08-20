@@ -28,6 +28,7 @@ const DAEMON_RECONNECT_MAX_DELAY_MS = 10_000
 // Only treat a connection as healthy (and reset backoff) after it stays open
 // this long — mirrors the relay clients.
 const DAEMON_BACKOFF_RESET_MS = 10_000
+const DAEMON_SOCKET_CONNECT_TIMEOUT_MS = 10_000
 const THREAD_PREFETCH_LIMIT = 3
 const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
 // A thread the client believes is live but that has gone this long without a
@@ -231,12 +232,17 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
     let backoffResetTimer: number | null = null
+    let connectTimeout: number | null = null
     let cancelled = false
 
     const teardownSocket = () => {
       if (backoffResetTimer !== null) {
         window.clearTimeout(backoffResetTimer)
         backoffResetTimer = null
+      }
+      if (connectTimeout !== null) {
+        window.clearTimeout(connectTimeout)
+        connectTimeout = null
       }
       if (!socket) return
       // Null out handlers before closing so onerror/onclose cannot double-fire
@@ -273,10 +279,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
           if (cancelled) return
           setBaseUrl(nextBaseUrl)
           const nextApi = createDaemonApiClient(nextBaseUrl)
-          const [nextSnapshot, nextRemoteStatus] = await Promise.all([
-            nextApi.snapshot(),
-            nextApi.remoteStatus(),
-          ])
+          const nextSnapshot = await nextApi.snapshot()
           if (cancelled) return
           // A frame-batched event from the socket that just died may still be
           // queued. It predates this authoritative reconnect snapshot and must
@@ -284,13 +287,25 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
           // backward. The new event socket seeds itself with another snapshot.
           clearPendingEvents()
           setSnapshot(nextSnapshot)
-          setRemoteStatus(nextRemoteStatus)
           setConnectionError(null)
           setConnectionState('ready')
           recordPerformance('falcondeck:daemon-bootstrap', startedAt, { attempt: attempt + 1 })
           socket = nextApi.connectEvents(handleEvent)
+          connectTimeout = window.setTimeout(() => {
+            connectTimeout = null
+            if (!cancelled && socket?.readyState === WebSocket.CONNECTING) {
+              teardownSocket()
+              setConnectionState('error')
+              setConnectionError(CONNECTION_COPY.lostConnection)
+              scheduleReconnect()
+            }
+          }, DAEMON_SOCKET_CONNECT_TIMEOUT_MS)
           socket.onopen = () => {
             if (cancelled) return
+            if (connectTimeout !== null) {
+              window.clearTimeout(connectTimeout)
+              connectTimeout = null
+            }
             // Resetting backoff immediately would defeat it when the daemon
             // drops connections right after accepting them; only reset once
             // the connection has stayed open for a while.
@@ -720,15 +735,22 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
   // Poll remote status
   useEffect(() => {
-    if (!api || !remoteStatus || remoteStatus.status === 'inactive') return
-    const interval = window.setInterval(() => {
+    if (!api || remoteStatus?.status === 'inactive') return
+    let inFlight = false
+    const refresh = () => {
+      if (inFlight) return
+      inFlight = true
       void api.remoteStatus().then(setRemoteStatus).catch((error) => {
         const message = error instanceof Error ? error.message : 'Failed to refresh remote status'
         setRemoteStatus((current) => current ? { ...current, last_error: message } : current)
+      }).finally(() => {
+        inFlight = false
       })
-    }, 2000)
+    }
+    refresh()
+    const interval = window.setInterval(refresh, 2000)
     return () => window.clearInterval(interval)
-  }, [api, remoteStatus])
+  }, [api, remoteStatus?.status])
 
   // Refresh git on workspace change
    

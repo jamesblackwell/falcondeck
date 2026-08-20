@@ -66,6 +66,7 @@ import {
   normalizeThreadHandle,
   normalizeThreadSummary,
 } from "./normalization";
+import { fetchWithTimeout } from "./transport-timeout";
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -142,7 +143,7 @@ export function createDaemonApiClient(baseUrl: string) {
       const suffix = query ? `?${query}` : "";
       return normalizeDaemonSnapshot(
         await parseJson<DaemonSnapshot>(
-          await fetch(`${baseUrl}/api/snapshot${suffix}`),
+          await fetchWithTimeout(`${baseUrl}/api/snapshot${suffix}`),
         ),
       );
     },
@@ -268,7 +269,7 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async remoteStatus() {
       return parseJson<RemoteStatusResponse>(
-        await fetch(`${baseUrl}/api/remote/status`),
+        await fetchWithTimeout(`${baseUrl}/api/remote/status`),
       );
     },
     /** Cached (60s) local harness inventory; shallow, no network lookups. */
