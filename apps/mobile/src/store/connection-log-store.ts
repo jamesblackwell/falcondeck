@@ -19,9 +19,12 @@ export interface ConnectionLogEntry {
   level: ConnectionLogLevel
   message: string
   detail?: string
+  /** Collapsed repeats keep a flaky link debuggable without drowning the log. */
+  count?: number
 }
 
 const MAX_ENTRIES = 300
+const REPEAT_WINDOW_MS = 5_000
 
 let nextId = 1
 
@@ -42,23 +45,41 @@ interface ConnectionLogActions {
   hide: () => void
 }
 
-export const useConnectionLogStore = create<ConnectionLogState & ConnectionLogActions>(
-  (set) => ({
-    entries: [],
-    visible: false,
-    dismissedForRun: false,
+export const useConnectionLogStore = create<
+  ConnectionLogState & ConnectionLogActions
+>((set) => ({
+  entries: [],
+  visible: false,
+  dismissedForRun: false,
 
-    _append: (entry) =>
-      set((state) => ({
-        entries: [...state.entries, { ...entry, id: nextId++, at: Date.now() }].slice(
+  _append: (entry) =>
+    set((state) => {
+      const now = Date.now()
+      const previous = state.entries[state.entries.length - 1]
+      if (
+        previous &&
+        previous.level === entry.level &&
+        previous.message === entry.message &&
+        previous.detail === entry.detail &&
+        now - previous.at <= REPEAT_WINDOW_MS
+      ) {
+        return {
+          entries: [
+            ...state.entries.slice(0, -1),
+            { ...previous, at: now, count: (previous.count ?? 1) + 1 },
+          ],
+        }
+      }
+      return {
+        entries: [...state.entries, { ...entry, id: nextId++, at: now }].slice(
           -MAX_ENTRIES,
         ),
-      })),
+      }
+    }),
 
-    show: () => set({ visible: true }),
-    hide: () => set({ visible: false, dismissedForRun: true }),
-  }),
-)
+  show: () => set({ visible: true }),
+  hide: () => set({ visible: false, dismissedForRun: true }),
+}))
 
 /** Log from anywhere — stores, hooks, callbacks — without a React binding. */
 export function logConnection(
@@ -71,5 +92,5 @@ export function logConnection(
 
 /** Open the debug screen without clearing the run's dismissal flag. */
 export function openConnectionDebug(): void {
-  useConnectionLogStore.setState({ visible: true })
+  useConnectionLogStore.getState().show()
 }

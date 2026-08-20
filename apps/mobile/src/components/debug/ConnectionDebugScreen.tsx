@@ -1,34 +1,29 @@
 /**
  * Connection debug screen.
  *
- * A deliberately transparent, closable full-screen overlay shown while the
- * launch sync is busy. Launch can take a while (relay socket → session key →
- * daemon presence → snapshot), and until it lands the app reads as frozen.
- * Rather than pretending nothing is happening, this spells out the exact
- * connection states, retry schedule, and a live log of what the app is doing.
- *
- * It is diagnostic UX, not a product surface: expect it to be simplified or
- * removed once the underlying launch stalls are ironed out.
+ * A calm, closable full-screen connection view. The first layer explains that
+ * FalconDeck is recovering normally; detailed transport history is opt-in.
  */
 import { memo, useEffect, useRef, useState } from 'react'
 import { Modal, Pressable, ScrollView, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
+import { shouldAutoShowConnectionDebug } from '@/lib/session-status'
 import { useConnectionLogStore, useRelayStore } from '@/store'
-import type { ConnectionLogEntry, ConnectionLogLevel } from '@/store/connection-log-store'
+import type {
+  ConnectionLogEntry,
+  ConnectionLogLevel,
+} from '@/store/connection-log-store'
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
 import { ActivityDiamond } from '@/components/ui/ActivityDiamond'
 import { Text } from '@/components/ui/Text'
 
 /**
- * Auto-show only after the busy period has lasted long enough that an ordinary
- * launch — and a routine reconnect flap, including the daemon's own relay
- * reconnect after a network blip (its supervisor takes up to ~15s) — would
- * have finished. Anything shorter shoves a full-screen diagnostic at the user
- * for outages that heal themselves.
+ * Ordinary 4G/Wi-Fi handoffs settle before this timer. Longer waits get the
+ * connection view instead of a stream of low-level errors.
  */
-const AUTO_SHOW_DELAY_MS = 20_000
+const AUTO_SHOW_DELAY_MS = 7_000
 
 function formatClock(at: number): string {
   const d = new Date(at)
@@ -65,6 +60,7 @@ function LogLine({ entry }: { entry: ConnectionLogEntry }) {
       <View style={styles.logBody}>
         <Text variant="mono" size="2xs" style={{ color: color[entry.level] }}>
           {entry.message}
+          {entry.count && entry.count > 1 ? ` ×${entry.count}` : ''}
         </Text>
         {entry.detail ? (
           <Text variant="mono" size="2xs" color="muted">
@@ -92,15 +88,33 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
   const error = useRelayStore((s) => s.error)
   const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
 
-  // Auto-open while the session is stuck in a busy stage, unless the user has
-  // closed the screen once this run.
+  // A normal cellular handoff should stay invisible. If it lasts, put a calm
+  // connection screen in front of a disabled composer instead of exposing a
+  // wall of transport warnings.
+  const autoShowDebug = shouldAutoShowConnectionDebug(status)
+  const autoScreenVisible = useRef(false)
   useEffect(() => {
-    if (!status.isBusy) return
+    if (!autoShowDebug) {
+      if (autoScreenVisible.current) {
+        useConnectionLogStore.setState({ visible: false })
+        autoScreenVisible.current = false
+      }
+      return
+    }
     const timer = setTimeout(() => {
-      if (!useConnectionLogStore.getState().dismissedForRun) show()
+      const connectionLog = useConnectionLogStore.getState()
+      if (!connectionLog.dismissedForRun && !connectionLog.visible) {
+        autoScreenVisible.current = true
+        show()
+      }
     }, AUTO_SHOW_DELAY_MS)
     return () => clearTimeout(timer)
-  }, [status.isBusy, status.stage, show])
+  }, [autoShowDebug, show])
+
+  const [showDetails, setShowDetails] = useState(false)
+  useEffect(() => {
+    if (!visible) setShowDetails(false)
+  }, [visible])
 
   // One shared clock so elapsed/retry countdowns tick without per-row timers.
   const [now, setNow] = useState(() => Date.now())
@@ -127,6 +141,9 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
     status.nextRetryAt === null
       ? null
       : Math.max(0, Math.ceil((status.nextRetryAt - now) / 1_000))
+  const recoveryDetail =
+    status.detail ||
+    'Re-establishing the encrypted connection. Your most recently synced threads stay available.'
 
   return (
     <Modal
@@ -137,11 +154,13 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
       onRequestClose={hide}
     >
       <View style={styles.backdrop}>
-        <View style={[styles.sheet, { paddingTop: insets.top + theme.spacing[4] }]}>
+        <View
+          style={[styles.sheet, { paddingTop: insets.top + theme.spacing[4] }]}
+        >
           <View style={styles.header}>
             <View style={styles.headerText}>
               <Text variant="heading" size="md" weight="semibold">
-                {status.isBusy ? status.label : 'Connected'}
+                {status.isBusy ? status.label : 'Connection restored'}
               </Text>
               {status.isBusy && status.detail ? (
                 <Text variant="caption" size="xs" color="muted">
@@ -154,7 +173,10 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
               )}
             </View>
             {status.isBusy ? (
-              <ActivityDiamond size={theme.iconSize.lg} color={theme.colors.info.default} />
+              <ActivityDiamond
+                size={theme.iconSize.lg}
+                color={theme.colors.info.default}
+              />
             ) : (
               <View style={styles.readyDot} />
             )}
@@ -171,65 +193,133 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
             </Pressable>
           </View>
 
-          <ScrollView
-            ref={logRef}
-            style={styles.stateSection}
-            contentContainerStyle={styles.stateContent}
+          {status.isBusy ? (
+            <View style={styles.recoveryCard}>
+              <ActivityDiamond
+                size={theme.iconSize.xl}
+                color={theme.colors.info.default}
+              />
+              <Text
+                variant="body"
+                size="sm"
+                color="primary"
+                style={styles.recoveryCopy}
+              >
+                {recoveryDetail}
+              </Text>
+              <Text
+                variant="caption"
+                size="xs"
+                color="muted"
+                style={styles.recoveryCopy}
+              >
+                FalconDeck will continue automatically as soon as the relay is
+                ready.
+              </Text>
+            </View>
+          ) : null}
+
+          <Pressable
+            onPress={() => setShowDetails((current) => !current)}
+            accessibilityRole="button"
+            accessibilityLabel={
+              showDetails
+                ? 'Hide connection details'
+                : 'View connection details'
+            }
+            style={styles.detailsButton}
           >
-            <Text variant="microlabel" size="2xs" color="faint">
-              CONNECTION
+            <Text variant="label" size="sm" color="accent">
+              {showDetails
+                ? 'Hide connection details'
+                : 'View connection details'}
             </Text>
-            <Row label="Relay" value={connectionStatus.replace('_', ' ')} />
-            <Row label="Encrypted channel" value={isEncrypted ? 'yes' : 'no'} />
-            <Row
-              label="Your Mac"
-              value={
-                machinePresence === null
-                  ? 'unknown'
-                  : machinePresence.daemon_connected
-                    ? machinePresence.daemon_rpc_ready === false
-                      ? 'online (sync repairing)'
-                      : 'online'
-                    : 'offline'
-              }
-            />
-            <Row label="Projects synced" value={hasSyncedOnce ? 'yes' : 'not yet'} />
-            {error ? <Row label="Last error" value={error} /> : null}
+          </Pressable>
 
-            <Text variant="microlabel" size="2xs" color="faint" style={styles.sectionGap}>
-              SYNC
-            </Text>
-            {status.isBusy ? (
-              <>
-                {status.syncStartedAt !== null ? (
-                  <Row label="Waiting" value={`${elapsedSeconds}s`} />
-                ) : null}
-                {status.syncAttempt > 0 ? (
-                  <Row label="Attempt" value={String(status.syncAttempt)} />
-                ) : null}
-                {retrySeconds !== null ? <Row label="Next retry in" value={`${retrySeconds}s`} /> : null}
-                {status.lastError ? <Row label="Last error" value={status.lastError} /> : null}
-              </>
-            ) : (
-              <Text variant="caption" size="xs" color="muted">
-                Nothing in flight.
+          {showDetails ? (
+            <ScrollView
+              ref={logRef}
+              style={styles.stateSection}
+              contentContainerStyle={styles.stateContent}
+            >
+              <Text variant="microlabel" size="2xs" color="faint">
+                CONNECTION
               </Text>
-            )}
-            {syncDiagnostics.lastSuccessAt !== null ? (
-              <Row label="Last successful sync" value={formatClock(syncDiagnostics.lastSuccessAt)} />
-            ) : null}
+              <Row label="Relay" value={connectionStatus.replace('_', ' ')} />
+              <Row
+                label="Encrypted channel"
+                value={isEncrypted ? 'yes' : 'no'}
+              />
+              <Row
+                label="Desktop"
+                value={
+                  machinePresence === null
+                    ? 'unknown'
+                    : machinePresence.daemon_connected
+                      ? machinePresence.daemon_rpc_ready === false
+                        ? 'online (sync repairing)'
+                        : 'online'
+                      : 'offline'
+                }
+              />
+              <Row
+                label="Projects synced"
+                value={hasSyncedOnce ? 'yes' : 'not yet'}
+              />
+              {error ? <Row label="Last error" value={error} /> : null}
 
-            <Text variant="microlabel" size="2xs" color="faint" style={styles.sectionGap}>
-              ACTIVITY LOG
-            </Text>
-            {entries.length === 0 ? (
-              <Text variant="caption" size="xs" color="muted">
-                No connection activity recorded yet.
+              <Text
+                variant="microlabel"
+                size="2xs"
+                color="faint"
+                style={styles.sectionGap}
+              >
+                SYNC
               </Text>
-            ) : (
-              entries.map((entry) => <LogLine key={entry.id} entry={entry} />)
-            )}
-          </ScrollView>
+              {status.isBusy ? (
+                <>
+                  {status.syncStartedAt !== null ? (
+                    <Row label="Waiting" value={`${elapsedSeconds}s`} />
+                  ) : null}
+                  {status.syncAttempt > 0 ? (
+                    <Row label="Attempt" value={String(status.syncAttempt)} />
+                  ) : null}
+                  {retrySeconds !== null ? (
+                    <Row label="Next retry in" value={`${retrySeconds}s`} />
+                  ) : null}
+                  {status.lastError ? (
+                    <Row label="Last error" value={status.lastError} />
+                  ) : null}
+                </>
+              ) : (
+                <Text variant="caption" size="xs" color="muted">
+                  Nothing in flight.
+                </Text>
+              )}
+              {syncDiagnostics.lastSuccessAt !== null ? (
+                <Row
+                  label="Last successful sync"
+                  value={formatClock(syncDiagnostics.lastSuccessAt)}
+                />
+              ) : null}
+
+              <Text
+                variant="microlabel"
+                size="2xs"
+                color="faint"
+                style={styles.sectionGap}
+              >
+                ACTIVITY LOG
+              </Text>
+              {entries.length === 0 ? (
+                <Text variant="caption" size="xs" color="muted">
+                  No connection activity recorded yet.
+                </Text>
+              ) : (
+                entries.map((entry) => <LogLine key={entry.id} entry={entry} />)
+              )}
+            </ScrollView>
+          ) : null}
         </View>
       </View>
     </Modal>
@@ -272,6 +362,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   stateSection: {
     flex: 1,
+  },
+  recoveryCard: {
+    alignItems: 'center',
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[6],
+    paddingVertical: theme.spacing[8],
+  },
+  recoveryCopy: {
+    textAlign: 'center',
+  },
+  detailsButton: {
+    alignSelf: 'center',
+    minHeight: theme.minTouchTarget,
+    justifyContent: 'center',
+    paddingHorizontal: theme.spacing[3],
   },
   stateContent: {
     paddingVertical: theme.spacing[3],

@@ -7,8 +7,16 @@
  * is waiting for instead of looking broken.
  */
 
+import { CONNECTION_COPY } from './connection-copy'
+
 export type SessionSyncStage =
-  'pairing' | 'connecting' | 'securing' | 'syncing' | 'repairing' | 'offline' | 'ready'
+  | 'pairing'
+  | 'connecting'
+  | 'securing'
+  | 'syncing'
+  | 'repairing'
+  | 'offline'
+  | 'ready'
 
 export interface SessionSyncStatus {
   stage: SessionSyncStage
@@ -38,7 +46,7 @@ export interface SessionSyncInput {
   /** The paired desktop is reachable through the relay. */
   daemonConnected: boolean
   /** Presence has arrived from the relay. False avoids briefly reporting an
-   * offline Mac between the socket-ready and presence frames. */
+   * offline desktop between the socket-ready and presence frames. */
   daemonPresenceKnown?: boolean
   /** The connected daemon has registered snapshot.current. Undefined means
    * an older relay that only reports transport presence. */
@@ -51,9 +59,17 @@ export interface SessionSyncInput {
   lastError?: string | null
 }
 
-export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncStatus {
-  const { connectionStatus, isEncrypted, isSyncing, hasSnapshot, daemonConnected, hasSyncedOnce } =
-    input
+export function resolveSessionSyncStatus(
+  input: SessionSyncInput,
+): SessionSyncStatus {
+  const {
+    connectionStatus,
+    isEncrypted,
+    isSyncing,
+    hasSnapshot,
+    daemonConnected,
+    hasSyncedOnce,
+  } = input
   const diagnostics = {
     syncStartedAt: input.syncStartedAt ?? null,
     syncAttempt: input.syncAttempt ?? 0,
@@ -73,50 +89,65 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
   })
 
   if (connectionStatus === 'claiming') {
-    return busy('pairing', 'Pairing this device…')
+    return busy('pairing', CONNECTION_COPY.pairing)
   }
 
   if (!isEncrypted) {
     // 'connected' means the socket is up but the session data key has not
     // arrived yet, which is its own (usually brief) wait.
     if (connectionStatus === 'connected') {
-      return busy('securing', 'Securing session…')
+      return busy('securing', CONNECTION_COPY.securing)
     }
-    if (connectionStatus === 'connecting' || connectionStatus === 'disconnected') {
+    if (
+      connectionStatus === 'connecting' ||
+      connectionStatus === 'disconnected'
+    ) {
       return busy(
         'connecting',
-        // Not "to your Mac": the phone connects to the relay, and the Mac may
-        // be perfectly online while this socket is down.
-        'Reconnecting…',
-        hasSnapshot ? 'Showing your last synced threads.' : '',
+        // The phone connects to the relay. Desktop may be online while this
+        // socket is down, especially on spotty cellular.
+        CONNECTION_COPY.reconnecting,
+        hasSnapshot ? CONNECTION_COPY.reconnectingStaleDetail : '',
       )
     }
-    return busy('offline', 'Not connected', 'Pair this device from Settings.')
+    return busy(
+      'offline',
+      CONNECTION_COPY.notConnected,
+      CONNECTION_COPY.notConnectedDetail,
+    )
   }
 
   if (input.daemonPresenceKnown === false) {
-    return busy('syncing', 'Checking your Mac…')
+    return busy('syncing', CONNECTION_COPY.checkingDesktop)
   }
 
   if (!daemonConnected) {
-    return busy('offline', 'Your Mac is offline', 'Open FalconDeck on your Mac to start a thread.')
+    return busy(
+      'offline',
+      CONNECTION_COPY.desktopOffline,
+      CONNECTION_COPY.desktopOfflineDetail,
+    )
   }
 
   if (input.daemonRpcReady === false) {
-    return busy('repairing', 'Repairing sync…', 'Your Mac is online but not answering yet.')
+    return busy(
+      'repairing',
+      CONNECTION_COPY.repairing,
+      CONNECTION_COPY.repairingDetail,
+    )
   }
 
   if (isSyncing || !hasSyncedOnce) {
     return busy(
       'syncing',
-      'Syncing your projects…',
-      hasSnapshot ? 'Threads may be a few seconds out of date.' : '',
+      CONNECTION_COPY.syncing,
+      hasSnapshot ? CONNECTION_COPY.syncingStaleDetail : '',
     )
   }
 
   return {
     stage: 'ready',
-    label: 'Connected',
+    label: CONNECTION_COPY.connected,
     detail: '',
     isBusy: false,
     ...diagnostics,
@@ -127,21 +158,29 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
  * Why the composer's send button is dead, phrased for the person holding the
  * phone. Returns null when sending is only blocked for unrelated reasons.
  */
-export function sessionSendBlockReason(status: SessionSyncStatus): string | null {
+export function sessionSendBlockReason(
+  status: SessionSyncStatus,
+): string | null {
   switch (status.stage) {
-    case 'pairing':
-      return 'Pairing this device…'
-    case 'connecting':
-      return 'Reconnecting…'
-    case 'securing':
-      return 'Securing session…'
-    case 'syncing':
-      return 'Syncing with your Mac…'
-    case 'repairing':
-      return 'Repairing sync with your Mac…'
-    case 'offline':
-      return 'Not connected to your Mac'
     case 'ready':
       return null
+    case 'pairing':
+    case 'connecting':
+    case 'securing':
+    case 'syncing':
+    case 'repairing':
+    case 'offline':
+      return status.label
   }
+}
+
+/**
+ * The connection screen appears only after its own grace period, so it can
+ * calmly explain any prolonged wait without flashing during ordinary 4G/Wi-Fi
+ * flaps. Detailed transport history stays behind an explicit control there.
+ */
+export function shouldAutoShowConnectionDebug(
+  status: SessionSyncStatus,
+): boolean {
+  return status.isBusy
 }

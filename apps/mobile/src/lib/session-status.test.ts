@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { resolveSessionSyncStatus, sessionSendBlockReason } from './session-status'
+import {
+  resolveSessionSyncStatus,
+  sessionSendBlockReason,
+  shouldAutoShowConnectionDebug,
+} from './session-status'
 
 const ready = {
   connectionStatus: 'encrypted',
@@ -32,12 +36,16 @@ describe('resolveSessionSyncStatus', () => {
 
   it('reports reconnecting while the socket is down', () => {
     for (const connectionStatus of ['connecting', 'disconnected']) {
-      const status = resolveSessionSyncStatus({ ...ready, connectionStatus, isEncrypted: false })
+      const status = resolveSessionSyncStatus({
+        ...ready,
+        connectionStatus,
+        isEncrypted: false,
+      })
       expect(status.stage).toBe('connecting')
-      // The phone's socket is to the relay, not the Mac — so the headline does
-      // not blame a Mac that may well be online.
-      expect(status.label).toBe('Reconnecting…')
-      expect(sessionSendBlockReason(status)).toBe('Reconnecting…')
+      // The phone's socket is to the relay, not the desktop — so the headline
+      // does not blame a computer that may well be online.
+      expect(status.label).toBe('Reconnecting to relay…')
+      expect(sessionSendBlockReason(status)).toBe('Reconnecting to relay…')
     }
   })
 
@@ -74,30 +82,38 @@ describe('resolveSessionSyncStatus', () => {
   })
 
   it('keeps a second line only where the user has something to do', () => {
-    const offline = resolveSessionSyncStatus({ ...ready, daemonConnected: false })
-    expect(offline.label).toBe('Your Mac is offline')
-    expect(offline.detail).toContain('Open FalconDeck')
+    const offline = resolveSessionSyncStatus({
+      ...ready,
+      daemonConnected: false,
+    })
+    expect(offline.label).toBe('Waiting for desktop…')
+    expect(offline.detail).toContain('Keep FalconDeck open')
   })
 
   it('reports syncing again on a later refetch', () => {
-    expect(resolveSessionSyncStatus({ ...ready, isSyncing: true }).stage).toBe('syncing')
+    expect(resolveSessionSyncStatus({ ...ready, isSyncing: true }).stage).toBe(
+      'syncing',
+    )
   })
 
-  it('distinguishes a live Mac whose snapshot RPC registration is missing', () => {
+  it('distinguishes a live desktop whose snapshot RPC registration is missing', () => {
     const status = resolveSessionSyncStatus({
       ...ready,
       hasSyncedOnce: false,
       daemonRpcReady: false,
     })
     expect(status.stage).toBe('repairing')
-    expect(status.detail).toContain('not answering yet')
-    expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
+    expect(status.detail).toContain('not ready to sync yet')
+    expect(sessionSendBlockReason(status)).toBe('Repairing sync…')
   })
 
   it('keeps reporting a missing snapshot RPC after a previous successful sync', () => {
-    const status = resolveSessionSyncStatus({ ...ready, daemonRpcReady: false })
+    const status = resolveSessionSyncStatus({
+      ...ready,
+      daemonRpcReady: false,
+    })
     expect(status.stage).toBe('repairing')
-    expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
+    expect(sessionSendBlockReason(status)).toBe('Repairing sync…')
   })
 
   it('reports an offline desktop instead of a generic first-sync wait', () => {
@@ -117,11 +133,14 @@ describe('resolveSessionSyncStatus', () => {
       daemonPresenceKnown: false,
     })
     expect(status.stage).toBe('syncing')
-    expect(status.label).toBe('Checking your Mac…')
+    expect(status.label).toBe('Checking desktop…')
   })
 
   it('surfaces an offline desktop once the session itself is healthy', () => {
-    const status = resolveSessionSyncStatus({ ...ready, daemonConnected: false })
+    const status = resolveSessionSyncStatus({
+      ...ready,
+      daemonConnected: false,
+    })
     expect(status.stage).toBe('offline')
     expect(status.isBusy).toBe(true)
   })
@@ -152,8 +171,59 @@ describe('sessionSendBlockReason', () => {
 
   it('explains the wait instead of a bare "reconnect"', () => {
     const reason = sessionSendBlockReason(
-      resolveSessionSyncStatus({ ...ready, connectionStatus: 'connected', isEncrypted: false }),
+      resolveSessionSyncStatus({
+        ...ready,
+        connectionStatus: 'connected',
+        isEncrypted: false,
+      }),
     )
     expect(reason).toBe('Securing session…')
+  })
+
+  it('uses the same offline headline for send as for the banner', () => {
+    expect(
+      sessionSendBlockReason(
+        resolveSessionSyncStatus({ ...ready, daemonConnected: false }),
+      ),
+    ).toBe('Waiting for desktop…')
+  })
+})
+
+describe('shouldAutoShowConnectionDebug', () => {
+  it('uses the delayed connection screen for every prolonged wait', () => {
+    expect(
+      shouldAutoShowConnectionDebug(
+        resolveSessionSyncStatus({
+          ...ready,
+          connectionStatus: 'connecting',
+          isEncrypted: false,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      shouldAutoShowConnectionDebug(
+        resolveSessionSyncStatus({ ...ready, daemonConnected: false }),
+      ),
+    ).toBe(true)
+  })
+
+  it('includes a stuck handshake and first sync, but never a ready session', () => {
+    expect(
+      shouldAutoShowConnectionDebug(
+        resolveSessionSyncStatus({
+          ...ready,
+          connectionStatus: 'connected',
+          isEncrypted: false,
+        }),
+      ),
+    ).toBe(true)
+    expect(
+      shouldAutoShowConnectionDebug(
+        resolveSessionSyncStatus({ ...ready, hasSyncedOnce: false }),
+      ),
+    ).toBe(true)
+    expect(shouldAutoShowConnectionDebug(resolveSessionSyncStatus(ready))).toBe(
+      false,
+    )
   })
 })

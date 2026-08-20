@@ -20,7 +20,9 @@ const base = {
 
 describe('SyncBanner', () => {
   it('renders nothing once the session is usable', () => {
-    const r = renderComponent(<SyncBanner status={resolveSessionSyncStatus(base)} />)
+    const r = renderComponent(
+      <SyncBanner status={resolveSessionSyncStatus(base)} />,
+    )
     expect(r.toJSON()).toBeNull()
   })
 
@@ -28,7 +30,9 @@ describe('SyncBanner', () => {
     vi.useFakeTimers()
     try {
       const r = renderComponent(
-        <SyncBanner status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })} />,
+        <SyncBanner
+          status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })}
+        />,
       )
 
       expect(r.toJSON()).toBeNull()
@@ -69,8 +73,9 @@ describe('SyncBanner', () => {
         vi.advanceTimersByTime(1)
       })
       const text = textOf(r)
-      expect(text).toContain('Reconnecting…')
+      expect(text).toContain('Reconnecting to relay…')
       expect(text).not.toContain('your Mac')
+      expect(text).not.toContain('Mac')
       cleanup()
     } finally {
       vi.useRealTimers()
@@ -86,7 +91,7 @@ describe('SyncBanner', () => {
       })
       const r = renderComponent(<SyncBanner status={offline} />)
 
-      // The relay reports the Mac offline for a few seconds whenever its
+      // The relay reports desktop offline for a few seconds whenever its
       // stale daemon socket is discovered mid-reconnect; stay quiet until
       // the outage outlives a routine flap.
       expect(r.toJSON()).toBeNull()
@@ -98,7 +103,7 @@ describe('SyncBanner', () => {
       act(() => {
         vi.advanceTimersByTime(1)
       })
-      expect(textOf(r)).toContain('Your Mac is offline')
+      expect(textOf(r)).toContain('Waiting for desktop…')
       cleanup()
     } finally {
       vi.useRealTimers()
@@ -173,18 +178,21 @@ describe('SyncBanner', () => {
           syncAttempt: 4,
           nextRetryAt: now + 3_000,
           lastError:
-            'Your Mac is connected, but snapshot.current is not registered. FalconDeck will retry automatically.',
+            'Desktop is connected, but sync is not ready yet. FalconDeck will retry automatically.',
         })}
       />,
     )
     const text = textOf(r)
     expect(text).toContain('Waiting 31s · attempt 4 · retry in 3s')
-    expect(text).toContain('Last error: Your Mac is connected')
-    expect(text).toContain('snapshot.current is not registered')
+    expect(text).toContain(
+      'Last error: Desktop is connected, but sync is not ready yet',
+    )
     const banner = r.root.find(
       (node) => node.props?.accessibilityRole === 'progressbar',
     )
     expect(banner.props.accessibilityLabel).toContain('Waiting 31s · attempt 4')
-    expect(banner.props.accessibilityLabel).toContain('Last error: Your Mac is connected')
+    expect(banner.props.accessibilityLabel).toContain(
+      'Last error: Desktop is connected, but sync is not ready yet',
+    )
   })
 })

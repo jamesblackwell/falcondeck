@@ -1,10 +1,18 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { logConnection, openConnectionDebug, useConnectionLogStore } from './connection-log-store'
+import {
+  logConnection,
+  openConnectionDebug,
+  useConnectionLogStore,
+} from './connection-log-store'
 
 describe('connection-log-store', () => {
   beforeEach(() => {
-    useConnectionLogStore.setState({ entries: [], visible: false, dismissedForRun: false })
+    useConnectionLogStore.setState({
+      entries: [],
+      visible: false,
+      dismissedForRun: false,
+    })
   })
 
   it('appends timestamped entries from anywhere', () => {
@@ -13,9 +21,16 @@ describe('connection-log-store', () => {
 
     const entries = useConnectionLogStore.getState().entries
     expect(entries).toHaveLength(2)
-    expect(entries[0]).toMatchObject({ level: 'info', message: 'Relay: connecting' })
+    expect(entries[0]).toMatchObject({
+      level: 'info',
+      message: 'Relay: connecting',
+    })
     expect(entries[0].at).toBeGreaterThan(0)
-    expect(entries[1]).toMatchObject({ level: 'error', message: 'Error', detail: 'socket closed' })
+    expect(entries[1]).toMatchObject({
+      level: 'error',
+      message: 'Error',
+      detail: 'socket closed',
+    })
   })
 
   it('caps the buffer, keeping the newest entries', () => {
@@ -26,6 +41,29 @@ describe('connection-log-store', () => {
     expect(entries).toHaveLength(300)
     expect(entries[0].message).toBe('entry 100')
     expect(entries[299].message).toBe('entry 399')
+  })
+
+  it('coalesces repeated connection failures into one diagnostic entry', () => {
+    logConnection(
+      'warn',
+      'Desktop is connected, but that action is not ready yet.',
+    )
+    logConnection(
+      'warn',
+      'Desktop is connected, but that action is not ready yet.',
+    )
+    logConnection(
+      'warn',
+      'Desktop is connected, but that action is not ready yet.',
+    )
+
+    const entries = useConnectionLogStore.getState().entries
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      level: 'warn',
+      message: 'Desktop is connected, but that action is not ready yet.',
+      count: 3,
+    })
   })
 
   it('hide dismisses auto-show for the run; openConnectionDebug reopens without clearing the dismissal', () => {
