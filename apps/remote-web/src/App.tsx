@@ -54,7 +54,6 @@ import {
   relayBacklogWouldOverflow,
   relayRpcFailureMessage,
   RELAY_RPC_TIMEOUT_MS,
-  REMOTE_EVENT_BATCH_FEATURE,
   reconcileSnapshotSelection,
   resolvePersistedMode,
   resolvePermissionMode,
@@ -1322,13 +1321,6 @@ function RemoteApp() {
           }, RELAY_BACKOFF_RESET_MS);
           setConnectionStatus("connected");
           setHasConnectedOnce(true);
-          sendRelayMessage(openSocket, {
-            type: "ephemeral",
-            body: {
-              kind: "client-capabilities",
-              features: [REMOTE_EVENT_BATCH_FEATURE],
-            },
-          });
           sendRelayMessage(openSocket, {
             type: "sync",
             after_seq: lastReceivedSeqRef.current,

@@ -1,8 +1,6 @@
 import { normalizeEventEnvelope, normalizeInteractiveRequest } from './normalization'
 import type { EventEnvelope } from './types'
 
-export const REMOTE_EVENT_BATCH_FEATURE = 'daemon-event-batch-v1'
-
 /**
  * Removes exactly the updates visible at the start of a display-frame flush.
  * Updates appended while asynchronous decryption is running remain in the

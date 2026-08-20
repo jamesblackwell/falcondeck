@@ -5,7 +5,7 @@ use falcondeck_core::{
     DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, PairingPublicKeyBundle,
     RelayClientMessage, RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse,
     RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial, SnapshotRequest,
-    StartThreadRequest, TextDeltaTarget, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest,
     crypto::{
         LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
@@ -31,9 +31,6 @@ type RelayWriter = futures_util::stream::SplitSink<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
-
-const REMOTE_TEXT_BATCH_MAX_EVENTS: usize = 16;
-const REMOTE_TEXT_BATCH_MAX_BYTES: usize = 32 << 10;
 
 /// Every method the encrypted RPC dispatcher understands must be registered
 /// with the relay or it fails the call without consulting the daemon
@@ -196,7 +193,6 @@ impl AppState {
         let mut bootstrap_publishes_used: u32 = 0;
         let mut last_bootstrap_publish: Option<tokio::time::Instant> = None;
         let mut last_bootstrap_refusal: Option<tokio::time::Instant> = None;
-        let mut client_supports_event_batches = false;
         // Concurrent RPC results funnel through this outbox so the select
         // loop stays the only writer to the socket while request handling
         // itself runs on per-RPC tasks.
@@ -209,28 +205,10 @@ impl AppState {
                             if event.seq < min_forward_seq {
                                 continue;
                             }
-                            let (batch, deferred, lagged) = if client_supports_event_batches {
-                                collect_text_batch(&mut events, event)
-                            } else {
-                                (vec![event], None, false)
-                            };
                             send_relay_message(
                                 &mut writer,
-                                &remote_events_message(&pairing.data_key, &batch)?,
+                                &remote_event_message(&pairing.data_key, &event)?,
                             ).await?;
-                            if lagged {
-                                tracing::warn!("remote daemon event stream lagged while batching text; sending fresh snapshot");
-                                self.publish_remote_snapshot(&mut writer, &pairing.data_key, self.snapshot().await)
-                                    .await?;
-                            }
-                            if let Some(deferred) = deferred
-                                && deferred.seq >= min_forward_seq
-                            {
-                                send_relay_message(
-                                    &mut writer,
-                                    &remote_event_message(&pairing.data_key, &deferred)?,
-                                ).await?;
-                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
@@ -313,9 +291,7 @@ impl AppState {
                                     self.handle_queued_remote_action(&mut writer, &pairing.data_key, action.action_id, action.action_type, payload).await?;
                                 }
                                 RelayServerMessage::Ephemeral { body } => {
-                                    if supports_remote_event_batches(&body) {
-                                        client_supports_event_batches = true;
-                                    } else if let Some(client_bundle) = parse_bootstrap_request(&body) {
+                                    if let Some(client_bundle) = parse_bootstrap_request(&body) {
                                         // Self-signed validity is not trust: only bundles the
                                         // daemon saw complete a pairing claim may be handed the
                                         // data key, otherwise a compromised relay could mint its
@@ -1834,18 +1810,6 @@ pub(super) fn parse_bootstrap_request(body: &Value) -> Option<PairingPublicKeyBu
     Some(client_bundle)
 }
 
-fn supports_remote_event_batches(body: &Value) -> bool {
-    body.get("kind").and_then(Value::as_str) == Some("client-capabilities")
-        && body
-            .get("features")
-            .and_then(Value::as_array)
-            .is_some_and(|features| {
-                features
-                    .iter()
-                    .any(|feature| feature.as_str() == Some("daemon-event-batch-v1"))
-            })
-}
-
 /// True when the requesting bundle exactly matches (encryption public key AND
 /// identity public key) a bundle that completed pairing on this daemon.
 pub(super) fn is_trusted_client_bundle(
@@ -1872,118 +1836,18 @@ pub(super) fn encrypt_remote_daemon_event(
     .map_err(|error| format!("failed to encrypt relay update: {error}"))
 }
 
-fn encrypt_remote_daemon_events(
+fn remote_event_message(
     data_key: &[u8; 32],
-    events: &[EventEnvelope],
-) -> Result<EncryptedEnvelope, String> {
-    encrypt_json(
-        data_key,
-        &json!({
-            "kind": "daemon-events",
-            "events": events,
-        }),
-    )
-    .map_err(|error| format!("failed to encrypt batched relay updates: {error}"))
-}
-
-fn text_event_parts(event: &EventEnvelope) -> Option<(&str, TextDeltaTarget, Option<u64>)> {
-    match &event.event {
-        UnifiedEvent::Text {
-            item_id,
-            target,
-            end_offset,
-            ..
-        } => Some((item_id, *target, *end_offset)),
-        _ => None,
-    }
-}
-
-fn can_batch_text_events(previous: &EventEnvelope, next: &EventEnvelope) -> bool {
-    let Some((previous_item, previous_target, previous_end)) = text_event_parts(previous) else {
-        return false;
-    };
-    let Some((next_item, next_target, next_start)) = (match &next.event {
-        UnifiedEvent::Text {
-            item_id,
-            target,
-            start_offset,
-            ..
-        } => Some((item_id.as_str(), *target, *start_offset)),
-        _ => None,
-    }) else {
-        return false;
-    };
-
-    previous.seq.checked_add(1) == Some(next.seq)
-        && previous.workspace_id == next.workspace_id
-        && previous.thread_id == next.thread_id
-        && previous_item == next_item
-        && previous_target == next_target
-        && (previous_end.is_none() || next_start.is_none() || previous_end == next_start)
-}
-
-fn serialized_event_size(event: &EventEnvelope) -> usize {
-    serde_json::to_vec(event)
-        .map(|encoded| encoded.len())
-        .unwrap_or(0)
-}
-
-fn collect_text_batch(
-    events: &mut broadcast::Receiver<EventEnvelope>,
-    first: EventEnvelope,
-) -> (Vec<EventEnvelope>, Option<EventEnvelope>, bool) {
-    if text_event_parts(&first).is_none() {
-        return (vec![first], None, false);
-    }
-
-    let mut batch = vec![first];
-    let mut batch_bytes = serialized_event_size(&batch[0]);
-    while batch.len() < REMOTE_TEXT_BATCH_MAX_EVENTS {
-        match events.try_recv() {
-            Ok(next) => {
-                let next_bytes = serialized_event_size(&next);
-                let can_batch = batch
-                    .last()
-                    .is_some_and(|previous| can_batch_text_events(previous, &next));
-                if can_batch
-                    && batch_bytes.saturating_add(next_bytes) <= REMOTE_TEXT_BATCH_MAX_BYTES
-                {
-                    batch_bytes = batch_bytes.saturating_add(next_bytes);
-                    batch.push(next);
-                } else {
-                    return (batch, Some(next), false);
-                }
-            }
-            Err(broadcast::error::TryRecvError::Empty) => break,
-            Err(broadcast::error::TryRecvError::Lagged(_))
-            | Err(broadcast::error::TryRecvError::Closed) => return (batch, None, true),
-        }
-    }
-
-    (batch, None, false)
-}
-
-fn remote_events_message(
-    data_key: &[u8; 32],
-    events: &[EventEnvelope],
+    event: &EventEnvelope,
 ) -> Result<RelayClientMessage, String> {
-    let Some(first) = events.first() else {
-        return Err("cannot send an empty remote event batch".to_string());
-    };
-    let envelope = if events.len() == 1 {
-        encrypt_remote_daemon_event(data_key, first)?
-    } else {
-        encrypt_remote_daemon_events(data_key, events)?
-    };
-    if events.len() == 1
-        && matches!(
-            first.event,
-            UnifiedEvent::RealtimeAudioStarted { .. }
-                | UnifiedEvent::RealtimeAudioDelta { .. }
-                | UnifiedEvent::RealtimeAudioEnded { .. }
-                | UnifiedEvent::RealtimeItemAdded { .. }
-        )
-    {
+    let envelope = encrypt_remote_daemon_event(data_key, event)?;
+    if matches!(
+        event.event,
+        UnifiedEvent::RealtimeAudioStarted { .. }
+            | UnifiedEvent::RealtimeAudioDelta { .. }
+            | UnifiedEvent::RealtimeAudioEnded { .. }
+            | UnifiedEvent::RealtimeItemAdded { .. }
+    ) {
         return Ok(RelayClientMessage::Ephemeral {
             body: json!({
                 "kind": "encrypted-daemon-event",
@@ -1994,13 +1858,6 @@ fn remote_events_message(
     Ok(RelayClientMessage::Update {
         body: RelayUpdateBody::Encrypted { envelope },
     })
-}
-
-fn remote_event_message(
-    data_key: &[u8; 32],
-    event: &EventEnvelope,
-) -> Result<RelayClientMessage, String> {
-    remote_events_message(data_key, std::slice::from_ref(event))
 }
 
 async fn register_remote_rpc_methods(writer: &mut RelayWriter) -> Result<(), String> {
@@ -2040,82 +1897,27 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
 mod tests {
     use super::*;
 
-    fn text_event(seq: u64, start_offset: u64, end_offset: u64, delta: &str) -> EventEnvelope {
-        EventEnvelope {
-            seq,
+    #[test]
+    fn durable_events_keep_the_legacy_single_event_envelope() {
+        let event = EventEnvelope {
+            seq: 10,
             emitted_at: Utc::now(),
             workspace_id: Some("workspace-1".to_string()),
             thread_id: Some("thread-1".to_string()),
-            event: UnifiedEvent::Text {
-                item_id: "assistant-1".to_string(),
-                delta: delta.to_string(),
-                target: TextDeltaTarget::AssistantText,
-                start_offset: Some(start_offset),
-                end_offset: Some(end_offset),
-            },
-        }
-    }
-
-    #[test]
-    fn adjacent_text_deltas_batch_without_crossing_control_events() {
-        let (sender, mut receiver) = broadcast::channel(8);
-        sender.send(text_event(11, 0, 2, "hi")).unwrap();
-        sender.send(text_event(12, 2, 5, " there")).unwrap();
-        sender
-            .send(EventEnvelope {
-                seq: 13,
-                emitted_at: Utc::now(),
-                workspace_id: Some("workspace-1".to_string()),
-                thread_id: Some("thread-1".to_string()),
-                event: UnifiedEvent::Stop { reason: None },
-            })
-            .unwrap();
-
-        let (batch, deferred, lagged) = collect_text_batch(&mut receiver, text_event(10, 0, 0, ""));
-        assert_eq!(batch.len(), 3);
-        assert_eq!(batch[1].seq, 11);
-        assert_eq!(batch[2].seq, 12);
-        assert_eq!(deferred.as_ref().map(|event| event.seq), Some(13));
-        assert!(!lagged);
-    }
-
-    #[test]
-    fn batched_text_deltas_use_a_replayed_encrypted_envelope() {
-        let events = vec![text_event(10, 0, 2, "hi"), text_event(11, 2, 5, " there")];
-        let message = remote_events_message(&[6; 32], &events).expect("encrypted event batch");
+            event: UnifiedEvent::Stop { reason: None },
+        };
+        let message = remote_event_message(&[6; 32], &event).expect("encrypted event");
         let RelayClientMessage::Update {
             body: RelayUpdateBody::Encrypted { envelope },
         } = message
         else {
             panic!("expected a durable encrypted update");
         };
-        let payload: Value = decrypt_json(&[6; 32], &envelope).expect("decrypt event batch");
+        let payload: Value = decrypt_json(&[6; 32], &envelope).expect("decrypt event");
         assert_eq!(
             payload.get("kind").and_then(Value::as_str),
-            Some("daemon-events")
+            Some("daemon-event")
         );
-        assert_eq!(
-            payload
-                .get("events")
-                .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn event_batching_requires_an_explicit_client_capability() {
-        assert!(supports_remote_event_batches(&json!({
-            "kind": "client-capabilities",
-            "features": ["daemon-event-batch-v1"],
-        })));
-        assert!(!supports_remote_event_batches(&json!({
-            "kind": "client-capabilities",
-            "features": [],
-        })));
-        assert!(!supports_remote_event_batches(&json!({
-            "kind": "request-bootstrap",
-        })));
     }
 
     #[test]

@@ -26,10 +26,7 @@ import {
   type BoxKeyPair,
   type SessionCryptoState,
 } from './crypto'
-import {
-  parseDaemonEvents as parseRemoteDaemonEvents,
-  REMOTE_EVENT_BATCH_FEATURE,
-} from './remote-events'
+import { parseDaemonEvents as parseRemoteDaemonEvents } from './remote-events'
 import { encryptedDaemonEventEnvelope, isLiveRealtimeEvent } from './realtime-audio'
 import {
   REMOTE_SESSION_STORAGE_VERSION,
@@ -381,13 +378,6 @@ export class RemoteHostClient {
             this.reconnectAttempt = 0
           }, RELAY_BACKOFF_RESET_MS)
           this.setStatus(this.sessionCrypto ? 'encrypted' : 'connected')
-          this.send({
-            type: 'ephemeral',
-            body: {
-              kind: 'client-capabilities',
-              features: [REMOTE_EVENT_BATCH_FEATURE],
-            },
-          })
           this.send({ type: 'sync', after_seq: this.cursor })
           this.startBootstrapRecovery()
         }

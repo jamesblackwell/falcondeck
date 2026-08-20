@@ -8,7 +8,6 @@ import {
   parseDaemonEvents as parseRemoteDaemonEvents,
   publicKeyToBase64,
   relayBacklogWouldOverflow,
-  REMOTE_EVENT_BATCH_FEATURE,
   relayReconnectDelayMs,
   resolveRelayTruncationCursor,
 } from '@falcondeck/client-core'
@@ -811,13 +810,6 @@ export function useRelayConnection() {
             reconnectAttempt.current = 0
           }, RELAY_BACKOFF_RESET_MS)
           relay._setConnectionStatus('connected')
-          relay._sendMessage({
-            type: 'ephemeral',
-            body: {
-              kind: 'client-capabilities',
-              features: [REMOTE_EVENT_BATCH_FEATURE],
-            },
-          })
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
           if (!relay._getSessionCrypto()) {
             requestBootstrapWhileKeyless()
