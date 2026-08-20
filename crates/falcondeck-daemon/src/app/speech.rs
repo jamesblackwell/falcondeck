@@ -409,17 +409,25 @@ fn decoded_base64_len(value: &str) -> Result<usize, DaemonError> {
 }
 
 fn fallback_models(preferred: &str) -> Vec<String> {
-    std::iter::once(preferred.trim())
-        .chain(FALLBACK_MODELS)
+    let preferred = preferred.trim();
+    // ":nitro" is OpenRouter's throughput-first routing variant: the same
+    // model served by its fastest provider. Try it before the plain id; a
+    // rejected variant fails fast with a 4xx and the plain model runs next.
+    let nitro = (!preferred.is_empty() && !preferred.contains(':'))
+        .then(|| format!("{preferred}:nitro"));
+    nitro
+        .into_iter()
+        .chain(std::iter::once(preferred.to_string()))
+        .chain(FALLBACK_MODELS.iter().map(|model| (*model).to_string()))
         .filter(|model| !model.is_empty())
         .fold(Vec::new(), |mut models, model| {
-            if !models.iter().any(|existing| existing == model) {
-                models.push(model.to_string());
+            if !models.contains(&model) {
+                models.push(model);
             }
             models
         })
         .into_iter()
-        .take(4)
+        .take(5)
         .collect()
 }
 
@@ -607,7 +615,22 @@ mod tests {
 
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
-        assert_eq!(fallback_models("openai/whisper-large-v3-turbo").len(), 4);
+        let models = fallback_models("openai/whisper-large-v3-turbo");
+        assert_eq!(
+            models[..2],
+            [
+                "openai/whisper-large-v3-turbo:nitro".to_string(),
+                "openai/whisper-large-v3-turbo".to_string(),
+            ]
+        );
+        assert_eq!(models.len(), 5);
+    }
+
+    #[test]
+    fn fallback_models_never_stack_variant_suffixes() {
+        let models = fallback_models("openai/whisper-large-v3-turbo:free");
+        assert_eq!(models[0], "openai/whisper-large-v3-turbo:free");
+        assert!(models.iter().all(|model| !model.contains(":free:")));
     }
 
     #[test]
