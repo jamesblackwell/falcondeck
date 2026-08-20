@@ -14,6 +14,7 @@ import {
   SquarePen,
   Sun,
   X,
+  type LucideIcon,
 } from 'lucide-react'
 
 import {
@@ -23,6 +24,7 @@ import {
   wasTurnInterruptedByShutdown,
   type ProjectGroup,
   type ThreadAttentionPresentation,
+  type ThreadMessageMatch,
   type ThreadSummary,
 } from '@falcondeck/client-core'
 import {
@@ -31,8 +33,11 @@ import {
   Kbd,
   PaletteSwatch,
   cn,
+  previewAppearance,
   updateAppearance,
-  useAppearance,
+  usePersistedAppearance,
+  type AppearanceSettings,
+  type PalettePreview,
 } from '@falcondeck/ui'
 
 import { isComposingKeyboardEvent } from '../lib/keyboard'
@@ -40,12 +45,16 @@ import { isComposingKeyboardEvent } from '../lib/keyboard'
 type PaletteItem = {
   id: string
   kind: 'thread' | 'action' | 'appearance'
-  section: 'Unread threads' | 'Threads' | 'Actions' | 'Appearance'
+  section: 'Unread threads' | 'Threads' | 'Message matches' | 'Actions' | 'Appearance'
   label: string
   sublabel?: string
+  /** Second line under the label, used for message-content excerpts. */
+  snippet?: string
+  /** Lowercased keywords to emphasise inside `snippet`. */
+  snippetTokens?: readonly string[]
   /** Workspace this row belongs to; drives the `project:` scope filter. */
   projectId?: string
-  icon: React.ReactNode
+  icon: PaletteIcon
   search: PaletteSearchFields
   active?: boolean
   unread?: boolean
@@ -53,6 +62,8 @@ type PaletteItem = {
   status?: PaletteThreadStatus
   /** Rendered shortcut tokens ("⌘", "U") shown right-aligned on the row. */
   shortcut?: readonly string[]
+  /** Applied to the document while the row is highlighted, then rolled back. */
+  preview?: Partial<AppearanceSettings>
   run: () => void
 }
 
@@ -92,8 +103,45 @@ function threadPaletteStatus(
   }
 }
 
-function threadPaletteIcon(status: PaletteThreadStatus): React.ReactNode {
-  switch (status.tone) {
+/**
+ * Icons are described, not built, while items are assembled: the palette holds
+ * an entry per thread, so eagerly creating ~1.5k React elements cost more at
+ * open than everything else combined. Only the rows on screen render one.
+ */
+type PaletteIcon =
+  | { kind: 'status'; tone: PaletteThreadStatus['tone'] }
+  | { kind: 'glyph'; Glyph: LucideIcon }
+  | { kind: 'swatch'; preview: PalettePreview }
+
+/**
+ * Emphasises the searched words inside a message excerpt, so the reason a
+ * thread is in the list is visible without reading the whole line.
+ */
+function highlightSnippet(
+  snippet: string,
+  tokens: readonly string[] | undefined,
+): React.ReactNode {
+  if (!tokens?.length) return snippet
+  const escaped = tokens
+    .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean)
+  if (!escaped.length) return snippet
+  const pattern = new RegExp(`(${escaped.join('|')})`, 'gi')
+  return snippet.split(pattern).map((part, index) =>
+    index % 2 === 1 ? (
+      <mark key={index} className="bg-transparent font-medium text-fg-secondary">
+        {part}
+      </mark>
+    ) : (
+      part
+    ),
+  )
+}
+
+function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
+  if (icon.kind === 'glyph') return <icon.Glyph className="h-3.5 w-3.5" />
+  if (icon.kind === 'swatch') return <PaletteSwatch preview={icon.preview} size={14} />
+  switch (icon.tone) {
     case 'accent':
       return <ActivityDiamond />
     case 'danger':
@@ -128,8 +176,15 @@ export type PaletteSearchFields = {
 
 const PRIORITY_THREAD_COMPARATOR = compareThreads('priority')
 const MAX_SEARCH_RESULTS = 30
+/** Lowest score `fieldScore` gives a scattered-subsequence match. */
+const SUBSEQUENCE_SCORE_BASE = 120
+/** Added per token that only matched as a subsequence, to sort guesses last. */
+const WEAK_MATCH_PENALTY = 1000
+
 /** Stable default so an unset hints prop does not rebuild the item list. */
 const NO_SHORTCUT_HINTS: PaletteShortcutHints = {}
+/** Stable empty result, so clearing matches cannot loop the fetch effect. */
+const NO_MESSAGE_MATCHES: readonly ThreadMessageMatch[] = []
 
 function normalizeSearchText(value: string): string {
   return value
@@ -180,24 +235,43 @@ function cachedThreadSearchFields(
   return fields
 }
 
+/** Word characters for boundary detection, without allocating a regex match. */
+function isWordCharCode(code: number): boolean {
+  // 0-9, a-z (targets are already lowercased by normalizeSearchText).
+  return (code >= 48 && code <= 57) || (code >= 97 && code <= 122)
+}
+
 function fieldScore(query: string, target: string): number | null {
   if (!target) return null
-  if (target === query) return 0
-  if (target.startsWith(query)) return 4
+  // One indexOf answers exact/prefix/word/substring; the old version paid for
+  // up to four scans of the same string per field, per item, per keystroke.
+  const first = target.indexOf(query)
+  if (first === 0) return target.length === query.length ? 0 : 4
 
-  let wordIndex = target.indexOf(query)
-  while (wordIndex > 0 && /[a-z0-9]/.test(target[wordIndex - 1] ?? '')) {
-    wordIndex = target.indexOf(query, wordIndex + 1)
+  if (first > 0) {
+    let wordIndex = first
+    while (wordIndex > 0 && isWordCharCode(target.charCodeAt(wordIndex - 1))) {
+      wordIndex = target.indexOf(query, wordIndex + 1)
+    }
+    if (wordIndex > 0) return 12 + wordIndex
+    return 32 + first
   }
-  if (wordIndex >= 0) return 12 + wordIndex
 
-  const substringIndex = target.indexOf(query)
-  if (substringIndex >= 0) return 32 + substringIndex
-
+  // Scattered-subsequence fallback, walked by char code: the old version
+  // iterated the query as strings and called indexOf per character, which
+  // allocated on every non-matching candidate — the bulk of a keystroke's GC.
   let targetIndex = 0
   let gaps = 0
-  for (const character of query) {
-    const found = target.indexOf(character, targetIndex)
+  for (let queryIndex = 0; queryIndex < query.length; queryIndex += 1) {
+    const code = query.charCodeAt(queryIndex)
+    let found = -1
+    while (targetIndex < target.length) {
+      if (target.charCodeAt(targetIndex) === code) {
+        found = targetIndex
+        break
+      }
+      targetIndex += 1
+    }
     if (found === -1) return null
     gaps += found - targetIndex
     targetIndex = found + 1
@@ -227,17 +301,26 @@ export function paletteSearchScore(
   const normalizedQuery = normalizeSearchText(query)
   if (!normalizedQuery) return 0
 
-  return normalizedPaletteSearchScore(normalizedQuery, normalizeSearchFields(search))
+  return normalizedPaletteSearchScore(
+    normalizedQuery,
+    normalizedQuery.split(/\s+/),
+    normalizeSearchFields(search),
+  )
 }
 
+/**
+ * Tokens are split once per query by the caller, not once per candidate: with
+ * ~1.5k threads the per-item split dominated both CPU and GC during typing.
+ */
 function normalizedPaletteSearchScore(
   normalizedQuery: string,
+  queryTokens: readonly string[],
   search: PaletteSearchFields,
 ): number | null {
   const phraseScore = fieldScore(normalizedQuery, search.primary)
   let score = phraseScore === null ? 0 : phraseScore - 20
 
-  for (const token of normalizedQuery.split(/\s+/)) {
+  for (const token of queryTokens) {
     const candidates = [
       fieldScore(token, search.primary),
       fieldScore(token, search.secondary),
@@ -252,6 +335,10 @@ function normalizedPaletteSearchScore(
       null,
     )
     if (tokenScore === null) return null
+    // A token that only matched as a scattered subsequence is a guess, not a
+    // hit; the penalty keeps such rows ranked last and lets callers drop them
+    // when something better (a message-content match) exists.
+    if (tokenScore >= SUBSEQUENCE_SCORE_BASE) score += WEAK_MATCH_PENALTY
     score += tokenScore
   }
   return score
@@ -289,6 +376,20 @@ function resolveProjectToken(
   return prefixed.length === 1 ? prefixed[0]!.id : null
 }
 
+/** Shortest query worth sending to the message index. */
+const MIN_MESSAGE_QUERY_CHARS = 3
+/** Keystroke quiet period before the message index is asked. */
+const MESSAGE_SEARCH_DEBOUNCE_MS = 180
+/** Message matches shown under the title results. */
+const MAX_MESSAGE_MATCHES = 8
+/** Title matches kept on screen once message matches are also showing. */
+const MAX_TITLES_WITH_MESSAGES = 12
+
+export type SearchThreadMessages = (
+  query: string,
+  options: { workspaceId: string | null; signal: AbortSignal },
+) => Promise<ThreadMessageMatch[]>
+
 export type CommandPaletteProps = {
   groups: ProjectGroup[]
   onSelectThread: (workspaceId: string, threadId: string) => void
@@ -296,6 +397,8 @@ export type CommandPaletteProps = {
   onOpenSettings?: () => void
   onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
+  /** Searches indexed user messages; omit to keep the palette title-only. */
+  onSearchMessages?: SearchThreadMessages
   shortcutHints?: PaletteShortcutHints
   /** Controlled open request for hosts with customizable shortcuts. */
   openRequestKey?: number
@@ -317,6 +420,7 @@ export const CommandPalette = memo(function CommandPalette({
   onOpenSettings,
   onOpenActivity,
   onOpenKeyboardShortcuts,
+  onSearchMessages,
   shortcutHints = NO_SHORTCUT_HINTS,
   openRequestKey,
   initialQuery = '',
@@ -335,7 +439,7 @@ export const CommandPalette = memo(function CommandPalette({
   const consumedOpenRequestKeyRef = useRef<number | undefined>(undefined)
   const searchFieldsCacheRef = useRef(new Map<string, CachedThreadSearchFields>())
   const listId = useId()
-  const appearance = useAppearance()
+  const appearance = usePersistedAppearance()
 
   useEffect(() => {
     if (openRequestKey === undefined) return
@@ -427,7 +531,7 @@ export const CommandPalette = memo(function CommandPalette({
         label: thread.title,
         sublabel: label,
         projectId: group.workspace.id,
-        icon: threadPaletteIcon(status),
+        icon: { kind: 'status', tone: status.tone },
         status,
         search: cachedThreadSearchFields(
           searchCache,
@@ -451,7 +555,7 @@ export const CommandPalette = memo(function CommandPalette({
         label: thread.title,
         sublabel: label,
         projectId: group.workspace.id,
-        icon: threadPaletteIcon(status),
+        icon: { kind: 'status', tone: status.tone },
         status,
         search: cachedThreadSearchFields(
           searchCache,
@@ -473,7 +577,7 @@ export const CommandPalette = memo(function CommandPalette({
           section: 'Actions',
           label: `New thread in ${label}`,
           projectId: group.workspace.id,
-          icon: <SquarePen className="h-3.5 w-3.5" />,
+          icon: { kind: 'glyph', Glyph: SquarePen },
           search: normalizeSearchFields({
             primary: `New thread in ${label}`,
             secondary: group.workspace.path,
@@ -489,7 +593,7 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'action',
         section: 'Actions',
         label: 'Open Activity',
-        icon: <Activity className="h-3.5 w-3.5" />,
+        icon: { kind: 'glyph', Glyph: Activity },
         shortcut: shortcutHints.activity,
         search: normalizeSearchFields({ primary: 'Open Activity', secondary: '', keywords: 'attention queue blocked failed unread running' }),
         run: onOpenActivity,
@@ -501,7 +605,7 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'action',
         section: 'Actions',
         label: 'Keyboard shortcuts',
-        icon: <Keyboard className="h-3.5 w-3.5" />,
+        icon: { kind: 'glyph', Glyph: Keyboard },
         shortcut: shortcutHints.keyboardShortcuts,
         search: normalizeSearchFields({ primary: 'Keyboard shortcuts', secondary: '', keywords: 'keybindings hotkeys bindings shortcuts keymap help cheatsheet' }),
         run: onOpenKeyboardShortcuts,
@@ -513,7 +617,7 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'action',
         section: 'Actions',
         label: 'Open settings',
-        icon: <Settings className="h-3.5 w-3.5" />,
+        icon: { kind: 'glyph', Glyph: Settings },
         shortcut: shortcutHints.settings,
         search: normalizeSearchFields({ primary: 'Open settings', secondary: '', keywords: 'settings preferences options' }),
         run: onOpenSettings,
@@ -528,13 +632,14 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'appearance',
         section: 'Appearance',
         label: `Theme: ${value.charAt(0).toUpperCase()}${value.slice(1)}`,
-        icon: <Icon className="h-3.5 w-3.5" />,
+        icon: { kind: 'glyph', Glyph: Icon },
         search: normalizeSearchFields({
           primary: `Theme: ${value}`,
           secondary: '',
           keywords: `theme mode appearance ${value} light dark system`,
         }),
         active: appearance.theme === value,
+        preview: { theme: value },
         run: () => updateAppearance({ theme: value }),
       })
     }
@@ -547,13 +652,20 @@ export const CommandPalette = memo(function CommandPalette({
         kind: 'appearance',
         section: 'Appearance',
         label: `${option.appearance === 'light' ? 'Light' : 'Dark'} theme: ${option.label}`,
-        icon: <PaletteSwatch preview={option.preview} size={14} />,
+        icon: { kind: 'swatch', preview: option.preview },
         search: normalizeSearchFields({
           primary: `${option.appearance} theme: ${option.label}`,
           secondary: '',
           keywords: `palette color theme appearance ${option.appearance} ${option.label}`,
         }),
         active: selected,
+        // A light theme is invisible while the app renders dark, so the
+        // preview flips the mode too — selecting the row still only saves the
+        // colour choice, exactly as clicking it always did.
+        preview:
+          option.appearance === 'light'
+            ? { theme: 'light', lightColorTheme: option.value }
+            : { theme: 'dark', darkColorTheme: option.value },
         run: () => {
           if (option.appearance === 'light') {
             updateAppearance({ lightColorTheme: option.value })
@@ -580,7 +692,48 @@ export const CommandPalette = memo(function CommandPalette({
     ? getProjectLabel(activeProject.workspace.path)
     : null
 
-  const filtered = useMemo(() => {
+  // Message-content matches come from the daemon's excerpt index, so they are
+  // fetched rather than derived: titles stay instant, content follows.
+  const [messageMatches, setMessageMatches] = useState<readonly ThreadMessageMatch[]>([])
+  const scopedWorkspaceId = activeProject?.workspace.id ?? null
+
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (!open || !onSearchMessages || trimmed.length < MIN_MESSAGE_QUERY_CHARS) {
+      setMessageMatches(NO_MESSAGE_MATCHES)
+      return
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      onSearchMessages(trimmed, {
+        workspaceId: scopedWorkspaceId,
+        signal: controller.signal,
+      })
+        .then((matches) => {
+          if (!controller.signal.aborted) setMessageMatches(matches)
+        })
+        .catch(() => {
+          // An aborted or failed lookup just leaves the title results alone.
+          if (!controller.signal.aborted) setMessageMatches(NO_MESSAGE_MATCHES)
+        })
+    }, MESSAGE_SEARCH_DEBOUNCE_MS)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [onSearchMessages, open, query, scopedWorkspaceId])
+
+  /** Threads by id, for turning message matches into rows. */
+  const threadIndex = useMemo(() => {
+    if (!open) return new Map<string, { thread: ThreadSummary; group: ProjectGroup }>()
+    const index = new Map<string, { thread: ThreadSummary; group: ProjectGroup }>()
+    for (const group of groups) {
+      for (const thread of group.threads) index.set(thread.id, { thread, group })
+    }
+    return index
+  }, [groups, open])
+
+  const filtered = useMemo<{ items: PaletteItem[]; strong: number }>(() => {
     let scopedItems = initialScope === 'threads'
       ? items.filter((item) => item.kind === 'thread')
       : items
@@ -601,15 +754,23 @@ export const CommandPalette = memo(function CommandPalette({
           rest.push(item)
         }
       }
-      return [...threads, ...rest]
+      const browse = [...threads, ...rest]
+      return { items: browse, strong: browse.length }
     }
     const normalizedQuery = normalizeSearchText(query)
+    const queryTokens = normalizedQuery.split(/\s+/)
     const ranked: Array<{ item: PaletteItem; index: number; score: number }> = []
     for (let index = 0; index < scopedItems.length; index += 1) {
       const item = scopedItems[index]
       if (!item) continue
-      const score = normalizedPaletteSearchScore(normalizedQuery, item.search)
+      const score = normalizedPaletteSearchScore(normalizedQuery, queryTokens, item.search)
       if (score === null) continue
+      // Once the window is full, most candidates lose outright. Rejecting them
+      // before the binary search skips both the walk and the entry allocation;
+      // ties can never win either, because index only grows.
+      if (ranked.length === MAX_SEARCH_RESULTS && score >= ranked[MAX_SEARCH_RESULTS - 1]!.score) {
+        continue
+      }
 
       let low = 0
       let high = ranked.length
@@ -627,16 +788,95 @@ export const CommandPalette = memo(function CommandPalette({
         if (ranked.length > MAX_SEARCH_RESULTS) ranked.pop()
       }
     }
-    return ranked.map((entry) => entry.item)
+    return {
+      items: ranked.map((entry) => entry.item),
+      // Ranked ascending, so every strong match precedes every weak one.
+      strong: ranked.filter((entry) => entry.score < WEAK_MATCH_PENALTY).length,
+    }
   }, [activeProject, initialScope, items, query])
+
+  /**
+   * Message rows are appended after the title results and never duplicate a
+   * thread already shown: a thread whose title matched needs no excerpt.
+   */
+  const messageItems = useMemo<PaletteItem[]>(() => {
+    if (!messageMatches.length) return []
+    const snippetTokens = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+    const alreadyShown = new Set(
+      filtered.items
+        .filter((item) => item.kind === 'thread')
+        .map((item) => item.id.slice('thread:'.length)),
+    )
+    // The daemon ranks opening matches above trailing ones but knows nothing
+    // about recency, which is the tie-breaker that makes a list feel sorted.
+    const ordered = [...messageMatches].sort((left, right) => {
+      const byPosition =
+        (left.position === 'opening' ? 0 : 1) - (right.position === 'opening' ? 0 : 1)
+      if (byPosition !== 0) return byPosition
+      const leftThread = threadIndex.get(left.thread_id)?.thread
+      const rightThread = threadIndex.get(right.thread_id)?.thread
+      return (rightThread?.updated_at ?? '').localeCompare(leftThread?.updated_at ?? '')
+    })
+
+    const rows: PaletteItem[] = []
+    for (const match of ordered) {
+      if (rows.length >= MAX_MESSAGE_MATCHES) break
+      if (alreadyShown.has(match.thread_id)) continue
+      const entry = threadIndex.get(match.thread_id)
+      if (!entry || entry.thread.is_archived) continue
+      const attention = deriveThreadAttentionPresentation(entry.thread)
+      const status = threadPaletteStatus(entry.thread, attention)
+      rows.push({
+        id: `message:${match.thread_id}`,
+        kind: 'thread',
+        section: 'Message matches',
+        label: entry.thread.title,
+        sublabel: getProjectLabel(entry.group.workspace.path),
+        snippet: match.snippet,
+        snippetTokens,
+        projectId: entry.group.workspace.id,
+        icon: { kind: 'status', tone: status.tone },
+        status,
+        // Ranking is the daemon's; these rows bypass the fuzzy scorer.
+        search: { primary: '', secondary: '', keywords: '' },
+        run: () => onSelectThread(entry.group.workspace.id, entry.thread.id),
+      })
+    }
+    return rows
+  }, [filtered, messageMatches, onSelectThread, query, threadIndex])
+
+  const visible = useMemo(() => {
+    if (!messageItems.length) return filtered.items
+    // Fuzzy title matching fills its window with scattered-subsequence guesses
+    // on a multi-word query. Once real message matches exist, those guesses are
+    // noise standing between the query and its answer.
+    const titles = filtered.items.slice(
+      0,
+      Math.min(filtered.strong, MAX_TITLES_WITH_MESSAGES),
+    )
+    return [...titles, ...messageItems]
+  }, [filtered, messageItems])
 
   useEffect(() => {
     setHighlight(0)
   }, [initialScope, projectId, query])
 
   useEffect(() => {
-    setHighlight((current) => Math.min(current, Math.max(0, filtered.length - 1)))
-  }, [filtered.length])
+    setHighlight((current) => Math.min(current, Math.max(0, visible.length - 1)))
+  }, [visible.length])
+
+  // Try the highlighted theme on for real. Rolls back when the highlight moves
+  // off an appearance row, and when the palette closes without a selection —
+  // committing goes through `updateAppearance`, which clears the preview too.
+  useEffect(() => {
+    if (!open) return
+    previewAppearance(visible[highlight]?.preview ?? null)
+  }, [highlight, open, visible])
+
+  useEffect(() => {
+    if (!open) return
+    return () => previewAppearance(null)
+  }, [open])
 
   // Typing the prefix by hand is the keyboard route to the same scope the
   // sidebar row's search icon sets.
@@ -672,19 +912,19 @@ export const CommandPalette = memo(function CommandPalette({
       if (isComposingKeyboardEvent(event)) return
       if (event.key === 'ArrowDown') {
         event.preventDefault()
-        setHighlight((current) => filtered.length ? (current + 1) % filtered.length : 0)
+        setHighlight((current) => visible.length ? (current + 1) % visible.length : 0)
       } else if (event.key === 'ArrowUp') {
         event.preventDefault()
-        setHighlight((current) => filtered.length ? (current - 1 + filtered.length) % filtered.length : 0)
+        setHighlight((current) => visible.length ? (current - 1 + visible.length) % visible.length : 0)
       } else if (event.key === 'Home') {
         event.preventDefault()
         setHighlight(0)
       } else if (event.key === 'End') {
         event.preventDefault()
-        setHighlight(Math.max(0, filtered.length - 1))
+        setHighlight(Math.max(0, visible.length - 1))
       } else if (event.key === 'Enter') {
         event.preventDefault()
-        const item = filtered[highlight]
+        const item = visible[highlight]
         if (item) runItem(item)
       } else if (event.key === 'Backspace' && projectId && query === '') {
         // Chip-style deletion: the empty field's next backspace drops the
@@ -700,13 +940,24 @@ export const CommandPalette = memo(function CommandPalette({
         event.preventDefault()
       }
     },
-    [clearProjectScope, close, filtered, highlight, projectId, query, runItem],
+    [clearProjectScope, close, highlight, projectId, query, runItem, visible],
   )
 
+  const scrolledQueryRef = useRef(query)
   useEffect(() => {
-    const node = listRef.current?.querySelector<HTMLElement>('[data-highlighted="true"]')
+    const list = listRef.current
+    if (!list) return
+    // Typing always resets the highlight to the first row, so the list only
+    // needs rewinding — reading layout to decide would force a synchronous
+    // reflow on every keystroke, which measured worse than the scroll itself.
+    if (scrolledQueryRef.current !== query) {
+      scrolledQueryRef.current = query
+      list.scrollTop = 0
+      return
+    }
+    const node = list.querySelector<HTMLElement>('[data-highlighted="true"]')
     node?.scrollIntoView({ block: 'nearest' })
-  }, [highlight, filtered])
+  }, [highlight, query, visible])
 
   if (!open || typeof document === 'undefined') return null
 
@@ -755,7 +1006,7 @@ export const CommandPalette = memo(function CommandPalette({
             aria-autocomplete="list"
             aria-controls={listId}
             aria-expanded="true"
-            aria-activedescendant={filtered[highlight] ? `${listId}-${filtered[highlight].id}` : undefined}
+            aria-activedescendant={visible[highlight] ? `${listId}-${visible[highlight].id}` : undefined}
             value={query}
             onChange={(event) => handleQueryChange(event.target.value)}
             placeholder={searchLabel + '…'}
@@ -766,19 +1017,22 @@ export const CommandPalette = memo(function CommandPalette({
         </div>
 
         <span className="sr-only" role="status" aria-live="polite">
-          {filtered.length} {filtered.length === 1 ? 'result' : 'results'}
+          {visible.length} {visible.length === 1 ? 'result' : 'results'}
         </span>
         <div id={listId} role="listbox" ref={listRef} className="max-h-[52vh] overflow-y-auto p-1.5">
-          {filtered.length === 0 ? (
+          {visible.length === 0 ? (
             <p className="px-2.5 py-6 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
               No matches
             </p>
           ) : null}
-          {filtered.map((item, index) => {
+          {visible.map((item, index) => {
             // While searching the list is pure relevance order, so section
             // headers would only repeat and push results apart. Sections stay
-            // for the unfiltered browse view.
-            const showHeader = !isSearching && item.section !== lastSection
+            // for the unfiltered browse view — and for message matches, which
+            // need the label to explain why a title that does not match is here.
+            const showHeader =
+              item.section !== lastSection &&
+              (!isSearching || item.section === 'Message matches')
             lastSection = item.section
             return (
               <React.Fragment key={item.id}>
@@ -796,16 +1050,28 @@ export const CommandPalette = memo(function CommandPalette({
                   onMouseEnter={() => setHighlight(index)}
                   onClick={() => runItem(item)}
                   className={cn(
-                    'flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left',
+                    'flex w-full gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left',
+                    item.snippet ? 'items-start' : 'items-center',
                     index === highlight ? 'bg-surface-3' : undefined,
                   )}
                 >
                   <span aria-hidden="true" className="shrink-0 text-fg-muted">
-                    {item.icon}
+                    {renderPaletteIcon(item.icon)}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
-                    {item.label}
-                  </span>
+                  {item.snippet ? (
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+                        {item.label}
+                      </span>
+                      <span className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                        {highlightSnippet(item.snippet, item.snippetTokens)}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+                      {item.label}
+                    </span>
+                  )}
                   {item.status ? (
                     <span
                       className={cn(

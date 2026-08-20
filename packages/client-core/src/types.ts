@@ -1279,6 +1279,29 @@ export type SnapshotRequest = {
   include_archived_threads?: boolean | null;
 };
 
+/** Keyword search across the user messages the daemon has indexed. */
+export type ThreadMessageSearchRequest = {
+  query: string;
+  workspace_id?: string | null;
+  limit?: number | null;
+};
+
+/** Which end of a thread an indexed message match came from. */
+export type ThreadMessagePosition = "opening" | "recent";
+
+export type ThreadMessageMatch = {
+  thread_id: string;
+  workspace_id: string;
+  snippet: string;
+  position: ThreadMessagePosition;
+};
+
+export type ThreadMessageSearchResponse = {
+  matches: ThreadMessageMatch[];
+  indexed_threads: number;
+  indexing: boolean;
+};
+
 export type ThreadDetailMode = "full" | "tail" | "before";
 
 export type ThreadDetailRequest = {

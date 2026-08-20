@@ -28,6 +28,8 @@ import type {
   ScheduledTaskRunSummary,
   ScheduledTaskSummary,
   SnapshotRequest,
+  ThreadMessageSearchRequest,
+  ThreadMessageSearchResponse,
   SpeechCredentialStatus,
   ProviderUsageOverview,
   SelectedSkillReference,
@@ -142,6 +144,24 @@ export function createDaemonApiClient(baseUrl: string) {
         await parseJson<DaemonSnapshot>(
           await fetch(`${baseUrl}/api/snapshot${suffix}`),
         ),
+      );
+    },
+    /**
+     * Keyword search over the user messages the daemon indexed from provider
+     * session files. Titles are searched client-side; this covers the case
+     * where the thread's title never mentioned the thing you remember typing.
+     */
+    async searchThreadMessages(
+      request: ThreadMessageSearchRequest,
+      init?: { signal?: AbortSignal },
+    ) {
+      return parseJson<ThreadMessageSearchResponse>(
+        await fetch(`${baseUrl}/api/threads/search`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+          signal: init?.signal,
+        }),
       );
     },
     async preferences() {

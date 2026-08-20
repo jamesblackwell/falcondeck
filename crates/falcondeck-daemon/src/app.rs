@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tokio::{
     sync::mpsc,
     sync::{Mutex, Notify, OnceCell, Semaphore, broadcast, oneshot},
-    task::JoinHandle,
+    task::{JoinHandle, spawn_blocking},
     time::{Duration, timeout},
 };
 use tracing::debug;
@@ -63,6 +63,7 @@ mod remote_lifecycle;
 mod scheduled_tasks;
 mod speech;
 mod storage;
+mod thread_search;
 mod threads;
 mod utility_model;
 mod workspace_ops;
@@ -119,6 +120,12 @@ struct InnerState {
     operational_conditions: StdMutex<HashMap<(String, String), OperationalCondition>>,
     /// Latest high-frequency token usage keyed by thread id.
     thread_token_usage: StdMutex<HashMap<String, ThreadTokenUsage>>,
+    /// User-message excerpts per provider session, for content search.
+    thread_search: StdMutex<thread_search::ThreadSearchIndex>,
+    /// When the excerpt index last finished a scan of the session files.
+    thread_search_scanned_at: StdMutex<Option<std::time::Instant>>,
+    /// Serializes scans so concurrent searches trigger at most one walk.
+    thread_search_scan: Mutex<()>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
     realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
     /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
@@ -585,6 +592,9 @@ impl AppState {
                 service_notices: StdMutex::new(Vec::new()),
                 operational_conditions: StdMutex::new(HashMap::new()),
                 thread_token_usage: StdMutex::new(HashMap::new()),
+                thread_search: StdMutex::new(thread_search::ThreadSearchIndex::default()),
+                thread_search_scanned_at: StdMutex::new(None),
+                thread_search_scan: Mutex::new(()),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
@@ -1330,6 +1340,141 @@ impl AppState {
             host.lock().await.stop().await;
         }
         self.persist_local_state().await
+    }
+
+    /// How long an excerpt index is trusted before a search triggers another
+    /// scan. Unchanged files are skipped by mtime, so a rescan is cheap.
+    const THREAD_SEARCH_TTL: Duration = Duration::from_secs(60);
+
+    /// Loads the persisted excerpt index and kicks off a first scan, so the
+    /// first search after launch has content to match against.
+    pub fn start_thread_search_index(&self) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let path = thread_search::index_path(&state.inner.state_path);
+            if let Ok(contents) = tokio::fs::read_to_string(&path).await
+                && let Ok(index) =
+                    serde_json::from_str::<thread_search::ThreadSearchIndex>(&contents)
+            {
+                *state
+                    .inner
+                    .thread_search
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = index;
+            }
+            state.refresh_thread_search_index(true).await;
+        });
+    }
+
+    /// Rescans provider session files into the excerpt index. With `wait` the
+    /// caller is blocked until the scan lands; otherwise it runs detached.
+    async fn refresh_thread_search_index(&self, wait: bool) {
+        let state = self.clone();
+        let scan = async move {
+            let _guard = state.inner.thread_search_scan.lock().await;
+            // Another task may have refreshed while this one queued.
+            if state.thread_search_index_is_fresh() {
+                return;
+            }
+            let previous = state
+                .inner
+                .thread_search
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let Ok(index) = spawn_blocking(move || thread_search::rescan(&previous)).await else {
+                return;
+            };
+
+            let path = thread_search::index_path(&state.inner.state_path);
+            if let Ok(serialized) = serde_json::to_string(&index) {
+                if let Err(error) = tokio::fs::write(&path, serialized).await {
+                    // A missing cache only costs one rescan next launch.
+                    tracing::debug!("could not persist thread search index: {error}");
+                }
+            }
+            *state
+                .inner
+                .thread_search
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = index;
+            *state
+                .inner
+                .thread_search_scanned_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+        };
+        if wait {
+            scan.await;
+        } else {
+            tokio::spawn(scan);
+        }
+    }
+
+    fn thread_search_index_is_fresh(&self) -> bool {
+        self.inner
+            .thread_search_scanned_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|scanned| scanned.elapsed() < Self::THREAD_SEARCH_TTL)
+    }
+
+    /// Keyword search across the indexed user messages of every known thread.
+    pub async fn search_thread_messages(
+        &self,
+        request: falcondeck_core::ThreadMessageSearchRequest,
+    ) -> falcondeck_core::ThreadMessageSearchResponse {
+        // The first search after launch waits for the scan; later ones answer
+        // from the current index and refresh behind the response.
+        let indexed_before = self.thread_search_index_is_fresh();
+        if !indexed_before {
+            self.refresh_thread_search_index(true).await;
+        }
+
+        let threads = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .filter(|workspace| {
+                    request
+                        .workspace_id
+                        .as_ref()
+                        .is_none_or(|workspace_id| workspace_id == &workspace.summary.id)
+                })
+                .flat_map(|workspace| {
+                    workspace.threads.values().filter_map(|thread| {
+                        Some(thread_search::SearchableThread {
+                            thread_id: thread.summary.id.clone(),
+                            workspace_id: thread.summary.workspace_id.clone(),
+                            session_id: thread.summary.native_session_id.clone()?,
+                        })
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let index = self
+            .inner
+            .thread_search
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let limit = request.limit.unwrap_or(thread_search::MAX_MATCHES);
+        let matches = thread_search::search(&index, &threads, &request.query, limit);
+        let indexed_threads = threads
+            .iter()
+            .filter(|thread| index.sessions.contains_key(&thread.session_id))
+            .count();
+
+        if indexed_before && !self.thread_search_index_is_fresh() {
+            self.refresh_thread_search_index(false).await;
+        }
+
+        falcondeck_core::ThreadMessageSearchResponse {
+            matches,
+            indexed_threads,
+            indexing: false,
+        }
     }
 
     pub async fn snapshot(&self) -> DaemonSnapshot {

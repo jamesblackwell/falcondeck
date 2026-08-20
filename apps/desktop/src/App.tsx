@@ -3690,6 +3690,27 @@ function AppInner() {
     }));
   }, []);
 
+  // Message-content search is served by the local daemon's excerpt index;
+  // remote-host threads keep their titles searchable and nothing more.
+  const handleSearchThreadMessages = useCallback(
+    async (
+      query: string,
+      options: { workspaceId: string | null; signal: AbortSignal },
+    ) => {
+      if (!api) return [];
+      const response = await api.searchThreadMessages(
+        {
+          query,
+          workspace_id: options.workspaceId,
+          limit: 12,
+        },
+        { signal: options.signal },
+      );
+      return response.matches;
+    },
+    [api],
+  );
+
   const handleOpenExtensionPanel = useCallback((panelKey: string) => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(false);
@@ -5198,6 +5219,7 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             onOpenActivity={handleOpenActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
+            onSearchMessages={handleSearchThreadMessages}
             shortcutHints={paletteShortcutHints}
             openRequestKey={paletteRequest.key}
             initialQuery={paletteRequest.query}

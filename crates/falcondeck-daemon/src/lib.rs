@@ -206,6 +206,9 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         if let Err(error) = restore_state.restore_local_state().await {
             tracing::warn!("failed to restore daemon local state: {error}");
         }
+        // Warm the message-search excerpts once threads are known, so the
+        // first search does not pay for the whole session-file walk.
+        restore_state.start_thread_search_index();
     });
     let router = api::router(state.clone());
 

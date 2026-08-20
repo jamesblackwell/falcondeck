@@ -1618,6 +1618,53 @@ pub struct SnapshotRequest {
     pub include_archived_threads: bool,
 }
 
+/// Request payload for keyword search across thread message content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ThreadMessageSearchRequest {
+    /// Raw keywords typed by the operator; matched case-insensitively.
+    pub query: String,
+    /// Restricts results to one workspace when set.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Caps returned matches; the daemon applies its own upper bound too.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Where in a thread a message match was found.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadMessagePosition {
+    /// Among the first user messages, i.e. what the thread was started to do.
+    Opening,
+    /// Among the most recent user messages.
+    Recent,
+}
+
+/// One thread whose indexed user messages matched the query.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadMessageMatch {
+    /// Thread carrying the matching message.
+    pub thread_id: String,
+    /// Workspace owning the thread.
+    pub workspace_id: String,
+    /// Excerpt of the matching message, centred on the first keyword hit.
+    pub snippet: String,
+    /// Which end of the thread the match came from.
+    pub position: ThreadMessagePosition,
+}
+
+/// Result of a thread message search, with index coverage for the caller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ThreadMessageSearchResponse {
+    /// Matches ordered best-first.
+    pub matches: Vec<ThreadMessageMatch>,
+    /// Threads whose message content is currently indexed.
+    pub indexed_threads: usize,
+    /// Whether a background scan is still filling the index.
+    pub indexing: bool,
+}
+
 /// Request payload used to start a new thread in a workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartThreadRequest {

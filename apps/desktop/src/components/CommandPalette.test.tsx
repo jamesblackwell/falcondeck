@@ -7,6 +7,11 @@ import {
   fuzzyScore,
   paletteSearchScore,
 } from "@falcondeck/chat-ui/command-palette";
+import {
+  getPersistedAppearance,
+  initAppearance,
+  updateAppearance,
+} from "@falcondeck/ui";
 import type {
   ProjectGroup,
   ThreadSummary,
@@ -406,6 +411,172 @@ describe("CommandPalette controlled requests", () => {
     fireEvent.keyDown(input.closest("[role='dialog']")!, { key: "Backspace" });
 
     expect(screen.getByRole("option", { name: /Release notes/ })).toBeInTheDocument();
+  });
+
+  it("adds message-content matches under the title results", async () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ path: "/Users/james/falcondeck" }),
+        threads: [
+          thread({ id: "titled", title: "Waveform width" }),
+          thread({ id: "untitled", title: "Sidebar polish" }),
+        ],
+      },
+    ];
+    const onSelectThread = vi.fn();
+    const onSearchMessages = vi.fn().mockResolvedValue([
+      // A thread the title search already found must not be repeated.
+      {
+        thread_id: "titled",
+        workspace_id: "workspace-1",
+        snippet: "make the waveform full width",
+        position: "opening",
+      },
+      {
+        thread_id: "untitled",
+        workspace_id: "workspace-1",
+        snippet: "the waveform still clips on the right",
+        position: "recent",
+      },
+    ]);
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={onSelectThread}
+        onSearchMessages={onSearchMessages}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "waveform" },
+    });
+
+    const match = await screen.findByRole("option", {
+      name: /Sidebar polish.*waveform still clips/,
+    });
+    expect(onSearchMessages).toHaveBeenCalledWith(
+      "waveform",
+      expect.objectContaining({ workspaceId: null }),
+    );
+    expect(screen.getByText("Message matches")).toBeInTheDocument();
+    // The title hit stays a single row rather than appearing twice.
+    expect(screen.getAllByRole("option", { name: /Waveform width/ })).toHaveLength(1);
+
+    fireEvent.click(match);
+    expect(onSelectThread).toHaveBeenCalledWith("workspace-1", "untitled");
+  });
+
+  it("leaves the message index alone for short queries", async () => {
+    const onSearchMessages = vi.fn().mockResolvedValue([]);
+    render(
+      <CommandPalette
+        groups={[{ workspace: workspace(), threads: [thread()] }]}
+        onSelectThread={vi.fn()}
+        onSearchMessages={onSearchMessages}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "wa" } });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(onSearchMessages).not.toHaveBeenCalled();
+  });
+
+  it("scopes message search to the active project", async () => {
+    const onSearchMessages = vi.fn().mockResolvedValue([]);
+    render(
+      <CommandPalette
+        groups={[{ workspace: workspace(), threads: [thread()] }]}
+        onSelectThread={vi.fn()}
+        onSearchMessages={onSearchMessages}
+        openRequestKey={1}
+        initialProjectId="workspace-1"
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "waveform" },
+    });
+    await vi.waitFor(() =>
+      expect(onSearchMessages).toHaveBeenCalledWith(
+        "waveform",
+        expect.objectContaining({ workspaceId: "workspace-1" }),
+      ),
+    );
+  });
+
+  it("previews the highlighted theme and rolls it back on escape", () => {
+    initAppearance();
+    updateAppearance({ theme: "dark", darkColorTheme: "falcon-dark" });
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    const input = screen.getByRole("combobox");
+    // The top match is highlighted as you type, so the preview lands with it.
+    fireEvent.change(input, { target: { value: "dracula" } });
+    fireEvent.mouseEnter(screen.getByRole("option", { name: /dark theme: Dracula/i }));
+    expect(document.documentElement.dataset.colorTheme).toBe("dracula");
+    // The preview never touches what is saved.
+    expect(getPersistedAppearance().darkColorTheme).toBe("falcon-dark");
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(document.documentElement.dataset.colorTheme).toBe("falcon-dark");
+  });
+
+  it("keeps the previewed theme once it is selected", () => {
+    initAppearance();
+    updateAppearance({ theme: "dark", darkColorTheme: "falcon-dark" });
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "nord" } });
+    fireEvent.click(screen.getByRole("option", { name: /dark theme: Nord/i }));
+
+    expect(getPersistedAppearance().darkColorTheme).toBe("nord");
+    expect(document.documentElement.dataset.colorTheme).toBe("nord");
+  });
+
+  it("previews a light theme by flipping the mode, without saving the flip", () => {
+    initAppearance();
+    updateAppearance({ theme: "dark", lightColorTheme: "falcon-light" });
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "gruvbox light" } });
+    fireEvent.mouseEnter(
+      screen.getByRole("option", { name: /light theme: Gruvbox Light/i }),
+    );
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(document.documentElement.dataset.colorTheme).toBe("gruvbox-light");
+
+    fireEvent.click(screen.getByRole("option", { name: /light theme: Gruvbox Light/i }));
+    // Choosing a light palette while in dark mode stores the palette only.
+    expect(getPersistedAppearance().theme).toBe("dark");
+    expect(getPersistedAppearance().lightColorTheme).toBe("gruvbox-light");
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
   it("uses a thread-only scope for the dedicated search shortcut", () => {

@@ -137,6 +137,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/control/search", post(control_search))
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
+        .route("/api/threads/search", post(search_thread_messages))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
         .route(
@@ -293,6 +294,13 @@ async fn snapshot(
     Query(request): Query<SnapshotRequest>,
 ) -> Json<falcondeck_core::DaemonSnapshot> {
     Json(state.snapshot_with_request(&request).await)
+}
+
+async fn search_thread_messages(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::ThreadMessageSearchRequest>,
+) -> Json<falcondeck_core::ThreadMessageSearchResponse> {
+    Json(state.search_thread_messages(request).await)
 }
 
 async fn preferences(
