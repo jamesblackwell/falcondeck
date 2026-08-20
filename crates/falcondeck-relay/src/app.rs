@@ -41,9 +41,14 @@ const PENDING_RPC_TTL_SECONDS: i64 = 30;
 /// disconnect are parked for re-dispatch instead of failing fast, so a
 /// client that was just told "connected" does not see a spurious error.
 const DAEMON_RECONNECT_GRACE_SECONDS: i64 = 20;
-/// An authoritative snapshot is the minimum RPC capability remote clients
-/// need before a connected daemon can be considered ready to sync.
+/// An authoritative snapshot and thread detail are the minimum RPC
+/// capabilities remote clients need before a connected daemon can be
+/// considered ready to sync. The phone requests the snapshot first and then
+/// immediately fetches the selected thread, so advertising readiness after
+/// only the first registration exposes a short, avoidable `thread.detail is
+/// not registered` race on every reconnect.
 const REQUIRED_SYNC_RPC_METHOD: &str = "snapshot.current";
+const REQUIRED_THREAD_DETAIL_RPC_METHOD: &str = "thread.detail";
 /// Default Expo Push API endpoint; override (or disable with an empty value)
 /// via `FALCONDECK_RELAY_EXPO_PUSH_URL`.
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
@@ -365,7 +370,9 @@ impl LiveSession {
     }
 
     fn daemon_rpc_ready(&self) -> bool {
-        self.rpc_owner(REQUIRED_SYNC_RPC_METHOD).is_some()
+        [REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD]
+            .into_iter()
+            .all(|method| self.rpc_owner(method).is_some())
     }
 
     /// Remove expired pending RPC entries, returning the requester peers
@@ -2007,7 +2014,8 @@ impl AppState {
                             session_id,
                             request_id,
                             peer_id,
-                            owner_peer_id = pending.responder_peer_id.as_deref().unwrap_or("<parked>"),
+                            owner_peer_id =
+                                pending.responder_peer_id.as_deref().unwrap_or("<parked>"),
                             "rejecting rpc result from non-owner daemon peer"
                         );
                         live.pending_rpc.insert(request_id.clone(), pending);
@@ -3690,8 +3698,9 @@ mod tests {
     };
 
     use super::{
-        LiveSession, PeerHandle, REQUIRED_SYNC_RPC_METHOD, chunk_replay_updates,
-        namespaced_rpc_request_id, push_dedupe_key, strip_rpc_request_id_namespace, sync_messages,
+        LiveSession, PeerHandle, REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD,
+        chunk_replay_updates, namespaced_rpc_request_id, push_dedupe_key,
+        strip_rpc_request_id_namespace, sync_messages,
     };
 
     fn test_update(seq: u64) -> RelayUpdate {
@@ -3836,7 +3845,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_presence_is_not_sync_ready_until_snapshot_rpc_is_owned() {
+    fn daemon_presence_is_not_sync_ready_until_snapshot_and_thread_detail_are_owned() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let mut live = LiveSession::default();
         live.peers.insert(
@@ -3853,6 +3862,11 @@ mod tests {
 
         live.rpc_methods.insert(
             REQUIRED_SYNC_RPC_METHOD.to_string(),
+            vec!["daemon-1".to_string()],
+        );
+        assert!(!live.daemon_rpc_ready());
+        live.rpc_methods.insert(
+            REQUIRED_THREAD_DETAIL_RPC_METHOD.to_string(),
             vec!["daemon-1".to_string()],
         );
         assert!(live.daemon_rpc_ready());

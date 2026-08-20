@@ -41,6 +41,10 @@ const REMOTE_TEXT_BATCH_MAX_BYTES: usize = 32 << 10;
 /// this list to `dispatch_remote_rpc`'s match arms.
 pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "snapshot.current",
+    // The phone requests this immediately after its first snapshot. Keep the
+    // pair adjacent so the relay cannot advertise a ready daemon while the
+    // required detail handler is still waiting in its registration queue.
+    "thread.detail",
     "preferences.read",
     "preferences.update",
     "speech.status",
@@ -51,7 +55,6 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "approval.respond",
     "thread.start",
     "thread.fork",
-    "thread.detail",
     "thread.update",
     "thread.archive",
     "thread.unarchive",
@@ -2207,5 +2210,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn registers_snapshot_and_thread_detail_before_optional_remote_actions() {
+        assert_eq!(REMOTE_RPC_METHODS.first(), Some(&"snapshot.current"));
+        assert_eq!(REMOTE_RPC_METHODS.get(1), Some(&"thread.detail"));
     }
 }

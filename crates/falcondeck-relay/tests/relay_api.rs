@@ -2064,6 +2064,19 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
             method: "snapshot.current".to_string(),
         }
     );
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "thread.detail".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::RpcRegistered {
+            method: "thread.detail".to_string(),
+        }
+    );
 
     let client_url = ws_url_for(
         &client,
