@@ -16,6 +16,7 @@ import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
 import { activityTailStore } from '../activity-tails'
 import { detectApiBaseUrl } from '../api'
+import { CONNECTION_COPY } from '../connection-copy'
 import { performanceTracingEnabled, recordPerformance } from '../performance'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
@@ -302,14 +303,14 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
             if (cancelled) return
             teardownSocket()
             setConnectionState('error')
-            setConnectionError('Lost connection to daemon')
+            setConnectionError(CONNECTION_COPY.lostConnection)
             scheduleReconnect()
           }
           socket.onerror = () => {
             if (cancelled) return
             teardownSocket()
             setConnectionState('error')
-            setConnectionError('Failed to connect to daemon events')
+            setConnectionError(CONNECTION_COPY.lostConnection)
             scheduleReconnect()
           }
           return
@@ -324,7 +325,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       if (cancelled) return
       setConnectionState('error')
       setConnectionError(
-        lastError instanceof Error ? lastError.message : 'Failed to connect to daemon',
+        lastError instanceof Error ? lastError.message : CONNECTION_COPY.connectFailed,
       )
       scheduleReconnect()
     }

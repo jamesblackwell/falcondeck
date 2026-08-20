@@ -2,7 +2,7 @@
 // and a DaemonApiClient-shaped adapter so App call sites can route thread and
 // turn operations to whichever daemon owns the workspace. A host is another
 // falcondeck-daemon enrolled through the relay — same protocol the mobile app
-// speaks to this Mac, pointed the other way.
+// speaks to this computer, pointed the other way.
 import {
   applyEventToThreadDetail,
   applySnapshotEvent,
@@ -56,6 +56,7 @@ import {
 import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
 import { activityTailStore } from './activity-tails'
+import { CONNECTION_COPY } from './connection-copy'
 
 const HOSTS_STORAGE_KEY = 'falcondeck.desktop.hosts.v1'
 
@@ -383,7 +384,7 @@ export class HostConnection {
   ): Promise<ThreadDetail> {
     const key = `${workspaceId}:${threadId}`
     const client = this.client
-    if (!client) throw new Error('Host is not connected')
+    if (!client) throw new Error(CONNECTION_COPY.serverNotConnected)
     const page = normalizeThreadDetail(
       await client.rpc('thread.detail', {
         workspace_id: workspaceId,
@@ -463,7 +464,7 @@ export class HostConnection {
 
   private rpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
     const client = this.client
-    if (!client) return Promise.reject(new Error('Host is not connected'))
+    if (!client) return Promise.reject(new Error(CONNECTION_COPY.serverNotConnected))
     return client.rpc<T>(method, params)
   }
 
