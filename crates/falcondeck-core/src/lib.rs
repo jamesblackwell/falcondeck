@@ -224,6 +224,9 @@ pub struct ConversationPreferences {
     /// Whether thread-level expand/collapse controls should be shown.
     #[serde(default = "default_true")]
     pub show_expand_all_controls: bool,
+    /// Whether tall sent messages clamp behind a "Show more" fade.
+    #[serde(default = "default_true")]
+    pub collapse_long_user_messages: bool,
 }
 
 impl Default for ConversationPreferences {
@@ -236,6 +239,7 @@ impl Default for ConversationPreferences {
             auto_expand: ConversationAutoExpandPreferences::default(),
             group_read_only_tools: true,
             show_expand_all_controls: true,
+            collapse_long_user_messages: true,
         }
     }
 }
@@ -361,6 +365,9 @@ pub struct ConversationPreferencesPatch {
     /// Optional expand-all control visibility update.
     #[serde(default)]
     pub show_expand_all_controls: Option<bool>,
+    /// Optional long-sent-message clamping update.
+    #[serde(default)]
+    pub collapse_long_user_messages: Option<bool>,
 }
 
 /// Partial update payload for auto-expand preferences.

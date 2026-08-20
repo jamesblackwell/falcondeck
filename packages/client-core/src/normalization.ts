@@ -310,6 +310,7 @@ const DEFAULT_CONVERSATION_PREFERENCES: ConversationPreferences = {
   group_read_only_tools: true,
   show_expand_all_controls: true,
   thinking_display: "auto",
+  collapse_long_user_messages: true,
 };
 
 const DEFAULT_NOTIFICATION_PREFERENCES = {
@@ -2129,6 +2130,8 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       group_read_only_tools: conversation.group_read_only_tools ?? true,
       show_expand_all_controls: conversation.show_expand_all_controls ?? true,
       thinking_display: thinkingDisplay,
+      collapse_long_user_messages:
+        conversation.collapse_long_user_messages ?? true,
     },
     notifications: {
       enabled: notifications.enabled ?? true,

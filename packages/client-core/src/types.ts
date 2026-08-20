@@ -279,6 +279,8 @@ export type ConversationPreferences = {
   group_read_only_tools: boolean;
   show_expand_all_controls: boolean;
   thinking_display: ThinkingDisplay;
+  /** Clamp walls of text in sent messages behind a fade with "Show more". */
+  collapse_long_user_messages: boolean;
 };
 
 export type NotificationPreferences = {
@@ -326,6 +328,7 @@ export type UpdateConversationPreferences = {
   group_read_only_tools?: boolean | null;
   show_expand_all_controls?: boolean | null;
   thinking_display?: ThinkingDisplay | null;
+  collapse_long_user_messages?: boolean | null;
 };
 
 export type UpdateNotificationPreferences = Partial<NotificationPreferences>;

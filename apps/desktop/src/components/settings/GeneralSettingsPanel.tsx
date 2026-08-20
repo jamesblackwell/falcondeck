@@ -336,6 +336,12 @@ export function GeneralSettingsPanel({
             onToggle={(next) => onUpdatePreferences({ conversation: { group_read_only_tools: next } })}
           />
           <PreferenceToggle
+            label="Collapse long messages you send"
+            description="Clamp a pasted wall of text to a few lines with a Show more fade. Handoff prompts especially benefit."
+            enabled={current.conversation.collapse_long_user_messages}
+            onToggle={(next) => onUpdatePreferences({ conversation: { collapse_long_user_messages: next } })}
+          />
+          <PreferenceToggle
             label="Show expand/collapse all controls"
             description="Expose quick thread-level controls above the conversation when tool cards are present."
             enabled={current.conversation.show_expand_all_controls}

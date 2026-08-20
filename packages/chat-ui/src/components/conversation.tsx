@@ -65,6 +65,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   animateEnter,
   expansionMode,
   thinkingDisplay,
+  collapseLongUserMessages,
   isStreamingReasoning,
   retrySource,
   onRetryResponse,
@@ -79,6 +80,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   thinkingDisplay: ReturnType<
     typeof normalizePreferences
   >["conversation"]["thinking_display"];
+  collapseLongUserMessages: boolean;
   isStreamingReasoning: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: EditResendHandler;
@@ -100,6 +102,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
           expansionMode={expansionMode}
           suppressReadOnlyDetail={block.suppress_read_only_detail}
           thinkingDisplay={thinkingDisplay}
+          collapseLongUserMessages={collapseLongUserMessages}
           isStreamingReasoning={isStreamingReasoning}
           retrySource={
             block.item.kind === "assistant_message" ? retrySource : null
@@ -351,6 +354,8 @@ export const Conversation = memo(function Conversation({
     (block) => block.kind === "work_session" && block.running,
   );
   const thinkingDisplay = normalizedPreferences.conversation.thinking_display;
+  const collapseLongUserMessages =
+    normalizedPreferences.conversation.collapse_long_user_messages;
   // Only the trailing thought is still arriving; anything a later item follows
   // has finished, which is what `auto` keys its collapse off.
   const streamingReasoningId = useMemo(() => {
@@ -922,6 +927,7 @@ export const Conversation = memo(function Conversation({
                   animateEnter={enteringBlockIds.has(block.id)}
                   expansionMode={expansionMode}
                   thinkingDisplay={thinkingDisplay}
+                  collapseLongUserMessages={collapseLongUserMessages}
                   isStreamingReasoning={
                     block.kind === "item" &&
                     block.item.id === streamingReasoningId

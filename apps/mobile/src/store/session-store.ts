@@ -735,6 +735,14 @@ export function useThinkingDisplay(): ThinkingDisplay {
   return useSessionStore((s) => s.snapshot?.preferences.conversation.thinking_display ?? 'auto');
 }
 
+/** Same primitive subscription as `useThinkingDisplay`, for the same reason.
+    Older daemons omit the field; absent means the shipped default, on. */
+export function useCollapseLongUserMessages(): boolean {
+  return useSessionStore(
+    (s) => s.snapshot?.preferences.conversation.collapse_long_user_messages ?? true,
+  );
+}
+
 export function useInteractiveRequests() {
   return useSessionStore(
     useShallow((s) =>

@@ -16,5 +16,6 @@ export {
   useApprovals,
   useInteractiveRequests,
   useThinkingDisplay,
+  useCollapseLongUserMessages,
 } from './session-store'
 export { useUIStore } from './ui-store'

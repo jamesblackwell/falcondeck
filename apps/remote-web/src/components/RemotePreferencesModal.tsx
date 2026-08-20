@@ -50,6 +50,10 @@ const PREFERENCE_TOGGLE_CONFIG = [
     key: 'show_expand_all_controls' as const,
     label: 'Show expand/collapse all controls',
   },
+  {
+    key: 'collapse_long_user_messages' as const,
+    label: 'Collapse long messages you send',
+  },
 ] as const
 
 type RemotePreferencesModalProps = {

@@ -10,7 +10,9 @@ import {
   AlertTriangle,
   Ban,
   BookOpen,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CheckCircle2,
   Circle,
   CircleX,
@@ -215,10 +217,17 @@ function ImagePreviewDialog({
   );
 }
 
+/** Six-ish body lines; a sent message taller than this clamps behind a fade
+    so a pasted wall of text (handoffs especially) reads as one glanceable
+    bubble instead of pages of scrollback. */
+const COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX = 160;
+
 function UserMessage({
   item,
+  collapseLongMessages = true,
 }: {
   item: Extract<ConversationItem, { kind: "user_message" }>;
+  collapseLongMessages?: boolean;
 }) {
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
     null,
@@ -241,6 +250,10 @@ function UserMessage({
     [],
   );
   const hasText = item.text.trim().length > 0;
+  const collapsible = collapseLongMessages && hasText;
+  const [expanded, setExpanded] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const textRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (previewAttachmentId && !previewAttachment) {
@@ -253,19 +266,72 @@ function UserMessage({
     if (!previewAttachmentId) previewTriggerRef.current?.focus();
   }, [previewAttachmentId]);
 
+  // The text keeps its natural height inside the clamped wrapper, so
+  // scrollHeight is the unclamped size even while collapsed. Re-measure on
+  // resize: the bubble is width-fit, and reflow moves messages across the cap.
+  useEffect(() => {
+    const node = textRef.current;
+    if (!collapsible || !node) return;
+    const measure = () =>
+      setOverflowing(
+        node.scrollHeight > COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX + 1,
+      );
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [collapsible, item.text]);
+
+  const collapsed = collapsible && overflowing && !expanded;
+
   return (
     <div className="group/message relative ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
       <div
-        data-message-selectable-content
-        className="fd-type-body max-w-none break-words text-fg-primary"
+        className={cn("relative", collapsed && "overflow-hidden")}
+        style={
+          collapsed
+            ? { maxHeight: COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX }
+            : undefined
+        }
       >
-        <MessageMarkdown
-          text={item.text}
-          defer={false}
-          interpretDirectives={false}
-          highlightCommands
-        />
+        <div
+          ref={textRef}
+          data-message-selectable-content
+          className="fd-type-body max-w-none break-words text-fg-primary"
+        >
+          <MessageMarkdown
+            text={item.text}
+            defer={false}
+            interpretDirectives={false}
+            highlightCommands
+          />
+        </div>
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={() => setExpanded(true)}
+            aria-label="Show the full message"
+            className="fd-focus absolute inset-x-0 bottom-0 flex h-14 items-end justify-center bg-gradient-to-t from-surface-3 to-transparent"
+          >
+            <span className="flex items-center gap-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors group-hover/message:text-fg-secondary">
+              Show more
+              <ChevronDown aria-hidden="true" className="h-3 w-3" />
+            </span>
+          </button>
+        ) : null}
       </div>
+      {collapsible && overflowing && expanded ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(false)}
+          aria-label="Collapse the message"
+          className="fd-focus mt-2 flex items-center gap-1 rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors hover:text-fg-secondary"
+        >
+          Show less
+          <ChevronUp aria-hidden="true" className="h-3 w-3" />
+        </button>
+      ) : null}
       {item.attachments.length > 0 ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {item.attachments.map((attachment) => (
@@ -3042,6 +3108,7 @@ export const MessageCard = memo(function MessageCard({
   expansionMode = "default",
   suppressReadOnlyDetail = false,
   thinkingDisplay = "auto",
+  collapseLongUserMessages = true,
   isStreamingReasoning = false,
   readAloud,
 }: {
@@ -3050,6 +3117,8 @@ export const MessageCard = memo(function MessageCard({
   expansionMode?: ExpansionMode;
   suppressReadOnlyDetail?: boolean;
   thinkingDisplay?: ThinkingDisplay;
+  /** Clamp tall sent messages behind a "Show more" fade. */
+  collapseLongUserMessages?: boolean;
   /** True only for the thought currently arriving, which `auto` expands. */
   isStreamingReasoning?: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
@@ -3060,7 +3129,12 @@ export const MessageCard = memo(function MessageCard({
 }) {
   switch (item.kind) {
     case "user_message":
-      return <UserMessage item={item} />;
+      return (
+        <UserMessage
+          item={item}
+          collapseLongMessages={collapseLongUserMessages}
+        />
+      );
     case "assistant_message":
       return <AssistantMessage item={item} readAloud={readAloud} />;
     case "image":

@@ -210,6 +210,12 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         {
             preferences.conversation.show_expand_all_controls = show;
         }
+        if let Some(collapse) = conversation
+            .get("collapse_long_user_messages")
+            .and_then(Value::as_bool)
+        {
+            preferences.conversation.collapse_long_user_messages = collapse;
+        }
         if let Some(auto_expand) = conversation.get("auto_expand") {
             if let Some(value) = auto_expand.get("approvals").and_then(Value::as_bool) {
                 preferences.conversation.auto_expand.approvals = value;
@@ -341,6 +347,9 @@ pub(super) fn apply_preferences_patch(
         }
         if let Some(value) = conversation.show_expand_all_controls {
             preferences.conversation.show_expand_all_controls = value;
+        }
+        if let Some(value) = conversation.collapse_long_user_messages {
+            preferences.conversation.collapse_long_user_messages = value;
         }
         if let Some(auto_expand) = conversation.auto_expand {
             apply_auto_expand_patch(&mut preferences.conversation.auto_expand, auto_expand);

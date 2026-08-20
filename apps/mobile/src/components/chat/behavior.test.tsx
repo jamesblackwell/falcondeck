@@ -942,3 +942,76 @@ describe("chat behavior components", () => {
     expect(textOf(renderer)).toContain("1 read-only tool");
   });
 });
+
+describe("long user message collapsing", () => {
+  afterEach(cleanup);
+
+  const longMessage = (id: string) => ({
+    kind: "user_message" as const,
+    id,
+    text: Array.from({ length: 40 }, (_, i) => `Line ${i}`).join("\n"),
+    attachments: [],
+    created_at: "2026-03-16T10:00:00Z",
+  });
+
+  function measureText(renderer: ReturnType<typeof renderComponent>, height: number) {
+    // The measuring wrapper is the only node in this tree with an onLayout;
+    // composite and host nodes share the same handler, so any match works.
+    const measured = renderer.root.findAll(
+      (node) => typeof node.props.onLayout === "function",
+    );
+    act(() => {
+      measured[0]!.props.onLayout({ nativeEvent: { layout: { height } } });
+    });
+  }
+
+  it("clamps a tall message behind Show more and expands on demand", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("long-1")} />);
+    measureText(renderer, 400);
+
+    const showMore = renderer.root.findByProps({
+      accessibilityLabel: "Show the full message",
+    });
+    act(() => showMore.props.onPress());
+
+    const showLess = renderer.root.findByProps({
+      accessibilityLabel: "Collapse the message",
+    });
+    act(() => showLess.props.onPress());
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("leaves short messages alone", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("short-1")} />);
+    measureText(renderer, 80);
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }),
+    ).toHaveLength(0);
+  });
+
+  it("resets expansion when the recycled cell shows another message", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("recycle-1")} />);
+    measureText(renderer, 400);
+    act(() =>
+      renderer.root
+        .findByProps({ accessibilityLabel: "Show the full message" })
+        .props.onPress(),
+    );
+
+    act(() => {
+      renderer.update(<UserMessageBlock item={longMessage("recycle-2")} />);
+    });
+    measureText(renderer, 400);
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+});

@@ -436,7 +436,26 @@ function approvalReceipt(
   };
 }
 
+// Handoff-sized wall of text: exercises the collapse-behind-a-fade clamp.
+const longUserText = [
+  "Can you do a quick production check? It's been about 15 hours. It would be very nice to just check recent customers, check the current state of their subscriptions, see if anybody's used the top-up feature, and just generally try and look for any bugs and issues with our implementation.",
+  ...Array.from(
+    { length: 14 },
+    (_, i) =>
+      `Context item ${i + 1}: the previous session established this while auditing the transcript pipeline, and it must carry over into this thread verbatim so nothing is lost in the handoff.`,
+  ),
+].join("\n\n");
+
 const mixedItems: ConversationItem[] = [
+  {
+    kind: "user_message",
+    id: "user-0-long",
+    text: longUserText,
+    attachments: [],
+    turn_id: "turn-qa-0",
+    previous_turn_id: null,
+    created_at: at(-1),
+  },
   {
     kind: "user_message",
     id: "user-1",

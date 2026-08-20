@@ -83,6 +83,13 @@ export default function ConversationSettingsScreen() {
 
       <SettingsSection title="Transcript behavior">
         <PreferenceSwitch
+          label="Collapse long messages"
+          description="Shorten walls of text you send to a few lines with Show more."
+          value={current.collapse_long_user_messages}
+          disabled={isUpdating}
+          onValueChange={(value) => void update({ collapse_long_user_messages: value })}
+        />
+        <PreferenceSwitch
           label="Group repeated lookups"
           description="Combine back-to-back searches and file reads into one summary."
           value={current.group_read_only_tools}
