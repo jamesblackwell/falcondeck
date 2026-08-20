@@ -215,35 +215,24 @@ impl AppState {
         request: SpeechTranscriptionRequest,
     ) -> Result<SpeechTranscriptionResponse, DaemonError> {
         validate_audio_format(&request.format)?;
-        let decoded_len = decoded_base64_len(&request.audio_base64)?;
-        if decoded_len == 0 || decoded_len > MAX_AUDIO_BYTES {
-            return Err(DaemonError::BadRequest(format!(
-                "audio recording must be between 1 byte and {MAX_AUDIO_BYTES} bytes"
-            )));
-        }
+        // Decoded once up front: OpenRouter's transcription endpoint accepts
+        // multipart uploads (verified live against every provider family), so
+        // sending raw bytes shaves the 33% base64 inflation off every upload.
+        let audio = decode_base64_audio(&request.audio_base64)?;
         let api_key = self.openrouter_key_cached().await?.ok_or_else(|| {
             DaemonError::BadRequest(
                 "OpenRouter is not configured on the connected desktop".to_string(),
             )
         })?;
         let models = fallback_models(&request.model);
-        // Built once: the payload embeds the (potentially multi-megabyte)
-        // base64 audio, so only the model id is swapped between attempts.
-        let mut payload = json!({
-            "model": "",
-            "input_audio": { "data": "", "format": request.format },
-            "temperature": 0
-        });
-        // Moved rather than passed through json!, which would copy the
-        // multi-megabyte base64 string into the payload.
-        payload["input_audio"]["data"] = Value::String(request.audio_base64);
-        if let Some(language) = request
+        // The extension tells OpenRouter the container format.
+        let file_name = format!("audio.{}", request.format);
+        let language = request
             .language
             .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            payload["language"] = Value::String(language.to_string());
-        }
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let mut last_error = "Transcription failed".to_string();
         let fallback_deadline = Instant::now() + FALLBACK_TIME_BUDGET;
 
@@ -251,13 +240,23 @@ impl AppState {
             if Instant::now() > fallback_deadline {
                 break;
             }
-            payload["model"] = Value::String(model.clone());
+            let mut form = reqwest::multipart::Form::new()
+                .part(
+                    "file",
+                    reqwest::multipart::Part::bytes(audio.clone())
+                        .file_name(file_name.clone()),
+                )
+                .text("model", model.clone())
+                .text("temperature", "0");
+            if let Some(language) = &language {
+                form = form.text("language", language.clone());
+            }
             let response = match OPENROUTER_CLIENT
                 .post(OPENROUTER_TRANSCRIPTIONS_URL)
                 .bearer_auth(&api_key)
                 .header("X-Title", "FalconDeck")
                 .timeout(TRANSCRIPTION_TIMEOUT)
-                .json(&payload)
+                .multipart(form)
                 .send()
                 .await
             {
@@ -408,15 +407,24 @@ fn validate_audio_format(format: &str) -> Result<(), DaemonError> {
     }
 }
 
-fn decoded_base64_len(value: &str) -> Result<usize, DaemonError> {
+fn decode_base64_audio(value: &str) -> Result<Vec<u8>, DaemonError> {
+    let size_error = || {
+        DaemonError::BadRequest(format!(
+            "audio recording must be between 1 byte and {MAX_AUDIO_BYTES} bytes"
+        ))
+    };
+    // Reject oversized payloads from the length estimate before decoding.
     let estimate = value.len().saturating_mul(3) / 4;
     if estimate > MAX_AUDIO_BYTES + 2 {
-        return Ok(estimate);
+        return Err(size_error());
     }
-    STANDARD
+    let audio = STANDARD
         .decode(value)
-        .map(|bytes| bytes.len())
-        .map_err(|_| DaemonError::BadRequest("audio is not valid base64".to_string()))
+        .map_err(|_| DaemonError::BadRequest("audio is not valid base64".to_string()))?;
+    if audio.is_empty() || audio.len() > MAX_AUDIO_BYTES {
+        return Err(size_error());
+    }
+    Ok(audio)
 }
 
 /// ":nitro" is OpenRouter's throughput-first routing variant: the same model
@@ -664,8 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn decoded_base64_len_rejects_malformed_audio() {
-        assert!(decoded_base64_len("not base64").is_err());
+    fn decode_base64_audio_rejects_malformed_and_empty_audio() {
+        assert!(decode_base64_audio("not base64").is_err());
+        assert!(decode_base64_audio("").is_err());
+        assert_eq!(decode_base64_audio("aGk=").unwrap(), b"hi");
     }
 
     #[test]
