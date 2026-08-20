@@ -344,8 +344,8 @@ export function RemotePairingPopover({
               <div className="flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-warning-muted px-3 py-2.5 text-[length:var(--fd-text-sm)] text-warning">
                 <RefreshCw className="h-3.5 w-3.5" />
                 {status === 'degraded'
-                  ? 'Connection dropped — retrying…'
-                  : 'Relay unreachable — retrying…'}
+                  ? 'Reconnecting to relay…'
+                  : 'Waiting to reach relay…'}
               </div>
             ) : null}
 
