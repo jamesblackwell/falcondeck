@@ -555,14 +555,16 @@ impl CodexSession {
     }
 
     fn enable_reconnect_on_exit(&self) {
-        self.reconnect_on_exit.store(true, Ordering::Release);
-        if self.is_closed() {
+        // Sequential consistency with the EOF-side `closed` store makes it
+        // impossible for activation and exit to each miss the other's flag.
+        self.reconnect_on_exit.store(true, Ordering::SeqCst);
+        if self.closed.load(Ordering::SeqCst) {
             self.schedule_reconnect_once();
         }
     }
 
     fn schedule_reconnect_once(&self) {
-        if !self.reconnect_on_exit.load(Ordering::Acquire)
+        if !self.reconnect_on_exit.load(Ordering::SeqCst)
             || self.expected_exit.load(Ordering::Acquire)
             || self.state.is_shutting_down()
             || self
@@ -822,7 +824,9 @@ impl CodexSession {
         // The app-server is gone. Mark the session closed so new requests fail
         // fast, then fail every in-flight request — otherwise their callers
         // would wait on the response channel forever.
-        self.closed.store(true, Ordering::Release);
+        // Pairs with activation's SeqCst store/load so an exit concurrent with
+        // attachment always schedules on one side of the race.
+        self.closed.store(true, Ordering::SeqCst);
         let pending = std::mem::take(&mut *self.pending.lock().await);
         for (_, tx) in pending {
             let _ = tx.send(Err(DaemonError::Rpc(
