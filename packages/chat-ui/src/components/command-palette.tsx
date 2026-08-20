@@ -13,6 +13,7 @@ import {
   Settings,
   SquarePen,
   Sun,
+  X,
 } from 'lucide-react'
 
 import {
@@ -42,6 +43,8 @@ type PaletteItem = {
   section: 'Unread threads' | 'Threads' | 'Actions' | 'Appearance'
   label: string
   sublabel?: string
+  /** Workspace this row belongs to; drives the `project:` scope filter. */
+  projectId?: string
   icon: React.ReactNode
   search: PaletteSearchFields
   active?: boolean
@@ -254,6 +257,38 @@ function normalizedPaletteSearchScore(
   return score
 }
 
+/**
+ * `project:` prefix support. Typing `project:falcondeck ` — or clicking the
+ * search affordance on a sidebar project row — narrows the palette to one
+ * workspace, shown as a removable chip instead of raw text.
+ */
+const PROJECT_PREFIX_PATTERN = /^project:([^\s]+)\s(.*)$/i
+
+function projectMatchKey(value: string): string {
+  return normalizeSearchText(value).replace(/[^a-z0-9]/g, '')
+}
+
+/**
+ * Resolve a typed prefix token to exactly one project. Ambiguous tokens are
+ * left as plain text so the query still searches instead of silently picking.
+ */
+function resolveProjectToken(
+  groups: ProjectGroup[],
+  token: string,
+): string | null {
+  const wanted = projectMatchKey(token)
+  if (!wanted) return null
+  const labels = groups.map((group) => ({
+    id: group.workspace.id,
+    key: projectMatchKey(getProjectLabel(group.workspace.path)),
+  }))
+  const exact = labels.filter((entry) => entry.key === wanted)
+  if (exact.length === 1) return exact[0]!.id
+  if (exact.length > 1) return null
+  const prefixed = labels.filter((entry) => entry.key.startsWith(wanted))
+  return prefixed.length === 1 ? prefixed[0]!.id : null
+}
+
 export type CommandPaletteProps = {
   groups: ProjectGroup[]
   onSelectThread: (workspaceId: string, threadId: string) => void
@@ -266,6 +301,8 @@ export type CommandPaletteProps = {
   openRequestKey?: number
   initialQuery?: string
   initialScope?: 'all' | 'threads'
+  /** Opens the palette already scoped to one project's threads. */
+  initialProjectId?: string | null
   requestMode?: 'open' | 'toggle' | 'close'
 }
 
@@ -284,12 +321,16 @@ export const CommandPalette = memo(function CommandPalette({
   openRequestKey,
   initialQuery = '',
   initialScope = 'all',
+  initialProjectId = null,
   requestMode = 'open',
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  // Scope chip: while set, the list only contains this project's threads.
+  const [projectId, setProjectId] = useState<string | null>(null)
   const [highlight, setHighlight] = useState(0)
   const listRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const consumedOpenRequestKeyRef = useRef<number | undefined>(undefined)
   const searchFieldsCacheRef = useRef(new Map<string, CachedThreadSearchFields>())
@@ -301,6 +342,7 @@ export const CommandPalette = memo(function CommandPalette({
     if (openRequestKey <= 0 || consumedOpenRequestKeyRef.current === openRequestKey) return
     consumedOpenRequestKeyRef.current = openRequestKey
     setQuery(initialQuery)
+    setProjectId(initialProjectId)
     setOpen((current) => {
       const next = requestMode === 'toggle' ? !current : requestMode !== 'close'
       if (!current && next && typeof document !== 'undefined') {
@@ -308,7 +350,7 @@ export const CommandPalette = memo(function CommandPalette({
       }
       return next
     })
-  }, [initialQuery, openRequestKey, requestMode])
+  }, [initialProjectId, initialQuery, openRequestKey, requestMode])
 
   useEffect(() => {
     if (openRequestKey !== undefined) return
@@ -330,9 +372,10 @@ export const CommandPalette = memo(function CommandPalette({
   useEffect(() => {
     if (!open) {
       setQuery(initialQuery)
+      setProjectId(initialProjectId)
       setHighlight(0)
     }
-  }, [initialQuery, open])
+  }, [initialProjectId, initialQuery, open])
 
   const close = useCallback(() => setOpen(false), [])
 
@@ -383,6 +426,7 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Unread threads',
         label: thread.title,
         sublabel: label,
+        projectId: group.workspace.id,
         icon: threadPaletteIcon(status),
         status,
         search: cachedThreadSearchFields(
@@ -406,6 +450,7 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Threads',
         label: thread.title,
         sublabel: label,
+        projectId: group.workspace.id,
         icon: threadPaletteIcon(status),
         status,
         search: cachedThreadSearchFields(
@@ -427,6 +472,7 @@ export const CommandPalette = memo(function CommandPalette({
           kind: 'action',
           section: 'Actions',
           label: `New thread in ${label}`,
+          projectId: group.workspace.id,
           icon: <SquarePen className="h-3.5 w-3.5" />,
           search: normalizeSearchFields({
             primary: `New thread in ${label}`,
@@ -521,16 +567,36 @@ export const CommandPalette = memo(function CommandPalette({
     return result
   }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenSettings, onSelectThread, open, shortcutHints])
 
+  // A project that has since disappeared (removed, or a stale request) must
+  // not silently hide every result, so the chip only survives while it resolves.
+  const activeProject = useMemo(
+    () =>
+      projectId
+        ? (groups.find((group) => group.workspace.id === projectId) ?? null)
+        : null,
+    [groups, projectId],
+  )
+  const activeProjectLabel = activeProject
+    ? getProjectLabel(activeProject.workspace.path)
+    : null
+
   const filtered = useMemo(() => {
-    const scopedItems = initialScope === 'threads'
+    let scopedItems = initialScope === 'threads'
       ? items.filter((item) => item.kind === 'thread')
       : items
+    if (activeProject) {
+      const scopeId = activeProject.workspace.id
+      scopedItems = scopedItems.filter((item) => item.projectId === scopeId)
+    }
     if (!query.trim()) {
+      // Browsing all projects shows a short teaser of threads; inside a single
+      // project the browse list *is* the answer, so let it run full length.
+      const threadLimit = activeProject ? MAX_SEARCH_RESULTS : 8
       const threads: PaletteItem[] = []
       const rest: PaletteItem[] = []
       for (const item of scopedItems) {
         if (item.kind === 'thread') {
-          if (threads.length < 8) threads.push(item)
+          if (threads.length < threadLimit) threads.push(item)
         } else {
           rest.push(item)
         }
@@ -562,15 +628,36 @@ export const CommandPalette = memo(function CommandPalette({
       }
     }
     return ranked.map((entry) => entry.item)
-  }, [initialScope, items, query])
+  }, [activeProject, initialScope, items, query])
 
   useEffect(() => {
     setHighlight(0)
-  }, [initialScope, query])
+  }, [initialScope, projectId, query])
 
   useEffect(() => {
     setHighlight((current) => Math.min(current, Math.max(0, filtered.length - 1)))
   }, [filtered.length])
+
+  // Typing the prefix by hand is the keyboard route to the same scope the
+  // sidebar row's search icon sets.
+  const handleQueryChange = useCallback(
+    (value: string) => {
+      const match = projectId ? null : PROJECT_PREFIX_PATTERN.exec(value)
+      const resolved = match ? resolveProjectToken(groups, match[1]!) : null
+      if (match && resolved) {
+        setProjectId(resolved)
+        setQuery(match[2] ?? '')
+        return
+      }
+      setQuery(value)
+    },
+    [groups, projectId],
+  )
+
+  const clearProjectScope = useCallback(() => {
+    setProjectId(null)
+    inputRef.current?.focus()
+  }, [])
 
   const runItem = useCallback(
     (item: PaletteItem) => {
@@ -599,6 +686,11 @@ export const CommandPalette = memo(function CommandPalette({
         event.preventDefault()
         const item = filtered[highlight]
         if (item) runItem(item)
+      } else if (event.key === 'Backspace' && projectId && query === '') {
+        // Chip-style deletion: the empty field's next backspace drops the
+        // scope rather than closing the palette.
+        event.preventDefault()
+        clearProjectScope()
       } else if (event.key === 'Escape') {
         event.preventDefault()
         close()
@@ -608,7 +700,7 @@ export const CommandPalette = memo(function CommandPalette({
         event.preventDefault()
       }
     },
-    [close, filtered, highlight, runItem],
+    [clearProjectScope, close, filtered, highlight, projectId, query, runItem],
   )
 
   useEffect(() => {
@@ -620,6 +712,11 @@ export const CommandPalette = memo(function CommandPalette({
 
   let lastSection: PaletteItem['section'] | null = null
   const isSearching = query.trim().length > 0
+  const searchLabel = activeProjectLabel
+    ? `Search threads in ${activeProjectLabel}`
+    : initialScope === 'threads'
+      ? 'Search threads'
+      : 'Search threads and commands'
 
   return createPortal(
     <div
@@ -637,17 +734,32 @@ export const CommandPalette = memo(function CommandPalette({
       >
         <div className="flex items-center gap-2 border-b border-border-subtle px-3 py-2.5">
           <Search aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+          {activeProjectLabel ? (
+            <span className="flex max-w-[12rem] shrink-0 items-center gap-1 rounded-[var(--fd-radius-sm)] bg-surface-3 py-0.5 pl-1.5 pr-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
+              <FolderClosed aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
+              <span className="truncate">{activeProjectLabel}</span>
+              <button
+                type="button"
+                onClick={clearProjectScope}
+                aria-label={`Search all projects instead of ${activeProjectLabel}`}
+                className="fd-focus shrink-0 rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:text-fg-primary"
+              >
+                <X aria-hidden="true" className="h-3 w-3" />
+              </button>
+            </span>
+          ) : null}
           <input
             autoFocus
+            ref={inputRef}
             role="combobox"
             aria-autocomplete="list"
             aria-controls={listId}
             aria-expanded="true"
             aria-activedescendant={filtered[highlight] ? `${listId}-${filtered[highlight].id}` : undefined}
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={initialScope === 'threads' ? 'Search threads…' : 'Search threads and commands…'}
-            aria-label={initialScope === 'threads' ? 'Search threads' : 'Search threads and commands'}
+            onChange={(event) => handleQueryChange(event.target.value)}
+            placeholder={searchLabel + '…'}
+            aria-label={searchLabel}
             className="w-full bg-transparent text-[length:var(--fd-text-base)] text-fg-primary outline-none placeholder:text-fg-muted"
           />
           <Kbd>esc</Kbd>
@@ -704,7 +816,9 @@ export const CommandPalette = memo(function CommandPalette({
                       {item.status.label}
                     </span>
                   ) : null}
-                  {item.sublabel ? (
+                  {/* Inside a project scope every row shares the same
+                      project, so the per-row label is only repetition. */}
+                  {item.sublabel && !activeProject ? (
                     <span className="flex shrink-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
                       {!item.unread ? (
                         <FolderClosed aria-hidden="true" className="h-3 w-3" />

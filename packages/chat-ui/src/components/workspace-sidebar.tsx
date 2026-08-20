@@ -78,6 +78,8 @@ export type WorkspaceSidebarProps = {
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread?: (workspaceId: string) => void;
+  /** Open the command palette scoped to one project's threads. */
+  onSearchProjectThreads?: (workspaceId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
   onDeleteThread?: (
@@ -520,6 +522,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onSelectWorkspace,
   onSelectThread,
   onNewThread,
+  onSearchProjectThreads,
   onArchiveThread,
   onDeleteThread,
   onRenameThread,
@@ -1714,6 +1717,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                       onNewThread={
                         onNewThread
                           ? () => handleNewThread(workspaceId)
+                          : undefined
+                      }
+                      onSearchThreads={
+                        onSearchProjectThreads
+                          ? () => onSearchProjectThreads(workspaceId)
                           : undefined
                       }
                       onOpenContextMenu={

@@ -325,6 +325,89 @@ describe("CommandPalette controlled requests", () => {
     expect(screen.queryByRole("option", { name: /Release checklist.*website/ })).not.toBeInTheDocument();
   });
 
+  it("scopes the list to one project and lets the chip be dropped", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ path: "/Users/james/falcondeck" }),
+        threads: [thread({ id: "deck", title: "Release checklist" })],
+      },
+      {
+        workspace: workspace({ id: "workspace-2", path: "/Users/james/website" }),
+        threads: [
+          thread({
+            id: "site",
+            workspace_id: "workspace-2",
+            title: "Release notes",
+          }),
+        ],
+      },
+    ];
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={vi.fn()}
+        onOpenSettings={vi.fn()}
+        openRequestKey={1}
+        initialProjectId="workspace-1"
+        requestMode="open"
+      />,
+    );
+
+    expect(
+      screen.getByRole("combobox", { name: "Search threads in falcondeck" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Release checklist/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Release notes/ })).not.toBeInTheDocument();
+    // Project-scoped actions survive the filter; global ones do not.
+    expect(screen.queryByRole("option", { name: /Open settings/ })).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Search all projects instead of falcondeck",
+      }),
+    );
+
+    expect(screen.getByRole("option", { name: /Release notes/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Open settings/ })).toBeInTheDocument();
+  });
+
+  it("turns a typed project: prefix into the same scope", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ path: "/Users/james/falcondeck" }),
+        threads: [thread({ id: "deck", title: "Release checklist" })],
+      },
+      {
+        workspace: workspace({ id: "workspace-2", path: "/Users/james/website" }),
+        threads: [
+          thread({
+            id: "site",
+            workspace_id: "workspace-2",
+            title: "Release notes",
+          }),
+        ],
+      },
+    ];
+
+    render(
+      <CommandPalette groups={groups} onSelectThread={vi.fn()} openRequestKey={1} requestMode="open" />,
+    );
+
+    const input = screen.getByRole("combobox");
+    fireEvent.change(input, { target: { value: "project:falcon release" } });
+
+    // The prefix is lifted out of the field and rendered as the scope chip.
+    expect(input).toHaveValue("release");
+    expect(screen.getByRole("option", { name: /Release checklist/ })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /Release notes/ })).not.toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.keyDown(input.closest("[role='dialog']")!, { key: "Backspace" });
+
+    expect(screen.getByRole("option", { name: /Release notes/ })).toBeInTheDocument();
+  });
+
   it("uses a thread-only scope for the dedicated search shortcut", () => {
     render(
       <CommandPalette

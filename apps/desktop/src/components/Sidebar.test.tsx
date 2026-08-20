@@ -227,6 +227,17 @@ describe("DesktopSidebar", () => {
     expect(onAddProject).toHaveBeenCalledOnce();
   });
 
+  it("searches one project's threads from the project row", () => {
+    const onSearchProjectThreads = vi.fn();
+    renderSidebar({ onSearchProjectThreads, onSearch: vi.fn() });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Search threads in falcondeck" }),
+    );
+
+    expect(onSearchProjectThreads).toHaveBeenCalledWith("workspace-1");
+  });
+
   it("starts a thread from a row above every other navigation", () => {
     const onNewThread = vi.fn();
     renderSidebar({ onNewThread, onOpenActivity: vi.fn() });

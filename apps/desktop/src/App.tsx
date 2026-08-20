@@ -439,6 +439,7 @@ function AppInner() {
     key: 0,
     query: "",
     scope: "all" as "all" | "threads",
+    projectId: null as string | null,
     mode: "toggle" as "open" | "toggle" | "close",
   });
   const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
@@ -3672,7 +3673,20 @@ function AppInner() {
       key: current.key + 1,
       query: "",
       scope: "all",
+      projectId: null,
       mode: "toggle",
+    }));
+  }, []);
+
+  // The search icon on a project row opens the palette already scoped to that
+  // project, so it always opens rather than toggling an existing scope away.
+  const handleSearchProjectThreads = useCallback((workspaceId: string) => {
+    setPaletteRequest((current) => ({
+      key: current.key + 1,
+      query: "",
+      scope: "all",
+      projectId: workspaceId,
+      mode: "open",
     }));
   }, []);
 
@@ -4962,6 +4976,7 @@ function AppInner() {
             key: current.key + 1,
             query: "",
             scope: "all",
+            projectId: null,
             mode: "toggle",
           }));
           break;
@@ -4970,6 +4985,7 @@ function AppInner() {
             key: current.key + 1,
             query: "",
             scope: "threads",
+            projectId: null,
             mode: "open",
           }));
           break;
@@ -5186,6 +5202,7 @@ function AppInner() {
             openRequestKey={paletteRequest.key}
             initialQuery={paletteRequest.query}
             initialScope={paletteRequest.scope}
+            initialProjectId={paletteRequest.projectId}
             requestMode={paletteRequest.mode}
           />
         </Suspense>
@@ -5208,6 +5225,7 @@ function AppInner() {
             onMarkThreadUnread={handleMarkThreadUnread}
             onAddProject={handleAddProject}
             onSearch={handleOpenCommandPalette}
+            onSearchProjectThreads={handleSearchProjectThreads}
             onRemoveWorkspace={handleRemoveWorkspace}
             threadSort={threadSort}
             onThreadSortChange={handleThreadSortChange}

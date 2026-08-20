@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { memo, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { ChevronRight, FolderClosed, FolderOpen, Globe, SquarePen } from 'lucide-react'
+import { ChevronRight, FolderClosed, FolderOpen, Globe, Search, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { workspaceColorCssVar } from '@falcondeck/client-core'
@@ -20,6 +20,8 @@ export type WorkspaceGroupProps = {
   isSelected: boolean
   onSelect: () => void
   onNewThread?: () => void
+  /** Search this project's threads; revealed on row hover. */
+  onSearchThreads?: () => void
   onOpenContextMenu?: (position: { x: number; y: number }) => void
   /** Theme-backed categorical token, e.g. `cat-3`. */
   color?: string | null
@@ -37,6 +39,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   isSelected,
   onSelect,
   onNewThread,
+  onSearchThreads,
   onOpenContextMenu,
   color,
   dragHandleProps,
@@ -172,6 +175,18 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               ) : null}
             </span>
           </Collapsible.Trigger>
+          {onSearchThreads ? (
+            <button
+              type="button"
+              data-no-workspace-drag="true"
+              onClick={onSearchThreads}
+              title={`Search threads in ${pathLabel}`}
+              aria-label={`Search threads in ${pathLabel}`}
+              className="fd-focus shrink-0 self-center rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-[opacity,color,background-color] duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <Search aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
           {onNewThread ? (
             <button
               type="button"
