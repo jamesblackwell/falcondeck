@@ -1,4 +1,11 @@
-import { Fragment, memo, useDeferredValue, useMemo, useRef } from "react";
+import {
+  Fragment,
+  memo,
+  useDeferredValue,
+  useMemo,
+  useRef,
+  type ComponentProps,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -9,6 +16,7 @@ import {
   agentDirectiveLabel,
   safeExternalUrl,
   splitAgentMessageSegments,
+  splitSlashCommandSegments,
   type AgentDirectiveAttribute,
 } from "@falcondeck/client-core";
 
@@ -16,6 +24,61 @@ import { CodeBlock } from "./code-block";
 
 const remarkPlugins = [remarkGfm];
 const markdownProcessor = unified().use(remarkParse).use(remarkGfm);
+
+/* --- Slash-command mentions ------------------------------------------ */
+/* Skill invocations the user typed (`/db-query`) take the accent colour so a
+   command reads as an instruction to the agent rather than ordinary prose.
+   Only user messages opt in: agent prose regularly contains absolute paths
+   and web routes that would satisfy the same token rule. */
+
+const SLASH_COMMAND_NODE = "slashCommandMention";
+
+type SlashCommandMdastNode = {
+  type: string;
+  value?: string;
+  children?: SlashCommandMdastNode[];
+};
+
+function highlightSlashCommandNodes(node: SlashCommandMdastNode) {
+  if (!node.children) return;
+  // Link labels keep their own colour; a command inside one is already styled.
+  if (node.type === "link" || node.type === "linkReference") return;
+  node.children = node.children.flatMap((child) => {
+    if (child.type !== "text" || !child.value) {
+      highlightSlashCommandNodes(child);
+      return [child];
+    }
+    const segments = splitSlashCommandSegments(child.value);
+    if (!segments.some((segment) => segment.kind === "command")) return [child];
+    return segments.map((segment) =>
+      segment.kind === "command"
+        ? { type: SLASH_COMMAND_NODE, value: segment.value }
+        : { type: "text", value: segment.value },
+    );
+  });
+}
+
+function remarkSlashCommands() {
+  return (tree: SlashCommandMdastNode) => highlightSlashCommandNodes(tree);
+}
+
+const slashCommandRemarkPlugins = [remarkGfm, remarkSlashCommands];
+
+const slashCommandRemarkRehypeOptions = {
+  handlers: {
+    [SLASH_COMMAND_NODE]: (
+      _state: unknown,
+      node: { value?: string },
+    ) => ({
+      type: "element" as const,
+      tagName: "span",
+      properties: { className: "font-medium text-accent" },
+      children: [{ type: "text" as const, value: node.value ?? "" }],
+    }),
+  },
+  // mdast-util-to-hast types `handlers` with only built-in node names, but
+  // runtime dispatch is by node type string, custom types included.
+} as unknown as ComponentProps<typeof ReactMarkdown>["remarkRehypeOptions"];
 
 type MarkdownDefinitionNode = {
   type: string;
@@ -368,10 +431,17 @@ const streamingMarkdownComponents = {
   code: markdownCodeComponent(false),
 } as const;
 
-export function renderMarkdown(text: string, highlightCode = true) {
+export function renderMarkdown(
+  text: string,
+  highlightCode = true,
+  highlightCommands = false,
+) {
   return (
     <ReactMarkdown
-      remarkPlugins={remarkPlugins}
+      remarkPlugins={highlightCommands ? slashCommandRemarkPlugins : remarkPlugins}
+      remarkRehypeOptions={
+        highlightCommands ? slashCommandRemarkRehypeOptions : undefined
+      }
       components={
         highlightCode ? markdownComponents : streamingMarkdownComponents
       }
@@ -648,6 +718,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   defer = true,
   streaming = false,
   interpretDirectives = true,
+  highlightCommands = false,
 }: {
   text: string;
   defer?: boolean;
@@ -655,6 +726,8 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   streaming?: boolean;
   /** Only trusted agent messages may turn machine directives into annotations. */
   interpretDirectives?: boolean;
+  /** Tint slash-command mentions; only user-authored messages opt in. */
+  highlightCommands?: boolean;
 }) {
   const deferredText = useDeferredValue(text);
   const visibleText = defer ? deferredText : text;
@@ -667,12 +740,12 @@ export const MessageMarkdown = memo(function MessageMarkdown({
     ) : interpretDirectives ? (
       renderMessageContent(visibleText, true, false)
     ) : (
-      renderMarkdown(visibleText, true)
+      renderMarkdown(visibleText, true, highlightCommands)
     );
     // The `fd-markdown` scope carries the prose rules that Tailwind utilities
     // cannot express — reading measure, wrap quality, task-list checkboxes.
     // Blocks stay direct children of this element, so the `first:`/`last:`
     // margin resets on them are unaffected.
     return <div className="fd-markdown">{content}</div>;
-  }, [interpretDirectives, streaming, visibleText]);
+  }, [highlightCommands, interpretDirectives, streaming, visibleText]);
 });

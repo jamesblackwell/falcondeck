@@ -263,6 +263,7 @@ function UserMessage({
           text={item.text}
           defer={false}
           interpretDirectives={false}
+          highlightCommands
         />
       </div>
       {item.attachments.length > 0 ? (

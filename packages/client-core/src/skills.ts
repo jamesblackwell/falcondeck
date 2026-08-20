@@ -22,6 +22,42 @@ export function providerSupportsSkill(skill: SkillSummary, provider: AgentProvid
   return skill.availability === 'both' || skill.availability === provider
 }
 
+/**
+ * A slash-command mention: preceded by start-of-text or whitespace, a `/`
+ * followed by a word, and not a path segment (`/api/provider` never matches).
+ * The lookahead forbids every token character plus `/`, so the engine cannot
+ * backtrack into matching `/ap` out of `/api/provider`. Shared by composer
+ * skill detection and transcript command highlighting so what lights up in a
+ * sent message is exactly what the composer treated as a command mention.
+ */
+const SLASH_COMMAND_MENTION = /(^|\s)(\/[A-Za-z0-9_-]+)(?![A-Za-z0-9_/-])/g
+
+export type SlashCommandSegment = {
+  kind: 'text' | 'command'
+  value: string
+}
+
+/** Splits plain text into ordinary runs and slash-command mentions. */
+export function splitSlashCommandSegments(text: string): SlashCommandSegment[] {
+  const segments: SlashCommandSegment[] = []
+  let cursor = 0
+
+  for (const match of text.matchAll(SLASH_COMMAND_MENTION)) {
+    const commandStart = (match.index ?? 0) + match[1].length
+    const command = match[2]
+    if (commandStart > cursor) {
+      segments.push({ kind: 'text', value: text.slice(cursor, commandStart) })
+    }
+    segments.push({ kind: 'command', value: command })
+    cursor = commandStart + command.length
+  }
+
+  if (cursor < text.length) {
+    segments.push({ kind: 'text', value: text.slice(cursor) })
+  }
+  return segments
+}
+
 export function selectedSkillsFromText(
   value: string,
   skills: SkillSummary[],
@@ -34,7 +70,7 @@ export function selectedSkillsFromText(
   const seen = new Set<string>()
   const selections: SelectedSkillReference[] = []
 
-  for (const match of value.matchAll(/(^|\s)(\/[A-Za-z0-9_-]+)(?!\/)/g)) {
+  for (const match of value.matchAll(SLASH_COMMAND_MENTION)) {
     const alias = canonicalSkillAlias(match[2] ?? '')
     const skill = byAlias.get(alias)
     if (!skill || seen.has(skill.id)) continue

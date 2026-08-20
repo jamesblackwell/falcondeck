@@ -419,3 +419,44 @@ describe("streaming agent directives", () => {
     expect(view.container).toHaveTextContent("::git-commit");
   });
 });
+
+describe("slash-command highlighting", () => {
+  it("tints a user-typed command mention", () => {
+    const view = render(
+      <MessageMarkdown
+        text={"Any usage evidence?\n\n/db-query"}
+        defer={false}
+        interpretDirectives={false}
+        highlightCommands
+      />,
+    );
+
+    const command = screen.getByText("/db-query");
+    expect(command.tagName).toBe("SPAN");
+    expect(command.className).toContain("text-accent");
+    expect(view.container).toHaveTextContent("Any usage evidence?");
+  });
+
+  it("leaves path segments and mid-word slashes untinted", () => {
+    const view = render(
+      <MessageMarkdown
+        text={"look at /api/provider and either/or in /Users/qa/notes.md"}
+        defer={false}
+        interpretDirectives={false}
+        highlightCommands
+      />,
+    );
+
+    expect(view.container.querySelector(".text-accent")).toBeNull();
+    expect(view.container).toHaveTextContent(
+      "look at /api/provider and either/or in /Users/qa/notes.md",
+    );
+  });
+
+  it("keeps command mentions plain without the opt-in", () => {
+    const view = render(<MessageMarkdown text={"Run /db-query"} defer={false} />);
+
+    expect(view.container.querySelector(".text-accent")).toBeNull();
+    expect(view.container).toHaveTextContent("Run /db-query");
+  });
+});

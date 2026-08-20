@@ -20,7 +20,11 @@ export const UserMessageBlock = memo(function UserMessageBlock({
     <View style={styles.row}>
       <View style={styles.bubble}>
         <AttachmentPreviewList attachments={item.attachments} />
-        <MarkdownRenderer text={item.text} interpretDirectives={false} />
+        <MarkdownRenderer
+          text={item.text}
+          interpretDirectives={false}
+          highlightCommands
+        />
       </View>
       <MessageActions
         text={item.text}

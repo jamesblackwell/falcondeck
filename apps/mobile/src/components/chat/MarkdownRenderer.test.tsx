@@ -665,3 +665,42 @@ describe("MarkdownRenderer", () => {
     expect(textOf(renderer)).toContain("https://example.com/only.png");
   });
 });
+
+describe("slash-command highlighting", () => {
+  const accentTexts = (renderer: ReturnType<typeof renderComponent>) =>
+    renderer.root.findAll(
+      (node) => typeof node.type !== "string" && node.props.color === "accent",
+    );
+
+  it("tints a user-typed command mention in the accent colour", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={"Any usage evidence?\n\n/db-query"}
+        interpretDirectives={false}
+        highlightCommands
+      />,
+    );
+
+    const commands = accentTexts(renderer);
+    expect(commands).toHaveLength(1);
+    expect(textOf(renderer)).toContain("/db-query");
+    expect(textOf(renderer)).toContain("Any usage evidence?");
+  });
+
+  it("leaves path segments untinted and requires the opt-in", () => {
+    const paths = renderComponent(
+      <MarkdownRenderer
+        text={"look at /api/provider and either/or"}
+        interpretDirectives={false}
+        highlightCommands
+      />,
+    );
+    expect(accentTexts(paths)).toHaveLength(0);
+    expect(textOf(paths)).toContain("look at /api/provider and either/or");
+
+    const optOut = renderComponent(
+      <MarkdownRenderer text={"Run /db-query"} interpretDirectives={false} />,
+    );
+    expect(accentTexts(optOut)).toHaveLength(0);
+  });
+});

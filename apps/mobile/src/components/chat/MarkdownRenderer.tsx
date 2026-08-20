@@ -1,4 +1,4 @@
-import { memo, useDeferredValue, useMemo, type ReactNode } from "react";
+import { Fragment, memo, useDeferredValue, useMemo, type ReactNode } from "react";
 import { ScrollView, View } from "react-native";
 import { Check, GitCommitHorizontal, Terminal, Upload } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -10,6 +10,7 @@ import {
   agentDirectiveLabel,
   safeExternalUrl,
   splitAgentMessageSegments,
+  splitSlashCommandSegments,
   stripAgentDirectiveLines,
   type AgentDirectiveAttribute,
 } from "@falcondeck/client-core";
@@ -24,6 +25,8 @@ interface MarkdownRendererProps {
   streaming?: boolean;
   /** Only trusted agent messages may turn machine directives into annotations. */
   interpretDirectives?: boolean;
+  /** Tint slash-command mentions; only user-authored messages opt in. */
+  highlightCommands?: boolean;
 }
 
 type MarkdownNode = {
@@ -315,9 +318,37 @@ function renderMarkdownInlineNodes(
   nodes: MarkdownNode[] | undefined,
   definitions: MarkdownDefinitions,
   keyPrefix: string,
+  highlightCommands = false,
 ): ReactNode[] {
   return (nodes ?? []).map((node, index) =>
-    renderMarkdownInlineNode(node, definitions, `${keyPrefix}-inline-${index}`),
+    renderMarkdownInlineNode(
+      node,
+      definitions,
+      `${keyPrefix}-inline-${index}`,
+      highlightCommands,
+    ),
+  );
+}
+
+/**
+ * Skill invocations the user typed (`/db-query`) take the accent colour so a
+ * command reads as an instruction to the agent rather than ordinary prose.
+ */
+function renderSlashCommandText(value: string, key: string): ReactNode {
+  const segments = splitSlashCommandSegments(value);
+  if (!segments.some((segment) => segment.kind === "command")) return value;
+  return (
+    <Fragment key={key}>
+      {segments.map((segment, index) =>
+        segment.kind === "command" ? (
+          <Text key={`${key}-command-${index}`} color="accent" weight="medium">
+            {segment.value}
+          </Text>
+        ) : (
+          segment.value
+        ),
+      )}
+    </Fragment>
   );
 }
 
@@ -325,6 +356,7 @@ function renderMarkdownInlineNode(
   node: MarkdownNode,
   definitions: MarkdownDefinitions,
   key: string,
+  highlightCommands: boolean,
 ): ReactNode {
   switch (node.type) {
     case "break":
@@ -332,13 +364,23 @@ function renderMarkdownInlineNode(
     case "delete":
       return (
         <Text key={key} style={styles.inlineDelete}>
-          {renderMarkdownInlineNodes(node.children, definitions, key)}
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </Text>
       );
     case "emphasis":
       return (
         <Text key={key} style={styles.inlineEmphasis}>
-          {renderMarkdownInlineNodes(node.children, definitions, key)}
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </Text>
       );
     case "footnoteReference":
@@ -348,8 +390,11 @@ function renderMarkdownInlineNode(
         </Text>
       );
     case "html":
-    case "text":
       return node.value ?? "";
+    case "text": {
+      const value = node.value ?? "";
+      return highlightCommands ? renderSlashCommandText(value, key) : value;
+    }
     case "image": {
       const url = safeExternalUrl(node.url);
 
@@ -454,11 +499,21 @@ function renderMarkdownInlineNode(
     case "strong":
       return (
         <Text key={key} weight="semibold">
-          {renderMarkdownInlineNodes(node.children, definitions, key)}
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </Text>
       );
     default:
-      return renderMarkdownInlineNodes(node.children, definitions, key);
+      return renderMarkdownInlineNodes(
+        node.children,
+        definitions,
+        key,
+        highlightCommands,
+      );
   }
 }
 
@@ -578,6 +633,7 @@ export function renderMarkdownBlocks(
   nodes: MarkdownNode[] | undefined,
   definitions: MarkdownDefinitions,
   keyPrefix = "markdown",
+  highlightCommands = false,
 ): ReactNode[] {
   const blocks = nodes ?? [];
   const renderedIndexes = blocks.flatMap((node, index) =>
@@ -598,12 +654,18 @@ export function renderMarkdownBlocks(
   }
 
   return blocks.map((node, index) =>
-    renderMarkdownBlock(node, definitions, `${keyPrefix}-block-${index}`, {
-      isFirst: index === firstRenderedIndex,
-      isLast: index === lastRenderedIndex,
-      previousType:
-        blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
-    }),
+    renderMarkdownBlock(
+      node,
+      definitions,
+      `${keyPrefix}-block-${index}`,
+      {
+        isFirst: index === firstRenderedIndex,
+        isLast: index === lastRenderedIndex,
+        previousType:
+          blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
+      },
+      highlightCommands,
+    ),
   );
 }
 
@@ -612,13 +674,19 @@ function renderMarkdownBlock(
   definitions: MarkdownDefinitions,
   key: string,
   position: { isFirst: boolean; isLast: boolean; previousType: string | null },
+  highlightCommands: boolean,
 ): ReactNode {
   switch (node.type) {
     case "blockquote":
       return (
         <View key={key} style={styles.blockquote}>
           <View style={styles.blockquoteContent}>
-            {renderMarkdownBlocks(node.children, definitions, key)}
+            {renderMarkdownBlocks(
+              node.children,
+              definitions,
+              key,
+              highlightCommands,
+            )}
           </View>
         </View>
       );
@@ -655,7 +723,12 @@ function renderMarkdownBlock(
           >
             [{node.label ?? node.identifier ?? ""}]
           </Text>
-          {renderMarkdownBlocks(node.children, definitions, key)}
+          {renderMarkdownBlocks(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </View>
       );
     case "heading":
@@ -670,7 +743,12 @@ function renderMarkdownBlock(
             position.isFirst ? undefined : headingLeadStyle(node.depth),
           ]}
         >
-          {renderMarkdownInlineNodes(node.children, definitions, key)}
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </Text>
       );
     case "html":
@@ -693,6 +771,7 @@ function renderMarkdownBlock(
                   child.children,
                   definitions,
                   `${key}-item-${index}`,
+                  highlightCommands,
                 )}
               </View>
             </View>
@@ -702,7 +781,12 @@ function renderMarkdownBlock(
     case "paragraph":
       return (
         <Text key={key} selectable color="primary" style={styles.paragraph}>
-          {renderMarkdownInlineNodes(node.children, definitions, key)}
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </Text>
       );
     case "table":
@@ -716,7 +800,12 @@ function renderMarkdownBlock(
         </Text>
       ) : (
         <View key={key}>
-          {renderMarkdownBlocks(node.children, definitions, key)}
+          {renderMarkdownBlocks(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
         </View>
       );
   }
@@ -727,6 +816,7 @@ export const MarkdownRenderer = memo(
     text,
     streaming = false,
     interpretDirectives = true,
+    highlightCommands = false,
   }: MarkdownRendererProps) {
     const deferredText = useDeferredValue(text);
     const renderedBlocks = useMemo(() => {
@@ -766,18 +856,20 @@ export const MarkdownRenderer = memo(
             tree.children,
             definitions,
             `segment-${index}`,
+            highlightCommands,
           ),
         );
       });
       return blocks;
-    }, [deferredText, interpretDirectives, streaming]);
+    }, [deferredText, highlightCommands, interpretDirectives, streaming]);
 
     return <View style={styles.container}>{renderedBlocks}</View>;
   },
   (prev, next) =>
     prev.text === next.text &&
     prev.streaming === next.streaming &&
-    prev.interpretDirectives === next.interpretDirectives,
+    prev.interpretDirectives === next.interpretDirectives &&
+    prev.highlightCommands === next.highlightCommands,
 );
 
 const styles = StyleSheet.create((theme) => ({
