@@ -9,6 +9,7 @@ import {
   MessageSquare,
   Monitor,
   Moon,
+  Puzzle,
   Search,
   Settings,
   SquarePen,
@@ -397,6 +398,7 @@ export type CommandPaletteProps = {
   onOpenSettings?: () => void
   onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
+  onOpenPlugins?: () => void
   /** Searches indexed user messages; omit to keep the palette title-only. */
   onSearchMessages?: SearchThreadMessages
   shortcutHints?: PaletteShortcutHints
@@ -420,6 +422,7 @@ export const CommandPalette = memo(function CommandPalette({
   onOpenSettings,
   onOpenActivity,
   onOpenKeyboardShortcuts,
+  onOpenPlugins,
   onSearchMessages,
   shortcutHints = NO_SHORTCUT_HINTS,
   openRequestKey,
@@ -599,6 +602,17 @@ export const CommandPalette = memo(function CommandPalette({
         run: onOpenActivity,
       })
     }
+    if (onOpenPlugins) {
+      result.push({
+        id: 'plugins',
+        kind: 'action',
+        section: 'Actions',
+        label: 'Open Plugins',
+        icon: { kind: 'glyph', Glyph: Puzzle },
+        search: normalizeSearchFields({ primary: 'Open Plugins', secondary: '', keywords: 'plugins skills mcp servers connectors install registry' }),
+        run: onOpenPlugins,
+      })
+    }
     if (onOpenKeyboardShortcuts) {
       result.push({
         id: 'keyboard-shortcuts',
@@ -677,7 +691,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenSettings, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenPlugins, onOpenSettings, onSelectThread, open, shortcutHints])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.

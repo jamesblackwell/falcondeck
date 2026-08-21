@@ -406,12 +406,12 @@ fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
-struct MarkdownMetadata {
-    name: Option<String>,
-    description: Option<String>,
+pub(crate) struct MarkdownMetadata {
+    pub(crate) name: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
-fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
+pub(crate) fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
     let lines = content.lines().collect::<Vec<_>>();
     let mut name = None;
     let mut description = None;
@@ -431,7 +431,9 @@ fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
                 index += 1;
             } else if let Some(value) = trimmed.strip_prefix("description:") {
                 let value = value.trim();
-                if matches!(value, "" | ">" | "|") {
+                // Any YAML block-scalar marker (`>`/`|`, optional chomping
+                // `-`/`+`) means the text lives on the following lines.
+                if matches!(value, "" | ">" | "|" | ">-" | "|-" | ">+" | "|+") {
                     let mut parts = Vec::new();
                     index += 1;
                     while index < lines.len() {
@@ -596,6 +598,18 @@ description: >
         assert_eq!(
             metadata.description.as_deref(),
             Some("Guide for writing idiomatic Rust code based on established best practices.")
+        );
+    }
+
+    #[test]
+    fn markdown_metadata_reads_chomping_block_scalar_descriptions() {
+        let metadata = parse_markdown_metadata(
+            "---\nname: doppler\ndescription: >-\n  Manage secrets with Doppler:\n  CLI operations and integrations.\n---\n",
+        );
+
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Manage secrets with Doppler: CLI operations and integrations.")
         );
     }
 

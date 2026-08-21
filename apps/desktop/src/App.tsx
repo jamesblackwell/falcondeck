@@ -253,6 +253,11 @@ const CommandPalette = lazy(() =>
     default: module.CommandPalette,
   })),
 );
+const PluginsView = lazy(() =>
+  import("./components/PluginsView").then((module) => ({
+    default: module.PluginsView,
+  })),
+);
 export default function App() {
   return (
     <ToastProvider>
@@ -431,6 +436,7 @@ function AppInner() {
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isExtensionsOpen, setIsExtensionsOpen] = useState(false);
+  const [isPluginsOpen, setIsPluginsOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
@@ -971,7 +977,11 @@ function AppInner() {
   useEffect(() => {
     if (
       activeExtensionPanelKey &&
-      (isActivityOpen || isScheduledOpen || isExtensionsOpen || isSettingsOpen)
+      (isActivityOpen ||
+        isScheduledOpen ||
+        isExtensionsOpen ||
+        isPluginsOpen ||
+        isSettingsOpen)
     ) {
       setActiveExtensionPanelKey(null);
     }
@@ -979,6 +989,7 @@ function AppInner() {
     activeExtensionPanelKey,
     isActivityOpen,
     isExtensionsOpen,
+    isPluginsOpen,
     isScheduledOpen,
     isSettingsOpen,
   ]);
@@ -3685,6 +3696,7 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
     setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3695,6 +3707,7 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
     setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3703,6 +3716,7 @@ function AppInner() {
     setIsScheduledOpen(true);
     setIsActivityOpen(false);
     setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3711,6 +3725,7 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(true);
     setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3719,6 +3734,16 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
     setIsExtensionsOpen(true);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenPlugins = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(true);
     setActiveExtensionPanelKey(null);
   }, []);
 
@@ -3787,6 +3812,7 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(false);
     setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
   }, []);
 
@@ -5100,6 +5126,7 @@ function AppInner() {
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
       setSelectedThreadId(next.id);
     },
@@ -5117,6 +5144,7 @@ function AppInner() {
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
       setSelectedThreadId(entry.threadId);
     },
@@ -5164,6 +5192,7 @@ function AppInner() {
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
           setIsExtensionsOpen(false);
+          setIsPluginsOpen(false);
           break;
         case "openActivity":
           handleOpenActivity();
@@ -5226,6 +5255,7 @@ function AppInner() {
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
           setIsExtensionsOpen(false);
+          setIsPluginsOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
         case "openProjectMenu":
@@ -5234,6 +5264,7 @@ function AppInner() {
             setIsScheduledOpen(false);
             setIsActivityOpen(false);
             setIsExtensionsOpen(false);
+            setIsPluginsOpen(false);
             setProjectMenuRequestKey((current) => current + 1);
           }
           break;
@@ -5253,6 +5284,7 @@ function AppInner() {
           setIsScheduledOpen(false);
           setIsActivityOpen(false);
           setIsExtensionsOpen(false);
+          setIsPluginsOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
           break;
         }
@@ -5351,9 +5383,11 @@ function AppInner() {
       ? "core.scheduled"
       : isExtensionsOpen
         ? "core.extensions"
-        : isSettingsOpen
-          ? "core.settings"
-          : activeExtensionPanelKey;
+        : isPluginsOpen
+          ? "core.plugins"
+          : isSettingsOpen
+            ? "core.settings"
+            : activeExtensionPanelKey;
 
   return (
     <>
@@ -5366,6 +5400,7 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             onOpenActivity={handleOpenActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
+            onOpenPlugins={handleOpenPlugins}
             onSearchMessages={handleSearchThreadMessages}
             shortcutHints={paletteShortcutHints}
             openRequestKey={paletteRequest.key}
@@ -5423,6 +5458,8 @@ function AppInner() {
             activityHasFailure={activityCounts.failed > 0}
             onOpenExtensions={handleOpenExtensions}
             extensionsOpen={isExtensionsOpen}
+            onOpenPlugins={handleOpenPlugins}
+            pluginsOpen={isPluginsOpen}
             enabledExtensionCount={
               snapshot?.extensions.catalog.filter(
                 (extension) => extension.enabled,
@@ -5502,6 +5539,7 @@ function AppInner() {
                       setIsScheduledOpen(false);
                       setIsActivityOpen(false);
                       setIsExtensionsOpen(false);
+                      setIsPluginsOpen(false);
                       setSelectedWorkspaceId(workspaceId);
                       setSelectedThreadId(threadId);
                     }}
@@ -5521,6 +5559,15 @@ function AppInner() {
                     />
                   </div>
                 </section>
+              ),
+              "core.plugins": (
+                <Suspense fallback={loadingThreadState}>
+                  <PluginsView
+                    baseUrl={baseUrl}
+                    workspaces={snapshot?.workspaces ?? []}
+                    onToast={toast}
+                  />
+                </Suspense>
               ),
               "core.settings": (
                 <Suspense fallback={loadingThreadState}>

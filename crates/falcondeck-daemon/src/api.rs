@@ -223,6 +223,10 @@ pub fn router(state: AppState) -> Router {
             "/api/connectors",
             get(read_connectors).put(update_connectors),
         )
+        .route("/api/skills", get(read_skill_library))
+        .route("/api/skills/registry", get(search_skill_registry))
+        .route("/api/skills/install", post(install_library_skill))
+        .route("/api/skills/{skill_name}", delete(uninstall_library_skill))
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/provider-usage", get(read_provider_usage))
         .route("/api/harnesses", get(read_harnesses))
@@ -959,6 +963,60 @@ async fn harness_upgrade_job_status(
     Path(job_id): Path<String>,
 ) -> Result<Json<falcondeck_core::HarnessUpgradeJob>, DaemonError> {
     Ok(Json(state.harness_upgrade_job(&job_id).await?))
+}
+
+fn skill_library_root() -> Result<std::path::PathBuf, DaemonError> {
+    crate::skill_library::library_root().map_err(DaemonError::Process)
+}
+
+async fn read_skill_library() -> Result<Json<serde_json::Value>, DaemonError> {
+    Ok(Json(crate::skill_library::library_overview(
+        &skill_library_root()?,
+    )))
+}
+
+#[derive(serde::Deserialize)]
+struct SkillRegistryQuery {
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn search_skill_registry(
+    Query(query): Query<SkillRegistryQuery>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    let root = skill_library_root()?;
+    crate::skill_library::search_registry(
+        &root,
+        query.q.as_deref().unwrap_or(""),
+        query.limit.unwrap_or(30),
+    )
+    .await
+    .map(Json)
+    .map_err(DaemonError::Process)
+}
+
+#[derive(serde::Deserialize)]
+struct InstallSkillRequest {
+    source: String,
+    skill: String,
+}
+
+async fn install_library_skill(
+    Json(request): Json<InstallSkillRequest>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    let root = skill_library_root()?;
+    crate::skill_library::install_skill(&root, &request.source, &request.skill)
+        .await
+        .map(Json)
+        .map_err(DaemonError::BadRequest)
+}
+
+async fn uninstall_library_skill(
+    Path(skill_name): Path<String>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    crate::skill_library::uninstall_skill(&skill_library_root()?, &skill_name)
+        .map_err(DaemonError::BadRequest)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn read_connectors(

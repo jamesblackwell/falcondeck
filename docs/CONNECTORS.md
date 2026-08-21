@@ -77,3 +77,7 @@ server list with per-scope chips, enable toggles, an add-server form, and
 paste-JSON import. The composer shows a plug chip with the count of servers
 available to the current workspace. Remote daemons expose the same config over
 the encrypted `connectors.read` / `connectors.update` RPCs.
+
+The same panel also renders inside the sidebar's **Plugins** view (MCP servers
+section), which pairs it with the skills library — see `docs/PLATFORM.md` §5
+for the skills install/browse surface and its `/api/skills*` endpoints.

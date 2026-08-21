@@ -24,6 +24,7 @@ pub mod logging;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 mod ship;
+mod skill_library;
 mod skills;
 mod ssh_config;
 pub mod stdio_helper;

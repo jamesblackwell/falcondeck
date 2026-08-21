@@ -232,6 +232,8 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "git.status"
             | "git.diff"
             | "connectors.read"
+            | "skills.read"
+            | "skills.registry.search"
             | "providers.read"
             | "providers.usage"
             | "harnesses.read"
@@ -291,6 +293,10 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.ship",
     "connectors.read",
     "connectors.update",
+    "skills.read",
+    "skills.registry.search",
+    "skills.install",
+    "skills.uninstall",
     "providers.read",
     "providers.update",
     "providers.usage",
@@ -1226,6 +1232,35 @@ impl AppState {
                         );
                     }
                     result
+                }
+                "skills.read" => match crate::skill_library::library_root() {
+                    Ok(root) => Ok(crate::skill_library::library_overview(&root)),
+                    Err(error) => Err(error),
+                },
+                "skills.registry.search" => {
+                    let root = crate::skill_library::library_root()?;
+                    let query = extract_string(&params, &["q", "query"]).unwrap_or_default();
+                    let limit = params
+                        .get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(30) as usize;
+                    crate::skill_library::search_registry(&root, &query, limit).await
+                }
+                "skills.install" => {
+                    let root = crate::skill_library::library_root()?;
+                    let source = required(&["source"])?;
+                    let skill = required(&["skill"])?;
+                    let result = crate::skill_library::install_skill(&root, &source, &skill).await;
+                    if result.is_ok() {
+                        tracing::info!(skill, source, "skill installed by a paired device");
+                    }
+                    result
+                }
+                "skills.uninstall" => {
+                    let root = crate::skill_library::library_root()?;
+                    let skill = required(&["skill", "name"])?;
+                    crate::skill_library::uninstall_skill(&root, &skill)
+                        .map(|()| serde_json::json!({ "ok": true }))
                 }
                 "thread.start" => {
                     let request = StartThreadRequest {

@@ -4,6 +4,7 @@ import {
   Blocks,
   Clock3,
   PanelsTopLeft,
+  Puzzle,
   Settings,
 } from "lucide-react";
 
@@ -31,6 +32,8 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenExtensions?: () => void;
   extensionsOpen?: boolean;
   enabledExtensionCount?: number;
+  onOpenPlugins?: () => void;
+  pluginsOpen?: boolean;
   extensionPanels?: readonly ExtensionPanelDefinition[];
   activeExtensionPanelKey?: string | null;
   onOpenExtensionPanel?: (panelKey: string) => void;
@@ -50,6 +53,8 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenExtensions,
   extensionsOpen = false,
   enabledExtensionCount = 0,
+  onOpenPlugins,
+  pluginsOpen = false,
   extensionPanels = [],
   activeExtensionPanelKey = null,
   onOpenExtensionPanel,
@@ -73,6 +78,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         onOpenScheduled ||
         onOpenActivity ||
         onOpenExtensions ||
+        onOpenPlugins ||
         extensionPanels.length > 0 ? (
           <>
             {onOpenActivity ? (
@@ -152,6 +158,25 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                       {enabledExtensionCount}
                     </span>
                   ) : null}
+                </button>
+              </Tooltip>
+            ) : null}
+            {onOpenPlugins ? (
+              <Tooltip label="Plugins">
+                <button
+                  type="button"
+                  onClick={onOpenPlugins}
+                  className={cn(
+                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                    pluginsOpen
+                      ? "bg-surface-3 text-fg-primary"
+                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+                  )}
+                  aria-current={pluginsOpen ? "page" : undefined}
+                  aria-label="Plugins"
+                >
+                  <Puzzle aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1">Plugins</span>
                 </button>
               </Tooltip>
             ) : null}

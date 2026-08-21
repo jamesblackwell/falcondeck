@@ -207,6 +207,19 @@ without a daemon restart. What remains for Phase 2 is the UI:
   an open per-provider list (killing the `Codex|Claude|Both` lattice), and the
   hardcoded `.codex/skills`/`.claude/commands` scan generalized per provider.
 
+Skills install/browse **shipped 2026-08-21** as the desktop **Plugins** view
+("plugin" being our sanctioned informal synonym for connectors, per §2): one
+top-level surface with a Skills section (the managed library under
+`~/.agents/skills`, plus search/trending browse of the skills.sh registry) and
+an MCP servers section (the existing Connectors panel). The daemon side is
+`crates/falcondeck-daemon/src/skill_library.rs` — `GET /api/skills`,
+`GET /api/skills/registry`, `POST /api/skills/install`,
+`DELETE /api/skills/{name}`, mirrored as `skills.*` relay RPCs. Installs
+download one bounded skill tree from the source GitHub repo (no `npx`, no
+symlinks, ≤64 files / 5 MB) into `~/.agents/skills/<id>` — already a scan root
+for every provider — and write a `.falcondeck-skill.json` provenance marker;
+only directories carrying that marker can be uninstalled from the UI.
+
 This is also the answer for "agents need tools in a room": connectors are
 room-scoped, so every participant sees the same tools.
 
@@ -261,7 +274,9 @@ Each phase is independently shippable and each unlocks the next:
   progress.
 - **Phase 2 — connectors** *(shipped 2026-08-07)*: Connectors settings UI
   over `connectors.json` with paste-JSON import and per-workspace scoping,
-  plus a composer tools chip ✓. Still open: skills install/enable UI.
+  plus a composer tools chip ✓. Skills install/browse UI (the Plugins view
+  over `~/.agents/skills` + skills.sh) shipped 2026-08-21 ✓. Still open:
+  per-skill enable/disable and per-thread toggles.
 - **Phase 3 — extensions**: follow `docs/EXTENSIONS.md` from manifest and
   daemon foundations through the Deno host, declarative UI, and authoring CLI.
   Thread Tags is the first official extension and is enabled by default.
