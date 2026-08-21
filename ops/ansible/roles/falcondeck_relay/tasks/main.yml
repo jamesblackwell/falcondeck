@@ -42,6 +42,9 @@
       - --exclude=target
       - --exclude=node_modules
       - --exclude=dist
+      - --exclude=.expo
+      - --exclude=apps/mobile/ios
+      - --exclude=apps/mobile/src/vendor/mermaid.min.txt
       - --exclude=ops/ansible/inventory/local
       - --exclude=ops/ansible/group_vars/*.local.yml
       - --exclude=.DS_Store
