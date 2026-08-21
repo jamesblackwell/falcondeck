@@ -183,6 +183,7 @@ export class RemoteHostClient {
   private sessionCrypto: SessionCryptoState | null = null
   private statusValue: RemoteHostStatus = 'idle'
   private presenceValue: MachinePresence | null = null
+  private syncedPresenceFloor: number | null = null
   private running = false
   private generation = 0
   private reconnectAttempt = 0
@@ -353,6 +354,7 @@ export class RemoteHostClient {
     this.parkedEncryptedUpdates = []
     this.evictedWhileParked = false
     this.pendingTruncationNextSeq = null
+    this.syncedPresenceFloor = null
     this.setStatus('connecting')
     this.setPresence(null)
 
@@ -442,6 +444,7 @@ export class RemoteHostClient {
     this.parkedEncryptedUpdates = []
     this.evictedWhileParked = false
     this.pendingTruncationNextSeq = null
+    this.syncedPresenceFloor = null
     this.snapshotRecoveryRequired = false
     this.snapshotRecoveryPromise = null
     this.pendingUpdates = []
@@ -525,6 +528,10 @@ export class RemoteHostClient {
           this.callbacks.onError?.('Remote event backlog exceeded the safe limit')
           this.scheduleReconnect()
           return
+        }
+        if (payload.presence) {
+          this.syncedPresenceFloor = payload.next_seq
+          this.setPresence(payload.presence)
         }
         if (payload.history_truncated) {
           // Updates were lost server-side; derived state must be rebuilt.
@@ -717,13 +724,16 @@ export class RemoteHostClient {
               if (deferredBootstrapSeq === null) {
                 advanceCursor(update.seq)
               }
+              if (cursorChanged) {
+                this.cursor = nextCursor
+                cursorChanged = false
+              }
               this.persistSession({
                 pairingId: update.body.material.pairing_id,
                 daemonPublicKey: update.body.material.daemon_public_key,
                 daemonIdentityPublicKey: update.body.material.daemon_identity_public_key,
                 dataKey: bytesToBase64(this.sessionCrypto.dataKey),
               })
-              cursorChanged = false
             } catch (error) {
               this.callbacks.onError?.(
                 error instanceof Error
@@ -737,7 +747,12 @@ export class RemoteHostClient {
           }
 
           if (update.body.t === 'presence') {
-            this.setPresence(update.body.presence)
+            if (
+              this.syncedPresenceFloor === null ||
+              update.seq >= this.syncedPresenceFloor
+            ) {
+              this.setPresence(update.body.presence)
+            }
             advanceCursor(update.seq)
             continue
           }
