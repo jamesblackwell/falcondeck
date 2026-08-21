@@ -68,6 +68,27 @@ describe('SessionListItem props contract', () => {
     expect(onOpenThreadOptions).toHaveBeenCalledWith('workspace-1', item)
   })
 
+  it('uses the quiet supporting treatment for thread titles', () => {
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: thread({ id: 'thread-1', workspace_id: 'workspace-1', title: 'Quiet title' }),
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+    }))
+    const title = renderer.root.find(
+      (node) => String(node.type) === 'Text' && node.children.includes('Quiet title'),
+    )
+    const style = Object.assign({}, ...title.props.style.filter(Boolean))
+
+    expect(style).toMatchObject({
+      color: '#ccc',
+      fontFamily: 'Geist',
+      fontSize: 14,
+      fontWeight: '400',
+      lineHeight: 21,
+    })
+  })
+
   it('accepts a full thread summary so presentation stays aligned with shared clients', () => {
     const props = {
       thread: {

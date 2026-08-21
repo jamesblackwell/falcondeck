@@ -445,7 +445,7 @@ export const SidebarView = memo(function SidebarView({
                 color={accent ?? theme.colors.fg.muted}
               />
               <Text
-                variant="label"
+                variant="supporting"
                 color="secondary"
                 weight="normal"
                 numberOfLines={1}

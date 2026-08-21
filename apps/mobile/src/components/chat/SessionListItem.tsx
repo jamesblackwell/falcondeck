@@ -87,9 +87,12 @@ function SessionListItemInner({
           />
         ) : null}
       </View>
+      {/* Regular, not label: Geist only ships Regular/Bold, so weight 500
+          rounds to Bold and these rows look heavier than desktop. */}
       <Text
-        variant="label"
+        variant="supporting"
         color={isSelected ? 'primary' : 'secondary'}
+        weight="normal"
         numberOfLines={1}
         style={styles.title}
       >
