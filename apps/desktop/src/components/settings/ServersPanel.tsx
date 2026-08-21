@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react'
 
+import { CONNECTION_COPY, falconDeckHttpError } from '../../connection-copy'
 import type { HostView } from '../../hosts'
 import type { HostManager } from '../../hosts'
 
@@ -169,7 +170,7 @@ function ServerRow({
       })
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null
-        throw new Error(payload?.error ?? `Failed with status ${response.status}`)
+        throw new Error(payload?.error ?? falconDeckHttpError(response.status))
       }
       return (await response.json()) as { ok: boolean; pairing_code: string | null; output: string }
     },
@@ -224,7 +225,7 @@ function ServerRow({
     setBusy('project')
     try {
       const connection = manager.connection(host.id)
-      if (!connection) throw new Error('Server is not connected')
+      if (!connection) throw new Error(CONNECTION_COPY.serverNotConnected)
       await connection.api().connectWorkspace(path)
       setProjectPath('')
       setIsAddingProject(false)
@@ -377,7 +378,7 @@ function AddServerFlow({
     if (!baseUrl || mode !== 'ssh' || sshHosts !== null) return
     void fetch(`${baseUrl}/api/ssh/hosts`)
       .then(async (response) => {
-        if (!response.ok) throw new Error(`Failed with status ${response.status}`)
+        if (!response.ok) throw new Error(falconDeckHttpError(response.status))
         return (await response.json()) as { hosts: SshConfigHost[] }
       })
       .then((payload) => {
@@ -425,7 +426,7 @@ function AddServerFlow({
       })
       if (!startResponse.ok) {
         const payload = (await startResponse.json().catch(() => null)) as { error?: string } | null
-        throw new Error(payload?.error ?? `Failed with status ${startResponse.status}`)
+        throw new Error(payload?.error ?? falconDeckHttpError(startResponse.status))
       }
       const { job_id } = (await startResponse.json()) as { job_id: string }
 

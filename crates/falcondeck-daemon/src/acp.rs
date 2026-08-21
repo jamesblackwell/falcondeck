@@ -303,7 +303,7 @@ pub fn known_provider_ids(state_path: &Path) -> Vec<String> {
         .map(|entries| {
             entries
                 .keys()
-                .filter(|id| id.as_str() != "codex" && id.as_str() != "claude")
+                .filter(|id| !AgentProvider::is_reserved_id(id.as_str()))
                 .cloned()
                 .collect()
         })
@@ -347,7 +347,7 @@ pub fn providers_overview(state_dir: &Path) -> Value {
                 "label": entry.get("label").and_then(Value::as_str).unwrap_or(id),
                 "command": command,
                 "binary_found": binary_found,
-                "reserved": id == "codex" || id == "claude",
+                "reserved": AgentProvider::is_reserved_id(id),
                 "malformed": malformed,
             })
         })
@@ -361,7 +361,7 @@ pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), S
         .as_object()
         .ok_or("invalid providers payload: expected an object of provider entries")?;
     for (id, entry) in entries {
-        if id == "codex" || id == "claude" {
+        if AgentProvider::is_reserved_id(id) {
             return Err(format!(
                 "'{id}' is a built-in provider and cannot be overridden"
             ));
@@ -406,7 +406,7 @@ pub fn load_acp_provider_configs(state_dir: &Path) -> Vec<AcpProviderConfig> {
                 .providers
                 .into_iter()
                 .filter(|(id, config)| {
-                    let reserved = id == "codex" || id == "claude";
+                    let reserved = AgentProvider::is_reserved_id(id);
                     let valid = !config.command.is_empty();
                     if reserved {
                         tracing::warn!(provider = %id, "providers.json cannot override built-in providers");
@@ -1653,7 +1653,7 @@ impl AcpRuntime {
     pub async fn ensure_workspace_metadata(
         &self,
         cwd: &str,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
     ) -> Result<(), DaemonError> {
         if self.metadata_discovered.load(Ordering::Acquire) {
             return Ok(());
@@ -1663,9 +1663,9 @@ impl AcpRuntime {
             return Ok(());
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::with_builtin_control(
+            &crate::connectors::with_builtin_servers(
                 crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
-                builtin_control,
+                builtin,
             ),
             self.supports_http_mcp().await,
         );
@@ -1879,7 +1879,7 @@ impl AcpRuntime {
         known_native_session: Option<&str>,
         cwd: &str,
         permission_mode: Option<&str>,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
         agent_context: Option<&str>,
         model_id: Option<&str>,
     ) -> Result<String, DaemonError> {
@@ -1889,9 +1889,9 @@ impl AcpRuntime {
             return Ok(existing.clone());
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::with_builtin_control(
+            &crate::connectors::with_builtin_servers(
                 crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
-                builtin_control,
+                builtin,
             ),
             self.supports_http_mcp().await,
         );
@@ -1902,7 +1902,7 @@ impl AcpRuntime {
             && self.supports_load_session().await
         {
             match self
-                .load_session_locked(thread_id, native_session, cwd, builtin_control)
+                .load_session_locked(thread_id, native_session, cwd, builtin)
                 .await
             {
                 Ok(()) => return Ok(native_session.to_string()),
@@ -1952,14 +1952,14 @@ impl AcpRuntime {
         thread_id: &str,
         native_session: &str,
         cwd: &str,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
     ) -> Result<(), DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
         if self.sessions.lock().await.contains_key(thread_id) {
             return Ok(());
         }
-        self.load_session_locked(thread_id, native_session, cwd, builtin_control)
+        self.load_session_locked(thread_id, native_session, cwd, builtin)
             .await
     }
 
@@ -1968,7 +1968,7 @@ impl AcpRuntime {
         thread_id: &str,
         native_session: &str,
         cwd: &str,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
     ) -> Result<(), DaemonError> {
         if !self.supports_load_session().await {
             return Err(DaemonError::Process(format!(
@@ -1977,9 +1977,9 @@ impl AcpRuntime {
             )));
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::with_builtin_control(
+            &crate::connectors::with_builtin_servers(
                 crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
-                builtin_control,
+                builtin,
             ),
             self.supports_http_mcp().await,
         );
@@ -3509,7 +3509,7 @@ mod tests {
                 None,
                 env!("CARGO_MANIFEST_DIR"),
                 None,
-                None,
+                &Default::default(),
                 None,
                 None,
             )
@@ -3572,7 +3572,7 @@ mod tests {
                 None,
                 env!("CARGO_MANIFEST_DIR"),
                 None,
-                None,
+                &Default::default(),
                 None,
                 None,
             )
@@ -3597,7 +3597,7 @@ mod tests {
                 None,
                 env!("CARGO_MANIFEST_DIR"),
                 None,
-                None,
+                &Default::default(),
                 None,
                 None,
             )
@@ -3682,7 +3682,7 @@ mod tests {
                 None,
                 env!("CARGO_MANIFEST_DIR"),
                 None,
-                None,
+                &Default::default(),
                 None,
                 None,
             )
@@ -4006,6 +4006,7 @@ mod tests {
                 "providers": {
                     "mockagent": { "command": ["echo", "agent", "stdio"], "label": "Mock" },
                     "codex": { "command": ["sh"], "label": "Nope" },
+                    "agy": { "command": ["sh"], "label": "Nope" },
                     "empty": { "command": [], "label": "Empty" },
                     "unlabeled": { "command": ["sh", "acp"], "label": "  " },
                     "notinstalled": { "command": ["definitely-not-a-real-binary-xyz"], "label": "Ghost" }

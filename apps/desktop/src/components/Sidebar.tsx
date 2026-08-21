@@ -68,7 +68,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         "commandPalette",
         shortcutSettings,
       )}
-      headerClassName="min-h-12 justify-center gap-1 pb-1 pl-20 pr-3 pt-1"
+      headerClassName="h-12 justify-center gap-0 py-0 pl-20 pr-2"
       topNavigation={
         onOpenScheduled ||
         onOpenActivity ||

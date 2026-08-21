@@ -5,8 +5,19 @@
       "defaultEnabled": true
     },
     {
+      "path": "official/scratch-pad",
+      "defaultEnabled": true
+    },
+    {
       "path": "official/mini-zen",
       "defaultEnabled": false
+    },
+    {
+      "path": "official/follow-up-suggestions",
+      "defaultEnabled": true,
+      "defaultGrantedPermissions": [
+        "agent-tools:register"
+      ]
     }
   ]
 }

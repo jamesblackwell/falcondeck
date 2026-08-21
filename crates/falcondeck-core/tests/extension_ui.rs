@@ -67,7 +67,26 @@ fn panel_contributions_use_the_public_camel_case_wire_shape() {
 
     assert_eq!(contributions.panels.len(), 1);
     assert_eq!(contributions.panels[0].view, "attention-panel");
+    assert_eq!(contributions.panels[0].icon, None);
     assert!(contributions.sidebar_filters.is_empty());
+}
+
+#[test]
+fn panel_icons_round_trip_on_the_public_wire_shape() {
+    let contributions: ExtensionContributions = serde_json::from_value(json!({
+        "panels": [{
+            "id": "pad",
+            "title": "Scratch pad",
+            "view": "scratch-pad",
+            "icon": "notebook-pen"
+        }]
+    }))
+    .expect("panel icon should deserialize");
+
+    assert_eq!(
+        contributions.panels[0].icon.as_deref(),
+        Some("notebook-pen")
+    );
 }
 
 #[test]

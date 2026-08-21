@@ -122,6 +122,11 @@ pub(super) fn lifecycle_event(
             workspace_id: thread.workspace_id.clone(),
             thread_id: thread.id.clone(),
         }),
+        UnifiedEvent::TurnStart { turn_id } => Some(ExtensionEvent::TurnStarted {
+            workspace_id: workspace_id?.to_string(),
+            thread_id: thread_id?.to_string(),
+            turn_id: turn_id.clone(),
+        }),
         UnifiedEvent::TurnEnd { turn_id, .. } => Some(ExtensionEvent::TurnEnded {
             workspace_id: workspace_id?.to_string(),
             thread_id: thread_id?.to_string(),

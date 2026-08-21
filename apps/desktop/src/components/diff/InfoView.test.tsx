@@ -99,4 +99,27 @@ describe('InfoView', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View all 40 in Changes' }))
     expect(onViewAllChanges).toHaveBeenCalled()
   })
+
+  it('labels a same-provider handoff as a fork, not a cross-provider handoff', () => {
+    renderInfo({
+      thread: {
+        ...thread,
+        provider: 'claude',
+        handoff_from: { thread_id: 'source-thread', provider: 'claude' },
+      } as ThreadSummary,
+    })
+    expect(screen.getByText('Forked from an earlier thread')).toBeInTheDocument()
+    expect(screen.queryByText(/Handed off from/)).not.toBeInTheDocument()
+  })
+
+  it('still labels a genuine cross-provider handoff by its source provider', () => {
+    renderInfo({
+      thread: {
+        ...thread,
+        provider: 'claude',
+        handoff_from: { thread_id: 'source-thread', provider: 'codex' },
+      } as ThreadSummary,
+    })
+    expect(screen.getByText('Handed off from codex')).toBeInTheDocument()
+  })
 })

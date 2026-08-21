@@ -181,6 +181,12 @@ describe('normalizeSendError', () => {
     )
   })
 
+  it('rewrites Antigravity connectivity failures into actionable copy', () => {
+    expect(
+      normalizeSendError('workspace is not currently connected to Antigravity', 'agy'),
+    ).toContain('not connected to Antigravity yet')
+  })
+
   it('preserves unrelated errors', () => {
     expect(normalizeSendError('Something else went wrong', 'codex')).toBe('Something else went wrong')
   })

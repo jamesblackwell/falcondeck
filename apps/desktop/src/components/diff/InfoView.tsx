@@ -62,7 +62,15 @@ function originLabel(thread: ThreadSummary | null): string | null {
   if (thread.origin?.kind === 'automation') {
     return `Automation · ${thread.origin.name}`
   }
-  if (thread.handoff_from) return `Handed off from ${thread.handoff_from.provider}`
+  if (thread.handoff_from) {
+    // "Fork thread" on a provider with no native session-fork RPC is
+    // implemented as a same-provider handoff (see workspace_ops.rs), so a
+    // same-provider `handoff_from` is a fork, not a genuine cross-provider
+    // continuation — the two need different copy here.
+    return thread.handoff_from.provider === thread.provider
+      ? 'Forked from an earlier thread'
+      : `Handed off from ${thread.handoff_from.provider}`
+  }
   return null
 }
 

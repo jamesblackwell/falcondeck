@@ -306,7 +306,7 @@ export function OnboardingWizard({
               </h2>
               <p className="max-w-md text-[length:var(--fd-text-sm)] text-fg-muted">
                 FalconDeck orchestrates coding agents — Codex, Claude Code,
-                OpenCode, and friends — from your Mac. This takes about a
+                OpenCode, and friends — from this computer. This takes about a
                 minute: check your tools, connect a project, and you&apos;re
                 off.
               </p>
@@ -340,7 +340,7 @@ export function OnboardingWizard({
                   id="onboarding-title"
                   className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
                 >
-                  Dictate anywhere on your Mac
+                  Dictate on this computer
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
                   Apple Speech works without an API key. You can optionally use

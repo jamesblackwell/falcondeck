@@ -166,6 +166,47 @@ Happy Engineering uses this path and experiences patchier Codex integration comp
 | Per-turn startup cost | Small (process spawn) | None (persistent) |
 | Mobile handoff | Built-in `--remote-control` | Via daemon (CodexMonitor) |
 
+## Antigravity CLI (Google)
+
+### Recommended Path: CLI Subprocess with Structured I/O
+
+Antigravity CLI (`agy`) is the successor to Gemini CLI. There is no ACP
+server and no app-server. The official embedding surface is print mode
+with stream-json I/O, documented at
+[antigravity.google/docs/cli/headless](https://antigravity.google/docs/cli/headless/).
+
+**How it works**: Spawn `agy` as a subprocess per turn. Do **not** pass `-p`
+together with `--input-format stream-json` — stdin is the only prompt
+channel. Write one NDJSON user event per turn; keep stdin open to steer;
+close stdin after the terminal `result` event so the process exits. Resume
+with `--conversation <id>` from the `init` / `result` payload.
+
+```
+agy --input-format stream-json --output-format stream-json --print-timeout 24h
+    [--conversation <id>] [--model <slug>] [--effort low|medium|high]
+    [--mode accept-edits|plan] [--sandbox] [--dangerously-skip-permissions]
+```
+
+Stdin:
+
+```
+{"event":"user","message":{"content":[{"type":"text","text":"<prompt>"}]}}
+```
+
+Stdout events: `init`, `step_update` (`user_input`, `agent_response`,
+`tool`, `checkpoint`), `result`.
+
+**Auth**: Google sign-in via the system keyring. Probe with
+`agy -p "/usage" --output-format json`.
+
+**Session storage**: `~/.gemini/antigravity-cli/conversations/` (protobuf /
+sqlite). FalconDeck lists threads from
+`cache/conversation_metadata.json` scoped to the workspace; it does not
+replay the opaque transcript.
+
+**Limits versus Claude**: no interactive permission broker in headless
+mode; no `--mcp-config` flag; `/fork` and `/goal` are TUI-only.
+
 ## Why Not "ACP"?
 
 Two unrelated protocols share the ACP acronym; neither is used here, deliberately:

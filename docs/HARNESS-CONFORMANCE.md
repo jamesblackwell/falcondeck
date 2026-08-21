@@ -1,6 +1,6 @@
 # Harness conformance
 
-FalconDeck drives four harnesses across three protocols, each shipped by
+FalconDeck drives five harnesses across three protocols, each shipped by
 someone else and updated without warning. These probes check that the
 assumptions FalconDeck makes about them still hold.
 
@@ -8,6 +8,7 @@ assumptions FalconDeck makes about them still hold.
 | --- | --- | --- |
 | Claude | `claude` CLI, stream-json | `--example harness_conformance` |
 | Codex | `codex app-server` JSON-RPC | `--example harness_conformance` |
+| Antigravity | `agy` CLI, stream-json | unit tests in `agy.rs` (`REQUIRED_CLI_FLAGS`) |
 | OpenCode (native) | HTTP session API | `--example opencode_conformance` |
 | OpenCode / Grok / pi (ACP) | ACP over stdio | `--example acp_conformance --all` |
 

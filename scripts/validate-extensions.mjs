@@ -22,10 +22,26 @@ const contributionShapes = {
   threadMenuActions: { title: true, view: false, ui: false },
   threadDecorations: { title: false, view: true, ui: true },
   sidebarFilters: { title: true, view: true, ui: true },
-  panels: { title: true, view: true, ui: true },
+  panels: { title: true, view: true, ui: true, icon: true },
+  composerSuggestions: { title: false, view: true, ui: false },
+  agentTools: { title: true, view: false, ui: false, tool: true },
 };
 const identifierPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-const supportedPermissions = new Set(["threads:read"]);
+const panelIcons = new Set([
+  "activity",
+  "blocks",
+  "clock",
+  "file-text",
+  "kanban",
+  "notebook",
+  "notebook-pen",
+  "sticky-note",
+]);
+const supportedPermissions = new Set([
+  "threads:read",
+  "agent-tools:register",
+]);
+const AGENT_TOOLS_PERMISSION = "agent-tools:register";
 const uiTones = new Set([
   "default",
   "muted",
@@ -438,6 +454,8 @@ if (manifest) {
         ...(shape.title ? ["title"] : []),
         ...(shape.view ? ["view"] : []),
         ...(shape.ui ? ["ui"] : []),
+        ...(shape.icon ? ["icon"] : []),
+        ...(shape.tool ? ["description", "inputSchema"] : []),
       ]);
       for (const property of Object.keys(contribution)) {
         if (!allowedKeys.has(property)) {
@@ -468,17 +486,50 @@ if (manifest) {
         ids.add(id);
         if (key === "threadMenuActions") declaredActions.add(id);
       }
+      const titleLimit = shape.tool ? 60 : 80;
       if (
         shape.title &&
         (typeof contribution.title !== "string" ||
           contribution.title.trim().length === 0 ||
-          [...contribution.title].length > 80)
+          [...contribution.title].length > titleLimit)
       ) {
         report(
           "FDX1016",
-          "title must contain 1–80 characters",
+          `title must contain 1–${titleLimit} characters`,
           `/contributes/${key}/${index}/title`,
         );
+      }
+      if (shape.tool) {
+        if (
+          typeof contribution.description !== "string" ||
+          contribution.description.trim().length < 16 ||
+          [...contribution.description].length > 1024
+        ) {
+          report(
+            "FDX1024",
+            "agent tool description must contain 16–1024 characters",
+            `/contributes/${key}/${index}/description`,
+          );
+        }
+        if (
+          !isObject(contribution.inputSchema) ||
+          contribution.inputSchema.type !== "object"
+        ) {
+          report(
+            "FDX1025",
+            "agent tool inputSchema must describe a JSON object",
+            `/contributes/${key}/${index}/inputSchema`,
+          );
+        } else if (
+          new TextEncoder().encode(JSON.stringify(contribution.inputSchema))
+            .byteLength > 8192
+        ) {
+          report(
+            "FDX1025",
+            "agent tool inputSchema exceeds 8192 bytes",
+            `/contributes/${key}/${index}/inputSchema`,
+          );
+        }
       }
       if (
         shape.view &&
@@ -491,6 +542,17 @@ if (manifest) {
         );
       } else if (shape.view) {
         declaredViews.add(contribution.view);
+      }
+      if (
+        shape.icon &&
+        contribution.icon !== undefined &&
+        !panelIcons.has(contribution.icon)
+      ) {
+        report(
+          "FDX1023",
+          "panel icon must be a host-owned icon name",
+          `/contributes/${key}/${index}/icon`,
+        );
       }
       if (shape.ui && contribution.ui !== undefined) {
         uiDocuments.push({
@@ -508,6 +570,23 @@ if (manifest) {
       declaredActions,
       declaredViews,
       ui.requireSelectRoot,
+    );
+  }
+  if (
+    (contributes?.agentTools?.length ?? 0) > 0 &&
+    !(manifest.permissions ?? []).includes(AGENT_TOOLS_PERMISSION)
+  ) {
+    report(
+      "FDX1026",
+      `extensions contributing agentTools must declare the ${AGENT_TOOLS_PERMISSION} permission`,
+      "/permissions",
+    );
+  }
+  if ((contributes?.agentTools?.length ?? 0) > 8) {
+    report(
+      "FDX1027",
+      "manifest cannot declare more than 8 agent tools",
+      "/contributes/agentTools",
     );
   }
   if (contributionCount > 256) {

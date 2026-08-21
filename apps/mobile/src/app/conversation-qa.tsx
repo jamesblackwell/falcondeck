@@ -7,6 +7,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import {
   applyConversationEventsToItems,
   conversationRenderBlockType,
+  latestVisibleAssistantMessageId,
   validateImageAttachmentBudget,
   type ConversationItem,
   type ConversationRenderBlock,
@@ -625,6 +626,11 @@ const markdownAdversarialItems: ConversationItem[] = [
         { length: 18 },
         (_, index) => `bounded output line ${index + 1}`,
       ),
+      "```",
+      "",
+      "```mermaid",
+      "flowchart TD",
+      "  home[Homepage] --> studio[Studio]",
       "```",
     ].join("\n"),
     lifecycle: "complete",
@@ -1667,6 +1673,7 @@ export default function ConversationQaScreen() {
 
   // Keep the stress harness faithful to production: a streamed tail must not
   // replace the renderItem function and invalidate otherwise stable rows.
+  const lastAssistantMessageId = latestVisibleAssistantMessageId(blocks);
   const renderBlock = useCallback(
     ({ item }: { item: ConversationRenderBlock }) => (
       <MessageRouter
@@ -1690,9 +1697,14 @@ export default function ConversationQaScreen() {
             : null
         }
         onRetryResponse={actionsUnavailable ? undefined : simulateBranchAction}
+        showReceivedAt={
+          item.kind === "item" &&
+          item.item.kind === "assistant_message" &&
+          item.item.id === lastAssistantMessageId
+        }
       />
     ),
-    [actionsUnavailable, scenario],
+    [actionsUnavailable, lastAssistantMessageId, scenario],
   );
 
   if (!__DEV__) return <Redirect href="/" />;
@@ -1884,6 +1896,7 @@ export default function ConversationQaScreen() {
         key={scenario}
         data={blocks}
         renderItem={renderBlock}
+        extraData={lastAssistantMessageId}
         keyExtractor={qaBlockKey}
         getItemType={conversationRenderBlockType}
         accessibilityLabel="Conversation QA transcript"

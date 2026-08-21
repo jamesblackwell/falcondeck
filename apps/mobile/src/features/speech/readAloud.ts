@@ -1,4 +1,5 @@
 import {
+  AudioManager,
   AudioContext,
   type AudioBuffer,
   type AudioBufferSourceNode,
@@ -73,6 +74,7 @@ export class NativeReadAloudPlayer {
       node: null,
     }
     this.active = playback
+    this.activatePlaybackSession()
     this.setState(key, 'loading')
     void this.playChunks(playback, chunks)
   }
@@ -81,6 +83,7 @@ export class NativeReadAloudPlayer {
     const active = this.active
     if (!active || (key && active.key !== key)) return
     this.active = null
+    this.deactivatePlaybackSession()
     try {
       active.node?.stop()
     } catch {
@@ -110,10 +113,12 @@ export class NativeReadAloudPlayer {
         if (this.active !== playback) return
       }
       this.active = null
+      this.deactivatePlaybackSession()
       this.setState(playback.key, 'idle')
     } catch {
       if (this.active !== playback) return
       this.active = null
+      this.deactivatePlaybackSession()
       try {
         playback.node?.stop()
       } catch {
@@ -149,6 +154,28 @@ export class NativeReadAloudPlayer {
     this.context ??= new AudioContext()
     void this.context.resume().catch(() => undefined)
     return this.context
+  }
+
+  /**
+   * Marks the audio session as spoken-audio playback so iOS keeps it running
+   * when the device is locked or the app is backgrounded (requires the
+   * UIBackgroundModes audio entitlement). Without this the session defaults to
+   * ambient and playback is suspended on lock.
+   */
+  private activatePlaybackSession(): void {
+    try {
+      AudioManager.setAudioSessionOptions({
+        iosCategory: 'playback',
+        iosMode: 'spokenAudio',
+      })
+      void AudioManager.setAudioSessionActivity(true).catch(() => undefined)
+    } catch {
+      // Session configuration is best-effort; playback still works in-app.
+    }
+  }
+
+  private deactivatePlaybackSession(): void {
+    void AudioManager.setAudioSessionActivity(false).catch(() => undefined)
   }
 }
 

@@ -888,11 +888,7 @@ async fn in_flight_rpc_is_redispatched_to_a_surviving_owner_when_its_responder_d
     let (mut first_daemon_ws, _) = connect_async(first_daemon_url).await.unwrap();
     let (mut second_daemon_ws, _) = connect_async(second_daemon_url).await.unwrap();
     let (mut client_ws, _) = connect_async(client_url).await.unwrap();
-    for socket in [
-        &mut first_daemon_ws,
-        &mut second_daemon_ws,
-        &mut client_ws,
-    ] {
+    for socket in [&mut first_daemon_ws, &mut second_daemon_ws, &mut client_ws] {
         assert!(matches!(
             recv_server_message(socket).await,
             RelayServerMessage::Ready { .. }
@@ -950,9 +946,7 @@ async fn in_flight_rpc_is_redispatched_to_a_surviving_owner_when_its_responder_d
     .await;
     loop {
         match recv_server_message(&mut client_ws).await {
-            RelayServerMessage::RpcResult {
-                request_id, ok, ..
-            } if request_id == "failover" => {
+            RelayServerMessage::RpcResult { request_id, ok, .. } if request_id == "failover" => {
                 assert!(ok, "redispatched rpc must succeed, not fail");
                 break;
             }
@@ -1068,9 +1062,7 @@ async fn in_flight_rpc_parks_across_a_lone_daemon_reconnect() {
     .await;
     loop {
         match recv_server_message(&mut client_ws).await {
-            RelayServerMessage::RpcResult {
-                request_id, ok, ..
-            } if request_id == "parked" => {
+            RelayServerMessage::RpcResult { request_id, ok, .. } if request_id == "parked" => {
                 assert!(ok, "parked rpc must resolve once the daemon returns");
                 break;
             }
@@ -1198,9 +1190,9 @@ async fn rpc_called_during_the_daemon_reconnect_grace_window_is_parked() {
     .await;
     loop {
         match recv_server_message(&mut client_ws).await {
-            RelayServerMessage::RpcResult {
-                request_id, ok, ..
-            } if request_id == "grace-window" => {
+            RelayServerMessage::RpcResult { request_id, ok, .. }
+                if request_id == "grace-window" =>
+            {
                 assert!(ok, "grace-window rpc must resolve once the daemon returns");
                 break;
             }

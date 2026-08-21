@@ -13,6 +13,8 @@ import {
 } from '@falcondeck/ui'
 import { Bot, Plus, Trash2, X } from 'lucide-react'
 
+import { falconDeckHttpError } from '../../connection-copy'
+
 type ProviderEntry = {
   label?: string
   command?: string[]
@@ -45,6 +47,11 @@ export type AgentsPanelProps = {
 const BUILT_IN_AGENTS = [
   { id: 'codex', label: 'Codex', detail: 'OpenAI Codex CLI, full integration' },
   { id: 'claude', label: 'Claude', detail: 'Claude Code CLI, full integration' },
+  {
+    id: 'agy',
+    label: 'Antigravity',
+    detail: 'Google Antigravity CLI (`agy`), full integration',
+  },
 ]
 
 const RECOMMENDED_AGENTS = [
@@ -88,7 +95,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
     setIsLoading(true)
     try {
       const response = await fetch(`${baseUrl}/api/providers`)
-      if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+      if (!response.ok) throw new Error(falconDeckHttpError(response.status))
       setOverview((await response.json()) as ProvidersOverview)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error))
@@ -122,7 +129,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
         })
         if (!response.ok) {
           const body = await response.text()
-          throw new Error(body || `daemon returned ${response.status}`)
+          throw new Error(body || falconDeckHttpError(response.status))
         }
         await load()
         return true

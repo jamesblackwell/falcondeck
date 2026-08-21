@@ -60,12 +60,14 @@ describe("handoff context", () => {
     });
 
     expect(prompt).toContain("can still be resumed separately");
-    expect(prompt).toContain("verbatim");
+    expect(prompt).toContain("Timestamps and repeated workspace prefixes are omitted");
     expect(prompt).toContain("It is context only, not a task");
     expect(prompt).toContain("Do not start working");
     expect(prompt).toContain("let the user explain what they would like to work on next");
     expect(prompt).toContain("Keep the old thread unchanged");
     expect(prompt).toContain("<previous-session-transcript>");
+    expect(prompt).not.toContain("2026-08-12T12:00:00Z");
+    expect(prompt).not.toMatch(/\*Sent · /);
   });
 
   it("never names the product or the source provider to the destination", () => {
@@ -92,6 +94,62 @@ describe("handoff context", () => {
     expect(prompt).toContain("another AI coding assistant");
     // An untitled thread must not fall back to a product-branded heading.
     expect(prompt).toContain("# Previous session");
+  });
+
+  it("strips timestamps and repeated workspace prefixes from the destination prompt", () => {
+    const workspace = "/Users/James/www/sites/lucidpic";
+    const prompt = buildHandoffPrompt({
+      items: [
+        {
+          kind: "user_message",
+          id: "user-1",
+          text: "Find the terms copy",
+          attachments: [],
+          turn_id: null,
+          previous_turn_id: null,
+          created_at: "2026-08-19T14:48:55.210966Z",
+        },
+        {
+          kind: "tool_call",
+          id: "tool-1",
+          title: `cd ${workspace} && rg selected frontend`,
+          tool_kind: "command",
+          status: "completed",
+          output: "frontend/marketing/pages/Legal/Terms.tsx:135:",
+          exit_code: 0,
+          display: {
+            is_read_only: true,
+            has_side_effect: false,
+            is_error: false,
+            lifecycle: "succeeded",
+            artifact_kind: "command_output",
+            activity_kind: "command",
+            history_mode: "full",
+            summary_hint: null,
+          },
+          detail: {
+            kind: "command_execution",
+            command: `cd ${workspace} && rg selected frontend`,
+            cwd: workspace,
+            actions: [],
+            process_id: "43",
+            duration_ms: 90,
+            source: "codex",
+          },
+          created_at: "2026-08-19T14:48:59.313830Z",
+          completed_at: "2026-08-19T14:48:59.313830Z",
+        },
+      ],
+      sourceTitle: "Previous session",
+      workspacePath: workspace,
+    });
+
+    expect(prompt).toContain("## Tool — rg selected frontend");
+    expect(prompt).toContain("Find the terms copy");
+    expect(prompt).not.toContain("2026-08-19T14:48:55.210966Z");
+    expect(prompt).not.toContain("cd /Users/James/www/sites/lucidpic");
+    expect(prompt).not.toContain("Exit code: 0");
+    expect(prompt).not.toContain("process_id");
   });
 
   it("bounds very long conversations inside the handoff prompt", () => {

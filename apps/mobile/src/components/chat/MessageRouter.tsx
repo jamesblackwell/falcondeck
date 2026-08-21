@@ -38,6 +38,7 @@ interface MessageRouterProps {
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
   ) => void;
+  showReceivedAt?: boolean;
 }
 
 export const MessageRouter = memo(function MessageRouter({
@@ -45,6 +46,7 @@ export const MessageRouter = memo(function MessageRouter({
   canRetryResponse = false,
   retrySource = null,
   onRetryResponse,
+  showReceivedAt = false,
 }: MessageRouterProps) {
   if (block.kind === "tool_summary") {
     return (
@@ -80,6 +82,7 @@ export const MessageRouter = memo(function MessageRouter({
         <AssistantMessageBlock
           key={block.id}
           item={item}
+          showReceivedAt={showReceivedAt}
           retrySource={canRetryResponse ? retrySource : null}
           onRetryResponse={canRetryResponse ? onRetryResponse : undefined}
         />

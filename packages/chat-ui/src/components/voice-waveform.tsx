@@ -1,34 +1,81 @@
-import type { CSSProperties } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "@falcondeck/ui";
 
-const VOICE_BAR_COUNT = 36;
+const BAR_WIDTH = 3;
+const BAR_GAP = 3;
+const DOT_HEIGHT = 4;
+const MAX_BAR_HEIGHT = 26;
 
-function barStyle(index: number): CSSProperties {
-  const duration = 0.8 + ((index * 37) % 9) / 12;
-  const delay = -(((index * 53) % 100) / 100) * duration;
-  return {
-    animationDuration: `${duration.toFixed(2)}s`,
-    animationDelay: `${delay.toFixed(2)}s`,
-  };
-}
+/**
+ * Scrolling loudness history for an in-composer recording session. Bars fill
+ * from the left as levels arrive; unfilled slots read as faint dots, and once
+ * the strip is full the oldest samples scroll off, iOS-voice-memo style.
+ */
+export function VoiceWaveform({
+  levels,
+  muted = false,
+  className,
+}: {
+  /** Loudness samples in [0, 1], oldest first. */
+  levels: readonly number[];
+  /** Dims the strip while the recording is being transcribed. */
+  muted?: boolean;
+  className?: string;
+}) {
+  const stripRef = useRef<HTMLDivElement>(null);
+  const [slotCount, setSlotCount] = useState(0);
 
-export function VoiceWaveform({ className }: { className?: string }) {
+  useLayoutEffect(() => {
+    const element = stripRef.current;
+    if (!element) return;
+    const update = () => {
+      setSlotCount(
+        Math.max(
+          0,
+          Math.floor((element.clientWidth + BAR_GAP) / (BAR_WIDTH + BAR_GAP)),
+        ),
+      );
+    };
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const visible = levels.slice(-slotCount);
+
   return (
     <div
+      ref={stripRef}
       aria-hidden="true"
       className={cn(
-        "flex h-8 items-center justify-center gap-[3px] overflow-hidden",
+        "flex h-8 min-w-0 flex-1 items-center overflow-hidden",
+        muted && "opacity-40",
         className,
       )}
+      style={{ gap: BAR_GAP }}
     >
-      {Array.from({ length: VOICE_BAR_COUNT }, (_, index) => (
-        <span
-          key={index}
-          className="fd-voice-bar h-full w-0.5 shrink-0 rounded-full bg-fg-muted"
-          style={barStyle(index)}
-        />
-      ))}
+      {Array.from({ length: slotCount }, (_, index) => {
+        const level = visible[index];
+        const filled = level !== undefined;
+        return (
+          <span
+            key={index}
+            className={cn(
+              "shrink-0 rounded-full",
+              filled ? "bg-fg-muted" : "bg-fg-faint",
+            )}
+            style={{
+              width: BAR_WIDTH,
+              height: filled
+                ? DOT_HEIGHT + level * (MAX_BAR_HEIGHT - DOT_HEIGHT)
+                : DOT_HEIGHT,
+            }}
+          />
+        );
+      })}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { act } from "react-test-renderer";
+import { __resetAllStores } from "react-native-mmkv";
 import { renderComponent, cleanup, textOf } from "../../test/render";
 import { ConnectionHeader } from "./ConnectionHeader";
 import { SidebarView } from "./SidebarView";
@@ -22,6 +23,7 @@ const idleRelayState = {
 
 afterEach(() => {
   cleanup();
+  __resetAllStores();
   useRelayStore.setState(idleRelayState);
 });
 
@@ -53,7 +55,7 @@ describe("ConnectionHeader component", () => {
     );
     expect(textOf(r)).toBe("");
     expect(
-      r.root.findByProps({ accessibilityLabel: "Connection: Disconnected" }),
+      r.root.findByProps({ accessibilityLabel: "Connection: Reconnecting to relay…" }),
     ).toBeTruthy();
   });
   it("keeps connecting detail in its accessible label", () => {
@@ -187,6 +189,42 @@ describe("SidebarView component", () => {
     const r = renderComponent(<SidebarView {...base} groups={groups} />);
     expect(textOf(r)).toContain("proj");
     expect(textOf(r)).toContain("Test thread");
+  });
+  it("sorts project chats by last updated, priority, or name", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [
+          thread({
+            id: "older",
+            workspace_id: "w1",
+            title: "Alpha",
+            updated_at: "2026-03-16T09:00:00Z",
+          }),
+          thread({
+            id: "newer",
+            workspace_id: "w1",
+            title: "Zebra",
+            updated_at: "2026-03-16T12:00:00Z",
+          }),
+        ],
+      },
+    ];
+    const r = renderComponent(<SidebarView {...base} groups={groups} />);
+    expect(
+      r.root.findAllByProps({ accessibilityLabel: "Sort chats" }),
+    ).toHaveLength(1);
+
+    const text = () => textOf(r);
+    expect(text().indexOf("Zebra")).toBeLessThan(text().indexOf("Alpha"));
+
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: "Sort chats" }).props.onPress();
+    });
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: "Name" }).props.onPress();
+    });
+    expect(text().indexOf("Alpha")).toBeLessThan(text().indexOf("Zebra"));
   });
   it("renders selected", () => {
     const groups: ProjectGroup[] = [

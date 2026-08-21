@@ -67,6 +67,7 @@ function capitalize(s: string) {
 const DEFAULT_PROVIDERS: ProviderOption[] = [
   { provider: 'codex', label: 'Codex' },
   { provider: 'claude', label: 'Claude' },
+  { provider: 'agy', label: 'Antigravity' },
 ]
 
 const MODEL_DEFAULT_VALUE = '__default__'

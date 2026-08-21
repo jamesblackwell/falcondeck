@@ -1,8 +1,8 @@
-use std::sync::{LazyLock, Mutex as StdMutex};
 #[cfg(test)]
 use std::sync::OnceLock;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex as StdMutex};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -243,8 +243,7 @@ impl AppState {
             let mut form = reqwest::multipart::Form::new()
                 .part(
                     "file",
-                    reqwest::multipart::Part::bytes(audio.clone())
-                        .file_name(file_name.clone()),
+                    reqwest::multipart::Part::bytes(audio.clone()).file_name(file_name.clone()),
                 )
                 .text("model", model.clone())
                 .text("temperature", "0");

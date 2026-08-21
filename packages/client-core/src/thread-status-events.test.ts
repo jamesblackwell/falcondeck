@@ -129,4 +129,111 @@ describe("thread status events", () => {
 
     expect(snapshot.threads[0]?.status).toBe("running");
   });
+
+  it("keeps a mark-read watermark when a same-timestamp unread replay lands", () => {
+    const read = thread({
+      attention: {
+        level: "none",
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 7,
+        last_read_seq: 7,
+      },
+    });
+    let snapshot = snapshotWith(read);
+    snapshot = apply(
+      snapshot,
+      thread({
+        ...read,
+        attention: {
+          ...read.attention,
+          level: "unread",
+          unread: true,
+          last_read_seq: 0,
+        },
+      }),
+    );
+
+    expect(snapshot.threads[0]?.attention).toMatchObject({
+      unread: false,
+      last_read_seq: 7,
+      last_agent_activity_seq: 7,
+      level: "none",
+    });
+  });
+
+  it("still applies a newer mark-unread that walks last_read_seq back", () => {
+    const read = thread({
+      attention: {
+        level: "none",
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 7,
+        last_read_seq: 7,
+      },
+    });
+    let snapshot = snapshotWith(read);
+    snapshot = apply(
+      snapshot,
+      thread({
+        ...read,
+        updated_at: "2026-08-13T18:29:00Z",
+        attention: {
+          ...read.attention,
+          level: "unread",
+          unread: true,
+          last_read_seq: 6,
+        },
+      }),
+    );
+
+    expect(snapshot.threads[0]?.attention).toMatchObject({
+      unread: true,
+      last_read_seq: 6,
+      last_agent_activity_seq: 7,
+      level: "unread",
+    });
+  });
+
+  it("keeps the higher activity seq when a same-timestamp update is older attention", () => {
+    const live = thread({
+      status: "idle",
+      attention: {
+        level: "unread",
+        badge_label: null,
+        unread: true,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 12,
+        last_read_seq: 7,
+      },
+    });
+    let snapshot = snapshotWith(live);
+    snapshot = apply(
+      snapshot,
+      thread({
+        ...live,
+        title: "Renamed",
+        attention: {
+          ...live.attention,
+          last_agent_activity_seq: 4,
+          last_read_seq: 4,
+          unread: false,
+          level: "none",
+        },
+      }),
+    );
+
+    expect(snapshot.threads[0]?.title).toBe("Renamed");
+    expect(snapshot.threads[0]?.attention).toMatchObject({
+      last_agent_activity_seq: 12,
+      last_read_seq: 7,
+      unread: true,
+      level: "unread",
+    });
+  });
 });

@@ -931,6 +931,27 @@ describe("respondInteractive", () => {
     }
     expect(setError).toHaveBeenCalledWith("Relay disconnected");
   });
+
+  it("does not toast a dropped relay while reconnecting already explains it", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("Lost the relay connection"));
+    const setError = vi.fn();
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+    const harness = mountSessionActions();
+    try {
+      await expect(
+        harness.getActions().respondInteractive("workspace-1", "question-1", {
+          kind: "question",
+          answers: { framework: ["React Native"] },
+        }),
+      ).rejects.toThrow("Lost the relay connection");
+    } finally {
+      harness.unmount();
+    }
+    expect(setError).not.toHaveBeenCalled();
+  });
 });
 
 describe("_sendMessage", () => {
@@ -940,7 +961,7 @@ describe("_sendMessage", () => {
     const relay = useRelayStore.getState();
     expect(() => {
       relay._sendMessage({ type: "ping" });
-    }).toThrow("Remote connection is not ready");
+    }).toThrow("Not connected to the relay");
   });
 });
 

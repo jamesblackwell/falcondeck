@@ -27,7 +27,7 @@ describe('RemoteAccessPanel', () => {
         relayUrl="https://connect.falcondeck.com"
         isStartingRemote={false}
         remoteControlsDisabled
-        remoteControlsUnavailableReason="FalconDeck is still connecting to the local daemon."
+        remoteControlsUnavailableReason="FalconDeck is still connecting."
         revokingDeviceId={null}
         onStartPairing={vi.fn()}
         onRefreshRemoteStatus={vi.fn()}
@@ -35,7 +35,7 @@ describe('RemoteAccessPanel', () => {
       />,
     )
 
-    expect(screen.getByText('FalconDeck is still connecting to the local daemon.')).toBeInTheDocument()
+    expect(screen.getByText('FalconDeck is still connecting.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /start pairing/i })).toBeDisabled()
     expect(screen.getByRole('button', { name: /refresh status/i })).toBeDisabled()
   })

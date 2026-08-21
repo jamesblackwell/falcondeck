@@ -1139,6 +1139,26 @@ export function conversationRenderBlockType(
   return block.kind === "item" ? block.item.kind : block.kind;
 }
 
+/** The most recent finished assistant reply in the visible transcript.
+ *
+ * Commentary and in-flight answers are skipped so a previous completed
+ * response keeps its received-at stamp until the new one settles. */
+export function latestVisibleAssistantMessageId(
+  blocks: readonly ConversationRenderBlock[],
+): string | null {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block?.kind !== "item" || block.item.kind !== "assistant_message") {
+      continue;
+    }
+    if (block.item.phase === "commentary") continue;
+    const lifecycle = contentLifecycle(block.item);
+    if (lifecycle === "pending" || lifecycle === "streaming") continue;
+    return block.item.id;
+  }
+  return null;
+}
+
 export type ConversationLiveActivityGroup = {
   kind: "live_activity_group";
   id: string;

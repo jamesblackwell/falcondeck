@@ -1,4 +1,4 @@
-import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
+import { compareThreads, type ProjectGroup, type ThreadSortMode, type ThreadSummary } from '@falcondeck/client-core'
 
 export const VISIBLE_THREAD_LIMIT = 5
 export const SHOW_MORE_STEP = 10
@@ -44,18 +44,22 @@ export function buildSidebarRows(
   collapsedWorkspaces: Set<string>,
   visibleThreadCounts: ReadonlyMap<string, number>,
   selectedThreadId: string | null,
+  sortMode: ThreadSortMode = 'last_updated',
 ): SidebarRow[] {
-  const pinnedRows: SidebarRow[] = groups.flatMap((group) =>
-    group.threads
-      .filter((thread) => thread.is_pinned)
-      .map((thread) => ({
-        key: `pinned:${group.workspace.id}:${thread.id}`,
-        type: 'thread' as const,
-        workspaceId: group.workspace.id,
-        thread,
-        isCollapsed: false,
-      })),
-  )
+  const compare = compareThreads(sortMode)
+  const pinnedRows: SidebarRow[] = groups
+    .flatMap((group) =>
+      group.threads
+        .filter((thread) => thread.is_pinned)
+        .map((thread) => ({
+          key: `pinned:${group.workspace.id}:${thread.id}`,
+          type: 'thread' as const,
+          workspaceId: group.workspace.id,
+          thread,
+          isCollapsed: false,
+        })),
+    )
+    .sort((left, right) => compare(left.thread, right.thread))
 
   const projectRows = groups.flatMap((group) => {
     const workspaceName =

@@ -2,6 +2,8 @@ export * from "./components/interactive-request-card";
 export * from "./components/interactive-request-bar";
 export * from "./components/interrupted-turn-notice";
 export * from "./components/code-block";
+export * from "./components/mermaid-block";
+export * from "./lib/mermaid";
 export * from "./components/diff-block";
 export * from "./components/diff-lines";
 export * from "./components/conversation";
@@ -24,6 +26,7 @@ export {
 } from "./components/message-markdown";
 export * from "./components/goal-control";
 export * from "./components/goal-bubble";
+export * from "./components/composer-suggestion-pill";
 export * from "./components/composer-context-bar";
 export * from "./components/model-selector";
 export * from "./components/provider-icon";

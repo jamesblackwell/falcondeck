@@ -68,6 +68,8 @@ import type { QuotedSelection } from "../lib/quoted-selection";
 export type VoiceComposerActive = {
   state: "recording" | "transcribing" | "failed";
   seconds: number;
+  /** Live loudness samples, oldest first, in [0, 1]. */
+  levels?: readonly number[];
   error?: string | null;
   configured: boolean;
   hasPending: boolean;
@@ -843,114 +845,135 @@ export const PromptInput = memo(function PromptInput({
           </div>
         ) : null}
 
-        {/* Textarea */}
-        {voice ? (
-          <div className="flex min-h-[52px] items-center gap-3 px-4 pt-4 pb-3">
-            {voice.state === "recording" ? (
-              <>
-                <span role="status" aria-live="polite" className="sr-only">
-                  Recording voice input
-                </span>
-                <Tooltip label="Cancel">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={voice.onCancel}
-                    aria-label="Cancel voice input"
-                    className="h-9 w-9 shrink-0 rounded-full p-0"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </Tooltip>
-                <VoiceWaveform className="min-w-0 flex-1" />
-                <span
-                  aria-hidden="true"
-                  className="shrink-0 font-mono text-[length:var(--fd-text-sm)] tabular-nums text-fg-secondary"
-                >
-                  {formatVoiceDuration(voice.seconds)}
-                </span>
-                <Tooltip label="Stop">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={voice.onStop}
-                    aria-label="Stop recording"
-                    className="h-9 w-9 shrink-0 rounded-full p-0"
-                  >
-                    <Square className="h-3.5 w-3.5 fill-current" />
-                  </Button>
-                </Tooltip>
-                <Tooltip label="Send" shortcut={sendShortcut}>
-                  <Button
-                    type="button"
-                    onClick={voice.onStopAndSend}
-                    disabled={sendDisabled}
-                    aria-label="Transcribe and send"
-                    className="h-9 w-9 shrink-0 rounded-full p-0"
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                </Tooltip>
-              </>
-            ) : null}
-            {voice.state === "transcribing" ? (
-              <div className="flex w-full items-center gap-2 text-fg-secondary">
-                <ActivityDiamond size="md" />
-                <span className="text-[length:var(--fd-text-sm)]">
-                  Transcribing…
-                </span>
-              </div>
-            ) : null}
-            {voice.state === "failed" ? (
-              <div className="flex w-full flex-wrap items-center justify-between gap-2">
-                <p
-                  role="status"
-                  aria-live="polite"
-                  className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-danger"
-                >
-                  {voice.error ?? "Voice input failed."}
-                </p>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {!voice.configured && voice.onOpenSettings ? (
-                    <button
-                      type="button"
-                      onClick={voice.onOpenSettings}
-                      className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
-                    >
-                      Open Speech settings
-                    </button>
-                  ) : null}
-                  {voice.hasPending ? (
+        {/* Textarea + footer stay mounted during dictation so the card keeps
+            its idle height. The session overlays that layout instead of
+            replacing it with a shorter row. */}
+        <div className="relative">
+          {voice ? (
+            <div className="absolute inset-0 z-10 flex items-center gap-3 px-4">
+              {voice.state === "recording" || voice.state === "transcribing" ? (
+                <>
+                  {voice.state === "recording" ? (
                     <>
-                      <button
-                        type="button"
-                        onClick={voice.onDiscard}
-                        className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
-                      >
-                        Discard
-                      </button>
-                      <button
-                        type="button"
-                        onClick={voice.onRetry}
-                        className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
-                      >
-                        Retry
-                      </button>
+                      <span role="status" aria-live="polite" className="sr-only">
+                        Recording voice input
+                      </span>
+                      <Tooltip label="Cancel">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={voice.onCancel}
+                          aria-label="Cancel voice input"
+                          className="h-9 w-9 shrink-0 rounded-full p-0"
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </Tooltip>
+                    </>
+                  ) : (
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center">
+                      <ActivityDiamond size="md" />
+                    </div>
+                  )}
+                  <VoiceWaveform
+                    levels={voice.levels ?? []}
+                    muted={voice.state === "transcribing"}
+                  />
+                  {voice.state === "transcribing" ? (
+                    <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                      Transcribing…
+                    </span>
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className="shrink-0 font-mono text-[length:var(--fd-text-sm)] tabular-nums text-fg-secondary"
+                    >
+                      {formatVoiceDuration(voice.seconds)}
+                    </span>
+                  )}
+                  {voice.state === "recording" ? (
+                    <>
+                      <Tooltip label="Stop">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          onClick={voice.onStop}
+                          aria-label="Stop recording"
+                          className="h-9 w-9 shrink-0 rounded-full p-0"
+                        >
+                          <Square className="h-3.5 w-3.5 fill-current" />
+                        </Button>
+                      </Tooltip>
+                      <Tooltip label="Send" shortcut={sendShortcut}>
+                        <Button
+                          type="button"
+                          onClick={voice.onStopAndSend}
+                          disabled={sendDisabled}
+                          aria-label="Transcribe and send"
+                          className="h-9 w-9 shrink-0 rounded-full p-0"
+                        >
+                          <Send className="h-4 w-4" />
+                        </Button>
+                      </Tooltip>
                     </>
                   ) : null}
-                  <button
-                    type="button"
-                    onClick={voice.onDismiss}
-                    className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                </>
+              ) : null}
+              {voice.state === "failed" ? (
+                <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-danger"
                   >
-                    Dismiss
-                  </button>
+                    {voice.error ?? "Voice input failed."}
+                  </p>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    {!voice.configured && voice.onOpenSettings ? (
+                      <button
+                        type="button"
+                        onClick={voice.onOpenSettings}
+                        className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                      >
+                        Open Speech settings
+                      </button>
+                    ) : null}
+                    {voice.hasPending ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={voice.onDiscard}
+                          className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                        >
+                          Discard
+                        </button>
+                        <button
+                          type="button"
+                          onClick={voice.onRetry}
+                          className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
+                        >
+                          Retry
+                        </button>
+                      </>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={voice.onDismiss}
+                      className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div
+            className={voice ? "invisible" : undefined}
+            inert={Boolean(voice)}
+            aria-hidden={Boolean(voice)}
+          >
             <label htmlFor={textareaId} className="sr-only">
               Message composer
             </label>
@@ -958,7 +981,7 @@ export const PromptInput = memo(function PromptInput({
               id={textareaId}
               ref={textareaRef}
               value={value}
-              disabled={disabled}
+              disabled={disabled || Boolean(voice)}
               aria-label="Message composer"
               onChange={handleChange}
               onKeyDown={handleKeyDown}
@@ -977,8 +1000,6 @@ export const PromptInput = memo(function PromptInput({
               }}
               rows={1}
             />
-          </>
-        )}
 
         {attachmentInputNotice ? (
           <div className="flex items-center gap-2 px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning">
@@ -996,7 +1017,7 @@ export const PromptInput = memo(function PromptInput({
           </div>
         ) : null}
 
-        {slashQuery && !disabled ? (
+        {slashQuery && !disabled && !voice ? (
           <div className="absolute right-3 bottom-full left-3 z-40 mb-2 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]">
             {slashSuggestionCount > 0 ? (
               <div className="max-h-64 overflow-y-auto py-1">
@@ -1087,9 +1108,8 @@ export const PromptInput = memo(function PromptInput({
           </p>
         ) : null}
 
-        {/* Footer: tools + send. A voice session owns the whole card — its
-            own row carries every control it needs. */}
-        {voice ? null : (
+        {/* Footer: tools + send. Hidden (not unmounted) during dictation so
+            the card keeps this row's height under the overlay. */}
         <div className="flex items-center gap-1.5 px-3 pb-3">
           <input
             ref={fileInputRef}
@@ -1395,7 +1415,8 @@ export const PromptInput = memo(function PromptInput({
             )}
           </div>
         </div>
-        )}
+          </div>
+        </div>
       </div>
     </div>
   );

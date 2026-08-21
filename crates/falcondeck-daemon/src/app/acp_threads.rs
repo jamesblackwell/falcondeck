@@ -129,11 +129,11 @@ impl AppState {
                     }
                     runtime.forget_session(&thread_id).await;
                 }
-                let builtin_control = app
-                    .builtin_control_spec(&provider, &cwd, Some(&thread_id))
+                let builtin = app
+                    .builtin_connectors(&provider, &cwd, Some(&thread_id))
                     .await;
                 if let Err(error) = runtime
-                    .load_session(&thread_id, &native_session, &cwd, builtin_control.as_ref())
+                    .load_session(&thread_id, &native_session, &cwd, &builtin)
                     .await
                 {
                     tracing::info!(
@@ -296,8 +296,8 @@ impl AppState {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
-        let builtin_control = self
-            .builtin_control_spec(provider, &workspace_path, None)
+        let builtin = self
+            .builtin_connectors(provider, &workspace_path, None)
             .await;
         // Grok (and similar) already advertise a catalog on initialize.
         // Publish it before the discovery session so a new-thread composer
@@ -307,7 +307,7 @@ impl AppState {
                 .await;
         }
         if let Err(error) = runtime
-            .ensure_workspace_metadata(&workspace_path, builtin_control.as_ref())
+            .ensure_workspace_metadata(&workspace_path, &builtin)
             .await
         {
             // Some ACP agents require auth or do not implement session/new
@@ -361,11 +361,11 @@ impl AppState {
             };
             workspace.summary.path.clone()
         };
-        let builtin_control = self
-            .builtin_control_spec(&runtime.provider, &workspace_path, None)
+        let builtin = self
+            .builtin_connectors(&runtime.provider, &workspace_path, None)
             .await;
         if let Err(error) = runtime
-            .ensure_workspace_metadata(&workspace_path, builtin_control.as_ref())
+            .ensure_workspace_metadata(&workspace_path, &builtin)
             .await
         {
             tracing::info!(
@@ -1700,8 +1700,8 @@ async fn run_acp_turn_startup(
             },
         )
     };
-    let builtin_control = app
-        .builtin_control_spec(provider, &cwd, Some(thread_id))
+    let builtin = app
+        .builtin_connectors(provider, &cwd, Some(thread_id))
         .await;
     let agent_context = app.agent_context_instructions(provider).await;
     let first_start = runtime
@@ -1710,7 +1710,7 @@ async fn run_acp_turn_startup(
             known_native_session.as_deref(),
             &cwd,
             requested_permission_mode.as_deref(),
-            builtin_control.as_ref(),
+            &builtin,
             agent_context.as_deref(),
             requested_model_id.as_deref(),
         )
@@ -1757,7 +1757,7 @@ async fn run_acp_turn_startup(
                     known_native_session.as_deref(),
                     &cwd,
                     requested_permission_mode.as_deref(),
-                    builtin_control.as_ref(),
+                    &builtin,
                     agent_context.as_deref(),
                     requested_model_id.as_deref(),
                 )

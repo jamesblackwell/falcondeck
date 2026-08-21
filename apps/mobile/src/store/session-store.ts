@@ -49,6 +49,21 @@ export interface ThreadHistoryState {
   isPartial: boolean;
 }
 
+/** Enough to put a thread back if an optimistic archive RPC fails. */
+export type ThreadArchiveUndo = {
+  thread: ThreadSummary;
+  index: number;
+  workspaceCurrentThreadId: string | null;
+  interactiveRequests: DaemonSnapshot['interactive_requests'];
+  selectedWorkspaceId: string | null;
+  selectedThreadId: string | null;
+  threadDetail: ThreadDetail | null;
+  threadItems: ConversationItem[] | undefined;
+  threadHistory: ThreadHistoryState | undefined;
+  threadDetailError: string | undefined;
+  postSelectedThreadId: string | null;
+};
+
 interface SessionState {
   snapshot: DaemonSnapshot | null;
   selectedWorkspaceId: string | null;
@@ -72,6 +87,9 @@ interface SessionActions {
   selectNewThread: (workspaceId: string) => void;
   applyThreadHandle: (handle: ThreadHandle) => void;
   applyThreadSummary: (thread: ThreadSummary) => void;
+  /** Drops the thread from the sidebar immediately; restore with the undo. */
+  archiveThreadLocally: (threadId: string) => ThreadArchiveUndo | null;
+  restoreArchivedThread: (undo: ThreadArchiveUndo) => void;
   setThreadDetail: (
     detail: ThreadDetail | null,
     options?: { mergeMode?: ThreadDetailMergeMode },
@@ -124,6 +142,137 @@ function filterActiveSnapshot(snapshot: DaemonSnapshot | null): DaemonSnapshot |
     interactive_requests: snapshot.interactive_requests.filter(
       (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
     ),
+  };
+}
+
+function captureThreadArchiveUndo(
+  state: SessionState,
+  threadId: string,
+): ThreadArchiveUndo | null {
+  const snapshot = state.snapshot;
+  if (!snapshot) return null;
+  const index = snapshot.threads.findIndex((thread) => thread.id === threadId);
+  if (index < 0) return null;
+  const thread = snapshot.threads[index]!;
+  if (thread.is_archived) return null;
+  const workspace = snapshot.workspaces.find((entry) => entry.id === thread.workspace_id);
+  return {
+    thread,
+    index,
+    workspaceCurrentThreadId: workspace?.current_thread_id ?? null,
+    interactiveRequests: snapshot.interactive_requests.filter(
+      (request) => request.thread_id === threadId,
+    ),
+    selectedWorkspaceId: state.selectedWorkspaceId,
+    selectedThreadId: state.selectedThreadId,
+    threadDetail: state.threadDetail,
+    threadItems: state.threadItems[threadId],
+    threadHistory: state.threadHistory[threadId],
+    threadDetailError: state.threadDetailErrors[threadId],
+    postSelectedThreadId: state.selectedThreadId,
+  };
+}
+
+function dropArchivedThread(state: SessionState, threadId: string): SessionState | null {
+  if (!state.snapshot?.threads.some((thread) => thread.id === threadId)) return null;
+  const nextSnapshot = filterActiveSnapshot({
+    ...state.snapshot,
+    threads: state.snapshot.threads.map((thread) =>
+      thread.id === threadId ? { ...thread, is_archived: true } : thread,
+    ),
+  })!;
+
+  const visibleThreadIds = new Set(nextSnapshot.threads.map((thread) => thread.id));
+  const nextThreadItems = pruneThreadRecord(state.threadItems, visibleThreadIds);
+  const nextThreadHistory = pruneThreadRecord(state.threadHistory, visibleThreadIds);
+  const nextThreadDetailErrors = pruneThreadRecord(state.threadDetailErrors, visibleThreadIds);
+  let nextThreadDetail =
+    state.threadDetail && visibleThreadIds.has(state.threadDetail.thread.id)
+      ? state.threadDetail
+      : null;
+  const nextSelection = reconcileSnapshotSelection(
+    nextSnapshot,
+    state.selectedWorkspaceId,
+    state.selectedThreadId,
+    { preserveEmptyThreadSelection: true },
+  );
+  nextThreadDetail =
+    nextThreadDetail?.thread.id === nextSelection.threadId ? nextThreadDetail : null;
+
+  return {
+    ...state,
+    snapshot: nextSnapshot,
+    threadItems: nextThreadItems,
+    threadHistory: nextThreadHistory,
+    threadDetail: nextThreadDetail,
+    threadDetailErrors: nextThreadDetailErrors,
+    selectedWorkspaceId: nextSelection.workspaceId,
+    selectedThreadId: nextSelection.threadId,
+  };
+}
+
+function restoreArchivedThreadState(
+  state: SessionState,
+  undo: ThreadArchiveUndo,
+): SessionState {
+  if (!state.snapshot) return state;
+  if (state.snapshot.threads.some((thread) => thread.id === undo.thread.id)) {
+    return state;
+  }
+
+  const threads = [...state.snapshot.threads];
+  threads.splice(Math.min(undo.index, threads.length), 0, undo.thread);
+
+  const workspaces = state.snapshot.workspaces.map((workspace) =>
+    workspace.id === undo.thread.workspace_id
+      ? { ...workspace, current_thread_id: undo.workspaceCurrentThreadId }
+      : workspace,
+  );
+
+  const existingRequestIds = new Set(
+    state.snapshot.interactive_requests.map((request) => request.request_id),
+  );
+  const interactive_requests = [
+    ...undo.interactiveRequests.filter(
+      (request) => !existingRequestIds.has(request.request_id),
+    ),
+    ...state.snapshot.interactive_requests,
+  ];
+
+  const restoreSelection = state.selectedThreadId === undo.postSelectedThreadId;
+
+  let threadItems = state.threadItems;
+  if (undo.threadItems && !threadItems[undo.thread.id]) {
+    threadItems = { ...threadItems, [undo.thread.id]: undo.threadItems };
+  }
+  let threadHistory = state.threadHistory;
+  if (undo.threadHistory && !threadHistory[undo.thread.id]) {
+    threadHistory = { ...threadHistory, [undo.thread.id]: undo.threadHistory };
+  }
+  let threadDetailErrors = state.threadDetailErrors;
+  if (undo.threadDetailError && !threadDetailErrors[undo.thread.id]) {
+    threadDetailErrors = {
+      ...threadDetailErrors,
+      [undo.thread.id]: undo.threadDetailError,
+    };
+  }
+
+  return {
+    ...state,
+    snapshot: {
+      ...state.snapshot,
+      threads,
+      workspaces,
+      interactive_requests,
+    },
+    threadItems,
+    threadHistory,
+    threadDetailErrors,
+    selectedWorkspaceId: restoreSelection
+      ? undo.selectedWorkspaceId
+      : state.selectedWorkspaceId,
+    selectedThreadId: restoreSelection ? undo.selectedThreadId : state.selectedThreadId,
+    threadDetail: restoreSelection ? undo.threadDetail : state.threadDetail,
   };
 }
 
@@ -469,6 +618,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (!state.snapshot?.threads.some((entry) => entry.id === thread.id)) {
         return state;
       }
+      if (thread.is_archived) {
+        return dropArchivedThread(state, thread.id) ?? state;
+      }
       return {
         snapshot: {
           ...state.snapshot,
@@ -482,6 +634,24 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             : state.threadDetail,
       };
     });
+    persistStateCache(get());
+  },
+
+  archiveThreadLocally: (threadId) => {
+    let undo: ThreadArchiveUndo | null = null;
+    set((state) => {
+      const captured = captureThreadArchiveUndo(state, threadId);
+      if (!captured) return state;
+      const next = dropArchivedThread(state, threadId)!;
+      undo = { ...captured, postSelectedThreadId: next.selectedThreadId };
+      return next;
+    });
+    if (undo) persistStateCache(get());
+    return undo;
+  },
+
+  restoreArchivedThread: (undo) => {
+    set((state) => restoreArchivedThreadState(state, undo));
     persistStateCache(get());
   },
 

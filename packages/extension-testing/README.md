@@ -24,6 +24,12 @@ subscriptions with the same identifier-only payload and effect boundary;
 `storageSnapshot` and `diagnosticSnapshot` return detached JSON values for
 assertions.
 
+`invokeTool` exercises a declared `agentTools` entry the way the MCP bridge
+does, with daemon-supplied thread and workspace context; it fails closed
+without the `agent-tools:register` grant. Pass `declaredTools` and
+`declaredSuggestionViews` from the fixture manifest so undeclared tools and
+out-of-bounds composer suggestions fail here rather than at the daemon.
+
 `publishedViewSnapshot` exposes the latest successfully committed projection
 per view and scope. The fake boundary also enforces the daemon's per-view,
 retained-view-state, publication-count, action-input, storage, scope, and host

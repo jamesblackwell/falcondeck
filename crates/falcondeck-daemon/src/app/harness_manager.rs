@@ -90,6 +90,15 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         builtin: true,
     },
     KnownHarness {
+        id: "agy",
+        label: "Antigravity",
+        bin: "agy",
+        npm_package: None,
+        upgrade_command: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+        auth_probe: None,
+        builtin: true,
+    },
+    KnownHarness {
         id: "opencode",
         label: "OpenCode",
         bin: "opencode",
@@ -462,7 +471,7 @@ impl AppState {
                     .iter()
                     .filter_map(|entry| {
                         let id = entry.get("id")?.as_str()?.to_string();
-                        if id == "codex" || id == "claude" {
+                        if falcondeck_core::AgentProvider::is_reserved_id(&id) {
                             return None;
                         }
                         let label = entry

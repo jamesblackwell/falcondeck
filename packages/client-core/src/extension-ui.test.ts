@@ -242,10 +242,12 @@ describe("deriveExtensionPanels", () => {
       updated_at: "2026-08-13T00:00:01Z",
     });
 
+    snapshot.catalog[0]!.contributes.panels[0]!.icon = "notebook-pen";
     expect(deriveExtensionPanels(snapshot)).toEqual([
       expect.objectContaining({
         key: "example.colors:attention",
         title: "Mini Zen",
+        icon: "notebook-pen",
         document: publishedDocument,
         unsupportedReason: null,
       }),

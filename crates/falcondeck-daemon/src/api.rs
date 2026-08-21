@@ -241,6 +241,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/speech/synthesize", post(speech_synthesize))
         .route("/api/extensions", get(extensions))
+        .route("/api/extensions/tools", get(extension_tools))
+        .route("/api/extensions/tools/invoke", post(invoke_extension_tool))
         .route(
             "/api/extensions/{extension_id}",
             axum::routing::patch(update_extension),
@@ -361,6 +363,20 @@ async fn speech_synthesize(
 
 async fn extensions(State(state): State<AppState>) -> Json<falcondeck_core::ExtensionSnapshot> {
     Json(state.extension_snapshot().await)
+}
+
+/// Dynamic tool catalogue for the `falcondeck-extensions` MCP bridge.
+async fn extension_tools(
+    State(state): State<AppState>,
+) -> Json<falcondeck_core::ExtensionAgentToolList> {
+    Json(state.extension_agent_tools().await)
+}
+
+async fn invoke_extension_tool(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::InvokeExtensionToolRequest>,
+) -> Result<Json<falcondeck_core::ExtensionToolResponse>, DaemonError> {
+    Ok(Json(state.invoke_extension_tool(request).await?))
 }
 
 async fn update_extension(

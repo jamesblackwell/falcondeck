@@ -4,7 +4,7 @@ Status: canonical architecture and implementation plan. The v0 foundation and
 Kanban vertical slice, scoped declarative UI v1, trusted official React
 frontends, standalone panels, bounded lifecycle events, and permission-gated
 summary reads are implemented; later capabilities are explicitly tracked
-below. Last reconciled with the code on 2026-08-18.
+below. Last reconciled with the code on 2026-08-21.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -13,7 +13,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 ### Implemented baseline
 
-- bundled catalog and manifest discovery, with Kanban enabled by default;
+- bundled catalog and manifest discovery, with Kanban and Scratch pad enabled
+  by default;
 - checked-in manifest schema and machine-readable validation diagnostics;
 - daemon-owned enablement, namespaced JSON storage, bounded view projections,
   generic action routing, snapshot fields, sequenced events, HTTP, and relay RPC;
@@ -39,15 +40,33 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   reduction, local HTTP and relay RPC mutation, and desktop grant controls;
 - the bundled, disabled-by-default Mini Zen proof extension, using public event,
   thread-summary, storage, and panel APIs with a useful pre-grant fallback;
+- the bundled, enabled-by-default Scratch pad notes panel, using private
+  storage, a declared action, and a trusted React editor on desktop and
+  remote web;
+- optional host-owned panel icons from a bounded Lucide name allowlist,
+  rendered in desktop and remote-web sidebar navigation;
 - `packages/extension-testing`, with deterministic public-SDK activation,
   storage, actions, view publications, failure injection, declaration checks,
   daemon-equivalent limits, and atomic rollback;
+- generic agent-tool registration: manifest-declared `agentTools`, the
+  `agent-tools:register` grant, a dedicated `falcondeck-extensions` MCP bridge
+  whose catalogue is discovered per session, and daemon-supplied thread and
+  workspace context on every call;
+- thread-scoped `composerSuggestions`: a bounded, daemon-validated projection
+  of 1–5 next actions, retired by the daemon at every turn-start boundary,
+  derived in `packages/client-core`, and rendered as one compact pill above the
+  composer in desktop, remote web, and mobile;
+- the bundled, enabled-by-default Follow-up suggestions extension, granted by
+  catalog policy on first discovery;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
 third-party trusted-frontend building or loading,
-permissions beyond summary-only `threads:read`, the remaining declarative form
+permissions beyond summary-only `threads:read` and `agent-tools:register`,
+direct shell execution from an extension tool, trusted extension frontends for
+third parties, persistent suggestion dismissals, Ask User Question, more than
+one visible suggestion pill, the remaining declarative form
 primitives and mobile renderer,
 migrations/transactions beyond atomic
 action commits, the full `create|test|dev|pack` CLI, archive signing/update, and
@@ -81,6 +100,8 @@ are therefore more important than prose alone.
 ## 2. Terminology
 
 - **Connector**: a tool exposed to an agent, such as an MCP server or skill.
+- **Bridge**: the built-in `falcondeck-extensions` MCP server. It publishes
+  enabled extensions' declared tools to a harness and owns no state of its own.
 - **Extension**: code that extends FalconDeck itself with UI, state, actions,
   events, automations, or agent-facing tools.
 - **Host**: the Deno sidecar supervised by the daemon. It executes extension
@@ -130,7 +151,8 @@ crates/
 extensions/
   official/
     thread-tags/
-    notepad/
+    scratch-pad/
+    follow-up-suggestions/
   examples/
     hello-panel/
   catalog.json                   # FalconDeck-owned bundling/default policy
@@ -178,9 +200,20 @@ extension cannot declare itself trusted or default-enabled in its manifest.
 Initial policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
+- `falcondeck.scratch-pad`: bundled and enabled by default as a personal
+  Markdown notes panel. It requests no permissions.
 - `falcondeck.mini-zen`: bundled but disabled by default so enabling the
   opinionated panel remains an explicit choice; its requested `threads:read`
   permission is still denied until separately granted.
+- `falcondeck.follow-up-suggestions`: bundled and enabled by default, and the
+  first package to use a catalog `defaultGrantedPermissions` entry. Its
+  `agent-tools:register` grant is applied once, on first discovery; afterwards
+  the daemon-owned grant set is the only authority, so a revoked permission is
+  never silently re-granted by a later restart or upgrade.
+
+`defaultGrantedPermissions` is distribution policy for bundled official
+packages. A manifest cannot claim it, and it never widens what the manifest
+declared.
 
 ## 5. Manifest contract
 
@@ -201,7 +234,7 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
     "sidebarFilters": [
       { "id": "tags", "title": "Stages", "view": "tag-index" }
     ],
-    "panels": [{ "id": "board", "title": "Kanban", "view": "kanban-board" }]
+    "panels": [{ "id": "board", "title": "Kanban", "view": "kanban-board", "icon": "kanban" }]
   },
   "permissions": ["threads:read"]
 }
@@ -212,8 +245,36 @@ semantic version, supported extension API range, backend entrypoint, declared
 contributions, and a permissions array. `frontend` is optional and currently
 accepted only as a build input for bundled official packages. The v0.1
 validator accepts at most 16
-unique permissions and currently recognizes only `threads:read`; unknown or
-duplicate permissions are rejected rather than run without enforcement.
+unique permissions and currently recognizes `threads:read` and
+`agent-tools:register`; unknown or duplicate permissions are rejected rather
+than run without enforcement.
+
+Two contribution kinds have no client-rendered declarative UI of their own:
+
+```json
+{
+  "contributes": {
+    "agentTools": [
+      {
+        "id": "suggest-follow-ups",
+        "title": "Suggest follow-ups",
+        "description": "Offer the user 1-5 short next actions …",
+        "inputSchema": { "type": "object", "properties": {} }
+      }
+    ],
+    "composerSuggestions": [{ "id": "follow-ups", "view": "follow-ups" }]
+  },
+  "permissions": ["agent-tools:register"]
+}
+```
+
+`agentTools` entries are capped at 8 per extension, need a 16–1024 character
+model-facing description and an `inputSchema` describing a JSON object under
+8 KiB, and require the `agent-tools:register` permission — a manifest that
+declares tools without it fails validation rather than registering nothing.
+`composerSuggestions` binds a declared thread-scoped view id to the
+host-rendered composer pill and accepts no `ui` or `icon`, because the pill is
+a host surface rather than an extension-authored document.
 
 Paths are package-relative, cannot traverse (including through symlinks), and
 must resolve beneath the installed root. Unknown manifest and contribution
@@ -252,11 +313,12 @@ capabilities:
 | `actions`   | Handle invocations from declared UI actions                 |
 | `events`    | Subscribe to bounded identifier-only lifecycle events       |
 | `threads`   | List summary-only threads with a `threads:read` grant       |
+| `tools`     | Handle agent tool calls with an `agent-tools:register` grant |
+| `composer`  | Publish or clear a thread's bounded next-action offers      |
 | `commands`  | Planned: slash or command-palette commands                  |
 
-Later facets may add schedules, notifications, agent tools, turn control,
-workspace files, and mediated network access. Plausibility alone does not put a
-facet into v1.
+Later facets may add schedules, notifications, turn control, workspace files,
+and mediated network access. Plausibility alone does not put a facet into v1.
 
 The v0.1 action registration is process-lifetime and returns `void`; disabling
 the extension terminates that isolated host. `events.on(type, handler)` returns
@@ -264,7 +326,7 @@ an idempotent disposable. Event handlers are ordered within one extension and
 their storage/view effects commit atomically through the same daemon boundary
 as actions.
 
-The initial event union contains `thread.updated`, `turn.ended`,
+The event union contains `thread.updated`, `turn.start`, `turn.ended`,
 `attention.opened`, and `attention.resolved`. Payloads contain only stable
 workspace, thread, turn, and request identifiers. Status, title, preview,
 prompt, transcript, and resolution fields are deliberately absent. An
@@ -278,6 +340,63 @@ workspace id, a title truncated to 256 characters, status, updated timestamp,
 and pending approval/question counts. Message previews, prompts, transcripts,
 turn content, agent configuration, and filesystem paths never cross this v1
 boundary.
+
+### Agent tools
+
+`context.tools.register(id, handler)` handles calls to a manifest-declared
+`agentTools` entry. The handler receives the agent's arguments plus the thread
+and workspace the calling turn belongs to:
+
+```ts
+context.tools.register("suggest-follow-ups", async ({ input, threadId }) => {
+  // …
+});
+```
+
+Registration fails closed without the `agent-tools:register` grant. Context is
+supplied by the daemon from the harness spawn, never chosen by the agent, so a
+tool call cannot be aimed at another conversation. A handler that raises is an
+ordinary rejection — the message goes back to the calling agent as a tool error
+and the extension keeps its healthy status, because models routinely pass
+arguments an extension declines. Only a host that dies, times out, or breaks
+the protocol marks the extension failed.
+
+The same MCP bridge also publishes a daemon-owned `falcondeck_rename_thread`
+tool whenever it is injected. That tool is not an extension: it applies a
+3–7 word title to the calling thread so an agent can retitle a conversation
+that has moved on. The rename dialog's Suggest title control is a separate,
+user-initiated path that generates a candidate through the same cheap utility
+models as auto-titling and fills the field without saving.
+
+### Composer suggestions
+
+`context.composer.publish(...)` offers a thread between one and five next
+actions; `context.composer.clear(...)` withdraws them.
+
+```ts
+await context.composer.publish({
+  viewId: "follow-ups",
+  threadId,
+  actions: [{ id: "ship", label: "Ship it", prompt: "Open a pull request." }],
+  preferredActionId: "ship",
+});
+```
+
+The bounds are owned by Rust and mirrored in the SDK and the fake host: 1–5
+actions, labels of at most 30 characters, an optional single-line description
+of at most 120, prompts of at most 512, and a `preferredActionId` that must
+name one of the offered actions. An out-of-bounds set is rejected at the daemon
+boundary rather than degrading across three renderers. Publishing an empty
+`actions` array is the documented way to clear a thread's offers.
+
+Staleness is the daemon's rule, not the extension's. Offers describe what to do
+*next*, so the daemon retires a thread's composer-suggestion projections at its
+turn-start boundary — the one provider-independent path every steer, queued
+turn, and fresh dispatch passes through. Retirement emits the same
+view-retraction event as a permission revoke, so every client drops the
+projection rather than rendering an empty offer. An extension that tried to
+manage this itself could only be right for harnesses that report a
+turn-started notification, so extensions should keep no staleness state.
 
 `defineExtensionUi(...)` type-checks UI v1 documents while preserving literal
 component, control, view, and action identifiers. The same checked document
@@ -320,7 +439,7 @@ v0.1 limits action input to 64 KiB, each published view to 16 KiB, one action
 to 256 publications, retained view state to 4 MiB per extension, and a host
 response to 2 MiB. Large-data on-demand fetching is planned; until it exists,
 extensions must publish summaries rather than payloads near these ceilings.
-This split lets clients render tags or notepad summaries while the host
+This split lets clients render tags or scratch-pad summaries while the host
 restarts without broadcasting private data.
 
 ## 8. Declarative UI
@@ -348,19 +467,34 @@ target. Select bindings carry a declared thread-scoped view id, a bounded safe
 object path, and the `includes_any` comparison; clients keep the selection
 itself local and never evaluate extension expressions.
 
+Composer suggestions are a host surface rather than a declarative document:
+clients render exactly one compact pill above the composer, and only once the
+associated turn is idle. The pill's primary segment submits its prompt as its
+own turn without touching the user's draft; a chevron opens the alternatives
+(a popover on desktop and remote web, a content-height bottom sheet on mobile);
+a cross dismisses the offer for that turn. Dismissals are keyed by offer and
+deliberately not persisted, so the next turn's suggestions arrive on their own.
+When more than one enabled extension offers suggestions for the same thread,
+clients render the alphabetically first extension's set, so the choice does not
+depend on projection arrival order.
+
 The generic web hosts currently consume `sidebarFilters` and `panels`. A panel
 is a titled, named full-main-area surface and uses the same bounded global UI
-document rules as other view contributions. Static manifest UI lets a lazy
-extension render on first paint; a synchronized global projection with the
-contribution's view id may replace that document later. Desktop registers core
-Activity and Settings takeovers plus extension panels by stable view id;
-remote web renders the same panel/navigation primitives. Kanban uses a dedicated
-stage filter so custom stages stay in sync, while other extensions still use
-the generic filter path. Its thread menu action and row decoration remain
-on their existing shared compatibility adapter. Header/composer actions,
-forms, modal hosts, colour picker, Markdown, icons, and the full mobile
-vocabulary remain planned rather than silently treated as implemented. Mobile
-shows attributed notices for enabled filters and panels, including the exact
+document rules as other view contributions. Panels may declare an optional
+`icon` from the host-owned Lucide allowlist (`activity`, `blocks`, `clock`,
+`file-text`, `kanban`, `notebook`, `notebook-pen`, `sticky-note`); unknown
+names fail validation, and older clients fall back to the generic panel icon.
+Static manifest UI lets a lazy extension render on first paint; a synchronized
+global projection with the contribution's view id may replace that document
+later. Desktop registers core Activity and Settings takeovers plus extension
+panels by stable view id; remote web renders the same panel/navigation
+primitives. Kanban uses a dedicated stage filter so custom stages stay in
+sync, while other extensions still use the generic filter path. Its thread
+menu action and row decoration remain on their existing shared compatibility
+adapter. Header/composer actions, forms, modal hosts, colour picker, Markdown,
+declarative-UI icons, and the full mobile vocabulary remain planned rather
+than silently treated as implemented. Mobile shows attributed notices for
+enabled filters and panels, including the exact
 panel-not-supported-here fallback; it does not silently discard either surface.
 
 The renderer supplies accessibility and keyboard semantics, theme tokens,
@@ -422,7 +556,8 @@ The daemon owns this lifecycle:
 3. Validate static declarative UI and render it without starting extension code.
 4. Lazily start that extension's host on its first executable action or queued event.
 5. Activate the package and collect its action registrations and event subscriptions.
-6. Route a declared action or identifier-only event with bounded input and a private-state copy.
+6. Route a declared action, agent tool call, or identifier-only event with
+   bounded input and a private-state copy.
 7. Validate and atomically persist the returned storage and view projections.
 8. Publish status and view changes through the unified event stream.
 9. Dispose the process on disable, shutdown, timeout, or protocol failure.
@@ -466,7 +601,6 @@ Broader planned families are:
 - `workspaces:read` and `workspace-files:read|write`;
 - `network:<origin>`;
 - `notifications:send`;
-- `agent-tools:register`;
 - lifecycle event subscriptions by event family.
 
 The daemon checks every operation, not only activation. Lifecycle events remain
@@ -474,9 +608,23 @@ identifier-only even with a grant; extensions explicitly request the reduced
 summary list through the gated SDK facet. Suspending upgrades that request new
 permissions remains a later upgrade-system gate.
 
+The second explicit capability is `agent-tools:register`. It lets an extension
+publish its manifest-declared tools to agent harnesses through the built-in
+`falcondeck-extensions` MCP bridge. Both the grant and enablement are checked
+when the bridge lists tools and again when the daemon routes a call, so:
+
+- disabling an extension or revoking the grant removes its tools from the next
+  harness spawn's catalogue; and
+- a harness that cached the old list has its call rejected immediately, before
+  any extension code runs.
+
+The bridge is only injected into a spawn when at least one enabled extension
+currently publishes a granted tool, so a user with none pays for no subprocess.
+
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
-official extensions stay within baseline capabilities unless the product has
-an explicit first-run consent design.
+official extensions stay within baseline capabilities unless the catalog grants
+them a named permission as distribution policy — today only
+`falcondeck.follow-up-suggestions` and only `agent-tools:register`.
 
 ## 11. Installation and enablement
 
@@ -699,7 +847,7 @@ Gate:
 
 ### Phase 6 — expand from demonstrated demand
 
-Candidates include standalone panels for Notepad, settings, conversation cards,
+Candidates include richer Scratch pad agent sharing, settings, conversation cards,
 automations, agent tools, schedules, and notifications. Each new capability
 needs a permission, limits, fake-host support, client fallback, and official or
 example consumer.

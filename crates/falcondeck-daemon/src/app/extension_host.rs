@@ -89,6 +89,24 @@ struct HostActionRequest<'a> {
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostToolRequest<'a> {
+    request_id: u64,
+    method: &'static str,
+    extension_id: &'a str,
+    entrypoint: String,
+    tool_id: &'a str,
+    arguments: &'a Value,
+    /// Daemon-supplied call context. Agents never choose which thread a tool
+    /// call lands on; the harness spawn decides it.
+    thread_id: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    storage: &'a BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_summaries: Option<&'a [ExtensionThreadSummary]>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub(super) enum ExtensionEvent {
@@ -98,6 +116,15 @@ pub(super) enum ExtensionEvent {
         workspace_id: String,
         #[serde(rename = "threadId")]
         thread_id: String,
+    },
+    #[serde(rename = "turn.start")]
+    TurnStarted {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
     },
     #[serde(rename = "turn.ended")]
     TurnEnded {
@@ -156,6 +183,35 @@ struct HostActionResponse {
     error: Option<String>,
 }
 
+/// Why a tool call did not produce a result.
+///
+/// Agent-facing tools are called by models, which routinely pass arguments an
+/// extension rejects. A rejection is normal traffic and must not mark the
+/// extension broken; only a host that died, timed out, or spoke the protocol
+/// wrongly is an extension failure worth surfacing in Settings.
+#[derive(Debug)]
+pub(super) enum ExtensionToolError {
+    /// Extension code raised. The message goes back to the calling agent.
+    Rejected(String),
+    /// The host itself failed.
+    Failed(DaemonError),
+}
+
+/// Wraps a host-level failure, which is always an extension failure.
+fn fail(error: DaemonError) -> ExtensionToolError {
+    ExtensionToolError::Failed(error)
+}
+
+impl From<ExtensionToolError> for DaemonError {
+    fn from(error: ExtensionToolError) -> Self {
+        match error {
+            ExtensionToolError::Rejected(message) => DaemonError::BadRequest(message),
+            ExtensionToolError::Failed(error) => error,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct ExtensionHostActionResult {
     pub(super) result: Value,
     pub(super) storage: BTreeMap<String, Value>,
@@ -176,15 +232,10 @@ impl ExtensionHost {
         }
     }
 
-    pub(super) async fn invoke(
-        &mut self,
-        package: &ExtensionPackage,
-        action_id: &str,
-        target: Option<&ExtensionViewScope>,
-        input: &Value,
-        storage: &BTreeMap<String, Value>,
-        thread_summaries: Option<&[ExtensionThreadSummary]>,
-    ) -> Result<ExtensionHostActionResult, DaemonError> {
+    /// Makes sure a live host process exists and is allowed to read this
+    /// package's root. A newly seen root needs a restart because the Deno
+    /// read allowlist is fixed at spawn.
+    async fn prepare(&mut self, package: &ExtensionPackage) -> Result<(), DaemonError> {
         let package_root = package
             .entrypoint
             .parent()
@@ -195,13 +246,30 @@ impl ExtensionHost {
         if self.allowed_package_roots.insert(package_root) && self.process.is_some() {
             self.stop().await;
         }
-        self.ensure_started().await?;
+        self.ensure_started().await
+    }
+
+    fn take_request_id(&mut self) -> u64 {
         let request_id = self.next_request_id;
         self.next_request_id = if request_id >= MAX_SAFE_JAVASCRIPT_INTEGER {
             1
         } else {
             request_id + 1
         };
+        request_id
+    }
+
+    pub(super) async fn invoke(
+        &mut self,
+        package: &ExtensionPackage,
+        action_id: &str,
+        target: Option<&ExtensionViewScope>,
+        input: &Value,
+        storage: &BTreeMap<String, Value>,
+        thread_summaries: Option<&[ExtensionThreadSummary]>,
+    ) -> Result<ExtensionHostActionResult, DaemonError> {
+        self.prepare(package).await?;
+        let request_id = self.take_request_id();
         let request = HostActionRequest {
             request_id,
             method: "action.invoke",
@@ -223,6 +291,44 @@ impl ExtensionHost {
         })
     }
 
+    /// Routes one agent tool call into the extension's isolated host, using
+    /// the same storage/publication commit path as an action.
+    pub(super) async fn invoke_tool(
+        &mut self,
+        package: &ExtensionPackage,
+        tool_id: &str,
+        arguments: &Value,
+        thread_id: Option<&str>,
+        workspace_id: Option<&str>,
+        storage: &BTreeMap<String, Value>,
+        thread_summaries: Option<&[ExtensionThreadSummary]>,
+    ) -> Result<ExtensionHostActionResult, ExtensionToolError> {
+        self.prepare(package)
+            .await
+            .map_err(ExtensionToolError::Failed)?;
+        let request_id = self.take_request_id();
+        let request = HostToolRequest {
+            request_id,
+            method: "tool.invoke",
+            extension_id: &package.id,
+            entrypoint: package.entrypoint.to_string_lossy().into_owned(),
+            tool_id,
+            arguments,
+            thread_id,
+            workspace_id,
+            storage,
+            thread_summaries,
+        };
+        let response = self
+            .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "tool")
+            .await?;
+        Ok(ExtensionHostActionResult {
+            result: response.result,
+            storage: response.storage,
+            published_views: response.published_views,
+        })
+    }
+
     pub(super) async fn dispatch_event(
         &mut self,
         package: &ExtensionPackage,
@@ -235,23 +341,8 @@ impl ExtensionHost {
                 "extension event exceeds {MAX_EXTENSION_EVENT_BYTES} bytes"
             )));
         }
-        let package_root = package
-            .entrypoint
-            .parent()
-            .ok_or_else(|| {
-                DaemonError::Process("extension entrypoint has no package root".to_string())
-            })?
-            .to_path_buf();
-        if self.allowed_package_roots.insert(package_root) && self.process.is_some() {
-            self.stop().await;
-        }
-        self.ensure_started().await?;
-        let request_id = self.next_request_id;
-        self.next_request_id = if request_id >= MAX_SAFE_JAVASCRIPT_INTEGER {
-            1
-        } else {
-            request_id + 1
-        };
+        self.prepare(package).await?;
+        let request_id = self.take_request_id();
         let request = HostEventRequest {
             request_id,
             method: "event.dispatch",
@@ -277,12 +368,13 @@ impl ExtensionHost {
         request_id: u64,
         request_timeout: Duration,
         operation: &str,
-    ) -> Result<HostActionResponse, DaemonError> {
-        let line = serde_json::to_vec(request)?;
-        let process = self
-            .process
-            .as_mut()
-            .ok_or_else(|| DaemonError::Process("extension host unavailable".to_string()))?;
+    ) -> Result<HostActionResponse, ExtensionToolError> {
+        let line = serde_json::to_vec(request).map_err(|error| fail(error.into()))?;
+        let process = self.process.as_mut().ok_or_else(|| {
+            fail(DaemonError::Process(
+                "extension host unavailable".to_string(),
+            ))
+        })?;
         let response = timeout(request_timeout, async {
             process.stdin.write_all(&line).await?;
             process.stdin.write_all(b"\n").await?;
@@ -296,23 +388,24 @@ impl ExtensionHost {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 self.stop().await;
-                return Err(error);
+                return Err(fail(error));
             }
             Err(_) => {
                 self.stop().await;
-                return Err(DaemonError::Process(format!(
+                return Err(fail(DaemonError::Process(format!(
                     "extension {operation} timed out"
-                )));
+                ))));
             }
         };
         if response.request_id != request_id {
             self.stop().await;
-            return Err(DaemonError::Process(
+            return Err(fail(DaemonError::Process(
                 "extension host returned a mismatched request id".to_string(),
-            ));
+            )));
         }
         if !response.ok {
-            return Err(DaemonError::Process(
+            // Extension code raised and the host is still healthy.
+            return Err(ExtensionToolError::Rejected(
                 response
                     .error
                     .unwrap_or_else(|| format!("extension {operation} failed")),
@@ -471,6 +564,85 @@ mod tests {
 
         assert!(Arc::ptr_eq(&first, &first_again));
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn official_follow_ups_publishes_and_clears_through_the_tool_contract() {
+        let deno = resolve_agent_binary("deno", "deno").executable;
+        if Command::new(deno).arg("--version").output().await.is_err() {
+            return;
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let package = ExtensionPackage {
+            id: "falcondeck.follow-up-suggestions".to_string(),
+            entrypoint: root.join("extensions/official/follow-up-suggestions/server.ts"),
+        };
+        let state_path = std::env::temp_dir().join("falcondeck-follow-ups-host-test/state.json");
+        let mut registry = super::super::extensions::ExtensionRegistry::new(&state_path);
+        registry
+            .restore()
+            .await
+            .expect("runtime support assets should restore");
+        let mut host = ExtensionHost::new(&state_path, "deno".to_string());
+
+        let published = host
+            .invoke_tool(
+                &package,
+                "suggest-follow-ups",
+                &serde_json::json!({
+                    "actions": [
+                        { "id": "ship", "label": "Ship it", "prompt": "Open a pull request." },
+                        { "id": "test", "label": "Run the tests", "prompt": "Run the suite." }
+                    ],
+                    "preferredActionId": "test"
+                }),
+                Some("thread-1"),
+                Some("workspace-1"),
+                &BTreeMap::new(),
+                None,
+            )
+            .await
+            .expect("a bounded offer set should publish");
+        assert_eq!(
+            published.result,
+            serde_json::json!({ "published": true, "count": 2 })
+        );
+        let view = published
+            .published_views
+            .first()
+            .expect("the tool should publish one thread-scoped view");
+        assert_eq!(view.view_id, "follow-ups");
+        assert_eq!(
+            view.scope.as_ref().map(|scope| scope.kind.as_str()),
+            Some("thread")
+        );
+        assert_eq!(
+            view.value.get("preferredActionId"),
+            Some(&serde_json::json!("test"))
+        );
+
+        // A model passing a label the contract rejects is a rejection, not an
+        // extension failure: the host stays up to serve the next call.
+        let rejected = host
+            .invoke_tool(
+                &package,
+                "suggest-follow-ups",
+                &serde_json::json!({
+                    "actions": [{ "id": "a", "label": "x".repeat(31), "prompt": "Do it." }]
+                }),
+                Some("thread-1"),
+                None,
+                &published.storage,
+                None,
+            )
+            .await
+            .expect_err("an over-long label must be refused");
+        assert!(matches!(rejected, ExtensionToolError::Rejected(_)));
+
+        host.stop().await;
+        // Staleness is the daemon's rule, not the extension's, so this
+        // package stores nothing between calls.
+        assert!(published.storage.is_empty());
     }
 
     #[tokio::test]

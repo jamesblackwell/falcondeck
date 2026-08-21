@@ -133,7 +133,7 @@ export const ThreadItem = memo(
           </span>
           <span
             className={cn(
-              "fd-type-label min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
+              "fd-type-supporting min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
               isSelected
                 ? "text-fg-primary"
                 : "text-fg-secondary group-hover:text-fg-primary",

@@ -29,7 +29,15 @@ async fn main() {
         .expect("connect");
     eprintln!("connected");
     let session_id = runtime
-        .ensure_session("steer-probe-thread", None, &cwd, None, None, None, None)
+        .ensure_session(
+            "steer-probe-thread",
+            None,
+            &cwd,
+            None,
+            &Default::default(),
+            None,
+            None,
+        )
         .await
         .expect("session");
     eprintln!("session: {session_id}");

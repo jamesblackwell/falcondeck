@@ -8,6 +8,7 @@ import { unified } from "unified";
 
 import {
   agentDirectiveLabel,
+  isMermaidLanguage,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitSlashCommandSegments,
@@ -17,6 +18,7 @@ import {
 
 import { Text } from "@/components/ui";
 import { CodeBlock } from "./CodeBlock";
+import { MermaidBlock } from "./MermaidBlock";
 import { useExternalUrl } from "./useExternalUrl";
 
 interface MarkdownRendererProps {
@@ -634,6 +636,7 @@ export function renderMarkdownBlocks(
   definitions: MarkdownDefinitions,
   keyPrefix = "markdown",
   highlightCommands = false,
+  allowMermaid = true,
 ): ReactNode[] {
   const blocks = nodes ?? [];
   const renderedIndexes = blocks.flatMap((node, index) =>
@@ -665,6 +668,7 @@ export function renderMarkdownBlocks(
           blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
       },
       highlightCommands,
+      allowMermaid,
     ),
   );
 }
@@ -675,6 +679,7 @@ function renderMarkdownBlock(
   key: string,
   position: { isFirst: boolean; isLast: boolean; previousType: string | null },
   highlightCommands: boolean,
+  allowMermaid: boolean,
 ): ReactNode {
   switch (node.type) {
     case "blockquote":
@@ -686,6 +691,7 @@ function renderMarkdownBlock(
               definitions,
               key,
               highlightCommands,
+              allowMermaid,
             )}
           </View>
         </View>
@@ -703,10 +709,14 @@ function renderMarkdownBlock(
             position.isLast ? styles.codeBlockLast : undefined,
           ]}
         >
-          <CodeBlock
-            code={node.value ?? ""}
-            language={node.lang ?? undefined}
-          />
+          {allowMermaid && isMermaidLanguage(node.lang) ? (
+            <MermaidBlock code={node.value ?? ""} />
+          ) : (
+            <CodeBlock
+              code={node.value ?? ""}
+              language={node.lang ?? undefined}
+            />
+          )}
         </View>
       );
     case "definition":
@@ -728,6 +738,7 @@ function renderMarkdownBlock(
             definitions,
             key,
             highlightCommands,
+            allowMermaid,
           )}
         </View>
       );
@@ -772,6 +783,7 @@ function renderMarkdownBlock(
                   definitions,
                   `${key}-item-${index}`,
                   highlightCommands,
+                  allowMermaid,
                 )}
               </View>
             </View>
@@ -805,6 +817,7 @@ function renderMarkdownBlock(
             definitions,
             key,
             highlightCommands,
+            allowMermaid,
           )}
         </View>
       );
@@ -857,6 +870,7 @@ export const MarkdownRenderer = memo(
             definitions,
             `segment-${index}`,
             highlightCommands,
+            !streaming,
           ),
         );
       });

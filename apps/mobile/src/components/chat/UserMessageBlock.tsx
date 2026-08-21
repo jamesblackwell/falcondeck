@@ -1,5 +1,5 @@
-import { memo, useState } from "react";
-import { Pressable, View } from "react-native";
+import { memo, useCallback, useRef, useState } from "react";
+import { Pressable, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { ChevronDown, ChevronUp } from "lucide-react-native";
 
@@ -16,6 +16,13 @@ type UserMessage = Extract<ConversationItem, { kind: "user_message" }>;
     handoff prompt) clamps behind a fade instead of filling the screen. */
 const COLLAPSED_USER_MESSAGE_MAX_HEIGHT = 160;
 
+/** Explicit line breaks are a lower bound on height; wrapping can only add
+    more. Starting already clamped avoids a one-frame flash of the full wall
+    of text — and the FlashList jump that flash used to trigger. */
+function looksLong(text: string): boolean {
+  return text.length > 600 || text.split("\n").length > 6;
+}
+
 interface UserMessageBlockProps {
   item: UserMessage;
 }
@@ -27,7 +34,13 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   const collapseLongMessages = useCollapseLongUserMessages();
   const collapsible = collapseLongMessages && item.text.trim().length > 0;
   const [expanded, setExpanded] = useState(false);
-  const [textHeight, setTextHeight] = useState(0);
+  const [overflowing, setOverflowing] = useState(
+    () => collapsible && looksLong(item.text),
+  );
+  // A collapsed bubble's onLayout often reports the cap, not the content.
+  // Once we've seen a real tall layout, ignore those capped reports so we
+  // don't un-collapse and start a measure loop.
+  const seenTallRef = useRef(false);
   // FlashList recycles instances across blocks; without this render-phase
   // reset, one expanded message leaks its state (and stale measurement) into
   // whichever user message the cell renders next.
@@ -35,14 +48,25 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   if (appliedItemId !== item.id) {
     setAppliedItemId(item.id);
     setExpanded(false);
-    setTextHeight(0);
+    setOverflowing(collapseLongMessages && looksLong(item.text));
+    seenTallRef.current = false;
   }
 
-  // The text keeps its natural height inside the clamped wrapper, so onLayout
-  // reports the unclamped size even while collapsed.
-  const overflowing =
-    collapsible && textHeight > COLLAPSED_USER_MESSAGE_MAX_HEIGHT + 1;
-  const collapsed = overflowing && !expanded;
+  const onTextLayout = useCallback((event: LayoutChangeEvent) => {
+    const height = event.nativeEvent.layout.height;
+    if (height <= 0) return;
+    if (height > COLLAPSED_USER_MESSAGE_MAX_HEIGHT + 1) {
+      seenTallRef.current = true;
+      setOverflowing(true);
+      return;
+    }
+    if (seenTallRef.current) return;
+    if (height < COLLAPSED_USER_MESSAGE_MAX_HEIGHT - 1) {
+      setOverflowing(false);
+    }
+  }, []);
+
+  const collapsed = collapsible && overflowing && !expanded;
 
   return (
     <View style={styles.row}>
@@ -50,11 +74,9 @@ export const UserMessageBlock = memo(function UserMessageBlock({
         <AttachmentPreviewList attachments={item.attachments} />
         <View style={collapsed ? styles.clampedText : null}>
           <View
-            onLayout={
-              collapsible
-                ? (event) => setTextHeight(event.nativeEvent.layout.height)
-                : undefined
-            }
+            collapsable={false}
+            onLayout={collapsible ? onTextLayout : undefined}
+            style={styles.measure}
           >
             <MarkdownRenderer
               text={item.text}
@@ -124,6 +146,9 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
+  },
+  measure: {
+    flexShrink: 0,
   },
   clampedText: {
     maxHeight: COLLAPSED_USER_MESSAGE_MAX_HEIGHT,

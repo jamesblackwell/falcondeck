@@ -57,7 +57,8 @@
       {
         "id": "board",
         "title": "Kanban",
-        "view": "kanban-board"
+        "view": "kanban-board",
+        "icon": "kanban"
       }
     ]
   },

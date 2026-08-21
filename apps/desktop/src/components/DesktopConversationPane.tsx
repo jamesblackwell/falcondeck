@@ -5,6 +5,8 @@ import {
   wasTurnInterruptedByShutdown,
 } from "@falcondeck/client-core";
 import type {
+  ComposerSuggestion,
+  ComposerSuggestionOffer,
   ConversationItem,
   FalconDeckPreferences,
   InteractiveRequest,
@@ -21,6 +23,7 @@ import {
   OperationalNotice,
   PlanBar,
   PromptInput,
+  ComposerSuggestionPill,
   QueuedTurns,
   type OpenFileDiff,
   type QuotedSelection,
@@ -69,6 +72,9 @@ type DesktopConversationPaneProps = {
   onSteerQueuedTurn?: (queuedId: string) => void;
   onEditQueuedTurn?: (queuedId: string, text: string) => void;
   onReorderQueuedTurns?: (queuedIds: string[]) => void;
+  composerSuggestions?: ComposerSuggestionOffer | null;
+  onSubmitComposerSuggestion?: (suggestion: ComposerSuggestion) => void;
+  onDismissComposerSuggestions?: () => void;
   queuedAttachmentBaseUrl?: string | null;
   canSteerQueuedTurn?: boolean;
   onOpenFile?: OpenFileDiff | null;
@@ -123,6 +129,9 @@ export function DesktopConversationPane({
   onSteerQueuedTurn,
   onEditQueuedTurn,
   onReorderQueuedTurns,
+  composerSuggestions,
+  onSubmitComposerSuggestion,
+  onDismissComposerSuggestions,
   queuedAttachmentBaseUrl,
   canSteerQueuedTurn,
   onOpenFile,
@@ -236,6 +245,13 @@ export function DesktopConversationPane({
                   `${queuedAttachmentBaseUrl}/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/threads/${encodeURIComponent(selectedThreadId)}/queue/${encodeURIComponent(queuedId)}/attachment-preview`
               : undefined
           }
+        />
+      ) : null}
+      {onSubmitComposerSuggestion && onDismissComposerSuggestions ? (
+        <ComposerSuggestionPill
+          offer={composerSuggestions ?? null}
+          onSubmit={onSubmitComposerSuggestion}
+          onDismiss={onDismissComposerSuggestions}
         />
       ) : null}
       <PromptInput

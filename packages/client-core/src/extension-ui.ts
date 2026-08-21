@@ -97,6 +97,7 @@ export type ExtensionPanelDefinition = {
   extensionName: string;
   contributionId: string;
   title: string;
+  icon?: string | null;
   document: ExtensionUiDocument | null;
   unsupportedReason: string | null;
 };
@@ -516,6 +517,7 @@ export function deriveExtensionPanels(
         extensionName: extension.name,
         contributionId: contribution.id,
         title: contribution.title ?? extension.name,
+        icon: contribution.icon ?? null,
         document: normalized?.ok ? normalized.document : null,
         unsupportedReason:
           normalized == null

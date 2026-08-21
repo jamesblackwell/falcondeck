@@ -12,9 +12,11 @@ import {
   renderMarkdownBlocks,
   splitMessageSegments,
 } from "./MarkdownRenderer";
+import { setMermaidAssetLoader } from "./mermaidEngine";
 
 afterEach(() => {
   cleanup();
+  setMermaidAssetLoader(null);
   vi.restoreAllMocks();
 });
 
@@ -441,6 +443,28 @@ describe("MarkdownRenderer", () => {
     expect(textOf(emptyCodeBlock)).not.toContain("undefined");
     expect(textOf(partialLink)).toContain("OpenAI");
     expect(textOf(partialLink)).not.toContain("[OpenAI](");
+  });
+
+  it("renders mermaid fences as diagrams when the message is settled", async () => {
+    setMermaidAssetLoader(async () => "window.mermaid={}");
+    const renderer = renderComponent(
+      <MarkdownRenderer text={"```mermaid\nflowchart TD\n  A-->B\n```"} />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(textOf(renderer)).toContain("Source");
+    expect(textOf(renderer)).not.toContain("flowchart TD");
+  });
+
+  it("keeps mermaid as source while streaming", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        streaming
+        text={"```mermaid\nflowchart TD\n  A-->B\n```"}
+      />,
+    );
+    expect(textOf(renderer)).toContain("flowchart TD");
   });
 
   it("opens only safe markdown links", async () => {

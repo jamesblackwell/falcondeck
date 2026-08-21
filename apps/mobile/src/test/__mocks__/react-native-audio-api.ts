@@ -34,4 +34,11 @@ export class AudioContext {
 
 export class AudioBuffer {}
 
+export const mockAudioManager = {
+  setAudioSessionOptions: vi.fn(),
+  setAudioSessionActivity: vi.fn(async () => undefined),
+}
+
+export const AudioManager = mockAudioManager
+
 export const decodePCMInBase64 = vi.fn(async () => ({ duration: 0.02 }))

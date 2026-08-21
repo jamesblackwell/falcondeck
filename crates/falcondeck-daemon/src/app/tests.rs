@@ -2126,6 +2126,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
             },
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
@@ -2166,6 +2167,100 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
         .await
         .expect_err("empty threads cannot be titled");
     assert!(error.to_string().contains("enough conversation"));
+}
+
+#[tokio::test]
+async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let workspace_id = "workspace-1".to_string();
+    let thread_id = "thread-1".to_string();
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some(thread_id.clone()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [(
+                thread_id.clone(),
+                super::ManagedThread::new(ThreadSummary {
+                    id: thread_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    title: "Auth setup".to_string(),
+                    provider: AgentProvider::CODEX,
+                    native_session_id: None,
+                    provider_transport: None,
+                    handoff_from: None,
+                    origin: None,
+                    status: ThreadStatus::Idle,
+                    updated_at: Utc::now(),
+                    last_message_preview: None,
+                    latest_turn_id: None,
+                    latest_plan: None,
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    agent: ThreadAgentParams::default(),
+                    attention: ThreadAttention::default(),
+                    is_archived: false,
+                    is_pinned: false,
+                    goal: None,
+                    queued_turns: Vec::new(),
+                    variant: None,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        },
+    );
+
+    let tools = app.extension_agent_tools().await;
+    assert!(
+        tools
+            .tools
+            .iter()
+            .any(|tool| tool.name == super::BUILTIN_RENAME_THREAD_TOOL)
+    );
+
+    let response = app
+        .invoke_extension_tool(falcondeck_core::InvokeExtensionToolRequest {
+            name: super::BUILTIN_RENAME_THREAD_TOOL.to_string(),
+            arguments: json!({ "title": "Billing webhook" }),
+            thread_id: Some(thread_id.clone()),
+            workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+        })
+        .await
+        .expect("builtin rename should apply");
+    assert_eq!(response.result["renamed"], true);
+    assert_eq!(response.result["title"], "Billing webhook");
+
+    let handle = app.thread_summary(&workspace_id, &thread_id).await.unwrap();
+    assert_eq!(handle.title, "Billing webhook");
 }
 
 #[test]
@@ -2248,6 +2343,7 @@ async fn update_thread_title_marks_thread_as_manual() {
             },
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
@@ -2863,6 +2959,10 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
         .unwrap();
     assert!(after.attention.unread);
     assert_eq!(after.attention.last_read_seq, 6);
+    assert!(
+        after.updated_at > before.updated_at,
+        "mark-unread must stamp a newer updated_at so remote replay of the pre-read summary cannot win",
+    );
     assert_eq!(
         after.attention.level,
         falcondeck_core::ThreadAttentionLevel::Unread
@@ -3409,6 +3509,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             summary: live_workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
@@ -3517,6 +3618,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
@@ -3607,6 +3709,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [codex, claude]
@@ -3982,6 +4085,7 @@ async fn insert_claude_workspace_with_session(
             },
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
@@ -4680,6 +4784,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
             },
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [
@@ -4893,6 +4998,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-e".to_string(), super::ManagedThread::new(thread))]
@@ -5000,6 +5106,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-q".to_string(), super::ManagedThread::new(thread))]
@@ -5168,6 +5275,7 @@ async fn busy_thread_app(
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
@@ -5595,6 +5703,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-hook".to_string(), super::ManagedThread::new(thread))]

@@ -27,7 +27,8 @@ import {
 } from '@/features/speech/speechSettings'
 import {
   getDesktopSpeechStatus,
-  transcribeWithDesktopOpenRouter,
+  transcriptionProgressLabel,
+  transcribeWithDesktopOpenRouterRetrying,
 } from '@/features/speech/openRouterTranscription'
 import {
   triggerComposerSelectionHaptic,
@@ -119,6 +120,7 @@ export function InlineVoiceRecorder({
   )
   const [levels, setLevels] = useState<number[]>([])
   const [localSeconds, setLocalSeconds] = useState(0)
+  const [transcriptionAttempt, setTranscriptionAttempt] = useState(1)
   const transcriptRef = useRef('')
   const finalizedTranscriptRef = useRef('')
   const cancelledRef = useRef(false)
@@ -181,13 +183,19 @@ export function InlineVoiceRecorder({
 
   const transcribeCloud = useCallback(
     async (uri: string) => {
+      setTranscriptionAttempt(1)
       setState('transcribing')
       setError(null)
       try {
-        const result = await transcribeWithDesktopOpenRouter({
+        const result = await transcribeWithDesktopOpenRouterRetrying({
           uri,
           model: settingsRef.current.model,
           language: settingsRef.current.language,
+          onAttempt: (attempt) => {
+            if (cancelledRef.current) return
+            setTranscriptionAttempt(attempt)
+          },
+          isCancelled: () => cancelledRef.current,
         })
         if (cancelledRef.current) return
         finishWithTranscript(result.text, uri)
@@ -359,9 +367,11 @@ export function InlineVoiceRecorder({
     }
     if (provider === 'on-device') {
       ExpoSpeechRecognitionModule.stop()
+      setTranscriptionAttempt(1)
       setState('transcribing')
       return
     }
+    setTranscriptionAttempt(1)
     setState('transcribing')
     try {
       await recorder.stop()
@@ -429,7 +439,7 @@ export function InlineVoiceRecorder({
         setError(
           cause instanceof Error
             ? cause.message
-            : 'Could not reach the paired desktop.',
+            : 'Could not reach the relay.',
         )
         setState('failed')
       }
@@ -539,8 +549,13 @@ export function InlineVoiceRecorder({
               color="secondary"
               size="xs"
               accessibilityLiveRegion="polite"
+              accessibilityLabel={
+                transcriptionAttempt > 1
+                  ? `Retrying transcription, attempt ${transcriptionAttempt}`
+                  : 'Transcribing'
+              }
             >
-              Transcribing…
+              {transcriptionProgressLabel(transcriptionAttempt)}
             </Text>
           ) : (
             <Text

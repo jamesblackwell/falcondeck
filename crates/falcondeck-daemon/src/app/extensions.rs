@@ -6,7 +6,8 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    ExtensionActionContribution, ExtensionContributions, ExtensionSnapshot, ExtensionStatus,
+    ComposerSuggestionSet, ExtensionActionContribution, ExtensionAgentTool,
+    ExtensionAgentToolContribution, ExtensionContributions, ExtensionSnapshot, ExtensionStatus,
     ExtensionSummary, ExtensionUiDocument, ExtensionUiNode, ExtensionView,
     ExtensionViewContribution, ExtensionViewScope,
 };
@@ -35,7 +36,28 @@ const MAX_UI_TEXT_CHARS: usize = 4_096;
 const MAX_UI_PATH_SEGMENTS: usize = 16;
 const MAX_UI_PATH_SEGMENT_CHARS: usize = 128;
 const MAX_MANIFEST_PERMISSIONS: usize = 16;
+const MAX_AGENT_TOOLS_PER_EXTENSION: usize = 8;
+const MAX_AGENT_TOOL_TITLE_CHARS: usize = 60;
+const MAX_AGENT_TOOL_DESCRIPTION_CHARS: usize = 1_024;
+const MAX_AGENT_TOOL_SCHEMA_BYTES: usize = 8 * 1024;
+pub(super) const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub(super) const THREADS_READ_PERMISSION: &str = "threads:read";
+/// Lets an extension publish manifest-declared tools to agent harnesses.
+pub(super) const AGENT_TOOLS_PERMISSION: &str = "agent-tools:register";
+const SUPPORTED_PERMISSIONS: &[&str] = &[THREADS_READ_PERMISSION, AGENT_TOOLS_PERMISSION];
+/// Joins an extension id and tool id into one MCP tool name. Neither id can
+/// contain a double underscore, so the split back is unambiguous.
+const TOOL_NAME_SEPARATOR: &str = "__";
+const EXTENSION_PANEL_ICONS: &[&str] = &[
+    "activity",
+    "blocks",
+    "clock",
+    "file-text",
+    "kanban",
+    "notebook",
+    "notebook-pen",
+    "sticky-note",
+];
 
 static EXTENSION_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$").expect("extension id regex is valid")
@@ -63,6 +85,10 @@ struct ExtensionCatalogEntry {
     path: String,
     #[serde(default)]
     default_enabled: bool,
+    /// Permissions granted on first discovery for bundled official packages.
+    /// Distribution policy, not something a manifest can claim for itself.
+    #[serde(default)]
+    default_granted_permissions: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +208,34 @@ impl ExtensionRegistry {
                 ),
                 (
                     self.root
+                        .join("official/scratch-pad/falcondeck.extension.json"),
+                    include_str!(
+                        "../../../../extensions/official/scratch-pad/falcondeck.extension.json"
+                    ),
+                ),
+                (
+                    self.root.join("official/scratch-pad/server.ts"),
+                    include_str!("../../../../extensions/official/scratch-pad/server.ts"),
+                ),
+                (
+                    self.root.join("official/scratch-pad/app.tsx"),
+                    include_str!("../../../../extensions/official/scratch-pad/app.tsx"),
+                ),
+                (
+                    self.root
+                        .join("official/follow-up-suggestions/falcondeck.extension.json"),
+                    include_str!(
+                        "../../../../extensions/official/follow-up-suggestions/falcondeck.extension.json"
+                    ),
+                ),
+                (
+                    self.root.join("official/follow-up-suggestions/server.ts"),
+                    include_str!(
+                        "../../../../extensions/official/follow-up-suggestions/server.ts"
+                    ),
+                ),
+                (
+                    self.root
                         .join("official/mini-zen/falcondeck.extension.json"),
                     include_str!(
                         "../../../../extensions/official/mini-zen/falcondeck.extension.json"
@@ -294,11 +348,18 @@ impl ExtensionRegistry {
                 .iter()
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            // A package the user has never seen starts from catalog policy;
+            // afterwards the daemon-owned grant set is the only authority, so
+            // a revoked permission is never silently re-granted.
+            let first_discovery = !self.persisted.grants.contains_key(&manifest.id);
             let granted_permissions = self
                 .persisted
                 .grants
                 .entry(manifest.id.clone())
                 .or_default();
+            if first_discovery {
+                granted_permissions.extend(entry.default_granted_permissions.iter().cloned());
+            }
             granted_permissions.retain(|permission| declared_permissions.contains(permission));
             let granted_permissions = granted_permissions.iter().cloned().collect::<Vec<_>>();
             let status = if enabled {
@@ -378,6 +439,61 @@ impl ExtensionRegistry {
             .get(extension_id)
             .cloned()
             .ok_or_else(|| DaemonError::NotFound("extension package not found".to_string()))
+    }
+
+    /// The agent tools currently publishable to harnesses: declared by an
+    /// enabled extension that also holds the `agent-tools:register` grant.
+    /// Both conditions are re-checked at every list and every invocation, so
+    /// disabling or revoking takes effect without restarting anything.
+    pub(super) fn agent_tools(&self) -> Vec<ExtensionAgentTool> {
+        let mut tools = self
+            .summaries
+            .values()
+            .filter(|summary| {
+                summary.enabled
+                    && summary
+                        .granted_permissions
+                        .iter()
+                        .any(|granted| granted == AGENT_TOOLS_PERMISSION)
+            })
+            .flat_map(|summary| {
+                summary
+                    .contributes
+                    .agent_tools
+                    .iter()
+                    .map(|tool| ExtensionAgentTool {
+                        name: agent_tool_name(&summary.id, &tool.id),
+                        extension_id: summary.id.clone(),
+                        tool_id: tool.id.clone(),
+                        title: tool.title.clone(),
+                        description: tool.description.clone(),
+                        input_schema: tool.input_schema.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
+    }
+
+    /// Resolves one MCP tool name to its package, failing closed when the
+    /// extension is unknown, disabled, ungranted, or never declared the tool.
+    pub(super) fn tool_package(
+        &self,
+        tool_name: &str,
+    ) -> Result<(ExtensionPackage, String), DaemonError> {
+        let tool = self
+            .agent_tools()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .ok_or_else(|| {
+                DaemonError::NotFound(format!("unknown FalconDeck extension tool: {tool_name}"))
+            })?;
+        let package = self
+            .packages
+            .get(&tool.extension_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound("extension package not found".to_string()))?;
+        Ok((package, tool.tool_id))
     }
 
     pub(super) fn contains_extension(&self, extension_id: &str) -> bool {
@@ -590,16 +706,32 @@ impl ExtensionRegistry {
                     .iter()
                     .chain(summary.contributes.sidebar_filters.iter())
                     .chain(summary.contributes.panels.iter())
+                    .chain(summary.contributes.composer_suggestions.iter())
                     .map(|contribution| contribution.view.as_str())
                     .collect::<std::collections::HashSet<_>>()
             })
             .ok_or_else(|| DaemonError::NotFound("extension not found".to_string()))?;
+        let suggestion_views = self
+            .summaries
+            .get(extension_id)
+            .map(|summary| {
+                summary
+                    .contributes
+                    .composer_suggestions
+                    .iter()
+                    .map(|contribution| contribution.view.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default();
         for published in &published_views {
             if !declared_views.contains(published.view_id.as_str()) {
                 return Err(DaemonError::BadRequest(format!(
                     "extension published undeclared view: {}",
                     published.view_id
                 )));
+            }
+            if suggestion_views.contains(published.view_id.as_str()) {
+                validate_composer_suggestion_view(published)?;
             }
             if let Some(scope) = published.scope.as_ref() {
                 validate_scope(scope)?;
@@ -662,6 +794,56 @@ impl ExtensionRegistry {
             summary.last_error = None;
         }
         Ok(updated_views)
+    }
+
+    /// Drops every thread-scoped composer-suggestion projection for one
+    /// thread, returning the views that were retired.
+    ///
+    /// Offers describe what to do *next* after a turn ended; once a new turn
+    /// is under way they are stale, whatever produced them. Enforcing that
+    /// here rather than in each extension keeps the rule provider-independent
+    /// — only Codex reports a `turn/started` notification.
+    pub(super) async fn retire_composer_suggestions(
+        &mut self,
+        thread_id: &str,
+    ) -> Result<Vec<ExtensionView>, DaemonError> {
+        let suggestion_views = self
+            .summaries
+            .values()
+            .flat_map(|summary| {
+                summary
+                    .contributes
+                    .composer_suggestions
+                    .iter()
+                    .map(move |contribution| (summary.id.as_str(), contribution.view.as_str()))
+            })
+            .collect::<HashSet<_>>();
+        if suggestion_views.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stale = self
+            .persisted
+            .views
+            .iter()
+            .filter(|(_, view)| {
+                view.scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.kind == "thread" && scope.id == thread_id)
+                    && suggestion_views
+                        .contains(&(view.extension_id.as_str(), view.view_id.as_str()))
+            })
+            .map(|(key, view)| (key.clone(), view.clone()))
+            .collect::<Vec<_>>();
+        if stale.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut persisted = self.persisted.clone();
+        for (key, _) in &stale {
+            persisted.views.remove(key);
+        }
+        self.persist_state(&persisted).await?;
+        self.persisted = persisted;
+        Ok(stale.into_iter().map(|(_, view)| view).collect())
     }
 
     async fn persist(&self) -> Result<(), DaemonError> {
@@ -837,7 +1019,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         || manifest
             .permissions
             .iter()
-            .any(|permission| permission != THREADS_READ_PERMISSION)
+            .any(|permission| !SUPPORTED_PERMISSIONS.contains(&permission.as_str()))
         || manifest.permissions.iter().collect::<HashSet<_>>().len() != manifest.permissions.len()
     {
         return Err(DaemonError::BadRequest(
@@ -847,7 +1029,9 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     let contribution_count = manifest.contributes.thread_menu_actions.len()
         + manifest.contributes.thread_decorations.len()
         + manifest.contributes.sidebar_filters.len()
-        + manifest.contributes.panels.len();
+        + manifest.contributes.panels.len()
+        + manifest.contributes.agent_tools.len()
+        + manifest.contributes.composer_suggestions.len();
     if contribution_count > MAX_MANIFEST_CONTRIBUTIONS {
         return Err(DaemonError::BadRequest(format!(
             "extension manifest exceeds {MAX_MANIFEST_CONTRIBUTIONS} contributions"
@@ -858,6 +1042,18 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     validate_unique_views(&manifest.contributes.thread_decorations, &mut ids)?;
     validate_unique_views(&manifest.contributes.sidebar_filters, &mut ids)?;
     validate_unique_views(&manifest.contributes.panels, &mut ids)?;
+    validate_unique_views(&manifest.contributes.composer_suggestions, &mut ids)?;
+    validate_agent_tools(&manifest.contributes.agent_tools, &mut ids)?;
+    if !manifest.contributes.agent_tools.is_empty()
+        && !manifest
+            .permissions
+            .iter()
+            .any(|permission| permission == AGENT_TOOLS_PERMISSION)
+    {
+        return Err(DaemonError::BadRequest(format!(
+            "extensions contributing agentTools must declare the {AGENT_TOOLS_PERMISSION} permission"
+        )));
+    }
     if manifest
         .contributes
         .sidebar_filters
@@ -878,6 +1074,16 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
             "extension panels require a title".to_string(),
         ));
     }
+    if let Some(icon) = manifest.contributes.panels.iter().find_map(|panel| {
+        panel
+            .icon
+            .as_deref()
+            .filter(|icon| !EXTENSION_PANEL_ICONS.contains(icon))
+    }) {
+        return Err(DaemonError::BadRequest(format!(
+            "unknown extension panel icon: {icon}"
+        )));
+    }
     let declared_actions = manifest
         .contributes
         .thread_menu_actions
@@ -890,6 +1096,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         .iter()
         .chain(manifest.contributes.sidebar_filters.iter())
         .chain(manifest.contributes.panels.iter())
+        .chain(manifest.contributes.composer_suggestions.iter())
         .map(|contribution| contribution.view.as_str())
         .collect::<HashSet<_>>();
     for contribution in manifest
@@ -902,6 +1109,16 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         if let Some(document) = contribution.ui.as_ref() {
             validate_ui_document(document, &declared_actions, &declared_views)?;
         }
+    }
+    if manifest
+        .contributes
+        .composer_suggestions
+        .iter()
+        .any(|contribution| contribution.ui.is_some() || contribution.icon.is_some())
+    {
+        return Err(DaemonError::BadRequest(
+            "composer suggestions are rendered by the host and accept no ui or icon".to_string(),
+        ));
     }
     for filter in &manifest.contributes.sidebar_filters {
         if filter
@@ -929,7 +1146,9 @@ fn validate_manifest_contribution_shape(manifest: &Value) -> Result<(), DaemonEr
             "threadMenuActions" => &["id", "title"][..],
             "threadDecorations" => &["id", "view", "ui"][..],
             "sidebarFilters" => &["id", "title", "view", "ui"][..],
-            "panels" => &["id", "title", "view", "ui"][..],
+            "panels" => &["id", "title", "view", "ui", "icon"][..],
+            "composerSuggestions" => &["id", "view"][..],
+            "agentTools" => &["id", "title", "description", "inputSchema"][..],
             _ => {
                 return Err(DaemonError::BadRequest(format!(
                     "unknown extension contribution point: {surface}"
@@ -958,6 +1177,90 @@ fn validate_manifest_contribution_shape(manifest: &Value) -> Result<(), DaemonEr
         }
     }
     Ok(())
+}
+
+/// Enforces the composer-suggestion contract on a published projection.
+/// Clients render these offers directly, so a malformed set is rejected at
+/// the daemon boundary rather than degrading in three separate renderers.
+fn validate_composer_suggestion_view(
+    published: &PublishedExtensionView,
+) -> Result<(), DaemonError> {
+    match published.scope.as_ref() {
+        Some(scope) if scope.kind == "thread" => {}
+        _ => {
+            return Err(DaemonError::BadRequest(
+                "composer suggestions must be published with a thread scope".to_string(),
+            ));
+        }
+    }
+    // An empty set is the documented way to clear a thread's offers.
+    if published
+        .value
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|actions| actions.is_empty())
+    {
+        return Ok(());
+    }
+    let set: ComposerSuggestionSet =
+        serde_json::from_value(published.value.clone()).map_err(|error| {
+            DaemonError::BadRequest(format!("malformed composer suggestions: {error}"))
+        })?;
+    set.validate().map_err(DaemonError::BadRequest)
+}
+
+fn validate_agent_tools<'a>(
+    tools: &'a [ExtensionAgentToolContribution],
+    ids: &mut HashSet<&'a str>,
+) -> Result<(), DaemonError> {
+    if tools.len() > MAX_AGENT_TOOLS_PER_EXTENSION {
+        return Err(DaemonError::BadRequest(format!(
+            "extension declares more than {MAX_AGENT_TOOLS_PER_EXTENSION} agent tools"
+        )));
+    }
+    for tool in tools {
+        if !CONTRIBUTION_ID_PATTERN.is_match(&tool.id) || !ids.insert(tool.id.as_str()) {
+            return Err(DaemonError::BadRequest(format!(
+                "extension contribution id is invalid or duplicated: {}",
+                tool.id
+            )));
+        }
+        if tool.title.trim().is_empty() || tool.title.chars().count() > MAX_AGENT_TOOL_TITLE_CHARS {
+            return Err(DaemonError::BadRequest(format!(
+                "agent tool title must be 1-{MAX_AGENT_TOOL_TITLE_CHARS} characters"
+            )));
+        }
+        // The description is the only thing steering the model toward or away
+        // from the tool, so require a real one rather than a placeholder.
+        if tool.description.trim().len() < 16
+            || tool.description.chars().count() > MAX_AGENT_TOOL_DESCRIPTION_CHARS
+        {
+            return Err(DaemonError::BadRequest(format!(
+                "agent tool description must be 16-{MAX_AGENT_TOOL_DESCRIPTION_CHARS} characters"
+            )));
+        }
+        if tool.input_schema.get("type").and_then(Value::as_str) != Some("object") {
+            return Err(DaemonError::BadRequest(
+                "agent tool inputSchema must describe a JSON object".to_string(),
+            ));
+        }
+        if serde_json::to_vec(&tool.input_schema)?.len() > MAX_AGENT_TOOL_SCHEMA_BYTES {
+            return Err(DaemonError::BadRequest(format!(
+                "agent tool inputSchema exceeds {MAX_AGENT_TOOL_SCHEMA_BYTES} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Builds the MCP tool name for one declared tool. Neither id may contain the
+/// separator, so [`split_agent_tool_name`] recovers both halves exactly.
+pub(super) fn agent_tool_name(extension_id: &str, tool_id: &str) -> String {
+    format!(
+        "{}{TOOL_NAME_SEPARATOR}{}",
+        extension_id.replace(['.', '-'], "_"),
+        tool_id.replace('-', "_")
+    )
 }
 
 fn validate_unique_actions<'a>(
@@ -1188,12 +1491,14 @@ mod tests {
             id: "thread-colors".to_string(),
             title: None,
             view: "thread-colors".to_string(),
+            icon: None,
             ui: None,
         }];
         manifest.contributes.sidebar_filters = vec![ExtensionViewContribution {
             id: "colors".to_string(),
             title: Some("Colours".to_string()),
             view: "color-index".to_string(),
+            icon: None,
             ui: Some(ExtensionUiDocument {
                 version: 1,
                 root: ExtensionUiNode::Select {
@@ -1259,6 +1564,7 @@ mod tests {
             id: "shared".to_string(),
             title: None,
             view: "result".to_string(),
+            icon: None,
             ui: None,
         }];
         assert!(validate_manifest(&duplicate).is_err());
@@ -1305,6 +1611,7 @@ mod tests {
             id: "attention".to_string(),
             title: Some("Mini Zen".to_string()),
             view: "attention-panel".to_string(),
+            icon: None,
             ui: Some(ExtensionUiDocument {
                 version: 1,
                 root: ExtensionUiNode::State {
@@ -1319,6 +1626,149 @@ mod tests {
 
         manifest.contributes.panels[0].title = None;
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn manifest_accepts_known_panel_icons_and_rejects_unknown_ones() {
+        let mut manifest = manifest();
+        manifest.contributes.panels = vec![ExtensionViewContribution {
+            id: "pad".to_string(),
+            title: Some("Scratch pad".to_string()),
+            view: "scratch-pad".to_string(),
+            icon: Some("notebook-pen".to_string()),
+            ui: None,
+        }];
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest.contributes.panels[0].icon = Some("spaceship".to_string());
+        let error = validate_manifest(&manifest).expect_err("unknown panel icons must fail");
+        assert!(error.to_string().contains("unknown extension panel icon"));
+    }
+
+    fn agent_tool(id: &str) -> ExtensionAgentToolContribution {
+        ExtensionAgentToolContribution {
+            id: id.to_string(),
+            title: "Suggest follow-ups".to_string(),
+            description: "Offer the user a few short next actions for this thread.".to_string(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    fn manifest_with_agent_tool() -> ExtensionManifest {
+        let mut manifest = manifest();
+        manifest.contributes.agent_tools = vec![agent_tool("suggest-follow-ups")];
+        manifest.permissions = vec![AGENT_TOOLS_PERMISSION.to_string()];
+        manifest
+    }
+
+    #[test]
+    fn manifest_accepts_agent_tools_only_with_their_permission() {
+        let manifest = manifest_with_agent_tool();
+        assert!(validate_manifest(&manifest).is_ok());
+
+        let mut ungranted = manifest_with_agent_tool();
+        ungranted.permissions = Vec::new();
+        let error = validate_manifest(&ungranted)
+            .expect_err("agent tools without their permission must fail");
+        assert!(error.to_string().contains(AGENT_TOOLS_PERMISSION));
+    }
+
+    #[test]
+    fn manifest_rejects_unusable_agent_tool_declarations() {
+        let mut thin_description = manifest_with_agent_tool();
+        thin_description.contributes.agent_tools[0].description = "do it".to_string();
+        assert!(validate_manifest(&thin_description).is_err());
+
+        let mut non_object_schema = manifest_with_agent_tool();
+        non_object_schema.contributes.agent_tools[0].input_schema =
+            serde_json::json!({ "type": "string" });
+        let error =
+            validate_manifest(&non_object_schema).expect_err("a non-object tool schema must fail");
+        assert!(error.to_string().contains("JSON object"));
+
+        let mut too_many = manifest_with_agent_tool();
+        too_many.contributes.agent_tools = (0..=MAX_AGENT_TOOLS_PER_EXTENSION)
+            .map(|index| agent_tool(&format!("tool-{index}")))
+            .collect();
+        assert!(validate_manifest(&too_many).is_err());
+    }
+
+    #[test]
+    fn agent_tool_names_stay_unambiguous_across_extensions() {
+        // Neither id may contain the separator, so these two cannot collide
+        // even though their halves concatenate to the same characters.
+        assert_ne!(agent_tool_name("a.b", "c-d"), agent_tool_name("a.b-c", "d"),);
+        assert_eq!(
+            agent_tool_name("falcondeck.follow-up-suggestions", "suggest-follow-ups"),
+            "falcondeck_follow_up_suggestions__suggest_follow_ups"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_composer_suggestions_with_host_owned_rendering() {
+        let mut manifest = manifest();
+        manifest.contributes.composer_suggestions = vec![ExtensionViewContribution {
+            id: "follow-ups".to_string(),
+            title: None,
+            view: "follow-ups".to_string(),
+            icon: None,
+            ui: None,
+        }];
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest.contributes.composer_suggestions[0].icon = Some("kanban".to_string());
+        let error = validate_manifest(&manifest)
+            .expect_err("composer suggestions must not carry host-owned rendering");
+        assert!(error.to_string().contains("rendered by the host"));
+    }
+
+    #[test]
+    fn composer_suggestion_views_are_bounded_before_they_reach_clients() {
+        let published = |value: Value, scope: Option<ExtensionViewScope>| PublishedExtensionView {
+            view_id: "follow-ups".to_string(),
+            scope,
+            value,
+        };
+        let thread = || {
+            Some(ExtensionViewScope {
+                kind: "thread".to_string(),
+                id: "thread-1".to_string(),
+            })
+        };
+        let valid = serde_json::json!({
+            "actions": [{ "id": "ship", "label": "Ship it", "prompt": "Open a PR." }],
+            "preferredActionId": "ship"
+        });
+
+        assert!(validate_composer_suggestion_view(&published(valid.clone(), thread())).is_ok());
+        // Clearing a thread's offers is a normal publication, not a violation.
+        assert!(
+            validate_composer_suggestion_view(&published(
+                serde_json::json!({ "actions": [] }),
+                thread()
+            ))
+            .is_ok()
+        );
+        // Without a thread scope the offers have no composer to attach to.
+        assert!(validate_composer_suggestion_view(&published(valid, None)).is_err());
+
+        let over_limit = serde_json::json!({
+            "actions": (0..6)
+                .map(|index| serde_json::json!({
+                    "id": format!("a{index}"),
+                    "label": "Ship it",
+                    "prompt": "Open a PR."
+                }))
+                .collect::<Vec<_>>()
+        });
+        assert!(validate_composer_suggestion_view(&published(over_limit, thread())).is_err());
+
+        let long_label = serde_json::json!({
+            "actions": [{ "id": "a", "label": "x".repeat(31), "prompt": "Open a PR." }]
+        });
+        let error = validate_composer_suggestion_view(&published(long_label, thread()))
+            .expect_err("an over-long label must fail");
+        assert!(error.to_string().contains("1-30 characters"));
     }
 
     #[test]
@@ -1449,6 +1899,17 @@ mod tests {
         assert_eq!(kanban.contributes.panels.len(), 1);
         assert_eq!(kanban.permissions, [THREADS_READ_PERMISSION]);
 
+        let scratch_pad = snapshot
+            .catalog
+            .iter()
+            .find(|extension| extension.id == "falcondeck.scratch-pad")
+            .expect("Scratch pad should be bundled");
+        assert!(scratch_pad.enabled);
+        assert_eq!(scratch_pad.name, "Scratch pad");
+        assert_eq!(scratch_pad.status, ExtensionStatus::Active);
+        assert_eq!(scratch_pad.contributes.panels.len(), 1);
+        assert!(scratch_pad.permissions.is_empty());
+
         let mini_zen = snapshot
             .catalog
             .iter()
@@ -1541,6 +2002,159 @@ mod tests {
                 .expect("Mini Zen should restore after revocation")
                 .granted_permissions
                 .is_empty()
+        );
+    }
+
+    const FOLLOW_UPS: &str = "falcondeck.follow-up-suggestions";
+    const FOLLOW_UPS_TOOL: &str = "falcondeck_follow_up_suggestions__suggest_follow_ups";
+
+    #[tokio::test]
+    async fn bundled_follow_ups_is_enabled_and_granted_on_a_fresh_install() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("state.json");
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.restore().await.expect("registry should restore");
+
+        assert!(registry.is_enabled(FOLLOW_UPS));
+        assert!(registry.has_grant(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
+        let tools = registry.agent_tools();
+        assert_eq!(tools.len(), 1, "only follow-ups publishes a tool today");
+        assert_eq!(tools[0].name, FOLLOW_UPS_TOOL);
+        assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_ok());
+    }
+
+    #[tokio::test]
+    async fn revoking_the_agent_tools_grant_survives_restart_and_hides_the_tool() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("state.json");
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.restore().await.expect("registry should restore");
+        registry
+            .update_permission(FOLLOW_UPS, AGENT_TOOLS_PERMISSION, false)
+            .await
+            .expect("granted permission should revoke");
+
+        assert!(registry.agent_tools().is_empty());
+        assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_err());
+
+        // Catalog policy applies once, on first discovery. A later restart
+        // must not quietly hand back a permission the user took away.
+        let mut restored = ExtensionRegistry::new(&state_path);
+        restored.restore().await.expect("revocation should restore");
+        assert!(!restored.has_grant(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
+        assert!(restored.agent_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabling_the_extension_withdraws_its_tools_immediately() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
+        registry.restore().await.expect("registry should restore");
+        registry
+            .update_enabled(FOLLOW_UPS, false)
+            .await
+            .expect("bundled extension should disable");
+
+        assert!(registry.agent_tools().is_empty());
+        let error = registry
+            .tool_package(FOLLOW_UPS_TOOL)
+            .expect_err("a disabled extension must not resolve a tool");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown FalconDeck extension tool")
+        );
+
+        registry
+            .update_enabled(FOLLOW_UPS, true)
+            .await
+            .expect("bundled extension should re-enable");
+        assert_eq!(registry.agent_tools().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_retires_only_that_thread_s_composer_suggestions() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("state.json");
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.restore().await.expect("registry should restore");
+
+        let offer = |thread_id: &str| ExtensionView {
+            extension_id: FOLLOW_UPS.to_string(),
+            view_id: "follow-ups".to_string(),
+            scope: Some(ExtensionViewScope {
+                kind: "thread".to_string(),
+                id: thread_id.to_string(),
+            }),
+            value: serde_json::json!({
+                "actions": [{ "id": "ship", "label": "Ship it", "prompt": "Open a PR." }]
+            }),
+            updated_at: Utc::now(),
+        };
+        registry
+            .persisted
+            .views
+            .insert("offer-1".to_string(), offer("thread-1"));
+        registry
+            .persisted
+            .views
+            .insert("offer-2".to_string(), offer("thread-2"));
+        // A projection from another contribution kind on the same thread must
+        // survive: only composer suggestions are turn-scoped.
+        registry.persisted.views.insert(
+            "stage".to_string(),
+            ExtensionView {
+                extension_id: "falcondeck.thread-tags".to_string(),
+                view_id: "thread-tags".to_string(),
+                scope: Some(ExtensionViewScope {
+                    kind: "thread".to_string(),
+                    id: "thread-1".to_string(),
+                }),
+                value: serde_json::json!({ "tagIds": ["in_progress"] }),
+                updated_at: Utc::now(),
+            },
+        );
+
+        let retired = registry
+            .retire_composer_suggestions("thread-1")
+            .await
+            .expect("a new turn should retire that thread's offers");
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].view_id, "follow-ups");
+
+        let remaining = registry
+            .persisted
+            .views
+            .values()
+            .map(|view| {
+                (
+                    view.view_id.as_str(),
+                    view.scope.as_ref().unwrap().id.as_str(),
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert!(remaining.contains(&("follow-ups", "thread-2")));
+        assert!(remaining.contains(&("thread-tags", "thread-1")));
+        assert!(!remaining.contains(&("follow-ups", "thread-1")));
+
+        // Retiring again is a no-op rather than a redundant persist and event.
+        assert!(
+            registry
+                .retire_composer_suggestions("thread-1")
+                .await
+                .expect("retiring twice should succeed")
+                .is_empty()
+        );
+
+        let mut restored = ExtensionRegistry::new(&state_path);
+        restored.restore().await.expect("retirement should persist");
+        assert!(
+            !restored
+                .persisted
+                .views
+                .values()
+                .any(|view| view.view_id == "follow-ups"
+                    && view.scope.as_ref().unwrap().id == "thread-1")
         );
     }
 

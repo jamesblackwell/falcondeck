@@ -96,6 +96,11 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     threadId: string,
   ) => Promise<string>;
+  /** Continues a thread in a fresh, independent copy; the source is unchanged. */
+  onForkThread?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<void> | void;
   onTogglePinThread?: (
     workspaceId: string,
     threadId: string,
@@ -136,6 +141,8 @@ export type WorkspaceSidebarProps = {
     collapsed: boolean,
   ) => void;
   isAddingProject?: boolean;
+  /** Optional chrome label. Desktop and the hosted app omit it so the
+   *  titlebar is just window controls and search. */
   title?: string;
   errors?: string[];
   emptyState?: SidebarEmptyState;
@@ -532,6 +539,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onDeleteThread,
   onRenameThread,
   onSuggestThreadTitle,
+  onForkThread,
   onTogglePinThread,
   onMarkThreadRead,
   onMarkThreadUnread,
@@ -549,7 +557,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   collapsedWorkspaceIds,
   onWorkspaceCollapsedChange,
   isAddingProject = false,
-  title = "Threads",
+  title,
   errors = [],
   emptyState = {
     title: "No projects",
@@ -1065,6 +1073,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onArchiveThread &&
         !onDeleteThread &&
         !onRenameThread &&
+        !onForkThread &&
         !onTogglePinThread &&
         !onMarkThreadRead &&
         !onMarkThreadUnread &&
@@ -1077,6 +1086,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [
       onArchiveThread,
       onDeleteThread,
+      onForkThread,
       onMarkThreadRead,
       onMarkThreadUnread,
       onRenameThread,
@@ -1129,6 +1139,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!threadContextMenu || !onRenameThread) return;
     openRenameDialog(threadContextMenu.workspaceId, threadContextMenu.thread);
   }, [onRenameThread, openRenameDialog, threadContextMenu]);
+
+  const handleForkFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onForkThread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    void Promise.resolve(onForkThread(workspaceId, thread.id)).catch(() => {});
+  }, [onForkThread, threadContextMenu]);
 
   const handleRequestRenameThreadFromRow = useCallback(
     ({
@@ -1552,20 +1569,34 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     };
   }, [closeCreateStageDialog, createStageTarget, isCreatingStage]);
 
+  const visibleErrors = errors.filter(Boolean);
+  const showHeader =
+    Boolean(title) ||
+    Boolean(onSearch) ||
+    visibleErrors.length > 0 ||
+    Boolean(headerClassName);
+
   return (
     <SidebarShell className={className}>
+      {showHeader ? (
       <SidebarHeader
         className={headerClassName}
         // Restores window dragging over the traffic-light row on desktop.
         data-tauri-drag-region="deep"
       >
-        <div className="flex items-center justify-between">
-          {/* Starting a thread is the sidebar's primary action, so it gets a
-              row of its own at the top of the list rather than a quiet header
-              link competing with the window controls. */}
-          <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
-            {title}
-          </span>
+        {title || onSearch ? (
+        <div
+          className={
+            title
+              ? "flex items-center justify-between"
+              : "flex items-center justify-end"
+          }
+        >
+          {title ? (
+            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
+              {title}
+            </span>
+          ) : null}
           {onSearch ? (
             <Tooltip label="Search" shortcut={searchShortcut}>
               <Button
@@ -1581,8 +1612,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             </Tooltip>
           ) : null}
         </div>
+        ) : null}
 
-        {errors.filter(Boolean).map((error) => (
+        {visibleErrors.map((error) => (
           <p
             key={error}
             className="text-[length:var(--fd-text-xs)] text-warning"
@@ -1818,6 +1850,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             : null
         }
         canRename={Boolean(onRenameThread)}
+        canFork={Boolean(onForkThread)}
         canArchive={Boolean(onArchiveThread)}
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
@@ -1838,6 +1871,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         }
         onClose={closeThreadContextMenu}
         onRename={handleStartRenameFromContextMenu}
+        onFork={handleForkFromContextMenu}
         onArchive={handleArchiveFromContextMenu}
         onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
@@ -1895,7 +1929,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ? createPortal(
             <div
               aria-hidden="true"
-              className="pointer-events-none fixed z-[100] flex max-w-64 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2.5 py-1.5 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)]"
+              className="fd-type-supporting pointer-events-none fixed z-[100] flex max-w-64 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2.5 py-1.5 text-fg-primary shadow-[var(--fd-shadow-lg)]"
               style={{
                 left: workspaceDragPosition.x + 12,
                 top: workspaceDragPosition.y + 12,

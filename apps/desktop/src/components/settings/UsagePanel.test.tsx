@@ -191,7 +191,7 @@ describe('UsagePanel', () => {
 
     render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
 
-    expect(await screen.findByText('daemon returned 500')).toBeInTheDocument()
+    expect(await screen.findByText('FalconDeck returned 500.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
 
     expect(await screen.findByText('12% used')).toBeInTheDocument()

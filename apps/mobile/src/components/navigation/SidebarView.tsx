@@ -1,25 +1,20 @@
 import {
   memo,
   useCallback,
-  useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from "react";
 import { Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import Animated, {
-  Easing,
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-} from "react-native-reanimated";
+import Animated from "react-native-reanimated";
 import { FlashList } from "@shopify/flash-list";
 import {
+  ArrowUpDown,
   ChevronDown,
-  ChevronRight,
+  FolderClosed,
+  FolderOpen,
   ListFilter,
   Plus,
   Settings,
@@ -34,12 +29,16 @@ import type {
   ExtensionSnapshot,
   ExtensionUiTone,
   ProjectGroup,
+  ThreadSortMode,
   ThreadSummary,
   ThreadTag,
 } from "@falcondeck/client-core";
 import {
   filterProjectGroupsByExtensions,
+  isThreadSortMode,
   isWorkspaceColorId,
+  sortProjectGroupThreads,
+  THREAD_SORT_OPTIONS,
   THREAD_TAGS_EXTENSION_ID,
 } from "@falcondeck/client-core";
 
@@ -47,9 +46,14 @@ import {
   Text,
   Button,
   EmptyState,
+  OptionSheet,
   Skeleton,
   SyncBanner,
 } from "@/components/ui";
+import {
+  readStoredThreadSort,
+  writeStoredThreadSort,
+} from "@/storage/thread-sort";
 import { SessionListItem } from "@/components/chat";
 import { useCollapsible } from "@/components/chat/useCollapsible";
 import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
@@ -86,10 +90,10 @@ function workspaceCatColor(
   return cat[Number(colorId.slice(4))];
 }
 
-const CHEVRON_TIMING = {
-  duration: 150,
-  easing: Easing.out(Easing.cubic),
-} as const;
+const SORT_SHEET_ITEMS = THREAD_SORT_OPTIONS.map((option) => ({
+  value: option.mode,
+  label: option.label,
+}));
 
 const EXTENSION_UI_TONES = new Set<ExtensionUiTone>([
   "gray",
@@ -107,43 +111,6 @@ function extensionUiTone(color: string): ExtensionUiTone {
     ? (color as ExtensionUiTone)
     : "gray";
 }
-
-const WorkspaceChevron = memo(function WorkspaceChevron({
-  workspaceId,
-  isOpen,
-  size,
-  color,
-}: {
-  workspaceId: string;
-  isOpen: boolean;
-  size: number;
-  color: string;
-}) {
-  const progress = useSharedValue(isOpen ? 1 : 0);
-  const renderedWorkspaceId = useRef(workspaceId);
-
-  useEffect(() => {
-    const target = isOpen ? 1 : 0;
-    // FlashList recycles rows, so this view can land on a different workspace
-    // mid-scroll: snap there instead of spinning through a toggle nobody made.
-    if (renderedWorkspaceId.current !== workspaceId) {
-      renderedWorkspaceId.current = workspaceId;
-      progress.value = target;
-      return;
-    }
-    progress.value = withTiming(target, CHEVRON_TIMING);
-  }, [isOpen, progress, workspaceId]);
-
-  const chevronStyle = useAnimatedStyle(() => ({
-    transform: [{ rotate: `${progress.value * 90}deg` }],
-  }));
-
-  return (
-    <Animated.View style={chevronStyle}>
-      <ChevronRight size={size} color={color} />
-    </Animated.View>
-  );
-});
 
 // Collapsed projects keep their thread rows in the list data so the same cells
 // can animate shut — height runs to zero while everything below slides up,
@@ -203,6 +170,8 @@ export const SidebarView = memo(function SidebarView({
     thread: ThreadSummary;
   } | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [sortMode, setSortMode] = useState<ThreadSortMode>(readStoredThreadSort);
   const [extensionFilterSelections, setExtensionFilterSelections] = useState<
     Map<string, ReadonlySet<string>>
   >(() => new Map());
@@ -258,12 +227,15 @@ export const SidebarView = memo(function SidebarView({
   );
   const displayGroups = useMemo(
     () =>
-      filterProjectGroupsByExtensions(
-        groups,
-        extensionSnapshot,
-        activeExtensionFilters,
+      sortProjectGroupThreads(
+        filterProjectGroupsByExtensions(
+          groups,
+          extensionSnapshot,
+          activeExtensionFilters,
+        ),
+        sortMode,
       ),
-    [activeExtensionFilters, extensionSnapshot, groups],
+    [activeExtensionFilters, extensionSnapshot, groups, sortMode],
   );
   const activeExtensionFilterCount = useMemo(
     () =>
@@ -293,8 +265,15 @@ export const SidebarView = memo(function SidebarView({
         collapsedWorkspaces,
         visibleThreadCounts,
         selectedThreadId,
+        sortMode,
       ),
-    [displayGroups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
+    [
+      displayGroups,
+      collapsedWorkspaces,
+      visibleThreadCounts,
+      selectedThreadId,
+      sortMode,
+    ],
   );
 
   const handleExtensionFilterChange = useCallback(
@@ -310,6 +289,13 @@ export const SidebarView = memo(function SidebarView({
 
   const clearExtensionFilters = useCallback(() => {
     setExtensionFilterSelections(new Map());
+  }, []);
+
+  const handleSortChange = useCallback((value: string) => {
+    if (!isThreadSortMode(value)) return;
+    setSortMode(value);
+    writeStoredThreadSort(value);
+    setSortOpen(false);
   }, []);
 
   // The drawer runs to the bottom of the screen, so the last thread would sit
@@ -373,47 +359,78 @@ export const SidebarView = memo(function SidebarView({
             <Text variant="caption" color="muted" weight="normal">
               {item.title.toUpperCase()}
             </Text>
-            {item.title === "Projects" &&
-            supportedExtensionFilters.length > 0 ? (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.filterButton,
-                  activeExtensionFilterCount > 0
-                    ? styles.filterButtonActive
-                    : undefined,
-                  pressed ? styles.filterButtonPressed : undefined,
-                ]}
-                onPress={() => setFiltersOpen(true)}
-                accessibilityRole="button"
-                accessibilityLabel="Filter threads"
-                accessibilityHint={
-                  activeExtensionFilterCount > 0
-                    ? `${activeExtensionFilterCount} selected`
-                    : "Filter threads by stage"
-                }
-                accessibilityState={{
-                  selected: activeExtensionFilterCount > 0,
-                }}
-              >
-                <ListFilter
-                  size={theme.iconSize.xs}
-                  color={
-                    activeExtensionFilterCount > 0
-                      ? theme.colors.accent.default
-                      : theme.colors.fg.muted
-                  }
-                />
-                {activeExtensionFilterCount > 0 ? (
-                  <Text
-                    variant="caption"
-                    size="2xs"
-                    color="accent"
-                    weight="semibold"
+            {item.title === "Projects" ? (
+              <View style={styles.sectionActions}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.filterButton,
+                    sortMode !== "last_updated"
+                      ? styles.filterButtonActive
+                      : undefined,
+                    pressed ? styles.filterButtonPressed : undefined,
+                  ]}
+                  onPress={() => setSortOpen(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Sort chats"
+                  accessibilityHint={`Currently ${
+                    THREAD_SORT_OPTIONS.find((option) => option.mode === sortMode)
+                      ?.label ?? "Last updated"
+                  }`}
+                  accessibilityState={{
+                    selected: sortMode !== "last_updated",
+                  }}
+                >
+                  <ArrowUpDown
+                    size={theme.iconSize.xs}
+                    color={
+                      sortMode !== "last_updated"
+                        ? theme.colors.accent.default
+                        : theme.colors.fg.muted
+                    }
+                  />
+                </Pressable>
+                {supportedExtensionFilters.length > 0 ? (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.filterButton,
+                      activeExtensionFilterCount > 0
+                        ? styles.filterButtonActive
+                        : undefined,
+                      pressed ? styles.filterButtonPressed : undefined,
+                    ]}
+                    onPress={() => setFiltersOpen(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Filter threads"
+                    accessibilityHint={
+                      activeExtensionFilterCount > 0
+                        ? `${activeExtensionFilterCount} selected`
+                        : "Filter threads by stage"
+                    }
+                    accessibilityState={{
+                      selected: activeExtensionFilterCount > 0,
+                    }}
                   >
-                    {activeExtensionFilterCount}
-                  </Text>
+                    <ListFilter
+                      size={theme.iconSize.xs}
+                      color={
+                        activeExtensionFilterCount > 0
+                          ? theme.colors.accent.default
+                          : theme.colors.fg.muted
+                      }
+                    />
+                    {activeExtensionFilterCount > 0 ? (
+                      <Text
+                        variant="caption"
+                        size="2xs"
+                        color="accent"
+                        weight="semibold"
+                      >
+                        {activeExtensionFilterCount}
+                      </Text>
+                    ) : null}
+                  </Pressable>
                 ) : null}
-              </Pressable>
+              </View>
             ) : null}
           </View>
         );
@@ -438,12 +455,17 @@ export const SidebarView = memo(function SidebarView({
               }
               accessibilityState={{ expanded: item.isOpen }}
             >
-              <WorkspaceChevron
-                workspaceId={item.workspaceId}
-                isOpen={item.isOpen}
-                size={theme.iconSize.xs}
-                color={accent ?? theme.colors.fg.muted}
-              />
+              {item.isOpen ? (
+                <FolderOpen
+                  size={theme.iconSize.xs}
+                  color={accent ?? theme.colors.fg.muted}
+                />
+              ) : (
+                <FolderClosed
+                  size={theme.iconSize.xs}
+                  color={accent ?? theme.colors.fg.muted}
+                />
+              )}
               <Text
                 variant="supporting"
                 color="secondary"
@@ -524,6 +546,7 @@ export const SidebarView = memo(function SidebarView({
       workspaceColors,
       activeExtensionFilterCount,
       supportedExtensionFilters.length,
+      sortMode,
       theme.colors.accent.default,
     ],
   );
@@ -655,6 +678,16 @@ export const SidebarView = memo(function SidebarView({
           onClose={() => setFiltersOpen(false)}
         />
       ) : null}
+
+      {sortOpen ? (
+        <OptionSheet
+          title="Sort chats by"
+          items={SORT_SHEET_ITEMS}
+          selected={sortMode}
+          onSelect={handleSortChange}
+          onClose={() => setSortOpen(false)}
+        />
+      ) : null}
     </View>
   );
 });
@@ -775,6 +808,10 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[3],
     paddingBottom: theme.spacing[1],
+  },
+  sectionActions: {
+    flexDirection: "row",
+    alignItems: "center",
   },
   filterButton: {
     minWidth: theme.minTouchTarget,

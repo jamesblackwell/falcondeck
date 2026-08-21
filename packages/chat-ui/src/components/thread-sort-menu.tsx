@@ -3,14 +3,8 @@ import { memo, useState } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { ArrowUpDown, Check } from 'lucide-react'
 
-import type { ThreadSortMode } from '@falcondeck/client-core'
+import { THREAD_SORT_OPTIONS, type ThreadSortMode } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
-
-const SORT_OPTIONS: { mode: ThreadSortMode; label: string }[] = [
-  { mode: 'priority', label: 'Priority' },
-  { mode: 'last_updated', label: 'Last updated' },
-  { mode: 'alphabetical', label: 'Name' },
-]
 
 /**
  * The "Sort chats by" menu on the Projects heading. Orders every project's
@@ -79,7 +73,7 @@ export const ThreadSortMenu = memo(function ThreadSortMenu({
             <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
               Sort chats by
             </p>
-            {SORT_OPTIONS.map((option) => (
+            {THREAD_SORT_OPTIONS.map((option) => (
               <button
                 key={option.mode}
                 type="button"

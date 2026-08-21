@@ -3,6 +3,7 @@ import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import {
+  ComposerSuggestionPill,
   Conversation,
   InteractiveRequestBar,
   MessageCard,
@@ -11,6 +12,7 @@ import {
 } from "@falcondeck/chat-ui";
 import {
   applyConversationEventsToItems,
+  type ComposerSuggestionOffer,
   filesToImageInputs,
   type ConversationItem,
   type EventEnvelope,
@@ -1212,11 +1214,47 @@ const markdownAdversarialItems: ConversationItem[] = [
         (_, index) => `bounded output line ${index + 1}`,
       ),
       "```",
+      "",
+      "```mermaid",
+      "flowchart TD",
+      "  home[Homepage] --> studio[Studio]",
+      "```",
     ].join("\n"),
     lifecycle: "complete",
     created_at: at(3),
   },
 ];
+
+/** A representative offer: a long-ish primary label plus alternatives. */
+const QA_SUGGESTION_OFFER: ComposerSuggestionOffer = {
+  extensionId: "falcondeck.follow-up-suggestions",
+  primary: {
+    id: "run-tests",
+    label: "Run the failing tests",
+    description: "Re-run the suite and report what is still broken",
+    prompt: "Run the full test suite and report the remaining failures.",
+  },
+  actions: [
+    {
+      id: "run-tests",
+      label: "Run the failing tests",
+      description: "Re-run the suite and report what is still broken",
+      prompt: "Run the full test suite and report the remaining failures.",
+    },
+    {
+      id: "widen",
+      label: "Check the other callers",
+      description: "Look for the same mistake elsewhere in the repo",
+      prompt: "Search the repository for other callers with the same problem.",
+    },
+    {
+      id: "ship",
+      label: "Open a pull request",
+      prompt: "Commit this work on a branch and open a pull request.",
+    },
+  ],
+  key: "qa:1:run-tests,widen,ship",
+};
 
 type QaScenario =
   | "mixed"
@@ -1228,6 +1266,7 @@ type QaScenario =
   | "content"
   | "requests"
   | "accessibility"
+  | "suggestions"
   | "long";
 
 type InterruptionPhase =
@@ -1587,6 +1626,7 @@ function ConversationQa() {
       requested === "content" ||
       requested === "requests" ||
       requested === "accessibility" ||
+      requested === "suggestions" ||
       requested === "long"
       ? requested === "history-truncated"
         ? "history"
@@ -1605,6 +1645,8 @@ function ConversationQa() {
   const [historyPhase, setHistoryPhase] =
     useState<HistoryRecoveryPhase>("cached");
   const [qaDraft, setQaDraft] = useState("");
+  const [qaSuggestionsDismissed, setQaSuggestionsDismissed] = useState(false);
+  const qaSuggestionOffer = qaSuggestionsDismissed ? null : QA_SUGGESTION_OFFER;
   const [qaAttachments, setQaAttachments] = useState<ImageInput[]>([]);
   const [qaPreparingAttachments, setQaPreparingAttachments] = useState(0);
   const [qaAttachmentError, setQaAttachmentError] = useState<string | null>(
@@ -1713,8 +1755,10 @@ function ConversationQa() {
                             : value === "requests"
                               ? "accessibility"
                               : value === "accessibility"
-                                ? "long"
-                                : "mixed",
+                                ? "suggestions"
+                                : value === "suggestions"
+                                  ? "long"
+                                  : "mixed",
             )
           }
         >
@@ -1735,8 +1779,10 @@ function ConversationQa() {
                         : scenario === "requests"
                           ? "Accessibility"
                           : scenario === "accessibility"
-                            ? "1,000 items"
-                            : "Mixed outputs"}
+                            ? "Composer suggestions"
+                            : scenario === "suggestions"
+                              ? "1,000 items"
+                              : "Mixed outputs"}
         </Button>
         {scenario === "interrupt" ? (
           <Button
@@ -1957,6 +2003,15 @@ function ConversationQa() {
       ) : null}
       {showComposer ? (
         <div className="shrink-0 border-t border-border-subtle bg-surface-0">
+          {scenario === "suggestions" && qaSuggestionOffer ? (
+            <div className="pt-2">
+              <ComposerSuggestionPill
+                offer={qaSuggestionOffer}
+                onSubmit={(suggestion) => setQaDraft(suggestion.prompt)}
+                onDismiss={() => setQaSuggestionsDismissed(true)}
+              />
+            </div>
+          ) : null}
           {qaAttachmentError ? (
             <p
               role="alert"
@@ -1977,6 +2032,10 @@ function ConversationQa() {
                 ? {
                     state: qaVoiceState,
                     seconds: 7,
+                    levels: Array.from(
+                      { length: 48 },
+                      (_, index) => 0.15 + ((index * 17) % 9) / 12,
+                    ),
                     error: "Transcription failed. Your recording is safe.",
                     configured: true,
                     hasPending: qaVoiceState === "failed",
@@ -2029,6 +2088,12 @@ function ConversationQa() {
 }
 
 initAppearance();
+// Same ?theme=/?palette= overrides as the activity fixture, so a change can be
+// checked in light and dark without touching appearance settings.
+const qaTheme = new URLSearchParams(window.location.search).get("theme");
+if (qaTheme) document.documentElement.dataset.theme = qaTheme;
+const qaPalette = new URLSearchParams(window.location.search).get("palette");
+if (qaPalette) document.documentElement.dataset.palette = qaPalette;
 installExternalLinkHandler();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

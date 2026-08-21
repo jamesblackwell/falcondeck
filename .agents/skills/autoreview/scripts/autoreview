@@ -576,6 +576,7 @@ def safe_engine_env(
     extra: dict[str, str] | None = None,
     *,
     engine: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     common_allowed_exact = {
         "ALL_PROXY",

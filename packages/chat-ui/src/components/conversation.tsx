@@ -22,6 +22,7 @@ import type {
 import {
   advanceResponseCompletionTracker,
   deriveConversationPresentation,
+  latestVisibleAssistantMessageId,
   normalizePreferences,
   reuseConversationPresentation,
   reuseRetrySourcesByAssistantId,
@@ -70,6 +71,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   retrySource,
   onRetryResponse,
   readAloud,
+  showReceivedAt,
 }: {
   block: ConversationRenderBlock;
   deferred: boolean;
@@ -85,6 +87,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: EditResendHandler;
   readAloud?: ReadAloudController;
+  showReceivedAt?: boolean;
 }) {
   return (
     <div
@@ -109,6 +112,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
           }
           onRetryResponse={onRetryResponse}
           readAloud={readAloud}
+          showReceivedAt={showReceivedAt}
         />
       ) : block.kind === "work_session" ? (
         <WorkSessionCard
@@ -295,6 +299,7 @@ export const Conversation = memo(function Conversation({
     return stable;
   }, [isThinking, normalizedPreferences, renderableItems]);
   const renderBlocks = presentation.history_blocks;
+  const lastAssistantMessageId = latestVisibleAssistantMessageId(renderBlocks);
   // A message sent into an on-screen thread slides up into place; everything
   // else must mount statically. Ids present at thread mount, arriving while
   // (or immediately after) history hydrates, or prepended by "load earlier"
@@ -940,6 +945,11 @@ export const Conversation = memo(function Conversation({
                   }
                   onRetryResponse={onRetryResponse}
                   readAloud={readAloud}
+                  showReceivedAt={
+                    block.kind === "item" &&
+                    block.item.kind === "assistant_message" &&
+                    block.item.id === lastAssistantMessageId
+                  }
                 />
               ))}
 

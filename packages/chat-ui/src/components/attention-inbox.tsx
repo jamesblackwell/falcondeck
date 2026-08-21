@@ -150,7 +150,7 @@ export const AttentionInbox = memo(function AttentionInbox({
                 className={cn('h-2 w-2 shrink-0 rounded-full', TONE_DOT[entry.tone])}
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+                <span className="fd-type-supporting block truncate text-fg-primary">
                   {entry.thread.title}
                 </span>
                 <span className="block truncate text-[length:var(--fd-text-2xs)] text-fg-muted">

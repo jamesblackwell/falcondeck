@@ -288,8 +288,9 @@ function upsertThread(
     return threads;
   }
 
+  const merged = mergeThreadSummary(current, nextThread);
   return threads.map((thread) =>
-    thread.id === nextThread.id ? nextThread : thread,
+    thread.id === nextThread.id ? merged : thread,
   );
 }
 
@@ -319,6 +320,68 @@ function isStaleThreadSummary(
     next.status === "running" &&
     TERMINAL_THREAD_STATUSES.has(current.status)
   );
+}
+
+function isNewerThreadSummary(
+  current: DaemonSnapshot["threads"][number],
+  next: DaemonSnapshot["threads"][number],
+) {
+  const currentAt = Date.parse(current.updated_at);
+  const nextAt = Date.parse(next.updated_at);
+  if (Number.isNaN(currentAt) || Number.isNaN(nextAt)) return false;
+  return nextAt > currentAt;
+}
+
+/**
+ * Mark-read preserves `updated_at` so opening a thread does not jump it in a
+ * Last updated sort. Relay reconnects then replay the last content
+ * `thread-updated` (unread, same timestamp) after an authoritative snapshot,
+ * which would otherwise wipe `last_read_seq` and light every row up as unread.
+ *
+ * Attention seqs therefore merge independently of the rest of the summary:
+ * activity and read watermarks only move forward at the same timestamp.
+ * Mark-unread is the one legitimate decrease, and the daemon stamps it with a
+ * fresh `updated_at` so it still wins.
+ */
+function mergeThreadSummary(
+  current: DaemonSnapshot["threads"][number],
+  next: DaemonSnapshot["threads"][number],
+): DaemonSnapshot["threads"][number] {
+  const last_agent_activity_seq = Math.max(
+    current.attention.last_agent_activity_seq,
+    next.attention.last_agent_activity_seq,
+  );
+  const last_read_seq = isNewerThreadSummary(current, next)
+    ? next.attention.last_read_seq
+    : Math.max(current.attention.last_read_seq, next.attention.last_read_seq);
+  const unread = last_agent_activity_seq > last_read_seq;
+  const nextLevel = next.attention.level;
+  const level =
+    nextLevel === "unread" || nextLevel === "none"
+      ? unread
+        ? "unread"
+        : "none"
+      : nextLevel;
+
+  if (
+    last_agent_activity_seq === next.attention.last_agent_activity_seq &&
+    last_read_seq === next.attention.last_read_seq &&
+    unread === next.attention.unread &&
+    level === nextLevel
+  ) {
+    return next;
+  }
+
+  return {
+    ...next,
+    attention: {
+      ...next.attention,
+      last_agent_activity_seq,
+      last_read_seq,
+      unread,
+      level,
+    },
+  };
 }
 
 /**

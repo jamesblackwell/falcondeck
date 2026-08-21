@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import {
@@ -22,6 +22,7 @@ import {
   citationTextPreview,
   contentLifecycle,
   assistantFailureDetail,
+  formatReceivedAgo,
   type ConversationCitation,
   type ConversationItem,
   type ConversationMemoryCitation,
@@ -39,6 +40,7 @@ type AssistantMessage = Extract<
 
 interface AssistantMessageBlockProps {
   item: AssistantMessage;
+  showReceivedAt?: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
@@ -383,14 +385,38 @@ const MemoryCitationBlock = memo(function MemoryCitationBlock({
   );
 });
 
+const MessageReceivedAt = memo(function MessageReceivedAt({
+  createdAt,
+}: {
+  createdAt: string;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+  const label = formatReceivedAgo(createdAt, nowMs);
+  if (!label) return null;
+  return (
+    <Text variant="meta" size="xs" color="muted">
+      {label}
+    </Text>
+  );
+});
+
 export const AssistantMessageBlock = memo(function AssistantMessageBlock({
   item,
+  showReceivedAt = false,
 }: AssistantMessageBlockProps) {
   const { theme } = useUnistyles();
   const lifecycle = contentLifecycle(item);
   const isCommentary = item.phase === "commentary";
   const failureDetail =
     lifecycle === "error" ? assistantFailureDetail(item) : null;
+  const receivedAt =
+    showReceivedAt && lifecycle !== "pending" && lifecycle !== "streaming" ? (
+      <MessageReceivedAt createdAt={item.created_at} />
+    ) : null;
 
   return (
     <View style={[styles.row, isCommentary ? styles.commentaryRow : undefined]}>
@@ -416,7 +442,12 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
       ) : null}
       <View style={styles.actions} accessible={false}>
         {lifecycle === "complete" && item.text.trim() ? (
-          <MessageActions text={item.text} readAloudKey={item.id} />
+          <View style={styles.actionRow}>
+            <MessageActions text={item.text} readAloudKey={item.id} />
+            {receivedAt}
+          </View>
+        ) : receivedAt ? (
+          receivedAt
         ) : null}
         {lifecycle === "interrupted" ? (
           <View
@@ -483,6 +514,12 @@ const styles = StyleSheet.create((theme) => ({
   actions: {
     flexDirection: "row",
     alignItems: "flex-start",
+    gap: theme.spacing[2],
+  },
+  actionRow: {
+    minHeight: theme.minTouchTarget,
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[2],
   },
   status: {

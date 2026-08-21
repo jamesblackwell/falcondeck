@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleDashed,
   Copy,
+  GitFork,
   Pin,
   PinOff,
   Plus,
@@ -107,6 +108,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   target,
   workspacePath,
   canRename,
+  canFork,
   canArchive,
   canDelete,
   canPin,
@@ -116,6 +118,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   selectedStage,
   onClose,
   onRename,
+  onFork,
   onArchive,
   onDelete,
   onTogglePin,
@@ -128,6 +131,8 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   target: ThreadContextMenuState | null
   workspacePath: string | null
   canRename: boolean
+  /** Whether this thread can be continued in a fresh, independent copy. */
+  canFork: boolean
   canArchive: boolean
   canDelete: boolean
   canPin: boolean
@@ -137,6 +142,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   selectedStage: ThreadTag | null
   onClose: () => void
   onRename: () => void
+  onFork: () => void
   onArchive: () => void
   onDelete: () => void
   onTogglePin: () => void
@@ -233,6 +239,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   const rowCount =
     Number(canPin) +
     Number(canRename) +
+    Number(canFork) +
     Number(showMarkRead) +
     Number(showMarkUnread) +
     Number(canSetStage) +
@@ -340,6 +347,13 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           icon={<SquarePen className={iconClassName} />}
           label="Rename"
           onClick={onRename}
+        />
+      ) : null}
+      {canFork ? (
+        <ThreadMenuItem
+          icon={<GitFork className={iconClassName} />}
+          label="Fork thread"
+          onClick={onFork}
         />
       ) : null}
       {showMarkRead ? (

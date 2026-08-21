@@ -193,14 +193,14 @@ describe('RemotePairingPopover', () => {
           onStartPairing={() => {}}
           isStartingRemote={false}
           remoteControlsDisabled
-          remoteControlsUnavailableReason="FalconDeck is still connecting to the local daemon."
+          remoteControlsUnavailableReason="FalconDeck is still connecting."
         />
       </ToastProvider>,
     )
 
     fireEvent.click(screen.getByRole('button', { name: /inactive/i }))
 
-    expect(await screen.findByText('FalconDeck is still connecting to the local daemon.')).toBeInTheDocument()
+    expect(await screen.findByText('FalconDeck is still connecting.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /start pairing/i })).toBeDisabled()
   })
 })

@@ -14,6 +14,7 @@ import { GitCommitHorizontal, Terminal, Upload } from "lucide-react";
 
 import {
   agentDirectiveLabel,
+  isMermaidLanguage,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitSlashCommandSegments,
@@ -21,6 +22,7 @@ import {
 } from "@falcondeck/client-core";
 
 import { CodeBlock } from "./code-block";
+import { MermaidBlock } from "./mermaid-block";
 
 const remarkPlugins = [remarkGfm];
 const markdownProcessor = unified().use(remarkParse).use(remarkGfm);
@@ -233,10 +235,14 @@ function markdownCodeComponent(highlight: boolean) {
     const isBlock = Boolean(match) || rawCode.includes("\n");
     const code = rawCode.replace(/\n$/, "");
     if (isBlock) {
+      const language = match?.[1] ?? null;
+      if (highlight && isMermaidLanguage(language)) {
+        return <MermaidBlock code={code} />;
+      }
       return (
         <CodeBlock
           code={code}
-          language={match?.[1] ?? null}
+          language={language}
           highlight={highlight}
         />
       );

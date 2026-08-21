@@ -14,6 +14,8 @@ import {
 } from '@falcondeck/ui'
 import { ClipboardPaste, Globe, Plug, Plus, Trash2, X } from 'lucide-react'
 
+import { falconDeckHttpError } from '../../connection-copy'
+
 export type ConnectorEntry = {
   command?: string | null
   args?: string[]
@@ -107,7 +109,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
     try {
       const query = scope === 'global' ? '' : `?workspace_id=${encodeURIComponent(scope)}`
       const response = await fetch(`${baseUrl}/api/connectors${query}`)
-      if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+      if (!response.ok) throw new Error(falconDeckHttpError(response.status))
       const data = (await response.json()) as ConnectorsOverview
       if (generation !== loadGeneration.current) return
       setOverview({ forScope: scope, data })
@@ -156,7 +158,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
         })
         if (!response.ok) {
           const body = await response.text()
-          throw new Error(body || `daemon returned ${response.status}`)
+          throw new Error(body || falconDeckHttpError(response.status))
         }
         await load()
         return true

@@ -18,6 +18,7 @@ import type {
 import { normalizeHarnessesOverview, normalizeHarnessUpgradeJob } from '@falcondeck/client-core'
 import { CheckCircle2, Download, RefreshCw, Terminal } from 'lucide-react'
 
+import { falconDeckHttpError } from '../../connection-copy'
 import type { HostView } from '../../hosts'
 
 export type HarnessesPanelProps = {
@@ -149,11 +150,11 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                 : {}),
             }),
           })
-          if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+          if (!response.ok) throw new Error(falconDeckHttpError(response.status))
           next = normalizeHarnessesOverview(await response.json())
         } else {
           const response = await fetch(`${baseUrl}/api/harnesses`)
-          if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+          if (!response.ok) throw new Error(falconDeckHttpError(response.status))
           next = normalizeHarnessesOverview(await response.json())
         }
         // Write only if the selection still matches: a slow probe for a
@@ -206,7 +207,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           })
           return
         }
-        if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+        if (!response.ok) throw new Error(falconDeckHttpError(response.status))
         const job = normalizeHarnessUpgradeJob(await response.json())
         if (!job) throw new Error('invalid job response')
         setJobLog(job.log)
@@ -264,10 +265,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         })
         if (!response.ok) {
           const body = await response.text()
-          throw new Error(body || `daemon returned ${response.status}`)
+          throw new Error(body || falconDeckHttpError(response.status))
         }
         const body = (await response.json()) as { job_id?: string }
-        if (!body.job_id) throw new Error('daemon did not return a job id')
+        if (!body.job_id) throw new Error('FalconDeck did not start the upgrade.')
         setJobLog([])
         setActiveJob({ jobId: body.job_id, harnessId: harness.id, hostKey })
       } catch (error) {

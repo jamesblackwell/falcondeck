@@ -15,6 +15,12 @@ export const THREAD_SORT_MODES: readonly ThreadSortMode[] = [
   'alphabetical',
 ]
 
+export const THREAD_SORT_OPTIONS: { mode: ThreadSortMode; label: string }[] = [
+  { mode: 'priority', label: 'Priority' },
+  { mode: 'last_updated', label: 'Last updated' },
+  { mode: 'alphabetical', label: 'Name' },
+]
+
 export function isThreadSortMode(value: unknown): value is ThreadSortMode {
   return THREAD_SORT_MODES.includes(value as ThreadSortMode)
 }
@@ -105,6 +111,18 @@ export function buildProjectGroups(
       workspace,
       threads: (threadsByWorkspace.get(workspace.id) ?? []).sort(compareByRecency),
     }))
+}
+
+/** Reorders chats inside each project. Pinned rows are sorted separately. */
+export function sortProjectGroupThreads(
+  groups: readonly ProjectGroup[],
+  mode: ThreadSortMode,
+): ProjectGroup[] {
+  const compare = compareThreads(mode)
+  return groups.map((group) => ({
+    ...group,
+    threads: [...group.threads].sort(compare),
+  }))
 }
 
 export function projectLabel(path: string) {

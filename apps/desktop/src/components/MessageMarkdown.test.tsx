@@ -1,6 +1,15 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: vi.fn(),
+    render: vi.fn(async () => ({
+      svg: '<svg data-testid="mermaid-svg"></svg>',
+    })),
+  },
+}));
 
 import {
   MessageMarkdown,
@@ -250,6 +259,32 @@ describe("streaming code highlighting", () => {
       "data-syntax-highlighting",
       "enabled",
     );
+  });
+
+  it("renders settled mermaid fences as diagrams", async () => {
+    render(
+      <MessageMarkdown
+        text={"```mermaid\nflowchart TD\n  A-->B\n```"}
+        defer={false}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("img", { name: "Mermaid diagram" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps mermaid as source while the message is still streaming", () => {
+    render(
+      <MessageMarkdown
+        text={"```mermaid\nflowchart TD\n  A-->B\n```"}
+        defer={false}
+        streaming
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: "Mermaid diagram" })).toBeNull();
+    expect(screen.getByText(/flowchart TD/)).toBeInTheDocument();
   });
 
   it("keeps a newly streamed fenced block empty until its first code token arrives", () => {

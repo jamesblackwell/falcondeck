@@ -26,6 +26,7 @@ import {
   deriveThreadAttentionPresentation,
   deriveExtensionPanels,
   deriveExtensionSidebarFilters,
+  deriveComposerSuggestions,
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
@@ -33,6 +34,7 @@ import {
   encryptJson,
   fetchWithTimeout,
   filesToImageInputs,
+  forkThread,
   generateBoxKeyPair,
   generateUserItemId,
   imageAttachmentSendBlockReason,
@@ -95,10 +97,12 @@ import {
   type ComposerDrafts,
   type ConversationItem,
   type DaemonSnapshot,
+  type ComposerSuggestion,
   type EncryptedEnvelope,
   type EventEnvelope,
   type ExtensionActionResponse,
   type ExtensionUiActionBinding,
+  type ForkThreadApi,
   type GitStatusResponse,
   type ImageInput,
   type InteractiveResponsePayload,
@@ -129,6 +133,7 @@ import {
 } from "@falcondeck/client-core";
 import {
   Conversation,
+  ComposerSuggestionPill,
   GoalBubble,
   GoalControl,
   InteractiveRequestBar,
@@ -344,6 +349,13 @@ function RemoteApp() {
     () => deriveThreadTags(snapshot?.extensions),
     [snapshot?.extensions],
   );
+  // The offer each thread has waved away, by thread id. A new turn produces a
+  // new offer key, so suggestions come back on their own; deliberately not
+  // persisted, and bounded by the number of threads rather than by how many
+  // times the user has dismissed something.
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<
+    Readonly<Record<string, string>>
+  >({});
   const extensionSidebarFilters = useMemo(
     () => deriveExtensionSidebarFilters(snapshot?.extensions),
     [snapshot?.extensions],
@@ -1126,6 +1138,37 @@ function RemoteApp() {
       ),
     [selectedThreadId, selectedWorkspaceId, snapshot?.threads],
   );
+  const composerSuggestionOffer = useMemo(() => {
+    const offer = deriveComposerSuggestions(
+      snapshot?.extensions,
+      selectedThreadId,
+      selectedThread?.status,
+    );
+    if (!offer || !selectedThreadId) return offer;
+    return dismissedSuggestions[selectedThreadId] === offer.key ? null : offer;
+  }, [
+    dismissedSuggestions,
+    selectedThread?.status,
+    selectedThreadId,
+    snapshot?.extensions,
+  ]);
+  // A chosen suggestion is its own turn: it submits the offered prompt and
+  // leaves whatever the user was drafting untouched.
+  const handleSubmitComposerSuggestion = useCallback(
+    (suggestion: ComposerSuggestion) => {
+      void handleSubmit({ text: suggestion.prompt });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedThreadId, selectedWorkspaceId],
+  );
+  const handleDismissComposerSuggestions = useCallback(() => {
+    const key = composerSuggestionOffer?.key;
+    if (!key || !selectedThreadId) return;
+    setDismissedSuggestions((current) => ({
+      ...current,
+      [selectedThreadId]: key,
+    }));
+  }, [composerSuggestionOffer?.key, selectedThreadId]);
   const operationalConditions = useMemo(
     () =>
       workspaceOperationalConditions(
@@ -2697,24 +2740,32 @@ function RemoteApp() {
     }
   }
 
-  async function handleSubmit() {
+  /**
+   * `override` sends a prompt the user did not type — today, a chosen composer
+   * suggestion. It carries no attachments and leaves the composer's own draft
+   * where it was, so choosing a suggestion never eats work in progress.
+   */
+  async function handleSubmit(override?: { text: string }) {
     if ((attachmentPreparationCountsRef.current[conversationKey] ?? 0) > 0) {
       setError("Wait for image preparation to finish before sending.");
       return;
     }
-    if (!selectedWorkspace || (!draft.trim() && attachments.length === 0))
+    const submittedDraft = override?.text ?? draft;
+    const submittedAttachments = override ? [] : attachments;
+    if (
+      !selectedWorkspace ||
+      (!submittedDraft.trim() && submittedAttachments.length === 0)
+    )
       return;
     const submitProvider = selectedThread?.provider ?? selectedProvider;
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(selectedWorkspace, submitProvider),
-      attachments.length,
+      submittedAttachments.length,
     );
     if (imageBlockReason) {
       setError(imageBlockReason);
       return;
     }
-    const submittedDraft = draft;
-    const submittedAttachments = attachments;
     const submittedSkills = selectedSkillsFromText(
       submittedDraft,
       selectedWorkspace.skills ?? [],
@@ -2749,13 +2800,15 @@ function RemoteApp() {
         );
         // Copy first, then delete: interruption during the new-thread handoff
         // may leave two recoverable drafts, but never zero.
-        setDraftForConversation(startedConversationKey, submittedDraft);
-        setAttachmentsForConversation(
-          startedConversationKey,
-          () => submittedAttachments,
-        );
-        setDraftForConversation(submittedKey, "");
-        setAttachmentsForConversation(submittedKey, () => []);
+        if (!override) {
+          setDraftForConversation(startedConversationKey, submittedDraft);
+          setAttachmentsForConversation(
+            startedConversationKey,
+            () => submittedAttachments,
+          );
+          setDraftForConversation(submittedKey, "");
+          setAttachmentsForConversation(submittedKey, () => []);
+        }
         pendingComposerKey = startedConversationKey;
         const adopted = conversationKeyRef.current === submittedKey;
         if (adopted) {
@@ -2824,8 +2877,10 @@ function RemoteApp() {
       // The relay has durably accepted the outbox entry. Until this point the
       // original composer remains in localStorage, surviving tab or process
       // loss without relying on an in-memory catch handler.
-      setDraftForConversation(pendingComposerKey, "");
-      setAttachmentsForConversation(pendingComposerKey, () => []);
+      if (!override) {
+        setDraftForConversation(pendingComposerKey, "");
+        setAttachmentsForConversation(pendingComposerKey, () => []);
+      }
       setError(null);
     } catch (e) {
       // Put the unsent input back where the user now is: the thread that was
@@ -2833,6 +2888,13 @@ function RemoteApp() {
       const restoreKey = activeThreadId
         ? draftKeyFor(selectedWorkspace.id, activeThreadId)
         : submittedKey;
+      if (override) {
+        // Nothing of the user's was consumed, so there is nothing to restore.
+        reportError(e, "Failed to send message");
+        sendingConversationKeyRef.current = null;
+        setIsSubmitting(false);
+        return;
+      }
       if (restoreKey !== submittedKey) {
         setDraftForConversation(submittedKey, "");
         setAttachmentsForConversation(submittedKey, () => []);
@@ -3730,6 +3792,77 @@ function RemoteApp() {
     }
   }
 
+  // Adapts the relay's `thread.*`/`turn.*` RPC methods to the shape the
+  // shared `forkThread` helper expects. Thread creation reads/writes go
+  // straight over the RPC channel like `branchFromMessage` above; the
+  // resulting turn goes through the durable queued-action path like every
+  // other turn submission on this client, so a fork survives a flaky
+  // connection the same way a normal send does.
+  const forkApi = useMemo<ForkThreadApi>(
+    () => ({
+      forkThread: (payload) =>
+        callRpc<ThreadHandle>("thread.fork", payload).then(
+          normalizeThreadHandle,
+        ),
+      startThread: (payload) =>
+        callRpc<ThreadHandle>("thread.start", payload).then(
+          normalizeThreadHandle,
+        ),
+      updateThread: (payload) =>
+        callRpc<ThreadHandle>("thread.update", payload).then(
+          normalizeThreadHandle,
+        ),
+      sendTurn: async (payload) => {
+        await submitQueuedAction("turn.start", payload, {
+          awaitCompletion: false,
+        });
+        return { ok: true };
+      },
+      threadDetail: (workspaceId, threadId, request) =>
+        callRpc<ThreadDetail>("thread.detail", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          ...request,
+        }).then(normalizeThreadDetail),
+    }),
+    [callRpc, submitQueuedAction],
+  );
+
+  async function handleForkThread(workspaceId: string, threadId: string) {
+    const workspace = snapshot?.workspaces.find(
+      (entry) => entry.id === workspaceId,
+    );
+    const thread = snapshot?.threads.find((entry) => entry.id === threadId);
+    if (!workspace || !thread) {
+      reportError(new Error("Thread not found"), "Failed to fork thread");
+      return;
+    }
+    try {
+      const handle = await forkThread(forkApi, { workspace, thread });
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              workspaces: current.workspaces.map((entry) =>
+                entry.id === handle.workspace.id ? handle.workspace : entry,
+              ),
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (entry) => entry.id !== handle.thread.id,
+                ),
+              ],
+            }
+          : current,
+      );
+      setSelectedWorkspaceId(handle.workspace.id);
+      setSelectedThreadId(handle.thread.id);
+      setError(null);
+    } catch (e) {
+      reportError(e, "Failed to fork thread");
+    }
+  }
+
   // Set by "Mark as unread" so the auto-read effect does not undo it while
   // the thread is still selected.
   const suppressAutoReadRef = useRef<{
@@ -4413,6 +4546,7 @@ function RemoteApp() {
                 onArchiveThread={handleArchiveThread}
                 onRenameThread={handleRenameThread}
                 onSuggestThreadTitle={handleSuggestThreadTitle}
+                onForkThread={handleForkThread}
                 onTogglePinThread={handleTogglePinThread}
                 onMarkThreadRead={handleMarkThreadRead}
                 onMarkThreadUnread={handleMarkThreadUnread}
@@ -4473,6 +4607,7 @@ function RemoteApp() {
           onArchiveThread={handleArchiveThread}
           onRenameThread={handleRenameThread}
           onSuggestThreadTitle={handleSuggestThreadTitle}
+          onForkThread={handleForkThread}
           onTogglePinThread={handleTogglePinThread}
           onMarkThreadRead={handleMarkThreadRead}
           onMarkThreadUnread={handleMarkThreadUnread}
@@ -4617,6 +4752,11 @@ function RemoteApp() {
                     onSetGoalStatus={handleSetGoalStatus}
                   />
                 ) : null}
+                <ComposerSuggestionPill
+                  offer={composerSuggestionOffer}
+                  onSubmit={handleSubmitComposerSuggestion}
+                  onDismiss={handleDismissComposerSuggestions}
+                />
                 <PromptInput
                   key={`${conversationKey}:${activeProvider}:${activeCapabilities.supports_images ? "images" : "no-images"}`}
                   value={draft}

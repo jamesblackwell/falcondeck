@@ -193,6 +193,36 @@ describe('session-store edge cases', () => {
       expect(current?.title).toBe('Streaming now')
       expect(notifications).toBe(1)
     })
+
+    it('does not mark every thread unread when relay replay repeats a pre-read summary', () => {
+      const readThread = thread({
+        attention: {
+          ...thread().attention,
+          last_agent_activity_seq: 9,
+          last_read_seq: 9,
+          unread: false,
+          level: 'none',
+        },
+      })
+      useSessionStore.getState().applyDaemonEvents([
+        snapshotEvent(snapshot({ threads: [readThread] })),
+        threadUpdatedEvent({
+          ...readThread,
+          attention: {
+            ...readThread.attention,
+            last_read_seq: 0,
+            unread: true,
+            level: 'unread',
+          },
+        }),
+      ])
+
+      expect(useSessionStore.getState().snapshot?.threads[0]?.attention).toMatchObject({
+        unread: false,
+        last_read_seq: 9,
+        last_agent_activity_seq: 9,
+      })
+    })
   })
 
   describe('rapid message stream', () => {

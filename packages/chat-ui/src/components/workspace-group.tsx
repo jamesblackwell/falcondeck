@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { memo, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { ChevronRight, FolderClosed, FolderOpen, Globe, Search, SquarePen } from 'lucide-react'
+import { FolderClosed, FolderOpen, Globe, Search, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { workspaceColorCssVar } from '@falcondeck/client-core'
@@ -103,49 +103,31 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               clicking anywhere in the row — not just on the label — toggles
               the collapse, matching the drag hit area on the row itself. */}
           <Collapsible.Trigger className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left">
-            {/* Folder and chevron are stacked so they can crossfade on hover
-                while the chevron keeps rotating through the open/close toggle. */}
             <span className="relative h-4 w-4 shrink-0">
-              <span
+              <FolderIcon
                 aria-hidden="true"
                 className={cn(
-                  'absolute inset-0 transition-opacity duration-[var(--fd-duration-fast)]',
-                  isOpen ? 'opacity-100 group-hover:opacity-0' : 'opacity-0',
+                  'h-4 w-4',
+                  folderColor ? null : 'text-fg-muted',
                 )}
-              >
-                <FolderIcon
-                  className={cn(
-                    'absolute inset-0 h-4 w-4',
-                    folderColor ? null : 'text-fg-muted',
-                  )}
-                  style={folderColor ? { color: folderColor } : undefined}
-                />
-                {/* Remote workspaces get a small globe badge on the folder
-                    instead of a separate icon or a second subtitle line. */}
-                {host ? (
-                  <Globe
-                    className={cn(
-                      'absolute -bottom-px -right-px h-2.5 w-2.5',
-                      host.connected
-                        ? 'text-fg-muted'
-                        : 'text-fg-muted opacity-60',
-                    )}
-                  />
-                ) : null}
-              </span>
-              <ChevronRight
-                aria-hidden="true"
-                className={cn(
-                  'absolute inset-0 h-4 w-4 text-fg-muted',
-                  'transition-[transform,opacity] duration-[var(--fd-duration-normal)] ease-[var(--fd-ease-default)]',
-                  isOpen
-                    ? 'rotate-90 opacity-0 group-hover:opacity-100'
-                    : 'rotate-0 opacity-100',
-                )}
+                style={folderColor ? { color: folderColor } : undefined}
               />
+              {/* Remote workspaces get a small globe badge on the folder
+                  instead of a separate icon or a second subtitle line. */}
+              {host ? (
+                <Globe
+                  aria-hidden="true"
+                  className={cn(
+                    'absolute -bottom-px -right-px h-2.5 w-2.5',
+                    host.connected
+                      ? 'text-fg-muted'
+                      : 'text-fg-muted opacity-60',
+                  )}
+                />
+              ) : null}
             </span>
             <span className="flex min-w-0 flex-1 items-center gap-2">
-              <span className="truncate text-[length:var(--fd-text-sm)] font-medium">
+              <span className="fd-type-supporting truncate">
                 {pathLabel}
               </span>
               {/* Host sits quietly at the right edge of the same row: muted

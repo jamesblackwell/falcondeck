@@ -196,6 +196,28 @@ describe('session-store', () => {
       ])
     })
 
+    it('removes a visible thread when a summary archives it', () => {
+      const remaining = thread({ id: 't2', title: 'Keep' })
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          threads: [thread({ id: 't1' }), remaining],
+        })),
+      )
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: thread({ id: 't1' }),
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
+
+      useSessionStore.getState().applyThreadSummary(thread({ id: 't1', is_archived: true }))
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2'])
+      expect(state.selectedThreadId).toBe('t2')
+      expect(state.threadDetail).toBeNull()
+      expect(state.threadItems['t1']).toBeUndefined()
+    })
+
     it('sets both workspace and thread when selecting a thread', () => {
       const { selectThread } = useSessionStore.getState()
       selectThread('w1', 't1')
@@ -608,6 +630,211 @@ describe('session-store', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+  })
+
+  describe('optimistic archive', () => {
+    const t1 = thread({ id: 't1', workspace_id: 'workspace-1', title: 'First' })
+    const t2 = thread({ id: 't2', workspace_id: 'workspace-1', title: 'Second' })
+    const t3 = thread({ id: 't3', workspace_id: 'workspace-1', title: 'Third' })
+
+    function loadThreads() {
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 't1' })],
+          threads: [t1, t2, t3],
+          interactive_requests: [
+            approval({ request_id: 'approval-t1', thread_id: 't1' }),
+            approval({ request_id: 'approval-t2', thread_id: 't2' }),
+          ],
+        })),
+      )
+    }
+
+    it('drops the thread from the sidebar immediately and returns undo state', () => {
+      loadThreads()
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: t1,
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
+      useSessionStore.getState().setThreadDetailError('t1', 'tail failed')
+
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+
+      expect(undo).toMatchObject({
+        thread: { id: 't1' },
+        index: 0,
+        selectedThreadId: 't1',
+      })
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2', 't3'])
+      expect(state.snapshot?.workspaces[0]?.current_thread_id).toBeNull()
+      expect(state.snapshot?.interactive_requests.map((entry) => entry.request_id)).toEqual([
+        'approval-t2',
+      ])
+      expect(state.selectedThreadId).toBe('t2')
+      expect(state.threadDetail).toBeNull()
+      expect(state.threadItems['t1']).toBeUndefined()
+      expect(state.threadHistory['t1']).toBeUndefined()
+      expect(state.threadDetailErrors['t1']).toBeUndefined()
+    })
+
+    it('restores the thread, selection, and transcript when the RPC fails', () => {
+      loadThreads()
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: t1,
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
+      useSessionStore.getState().setThreadDetailError('t1', 'tail failed')
+
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+      expect(undo).not.toBeNull()
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2', 't3'])
+      expect(state.snapshot?.workspaces[0]?.current_thread_id).toBe('t1')
+      expect(state.snapshot?.interactive_requests.map((entry) => entry.request_id)).toEqual([
+        'approval-t1',
+        'approval-t2',
+      ])
+      expect(state.selectedThreadId).toBe('t1')
+      expect(state.threadDetail?.thread.id).toBe('t1')
+      expect(state.threadItems['t1']?.map((item) => item.id)).toEqual(['msg-1'])
+      expect(state.threadHistory['t1']?.newestItemId).toBe('msg-1')
+      expect(state.threadDetailErrors['t1']).toBe('tail failed')
+    })
+
+    it('does not steal selection if the user opened another thread after archive', () => {
+      loadThreads()
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+      expect(useSessionStore.getState().selectedThreadId).toBe('t2')
+
+      useSessionStore.getState().selectThread('workspace-1', 't3')
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2', 't3'])
+      expect(state.selectedThreadId).toBe('t3')
+    })
+
+    it('is a no-op when restoring a thread that is already visible', () => {
+      loadThreads()
+      const undo = useSessionStore.getState().archiveThreadLocally('t2')
+      useSessionStore.getState().restoreArchivedThread(undo!)
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      expect(useSessionStore.getState().snapshot?.threads.map((entry) => entry.id)).toEqual([
+        't1',
+        't2',
+        't3',
+      ])
+    })
+
+    it('is a no-op when restoring after the snapshot has been cleared', () => {
+      loadThreads()
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+      useSessionStore.getState().reset({ preserveCache: true })
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      expect(useSessionStore.getState().snapshot).toBeNull()
+    })
+
+    it('leaves the open thread alone when archiving a different row', () => {
+      loadThreads()
+      useSessionStore.getState().selectThread('workspace-1', 't2')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: t2,
+        items: [assistantMessage('msg-2', 'open')],
+      }))
+
+      useSessionStore.getState().archiveThreadLocally('t1')
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2', 't3'])
+      expect(state.selectedThreadId).toBe('t2')
+      expect(state.threadDetail?.thread.id).toBe('t2')
+    })
+
+    it('returns null when there is no snapshot', () => {
+      expect(useSessionStore.getState().archiveThreadLocally('t1')).toBeNull()
+    })
+
+    it('returns null when the thread is not in the snapshot', () => {
+      loadThreads()
+      expect(useSessionStore.getState().archiveThreadLocally('missing')).toBeNull()
+    })
+
+    it('returns null when the snapshot thread is already archived', () => {
+      useSessionStore.setState({
+        snapshot: snapshot({
+          threads: [thread({ id: 'archived', is_archived: true })],
+        }),
+      })
+
+      expect(useSessionStore.getState().archiveThreadLocally('archived')).toBeNull()
+    })
+
+    it('keeps transcript state that landed while the RPC was in flight', () => {
+      loadThreads()
+      useSessionStore.getState().selectThread('workspace-1', 't1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        thread: t1,
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
+      useSessionStore.getState().setThreadDetailError('t1', 'tail failed')
+
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+      useSessionStore.setState({
+        threadItems: {
+          ...useSessionStore.getState().threadItems,
+          t1: [assistantMessage('msg-new', 'later')],
+        },
+        threadHistory: {
+          ...useSessionStore.getState().threadHistory,
+          t1: {
+            hasOlder: false,
+            oldestItemId: 'msg-new',
+            newestItemId: 'msg-new',
+            isPartial: false,
+          },
+        },
+        threadDetailErrors: {
+          ...useSessionStore.getState().threadDetailErrors,
+          t1: 'already retried',
+        },
+      })
+
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      const state = useSessionStore.getState()
+      expect(state.threadItems['t1']?.map((item) => item.id)).toEqual(['msg-new'])
+      expect(state.threadHistory['t1']?.newestItemId).toBe('msg-new')
+      expect(state.threadDetailErrors['t1']).toBe('already retried')
+    })
+
+    it('does not duplicate interactive requests that landed while the RPC was in flight', () => {
+      loadThreads()
+      const undo = useSessionStore.getState().archiveThreadLocally('t1')
+      const current = useSessionStore.getState().snapshot!
+      useSessionStore.setState({
+        snapshot: {
+          ...current,
+          interactive_requests: [
+            ...current.interactive_requests,
+            approval({ request_id: 'approval-t1', thread_id: 't1' }),
+          ],
+        },
+      })
+
+      useSessionStore.getState().restoreArchivedThread(undo!)
+
+      expect(
+        useSessionStore.getState().snapshot?.interactive_requests.map((entry) => entry.request_id),
+      ).toEqual(['approval-t2', 'approval-t1'])
     })
   })
 

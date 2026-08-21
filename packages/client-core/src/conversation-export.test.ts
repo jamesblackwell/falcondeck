@@ -331,4 +331,229 @@ describe("conversation Markdown export", () => {
     );
     expect(conversationExportFilename("notes.md")).toBe("notes.md");
   });
+
+  it("keeps timestamps and command details in the human export", () => {
+    const markdown = conversationItemsToMarkdown(everyConversationItem());
+    expect(markdown).toContain("*Sent · 2026-08-10T12:00:00Z*");
+    expect(markdown).toContain("*Completed · 2026-08-10T12:00:00Z*");
+    expect(markdown).toContain("Exit code: 0");
+    expect(markdown).toContain("### Tool details");
+    expect(markdown).toContain('"cwd": "/workspace"');
+  });
+
+  it("strips timestamps and repeated workspace chrome from a handoff transcript", () => {
+    const workspace = "/Users/James/www/sites/lucidpic";
+    const items: ConversationItem[] = [
+      {
+        kind: "user_message",
+        id: "user-1",
+        text: "Find the terms copy",
+        attachments: [],
+        created_at,
+      },
+      {
+        kind: "tool_call",
+        id: "tool-1",
+        title: `cd ${workspace} && rg "Plain English" frontend`,
+        tool_kind: "command",
+        status: "completed",
+        output: "frontend/marketing/pages/Legal/Terms.tsx:134:",
+        exit_code: 0,
+        display: {
+          is_read_only: true,
+          has_side_effect: false,
+          is_error: false,
+          lifecycle: "succeeded",
+          artifact_kind: "command_output",
+          activity_kind: "command",
+          history_mode: "full",
+          summary_hint: null,
+        },
+        detail: {
+          kind: "command_execution",
+          command: `cd ${workspace} && rg "Plain English" frontend`,
+          cwd: workspace,
+          actions: [],
+          process_id: "42",
+          duration_ms: 120,
+          source: "codex",
+        },
+        created_at,
+        completed_at: created_at,
+      },
+      {
+        kind: "tool_call",
+        id: "tool-2",
+        title: `cd ${workspace} && rg selected frontend`,
+        tool_kind: "command",
+        status: "completed",
+        output: "frontend/marketing/pages/Legal/Terms.tsx:135:",
+        exit_code: 0,
+        display: {
+          is_read_only: true,
+          has_side_effect: false,
+          is_error: false,
+          lifecycle: "succeeded",
+          artifact_kind: "command_output",
+          activity_kind: "command",
+          history_mode: "full",
+          summary_hint: null,
+        },
+        detail: {
+          kind: "command_execution",
+          command: `cd ${workspace} && rg selected frontend`,
+          cwd: workspace,
+          actions: [],
+          process_id: "43",
+          duration_ms: 90,
+          source: "codex",
+        },
+        created_at: "2026-08-19T14:48:59.313830Z",
+        completed_at: "2026-08-19T14:48:59.313830Z",
+      },
+      {
+        kind: "tool_call",
+        id: "tool-3",
+        title: `cd ${workspace} && npm test`,
+        tool_kind: "test",
+        status: "failed",
+        output: "1 failing",
+        exit_code: 1,
+        display: {
+          is_read_only: true,
+          has_side_effect: false,
+          is_error: true,
+          lifecycle: "failed",
+          artifact_kind: "test",
+          activity_kind: "test",
+          history_mode: "full",
+          summary_hint: null,
+        },
+        detail: {
+          kind: "command_execution",
+          command: `cd ${workspace} && npm test`,
+          cwd: workspace,
+          actions: [],
+          process_id: "44",
+          duration_ms: 800,
+          source: "codex",
+        },
+        created_at,
+        completed_at: created_at,
+      },
+      {
+        kind: "file_change",
+        id: "file-change-1",
+        changes: [
+          {
+            path: `${workspace}/frontend/marketing/pages/Legal/Terms.tsx`,
+            change_kind: "update",
+            diff: "@@ -1 +1 @@\n-old\n+new",
+            move_path: null,
+          },
+        ],
+        status: "completed",
+        lifecycle: "succeeded",
+        created_at,
+        completed_at: created_at,
+      },
+    ];
+
+    const markdown = conversationItemsToMarkdown(items, {
+      title: "Previous session",
+      mode: "handoff",
+      workspacePath: workspace,
+    });
+
+    expect(markdown).toContain("## Tool — rg \"Plain English\" frontend");
+    expect(markdown).toContain("## Tool — rg selected frontend");
+    expect(markdown).toContain("## Tool — npm test");
+    expect(markdown).toContain("*Failed*");
+    expect(markdown).toContain("Exit code: 1");
+    expect(markdown).toContain(
+      "### frontend/marketing/pages/Legal/Terms.tsx — update",
+    );
+    expect(markdown).toContain("Find the terms copy");
+    expect(markdown).not.toContain(created_at);
+    expect(markdown).not.toContain("2026-08-19T14:48:59.313830Z");
+    expect(markdown).not.toContain("cd /Users/James/www/sites/lucidpic");
+    expect(markdown).not.toContain("*Completed*");
+    expect(markdown).not.toContain("*Sent*");
+    expect(markdown).not.toContain("Exit code: 0");
+    expect(markdown).not.toContain("### Tool details");
+    expect(markdown).not.toContain("process_id");
+  });
+
+  it("unwraps shell wrappers and quoted cd prefixes on handoff", () => {
+    const workspace = "/Users/James/www/sites/lucidpic";
+    const markdown = conversationItemsToMarkdown(
+      [
+        {
+          kind: "tool_call",
+          id: "tool-1",
+          title: `/bin/zsh -lc 'cd "${workspace}" && git status'`,
+          tool_kind: "command",
+          status: "completed",
+          output: "clean",
+          exit_code: 0,
+          display: {
+            is_read_only: true,
+            has_side_effect: false,
+            is_error: false,
+            lifecycle: "succeeded",
+            artifact_kind: "command_output",
+            activity_kind: "command",
+            history_mode: "full",
+            summary_hint: null,
+          },
+          created_at,
+          completed_at: created_at,
+        },
+      ],
+      { mode: "handoff", workspacePath: workspace },
+    );
+    expect(markdown).toContain("## Tool — git status");
+    expect(markdown).not.toContain("/bin/zsh");
+    expect(markdown).not.toContain(workspace);
+  });
+
+  it("infers the workspace root from repeated command cwds when none is passed", () => {
+    const markdown = conversationItemsToMarkdown(
+      [
+        {
+          kind: "tool_call",
+          id: "tool-1",
+          title: "cd /Users/James/www/sites/lucidpic && ls",
+          tool_kind: "command",
+          status: "completed",
+          output: "ok",
+          exit_code: 0,
+          display: {
+            is_read_only: true,
+            has_side_effect: false,
+            is_error: false,
+            lifecycle: "succeeded",
+            artifact_kind: "command_output",
+            activity_kind: "command",
+            history_mode: "full",
+            summary_hint: null,
+          },
+          detail: {
+            kind: "command_execution",
+            command: "ls",
+            cwd: "/Users/James/www/sites/lucidpic",
+            actions: [],
+            process_id: null,
+            duration_ms: null,
+            source: null,
+          },
+          created_at,
+          completed_at: created_at,
+        },
+      ],
+      { mode: "handoff" },
+    );
+    expect(markdown).toContain("## Tool — ls");
+    expect(markdown).not.toContain("cd /Users/James/www/sites/lucidpic");
+  });
 });

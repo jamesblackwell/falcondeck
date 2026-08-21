@@ -54,4 +54,23 @@ describe("ExtensionPanelNavigation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Mini Zen" }));
     expect(onSelect).toHaveBeenCalledWith("example.zen:attention");
   });
+
+  it("renders a host-owned panel icon and falls back for unknown names", () => {
+    const { rerender } = render(
+      <ExtensionPanelNavigation
+        panels={[{ ...panel, icon: "notebook-pen" }]}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(document.querySelector(".lucide-notebook-pen")).toBeTruthy();
+
+    rerender(
+      <ExtensionPanelNavigation
+        panels={[{ ...panel, icon: "spaceship" }]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(document.querySelector(".lucide-panels-top-left")).toBeTruthy();
+  });
 });

@@ -1,11 +1,13 @@
-import type {
-  ExtensionActionInvocation,
-  ExtensionContext,
-  ExtensionDefinition,
-  ExtensionEvent,
-  ExtensionEventType,
-  ExtensionThreadSummary,
-  PublishedExtensionView,
+import {
+  validateComposerSuggestions,
+  type ExtensionActionInvocation,
+  type ExtensionContext,
+  type ExtensionDefinition,
+  type ExtensionEvent,
+  type ExtensionEventType,
+  type ExtensionThreadSummary,
+  type ExtensionToolInvocation,
+  type PublishedExtensionView,
 } from "@falcondeck/extension-sdk";
 
 const MAX_ACTION_INPUT_BYTES = 64 * 1024;
@@ -13,8 +15,11 @@ const MAX_EVENT_BYTES = 4 * 1024;
 const MAX_EVENT_HANDLERS_PER_TYPE = 32;
 const MAX_THREAD_SUMMARIES = 1_000;
 const MAX_THREAD_SUMMARY_BYTES = 2 * 1024 * 1024;
+const AGENT_TOOLS_PERMISSION = "agent-tools:register";
+const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
 const SUPPORTED_EVENT_TYPES = new Set<ExtensionEventType>([
   "thread.updated",
+  "turn.start",
   "turn.ended",
   "attention.opened",
   "attention.resolved",
@@ -32,12 +37,19 @@ type ActionHandler = (
   invocation: ExtensionActionInvocation,
 ) => unknown | Promise<unknown>;
 type EventHandler = (event: ExtensionEvent) => unknown | Promise<unknown>;
+type ToolHandler = (
+  invocation: ExtensionToolInvocation,
+) => unknown | Promise<unknown>;
 
 export type ExtensionTestHostOptions = {
   extensionId?: string;
   storage?: JsonRecord;
   declaredActions?: readonly string[];
   declaredViews?: readonly string[];
+  /** Manifest-declared `agentTools` ids, when the test asserts declarations. */
+  declaredTools?: readonly string[];
+  /** Manifest-declared `composerSuggestions` view ids. */
+  declaredSuggestionViews?: readonly string[];
   grantedPermissions?: readonly string[];
   threadSummaries?: readonly ExtensionThreadSummary[];
 };
@@ -51,6 +63,12 @@ export type ExtensionTestActionResult = {
   result: unknown;
   storage: JsonRecord;
   publishedViews: PublishedExtensionView[];
+};
+
+export type ExtensionTestToolInvocation = {
+  input?: unknown;
+  threadId?: string;
+  workspaceId?: string;
 };
 
 export type ExtensionTestEventResult = Omit<
@@ -121,6 +139,25 @@ function boundThreadSummaries(
   return bounded;
 }
 
+/**
+ * Mirrors the daemon's commit-time contract for `composerSuggestions` views:
+ * thread scope is mandatory, and any non-empty set must be within bounds.
+ */
+function assertComposerSuggestionView(view: PublishedExtensionView): void {
+  if (view.scope?.kind !== "thread") {
+    throw new Error(
+      "composer suggestions must be published with a thread scope",
+    );
+  }
+  const value = view.value as { actions?: unknown } | null;
+  const actions = value?.actions;
+  if (Array.isArray(actions) && actions.length === 0) return;
+  const violation = validateComposerSuggestions(
+    view.value as Parameters<typeof validateComposerSuggestions>[0],
+  );
+  if (violation) throw new Error(violation);
+}
+
 /** In-memory public-SDK host for extension unit and contract tests. */
 export class ExtensionTestHost {
   readonly extensionId: string;
@@ -128,7 +165,10 @@ export class ExtensionTestHost {
   private readonly definition: ExtensionDefinition;
   private readonly declaredActions: ReadonlySet<string> | null;
   private readonly declaredViews: ReadonlySet<string> | null;
+  private readonly declaredTools: ReadonlySet<string> | null;
+  private readonly declaredSuggestionViews: ReadonlySet<string>;
   private readonly actions = new Map<string, ActionHandler>();
+  private readonly tools = new Map<string, ToolHandler>();
   private readonly eventHandlers = new Map<
     ExtensionEventType,
     Set<EventHandler>
@@ -159,6 +199,12 @@ export class ExtensionTestHost {
     this.declaredViews = options.declaredViews
       ? new Set(options.declaredViews)
       : null;
+    this.declaredTools = options.declaredTools
+      ? new Set(options.declaredTools)
+      : null;
+    this.declaredSuggestionViews = new Set(
+      options.declaredSuggestionViews ?? [],
+    );
     for (const permission of options.grantedPermissions ?? []) {
       this.grantedPermissions.add(permission);
     }
@@ -195,12 +241,50 @@ export class ExtensionTestHost {
       },
       views: {
         publish: async (view) => {
-          if (this.declaredViews && !this.declaredViews.has(view.viewId)) {
+          this.publishView(view);
+        },
+      },
+      tools: {
+        register: (id, handler) => {
+          if (!this.grantedPermissions.has(AGENT_TOOLS_PERMISSION)) {
             throw new Error(
-              `extension published undeclared view: ${view.viewId}`,
+              `${AGENT_TOOLS_PERMISSION} permission is not granted`,
             );
           }
-          this.publishedViews.push(cloneJson(view));
+          if (this.declaredTools && !this.declaredTools.has(id)) {
+            throw new Error(`extension registered undeclared tool: ${id}`);
+          }
+          if (this.tools.has(id))
+            throw new Error(`tool already registered: ${id}`);
+          this.tools.set(id, handler as ToolHandler);
+        },
+      },
+      composer: {
+        publish: async ({
+          viewId,
+          threadId,
+          actions,
+          preferredActionId,
+          turnId,
+        }) => {
+          const violation = validateComposerSuggestions({
+            actions,
+            preferredActionId,
+            turnId,
+          });
+          if (violation) throw new Error(violation);
+          this.publishView({
+            viewId,
+            scope: { kind: "thread", id: threadId },
+            value: { actions, preferredActionId, turnId },
+          });
+        },
+        clear: async ({ viewId, threadId }) => {
+          this.publishView({
+            viewId,
+            scope: { kind: "thread", id: threadId },
+            value: { actions: [] },
+          });
         },
       },
       events: {
@@ -250,6 +334,13 @@ export class ExtensionTestHost {
         },
       },
     };
+  }
+
+  private publishView(view: PublishedExtensionView): void {
+    if (this.declaredViews && !this.declaredViews.has(view.viewId)) {
+      throw new Error(`extension published undeclared view: ${view.viewId}`);
+    }
+    this.publishedViews.push(cloneJson(view));
   }
 
   async activate(): Promise<void> {
@@ -308,6 +399,7 @@ export class ExtensionTestHost {
       for (const [id, handler] of previousActions) {
         this.actions.set(id, handler);
       }
+      this.tools.clear();
       this.eventHandlers.clear();
       for (const [type, handlers] of previousEventHandlers) {
         this.eventHandlers.set(type, new Set(handlers));
@@ -336,6 +428,9 @@ export class ExtensionTestHost {
       validateScope(view.scope);
       if (encodedBytes(view.value) > MAX_VIEW_BYTES) {
         throw new Error(`extension view exceeds ${MAX_VIEW_BYTES} bytes`);
+      }
+      if (this.declaredSuggestionViews.has(view.viewId)) {
+        assertComposerSuggestionView(view);
       }
     }
     const nextRetainedViews = new Map(this.retainedViews);
@@ -447,6 +542,58 @@ export class ExtensionTestHost {
       }
       const { storage, publishedViews } = this.commitEffects(null);
       return { storage, publishedViews };
+    } catch (error) {
+      this.restoreAfterFailure(
+        previousStorage,
+        wasActivated,
+        previousActions,
+        previousEventHandlers,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Calls a manifest-declared agent tool the way the MCP bridge does, with
+   * daemon-supplied thread and workspace context.
+   */
+  async invokeTool(
+    toolId: string,
+    invocation: ExtensionTestToolInvocation = {},
+  ): Promise<ExtensionTestActionResult> {
+    this.publishedViews = [];
+    if (this.nextFailure) {
+      const error = this.nextFailure;
+      this.nextFailure = null;
+      throw error;
+    }
+    if (!this.grantedPermissions.has(AGENT_TOOLS_PERMISSION)) {
+      throw new Error(`${AGENT_TOOLS_PERMISSION} permission is not granted`);
+    }
+    if (this.declaredTools && !this.declaredTools.has(toolId)) {
+      throw new Error("extension tool is not declared by the manifest");
+    }
+    const input = cloneJson(invocation.input ?? null);
+    if (encodedBytes(input) > MAX_TOOL_ARGUMENT_BYTES) {
+      throw new Error(
+        `extension tool arguments exceed ${MAX_TOOL_ARGUMENT_BYTES} bytes`,
+      );
+    }
+    const previousStorage = this.storageSnapshot();
+    const wasActivated = this.activated;
+    const previousActions = new Map(this.actions);
+    const previousEventHandlers = this.eventHandlerSnapshot();
+    try {
+      await this.activate();
+      const handler = this.tools.get(toolId);
+      if (!handler)
+        throw new Error(`extension did not register tool: ${toolId}`);
+      const result = await handler({
+        input,
+        threadId: invocation.threadId,
+        workspaceId: invocation.workspaceId,
+      });
+      return this.commitEffects(result);
     } catch (error) {
       this.restoreAfterFailure(
         previousStorage,

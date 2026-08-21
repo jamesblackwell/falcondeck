@@ -94,6 +94,102 @@ function blobBase64(blob: Blob): Promise<string> {
   });
 }
 
+const LEVEL_HISTORY_LIMIT = 240;
+const LEVEL_SAMPLE_MS = 150;
+
+/**
+ * Capture without the voice-processing unit. Echo cancellation / AGC tap the
+ * output device so macOS ducks or pauses whatever is already playing — even
+ * when the mic and headphones are different hardware.
+ */
+function microphoneConstraints(): MediaTrackConstraints {
+  const deviceId = readDictationSettings().inputDeviceId;
+  return {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    ...(deviceId ? { deviceId: { ideal: deviceId } } : {}),
+  };
+}
+
+async function openMicrophone(): Promise<MediaStream> {
+  const audio = microphoneConstraints();
+  const stream = await navigator.mediaDevices.getUserMedia({ audio }).catch(() =>
+    navigator.mediaDevices.getUserMedia({
+      audio: audio.deviceId ? { deviceId: audio.deviceId } : true,
+    }),
+  );
+  await Promise.all(
+    stream.getAudioTracks().map((track) =>
+      track
+        .applyConstraints({
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        })
+        .catch(() => undefined),
+    ),
+  );
+  return stream;
+}
+
+function rmsToLevel(rms: number): number {
+  if (rms <= 0) return 0;
+  const db = 20 * Math.log10(rms);
+  // Same voice-range mapping the native dictation meter uses.
+  const linear = Math.max(0, Math.min(1, (db + 55) / 55));
+  return Math.sqrt(linear);
+}
+
+function startLevelMeter(
+  stream: MediaStream,
+  onLevel: (level: number) => void,
+): () => void {
+  const AudioContextCtor = window.AudioContext;
+  if (!AudioContextCtor) return () => {};
+
+  const context = new AudioContextCtor();
+  const source = context.createMediaStreamSource(stream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.65;
+  source.connect(analyser);
+
+  const buffer = new Float32Array(analyser.fftSize);
+  let frame = 0;
+  let lastSampleAt = 0;
+
+  const tick = (now: number) => {
+    frame = window.requestAnimationFrame(tick);
+    if (now - lastSampleAt < LEVEL_SAMPLE_MS) return;
+    lastSampleAt = now;
+    if (typeof analyser.getFloatTimeDomainData === "function") {
+      analyser.getFloatTimeDomainData(buffer);
+    } else {
+      const bytes = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(bytes);
+      for (let index = 0; index < bytes.length; index += 1) {
+        buffer[index] = (bytes[index] - 128) / 128;
+      }
+    }
+    let sum = 0;
+    for (let index = 0; index < buffer.length; index += 1) {
+      sum += buffer[index] * buffer[index];
+    }
+    onLevel(rmsToLevel(Math.sqrt(sum / buffer.length)));
+  };
+
+  frame = window.requestAnimationFrame(tick);
+  void context.resume();
+
+  return () => {
+    window.cancelAnimationFrame(frame);
+    source.disconnect();
+    analyser.disconnect();
+    void context.close();
+  };
+}
+
 export function useVoiceRecorder({
   baseUrl,
   onTranscript,
@@ -106,9 +202,11 @@ export function useVoiceRecorder({
   const [pending, setPending] = useState<PendingRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [seconds, setSeconds] = useState(0);
+  const [levels, setLevels] = useState<number[]>([]);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const stopMeterRef = useRef<(() => void) | null>(null);
   // Which control ended the recording. Transcription resolves long after the
   // click, so the intent has to outlive it.
   const submitOnFinishRef = useRef(false);
@@ -120,6 +218,8 @@ export function useVoiceRecorder({
   }, [baseUrl]);
 
   const stopTracks = useCallback(() => {
+    stopMeterRef.current?.();
+    stopMeterRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
   }, []);
@@ -174,8 +274,8 @@ export function useVoiceRecorder({
     stopTracks();
     setError(
       pending
-        ? "The daemon disconnected. Your recording is saved — retry when it is back."
-        : "The daemon disconnected.",
+        ? "FalconDeck disconnected. Your recording is saved — retry when it is back."
+        : "FalconDeck disconnected.",
     );
     setState("failed");
   }, [baseUrl, pending, state, stopTracks]);
@@ -253,7 +353,8 @@ export function useVoiceRecorder({
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await openMicrophone();
+      streamRef.current = stream;
       const mimeType = preferredMimeType();
       // Transcription models resample to 16 kHz mono; 32 kbps speech audio
       // transcribes identically while keeping uploads several-fold smaller.
@@ -263,12 +364,18 @@ export function useVoiceRecorder({
         ...(mimeType ? { mimeType } : {}),
         audioBitsPerSecond: 32_000,
       });
-      streamRef.current = stream;
       recorderRef.current = recorder;
       chunksRef.current = [];
       cancelledRef.current = false;
       setSeconds(0);
+      setLevels([]);
       setError(null);
+      stopMeterRef.current = startLevelMeter(stream, (level) => {
+        setLevels((current) => [
+          ...current.slice(-(LEVEL_HISTORY_LIMIT - 1)),
+          level,
+        ]);
+      });
       recorder.ondataavailable = (event) => {
         if (event.data.size) chunksRef.current.push(event.data);
       };
@@ -279,6 +386,7 @@ export function useVoiceRecorder({
         // audio the user just said they did not want.
         if (cancelledRef.current) {
           chunksRef.current = [];
+          setLevels([]);
           setState("idle");
           return;
         }
@@ -324,6 +432,7 @@ export function useVoiceRecorder({
       recorder.stop();
     } else {
       stopTracks();
+      setLevels([]);
       setState("idle");
     }
     setError(null);
@@ -333,6 +442,7 @@ export function useVoiceRecorder({
     await writePendingRecording(null);
     setPending(null);
     setError(null);
+    setLevels([]);
     setState("idle");
   }, []);
 
@@ -349,12 +459,14 @@ export function useVoiceRecorder({
 
   const dismiss = useCallback(() => {
     setError(null);
+    setLevels([]);
     setState("idle");
   }, []);
 
   return {
     state,
     seconds,
+    levels,
     error,
     configured,
     hasPending: pending !== null,

@@ -23,7 +23,9 @@ use uuid::Uuid;
 use super::{
     AppState,
     acp_threads::{start_acp_turn, steer_acp_turn},
-    agent_helpers::{ResolvedSelectedSkill, claude_prompt_from_inputs, codex_inputs},
+    agent_helpers::{
+        ResolvedSelectedSkill, agy_prompt_from_inputs, claude_prompt_from_inputs, codex_inputs,
+    },
     opencode_threads::{requested_native_transport, start_opencode_turn, steer_opencode_turn},
     workspace_ops::{sandbox_policy_payload, send_turn},
 };
@@ -36,6 +38,7 @@ use crate::{
 pub(super) enum ProviderRuntime {
     Codex,
     Claude,
+    Agy,
     /// Any other provider id, served by the generic ACP adapter. Carries the id
     /// because the adapter is configured per provider.
     Acp(AgentProvider),
@@ -91,6 +94,8 @@ impl ProviderRuntime {
             Self::Codex
         } else if *provider == AgentProvider::CLAUDE {
             Self::Claude
+        } else if *provider == AgentProvider::AGY {
+            Self::Agy
         } else {
             Self::Acp(provider.clone())
         }
@@ -101,6 +106,7 @@ impl ProviderRuntime {
         match self {
             Self::Codex => AgentProvider::CODEX,
             Self::Claude => AgentProvider::CLAUDE,
+            Self::Agy => AgentProvider::AGY,
             Self::Acp(provider) => provider.clone(),
         }
     }
@@ -111,6 +117,7 @@ impl ProviderRuntime {
         match self {
             Self::Codex => "Codex".to_string(),
             Self::Claude => "Claude".to_string(),
+            Self::Agy => "Antigravity".to_string(),
             Self::Acp(provider) => provider.as_str().to_string(),
         }
     }
@@ -121,6 +128,7 @@ impl ProviderRuntime {
         match self {
             Self::Codex => AgentCapabilitySummary::codex(),
             Self::Claude => AgentCapabilitySummary::claude(),
+            Self::Agy => AgentCapabilitySummary::agy(),
             Self::Acp(provider) => {
                 if provider.as_str().eq_ignore_ascii_case("grok") {
                     return crate::acp::grok_placeholder_capabilities();
@@ -168,6 +176,12 @@ impl ProviderRuntime {
             Self::Claude => Ok(StartedThread {
                 thread_id: format!("claude-thread-{}", Uuid::new_v4().simple()),
                 title: "New Claude thread".to_string(),
+                native_session_id: None,
+                provider_transport: None,
+            }),
+            Self::Agy => Ok(StartedThread {
+                thread_id: format!("agy-thread-{}", Uuid::new_v4().simple()),
+                title: "New Antigravity thread".to_string(),
                 native_session_id: None,
                 provider_transport: None,
             }),
@@ -358,8 +372,8 @@ impl ProviderRuntime {
                 // The built-in FalconDeck connector is re-evaluated at each
                 // Claude turn spawn, so agent-control setting changes apply
                 // on the next turn.
-                let builtin_control = app
-                    .builtin_control_spec(
+                let builtin = app
+                    .builtin_connectors(
                         &AgentProvider::CLAUDE,
                         runtime.workspace_path(),
                         Some(spec.thread_id),
@@ -378,7 +392,7 @@ impl ProviderRuntime {
                         app.local_base_url().as_deref(),
                         &settings_dir,
                         spec.thread.working_directory(runtime.workspace_path()),
-                        builtin_control.as_ref(),
+                        &builtin,
                         agent_context.as_deref(),
                     )
                     .await?;
@@ -391,6 +405,51 @@ impl ProviderRuntime {
                 let thread_id = spec.thread_id.to_string();
                 tokio::spawn(async move {
                     app.monitor_claude_turn(
+                        workspace_id,
+                        thread_id,
+                        spawn.generation,
+                        spawn.stdout,
+                        spawn.stderr,
+                    )
+                    .await;
+                });
+                Ok(())
+            }
+            Self::Agy => {
+                let runtime = app.agy_runtime_for(spec.workspace_id).await?;
+                let session_id = spec.thread.native_session_id.clone();
+                let images = spec
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        TurnInputItem::Image(image) => Some(image.clone()),
+                        TurnInputItem::Text { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                let spawn = runtime
+                    .spawn_turn(
+                        spec.thread_id,
+                        session_id.as_deref(),
+                        &agy_prompt_from_inputs(spec.inputs, spec.selected_skills),
+                        &images,
+                        spec.thread.agent.model_id.as_deref(),
+                        spec.thread.agent.reasoning_effort.as_deref(),
+                        spec.thread.agent.permission_mode.as_deref(),
+                        spec.thread.agent.sandbox_mode.as_deref(),
+                        spec.thread.working_directory(runtime.workspace_path()),
+                    )
+                    .await?;
+                if !spawn.session_id.is_empty() {
+                    app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                        thread.native_session_id = Some(spawn.session_id.clone());
+                    })
+                    .await?;
+                }
+                let app = app.clone();
+                let workspace_id = spec.workspace_id.to_string();
+                let thread_id = spec.thread_id.to_string();
+                tokio::spawn(async move {
+                    app.monitor_agy_turn(
                         workspace_id,
                         thread_id,
                         spawn.generation,
@@ -475,6 +534,24 @@ impl ProviderRuntime {
                     )
                     .await
             }
+            Self::Agy => {
+                let runtime = app.agy_runtime_for(spec.workspace_id).await?;
+                let images = spec
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        TurnInputItem::Image(image) => Some(image.clone()),
+                        TurnInputItem::Text { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                runtime
+                    .steer_turn(
+                        spec.thread_id,
+                        &agy_prompt_from_inputs(spec.inputs, spec.selected_skills),
+                        &images,
+                    )
+                    .await
+            }
             Self::Acp(provider) => {
                 if spec.thread.provider_transport.as_deref() == Some("native") {
                     return steer_opencode_turn(
@@ -535,6 +612,10 @@ impl ProviderRuntime {
             }
             Self::Claude => {
                 let runtime = app.claude_runtime_for(workspace_id).await?;
+                runtime.interrupt_turn(thread_id).await
+            }
+            Self::Agy => {
+                let runtime = app.agy_runtime_for(workspace_id).await?;
                 runtime.interrupt_turn(thread_id).await
             }
             Self::Acp(provider) => {
@@ -614,6 +695,7 @@ impl ProviderRuntime {
                 .await?;
                 Ok(())
             }
+            Self::Agy => Err(unsupported("thread goals", &AgentProvider::AGY)),
             Self::Acp(provider) => Err(unsupported("thread goals", provider)),
         }
     }
@@ -642,6 +724,7 @@ impl ProviderRuntime {
                 .await?;
                 Ok(())
             }
+            Self::Agy => Err(unsupported("thread goals", &AgentProvider::AGY)),
             Self::Acp(provider) => Err(unsupported("thread goals", provider)),
         }
     }

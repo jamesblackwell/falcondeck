@@ -38,6 +38,52 @@ test("official Mini Zen panel declarative UI validates", () => {
   assert.deepEqual(result.output, { ok: true, diagnostics: [] });
 });
 
+test("official Scratch pad frontend and declarative UI validate", () => {
+  const result = validate(
+    resolve(repositoryRoot, "extensions/official/scratch-pad"),
+  );
+
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output, { ok: true, diagnostics: [] });
+});
+
+test("unknown panel icons fail with a stable diagnostic", () => {
+  const directory = mkdtempSync(
+    resolve(tmpdir(), "falcondeck-extension-validator-"),
+  );
+  try {
+    writeFileSync(resolve(directory, "server.ts"), "export default {}\n");
+    writeFileSync(
+      resolve(directory, "falcondeck.extension.json"),
+      JSON.stringify({
+        id: "example.panel",
+        name: "Example",
+        version: "1.0.0",
+        engines: { falcondeck: "^0.1" },
+        entrypoint: "server.ts",
+        contributes: {
+          panels: [
+            {
+              id: "main",
+              title: "Main",
+              view: "main-panel",
+              icon: "spaceship",
+            },
+          ],
+        },
+        permissions: [],
+      }),
+    );
+
+    const result = validate(directory);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.output.diagnostics[0]?.code, "FDX1023");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("trusted frontend paths cannot escape the extension package", () => {
   const directory = mkdtempSync(
     resolve(tmpdir(), "falcondeck-extension-validator-"),

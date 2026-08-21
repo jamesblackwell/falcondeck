@@ -18,6 +18,8 @@ import type {
 } from '@falcondeck/client-core'
 import { RefreshCw } from 'lucide-react'
 
+import { falconDeckHttpError } from '../../connection-copy'
+
 export type UsagePanelProps = {
   baseUrl: string | null
   onToast: (toast: {
@@ -179,7 +181,7 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
       if (mode === 'refresh') setIsLoading(true)
       try {
         const response = await fetch(`${baseUrl}/api/provider-usage`)
-        if (!response.ok) throw new Error(`daemon returned ${response.status}`)
+        if (!response.ok) throw new Error(falconDeckHttpError(response.status))
         setOverview((await response.json()) as ProviderUsageOverview)
         setLoadError(null)
       } catch (cause) {

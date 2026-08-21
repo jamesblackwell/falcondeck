@@ -219,7 +219,7 @@ impl ClaudeRuntime {
         daemon_base_url: Option<&str>,
         settings_dir: &Path,
         cwd: &str,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
         agent_context: Option<&str>,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
@@ -301,7 +301,7 @@ impl ClaudeRuntime {
         {
             command.arg("--settings").arg(settings_path);
         }
-        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir, builtin_control) {
+        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir, builtin) {
             command.arg("--mcp-config").arg(mcp_config_path);
         }
         if let Some(instructions) = agent_context.map(str::trim).filter(|text| !text.is_empty()) {
@@ -665,11 +665,11 @@ impl ClaudeRuntime {
     fn write_mcp_config_file(
         &self,
         settings_dir: &Path,
-        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        builtin: &crate::connectors::BuiltinConnectors,
     ) -> Option<PathBuf> {
-        let servers = crate::connectors::with_builtin_control(
+        let servers = crate::connectors::with_builtin_servers(
             crate::connectors::load_mcp_servers(&self.workspace_path, "claude"),
-            builtin_control,
+            builtin,
         );
         let body = crate::connectors::claude_mcp_config_json(&servers)?;
         if let Err(error) = fs::create_dir_all(settings_dir) {

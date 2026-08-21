@@ -480,6 +480,7 @@ export const ChatInput = memo(function ChatInput({
       <GlassSurface
         radius={theme.radius['2xl']}
         intensity={70}
+        highlight={false}
         contentStyle={styles.composer}
       >
         {attachments.length > 0 ? (

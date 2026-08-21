@@ -116,6 +116,12 @@ When a thread exceeds that, the head (objective, constraints, early decisions) a
 (current state) are kept verbatim and the middle is dropped with an explicit marker stating
 exactly how many characters were omitted and that the original thread retains everything.
 
+**Refinement (Aug 2026)**: handoff still does not summarize. It does strip UI chrome the
+destination cannot use: per-item timestamps, default "Completed"/"Sent" labels, `Exit code: 0`,
+command-execution JSON that only repeats the title, and a repeated workspace `cd` prefix on
+every shell tool. Failures, interruptions, non-zero exits, and the actual tool output stay.
+Download/Share export is unchanged and still includes timestamps.
+
 ## Decision 9: Mobile / Relay Authentication
 
 **Decision**: QR code pairing, no account required

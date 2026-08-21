@@ -227,7 +227,7 @@ describe('OnboardingWizard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
 
-    expect(screen.getByText('Dictate anywhere on your Mac')).toBeInTheDocument()
+    expect(screen.getByText('Dictate on this computer')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Apple Speech' })).toHaveAttribute(
       'aria-pressed',
       'true',

@@ -16,8 +16,8 @@ export function SpeechSettingsPanel({
           Speech
         </h1>
         <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-muted">
-          Dictate anywhere on your Mac or configure cloud transcription for
-          paired devices.
+          Dictate on this computer or configure cloud transcription for paired
+          devices.
         </p>
       </div>
       <DictationSetup baseUrl={baseUrl} onToast={onToast} />

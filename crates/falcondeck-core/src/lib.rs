@@ -172,6 +172,7 @@ fn default_utility_provider_order() -> Vec<AgentProvider> {
     vec![
         AgentProvider::CLAUDE,
         AgentProvider::CODEX,
+        AgentProvider::AGY,
         AgentProvider::new("opencode"),
         AgentProvider::new("grok"),
     ]
@@ -1193,6 +1194,181 @@ pub struct ExtensionContributions {
     /// Named full-main-area surfaces rendered by clients.
     #[serde(default)]
     pub panels: Vec<ExtensionViewContribution>,
+    /// Tools published to agent harnesses through the FalconDeck MCP bridge.
+    #[serde(default)]
+    pub agent_tools: Vec<ExtensionAgentToolContribution>,
+    /// Thread-scoped next-action offers rendered above the composer.
+    #[serde(default)]
+    pub composer_suggestions: Vec<ExtensionViewContribution>,
+}
+
+/// Declared agent-facing tool contribution.
+///
+/// Each entry becomes one namespaced MCP tool on the built-in
+/// `falcondeck-extensions` bridge while its extension is enabled and holds the
+/// `agent-tools:register` grant. The `input_schema` is passed to harnesses
+/// verbatim, so it is bounded and must describe a JSON object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionAgentToolContribution {
+    /// Identifier unique within the extension.
+    pub id: String,
+    /// Short human-facing tool title.
+    pub title: String,
+    /// Model-facing description explaining when to call the tool.
+    pub description: String,
+    /// JSON Schema for the tool's arguments object.
+    pub input_schema: Value,
+}
+
+/// One agent tool as published to a harness by the MCP bridge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionAgentTool {
+    /// Namespaced MCP tool name, such as `falcondeck_follow_up_suggestions_suggest`.
+    pub name: String,
+    /// Extension that declared the tool.
+    pub extension_id: String,
+    /// Manifest-declared tool id within that extension.
+    pub tool_id: String,
+    /// Short human-facing tool title.
+    pub title: String,
+    /// Model-facing description.
+    pub description: String,
+    /// JSON Schema for the tool's arguments object.
+    pub input_schema: Value,
+}
+
+/// The bridge's dynamic tool catalogue for one agent session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExtensionAgentToolList {
+    /// Tools currently enabled and granted, in stable name order.
+    pub tools: Vec<ExtensionAgentTool>,
+}
+
+/// Invocation of one published agent tool, routed from the MCP bridge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InvokeExtensionToolRequest {
+    /// Namespaced MCP tool name from [`ExtensionAgentToolList`].
+    pub name: String,
+    /// Tool-specific, size-bounded arguments object.
+    #[serde(default)]
+    pub arguments: Value,
+    /// Thread the calling agent turn belongs to, when the harness knows it.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Workspace path the calling agent runs in, when known.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+}
+
+/// Result of one agent tool invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionToolResponse {
+    /// Tool-specific result handed back to the agent.
+    #[serde(default)]
+    pub result: Value,
+}
+
+/// One offered next action rendered above the composer.
+///
+/// Extensions publish these as thread-scoped view state; the daemon validates
+/// the bounds below before any client sees them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComposerSuggestion {
+    /// Identifier unique within the offer set.
+    pub id: String,
+    /// Pill label, at most 30 characters.
+    pub label: String,
+    /// Optional single-line elaboration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Prompt submitted verbatim when the action is chosen.
+    pub prompt: String,
+}
+
+/// A bounded, thread-scoped set of composer offers published by an extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposerSuggestionSet {
+    /// Between one and five offers.
+    pub actions: Vec<ComposerSuggestion>,
+    /// Action shown in the pill's primary segment; defaults to the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_action_id: Option<String>,
+    /// Turn these offers were derived from, so stale sets can be discarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+}
+
+/// Fewest offers a published suggestion set may contain.
+pub const MIN_COMPOSER_SUGGESTIONS: usize = 1;
+/// Most offers a published suggestion set may contain; one pill stays compact.
+pub const MAX_COMPOSER_SUGGESTIONS: usize = 5;
+/// Longest pill label, in characters.
+pub const MAX_COMPOSER_SUGGESTION_LABEL_CHARS: usize = 30;
+/// Longest optional one-line description, in characters.
+pub const MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS: usize = 120;
+/// Longest submitted prompt, in characters.
+pub const MAX_COMPOSER_SUGGESTION_PROMPT_CHARS: usize = 512;
+/// Longest suggestion identifier, in characters.
+pub const MAX_COMPOSER_SUGGESTION_ID_CHARS: usize = 64;
+
+impl ComposerSuggestionSet {
+    /// Checks the published bounds, returning the first human-readable
+    /// violation. Both the daemon and the extension SDK call this so an
+    /// extension cannot widen the contract clients render.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.actions.len() < MIN_COMPOSER_SUGGESTIONS
+            || self.actions.len() > MAX_COMPOSER_SUGGESTIONS
+        {
+            return Err(format!(
+                "composer suggestions must contain between {MIN_COMPOSER_SUGGESTIONS} and {MAX_COMPOSER_SUGGESTIONS} actions"
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for action in &self.actions {
+            let id = action.id.trim();
+            if id.is_empty() || id.chars().count() > MAX_COMPOSER_SUGGESTION_ID_CHARS {
+                return Err(format!(
+                    "composer suggestion id must be 1-{MAX_COMPOSER_SUGGESTION_ID_CHARS} characters"
+                ));
+            }
+            if !seen.insert(id) {
+                return Err(format!("duplicate composer suggestion id: {id}"));
+            }
+            let label = action.label.trim();
+            if label.is_empty() || label.chars().count() > MAX_COMPOSER_SUGGESTION_LABEL_CHARS {
+                return Err(format!(
+                    "composer suggestion label must be 1-{MAX_COMPOSER_SUGGESTION_LABEL_CHARS} characters"
+                ));
+            }
+            if let Some(description) = action.description.as_deref()
+                && (description.chars().count() > MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS
+                    || description.contains('\n'))
+            {
+                return Err(format!(
+                    "composer suggestion description must be a single line of at most {MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS} characters"
+                ));
+            }
+            let prompt = action.prompt.trim();
+            if prompt.is_empty() || prompt.chars().count() > MAX_COMPOSER_SUGGESTION_PROMPT_CHARS {
+                return Err(format!(
+                    "composer suggestion prompt must be 1-{MAX_COMPOSER_SUGGESTION_PROMPT_CHARS} characters"
+                ));
+            }
+        }
+        if let Some(preferred) = self.preferred_action_id.as_deref()
+            && !self
+                .actions
+                .iter()
+                .any(|action| action.id.trim() == preferred.trim())
+        {
+            return Err(format!(
+                "preferred composer suggestion {preferred} is not one of the offered actions"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Declared action contribution.
@@ -1214,6 +1390,9 @@ pub struct ExtensionViewContribution {
     pub title: Option<String>,
     /// Manifest-declared view id consumed by the contribution.
     pub view: String,
+    /// Host-owned icon name for panel navigation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// Optional declarative fallback rendered before the host publishes a view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui: Option<ExtensionUiDocument>,
@@ -2389,6 +2568,8 @@ impl AgentProvider {
     pub const CODEX: Self = Self(std::borrow::Cow::Borrowed("codex"));
     /// Claude CLI-backed agent sessions.
     pub const CLAUDE: Self = Self(std::borrow::Cow::Borrowed("claude"));
+    /// Google Antigravity CLI (`agy`) sessions.
+    pub const AGY: Self = Self(std::borrow::Cow::Borrowed("agy"));
     /// OpenCode-backed agent sessions (native runner or ACP).
     pub const OPENCODE: Self = Self(std::borrow::Cow::Borrowed("opencode"));
 
@@ -2400,6 +2581,12 @@ impl AgentProvider {
     /// The provider id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this id is a native daemon backend that `providers.json` must
+    /// not shadow. ACP configuration uses this to refuse reserved names.
+    pub fn is_reserved_id(id: &str) -> bool {
+        id == Self::CODEX.as_str() || id == Self::CLAUDE.as_str() || id == Self::AGY.as_str()
     }
 }
 
@@ -2765,6 +2952,30 @@ impl AgentCapabilitySummary {
                 "auto".to_string(),
                 "manual".to_string(),
                 "dontAsk".to_string(),
+                "plan".to_string(),
+                "bypassPermissions".to_string(),
+            ],
+        }
+    }
+
+    /// Capability set for the Antigravity CLI (`agy`) provider.
+    pub fn agy() -> Self {
+        Self {
+            supports_review: false,
+            // `/goal` is a TUI overlay; print mode refuses interactive slash
+            // commands rather than applying them.
+            supports_goals: false,
+            supports_images: true,
+            supports_skills: true,
+            supports_interrupt: true,
+            // `--input-format stream-json` keeps stdin open and runs a turn
+            // per `{"event":"user"}` line, so extra messages reach the agent.
+            supports_steering: true,
+            supports_forking: false,
+            sandbox_modes: vec!["default".to_string(), "sandbox".to_string()],
+            permission_modes: vec![
+                "default".to_string(),
+                "accept-edits".to_string(),
                 "plan".to_string(),
                 "bypassPermissions".to_string(),
             ],
@@ -4861,6 +5072,17 @@ mod tests {
     #[test]
     fn codex_capabilities_include_steering() {
         assert!(AgentCapabilitySummary::codex().supports_steering);
+    }
+
+    #[test]
+    fn agy_is_a_reserved_native_provider() {
+        assert!(AgentProvider::is_reserved_id("agy"));
+        assert_eq!(AgentProvider::AGY.as_str(), "agy");
+        let capabilities = AgentCapabilitySummary::agy();
+        assert!(capabilities.supports_steering);
+        assert!(capabilities.supports_interrupt);
+        assert!(capabilities.permission_modes.contains(&"plan".to_string()));
+        assert!(capabilities.sandbox_modes.contains(&"sandbox".to_string()));
     }
 
     #[test]

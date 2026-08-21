@@ -23,6 +23,7 @@ import type {
   ThreadHandle,
 } from "@falcondeck/client-core";
 
+import { isRelayTransportError } from "@/lib/connection-copy";
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
@@ -97,7 +98,12 @@ export function useSessionActions() {
     return handle;
   }, []);
 
-  const submitTurn = useCallback(async () => {
+  /**
+   * `override` sends a prompt the user did not type — today, a chosen composer
+   * suggestion. It carries no attachments and leaves the composer's own draft
+   * alone, so choosing a suggestion never eats work in progress.
+   */
+  const submitTurn = useCallback(async (override?: { text: string }) => {
     const relay = useRelayStore.getState();
     const session = useSessionStore.getState();
     const ui = useUIStore.getState();
@@ -105,8 +111,8 @@ export function useSessionActions() {
     const workspace = session.snapshot?.workspaces.find(
       (w) => w.id === session.selectedWorkspaceId,
     );
-    const submittedDraft = ui.draft;
-    const submittedAttachments = ui.attachments;
+    const submittedDraft = override?.text ?? ui.draft;
+    const submittedAttachments = override ? [] : ui.attachments;
     const submittedKey = ui.conversationKey;
     if (
       !workspace ||
@@ -142,7 +148,9 @@ export function useSessionActions() {
     // relay round trip reads as the message having been typed twice. The
     // submitted text lives in the in-flight record until the turn settles, so a
     // failure — or a process death mid-request — still gives it back.
-    ui.beginSubmission(submittedKey, submittedDraft);
+    // An override never touched the composer, so there is nothing to empty and
+    // nothing to hand back on failure.
+    if (!override) ui.beginSubmission(submittedKey, submittedDraft);
 
     // Fresh per attempt: a retried send must not reuse an id the daemon may
     // already have committed a user item under.
@@ -174,7 +182,7 @@ export function useSessionActions() {
         // The send now belongs to the thread the daemon created, so recovery
         // has to hand it back there rather than to the workspace's new-thread
         // composer, which the user may already be typing in again.
-        ui.moveSubmission(submittedKey, branchKey);
+        if (!override) ui.moveSubmission(submittedKey, branchKey);
         ui.setIsSubmitting(true, branchKey);
         ui.setIsSubmitting(false, pendingConversationKey);
         pendingConversationKey = branchKey;
@@ -250,14 +258,18 @@ export function useSessionActions() {
           .removeLocalThreadItem(activeThreadId, userItemId);
       }
       ui.clearPendingNewThreadItem(userItemId);
-      ui.restoreFailedSubmission(
-        restoreKey,
-        submittedDraft,
-        submittedAttachments,
-      );
-      relay._setError(
-        e instanceof Error ? e.message : "Failed to send message",
-      );
+      if (!override) {
+        ui.restoreFailedSubmission(
+          restoreKey,
+          submittedDraft,
+          submittedAttachments,
+        );
+      }
+      if (!isRelayTransportError(e)) {
+        relay._setError(
+          e instanceof Error ? e.message : "Failed to send message",
+        );
+      }
     } finally {
       ui.clearPendingNewThreadItem(userItemId);
       ui.endSubmission(submittedKey);
@@ -287,7 +299,9 @@ export function useSessionActions() {
       } catch (e) {
         const error =
           e instanceof Error ? e : new Error("Interactive response failed");
-        relay._setError(error.message);
+        if (!isRelayTransportError(error)) {
+          relay._setError(error.message);
+        }
         throw error;
       }
     },
@@ -414,7 +428,9 @@ export function useSessionActions() {
         }
 
         if (options?.older) {
-          relay._setError("Couldn't load older messages. Try again.");
+          if (!isRelayTransportError(e)) {
+            relay._setError("Couldn't load older messages. Try again.");
+          }
         } else {
           // A tail-load failure on an uncached thread must not read as an
           // empty conversation; record it so the transcript shows an explicit
@@ -607,7 +623,9 @@ export function useSessionActions() {
         }
         const error =
           e instanceof Error ? e : new Error("Failed to retry response");
-        relay._setError(error.message);
+        if (!isRelayTransportError(error)) {
+          relay._setError(error.message);
+        }
         throw error;
       } finally {
         ui.setIsSubmitting(false, pendingConversationKey);

@@ -1427,6 +1427,14 @@ body {
   background: var(--fd-border-3);
 }
 
+/* Mermaid's SVG carries its own width. Cap it to the transcript column and
+   let unusually wide diagrams scroll instead of stretching the pane. */
+.fd-mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
 /* === Focus Ring ===
    Add the `fd-focus` class to any interactive element — Button/Input/Textarea
    already include it. Keyboard-only by design (`:focus-visible`), so pointer
@@ -1598,27 +1606,6 @@ body {
   50% {
     opacity: 1;
     transform: scale(1);
-  }
-}
-
-/* === Voice recording waveform === */
-@keyframes fd-voice-bar {
-  0%,
-  100% {
-    transform: scaleY(0.25);
-  }
-  50% {
-    transform: scaleY(1);
-  }
-}
-.fd-voice-bar {
-  animation: fd-voice-bar 1s ease-in-out infinite;
-  transform-origin: center;
-}
-@media (prefers-reduced-motion: reduce) {
-  .fd-voice-bar {
-    animation: none;
-    transform: scaleY(0.6);
   }
 }
 

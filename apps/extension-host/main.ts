@@ -24,6 +24,24 @@ type ActionInvocation = {
   target?: ViewScope;
   input: unknown;
 };
+type ToolInvocation = {
+  input: unknown;
+  threadId?: string;
+  workspaceId?: string;
+};
+type ComposerSuggestion = {
+  id: string;
+  label: string;
+  description?: string;
+  prompt: string;
+};
+type PublishComposerSuggestions = {
+  viewId: string;
+  threadId: string;
+  actions: ComposerSuggestion[];
+  preferredActionId?: string;
+  turnId?: string;
+};
 type ExtensionContext = {
   extension: { id: string };
   actions: {
@@ -38,6 +56,13 @@ type ExtensionContext = {
     delete(key: string): Promise<void>;
   };
   views: { publish(view: PublishedView): Promise<void> };
+  tools: {
+    register(id: string, handler: (invocation: ToolInvocation) => unknown): void;
+  };
+  composer: {
+    publish(suggestions: PublishComposerSuggestions): Promise<void>;
+    clear(target: { viewId: string; threadId: string }): Promise<void>;
+  };
   events: {
     on(
       type: string,
@@ -55,6 +80,7 @@ type ExtensionDefinition = {
 };
 type Runtime = {
   actions: Map<string, (invocation: ActionInvocation) => unknown>;
+  tools: Map<string, (invocation: ToolInvocation) => unknown>;
   eventHandlers: Map<
     string,
     Map<number, (event: ExtensionEvent) => void | Promise<void>>
@@ -82,12 +108,20 @@ type EventRequest = RuntimeRequest & {
   method: "event.dispatch";
   event: ExtensionEvent;
 };
-type HostRequest = ActionRequest | EventRequest;
+type ToolRequest = RuntimeRequest & {
+  method: "tool.invoke";
+  toolId: string;
+  arguments: unknown;
+  threadId?: string;
+  workspaceId?: string;
+};
+type HostRequest = ActionRequest | EventRequest | ToolRequest;
 
 const runtimes = new Map<string, Runtime>();
 const MAX_EVENT_HANDLERS_PER_TYPE = 32;
 const SUPPORTED_EVENT_TYPES = new Set([
   "thread.updated",
+  "turn.start",
   "turn.ended",
   "attention.opened",
   "attention.resolved",
@@ -133,6 +167,7 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
 
   const runtime = {} as Runtime;
   runtime.actions = new Map();
+  runtime.tools = new Map();
   runtime.eventHandlers = new Map();
   runtime.nextEventHandlerId = 1;
   runtime.storage = new Map(Object.entries(request.storage));
@@ -166,6 +201,32 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
     views: {
       publish(view) {
         runtime.publishedViews.push(view);
+        return Promise.resolve();
+      },
+    },
+    tools: {
+      register(id, handler) {
+        if (runtime.tools.has(id)) {
+          throw new Error(`tool already registered: ${id}`);
+        }
+        runtime.tools.set(id, handler);
+      },
+    },
+    composer: {
+      publish({ viewId, threadId, actions, preferredActionId, turnId }) {
+        runtime.publishedViews.push({
+          viewId,
+          scope: { kind: "thread", id: threadId },
+          value: { actions, preferredActionId, turnId },
+        });
+        return Promise.resolve();
+      },
+      clear({ viewId, threadId }) {
+        runtime.publishedViews.push({
+          viewId,
+          scope: { kind: "thread", id: threadId },
+          value: { actions: [] },
+        });
         return Promise.resolve();
       },
     },
@@ -254,6 +315,26 @@ async function invoke(request: ActionRequest): Promise<JsonObject> {
   };
 }
 
+async function invokeTool(request: ToolRequest): Promise<JsonObject> {
+  const runtime = await runtimeFor(request);
+  const handler = runtime.tools.get(request.toolId);
+  if (!handler) {
+    throw new Error(`extension did not register tool: ${request.toolId}`);
+  }
+  const result = await handler({
+    input: request.arguments,
+    threadId: request.threadId,
+    workspaceId: request.workspaceId,
+  });
+  return {
+    requestId: request.requestId,
+    ok: true,
+    result: result ?? null,
+    storage: Object.fromEntries(runtime.storage),
+    publishedViews: runtime.publishedViews,
+  };
+}
+
 async function dispatchEvent(request: EventRequest): Promise<JsonObject> {
   const runtime = await runtimeFor(request);
   const handlers = [
@@ -279,6 +360,8 @@ async function handleLine(line: string): Promise<void> {
       await writeProtocol(await invoke(request));
     } else if (request.method === "event.dispatch") {
       await writeProtocol(await dispatchEvent(request));
+    } else if (request.method === "tool.invoke") {
+      await writeProtocol(await invokeTool(request));
     } else {
       throw new Error(
         `unsupported host method: ${(request as { method?: unknown }).method}`,

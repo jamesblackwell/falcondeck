@@ -148,6 +148,8 @@ describe("PromptInput", () => {
     expect(
       screen.queryByRole("textbox", { name: "Message composer" }),
     ).not.toBeInTheDocument();
+    // The idle composer stays mounted (hidden) so the card does not shrink.
+    expect(document.querySelector("textarea")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Record voice input" }),
     ).not.toBeInTheDocument();

@@ -2,6 +2,7 @@ import { useCallback } from 'react'
 
 import { normalizeThreadSummary, type ThreadSummary } from '@falcondeck/client-core'
 
+import { triggerThreadArchiveFailedHaptic } from '@/lib/haptics'
 import { useRelayStore, useSessionStore } from '@/store'
 
 /**
@@ -41,6 +42,9 @@ export function consumeAutoReadSuppression(
 
 export function useThreadActions() {
   const archiveThread = useCallback(async (workspaceId: string, threadId: string) => {
+    const session = useSessionStore.getState()
+    const undo = session.archiveThreadLocally(threadId)
+    if (!undo) return
     const relay = useRelayStore.getState()
     try {
       await relay._callRpc(
@@ -50,6 +54,8 @@ export function useThreadActions() {
       )
       relay._setError(null)
     } catch (e) {
+      session.restoreArchivedThread(undo)
+      triggerThreadArchiveFailedHaptic()
       relay._setError(e instanceof Error ? e.message : 'Failed to archive thread')
       throw e
     }

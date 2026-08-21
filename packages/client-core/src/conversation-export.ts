@@ -20,20 +20,112 @@ import { planStepPresentation } from "./plan";
 import { formatDurationMs, isSafeExternalUrl } from "./provider-output";
 import { safeArtifactFilename } from "./artifact-presentation";
 import { serviceMessagePresentation } from "./service-message";
+import { unwrapShellCommand } from "./tool-label";
 import type { ConversationCitation, ConversationItem } from "./types";
 import { webSearchActionLabel } from "./web-search";
+
+export type ConversationMarkdownMode = "export" | "handoff";
 
 export type ConversationMarkdownOptions = {
   title?: string | null;
   /** True when older authoritative history has not been loaded by the client. */
   partial?: boolean;
+  /**
+   * `export` is the human download/share snapshot and keeps timestamps.
+   * `handoff` drops timestamps and other repeated chrome the destination
+   * model does not need. Content stays verbatim.
+   */
+  mode?: ConversationMarkdownMode;
+  /** Workspace path used to strip repeated `cd` prefixes and make paths relative. */
+  workspacePath?: string | null;
 };
+
+type MarkdownContext = {
+  mode: ConversationMarkdownMode;
+  workspaceRoot: string | null;
+};
+
+const DEFAULT_HANDOFF_STATUS = new Set([
+  "Complete",
+  "Completed",
+  "Sent",
+  "Recorded",
+  "Updated",
+]);
 
 function oneLine(value: string | null | undefined, fallback: string): string {
   return value?.trim().replace(/[\r\n]+/g, " ") || fallback;
 }
 
-function statusLine(label: string, createdAt: string): string {
+function normalizeWorkspaceRoot(path: string | null | undefined): string | null {
+  const trimmed = path?.trim().replace(/\/+$/, "");
+  return trimmed || null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Most common command cwd / `cd` prefix, used when the caller has no workspace path. */
+function inferWorkspaceRoot(
+  items: readonly ConversationItem[],
+): string | null {
+  const counts = new Map<string, number>();
+  const consider = (value: string | null | undefined) => {
+    const path = normalizeWorkspaceRoot(value);
+    if (!path || !path.startsWith("/")) return;
+    counts.set(path, (counts.get(path) ?? 0) + 1);
+  };
+  for (const item of items) {
+    if (item.kind !== "tool_call") continue;
+    if (item.detail?.kind === "command_execution") consider(item.detail.cwd);
+    const match = unwrapShellCommand(item.title).match(
+      /^cd\s+['"]?(\/[^'"\s;&]+)['"]?/,
+    );
+    if (match) consider(match[1]);
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [path, count] of counts) {
+    if (
+      count > bestCount ||
+      (count === bestCount && (best == null || path.length > best.length))
+    ) {
+      best = path;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function stripWorkspaceFromText(value: string, root: string): string {
+  const escaped = escapeRegExp(root);
+  const cdPrefix = new RegExp(
+    `^cd\\s+(?:['"]${escaped}['"]|${escaped})\\s*(?:&&|;|\\n)\\s*`,
+  );
+  const cdOnly = new RegExp(`^cd\\s+(?:['"]${escaped}['"]|${escaped})$`);
+  let next = value.replace(cdPrefix, "");
+  if (cdOnly.test(next)) next = "cd .";
+  if (next.startsWith(`${root}/`)) next = next.slice(root.length + 1);
+  else if (next === root) next = ".";
+  next = next.replaceAll(`${root}/`, "");
+  return next.trim() || value;
+}
+
+function compactHandoffTitle(title: string, workspaceRoot: string | null): string {
+  const unwrapped = unwrapShellCommand(title.trim());
+  if (!workspaceRoot) return unwrapped;
+  return stripWorkspaceFromText(unwrapped, workspaceRoot);
+}
+
+function statusLine(
+  label: string,
+  createdAt: string,
+  ctx: MarkdownContext,
+): string | null {
+  if (ctx.mode === "handoff") {
+    return DEFAULT_HANDOFF_STATUS.has(label) ? null : `*${label}*`;
+  }
   const timestamp = oneLine(createdAt, "Unknown time");
   return `*${label} · ${timestamp}*`;
 }
@@ -87,7 +179,23 @@ function citationLines(citations: readonly ConversationCitation[]): string[] {
   ];
 }
 
-function itemMarkdown(item: ConversationItem): string {
+function relativize(value: string, ctx: MarkdownContext): string {
+  if (ctx.mode !== "handoff" || !ctx.workspaceRoot) return value;
+  return stripWorkspaceFromText(value, ctx.workspaceRoot);
+}
+
+function shouldIncludeToolDetails(
+  item: Extract<ConversationItem, { kind: "tool_call" }>,
+  ctx: MarkdownContext,
+): boolean {
+  if (!item.detail) return false;
+  if (ctx.mode !== "handoff") return true;
+  // Command execution is already the title plus output; the JSON is cwd,
+  // duration, process id, and a duplicated command.
+  return item.detail.kind !== "command_execution";
+}
+
+function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
   switch (item.kind) {
     case "user_message": {
       const body = item.text.trim() || "_Image-only message_";
@@ -97,7 +205,7 @@ function itemMarkdown(item: ConversationItem): string {
       );
       return [
         "## You",
-        statusLine("Sent", item.created_at),
+        statusLine("Sent", item.created_at, ctx),
         body,
         ...attachments,
       ]
@@ -117,7 +225,7 @@ function itemMarkdown(item: ConversationItem): string {
             "### Memory sources",
             ...item.memory_citation.entries.map(
               (entry) =>
-                `- ${oneLine(entry.path, "Memory source")}:${entry.line_start}-${entry.line_end}${entry.note.trim() ? ` — ${entry.note.trim().replace(/\n/g, " ")}` : ""}`,
+                `- ${oneLine(relativize(entry.path, ctx), "Memory source")}:${entry.line_start}-${entry.line_end}${entry.note.trim() ? ` — ${entry.note.trim().replace(/\n/g, " ")}` : ""}`,
             ),
             ...item.memory_citation.thread_ids.map(
               (threadId) => `- Related thread: ${oneLine(threadId, "unknown")}`,
@@ -126,16 +234,18 @@ function itemMarkdown(item: ConversationItem): string {
         : [];
       return [
         `## ${phase}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         body || "_No response text was produced._",
         ...citationLines(item.citations ?? []),
         ...memory,
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "reasoning": {
       const lifecycle = contentLifecycle(item);
       const duration =
-        item.duration_ms != null
+        ctx.mode === "export" && item.duration_ms != null
           ? ` · ${formatDurationMs(item.duration_ms)}`
           : "";
       return [
@@ -143,6 +253,7 @@ function itemMarkdown(item: ConversationItem): string {
         statusLine(
           `${contentLifecycleLabel(lifecycle)}${duration}`,
           item.created_at,
+          ctx,
         ),
         item.content.trim() || null,
       ]
@@ -153,17 +264,21 @@ function itemMarkdown(item: ConversationItem): string {
       const lifecycle = contentLifecycle(item);
       return [
         `## Code review${item.subject?.trim() ? ` — ${oneLine(item.subject, "changes")}` : ""}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         item.content.trim() || "_No review findings were produced._",
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "context_compaction": {
       const lifecycle = item.lifecycle ?? "succeeded";
       return [
         "## Context compaction",
-        statusLine(toolLifecycleLabel(lifecycle), item.created_at),
+        statusLine(toolLifecycleLabel(lifecycle), item.created_at, ctx),
         "Earlier conversation was summarized for continuity.",
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "artifact": {
       const lifecycle = contentLifecycle(item);
@@ -179,7 +294,7 @@ function itemMarkdown(item: ConversationItem): string {
           : null;
       return [
         `## Artifact — ${oneLine(artifact.title, "Untitled artifact")}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         metadata.length ? metadata.join(" · ") : null,
         artifact.content
           ? codeFence(
@@ -196,10 +311,12 @@ function itemMarkdown(item: ConversationItem): string {
       const lifecycle = contentLifecycle(item);
       return [
         `## Unsupported output — ${providerOutputKindLabel(item.output_kind)}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         item.reason.trim() || "This provider output is not supported.",
         codeFence(formatInspectableValue(item.payload).text, "json"),
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "image": {
       const lifecycle = contentLifecycle(item);
@@ -209,7 +326,7 @@ function itemMarkdown(item: ConversationItem): string {
         : null;
       return [
         `## Image — ${title}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         item.image.alt_text?.trim() || "_No image description was supplied._",
         reference,
       ]
@@ -222,7 +339,7 @@ function itemMarkdown(item: ConversationItem): string {
       const search = item.search;
       return [
         `## ${webSearchActionLabel(search.action_kind, active)}`,
-        statusLine(contentLifecycleLabel(lifecycle), item.created_at),
+        statusLine(contentLifecycleLabel(lifecycle), item.created_at, ctx),
         search.query.trim() || "_No search query was supplied._",
         ...search.queries.map((query) => `- Related query: ${query}`),
         search.pattern ? `Find: ${codeFence(search.pattern)}` : null,
@@ -236,9 +353,9 @@ function itemMarkdown(item: ConversationItem): string {
     case "file_change": {
       const lifecycle = fileChangeLifecycle(item);
       const changes = item.changes.flatMap((change) => [
-        `### ${oneLine(change.path, "Unknown file")} — ${providerOutputKindLabel(change.change_kind)}`,
+        `### ${oneLine(relativize(change.path, ctx), "Unknown file")} — ${providerOutputKindLabel(change.change_kind)}`,
         change.move_path
-          ? `Moved to: ${oneLine(change.move_path, "Unknown file")}`
+          ? `Moved to: ${oneLine(relativize(change.move_path, ctx), "Unknown file")}`
           : null,
         change.diff
           ? codeFence(change.diff, "diff")
@@ -246,7 +363,7 @@ function itemMarkdown(item: ConversationItem): string {
       ]);
       return [
         "## File changes",
-        statusLine(toolLifecycleLabel(lifecycle), item.created_at),
+        statusLine(toolLifecycleLabel(lifecycle), item.created_at, ctx),
         ...changes,
       ]
         .filter(Boolean)
@@ -254,14 +371,24 @@ function itemMarkdown(item: ConversationItem): string {
     }
     case "tool_call": {
       const lifecycle = toolLifecycle(item);
+      const title =
+        ctx.mode === "handoff"
+          ? compactHandoffTitle(item.title, ctx.workspaceRoot)
+          : item.title;
+      const keepDetails = shouldIncludeToolDetails(item, ctx);
+      const keepExit =
+        item.exit_code != null &&
+        (ctx.mode === "export" || item.exit_code !== 0);
       return [
-        `## Tool — ${oneLine(item.title, "Tool call")}`,
-        statusLine(toolLifecycleLabel(lifecycle), item.created_at),
-        item.exit_code != null ? `Exit code: ${item.exit_code}` : null,
+        `## Tool — ${oneLine(title, "Tool call")}`,
+        statusLine(toolLifecycleLabel(lifecycle), item.created_at, ctx),
+        keepExit ? `Exit code: ${item.exit_code}` : null,
         item.output
           ? codeFence(item.output, "text")
-          : "_No tool output was supplied._",
-        item.detail
+          : ctx.mode === "handoff"
+            ? null
+            : "_No tool output was supplied._",
+        keepDetails
           ? `### Tool details\n\n${codeFence(formatInspectableValue(item.detail).text, "json")}`
           : null,
       ]
@@ -271,7 +398,7 @@ function itemMarkdown(item: ConversationItem): string {
     case "plan":
       return [
         "## Plan",
-        statusLine("Updated", item.created_at),
+        statusLine("Updated", item.created_at, ctx),
         item.plan.explanation?.trim() || null,
         ...item.plan.steps.map(
           (step) =>
@@ -283,21 +410,25 @@ function itemMarkdown(item: ConversationItem): string {
     case "diff":
       return [
         "## Diff",
-        statusLine("Recorded", item.created_at),
+        statusLine("Recorded", item.created_at, ctx),
         codeFence(item.diff, "diff"),
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     case "service": {
       const presentation = serviceMessagePresentation(item.level, item.message);
       return [
         `## Service — ${providerOutputKindLabel(item.level)}`,
-        statusLine("Recorded", item.created_at),
+        statusLine("Recorded", item.created_at, ctx),
         presentation.message.trim() || "_No diagnostic message was supplied._",
-      ].join("\n\n");
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "realtime":
       return [
         `## Realtime — ${oneLine(item.title, item.item_type)}`,
-        statusLine("Recorded", item.created_at),
+        statusLine("Recorded", item.created_at, ctx),
         item.summary?.trim() || null,
         codeFence(formatInspectableValue(item.payload).text, "json"),
       ]
@@ -314,10 +445,11 @@ function itemMarkdown(item: ConversationItem): string {
         statusLine(
           item.resolved ? "Resolved" : "Waiting for response",
           item.created_at,
+          ctx,
         ),
         evidence.command ? codeFence(evidence.command, "text") : null,
         evidence.path
-          ? `Path: ${oneLine(evidence.path, "Unknown path")}`
+          ? `Path: ${oneLine(relativize(evidence.path, ctx), "Unknown path")}`
           : null,
         evidence.detail,
         ...evidence.questions.map(
@@ -342,6 +474,15 @@ export function conversationItemsToMarkdown(
   options: ConversationMarkdownOptions = {},
 ): string {
   const title = oneLine(options.title, "FalconDeck conversation");
+  const mode = options.mode ?? "export";
+  const ctx: MarkdownContext = {
+    mode,
+    workspaceRoot:
+      mode === "handoff"
+        ? (normalizeWorkspaceRoot(options.workspacePath) ??
+          inferWorkspaceRoot(items))
+        : null,
+  };
   const partial = options.partial
     ? "> Earlier authoritative history is not currently loaded and is not included in this export."
     : null;
@@ -352,7 +493,7 @@ export function conversationItemsToMarkdown(
         item.kind !== "reasoning" ||
         Boolean(item.content.trim() || item.summary?.trim()),
     )
-    .map(itemMarkdown)
+    .map((item) => itemMarkdown(item, ctx))
     .join("\n\n---\n\n");
   return [preamble, transcript].filter(Boolean).join("\n\n").concat("\n");
 }

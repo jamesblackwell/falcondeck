@@ -8,6 +8,8 @@ describe("providerMark", () => {
     expect(providerMark("claude")?.title).toBe("Claude");
     expect(providerMark("opencode")?.title).toBe("OpenCode");
     expect(providerMark("gemini")?.title).toBe("Gemini");
+    expect(providerMark("agy")?.title).toBe("Gemini");
+    expect(providerMark("antigravity")?.title).toBe("Gemini");
     expect(providerMark("pi")?.title).toBe("Pi");
   });
 

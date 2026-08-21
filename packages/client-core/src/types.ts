@@ -1081,6 +1081,8 @@ export type ExtensionViewContribution = {
   id: string;
   title?: string | null;
   view: string;
+  /** Host-owned icon name for panel navigation. Unknown names fall back. */
+  icon?: string | null;
   /** Static declarative fallback used before a host publishes this view. */
   ui?: ExtensionUiDocument | null;
   /** Client-only diagnostic retained when a newer or malformed UI document is normalized. */
@@ -1176,12 +1178,23 @@ export type UnsupportedExtensionContribution = {
   entries: unknown[];
 };
 
+/** One tool an extension publishes to agent harnesses. */
+export type ExtensionAgentToolContribution = {
+  id: string;
+  title: string;
+  description: string;
+};
+
 export type ExtensionContributions = {
   threadMenuActions: ExtensionActionContribution[];
   threadDecorations: ExtensionViewContribution[];
   sidebarFilters: ExtensionViewContribution[];
   /** Named full-main-area surfaces. Optional while normalizing older snapshots. */
   panels?: ExtensionViewContribution[];
+  /** Thread-scoped next-action offers rendered above the composer. */
+  composerSuggestions?: ExtensionViewContribution[];
+  /** Tools published to agent harnesses through the FalconDeck MCP bridge. */
+  agentTools?: ExtensionAgentToolContribution[];
   /** Contribution kinds introduced by a newer daemon. */
   unsupported?: UnsupportedExtensionContribution[];
 };

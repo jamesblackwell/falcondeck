@@ -54,7 +54,17 @@
         "panels": {
           "type": "array",
           "maxItems": 256,
-          "items": { "$ref": "#/$defs/titledViewContribution" }
+          "items": { "$ref": "#/$defs/panelContribution" }
+        },
+        "composerSuggestions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/composerSuggestionContribution" }
+        },
+        "agentTools": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/agentToolContribution" }
         }
       },
       "additionalProperties": false
@@ -62,7 +72,7 @@
     "permissions": {
       "type": "array",
       "maxItems": 16,
-      "items": { "enum": ["threads:read"] },
+      "items": { "enum": ["threads:read", "agent-tools:register"] },
       "uniqueItems": true
     }
   },
@@ -77,12 +87,52 @@
       "type": "string",
       "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
     },
+    "panelIcon": {
+      "type": "string",
+      "enum": [
+        "activity",
+        "blocks",
+        "clock",
+        "file-text",
+        "kanban",
+        "notebook",
+        "notebook-pen",
+        "sticky-note"
+      ]
+    },
     "action": {
       "type": "object",
       "required": ["id", "title"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
+    "composerSuggestionContribution": {
+      "type": "object",
+      "description": "Binds a thread-scoped view of next-action offers to the host-rendered composer pill. The host owns the rendering, so no ui or icon is accepted.",
+      "required": ["id", "view"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "view": { "$ref": "#/$defs/identifier" }
+      },
+      "additionalProperties": false
+    },
+    "agentToolContribution": {
+      "type": "object",
+      "description": "One tool published to agent harnesses through the built-in falcondeck-extensions MCP bridge. Requires the agent-tools:register permission.",
+      "required": ["id", "title", "description", "inputSchema"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 60 },
+        "description": { "type": "string", "minLength": 16, "maxLength": 1024 },
+        "inputSchema": {
+          "type": "object",
+          "description": "JSON Schema for the tool's arguments, passed to harnesses verbatim.",
+          "required": ["type"],
+          "properties": { "type": { "const": "object" } }
+        }
       },
       "additionalProperties": false
     },
@@ -103,6 +153,18 @@
         "id": { "$ref": "#/$defs/identifier" },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
         "view": { "$ref": "#/$defs/identifier" },
+        "ui": { "$ref": "extension-ui-v1.schema.json" }
+      },
+      "additionalProperties": false
+    },
+    "panelContribution": {
+      "type": "object",
+      "required": ["id", "title", "view"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "view": { "$ref": "#/$defs/identifier" },
+        "icon": { "$ref": "#/$defs/panelIcon" },
         "ui": { "$ref": "extension-ui-v1.schema.json" }
       },
       "additionalProperties": false

@@ -186,6 +186,15 @@ pub(super) async fn connect_workspace_internal(
         app.provider_bin(&AgentProvider::CLAUDE),
     )
     .await?;
+    let crate::agy::AgyBootstrap {
+        runtime: agy_runtime,
+        account: agy_account,
+        models: agy_models,
+        skills: agy_native_skills,
+        capabilities: agy_capabilities,
+        threads: agy_threads,
+    } = crate::agy::AgyRuntime::connect(path_string.clone(), app.provider_bin(&AgentProvider::AGY))
+        .await?;
     let file_backed_skills = discover_file_backed_skills(&path_string);
     let codex_provider_skills = match codex_session.as_ref() {
         Some(session) => load_codex_provider_skills(app, session)
@@ -197,14 +206,24 @@ pub(super) async fn connect_workspace_internal(
         file_backed_skills
             .into_iter()
             .chain(codex_provider_skills)
+            .chain(agy_native_skills)
             .collect(),
     );
     let codex_skills = skills_for_provider(&merged_skills, AgentProvider::CODEX);
     let claude_skills = skills_for_provider(&merged_skills, AgentProvider::CLAUDE);
+    let agy_skills = skills_for_provider(&merged_skills, AgentProvider::AGY);
 
     let now = Utc::now();
     let mut threads = codex_threads;
     threads.extend(claude_threads.into_iter().map(|mut thread| {
+        thread.summary.workspace_id = workspace_id.clone();
+        crate::codex::HydratedThread {
+            summary: thread.summary,
+            items: thread.items,
+            title_is_provider_preview: thread.title_is_provider_preview,
+        }
+    }));
+    threads.extend(agy_threads.into_iter().map(|mut thread| {
         thread.summary.workspace_id = workspace_id.clone();
         crate::codex::HydratedThread {
             summary: thread.summary,
@@ -257,6 +276,15 @@ pub(super) async fn connect_workspace_internal(
             collaboration_modes: claude_collaboration_modes.clone(),
             skills: claude_skills.clone(),
             capabilities: claude_capabilities,
+        },
+        WorkspaceAgentSummary {
+            provider: AgentProvider::AGY,
+            label: "Antigravity".to_string(),
+            account: agy_account.clone(),
+            models: agy_models.clone(),
+            collaboration_modes: Vec::new(),
+            skills: agy_skills.clone(),
+            capabilities: agy_capabilities,
         },
     ];
     agents.extend(app.acp_agent_summaries());
@@ -386,6 +414,7 @@ pub(super) async fn connect_workspace_internal(
                 summary: summary.clone(),
                 codex_session,
                 claude_runtime: Some(claude_runtime),
+                agy_runtime: Some(agy_runtime),
                 opencode_runtime: previous_opencode_runtime,
                 acp_runtimes: previous_acp_runtimes,
                 threads,
@@ -718,11 +747,13 @@ pub(super) async fn start_thread(
                     "handoff source provider does not match the source thread".to_string(),
                 ));
             }
-            if source.summary.provider == provider {
-                return Err(DaemonError::BadRequest(
-                    "handoffs must continue in a different provider".to_string(),
-                ));
-            }
+            // Same-provider handoffs are how "Fork thread" continues a
+            // conversation on a provider with no native session-fork RPC
+            // (see AgentCapabilitySummary::supports_forking): a fresh thread
+            // seeded with the source transcript, source unchanged. The
+            // cross-provider "switch harness" picker never offers the
+            // current provider as a destination, so this relaxation only
+            // ever matters for the fork path.
             if thread_is_busy(&source.summary.status) {
                 return Err(DaemonError::BadRequest(
                     "wait for the active turn to finish before handing off".to_string(),
@@ -2182,6 +2213,11 @@ async fn send_turn_with_startup_mode(
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
 
+    // Whatever this send turns into — a steer, a queued turn, or a fresh
+    // dispatch — the user has moved past whatever an extension offered for
+    // the last turn. Retire those offers before anything else happens.
+    app.retire_composer_suggestions(&request.thread_id).await;
+
     // A caller that asked to steer gets the message injected into the running
     // turn where the harness supports it; everything else falls through to the
     // queue below.
@@ -3328,7 +3364,7 @@ pub(super) async fn refresh_connected_workspace_metadata(
     app: &AppState,
     workspace_id: &str,
 ) -> Result<WorkspaceSummary, DaemonError> {
-    let (workspace_path, codex_session, claude_runtime) = {
+    let (workspace_path, codex_session, claude_runtime, agy_runtime) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
@@ -3337,6 +3373,7 @@ pub(super) async fn refresh_connected_workspace_metadata(
             workspace.summary.path.clone(),
             workspace.codex_session.clone(),
             workspace.claude_runtime.clone(),
+            workspace.agy_runtime.clone(),
         )
     };
 
@@ -3348,6 +3385,10 @@ pub(super) async fn refresh_connected_workspace_metadata(
         Some(runtime) => Some(runtime.provider_metadata().await),
         None => None,
     };
+    let agy_metadata = match agy_runtime.as_ref() {
+        Some(runtime) => Some(runtime.provider_metadata().await),
+        None => None,
+    };
     let file_backed_skills = discover_file_backed_skills(&workspace_path);
     let codex_provider_skills = match codex_session.as_ref() {
         Some(session) => load_codex_provider_skills(app, session)
@@ -3355,14 +3396,20 @@ pub(super) async fn refresh_connected_workspace_metadata(
             .unwrap_or_default(),
         None => Vec::new(),
     };
+    let agy_native_skills = agy_metadata
+        .as_ref()
+        .map(|metadata| metadata.skills.clone())
+        .unwrap_or_default();
     let merged_skills = merge_skills(
         file_backed_skills
             .into_iter()
             .chain(codex_provider_skills)
+            .chain(agy_native_skills)
             .collect(),
     );
     let codex_skills = skills_for_provider(&merged_skills, AgentProvider::CODEX);
     let claude_skills = skills_for_provider(&merged_skills, AgentProvider::CLAUDE);
+    let agy_skills = skills_for_provider(&merged_skills, AgentProvider::AGY);
 
     let summary = {
         let mut workspaces = app.inner.workspaces.lock().await;
@@ -3385,6 +3432,14 @@ pub(super) async fn refresh_connected_workspace_metadata(
                 AgentProvider::CLAUDE,
                 metadata,
                 claude_skills,
+            );
+        }
+        if let Some(metadata) = agy_metadata {
+            update_workspace_agent_summary(
+                &mut workspace.summary.agents,
+                AgentProvider::AGY,
+                metadata,
+                agy_skills,
             );
         }
 
@@ -3842,6 +3897,11 @@ pub(super) async fn mark_thread_unread(
             && thread.summary.attention.last_read_seq > target
         {
             thread.summary.attention.last_read_seq = target;
+            // Mark-read keeps `updated_at` so opening a thread does not jump
+            // it in a Last updated sort. Mark-unread is the inverse action
+            // and must outrank a replayed pre-read summary that still carries
+            // that same timestamp, so it stamps now.
+            thread.summary.updated_at = Utc::now();
             changed = true;
         }
     }
@@ -4470,6 +4530,7 @@ mod tests {
                 summary: workspace,
                 codex_session: None,
                 claude_runtime: None,
+                agy_runtime: None,
                 opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads: [(thread_id.to_string(), ManagedThread::new(thread))]
@@ -5076,6 +5137,7 @@ mod tests {
                 },
                 codex_session: None,
                 claude_runtime: None,
+                agy_runtime: None,
                 opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads: HashMap::new(),

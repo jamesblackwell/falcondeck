@@ -12,6 +12,13 @@ function permissionPresentation(permission: string) {
         "Allows titles, status, timestamps, and pending-request counts. Messages and transcripts stay private.",
     };
   }
+  if (permission === "agent-tools:register") {
+    return {
+      title: "Offer tools to agents",
+      description:
+        "Publishes this extension's declared tools to agents running in FalconDeck. Revoking removes them from the next agent session and fails any call in the meantime.",
+    };
+  }
   return { title: permission, description: "Requested extension capability." };
 }
 

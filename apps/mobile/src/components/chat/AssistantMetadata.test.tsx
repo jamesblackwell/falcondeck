@@ -231,4 +231,28 @@ describe("AssistantMessageBlock metadata", () => {
     ).toHaveLength(0);
     expect(onRetryResponse).not.toHaveBeenCalled();
   });
+
+  it("shows a compact received-at stamp when asked", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T13:00:00Z"));
+    const renderer = renderComponent(
+      <AssistantMessageBlock item={assistant()} showReceivedAt />,
+    );
+    expect(textOf(renderer)).toContain("1h ago");
+    vi.useRealTimers();
+  });
+
+  it("hides the stamp while the reply is still streaming", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-09T13:00:00Z"));
+    const renderer = renderComponent(
+      <AssistantMessageBlock
+        item={assistant({ lifecycle: "streaming" })}
+        showReceivedAt
+      />,
+    );
+    expect(textOf(renderer)).not.toContain("1h ago");
+    expect(textOf(renderer)).not.toContain("now");
+    vi.useRealTimers();
+  });
 });

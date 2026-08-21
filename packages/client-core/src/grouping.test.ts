@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ThreadSummary, WorkspaceSummary } from './types'
-import { buildProjectGroups, compareThreads } from './grouping'
+import { buildProjectGroups, compareThreads, sortProjectGroupThreads } from './grouping'
 
 function workspace(id: string, path: string) {
   return { id, path } as WorkspaceSummary
@@ -10,6 +10,25 @@ function workspace(id: string, path: string) {
 function thread(id: string, workspaceId: string) {
   return { id, workspace_id: workspaceId, is_archived: false } as ThreadSummary
 }
+
+const summary = (overrides: Partial<ThreadSummary>): ThreadSummary =>
+  ({
+    id: 'thread',
+    workspace_id: 'workspace',
+    title: 'Chat',
+    status: 'idle',
+    updated_at: '2026-08-12T12:00:00Z',
+    attention: {
+      level: 'none',
+      badge_label: null,
+      unread: false,
+      pending_approval_count: 0,
+      pending_question_count: 0,
+      last_agent_activity_seq: 0,
+      last_read_seq: 0,
+    },
+    ...overrides,
+  }) as ThreadSummary
 
 describe('buildProjectGroups', () => {
   it('keeps saved projects first and falls back alphabetically for new projects', () => {
@@ -28,25 +47,6 @@ describe('buildProjectGroups', () => {
 })
 
 describe('compareThreads', () => {
-  const summary = (overrides: Partial<ThreadSummary>): ThreadSummary =>
-    ({
-      id: 'thread',
-      workspace_id: 'workspace',
-      title: 'Chat',
-      status: 'idle',
-      updated_at: '2026-08-12T12:00:00Z',
-      attention: {
-        level: 'none',
-        badge_label: null,
-        unread: false,
-        pending_approval_count: 0,
-        pending_question_count: 0,
-        last_agent_activity_seq: 0,
-        last_read_seq: 0,
-      },
-      ...overrides,
-    }) as ThreadSummary
-
   it('uses the work-queue bucket order', () => {
     const unread = summary({
       id: 'unread',
@@ -143,5 +143,33 @@ describe('compareThreads', () => {
     expect([second, first].sort(compare).map(({ id }) => id)).toEqual(['a', 'b'])
     first.updated_at = '2026-08-12T11:00:00Z'
     expect([second, first].sort(compare).map(({ id }) => id)).toEqual(['a', 'b'])
+  })
+})
+
+describe('sortProjectGroupThreads', () => {
+  it('reorders chats inside each project without moving the projects', () => {
+    const older = summary({
+      id: 'older',
+      title: 'Alpha',
+      updated_at: '2026-08-12T09:00:00Z',
+    })
+    const newer = summary({
+      id: 'newer',
+      title: 'Zebra',
+      updated_at: '2026-08-12T11:00:00Z',
+    })
+    const groups = [
+      {
+        workspace: workspace('ws', '/projects/alpha'),
+        threads: [older, newer],
+      },
+    ]
+
+    expect(
+      sortProjectGroupThreads(groups, 'last_updated')[0]?.threads.map(({ id }) => id),
+    ).toEqual(['newer', 'older'])
+    expect(
+      sortProjectGroupThreads(groups, 'alphabetical')[0]?.threads.map(({ id }) => id),
+    ).toEqual(['older', 'newer'])
   })
 })

@@ -85,6 +85,9 @@ describe("useVoiceRecorder", () => {
       mediaDevices: {
         getUserMedia: vi.fn(async () => ({
           getTracks: () => [{ stop: stopTrack }],
+          getAudioTracks: () => [
+            { applyConstraints: vi.fn(async () => undefined) },
+          ],
         })),
       },
     });
@@ -147,5 +150,19 @@ describe("useVoiceRecorder", () => {
     expect(view.result.current.state).toBe("idle");
     expect(view.result.current.hasPending).toBe(false);
     expect(onTranscript).not.toHaveBeenCalled();
+  });
+
+  it("opens the microphone without echo cancellation so playback can continue", async () => {
+    await startRecording();
+    const getUserMedia = navigator.mediaDevices.getUserMedia as ReturnType<
+      typeof vi.fn
+    >;
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: expect.objectContaining({
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      }),
+    });
   });
 });

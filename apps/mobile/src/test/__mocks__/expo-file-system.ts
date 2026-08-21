@@ -1,5 +1,12 @@
 export const fileSystemEvents: Array<{ type: string; value?: unknown }> = []
 
+let fileText = async () =>
+  'window.mermaid={initialize(){},render:async()=>({svg:"<svg></svg>"})};'
+
+export function __setFileText(impl: () => Promise<string>) {
+  fileText = impl
+}
+
 export const Paths = {
   cache: { uri: 'file:///mock-cache/' },
   document: { uri: 'file:///mock-documents/' },
@@ -39,6 +46,10 @@ export class File {
     fileSystemEvents.push({ type: 'create', value: options })
   }
 
+  async text() {
+    return fileText()
+  }
+
   write(content: string | Uint8Array, options?: unknown) {
     fileSystemEvents.push({ type: 'write', value: { content, options } })
   }
@@ -62,4 +73,6 @@ export class File {
 
 export function resetFileSystemMock() {
   fileSystemEvents.length = 0
+  fileText = async () =>
+    'window.mermaid={initialize(){},render:async()=>({svg:"<svg></svg>"})};'
 }

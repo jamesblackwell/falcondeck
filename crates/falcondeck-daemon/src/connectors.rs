@@ -153,12 +153,110 @@ pub fn with_builtin_control(
             }
         })
         .collect();
-    let executable = std::env::current_exe().unwrap_or_else(|error| {
-        tracing::warn!(%error, "failed to resolve the daemon executable for the builtin connector");
-        std::path::PathBuf::from("falcondeck-daemon")
-    });
-    servers.push(builtin_control_server(&executable, spec));
+    servers.push(builtin_control_server(&daemon_executable(), spec));
     servers
+}
+
+/// Reserved connector name for the built-in FalconDeck extensions bridge.
+pub const BUILTIN_EXTENSIONS_CONNECTOR_NAME: &str = "falcondeck-extensions";
+
+/// Everything the extensions MCP bridge needs to reach this daemon and know
+/// which conversation its tool calls belong to. Computed at each provider
+/// spawn boundary; never persisted to `connectors.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinExtensionsSpec {
+    /// Base HTTP URL of the daemon.
+    pub daemon_url: String,
+    /// Workspace the agent is running in.
+    pub workspace_path: String,
+    /// Thread the agent turn runs in, when known.
+    pub thread_id: Option<String>,
+}
+
+/// Builds the in-memory FalconDeck extensions MCP server for one spawn.
+pub fn builtin_extensions_server(
+    daemon_executable: &std::path::Path,
+    spec: &BuiltinExtensionsSpec,
+) -> McpServerConfig {
+    let mut env = BTreeMap::from([
+        (
+            crate::extension_mcp::ENV_DAEMON_URL.to_string(),
+            spec.daemon_url.clone(),
+        ),
+        (
+            crate::extension_mcp::ENV_EXTENSION_WORKSPACE.to_string(),
+            spec.workspace_path.clone(),
+        ),
+    ]);
+    if let Some(thread_id) = &spec.thread_id {
+        env.insert(
+            crate::extension_mcp::ENV_EXTENSION_THREAD.to_string(),
+            thread_id.clone(),
+        );
+    }
+    McpServerConfig {
+        name: BUILTIN_EXTENSIONS_CONNECTOR_NAME.to_string(),
+        transport: McpTransport::Stdio {
+            command: daemon_executable.display().to_string(),
+            args: vec!["mcp-extensions".to_string()],
+            env,
+        },
+    }
+}
+
+/// Appends the built-in extensions bridge to a merged connector list. As with
+/// the control connector, user entries using the reserved name are dropped
+/// rather than allowed to shadow the built-in server.
+pub fn with_builtin_extensions(
+    servers: Vec<McpServerConfig>,
+    spec: Option<&BuiltinExtensionsSpec>,
+) -> Vec<McpServerConfig> {
+    let Some(spec) = spec else {
+        return servers;
+    };
+    let mut servers: Vec<McpServerConfig> = servers
+        .into_iter()
+        .filter(|server| {
+            if server.name == BUILTIN_EXTENSIONS_CONNECTOR_NAME {
+                tracing::warn!(
+                    "ignoring user connector named {BUILTIN_EXTENSIONS_CONNECTOR_NAME:?}: the name is reserved for the built-in FalconDeck extensions bridge"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    servers.push(builtin_extensions_server(&daemon_executable(), spec));
+    servers
+}
+
+/// The built-in connectors that apply to one provider spawn. Each is
+/// independently optional: agent control and extension tools are separate
+/// user-facing switches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BuiltinConnectors {
+    /// FalconDeck control server, when agent control is enabled.
+    pub control: Option<BuiltinControlSpec>,
+    /// FalconDeck extensions bridge, when any extension publishes a tool.
+    pub extensions: Option<BuiltinExtensionsSpec>,
+}
+
+/// Appends every applicable built-in connector to a merged user list.
+pub fn with_builtin_servers(
+    servers: Vec<McpServerConfig>,
+    builtin: &BuiltinConnectors,
+) -> Vec<McpServerConfig> {
+    let servers = with_builtin_control(servers, builtin.control.as_ref());
+    with_builtin_extensions(servers, builtin.extensions.as_ref())
+}
+
+/// Resolves this daemon's own executable for built-in connector spawns.
+fn daemon_executable() -> std::path::PathBuf {
+    std::env::current_exe().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to resolve the daemon executable for a builtin connector");
+        std::path::PathBuf::from("falcondeck-daemon")
+    })
 }
 
 fn default_enabled() -> bool {
@@ -675,6 +773,113 @@ mod tests {
             "/Users/james/Code/quizgecko"
         );
         assert_eq!(env.get("FALCONDECK_CONTROL_THREAD").unwrap(), "thread-7");
+    }
+
+    fn extensions_spec(thread_id: Option<&str>) -> BuiltinExtensionsSpec {
+        BuiltinExtensionsSpec {
+            daemon_url: "http://127.0.0.1:4123".to_string(),
+            workspace_path: "/Users/james/Code/quizgecko".to_string(),
+            thread_id: thread_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn builtin_extensions_bridge_is_a_stdio_daemon_invocation() {
+        let server = builtin_extensions_server(
+            std::path::Path::new("/opt/falcondeck-daemon"),
+            &extensions_spec(Some("thread-7")),
+        );
+        assert_eq!(server.name, BUILTIN_EXTENSIONS_CONNECTOR_NAME);
+        let McpTransport::Stdio { command, args, env } = server.transport else {
+            panic!("the extensions bridge is stdio");
+        };
+        assert_eq!(command, "/opt/falcondeck-daemon");
+        assert_eq!(args, vec!["mcp-extensions".to_string()]);
+        assert_eq!(
+            env.get(crate::extension_mcp::ENV_EXTENSION_WORKSPACE)
+                .unwrap(),
+            "/Users/james/Code/quizgecko"
+        );
+        assert_eq!(
+            env.get(crate::extension_mcp::ENV_EXTENSION_THREAD).unwrap(),
+            "thread-7"
+        );
+    }
+
+    #[test]
+    fn both_builtin_connectors_reach_every_provider_materialisation() {
+        let builtin = BuiltinConnectors {
+            control: Some(spec(None)),
+            extensions: Some(extensions_spec(Some("thread-7"))),
+        };
+        let servers = with_builtin_servers(Vec::new(), &builtin);
+        let names: Vec<&str> = servers.iter().map(|server| server.name.as_str()).collect();
+        assert!(names.contains(&BUILTIN_CONNECTOR_NAME));
+        assert!(names.contains(&BUILTIN_EXTENSIONS_CONNECTOR_NAME));
+
+        let claude: Value =
+            serde_json::from_str(&claude_mcp_config_json(&servers).expect("claude config"))
+                .unwrap();
+        assert_eq!(
+            claude["mcpServers"][BUILTIN_EXTENSIONS_CONNECTOR_NAME]["args"],
+            json!(["mcp-extensions"])
+        );
+        let acp = acp_mcp_servers(&servers, false);
+        assert!(
+            acp.as_array()
+                .unwrap()
+                .iter()
+                .any(|server| server["name"] == json!(BUILTIN_EXTENSIONS_CONNECTOR_NAME))
+        );
+        let codex = codex_config_overrides(&servers);
+        assert!(
+            codex.iter().any(|entry| entry.contains("mcp-extensions")),
+            "codex overrides carry the bridge: {codex:?}"
+        );
+    }
+
+    #[test]
+    fn each_builtin_connector_is_independently_optional() {
+        // Agent control and extension tools are separate user-facing switches.
+        let control_only = with_builtin_servers(
+            Vec::new(),
+            &BuiltinConnectors {
+                control: Some(spec(None)),
+                extensions: None,
+            },
+        );
+        assert_eq!(control_only.len(), 1);
+        assert_eq!(control_only[0].name, BUILTIN_CONNECTOR_NAME);
+
+        let extensions_only = with_builtin_servers(
+            Vec::new(),
+            &BuiltinConnectors {
+                control: None,
+                extensions: Some(extensions_spec(None)),
+            },
+        );
+        assert_eq!(extensions_only.len(), 1);
+        assert_eq!(extensions_only[0].name, BUILTIN_EXTENSIONS_CONNECTOR_NAME);
+
+        assert!(with_builtin_servers(Vec::new(), &BuiltinConnectors::default()).is_empty());
+    }
+
+    #[test]
+    fn a_user_connector_cannot_shadow_the_extensions_bridge() {
+        let impostor = vec![McpServerConfig {
+            name: BUILTIN_EXTENSIONS_CONNECTOR_NAME.to_string(),
+            transport: McpTransport::Stdio {
+                command: "/tmp/evil".into(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+        }];
+        let servers = with_builtin_extensions(impostor, Some(&extensions_spec(None)));
+        assert_eq!(servers.len(), 1);
+        let McpTransport::Stdio { args, .. } = &servers[0].transport else {
+            panic!("the extensions bridge is stdio");
+        };
+        assert_eq!(args, &vec!["mcp-extensions".to_string()]);
     }
 
     #[test]

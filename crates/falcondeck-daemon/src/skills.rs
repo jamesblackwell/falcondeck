@@ -55,6 +55,7 @@ fn skill_scan_roots(root: &Path, source_kind: SkillSourceKind) -> Vec<SkillScanR
             providers: vec![
                 AgentProvider::CODEX,
                 AgentProvider::CLAUDE,
+                AgentProvider::AGY,
                 AgentProvider::OPENCODE,
             ],
             layout: SkillDirLayout::AgentsSkills,
@@ -643,6 +644,7 @@ description: >
 
         assert!(skill.supports_provider(&AgentProvider::CODEX));
         assert!(skill.supports_provider(&AgentProvider::CLAUDE));
+        assert!(skill.supports_provider(&AgentProvider::AGY));
         assert!(skill.supports_provider(&AgentProvider::OPENCODE));
         // The `$name` mention OpenCode expands is path-derived, not the
         // frontmatter name.

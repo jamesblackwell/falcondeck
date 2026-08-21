@@ -812,3 +812,74 @@ describe("Conversation empty state", () => {
     ).toBeNull();
   });
 });
+
+describe("Conversation received-at stamp", () => {
+  it("shows a compact age on the last finished assistant reply", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-08T13:00:00Z"));
+    const view = render(
+      <Conversation
+        items={[
+          {
+            kind: "assistant_message",
+            id: "assistant-old",
+            text: "Earlier answer",
+            lifecycle: "complete",
+            created_at: "2026-08-08T10:00:00Z",
+          },
+          {
+            kind: "user_message",
+            id: "user-2",
+            text: "Follow up",
+            attachments: [],
+            created_at: "2026-08-08T11:00:00Z",
+          },
+          {
+            kind: "assistant_message",
+            id: "assistant-latest",
+            text: "Latest answer",
+            lifecycle: "complete",
+            created_at: "2026-08-08T12:00:00Z",
+          },
+        ]}
+      />,
+    );
+
+    const stamp = screen.getByText("1h ago");
+    expect(stamp.tagName).toBe("TIME");
+    expect(stamp).toHaveAttribute("datetime", "2026-08-08T12:00:00Z");
+    expect(screen.queryByText("3h ago")).toBeNull();
+    view.unmount();
+    vi.useRealTimers();
+  });
+
+  it("keeps the previous stamp while a newer reply is still streaming", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-08T13:00:00Z"));
+    const view = render(
+      <Conversation
+        items={[
+          {
+            kind: "assistant_message",
+            id: "assistant-old",
+            text: "Earlier answer",
+            lifecycle: "complete",
+            created_at: "2026-08-08T12:00:00Z",
+          },
+          {
+            kind: "assistant_message",
+            id: "assistant-streaming",
+            text: "Working on it",
+            lifecycle: "streaming",
+            created_at: "2026-08-08T12:59:00Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("1h ago")).toBeInTheDocument();
+    expect(screen.queryByText("now")).toBeNull();
+    view.unmount();
+    vi.useRealTimers();
+  });
+});

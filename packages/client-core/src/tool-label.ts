@@ -148,7 +148,8 @@ export function toolCallFilePath(item: ToolCallLabelSource) {
   return describeToolCall(item).path
 }
 
-function unwrapShellCommand(title: string) {
+/** Strip `/bin/zsh -lc '…'` so the command itself is what callers label. */
+export function unwrapShellCommand(title: string) {
   const shellMatch = SHELL_WRAPPER_RE.exec(title)
   return shellMatch ? shellMatch[2].trim() : title
 }

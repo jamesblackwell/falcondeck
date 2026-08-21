@@ -244,7 +244,7 @@ describe('HarnessesPanel', () => {
 
     render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={[]} onToast={vi.fn()} />)
 
-    expect(await screen.findByText(/daemon returned 500/)).toBeInTheDocument()
+    expect(await screen.findByText(/FalconDeck returned 500/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

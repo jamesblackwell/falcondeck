@@ -94,6 +94,9 @@ export function workspaceSendBlockReason(
     if (provider === 'claude') {
       return 'Claude is logged out. Run `claude auth login` before sending messages.'
     }
+    if (provider === 'agy') {
+      return 'Antigravity is logged out. Run `agy` in a terminal to sign in before sending messages.'
+    }
     return `${workspaceProviderLabel(workspace, provider)} needs authentication in this project before you can send messages.`
   }
 
@@ -103,6 +106,9 @@ export function workspaceSendBlockReason(
 export function normalizeSendError(message: string, provider: AgentProvider) {
   if (message.includes('is not currently connected to Claude')) {
     return 'This project is not connected to Claude yet. Wait for it to reconnect or switch the new thread to Codex.'
+  }
+  if (message.includes('is not currently connected to Antigravity')) {
+    return 'This project is not connected to Antigravity yet. Wait for it to reconnect or switch the new thread to another agent.'
   }
   if (message.includes('is not currently connected to Codex')) {
     return 'This project is not connected to Codex yet. Wait for it to reconnect and try again.'

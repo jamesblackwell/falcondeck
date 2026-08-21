@@ -35,6 +35,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
+    agy::{AgyProviderMetadata, AgyRuntime},
     claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
     codex::{
         CodexBootstrap, CodexProviderMetadata, CodexSession, extract_string, extract_thread_id,
@@ -83,6 +84,9 @@ const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str = "FalconDeck was closed while this 
 const MAX_EXTENSION_THREAD_SUMMARIES: usize = 1_000;
 const MAX_EXTENSION_THREAD_TITLE_CHARS: usize = 256;
 const MAX_EXTENSION_THREAD_SUMMARY_BYTES: usize = 2 * 1024 * 1024;
+/// Daemon-owned tool on the extensions MCP bridge. Not an extension: agents
+/// in this conversation use it to rename the thread when the work has moved on.
+const BUILTIN_RENAME_THREAD_TOOL: &str = "falcondeck_rename_thread";
 
 /// How long `schedule_persist` waits before writing, so a burst of streamed
 /// updates costs one state snapshot instead of one per chunk.
@@ -207,6 +211,7 @@ struct ManagedWorkspace {
     summary: WorkspaceSummary,
     codex_session: Option<Arc<CodexSession>>,
     claude_runtime: Option<Arc<ClaudeRuntime>>,
+    agy_runtime: Option<Arc<AgyRuntime>>,
     opencode_runtime: Option<Arc<crate::opencode::OpenCodeRuntime>>,
     /// Live ACP agent processes keyed by provider id, started lazily on use.
     acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
@@ -306,6 +311,30 @@ fn bound_extension_thread_summaries(
             true
         })
         .collect()
+}
+
+fn builtin_rename_thread_tool() -> falcondeck_core::ExtensionAgentTool {
+    falcondeck_core::ExtensionAgentTool {
+        name: BUILTIN_RENAME_THREAD_TOOL.to_string(),
+        extension_id: "falcondeck".to_string(),
+        tool_id: "rename_thread".to_string(),
+        title: "Rename thread".to_string(),
+        description: "Rename this FalconDeck conversation in the sidebar. Call when the current title is stale because the work has evolved. Pass a 3-7 word title that names the concrete task now underway: no quotes, no trailing punctuation, no generic labels like Debugging. This applies the name immediately. Only this thread can be renamed.".to_string(),
+        input_schema: json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title"],
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "description": "3-7 word thread title reflecting the current work."
+                }
+            }
+        }),
+    }
 }
 
 impl AppState {
@@ -741,6 +770,45 @@ impl AppState {
         })
     }
 
+    /// Computes every built-in connector for one provider spawn. Evaluated
+    /// at each spawn boundary, so enabling or disabling agent control or an
+    /// extension applies on the next turn (Claude) or next process start
+    /// (Codex, ACP).
+    pub async fn builtin_connectors(
+        &self,
+        provider: &AgentProvider,
+        workspace_path: &str,
+        thread_id: Option<&str>,
+    ) -> crate::connectors::BuiltinConnectors {
+        crate::connectors::BuiltinConnectors {
+            control: self
+                .builtin_control_spec(provider, workspace_path, thread_id)
+                .await,
+            extensions: self
+                .builtin_extensions_spec(workspace_path, thread_id)
+                .await,
+        }
+    }
+
+    /// The extensions MCP bridge for one spawn, or `None` when no enabled
+    /// extension currently publishes a granted tool. Skipping the connector
+    /// entirely avoids spawning a bridge that could only report an empty
+    /// catalogue.
+    async fn builtin_extensions_spec(
+        &self,
+        workspace_path: &str,
+        thread_id: Option<&str>,
+    ) -> Option<crate::connectors::BuiltinExtensionsSpec> {
+        if self.inner.extensions.lock().await.agent_tools().is_empty() {
+            return None;
+        }
+        Some(crate::connectors::BuiltinExtensionsSpec {
+            daemon_url: self.local_base_url()?,
+            workspace_path: workspace_path.to_string(),
+            thread_id: thread_id.map(str::to_string),
+        })
+    }
+
     /// Whether the FalconDeck agent context (short instruction append plus
     /// bundled control skill) is enabled for this provider right now.
     /// Evaluated at every spawn boundary alongside
@@ -1114,6 +1182,18 @@ impl AppState {
                         skills: Vec::new(),
                         capabilities: AgentCapabilitySummary::claude(),
                     },
+                    WorkspaceAgentSummary {
+                        provider: AgentProvider::AGY,
+                        label: "Antigravity".to_string(),
+                        account: falcondeck_core::AccountSummary {
+                            status: falcondeck_core::AccountStatus::Unknown,
+                            label: "Antigravity reconnecting".to_string(),
+                        },
+                        models: Vec::new(),
+                        collaboration_modes: Vec::new(),
+                        skills: Vec::new(),
+                        capabilities: AgentCapabilitySummary::agy(),
+                    },
                 ];
                 agents.extend(acp_agents);
                 agents
@@ -1150,6 +1230,7 @@ impl AppState {
                 summary: summary.clone(),
                 codex_session: None,
                 claude_runtime: None,
+                agy_runtime: None,
                 opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads,
@@ -1296,6 +1377,7 @@ impl AppState {
                         workspace.summary.path.clone(),
                         workspace.codex_session.clone(),
                         workspace.claude_runtime.clone(),
+                        workspace.agy_runtime.clone(),
                         workspace.opencode_runtime.clone(),
                         workspace
                             .threads
@@ -1315,10 +1397,20 @@ impl AppState {
                 .collect::<Vec<_>>()
         };
 
-        for (workspace_id, _path, codex_session, claude_runtime, opencode_runtime, threads) in
-            snapshots
+        for (
+            workspace_id,
+            _path,
+            codex_session,
+            claude_runtime,
+            agy_runtime,
+            opencode_runtime,
+            threads,
+        ) in snapshots
         {
             if let Some(runtime) = claude_runtime {
+                let _ = runtime.shutdown().await;
+            }
+            if let Some(runtime) = agy_runtime {
                 let _ = runtime.shutdown().await;
             }
             if let Some(session) = codex_session {
@@ -1536,6 +1628,7 @@ impl AppState {
                 summary.agents.retain(|agent| {
                     agent.provider == AgentProvider::CODEX
                         || agent.provider == AgentProvider::CLAUDE
+                        || agent.provider == AgentProvider::AGY
                         || fresh_acp_ids.contains(&agent.provider)
                         || workspace
                             .acp_runtimes
@@ -1818,7 +1911,240 @@ impl AppState {
             )
             .await?;
         drop(host);
-        for view in &updated_views {
+        self.emit_extension_view_updates(&updated_views);
+        Ok(ExtensionActionResponse {
+            result: host_result.result,
+            updated_views,
+        })
+    }
+
+    /// The agent tools the `falcondeck-extensions` MCP bridge may publish
+    /// right now. Recomputed per request so a disable or revoke is reflected
+    /// the next time a harness lists tools. Includes the daemon-owned rename
+    /// tool so an agent can retitle this conversation without an extension.
+    pub async fn extension_agent_tools(&self) -> falcondeck_core::ExtensionAgentToolList {
+        let mut tools = vec![builtin_rename_thread_tool()];
+        tools.extend(self.inner.extensions.lock().await.agent_tools());
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        falcondeck_core::ExtensionAgentToolList { tools }
+    }
+
+    /// Routes one MCP bridge tool call to its extension host.
+    ///
+    /// Enablement and the `agent-tools:register` grant are re-checked here,
+    /// so a call from a harness that cached a stale tool list fails
+    /// immediately instead of running disabled extension code.
+    pub async fn invoke_extension_tool(
+        &self,
+        request: falcondeck_core::InvokeExtensionToolRequest,
+    ) -> Result<falcondeck_core::ExtensionToolResponse, DaemonError> {
+        if serde_json::to_vec(&request.arguments)?.len() > extensions::MAX_TOOL_ARGUMENT_BYTES {
+            return Err(DaemonError::BadRequest(format!(
+                "extension tool arguments exceed {} bytes",
+                extensions::MAX_TOOL_ARGUMENT_BYTES
+            )));
+        }
+        if request.name == BUILTIN_RENAME_THREAD_TOOL {
+            return self.invoke_builtin_rename_thread_tool(request).await;
+        }
+        let (package, tool_id) = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .tool_package(&request.name)?;
+        // Harnesses report a thread id and a filesystem path; extensions only
+        // ever see stable identifiers, so resolve one here.
+        let workspace_id = self
+            .extension_call_workspace_id(
+                request.thread_id.as_deref(),
+                request.workspace_path.as_deref(),
+            )
+            .await;
+        let host = self.inner.extension_hosts.lock().await.host(&package.id);
+        let mut host = host.lock().await;
+        let (storage, can_read_threads) = {
+            let registry = self.inner.extensions.lock().await;
+            // Re-check under the host gate: disable cannot interleave here.
+            registry.tool_package(&request.name)?;
+            (
+                registry.storage(&package.id),
+                registry.has_grant(&package.id, extensions::THREADS_READ_PERMISSION),
+            )
+        };
+        let thread_summaries = if can_read_threads {
+            Some(self.extension_thread_summaries().await)
+        } else {
+            None
+        };
+        let host_result = host
+            .invoke_tool(
+                &package,
+                &tool_id,
+                &request.arguments,
+                request.thread_id.as_deref(),
+                workspace_id.as_deref(),
+                &storage,
+                thread_summaries.as_deref(),
+            )
+            .await;
+        let host_result = match host_result {
+            Ok(result) => result,
+            // A model passing arguments the extension rejects is ordinary
+            // traffic. Hand the message back to the agent without marking the
+            // extension broken in Settings.
+            Err(extension_host::ExtensionToolError::Rejected(message)) => {
+                drop(host);
+                return Err(DaemonError::BadRequest(message));
+            }
+            Err(extension_host::ExtensionToolError::Failed(error)) => {
+                self.inner
+                    .extensions
+                    .lock()
+                    .await
+                    .mark_error(&package.id, &error.to_string())
+                    .await?;
+                let catalog = self.inner.extensions.lock().await.snapshot().catalog;
+                self.emit(
+                    None,
+                    None,
+                    UnifiedEvent::ExtensionCatalogUpdated { catalog },
+                );
+                drop(host);
+                return Err(error);
+            }
+        };
+        let updated_views = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .commit_action(
+                &package.id,
+                host_result.storage,
+                host_result.published_views,
+            )
+            .await?;
+        drop(host);
+        self.emit_extension_view_updates(&updated_views);
+        Ok(falcondeck_core::ExtensionToolResponse {
+            result: host_result.result,
+        })
+    }
+
+    async fn invoke_builtin_rename_thread_tool(
+        &self,
+        request: falcondeck_core::InvokeExtensionToolRequest,
+    ) -> Result<falcondeck_core::ExtensionToolResponse, DaemonError> {
+        let Some(thread_id) = request
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Err(DaemonError::BadRequest(
+                "this turn is not attached to a thread, so nothing was renamed".to_string(),
+            ));
+        };
+        let title = request
+            .arguments
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .ok_or_else(|| DaemonError::BadRequest("title is required".to_string()))?;
+        let workspace_id = self
+            .extension_call_workspace_id(Some(thread_id), request.workspace_path.as_deref())
+            .await
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let handle = self
+            .update_thread(UpdateThreadRequest {
+                workspace_id,
+                thread_id: thread_id.to_string(),
+                title: Some(title.to_string()),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                collaboration_mode_id: None,
+                service_tier: None,
+                pinned: None,
+                acknowledge_interruption: None,
+                permission_mode: None,
+                approval_policy: None,
+                sandbox_mode: None,
+            })
+            .await?;
+        Ok(falcondeck_core::ExtensionToolResponse {
+            result: json!({
+                "renamed": true,
+                "title": handle.thread.title,
+            }),
+        })
+    }
+
+    /// Retires a thread's composer suggestions because a new turn is
+    /// starting. Called from the one provider-independent turn-start path, so
+    /// offers from a finished turn never reappear beside newer work.
+    pub(crate) async fn retire_composer_suggestions(&self, thread_id: &str) {
+        let retired = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .retire_composer_suggestions(thread_id)
+            .await;
+        let retired = match retired {
+            Ok(retired) => retired,
+            Err(error) => {
+                tracing::warn!(%error, %thread_id, "failed to retire composer suggestions");
+                return;
+            }
+        };
+        for view in retired {
+            self.emit(
+                None,
+                Some(thread_id.to_string()),
+                UnifiedEvent::ExtensionViewUpdated {
+                    extension_id: view.extension_id,
+                    view_id: view.view_id,
+                    scope: view.scope,
+                    // No view: clients drop the projection outright rather
+                    // than rendering an empty offer set.
+                    view: None,
+                },
+            );
+        }
+    }
+
+    /// Resolves the workspace id for one agent tool call, preferring the
+    /// thread the turn belongs to and falling back to the spawn's path.
+    async fn extension_call_workspace_id(
+        &self,
+        thread_id: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Option<String> {
+        let workspaces = self.inner.workspaces.lock().await;
+        if let Some(thread_id) = thread_id
+            && let Some(workspace) = workspaces
+                .values()
+                .find(|workspace| workspace.threads.contains_key(thread_id))
+        {
+            return Some(workspace.summary.id.clone());
+        }
+        let workspace_path = workspace_path?;
+        let canonical = std::path::PathBuf::from(workspace_path)
+            .canonicalize()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| workspace_path.to_string());
+        workspaces
+            .values()
+            .find(|workspace| workspace.summary.path == canonical)
+            .map(|workspace| workspace.summary.id.clone())
+    }
+
+    /// Broadcasts changed projections so every connected client re-renders.
+    fn emit_extension_view_updates(&self, views: &[falcondeck_core::ExtensionView]) {
+        for view in views {
             self.emit(
                 None,
                 view.scope
@@ -1833,10 +2159,6 @@ impl AppState {
                 },
             );
         }
-        Ok(ExtensionActionResponse {
-            result: host_result.result,
-            updated_views,
-        })
     }
 
     pub async fn snapshot_with_request(&self, request: &SnapshotRequest) -> DaemonSnapshot {
@@ -2736,6 +3058,24 @@ impl IntoWorkspaceAgentUpdate for ClaudeProviderMetadata {
             account: self.account,
             models: self.models,
             collaboration_modes: self.collaboration_modes,
+            skills,
+            capabilities: self.capabilities,
+        }
+    }
+}
+
+impl IntoWorkspaceAgentUpdate for AgyProviderMetadata {
+    fn into_agent_summary(
+        self,
+        provider: AgentProvider,
+        skills: Vec<SkillSummary>,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            label: provider_label(&provider),
+            provider,
+            account: self.account,
+            models: self.models,
+            collaboration_modes: Vec::new(),
             skills,
             capabilities: self.capabilities,
         }

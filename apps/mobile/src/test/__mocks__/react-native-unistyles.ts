@@ -2,6 +2,7 @@
 // matching the tokens shape so StyleSheet.create(theme => ...) doesn't crash
 
 const stubTheme = {
+  isDark: true,
   colors: {
     surface: { 0: '#000', 1: '#111', 2: '#222', 3: '#333', 4: '#444' },
     fg: { primary: '#fff', secondary: '#ccc', tertiary: '#999', muted: '#666', faint: '#444' },
@@ -11,6 +12,7 @@ const stubTheme = {
     warning: { default: '#ff0', muted: 'rgba(255,255,0,0.1)' },
     danger: { default: '#f00', muted: 'rgba(255,0,0,0.1)' },
     info: { default: '#00f', muted: 'rgba(0,0,255,0.1)' },
+    cat: { 1: '#f87171', 2: '#fb923c', 3: '#fbbf24', 4: '#a3e635', 5: '#34d399', 6: '#2dd4bf', 7: '#22d3ee', 8: '#60a5fa', 9: '#818cf8', 10: '#a78bfa', 11: '#e879f9', 12: '#f472b6' },
     diff: { added: '#0f01', removed: '#f001', addedText: '#0f0', removedText: '#f00' },
     transparent: 'transparent',
     white: '#fff',

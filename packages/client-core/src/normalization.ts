@@ -1579,6 +1579,11 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
             const view = candidate as Record<string, unknown>;
             const id = normalizeId(view.id);
             const viewId = normalizeId(view.view);
+            const icon =
+              typeof view.icon === "string" &&
+              /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(view.icon)
+                ? view.icon
+                : undefined;
             const normalizedUi = normalizeExtensionUiDocument(view.ui);
             // A null `ui` is what this function emits for a contribution that
             // declared none, so it has to read as "no UI" and not as a
@@ -1595,6 +1600,7 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
                     view: viewId,
                     title:
                       typeof view.title === "string" ? view.title : undefined,
+                    icon,
                     ui: normalizedUi.ok ? normalizedUi.document : null,
                     uiUnsupportedReason:
                       hasUi && !normalizedUi.ok ? normalizedUi.reason : null,
@@ -1603,11 +1609,31 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
               : [];
           })
         : [];
+    const normalizeAgentTools = (candidate: unknown) =>
+      Array.isArray(candidate)
+        ? candidate.flatMap((candidate) => {
+            if (
+              !candidate ||
+              typeof candidate !== "object" ||
+              Array.isArray(candidate)
+            )
+              return [];
+            const tool = candidate as Record<string, unknown>;
+            const id = normalizeId(tool.id);
+            return id &&
+              typeof tool.title === "string" &&
+              typeof tool.description === "string"
+              ? [{ id, title: tool.title, description: tool.description }]
+              : [];
+          })
+        : [];
     const knownKinds = new Set([
       "threadMenuActions",
       "threadDecorations",
       "sidebarFilters",
       "panels",
+      "composerSuggestions",
+      "agentTools",
       // `unsupported` is this function's own output key. Snapshots get
       // normalized more than once on their way to the UI, so treating it as an
       // unknown kind would make the second pass report our own bookkeeping as
@@ -1649,6 +1675,8 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
       threadDecorations: normalizeViews(contributions.threadDecorations),
       sidebarFilters: normalizeViews(contributions.sidebarFilters),
       panels: normalizeViews(contributions.panels),
+      composerSuggestions: normalizeViews(contributions.composerSuggestions),
+      agentTools: normalizeAgentTools(contributions.agentTools),
       unsupported,
     };
   };

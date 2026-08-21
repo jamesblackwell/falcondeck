@@ -27,14 +27,15 @@ Tier 1 is the answer to "a new agent harness launches tomorrow". ACP is the
 industry's common denominator (Zed's protocol; spoken by OpenCode, Gemini
 CLI, Goose, Grok…), so most new harnesses arrive with an ACP mode. Native
 adapters are reserved for harnesses whose extra surface earns the maintenance
-(today: exactly two).
+(today: Codex, Claude, and Antigravity).
 
 ## The seams, and the invariants that keep them clean
 
 1. **`ProviderRuntime` (app/provider_runtime.rs)** — the ONLY place codex /
-   claude are recognized by name for routing. Six operations dispatch through
-   it. Invariant: never compare `provider == CODEX/CLAUDE` at a call site to
-   choose behavior; either dispatch through the seam or gate on a capability.
+   claude / agy are recognized by name for routing. Six operations dispatch
+   through it. Invariant: never compare `provider == CODEX/CLAUDE/AGY` at a
+   call site to choose behavior; either dispatch through the seam or gate on
+   a capability.
 2. **Open provider ids** — `AgentProvider` is a string, not an enum. Both
    normalizers (TS `normalizeProvider`, Rust `parse_agent_provider`) pass
    unknown ids through. Invariant: mapping an unknown id to a default
@@ -155,6 +156,24 @@ the second real integration (Crystal's dead `CliToolRegistry`).
    the process + a `ProviderRuntime` variant + ingestion into
    `push_conversation_item`. Budget accordingly; tier 1 covers more than you
    think.
+
+## Antigravity CLI (`agy`)
+
+Antigravity has no ACP server. FalconDeck drives it the same way it drives
+Claude: a native `ProviderRuntime::Agy` backend that spawns `agy` per turn
+with `--input-format stream-json` / `--output-format stream-json`, resumes
+with `--conversation`, and steers by writing another
+`{"event":"user","message":{"content":[…]}}` line to stdin.
+
+Headless print mode cannot show interactive permission prompts. Tools that
+would ask are soft-denied unless the thread's permission mode is
+`bypassPermissions` (`--dangerously-skip-permissions`) or the user has
+allow-rules in `~/.gemini/antigravity-cli/settings.json`. MCP servers are
+owned by Antigravity (`~/.gemini/config/mcp_config.json`); FalconDeck does
+not inject connectors into that file.
+
+Install: `curl -fsSL https://antigravity.google/cli/install.sh | bash`.
+Auth: run `agy` once in a terminal and complete Google sign-in.
 
 ## Pi
 

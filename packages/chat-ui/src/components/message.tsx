@@ -51,6 +51,7 @@ import {
   formatArtifactSize,
   formatDurationMs,
   formatInspectableValue,
+  formatReceivedAgo,
   formatWorkDuration,
   guardianReviewPresentation,
   interactiveRequestEvidencePresentation,
@@ -575,11 +576,36 @@ function MemoryCitationSources({
   );
 }
 
+function MessageReceivedAt({ createdAt }: { createdAt: string }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const label = formatReceivedAgo(createdAt, nowMs);
+  if (!label) return null;
+  const receivedAt = Date.parse(createdAt);
+  const absolute = Number.isFinite(receivedAt)
+    ? new Date(receivedAt).toLocaleString()
+    : createdAt;
+  return (
+    <time
+      dateTime={createdAt}
+      title={absolute}
+      className="fd-type-meta tabular-nums text-fg-muted"
+    >
+      {label}
+    </time>
+  );
+}
+
 function AssistantMessage({
   item,
+  showReceivedAt = false,
   readAloud,
 }: {
   item: Extract<ConversationItem, { kind: "assistant_message" }>;
+  showReceivedAt?: boolean;
   readAloud?: ReadAloudController;
 }) {
   const lifecycle = contentLifecycle(item);
@@ -601,6 +627,10 @@ function AssistantMessage({
   const canReadAloud =
     lifecycle === "complete" && item.text.trim().length > 0 && readAloud;
   const TerminalStatusIcon = terminalStatus?.icon;
+  const receivedAt =
+    showReceivedAt && lifecycle !== "pending" && lifecycle !== "streaming" ? (
+      <MessageReceivedAt createdAt={item.created_at} />
+    ) : null;
   return (
     <article
       aria-label={`${isCommentary ? "Assistant progress update" : "Assistant message"}, ${lifecycle}`}
@@ -640,53 +670,58 @@ function AssistantMessage({
       {memoryCitationEntries.length > 0 && item.memory_citation ? (
         <MemoryCitationSources citation={item.memory_citation} />
       ) : null}
-      {item.text.trim() || terminalStatus ? (
+      {item.text.trim() || terminalStatus || receivedAt ? (
         <div className="mt-1 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
-          {item.text.trim() ? (
-            <span className="inline-flex items-center gap-0.5 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
-              <CopyButton
-                text={assistantMessageCopyText(
-                  item.text,
-                  lifecycle === "pending" || lifecycle === "streaming",
-                )}
-                label="Copy response"
-              />
-              {canReadAloud ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    readAloud.activeMessageId === item.id
-                      ? readAloud.stop()
-                      : readAloud.awaitingGestureMessageId === item.id
-                        ? readAloud.resume()
-                        : readAloud.play(item.id, item.text)
-                  }
-                  disabled={readAloud.loadingMessageId != null}
-                  aria-label={
-                    readAloud.activeMessageId === item.id
-                      ? "Stop reading response"
-                      : readAloud.awaitingGestureMessageId === item.id
-                        ? "Play response"
-                        : "Read response aloud"
-                  }
-                  title={
-                    readAloud.activeMessageId === item.id
-                      ? "Stop reading"
-                      : readAloud.awaitingGestureMessageId === item.id
-                        ? "Play"
-                        : "Read aloud"
-                  }
-                  className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-wait disabled:opacity-50"
-                >
-                  {readAloud.loadingMessageId === item.id ? (
-                    <ActivityDiamond size="xs" tone="current" />
-                  ) : readAloud.activeMessageId === item.id ? (
-                    <Square aria-hidden="true" className="h-3 w-3" />
-                  ) : (
-                    <Volume2 aria-hidden="true" className="h-3 w-3" />
-                  )}
-                </button>
+          {item.text.trim() || receivedAt ? (
+            <span className="inline-flex items-center gap-2 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
+              {item.text.trim() ? (
+                <span className="inline-flex items-center gap-0.5">
+                  <CopyButton
+                    text={assistantMessageCopyText(
+                      item.text,
+                      lifecycle === "pending" || lifecycle === "streaming",
+                    )}
+                    label="Copy response"
+                  />
+                  {canReadAloud ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        readAloud.activeMessageId === item.id
+                          ? readAloud.stop()
+                          : readAloud.awaitingGestureMessageId === item.id
+                            ? readAloud.resume()
+                            : readAloud.play(item.id, item.text)
+                      }
+                      disabled={readAloud.loadingMessageId != null}
+                      aria-label={
+                        readAloud.activeMessageId === item.id
+                          ? "Stop reading response"
+                          : readAloud.awaitingGestureMessageId === item.id
+                            ? "Play response"
+                            : "Read response aloud"
+                      }
+                      title={
+                        readAloud.activeMessageId === item.id
+                          ? "Stop reading"
+                          : readAloud.awaitingGestureMessageId === item.id
+                            ? "Play"
+                            : "Read aloud"
+                      }
+                      className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {readAloud.loadingMessageId === item.id ? (
+                        <ActivityDiamond size="xs" tone="current" />
+                      ) : readAloud.activeMessageId === item.id ? (
+                        <Square aria-hidden="true" className="h-3 w-3" />
+                      ) : (
+                        <Volume2 aria-hidden="true" className="h-3 w-3" />
+                      )}
+                    </button>
+                  ) : null}
+                </span>
               ) : null}
+              {receivedAt}
             </span>
           ) : null}
           {terminalStatus && TerminalStatusIcon ? (
@@ -3110,6 +3145,7 @@ export const MessageCard = memo(function MessageCard({
   thinkingDisplay = "auto",
   collapseLongUserMessages = true,
   isStreamingReasoning = false,
+  showReceivedAt = false,
   readAloud,
 }: {
   item: ConversationItem;
@@ -3121,6 +3157,8 @@ export const MessageCard = memo(function MessageCard({
   collapseLongUserMessages?: boolean;
   /** True only for the thought currently arriving, which `auto` expands. */
   isStreamingReasoning?: boolean;
+  /** Show a compact received-at stamp on this assistant reply. */
+  showReceivedAt?: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
@@ -3136,7 +3174,13 @@ export const MessageCard = memo(function MessageCard({
         />
       );
     case "assistant_message":
-      return <AssistantMessage item={item} readAloud={readAloud} />;
+      return (
+        <AssistantMessage
+          item={item}
+          showReceivedAt={showReceivedAt}
+          readAloud={readAloud}
+        />
+      );
     case "image":
       return <ImageMessage item={item} />;
     case "web_search":

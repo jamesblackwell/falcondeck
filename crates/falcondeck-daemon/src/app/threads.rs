@@ -34,7 +34,12 @@ use super::{
         tool_display_metadata, with_renderable_attachment_previews,
     },
 };
-use crate::{claude::ClaudeRuntime, codex::CodexSession, error::DaemonError};
+use crate::{
+    agy::{self, AgyRuntime, AgyStreamEvent},
+    claude::ClaudeRuntime,
+    codex::CodexSession,
+    error::DaemonError,
+};
 
 /// How long a running Claude turn may stay silent — no stream traffic at all,
 /// not even thinking heartbeats — before the thread gets a visible warning.
@@ -341,6 +346,22 @@ impl AppState {
             .ok_or_else(|| {
                 DaemonError::BadRequest(format!(
                     "workspace {workspace_id} is not currently connected to Claude"
+                ))
+            })
+    }
+
+    pub(super) async fn agy_runtime_for(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Arc<AgyRuntime>, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.agy_runtime.as_ref())
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                DaemonError::BadRequest(format!(
+                    "workspace {workspace_id} is not currently connected to Antigravity"
                 ))
             })
     }
@@ -1320,6 +1341,380 @@ impl AppState {
         }
     }
 
+    pub(super) async fn monitor_agy_turn(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+        turn_generation: u64,
+        stdout: Option<tokio::process::ChildStdout>,
+        stderr: Option<tokio::process::ChildStderr>,
+    ) {
+        let mut last_line_at = tokio::time::Instant::now();
+        let mut stall_warned = false;
+        let mut turn_error: Option<String> = None;
+        let mut saw_agent_output = false;
+        let mut assistant_text = HashMap::<String, String>::new();
+        let mut running_tool_titles = HashMap::<String, String>::new();
+        let stderr_task = stderr.map(|stderr| {
+            let workspace_id = workspace_id.clone();
+            let thread_id = thread_id.clone();
+            tokio::spawn(async move {
+                let mut tail = std::collections::VecDeque::with_capacity(CLAUDE_STDERR_TAIL_LINES);
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                loop {
+                    let line = match lines.next_line().await {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!("failed to read antigravity stderr line: {error}");
+                            continue;
+                        }
+                    };
+                    let message = line.trim();
+                    if message.is_empty() {
+                        continue;
+                    }
+                    tracing::debug!(%workspace_id, %thread_id, "agy stderr: {message}");
+                    if tail.len() == CLAUDE_STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(message.to_string());
+                }
+                tail.into_iter().collect::<Vec<_>>()
+            })
+        });
+
+        let mut saw_result = false;
+        let mut result_reported_success = false;
+        if let Some(stdout) = stdout {
+            let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) => {
+                            let _ = line_tx.send(line);
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!("failed to read antigravity stdout line: {error}");
+                        }
+                    }
+                }
+            });
+            loop {
+                let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(_) => {
+                        if !stall_warned
+                            && last_line_at.elapsed() >= CLAUDE_STALL_WARN_AFTER
+                            && !self
+                                .thread_waiting_for_input(&workspace_id, &thread_id)
+                                .await
+                        {
+                            stall_warned = true;
+                            let minutes = last_line_at.elapsed().as_secs() / 60;
+                            let message = match running_tool_titles.values().next() {
+                                Some(title) => format!(
+                                    "Still running {title} — no output for {minutes}m. Stop the turn if this looks stuck."
+                                ),
+                                None => format!(
+                                    "No output from Antigravity for {minutes}m. Stop the turn if this looks stuck."
+                                ),
+                            };
+                            self.push_conversation_diagnostic(
+                                &workspace_id,
+                                &thread_id,
+                                ServiceLevel::Warning,
+                                message,
+                                Some("agy-watchdog".to_string()),
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
+                };
+                last_line_at = tokio::time::Instant::now();
+                stall_warned = false;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Some(event) = agy::parse_stream_line(trimmed) else {
+                    continue;
+                };
+                match event {
+                    AgyStreamEvent::Init { conversation_id } => {
+                        if !conversation_id.is_empty() {
+                            let _ = self
+                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                                    thread.native_session_id = Some(conversation_id);
+                                })
+                                .await;
+                        }
+                    }
+                    AgyStreamEvent::Step {
+                        step_index,
+                        state,
+                        step_type,
+                        tool_name,
+                        text_delta,
+                        tool_output,
+                        tool_error,
+                        subagent_label,
+                        ..
+                    } => {
+                        let done = state.eq_ignore_ascii_case("done");
+                        if step_type == "user_input" || step_type == "checkpoint" {
+                            continue;
+                        }
+                        if step_type == "agent_response" || text_delta.is_some() {
+                            if let Some(delta) = text_delta.as_deref() {
+                                saw_agent_output = true;
+                                let item_id = format!("agy-assistant-{thread_id}-{step_index}");
+                                let text = append_claude_text_delta(
+                                    assistant_text
+                                        .get(&item_id)
+                                        .map(String::as_str)
+                                        .unwrap_or(""),
+                                    delta,
+                                );
+                                assistant_text.insert(item_id.clone(), text.clone());
+                                let item = ConversationItem::AssistantMessage {
+                                    id: item_id,
+                                    text,
+                                    phase: None,
+                                    memory_citation: None,
+                                    citations: Vec::new(),
+                                    lifecycle: if done {
+                                        ContentLifecycle::Complete
+                                    } else {
+                                        ContentLifecycle::Streaming
+                                    },
+                                    error: None,
+                                    created_at: Utc::now(),
+                                };
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            }
+                            continue;
+                        }
+                        if step_type == "tool" || tool_name.is_some() || subagent_label.is_some() {
+                            let tool_id = format!("agy-tool-{thread_id}-{step_index}");
+                            let title = agy::tool_step_title(
+                                &step_type,
+                                tool_name.as_deref(),
+                                subagent_label.as_deref(),
+                            );
+                            let status = if let Some(error) = tool_error.as_deref() {
+                                if !error.is_empty() {
+                                    "failed"
+                                } else if done {
+                                    "completed"
+                                } else {
+                                    "running"
+                                }
+                            } else if done {
+                                "completed"
+                            } else {
+                                "running"
+                            };
+                            let output = tool_error.clone().or(tool_output);
+                            if status == "running" {
+                                running_tool_titles.insert(tool_id.clone(), title.clone());
+                            } else {
+                                running_tool_titles.remove(&tool_id);
+                            }
+                            let item = ConversationItem::ToolCall {
+                                id: tool_id,
+                                title: title.clone(),
+                                tool_kind: tool_name.clone().unwrap_or_else(|| step_type.clone()),
+                                status: status.to_string(),
+                                output: output.clone(),
+                                exit_code: None,
+                                display: Box::new(tool_display_metadata(
+                                    &title,
+                                    tool_name.as_deref().unwrap_or(&step_type),
+                                    status,
+                                    None,
+                                    output.as_deref(),
+                                )),
+                                detail: None,
+                                created_at: Utc::now(),
+                                completed_at: done.then(Utc::now),
+                            };
+                            let _ = self
+                                .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                .await;
+                        }
+                    }
+                    AgyStreamEvent::Result {
+                        conversation_id,
+                        success,
+                        response,
+                        error,
+                    } => {
+                        if !conversation_id.is_empty() {
+                            let _ = self
+                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                                    thread.native_session_id = Some(conversation_id);
+                                })
+                                .await;
+                        }
+                        if let Some(response) = response.filter(|text| !text.trim().is_empty())
+                            && !saw_agent_output
+                        {
+                            saw_agent_output = true;
+                            let item = ConversationItem::AssistantMessage {
+                                id: format!("agy-assistant-{thread_id}-result"),
+                                text: response,
+                                phase: None,
+                                memory_citation: None,
+                                citations: Vec::new(),
+                                lifecycle: ContentLifecycle::Complete,
+                                error: None,
+                                created_at: Utc::now(),
+                            };
+                            let _ = self
+                                .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                .await;
+                        }
+                        if let Some(error) = error.filter(|text| !text.trim().is_empty()) {
+                            turn_error = Some(error);
+                        } else if !success {
+                            turn_error = Some("Antigravity turn failed".to_string());
+                        }
+                        saw_result = true;
+                        result_reported_success = success && turn_error.is_none();
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut stderr_tail = Vec::new();
+        if let Some(stderr_task) = stderr_task
+            && !saw_result
+        {
+            stderr_tail = stderr_task.await.unwrap_or_default();
+        }
+
+        let mut was_interrupted = false;
+        if let Ok(runtime) = self.agy_runtime_for(&workspace_id).await {
+            let finished = if saw_result {
+                Ok(runtime.complete_turn(&thread_id, turn_generation).await)
+            } else {
+                runtime.finish_turn(&thread_id, turn_generation).await
+            };
+            match finished {
+                Ok(finish) if finish.stale => return,
+                Ok(finish) if finish.interrupted => {
+                    was_interrupted = true;
+                    turn_error = None;
+                }
+                Ok(finish) => match finish.status {
+                    Some(status) if !status.success() && turn_error.is_none() => {
+                        let headline = match status.code() {
+                            Some(code) => {
+                                format!("Antigravity turn failed with exit code {code}")
+                            }
+                            None => "Antigravity turn failed".to_string(),
+                        };
+                        turn_error = Some(if stderr_tail.is_empty() {
+                            headline
+                        } else {
+                            format!("{headline}: {}", stderr_tail.join("\n"))
+                        });
+                    }
+                    Some(status)
+                        if status.success() && !saw_agent_output && turn_error.is_none() =>
+                    {
+                        turn_error = Some(
+                            "Antigravity turn completed without emitting any assistant output"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
+                },
+                Err(_) => {}
+            }
+        }
+        if saw_result
+            && result_reported_success
+            && !saw_agent_output
+            && turn_error.is_none()
+            && !was_interrupted
+        {
+            turn_error = Some(
+                "Antigravity turn completed without emitting any assistant output".to_string(),
+            );
+        }
+        if was_interrupted {
+            self.push_conversation_diagnostic(
+                &workspace_id,
+                &thread_id,
+                ServiceLevel::Info,
+                "Turn interrupted".to_string(),
+                Some("agy-interrupt".to_string()),
+            )
+            .await;
+        }
+        let final_error = turn_error.clone();
+        let settled_at = Utc::now();
+        let tool_settlement = if was_interrupted {
+            ToolSettlement::Interrupted
+        } else if final_error.is_some() {
+            ToolSettlement::Failed
+        } else {
+            ToolSettlement::Completed
+        };
+        self.settle_turn_items_with_error(
+            &workspace_id,
+            &thread_id,
+            settled_at,
+            tool_settlement,
+            final_error.as_deref(),
+        )
+        .await;
+        let _ = self
+            .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                thread.status = if final_error.is_some() {
+                    ThreadStatus::Error
+                } else {
+                    ThreadStatus::Idle
+                };
+                thread.last_error = final_error.clone();
+                thread.updated_at = settled_at;
+            })
+            .await;
+        if let Ok(thread) = self.thread_summary(&workspace_id, &thread_id).await {
+            self.emit(
+                Some(workspace_id.clone()),
+                Some(thread_id.clone()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
+        if !was_interrupted {
+            self.notify_remote_attention(
+                if turn_error.is_some() {
+                    "turn-error"
+                } else {
+                    "turn-complete"
+                },
+                &workspace_id,
+                Some(thread_id.clone()),
+            )
+            .await;
+        }
+        if turn_error.is_none() && saw_agent_output {
+            self.maybe_schedule_ai_thread_title(workspace_id, thread_id)
+                .await;
+        }
+    }
+
     pub(super) async fn push_conversation_item(
         &self,
         workspace_id: &str,
@@ -1637,7 +2032,7 @@ impl ManagedWorkspace {
     pub(super) fn has_runtime(&self) -> bool {
         // A workspace is live if at least one provider runtime is attached;
         // requiring both would treat a Claude-only workspace as a placeholder.
-        self.codex_session.is_some() || self.claude_runtime.is_some()
+        self.codex_session.is_some() || self.claude_runtime.is_some() || self.agy_runtime.is_some()
     }
 }
 

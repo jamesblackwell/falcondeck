@@ -24,11 +24,13 @@ import {
   deriveExtensionPanels,
   deriveThreadAttentionPresentation,
   deriveExtensionSidebarFilters,
+  deriveComposerSuggestions,
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
   draftKeyFor,
   filesToImageInputs,
+  forkThread,
   generateUserItemId,
   imageAttachmentSendBlockReason,
   insertTranscript,
@@ -120,6 +122,7 @@ import {
 } from "./app-utils";
 import { isTauriDesktop, openActivityWindow, openExternalUrl } from "./api";
 import { RuntimeHealthNotifier } from "./components/RuntimeHealthNotifier";
+import { CONNECTION_COPY } from "./connection-copy";
 import { activityTailStore, threadTailKey } from "./activity-tails";
 import {
   ACTIVITY_WINDOW_EVENTS,
@@ -251,7 +254,6 @@ const CommandPalette = lazy(() =>
     default: module.CommandPalette,
   })),
 );
-
 export default function App() {
   return (
     <ToastProvider>
@@ -291,7 +293,7 @@ function AppInner() {
   useDesktopDictation(baseUrl);
   const readAloud = useReadAloud(
     useCallback(async (text: string) => {
-      if (!baseUrl) throw new Error("FalconDeck is not connected to its daemon");
+      if (!baseUrl) throw new Error(CONNECTION_COPY.notConnected);
       const response = await fetch(`${baseUrl}/api/speech/synthesize`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -483,7 +485,7 @@ function AppInner() {
       const host = remoteHosts.hostForWorkspace(workspaceId);
       const actionApi = host ? host.api() : api;
       if (!actionApi) {
-        setActionError("The FalconDeck daemon is not connected");
+        setActionError(CONNECTION_COPY.notConnected);
         return;
       }
       try {
@@ -546,7 +548,7 @@ function AppInner() {
       const host = remoteHosts.hostForWorkspace(workspaceId);
       const actionApi = host ? host.api() : api;
       if (!actionApi) {
-        throw new Error("The FalconDeck daemon is not connected");
+        throw new Error(CONNECTION_COPY.notConnected);
       }
       await actionApi.invokeExtensionAction(
         THREAD_TAGS_EXTENSION_ID,
@@ -562,7 +564,7 @@ function AppInner() {
 
   const handleSetExtensionEnabled = useCallback(
     async (extensionId: string, enabled: boolean) => {
-      if (!api) throw new Error("The FalconDeck daemon is not connected");
+      if (!api) throw new Error(CONNECTION_COPY.notConnected);
       const updated = await api.updateExtension(extensionId, enabled);
       setSnapshot((current) =>
         current
@@ -582,7 +584,7 @@ function AppInner() {
   );
   const handleSetExtensionPermission = useCallback(
     async (extensionId: string, permission: string, granted: boolean) => {
-      if (!api) throw new Error("The FalconDeck daemon is not connected");
+      if (!api) throw new Error(CONNECTION_COPY.notConnected);
       const updated = await api.updateExtensionPermission(
         extensionId,
         permission,
@@ -928,6 +930,13 @@ function AppInner() {
     () => deriveExtensionSidebarFilters(viewSnapshot?.extensions),
     [viewSnapshot?.extensions],
   );
+  // The offer each thread has waved away, by thread id. A new turn produces a
+  // new offer key, so suggestions come back on their own; deliberately not
+  // persisted, and bounded by the number of threads rather than by how many
+  // times the user has dismissed something.
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<
+    Readonly<Record<string, string>>
+  >({});
   const extensionPanels = useMemo<DesktopExtensionPanel[]>(() => {
     const localPanels = deriveExtensionPanels(snapshot?.extensions).map(
       (panel) => ({
@@ -1030,7 +1039,7 @@ function AppInner() {
       const actionApi = host
         ? (remoteHosts.manager.connection(host.id)?.api() ?? null)
         : api;
-      if (!actionApi) throw new Error("The FalconDeck daemon is not connected");
+      if (!actionApi) throw new Error(CONNECTION_COPY.notConnected);
       const response = await actionApi.invokeExtensionAction(
         panel.extensionId,
         actionId,
@@ -1153,6 +1162,20 @@ function AppInner() {
       ),
     [selectedThreadId, selectedWorkspaceId, viewSnapshot?.threads],
   );
+  const composerSuggestionOffer = useMemo(() => {
+    const offer = deriveComposerSuggestions(
+      viewSnapshot?.extensions,
+      selectedThreadId,
+      selectedThread?.status,
+    );
+    if (!offer || !selectedThreadId) return offer;
+    return dismissedSuggestions[selectedThreadId] === offer.key ? null : offer;
+  }, [
+    dismissedSuggestions,
+    selectedThread?.status,
+    selectedThreadId,
+    viewSnapshot?.extensions,
+  ]);
   // Where the selected thread's work lands, for the review rail's overview
   // tab. Without a project there is nothing to describe, so the tab hides.
   const reviewInfo = useMemo(() => {
@@ -1254,7 +1277,7 @@ function AppInner() {
     "https://app.falcondeck.com";
   const defaultRelayUrl = "https://connect.falcondeck.com";
   const remoteControlsUnavailableReason =
-    connectionError ?? "FalconDeck is still connecting to the local daemon.";
+    connectionError ?? CONNECTION_COPY.stillConnecting;
   const remoteControlsDisabled = !api;
   const pairingLink =
     remoteStatus?.pairing && remoteStatus.relay_url
@@ -1750,8 +1773,8 @@ function AppInner() {
   useEffect(() => {
     if (connectionError) {
       toast({
-        variant: "danger",
-        title: "Connection error",
+        variant: "warning",
+        title: "Reconnecting",
         description: connectionError,
       });
     }
@@ -2364,14 +2387,15 @@ function AppInner() {
         createdHandoff = titled;
         showHandoffThread(titled);
 
-        // The verbatim source transcript is handed over directly — bounded
-        // head + tail only when it cannot fit a destination context window.
-        // No summarization pass runs: a lossless transcript is always
-        // preferable, and it keeps handoffs working without any background
+        // The source transcript is handed over directly — bounded head +
+        // tail only when it cannot fit a destination context window. No
+        // summarization pass runs; timestamps and repeated workspace chrome
+        // are stripped. That keeps handoffs working without any background
         // model signed in.
         handoffPrompt = buildHandoffPrompt({
           items: sourceDetail.items,
           sourceTitle: selectedThread.title,
+          workspacePath: selectedWorkspace.path,
         });
 
         await client.sendTurn({
@@ -2514,7 +2538,7 @@ function AppInner() {
       const host = remoteHosts.hosts.find((entry) => entry.id === hostId);
       if (!connection) {
         throw new Error(
-          host ? `${host.name} is not connected` : "Server is not connected",
+          host ? `${host.name} is not connected` : CONNECTION_COPY.serverNotConnected,
         );
       }
       setIsAddingProject(true);
@@ -2974,8 +2998,8 @@ function AppInner() {
     if (!api) {
       setActionError(remoteControlsUnavailableReason);
       toast({
-        variant: "danger",
-        title: "FalconDeck is not ready yet",
+        variant: "warning",
+        title: "Not connected yet",
         description: remoteControlsUnavailableReason,
       });
       return;
@@ -3210,6 +3234,36 @@ function AppInner() {
     selectedSandboxMode,
     selectedIsolation,
   ]);
+
+  // A chosen suggestion is its own turn: it submits the offered prompt and
+  // leaves whatever the user was drafting untouched.
+  const handleSubmitComposerSuggestion = useCallback(
+    (suggestion: { id: string; prompt: string }) => {
+      void handleSubmit(false, {
+        text: suggestion.prompt,
+        preserveComposer: true,
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      api,
+      apiFor,
+      attachments,
+      draft,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+    ],
+  );
+  const handleDismissComposerSuggestions = useCallback(() => {
+    const key = composerSuggestionOffer?.key;
+    if (!key || !selectedThreadId) return;
+    setDismissedSuggestions((current) => ({
+      ...current,
+      [selectedThreadId]: key,
+    }));
+  }, [composerSuggestionOffer?.key, selectedThreadId]);
 
   // Dictation that asked to send waits for the composer to actually hold the
   // transcript; anything else the user does to the draft cancels it.
@@ -3490,8 +3544,8 @@ function AppInner() {
     if (!api) {
       setActionError(remoteControlsUnavailableReason);
       toast({
-        variant: "danger",
-        title: "FalconDeck is not ready yet",
+        variant: "warning",
+        title: "Not connected yet",
         description: remoteControlsUnavailableReason,
       });
       return;
@@ -3552,7 +3606,7 @@ function AppInner() {
   const handleWorkspaceOrderChange = useCallback(
     async (workspaceIds: string[]) => {
       if (!api)
-        throw new Error("FalconDeck is still connecting to the local daemon.");
+        throw new Error(CONNECTION_COPY.stillConnecting);
       try {
         const preferences = await api.updatePreferences({
           workspace_order: workspaceIds,
@@ -3579,7 +3633,7 @@ function AppInner() {
   const handleWorkspaceColorChange = useCallback(
     async (workspaceId: string, color: WorkspaceColorId | null) => {
       if (!api)
-        throw new Error("FalconDeck is still connecting to the local daemon.");
+        throw new Error(CONNECTION_COPY.stillConnecting);
       const nextColors = {
         ...(viewSnapshot?.preferences.workspace_colors ?? {}),
       };
@@ -3959,7 +4013,7 @@ function AppInner() {
   const handleArchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("FalconDeck is still connecting");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         await client.archiveThread(workspaceId, threadId);
         if (selectedThreadId === threadId) {
@@ -3996,7 +4050,7 @@ function AppInner() {
   const handleDeleteThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("FalconDeck is still connecting");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         await client.deleteThread(workspaceId, threadId);
         if (selectedThreadId === threadId) {
@@ -4033,10 +4087,66 @@ function AppInner() {
     ],
   );
 
+  const handleForkThread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      const thread = viewSnapshot?.threads.find(
+        (entry) => entry.id === threadId,
+      );
+      const workspace = viewSnapshot?.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      );
+      if (!thread || !workspace) {
+        throw new Error("Thread not found");
+      }
+      try {
+        const handle = await forkThread(client, { workspace, thread });
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                workspaces: current.workspaces.map((entry) =>
+                  entry.id === handle.workspace.id ? handle.workspace : entry,
+                ),
+                threads: [
+                  handle.thread,
+                  ...current.threads.filter(
+                    (entry) => entry.id !== handle.thread.id,
+                  ),
+                ],
+              }
+            : current,
+        );
+        setSelectedWorkspaceId(handle.workspace.id);
+        setSelectedThreadId(handle.thread.id);
+        setActionError(null);
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : "Failed to fork thread";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to fork thread",
+          description: msg,
+        });
+      }
+    },
+    [
+      apiFor,
+      setActionError,
+      setSelectedThreadId,
+      setSelectedWorkspaceId,
+      setSnapshot,
+      toast,
+      viewSnapshot,
+    ],
+  );
+
   const handleRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("FalconDeck is still connecting");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         const handle = await client.updateThread({
           workspace_id: workspaceId,
@@ -4063,7 +4173,7 @@ function AppInner() {
   const handleSuggestThreadTitle = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("FalconDeck is still connecting");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         const result = await client.suggestThreadTitle(workspaceId, threadId);
         const title = result.title.trim();
@@ -4236,7 +4346,7 @@ function AppInner() {
   const handleTogglePinThread = useCallback(
     async (workspaceId: string, threadId: string, pinned: boolean) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("FalconDeck is still connecting");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         const handle = await client.updateThread({
           workspace_id: workspaceId,
@@ -4345,7 +4455,7 @@ function AppInner() {
   const handleActivitySendMessage = useCallback(
     async (workspaceId: string, threadId: string, text: string) => {
       const client = apiFor(workspaceId);
-      if (!client) throw new Error("The FalconDeck daemon is not connected");
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
       const workspace = groups.find(
         (group) => group.workspace.id === workspaceId,
       )?.workspace;
@@ -5265,6 +5375,7 @@ function AppInner() {
             onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}
             onSuggestThreadTitle={handleSuggestThreadTitle}
+            onForkThread={handleForkThread}
             onTogglePinThread={handleTogglePinThread}
             onMarkThreadRead={handleMarkThreadRead}
             onMarkThreadUnread={handleMarkThreadUnread}
@@ -5542,6 +5653,9 @@ function AppInner() {
               operationalConditions={operationalConditions}
               onDismissOperationalCondition={dismissOperationalCondition}
               findRequestKey={findRequestKey}
+              composerSuggestions={composerSuggestionOffer}
+              onSubmitComposerSuggestion={handleSubmitComposerSuggestion}
+              onDismissComposerSuggestions={handleDismissComposerSuggestions}
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}
               onEditQueuedTurn={handleEditQueuedTurn}
@@ -5592,6 +5706,7 @@ function AppInner() {
                     ? {
                         state: voiceRecorder.state,
                         seconds: voiceRecorder.seconds,
+                        levels: voiceRecorder.levels,
                         error: voiceRecorder.error,
                         configured: voiceRecorder.configured === true,
                         hasPending: voiceRecorder.hasPending,

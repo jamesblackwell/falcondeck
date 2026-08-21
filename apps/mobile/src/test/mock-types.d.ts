@@ -38,3 +38,19 @@ declare module 'expo-notifications' {
   } | null
   export function __getChannels(): Map<string, unknown>
 }
+
+declare module 'expo-file-system' {
+  export function resetFileSystemMock(): void
+  export function __setFileText(impl: () => Promise<string>): void
+}
+
+declare module 'expo-asset' {
+  export function __setAssetLocalUri(uri: string | null): void
+  export function __resetAssetMock(): void
+}
+
+declare module 'react-native-webview' {
+  export function WebView(props: unknown): null
+  export function __setWebViewMessage(next: unknown): void
+  export function __resetWebViewMock(): void
+}

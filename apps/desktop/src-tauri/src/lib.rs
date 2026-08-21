@@ -436,11 +436,13 @@ async fn ensure_daemon_running(
 
     let codex_bin = resolve_agent_bin("codex", "FALCONDECK_CODEX_BIN");
     let claude_bin = resolve_agent_bin("claude", "FALCONDECK_CLAUDE_BIN");
+    let agy_bin = resolve_agent_bin("agy", "FALCONDECK_AGY_BIN");
     let deno_bin = bundled_deno_bin()?;
     let handle = spawn_embedded(DaemonConfig {
         bind_addr: "127.0.0.1:0"
             .parse::<SocketAddr>()
             .map_err(|error| error.to_string())?,
+        provider_bins: std::collections::HashMap::from([("agy".to_string(), agy_bin)]),
         codex_bin,
         claude_bin,
         deno_bin,

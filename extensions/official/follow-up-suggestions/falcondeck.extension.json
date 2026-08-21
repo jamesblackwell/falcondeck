@@ -1,0 +1,71 @@
+{
+  "$schema": "../../../schemas/extension-manifest.schema.json",
+  "id": "falcondeck.follow-up-suggestions",
+  "name": "Follow-up suggestions",
+  "version": "0.1.0",
+  "engines": {
+    "falcondeck": "^0.1"
+  },
+  "entrypoint": "server.ts",
+  "contributes": {
+    "agentTools": [
+      {
+        "id": "suggest-follow-ups",
+        "title": "Suggest follow-ups",
+        "description": "Offer the user 1-5 short next actions for this conversation, shown as a dismissible pill above their composer once your turn ends. Call this once near the end of a turn, only when there are genuinely useful next steps you did not already take (verify a change, widen the scope, ship it, investigate a nearby risk). Each action needs a label of at most 30 characters written as an imperative the user would say, an optional one-line description, and the exact prompt to submit if it is chosen. Set preferredActionId to the one you would recommend. This never blocks or changes your turn: it returns immediately and the user may ignore it entirely. Do not call it to ask a question, to confirm something you need an answer to before continuing, or to repeat work you already finished.",
+        "inputSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actions"],
+          "properties": {
+            "actions": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 5,
+              "description": "The offered next actions, most useful first.",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label", "prompt"],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "Short identifier unique within this call."
+                  },
+                  "label": {
+                    "type": "string",
+                    "maxLength": 30,
+                    "description": "Pill text, at most 30 characters, phrased as an imperative."
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 120,
+                    "description": "Optional single line explaining what the action does."
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "Prompt submitted verbatim if the user picks this action."
+                  }
+                }
+              }
+            },
+            "preferredActionId": {
+              "type": "string",
+              "maxLength": 64,
+              "description": "Id of the action to show first; defaults to the first action."
+            }
+          }
+        }
+      }
+    ],
+    "composerSuggestions": [
+      {
+        "id": "follow-ups",
+        "view": "follow-ups"
+      }
+    ]
+  },
+  "permissions": ["agent-tools:register"]
+}

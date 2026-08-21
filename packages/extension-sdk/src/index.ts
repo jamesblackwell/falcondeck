@@ -109,6 +109,12 @@ export type ExtensionEvent =
       threadId: string;
     }
   | {
+      type: "turn.start";
+      workspaceId: string;
+      threadId: string;
+      turnId: string;
+    }
+  | {
       type: "turn.ended";
       workspaceId: string;
       threadId: string;
@@ -147,6 +153,101 @@ export type ExtensionThreadSummary = {
   pendingQuestionCount: number;
 };
 
+/** Bounds the daemon enforces on every published suggestion set. */
+export const MIN_COMPOSER_SUGGESTIONS = 1;
+export const MAX_COMPOSER_SUGGESTIONS = 5;
+export const MAX_COMPOSER_SUGGESTION_LABEL_CHARS = 30;
+export const MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS = 120;
+export const MAX_COMPOSER_SUGGESTION_PROMPT_CHARS = 512;
+export const MAX_COMPOSER_SUGGESTION_ID_CHARS = 64;
+
+/** One offered next action rendered above the composer. */
+export type ComposerSuggestion = {
+  /** Identifier unique within the offer set. */
+  id: string;
+  /** Pill label, at most 30 characters. */
+  label: string;
+  /** Optional single-line elaboration. */
+  description?: string;
+  /** Prompt submitted verbatim when the action is chosen. */
+  prompt: string;
+};
+
+/** A bounded, thread-scoped set of composer offers. */
+export type ComposerSuggestionSet = {
+  actions: ComposerSuggestion[];
+  /** Action shown in the pill's primary segment; defaults to the first. */
+  preferredActionId?: string;
+  /** Turn the offers were derived from, so stale sets can be discarded. */
+  turnId?: string;
+};
+
+export type PublishComposerSuggestions = ComposerSuggestionSet & {
+  /** Manifest-declared `composerSuggestions` view id. */
+  viewId: string;
+  /** Thread the offers belong to. */
+  threadId: string;
+};
+
+/**
+ * Checks a suggestion set against the daemon's published bounds and returns
+ * the first violation. Mirrors `ComposerSuggestionSet::validate` in Rust so
+ * an authoring mistake fails in the extension rather than at the boundary.
+ */
+export function validateComposerSuggestions(
+  set: ComposerSuggestionSet,
+): string | null {
+  const { actions } = set;
+  if (
+    !Array.isArray(actions) ||
+    actions.length < MIN_COMPOSER_SUGGESTIONS ||
+    actions.length > MAX_COMPOSER_SUGGESTIONS
+  ) {
+    return `composer suggestions must contain between ${MIN_COMPOSER_SUGGESTIONS} and ${MAX_COMPOSER_SUGGESTIONS} actions`;
+  }
+  const seen = new Set<string>();
+  for (const action of actions) {
+    const id = action?.id?.trim() ?? "";
+    if (!id || [...id].length > MAX_COMPOSER_SUGGESTION_ID_CHARS) {
+      return `composer suggestion id must be 1-${MAX_COMPOSER_SUGGESTION_ID_CHARS} characters`;
+    }
+    if (seen.has(id)) return `duplicate composer suggestion id: ${id}`;
+    seen.add(id);
+    const label = action.label?.trim() ?? "";
+    if (!label || [...label].length > MAX_COMPOSER_SUGGESTION_LABEL_CHARS) {
+      return `composer suggestion label must be 1-${MAX_COMPOSER_SUGGESTION_LABEL_CHARS} characters`;
+    }
+    if (action.description !== undefined) {
+      if (
+        [...action.description].length >
+          MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS ||
+        action.description.includes("\n")
+      ) {
+        return `composer suggestion description must be a single line of at most ${MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS} characters`;
+      }
+    }
+    const prompt = action.prompt?.trim() ?? "";
+    if (!prompt || [...prompt].length > MAX_COMPOSER_SUGGESTION_PROMPT_CHARS) {
+      return `composer suggestion prompt must be 1-${MAX_COMPOSER_SUGGESTION_PROMPT_CHARS} characters`;
+    }
+  }
+  const preferred = set.preferredActionId?.trim();
+  if (preferred && !actions.some((action) => action.id.trim() === preferred)) {
+    return `preferred composer suggestion ${preferred} is not one of the offered actions`;
+  }
+  return null;
+}
+
+/** One agent-initiated call of a manifest-declared `agentTools` entry. */
+export type ExtensionToolInvocation<TInput = unknown> = {
+  /** Arguments the agent supplied, matching the declared input schema. */
+  input: TInput;
+  /** Thread the calling turn belongs to, supplied by the daemon. */
+  threadId?: string;
+  /** Workspace the calling turn runs in, supplied by the daemon. */
+  workspaceId?: string;
+};
+
 export type ExtensionContext = {
   extension: { id: string };
   actions: {
@@ -163,6 +264,25 @@ export type ExtensionContext = {
     delete(key: string): Promise<void>;
   };
   views: { publish<T>(view: PublishedExtensionView<T>): Promise<void> };
+  tools: {
+    /**
+     * Handles calls to a manifest-declared agent tool. Requires the
+     * `agent-tools:register` permission; the daemon re-checks enablement and
+     * the grant on every call, so a revoked tool fails rather than runs.
+     */
+    register<TInput = unknown, TResult = unknown>(
+      id: string,
+      handler: (
+        invocation: ExtensionToolInvocation<TInput>,
+      ) => TResult | Promise<TResult>,
+    ): void;
+  };
+  composer: {
+    /** Publishes a thread's next-action offers, replacing any previous set. */
+    publish(suggestions: PublishComposerSuggestions): Promise<void>;
+    /** Removes a thread's offers. */
+    clear(target: { viewId: string; threadId: string }): Promise<void>;
+  };
   events: {
     on<TType extends ExtensionEventType>(
       type: TType,

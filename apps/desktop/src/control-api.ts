@@ -9,6 +9,8 @@ import type {
   ControlSearchResponse,
 } from "@falcondeck/client-core";
 
+import { falconDeckHttpError } from "./connection-copy";
+
 /**
  * Typed helpers for the daemon's generic control routes. The desktop panels
  * and the MCP server call the same three endpoints — the control service is
@@ -36,7 +38,7 @@ async function controlPost<T>(baseUrl: string, path: string, body: unknown): Pro
     const detail = (payload as { error?: ControlErrorDetail } | null)?.error ?? null;
     throw new ControlRequestError(
       detail,
-      detail?.message ?? `daemon returned ${response.status}`,
+      detail?.message ?? falconDeckHttpError(response.status),
     );
   }
   return payload as T;

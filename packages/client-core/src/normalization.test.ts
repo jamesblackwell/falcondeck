@@ -38,11 +38,61 @@ describe("extension snapshot normalization", () => {
         threadDecorations: [],
         sidebarFilters: [],
         panels: [],
+        composerSuggestions: [],
+        agentTools: [],
         unsupported: [],
       },
       permissions: [],
       granted_permissions: [],
     });
+  });
+
+  it("carries agent tools and composer suggestions, and still degrades unknown kinds", () => {
+    const catalog = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "falcondeck.follow-up-suggestions",
+          name: "Follow-up suggestions",
+          version: "0.1.0",
+          contributes: {
+            composerSuggestions: [{ id: "follow-ups", view: "follow-ups" }],
+            agentTools: [
+              {
+                id: "suggest-follow-ups",
+                title: "Suggest follow-ups",
+                description: "Offer the user a few short next actions.",
+              },
+              // Missing a description: unusable, so it is dropped rather than
+              // shown to the user as a nameless capability.
+              { id: "broken", title: "Broken" },
+            ],
+            somethingNewer: [{ id: "from-the-future" }],
+          },
+        },
+      ],
+      views: [],
+    }).catalog[0];
+
+    expect(catalog.contributes.composerSuggestions).toEqual([
+      {
+        id: "follow-ups",
+        view: "follow-ups",
+        title: undefined,
+        icon: undefined,
+        ui: null,
+        uiUnsupportedReason: null,
+      },
+    ]);
+    expect(catalog.contributes.agentTools).toEqual([
+      {
+        id: "suggest-follow-ups",
+        title: "Suggest follow-ups",
+        description: "Offer the user a few short next actions.",
+      },
+    ]);
+    expect(catalog.contributes.unsupported).toEqual([
+      { kind: "somethingNewer", entries: [{ id: "from-the-future" }] },
+    ]);
   });
 
   it("normalizes permission grants separately from manifest requests", () => {

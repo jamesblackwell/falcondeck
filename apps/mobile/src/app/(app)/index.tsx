@@ -18,7 +18,9 @@ import {
   composerSelectionFor,
   conversationRenderBlockType,
   defaultProvider,
+  deriveComposerSuggestions,
   imageAttachmentSendBlockReason,
+  latestVisibleAssistantMessageId,
   operationalConditionDismissalKey,
   isDaemonRpcReady,
   workspaceOperationalConditions,
@@ -35,6 +37,7 @@ import {
   workspaceModels,
   workspaceProviderOptions,
   type AgentProvider,
+  type ComposerSuggestion,
   type ConversationPresentation,
   type ConversationRenderBlock,
   type InteractiveResponsePayload,
@@ -78,6 +81,8 @@ import {
   LiveActivityLane,
   MessageRouter,
   GoalBanner,
+  ComposerSuggestionPill,
+  ComposerSuggestionSheet,
   GoalSheet,
   JumpToBottomFab,
   QueuedTurns,
@@ -254,6 +259,14 @@ export default function HomeScreen() {
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false);
+  const [isSuggestionSheetOpen, setIsSuggestionSheetOpen] = useState(false);
+  // The offer each thread has waved away, by thread id. A new turn produces a
+  // new offer key, so suggestions come back on their own; deliberately not
+  // persisted, and bounded by the number of threads rather than by how many
+  // times the user has dismissed something.
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<
+    Readonly<Record<string, string>>
+  >({});
   const [isThreadOptionsOpen, setIsThreadOptionsOpen] = useState(false);
   const selectionSeedRef = useRef<string | null>(null);
   const composerInputRef = useRef<TextInput>(null);
@@ -287,6 +300,37 @@ export default function HomeScreen() {
     attachments.length,
   );
   const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
+  const composerSuggestionOffer = useMemo(() => {
+    const offer = deriveComposerSuggestions(
+      snapshot?.extensions,
+      selectedThreadId,
+      selectedThread?.status,
+    );
+    if (!offer || !selectedThreadId) return offer;
+    return dismissedSuggestions[selectedThreadId] === offer.key ? null : offer;
+  }, [
+    dismissedSuggestions,
+    selectedThread?.status,
+    selectedThreadId,
+    snapshot?.extensions,
+  ]);
+  // A chosen suggestion is its own turn: it submits the offered prompt and
+  // leaves whatever the user was drafting untouched.
+  const handleSubmitComposerSuggestion = useCallback(
+    (suggestion: ComposerSuggestion) => {
+      scrollToBottomIfNear();
+      void submitTurn({ text: suggestion.prompt });
+    },
+    [scrollToBottomIfNear, submitTurn],
+  );
+  const handleDismissComposerSuggestions = useCallback(() => {
+    const key = composerSuggestionOffer?.key;
+    if (!key || !selectedThreadId) return;
+    setDismissedSuggestions((current) => ({
+      ...current,
+      [selectedThreadId]: key,
+    }));
+  }, [composerSuggestionOffer?.key, selectedThreadId]);
   // A goal belongs to a thread, so there is nothing to set one on until one
   // exists — same gate as desktop.
   const showGoalControl = Boolean(workspace) && capabilities.supports_goals;
@@ -314,6 +358,7 @@ export default function HomeScreen() {
     return stable;
   }, [canRetryResponse, conversationItems]);
   /* eslint-enable react-hooks/refs */
+  const lastAssistantMessageId = latestVisibleAssistantMessageId(blocks);
   const renderBlock = useCallback(
     ({ item }: { item: ConversationRenderBlock }) => (
       <MessageRouter
@@ -326,9 +371,20 @@ export default function HomeScreen() {
             : null
         }
         onRetryResponse={retryResponse}
+        showReceivedAt={
+          item.kind === "item" &&
+          item.item.kind === "assistant_message" &&
+          item.item.id === lastAssistantMessageId
+        }
       />
     ),
-    [canRetryResponse, respondApproval, retryResponse, retrySources],
+    [
+      canRetryResponse,
+      lastAssistantMessageId,
+      respondApproval,
+      retryResponse,
+      retrySources,
+    ],
   );
 
   // Filter models by active provider (matches desktop behavior)
@@ -1209,6 +1265,7 @@ export default function HomeScreen() {
             ref={listRef}
             data={blocks}
             renderItem={renderBlock}
+            extraData={lastAssistantMessageId}
             keyExtractor={keyExtractor}
             getItemType={conversationRenderBlockType}
             accessibilityLabel="Conversation"
@@ -1260,6 +1317,13 @@ export default function HomeScreen() {
       <GoalBanner
         goal={selectedThread?.goal ?? null}
         onPress={() => setIsGoalSheetOpen(true)}
+      />
+
+      <ComposerSuggestionPill
+        offer={composerSuggestionOffer}
+        onSubmit={handleSubmitComposerSuggestion}
+        onShowAlternatives={() => setIsSuggestionSheetOpen(true)}
+        onDismiss={handleDismissComposerSuggestions}
       />
 
       <QueuedTurns
@@ -1331,6 +1395,14 @@ export default function HomeScreen() {
           onGoalCommand={() => setIsGoalSheetOpen(true)}
         />
       </View>
+
+      {isSuggestionSheetOpen && composerSuggestionOffer ? (
+        <ComposerSuggestionSheet
+          offer={composerSuggestionOffer}
+          onSubmit={handleSubmitComposerSuggestion}
+          onClose={() => setIsSuggestionSheetOpen(false)}
+        />
+      ) : null}
 
       {isGoalSheetOpen && showGoalControl ? (
         <GoalSheet

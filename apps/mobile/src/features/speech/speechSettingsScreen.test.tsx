@@ -39,7 +39,7 @@ describe('SpeechSettingsScreen', () => {
       label: 'API key',
     })
     expect(failedRow.props.detail).toBe(
-      'Paired desktop did not respond. Tap to retry.',
+      'Could not check desktop. Tap to retry.',
     )
 
     rpc.mockImplementation((method: string) =>

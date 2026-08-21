@@ -1,4 +1,16 @@
-import { PanelsTopLeft, X } from "lucide-react";
+import {
+  Activity,
+  Blocks,
+  Clock3,
+  FileText,
+  Kanban,
+  Notebook,
+  NotebookPen,
+  PanelsTopLeft,
+  StickyNote,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import type {
@@ -6,6 +18,28 @@ import type {
   ExtensionUiActionBinding,
 } from "@falcondeck/client-core";
 import { Button, cn } from "@falcondeck/ui";
+
+const PANEL_ICONS: Record<string, LucideIcon> = {
+  activity: Activity,
+  blocks: Blocks,
+  clock: Clock3,
+  "file-text": FileText,
+  kanban: Kanban,
+  notebook: Notebook,
+  "notebook-pen": NotebookPen,
+  "sticky-note": StickyNote,
+};
+
+function PanelIcon({
+  name,
+  className,
+}: {
+  name?: string | null;
+  className?: string;
+}) {
+  const Icon = (name && PANEL_ICONS[name]) || PanelsTopLeft;
+  return <Icon aria-hidden="true" className={className} />;
+}
 
 import {
   ExtensionUiFallback,
@@ -39,7 +73,10 @@ export function ExtensionPanel({
         data-tauri-drag-region="deep"
         className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-5 py-3"
       >
-        <PanelsTopLeft aria-hidden="true" className="h-4 w-4 text-fg-muted" />
+        <PanelIcon
+          name={panel.icon}
+          className="h-4 w-4 text-fg-muted"
+        />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
             {panel.title}
@@ -116,7 +153,7 @@ export function ExtensionPanelNavigation({
                 : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
             )}
           >
-            <PanelsTopLeft aria-hidden="true" className="h-4 w-4 shrink-0" />
+            <PanelIcon name={panel.icon} className="h-4 w-4 shrink-0" />
             <span className="min-w-0 flex-1 truncate">{panel.title}</span>
           </button>
         );

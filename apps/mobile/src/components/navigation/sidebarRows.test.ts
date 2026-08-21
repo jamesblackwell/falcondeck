@@ -94,6 +94,48 @@ describe('buildSidebarRows', () => {
     expect(rows[2]).toMatchObject({ key: 'thread:t1', type: 'thread', isCollapsed: true })
   })
 
+  it('orders pinned threads with the same sort mode as project chats', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project' }),
+          threads: [
+            thread({
+              id: 'pinned-z',
+              workspace_id: 'w1',
+              title: 'Zebra',
+              is_pinned: true,
+              updated_at: '2026-03-16T12:00:00Z',
+            }),
+            thread({ id: 'regular', workspace_id: 'w1', title: 'Regular' }),
+          ],
+        },
+        {
+          workspace: workspace({ id: 'w2', path: '/tmp/other' }),
+          threads: [
+            thread({
+              id: 'pinned-a',
+              workspace_id: 'w2',
+              title: 'Alpha',
+              is_pinned: true,
+              updated_at: '2026-03-16T11:00:00Z',
+            }),
+          ],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+      'alphabetical',
+    )
+
+    expect(
+      rows.filter((row) => row.type === 'thread' && row.key.startsWith('pinned:')).map((row) => {
+        return row.type === 'thread' ? row.thread.id : null
+      }),
+    ).toEqual(['pinned-a', 'pinned-z'])
+  })
+
   it('places pinned threads above projects and removes them from project rows', () => {
     const rows = buildSidebarRows(
       [

@@ -8,6 +8,7 @@ import type { ThreadSummary } from '@falcondeck/client-core'
 
 import { Button, Input, NativeSheet, Text } from '@/components/ui'
 import { useThreadActions } from '@/hooks/useThreadActions'
+import { triggerThreadArchiveHaptic } from '@/lib/haptics'
 
 interface ThreadOptionsSheetProps {
   workspaceId: string
@@ -26,7 +27,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   const [mode, setMode] = useState<'menu' | 'rename'>('menu')
   const [renameValue, setRenameValue] = useState(thread.title)
   const [pendingAction, setPendingAction] = useState<
-    'archive' | 'rename' | 'suggest' | 'pin' | 'unread' | null
+    'rename' | 'suggest' | 'pin' | 'unread' | null
   >(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -76,17 +77,10 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
     workspaceId,
   ])
 
-  const handleArchive = useCallback(async () => {
-    setPendingAction('archive')
-    setActionError(null)
-    try {
-      await archiveThread(workspaceId, thread.id)
-      onClose()
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Failed to archive thread')
-    } finally {
-      setPendingAction(null)
-    }
+  const handleArchive = useCallback(() => {
+    triggerThreadArchiveHaptic()
+    onClose()
+    void archiveThread(workspaceId, thread.id).catch(() => {})
   }, [archiveThread, onClose, thread.id, workspaceId])
 
   const handleRename = useCallback(async () => {
@@ -231,15 +225,14 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             </Pressable>
           ) : null}
           <Pressable
-            style={[styles.item, styles.dangerItem]}
+            style={[styles.item, styles.archiveItem]}
             accessibilityRole="button"
             accessibilityLabel="Archive thread"
-            onPress={() => void handleArchive()}
-            disabled={pendingAction === 'archive'}
+            onPress={handleArchive}
           >
             <View style={styles.itemLabel}>
-              <Archive size={theme.iconSize.sm} color={theme.colors.danger.default} />
-              <Text variant="label" color="danger">Archive</Text>
+              <Archive size={theme.iconSize.sm} color={theme.colors.info.default} />
+              <Text variant="label" color="info">Archive</Text>
             </View>
           </Pressable>
           {actionError ? (
@@ -289,8 +282,8 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.info.default,
     transform: [{ scale: 0.5 }],
   },
-  dangerItem: {
-    backgroundColor: theme.colors.danger.muted,
+  archiveItem: {
+    backgroundColor: theme.colors.info.muted,
   },
   renameInput: {
     marginTop: theme.spacing[2],

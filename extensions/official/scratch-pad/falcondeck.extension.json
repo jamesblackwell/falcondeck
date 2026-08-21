@@ -1,0 +1,54 @@
+{
+  "$schema": "../../../schemas/extension-manifest.schema.json",
+  "id": "falcondeck.scratch-pad",
+  "name": "Scratch pad",
+  "version": "0.2.0",
+  "engines": {
+    "falcondeck": "^0.1"
+  },
+  "entrypoint": "server.ts",
+  "frontend": "app.tsx",
+  "contributes": {
+    "threadMenuActions": [
+      {
+        "id": "notes",
+        "title": "Notes"
+      }
+    ],
+    "panels": [
+      {
+        "id": "pad",
+        "title": "Scratch pad",
+        "view": "scratch-pad",
+        "icon": "notebook-pen",
+        "ui": {
+          "version": 1,
+          "root": {
+            "type": "stack",
+            "gap": "large",
+            "children": [
+              {
+                "type": "text",
+                "text": "Scratch pad",
+                "style": "heading"
+              },
+              {
+                "type": "text",
+                "text": "A quiet place for a Markdown note.",
+                "tone": "muted"
+              },
+              { "type": "divider" },
+              {
+                "type": "state",
+                "state": "empty",
+                "title": "Empty",
+                "description": "Open Scratch pad on desktop or in the browser to write."
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "permissions": []
+}

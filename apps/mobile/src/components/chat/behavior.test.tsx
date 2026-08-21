@@ -985,9 +985,49 @@ describe("long user message collapsing", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("collapses an obviously long message before the first layout", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("pre-1")} />);
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("does not un-collapse when a follow-up layout reports the clamp", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("loop-1")} />);
+    measureText(renderer, 400);
+    measureText(renderer, 160);
+    measureText(renderer, 160);
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }).length,
+    ).toBeGreaterThan(0);
+  });
+
   it("leaves short messages alone", () => {
     const renderer = renderComponent(<UserMessageBlock item={longMessage("short-1")} />);
     measureText(renderer, 80);
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }),
+    ).toHaveLength(0);
+  });
+
+  it("leaves a brief message unclamped without waiting for layout", () => {
+    const renderer = renderComponent(
+      <UserMessageBlock
+        item={{
+          kind: "user_message",
+          id: "brief-1",
+          text: "Short question",
+          attachments: [],
+          created_at: "2026-03-16T10:00:00Z",
+        }}
+      />,
+    );
     expect(
       renderer.root.findAllByProps({
         accessibilityLabel: "Show the full message",
@@ -1013,5 +1053,29 @@ describe("long user message collapsing", () => {
         accessibilityLabel: "Show the full message",
       }).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("drops the clamp when a recycled cell shows a short message", () => {
+    const renderer = renderComponent(<UserMessageBlock item={longMessage("recycle-long")} />);
+    measureText(renderer, 400);
+
+    act(() => {
+      renderer.update(
+        <UserMessageBlock
+          item={{
+            kind: "user_message",
+            id: "recycle-short",
+            text: "Hi",
+            attachments: [],
+            created_at: "2026-03-16T10:00:00Z",
+          }}
+        />,
+      );
+    });
+    expect(
+      renderer.root.findAllByProps({
+        accessibilityLabel: "Show the full message",
+      }),
+    ).toHaveLength(0);
   });
 });

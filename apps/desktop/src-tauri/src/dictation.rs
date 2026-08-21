@@ -231,7 +231,7 @@ fn provider_code(provider: DictationProvider) -> i32 {
 
 fn validate_local_daemon_url(daemon_url: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(daemon_url)
-        .map_err(|_| "OpenRouter dictation requires the local FalconDeck daemon.".to_string())?;
+        .map_err(|_| "OpenRouter dictation needs FalconDeck to be connected.".to_string())?;
     let is_loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost"));
     if url.scheme() != "http"
         || !is_loopback
@@ -242,7 +242,7 @@ fn validate_local_daemon_url(daemon_url: &str) -> Result<(), String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("OpenRouter dictation requires the local FalconDeck daemon.".to_string());
+        return Err("OpenRouter dictation needs FalconDeck to be connected.".to_string());
     }
     Ok(())
 }
@@ -582,7 +582,7 @@ async fn transcribe_openrouter(
     let daemon_url = config
         .daemon_url
         .as_deref()
-        .ok_or_else(|| "The local FalconDeck daemon is unavailable.".to_string())?;
+        .ok_or_else(|| "FalconDeck is not connected.".to_string())?;
     let audio = tokio::fs::read(&path)
         .await
         .map_err(|error| format!("Could not read the retained recording: {error}"))?;
@@ -614,7 +614,9 @@ async fn transcribe_openrouter(
         .trim()
         .to_string();
     if text.chars().count() < 3 {
-        return Err("No speech was detected. Your recording has been retained.".to_string());
+        return Err(
+            "No speech was detected. Your recording is safe, so you can retry.".to_string(),
+        );
     }
     remember_transcript(&text);
 

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio'
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition'
 
-import { renderComponent } from '@/test/render'
+import { renderComponent, textOf } from '@/test/render'
 import {
   clearPendingVoiceRecording,
   getPendingVoiceRecording,
@@ -11,17 +11,20 @@ import {
   setPendingVoiceRecording,
   updateSpeechSettings,
 } from '@/features/speech/speechSettings'
+import { transcriptionRetry } from '@/features/speech/openRouterTranscription'
 import { useRelayStore } from '@/store/relay-store'
 
 import { InlineVoiceRecorder } from './InlineVoiceRecorder'
 
 describe('InlineVoiceRecorder', () => {
   const originalCallRpc = useRelayStore.getState()._callRpc
+  const originalWait = transcriptionRetry.wait
 
   beforeEach(async () => {
     vi.clearAllMocks()
     resetSpeechSettings()
     clearPendingVoiceRecording()
+    transcriptionRetry.wait = vi.fn(async () => {})
     useRelayStore.getState()._callRpc = vi.fn().mockResolvedValue({
       configured: true,
       storage: 'daemon_secret_store',
@@ -255,7 +258,59 @@ describe('InlineVoiceRecorder', () => {
     expect(useRelayStore.getState()._callRpc).not.toHaveBeenCalled()
   })
 
+  it('retries a dropped cloud transcription and shows the attempt', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    setPendingVoiceRecording('file:///saved-voice.m4a', 'openrouter')
+    let transcribeCalls = 0
+    let resolveSecond!: (value: { text: string; model: string }) => void
+    const secondAttempt = new Promise<{ text: string; model: string }>(
+      (resolve) => {
+        resolveSecond = resolve
+      },
+    )
+    const callRpc = vi.fn(async (method: string) => {
+      if (method === 'speech.status') {
+        return { configured: true, storage: 'daemon_secret_store' }
+      }
+      transcribeCalls += 1
+      if (transcribeCalls === 1) {
+        throw new Error('Lost the relay connection')
+      }
+      return secondAttempt
+    })
+    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    await act(async () => {
+      r.root
+        .findByProps({ accessibilityLabel: 'Retry transcription' })
+        .props.onPress()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(textOf(r)).toContain('Retrying (2)')
+    expect(
+      r.root.findByProps({
+        accessibilityLabel: 'Retrying transcription, attempt 2',
+      }),
+    ).toBeTruthy()
+
+    await act(async () => {
+      resolveSecond({ text: 'ship it', model: 'whisper' })
+      await secondAttempt
+    })
+  })
+
   afterEach(() => {
+    transcriptionRetry.wait = originalWait
     useRelayStore.getState()._callRpc = originalCallRpc
   })
 })

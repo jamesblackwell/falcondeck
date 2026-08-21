@@ -115,8 +115,8 @@ export default function SpeechSettingsScreen() {
                 : desktopStatus === 'missing'
                   ? 'Not configured — open FalconDeck settings on your desktop'
                   : desktopStatus === 'offline'
-                    ? 'Paired desktop did not respond. Tap to retry.'
-                    : 'Checking paired desktop…'
+                    ? 'Could not check desktop. Tap to retry.'
+                    : 'Checking desktop…'
             }
             value={
               desktopStatus === 'configured'

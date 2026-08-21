@@ -165,6 +165,32 @@ pub(super) fn codex_inputs(
     translated_inputs
 }
 
+pub(super) fn agy_prompt_from_inputs(
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> String {
+    let text = inputs
+        .iter()
+        .filter_map(|input| match input {
+            TurnInputItem::Text { text, .. } => Some(text.as_str()),
+            TurnInputItem::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let preambles = selected_skills
+        .iter()
+        .map(|skill| skill.alias.as_str())
+        .filter(|alias| !alias.is_empty() && !text.contains(alias))
+        .collect::<Vec<_>>();
+    if preambles.is_empty() {
+        return text;
+    }
+    if text.trim().is_empty() {
+        return preambles.join(" ");
+    }
+    format!("{}\n\n{text}", preambles.join(" "))
+}
+
 pub(super) fn claude_prompt_from_inputs(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
