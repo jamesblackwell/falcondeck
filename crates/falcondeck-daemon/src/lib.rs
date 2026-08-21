@@ -182,7 +182,6 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         state_path,
         config.deno_bin,
     );
-    state.start_runtime_health_monitor();
     // Scheduled definitions are small, local, and must be present before the
     // listener advertises readiness. Otherwise an early snapshot or mutation
     // can observe an empty registry and the background restore can overwrite

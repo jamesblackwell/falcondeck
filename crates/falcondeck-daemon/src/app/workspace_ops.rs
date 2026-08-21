@@ -3364,19 +3364,22 @@ pub(super) async fn refresh_connected_workspace_metadata(
     app: &AppState,
     workspace_id: &str,
 ) -> Result<WorkspaceSummary, DaemonError> {
-    let (workspace_path, codex_session, claude_runtime, agy_runtime) = {
+    let (workspace_path, claude_runtime, agy_runtime) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
         (
             workspace.summary.path.clone(),
-            workspace.codex_session.clone(),
             workspace.claude_runtime.clone(),
             workspace.agy_runtime.clone(),
         )
     };
 
+    // Metadata refresh is a real use of Codex. Resolve it through the same
+    // leased lazy-wake path as thread operations so a cold workspace wakes
+    // transparently and cannot retire halfway through these requests.
+    let codex_session = app.session_for(workspace_id).await.ok();
     let codex_metadata = match codex_session.as_ref() {
         Some(session) => Some(session.provider_metadata().await?),
         None => None,
@@ -3477,6 +3480,23 @@ enum CodexReconnectAttempt {
     Failed(String),
 }
 
+impl AppState {
+    /// Restores an intentionally retired Codex runtime on demand. The keyed
+    /// gate is shared with crash recovery, so a user action and the background
+    /// supervisor cannot launch competing app-servers for one workspace.
+    pub(super) async fn wake_codex_runtime(&self, workspace_id: &str) -> Result<(), DaemonError> {
+        match try_codex_reconnect(self, workspace_id).await {
+            CodexReconnectAttempt::AlreadyConnected | CodexReconnectAttempt::Reconnected => Ok(()),
+            CodexReconnectAttempt::WorkspaceGone => Err(DaemonError::NotFound(format!(
+                "workspace {workspace_id} was not found"
+            ))),
+            CodexReconnectAttempt::Failed(error) => Err(DaemonError::Process(format!(
+                "failed to wake Codex for this workspace: {error}"
+            ))),
+        }
+    }
+}
+
 /// Respawn the Codex app-server for a workspace after an unexpected exit.
 /// Bounded attempts double as the respawn-storm guard: a fresh session that
 /// dies immediately re-enters here, and after five failures recovery stays
@@ -3542,6 +3562,16 @@ pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
 }
 
 async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconnectAttempt {
+    let gate = {
+        let mut gates = app.inner.codex_runtime_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(workspace_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let _gate = gate.lock().await;
+
     let workspace_path = {
         let workspaces = app.inner.workspaces.lock().await;
         let Some(workspace) = workspaces.get(workspace_id) else {

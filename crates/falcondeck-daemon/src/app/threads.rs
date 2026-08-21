@@ -37,7 +37,7 @@ use super::{
 use crate::{
     agy::{self, AgyRuntime, AgyStreamEvent},
     claude::ClaudeRuntime,
-    codex::CodexSession,
+    codex::CodexSessionLease,
     error::DaemonError,
 };
 
@@ -179,17 +179,41 @@ impl AppState {
     pub(super) async fn session_for(
         &self,
         workspace_id: &str,
-    ) -> Result<Arc<CodexSession>, DaemonError> {
-        let workspaces = self.inner.workspaces.lock().await;
-        workspaces
-            .get(workspace_id)
-            .and_then(|workspace| workspace.codex_session.as_ref())
-            .map(Arc::clone)
-            .ok_or_else(|| {
-                DaemonError::BadRequest(format!(
-                    "workspace {workspace_id} is not currently connected to Codex"
-                ))
-            })
+    ) -> Result<CodexSessionLease, DaemonError> {
+        for _ in 0..2 {
+            let candidate = {
+                let workspaces = self.inner.workspaces.lock().await;
+                let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+                    DaemonError::NotFound(format!("workspace {workspace_id} was not found"))
+                })?;
+                workspace.codex_session.as_ref().map(Arc::clone)
+            };
+
+            if let Some(candidate) = candidate
+                && let Some(lease) = candidate.lease().await
+            {
+                // Retirement removes the map entry while holding the lease's
+                // exclusive counterpart. Rechecking identity after acquiring
+                // our shared lease closes the lookup-versus-retire race.
+                let still_attached = self
+                    .inner
+                    .workspaces
+                    .lock()
+                    .await
+                    .get(workspace_id)
+                    .and_then(|workspace| workspace.codex_session.as_ref())
+                    .is_some_and(|attached| lease.belongs_to(attached));
+                if still_attached {
+                    return Ok(lease);
+                }
+            }
+
+            self.wake_codex_runtime(workspace_id).await?;
+        }
+
+        Err(DaemonError::Process(format!(
+            "Codex could not stay connected for workspace {workspace_id}"
+        )))
     }
 
     /// Materialize a restored Codex thread before using thread-scoped RPCs.
@@ -198,7 +222,7 @@ impl AppState {
         &self,
         workspace_id: &str,
         thread_id: &str,
-    ) -> Result<Arc<CodexSession>, DaemonError> {
+    ) -> Result<CodexSessionLease, DaemonError> {
         let session = self.session_for(workspace_id).await?;
         let (requires_resume, cwd, summary) = {
             let workspaces = self.inner.workspaces.lock().await;

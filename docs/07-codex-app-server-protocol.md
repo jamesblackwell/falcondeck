@@ -16,6 +16,15 @@ Codex app-server is a long-lived process that exposes the full Codex agent harne
 
 ## Lifecycle
 
+FalconDeck owns one app-server process group per connected workspace. A
+workspace remains warm for five minutes after its last Codex request or event
+so ordinary follow-up messages avoid a restart. Once the grace period expires,
+FalconDeck stops the process group only if no Codex turn is running, waiting for
+input, queued, or being dispatched. The durable thread history remains in
+Codex's native storage; the next operation wakes the app-server and resumes the
+requested thread transparently. Shutdown and wake are serialized so an
+in-flight operation cannot race idle retirement.
+
 ```
 Client                           App Server
   |                                  |

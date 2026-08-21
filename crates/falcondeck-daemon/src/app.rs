@@ -99,6 +99,7 @@ pub struct AppState {
 
 /// Keyed `(workspace_id, provider)` startup locks for ACP agent processes.
 type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
+type CodexRuntimeGates = HashMap<String, Arc<Mutex<()>>>;
 
 struct InnerState {
     daemon: DaemonInfo,
@@ -114,8 +115,11 @@ struct InnerState {
     /// Per-workspace/provider gates prevent background metadata hydration and
     /// a first user turn from spawning competing ACP processes.
     acp_runtime_gates: Mutex<AcpRuntimeGates>,
-    /// Process-tree pressure state and the global optional-runtime start cap.
-    runtime_health: runtime_health::RuntimeHealth,
+    /// Per-workspace gates collapse a cold Codex wake and a background
+    /// reconnect into one app-server process.
+    codex_runtime_gates: Mutex<CodexRuntimeGates>,
+    /// Global cap for concurrently starting optional provider runtimes.
+    runtime_lifecycle: runtime_health::RuntimeLifecycle,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     /// Serializes full state snapshots so an older concurrent snapshot cannot
     /// overwrite newer remote pairing metadata.
@@ -635,7 +639,8 @@ impl AppState {
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
                 acp_runtime_gates: Mutex::new(HashMap::new()),
-                runtime_health: runtime_health::RuntimeHealth::default(),
+                codex_runtime_gates: Mutex::new(HashMap::new()),
+                runtime_lifecycle: runtime_health::RuntimeLifecycle::default(),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),

@@ -1,13 +1,17 @@
 use std::{
     collections::HashMap,
     fs::File,
+    future::Future,
     io::{BufRead, BufReader as StdBufReader, Read},
+    ops::Deref,
     path::PathBuf,
+    pin::Pin,
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use chrono::Utc;
@@ -20,7 +24,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, oneshot},
+    sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, oneshot},
     time::{Duration, timeout},
 };
 use tracing::warn;
@@ -237,11 +241,43 @@ pub struct CodexSession {
     /// for its terminal exit. This closes the race between activation and an
     /// already-observed EOF without adding a workspace-level state machine.
     reconnect_scheduled: AtomicBool,
+    /// Leases serialize proactive retirement against user operations. A
+    /// workspace may go cold only after every caller that acquired its live
+    /// session has finished, so a turn cannot lose the app-server between
+    /// lookup and request dispatch.
+    lifecycle_gate: Arc<RwLock<()>>,
+    /// Updated by both client requests and server events. Incoming turn-end
+    /// notifications therefore start the warm grace period when work really
+    /// finishes rather than when the turn originally started.
+    last_activity: StdMutex<Instant>,
     /// The wrapper CLI and every process it launches live in this group. The
     /// Homebrew `codex` entry point is a Node script which spawns the native
     /// app-server, so killing only `Child` leaves the real server orphaned.
     process_group_id: Option<u32>,
     state: AppState,
+}
+
+/// Keeps a Codex app-server live for the duration of one daemon operation.
+///
+/// The guard is intentionally owned: callers pass this handle across await
+/// points while a retirement task waits for exclusive access.
+pub struct CodexSessionLease {
+    session: Arc<CodexSession>,
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl Deref for CodexSessionLease {
+    type Target = CodexSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.session
+    }
+}
+
+impl CodexSessionLease {
+    pub(crate) fn belongs_to(&self, session: &Arc<CodexSession>) -> bool {
+        Arc::ptr_eq(&self.session, session)
+    }
 }
 
 /// Owns a bootstrapped app-server until the caller installs it in AppState.
@@ -264,6 +300,9 @@ impl PendingCodexSession {
             .take()
             .expect("pending Codex session already activated");
         session.enable_reconnect_on_exit();
+        session
+            .state
+            .schedule_codex_idle_retirement(Arc::clone(&session));
         session
     }
 }
@@ -316,14 +355,23 @@ impl CodexSession {
 
     /// Reconnects the live control plane without re-listing history that the
     /// daemon already holds. Reconnect used to rebuild and then discard up to
-    /// 100 transcripts on every attempt.
-    pub async fn reconnect(
+    /// 100 transcripts on every attempt. The explicit boxed future breaks the
+    /// recursive `Send` proof formed by stdout handling -> lazy wake -> stdout
+    /// handling; changing this back to an `async fn` makes that task graph fail
+    /// to compile even though the runtime flow is finite.
+    pub fn reconnect(
         workspace_id: String,
         workspace_path: String,
         codex_bin: String,
         state: AppState,
-    ) -> Result<CodexBootstrap, DaemonError> {
-        Self::connect_inner(workspace_id, workspace_path, codex_bin, state, false).await
+    ) -> Pin<Box<dyn Future<Output = Result<CodexBootstrap, DaemonError>> + Send>> {
+        Box::pin(Self::connect_inner(
+            workspace_id,
+            workspace_path,
+            codex_bin,
+            state,
+            false,
+        ))
     }
 
     async fn connect_inner(
@@ -411,6 +459,8 @@ impl CodexSession {
             expected_exit: AtomicBool::new(false),
             reconnect_on_exit: AtomicBool::new(false),
             reconnect_scheduled: AtomicBool::new(false),
+            lifecycle_gate: Arc::new(RwLock::new(())),
+            last_activity: StdMutex::new(Instant::now()),
             process_group_id,
             state: state.clone(),
         });
@@ -545,6 +595,10 @@ impl CodexSession {
         &self.workspace_path
     }
 
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
+
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
         let account_value = self.send_control_request("account/read", json!({})).await?;
         let models_value = self.send_control_request("model/list", json!({})).await?;
@@ -596,6 +650,36 @@ impl CodexSession {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn touch(&self) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
+    }
+
+    pub(crate) fn idle_for(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .elapsed()
+    }
+
+    pub(crate) async fn lease(self: &Arc<Self>) -> Option<CodexSessionLease> {
+        let guard = Arc::clone(&self.lifecycle_gate).read_owned().await;
+        if self.is_closed() {
+            return None;
+        }
+        self.touch();
+        Some(CodexSessionLease {
+            session: Arc::clone(self),
+            _guard: guard,
+        })
+    }
+
+    pub(crate) async fn retirement_guard(self: &Arc<Self>) -> OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.lifecycle_gate).write_owned().await
     }
 
     fn enable_reconnect_on_exit(&self) {
@@ -650,6 +734,7 @@ impl CodexSession {
         params: Value,
         response_timeout: Option<Duration>,
     ) -> Result<Value, DaemonError> {
+        self.touch();
         if self.is_closed() {
             return Err(self.disconnected_error());
         }
@@ -694,7 +779,7 @@ impl CodexSession {
             },
             None => rx.await,
         };
-        match received {
+        let result = match received {
             Ok(result) => result,
             Err(_) => {
                 self.pending.lock().await.remove(&id);
@@ -702,10 +787,13 @@ impl CodexSession {
                     "codex app-server disconnected before responding to {method}"
                 )))
             }
-        }
+        };
+        self.touch();
+        result
     }
 
     pub async fn send_notification(&self, method: &str, params: Value) -> Result<(), DaemonError> {
+        self.touch();
         if self.is_closed() {
             return Err(self.disconnected_error());
         }
@@ -767,6 +855,7 @@ impl CodexSession {
     }
 
     async fn write_raw_message(&self, payload: Value) -> Result<(), DaemonError> {
+        self.touch();
         if self.is_closed() {
             return Err(self.disconnected_error());
         }
@@ -786,6 +875,7 @@ impl CodexSession {
                     if line.trim().is_empty() {
                         continue;
                     }
+                    self.touch();
 
                     match serde_json::from_str::<Value>(&line) {
                         Ok(message) => {
@@ -1613,31 +1703,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn isolated_process_group_can_be_terminated_as_one_unit() {
-        let mut command = Command::new("/bin/sh");
-        command
-            .args(["-c", "sleep 30 & wait"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .process_group(0);
-        let mut child = command.spawn().unwrap();
-        let process_group_id = child.id().unwrap();
-
-        kill_process_group(process_group_id).unwrap();
-        let status = timeout(Duration::from_secs(2), child.wait())
-            .await
-            .expect("isolated process group should stop promptly")
-            .unwrap();
-
-        assert!(!status.success());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn dropping_unattached_session_terminates_its_process_group() {
+    fn sleeping_test_session() -> (tempfile::TempDir, Arc<CodexSession>) {
         let directory = tempfile::tempdir().unwrap();
         let state = AppState::new_with_state_path(
             "test".to_string(),
@@ -1666,9 +1732,41 @@ mod tests {
             expected_exit: AtomicBool::new(false),
             reconnect_on_exit: AtomicBool::new(false),
             reconnect_scheduled: AtomicBool::new(false),
+            lifecycle_gate: Arc::new(RwLock::new(())),
+            last_activity: StdMutex::new(Instant::now()),
             process_group_id: Some(process_group_id),
             state,
         });
+        (directory, session)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn isolated_process_group_can_be_terminated_as_one_unit() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group_id = child.id().unwrap();
+
+        kill_process_group(process_group_id).unwrap();
+        let status = timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("isolated process group should stop promptly")
+            .unwrap();
+
+        assert!(!status.success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_unattached_session_terminates_its_process_group() {
+        let (_directory, session) = sleeping_test_session();
 
         drop(PendingCodexSession::new(Arc::clone(&session)));
         let status = timeout(Duration::from_secs(2), session.child.lock().await.wait())
@@ -1680,6 +1778,34 @@ mod tests {
         assert!(session.is_closed());
         assert!(session.expected_exit.load(Ordering::Acquire));
         assert!(!session.reconnect_scheduled.load(Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retirement_waits_for_an_active_operation_lease() {
+        let (_directory, session) = sleeping_test_session();
+        let lease = session.lease().await.expect("session should be live");
+        let (acquired_tx, mut acquired_rx) = oneshot::channel();
+        let retire_session = Arc::clone(&session);
+        let waiter = tokio::spawn(async move {
+            let _guard = retire_session.retirement_guard().await;
+            let _ = acquired_tx.send(());
+        });
+
+        assert!(
+            timeout(Duration::from_millis(50), &mut acquired_rx)
+                .await
+                .is_err(),
+            "retirement must wait while an operation owns a live session"
+        );
+        drop(lease);
+        timeout(Duration::from_secs(2), &mut acquired_rx)
+            .await
+            .expect("retirement should proceed when the operation completes")
+            .expect("retirement waiter should stay alive");
+        waiter.await.unwrap();
+
+        session.shutdown().await.unwrap();
     }
 
     #[tokio::test]

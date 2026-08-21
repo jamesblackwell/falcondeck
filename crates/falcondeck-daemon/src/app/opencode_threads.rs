@@ -91,10 +91,9 @@ impl AppState {
             }
         }
 
-        // Keep optional provider startup bounded across workspaces, and do
-        // not add another process while FalconDeck is already under sustained
-        // memory pressure. Cached runtimes were returned above.
-        let _startup_permit = self.inner.runtime_health.optional_start_permit().await?;
+        // Keep optional provider startup bounded across workspaces. Cached
+        // runtimes were returned above without consuming a startup slot.
+        let _startup_permit = self.inner.runtime_lifecycle.optional_start_permit().await?;
 
         let config = self.opencode_config().ok_or_else(|| {
             DaemonError::BadRequest("OpenCode is not configured in providers.json".to_string())

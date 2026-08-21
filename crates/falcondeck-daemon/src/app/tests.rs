@@ -5326,9 +5326,24 @@ async fn busy_thread_app(
 ) -> (AppState, String) {
     let workspace_path = temp_dir.path().join("project-steer");
     std::fs::create_dir_all(&workspace_path).unwrap();
+    // A cold Codex workspace now wakes on demand. Keep these routing tests
+    // hermetic rather than accidentally launching the developer's real Codex
+    // binary when they intentionally attach no runtime to the fixture.
+    let provider_bins = if provider == AgentProvider::CODEX {
+        HashMap::from([(
+            AgentProvider::CODEX,
+            temp_dir
+                .path()
+                .join("missing-codex-for-steer-test")
+                .to_string_lossy()
+                .to_string(),
+        )])
+    } else {
+        HashMap::new()
+    };
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        HashMap::new(),
+        provider_bins,
         temp_dir.path().join("daemon-state.json"),
     );
     let workspace_id = "workspace-steer".to_string();
@@ -5498,17 +5513,15 @@ async fn a_codex_steer_reaches_the_runtime_and_never_queues() {
     )
     .await;
 
-    // No Codex session is attached, so reaching the provider is observable as
-    // a connection error rather than the message being parked in the queue.
+    // No Codex session is attached, so reaching the provider now attempts the
+    // cold wake and fails on the fixture's deliberately missing binary.
     let error = app
         .send_turn(steer_request(&workspace_id, true))
         .await
         .expect_err("steer must reach Codex");
 
     assert!(
-        error
-            .to_string()
-            .contains("not currently connected to Codex"),
+        error.to_string().contains("failed to wake Codex"),
         "unexpected error: {error}"
     );
     let summary = &app.snapshot().await.threads[0];

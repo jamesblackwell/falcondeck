@@ -374,9 +374,9 @@ impl AppState {
         }
 
         // A burst of restored thread opens can otherwise launch several heavy
-        // optional agents at once. Existing runtimes remain usable under
-        // pressure; only a new process waits behind this bounded gate.
-        let _startup_permit = self.inner.runtime_health.optional_start_permit().await?;
+        // optional agents at once. Only a new process waits behind this
+        // bounded gate; cached runtimes returned above do not.
+        let _startup_permit = self.inner.runtime_lifecycle.optional_start_permit().await?;
 
         let config = self
             .fresh_acp_provider_configs()
