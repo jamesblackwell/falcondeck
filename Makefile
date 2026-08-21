@@ -392,6 +392,8 @@ desktop-install: desktop-brand-assets
 			echo "Tauri CLI not found at $(TAURI_CLI). Run: npm install"; \
 			exit 1; \
 		fi; \
+		echo "Refreshing shared Rust protocol artifacts"; \
+		cd "$(ROOT)" && "$(PROJECT_CARGO)" clean -p falcondeck-core --release $(if $(DESKTOP_TAURI_TARGET),--target "$(DESKTOP_TAURI_TARGET)",); \
 		echo "Building packaged FalconDeck desktop app"; \
 		$(TAURI_BUILD_INSTALL); \
 		if [ ! -d "$(DESKTOP_BUNDLE_APP)" ]; then \
