@@ -1790,11 +1790,35 @@ pub struct ConnectWorkspaceRequest {
 }
 
 /// Optional filters applied when materializing a daemon snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotRequest {
     /// Whether archived threads should be included in the snapshot thread list.
     #[serde(default = "default_true")]
     pub include_archived_threads: bool,
+    /// Whether thread summaries should include the latest agent plan.
+    ///
+    /// Remote sidebar clients omit this. Plans are not shown in the project
+    /// list and can dominate snapshot size across many threads.
+    #[serde(default = "default_true")]
+    pub include_thread_plans: bool,
+    /// Whether thread summaries should include the latest diff/patch text.
+    ///
+    /// Codex writes the full patch onto [`ThreadSummary`] and it rides every
+    /// snapshot until something clears it. Remote clients do not render that
+    /// text in the sidebar, so they ask to drop it rather than encrypting and
+    /// shipping megabytes on every reconnect.
+    #[serde(default = "default_true")]
+    pub include_thread_diffs: bool,
+}
+
+impl Default for SnapshotRequest {
+    fn default() -> Self {
+        Self {
+            include_archived_threads: true,
+            include_thread_plans: true,
+            include_thread_diffs: true,
+        }
+    }
 }
 
 /// Request payload for keyword search across thread message content.
@@ -3359,8 +3383,14 @@ pub struct ThreadSummary {
     /// Latest turn identifier, if a turn has been started.
     pub latest_turn_id: Option<String>,
     /// Latest plan emitted into the thread, if any.
+    ///
+    /// Remote snapshot requests may omit this via
+    /// [`SnapshotRequest::include_thread_plans`].
     pub latest_plan: Option<ThreadPlan>,
-    /// Latest diff summary emitted into the thread, if any.
+    /// Latest diff/patch text emitted into the thread, if any.
+    ///
+    /// This is the full patch, not a summary. Remote snapshot requests may
+    /// omit it via [`SnapshotRequest::include_thread_diffs`].
     pub latest_diff: Option<String>,
     /// Latest tool title observed in the thread, if any.
     pub last_tool: Option<String>,

@@ -962,12 +962,26 @@ impl AppState {
         async {
             match method {
                 "snapshot.current" => {
-                    let request = SnapshotRequest {
-                        include_archived_threads: params
-                            .get("includeArchivedThreads")
-                            .or_else(|| params.get("include_archived_threads"))
+                    let rpc_bool = |camel: &str, snake: &str| {
+                        params
+                            .get(camel)
+                            .or_else(|| params.get(snake))
                             .and_then(Value::as_bool)
-                            .unwrap_or(true),
+                            .unwrap_or(true)
+                    };
+                    let request = SnapshotRequest {
+                        include_archived_threads: rpc_bool(
+                            "includeArchivedThreads",
+                            "include_archived_threads",
+                        ),
+                        include_thread_plans: rpc_bool(
+                            "includeThreadPlans",
+                            "include_thread_plans",
+                        ),
+                        include_thread_diffs: rpc_bool(
+                            "includeThreadDiffs",
+                            "include_thread_diffs",
+                        ),
                     };
                     serde_json::to_value(self.snapshot_with_request(&request).await)
                         .map_err(|error| format!("failed to serialize snapshot: {error}"))

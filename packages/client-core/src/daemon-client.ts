@@ -139,6 +139,12 @@ export function createDaemonApiClient(baseUrl: string) {
           String(request.include_archived_threads),
         );
       }
+      if (request.include_thread_plans != null) {
+        params.set("include_thread_plans", String(request.include_thread_plans));
+      }
+      if (request.include_thread_diffs != null) {
+        params.set("include_thread_diffs", String(request.include_thread_diffs));
+      }
       // URLSearchParams.size is missing in some RN polyfills.
       const query = params.toString();
       const suffix = query ? `?${query}` : "";

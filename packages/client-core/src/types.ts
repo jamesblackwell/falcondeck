@@ -1290,6 +1290,8 @@ export type ThreadTokenUsage = {
 
 export type SnapshotRequest = {
   include_archived_threads?: boolean | null;
+  include_thread_plans?: boolean | null;
+  include_thread_diffs?: boolean | null;
 };
 
 /** Keyword search across the user messages the daemon has indexed. */

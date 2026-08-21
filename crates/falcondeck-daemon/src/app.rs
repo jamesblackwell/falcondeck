@@ -2184,40 +2184,52 @@ impl AppState {
 
     pub async fn snapshot_with_request(&self, request: &SnapshotRequest) -> DaemonSnapshot {
         let mut snapshot = self.snapshot().await;
-        if request.include_archived_threads {
-            return snapshot;
+        if !request.include_archived_threads {
+            let visible_thread_ids = snapshot
+                .threads
+                .iter()
+                .filter(|thread| !thread.is_archived)
+                .map(|thread| thread.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+
+            snapshot
+                .threads
+                .retain(|thread| visible_thread_ids.contains(&thread.id));
+            snapshot.workspaces.iter_mut().for_each(|workspace| {
+                if workspace
+                    .current_thread_id
+                    .as_ref()
+                    .is_some_and(|thread_id| !visible_thread_ids.contains(thread_id))
+                {
+                    workspace.current_thread_id = None;
+                }
+            });
+            snapshot.interactive_requests.retain(|request| {
+                request
+                    .thread_id
+                    .as_ref()
+                    .is_none_or(|thread_id| visible_thread_ids.contains(thread_id))
+            });
+            snapshot.extensions.views.retain(|view| {
+                view.scope.as_ref().is_none_or(|scope| {
+                    scope.kind != "thread" || visible_thread_ids.contains(&scope.id)
+                })
+            });
         }
 
-        let visible_thread_ids = snapshot
-            .threads
-            .iter()
-            .filter(|thread| !thread.is_archived)
-            .map(|thread| thread.id.clone())
-            .collect::<std::collections::HashSet<_>>();
-
-        snapshot
-            .threads
-            .retain(|thread| visible_thread_ids.contains(&thread.id));
-        snapshot.workspaces.iter_mut().for_each(|workspace| {
-            if workspace
-                .current_thread_id
-                .as_ref()
-                .is_some_and(|thread_id| !visible_thread_ids.contains(thread_id))
-            {
-                workspace.current_thread_id = None;
+        // Plans and diffs are full agent artifacts hung off every thread
+        // summary. Dropping them here (instead of after serialize) is what
+        // keeps the encrypted RPC payload sidebar-sized for remote clients.
+        if !request.include_thread_plans || !request.include_thread_diffs {
+            for thread in &mut snapshot.threads {
+                if !request.include_thread_plans {
+                    thread.latest_plan = None;
+                }
+                if !request.include_thread_diffs {
+                    thread.latest_diff = None;
+                }
             }
-        });
-        snapshot.interactive_requests.retain(|request| {
-            request
-                .thread_id
-                .as_ref()
-                .is_none_or(|thread_id| visible_thread_ids.contains(thread_id))
-        });
-        snapshot.extensions.views.retain(|view| {
-            view.scope.as_ref().is_none_or(|scope| {
-                scope.kind != "thread" || visible_thread_ids.contains(&scope.id)
-            })
-        });
+        }
         snapshot
     }
 

@@ -5,7 +5,7 @@ use chrono::{Duration, Utc};
 use falcondeck_core::{
     AgentProvider, ContentLifecycle, ConversationItem, ExtensionThreadSummary, ImageInput,
     InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome, ServiceLevel,
-    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary,
+    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
     ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
     TurnInputItem, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
@@ -5169,6 +5169,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
     let snapshot = app
         .snapshot_with_request(&SnapshotRequest {
             include_archived_threads: false,
+            ..SnapshotRequest::default()
         })
         .await;
 
@@ -5188,6 +5189,96 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
             .map(|request| request.request_id.as_str())
             .collect::<Vec<_>>(),
         vec!["request-active"]
+    );
+}
+
+#[tokio::test]
+async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let workspace_id = "workspace-1".to_string();
+    let thread = ThreadSummary {
+        id: "thread-active".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Active thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now(),
+        last_message_preview: Some("hello".to_string()),
+        latest_turn_id: None,
+        latest_plan: Some(ThreadPlan {
+            explanation: Some("implement the change".to_string()),
+            steps: Vec::new(),
+        }),
+        latest_diff: Some("diff --git a/src/lib.rs b/src/lib.rs\n".to_string()),
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some(thread.id.clone()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [(thread.id.clone(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+
+    let full = app.snapshot_with_request(&SnapshotRequest::default()).await;
+    assert!(full.threads[0].latest_plan.is_some());
+    assert!(full.threads[0].latest_diff.is_some());
+
+    let slim = app
+        .snapshot_with_request(&SnapshotRequest {
+            include_thread_plans: false,
+            include_thread_diffs: false,
+            ..SnapshotRequest::default()
+        })
+        .await;
+    assert_eq!(slim.threads[0].latest_plan, None);
+    assert_eq!(slim.threads[0].latest_diff, None);
+    assert_eq!(
+        slim.threads[0].last_message_preview.as_deref(),
+        Some("hello")
     );
 }
 

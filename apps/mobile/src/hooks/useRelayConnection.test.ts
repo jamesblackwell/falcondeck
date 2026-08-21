@@ -5,7 +5,9 @@ import {
   canCheckpointReplayCursor,
   isInvalidSavedSessionError,
   shouldReconnectOnAppForeground,
-  shouldDeferSnapshotApplication,
+  shouldIgnoreReplaySnapshotEvent,
+  shouldParkSnapshotApplication,
+  shouldRefetchSnapshotApplication,
 } from './useRelayConnection'
 
 describe('foreground reconnect trigger', () => {
@@ -62,16 +64,27 @@ describe('invalid saved session detection', () => {
 })
 
 describe('snapshot race recovery', () => {
-  it('defers while a relay flush may still be decrypting an event', () => {
-    expect(shouldDeferSnapshotApplication(true, false)).toBe(true)
+  it('parks while a relay flush may still be decrypting an event', () => {
+    expect(shouldParkSnapshotApplication(true, 0)).toBe(true)
   })
 
-  it('defers when the bounded replay buffer overflowed', () => {
-    expect(shouldDeferSnapshotApplication(false, true)).toBe(true)
+  it('parks when updates are queued for the next frame', () => {
+    expect(shouldParkSnapshotApplication(false, 3)).toBe(true)
   })
 
-  it('accepts the snapshot when every raced event is ready to replay atomically', () => {
-    expect(shouldDeferSnapshotApplication(false, false)).toBe(false)
+  it('does not park when nothing is in flight or queued', () => {
+    expect(shouldParkSnapshotApplication(false, 0)).toBe(false)
+  })
+
+  it('refetches only when the bounded replay buffer overflowed', () => {
+    expect(shouldRefetchSnapshotApplication(true)).toBe(true)
+    expect(shouldRefetchSnapshotApplication(false)).toBe(false)
+  })
+
+  it('drops durable snapshot envelopes while snapshot.current is in flight', () => {
+    expect(shouldIgnoreReplaySnapshotEvent(true, 'snapshot')).toBe(true)
+    expect(shouldIgnoreReplaySnapshotEvent(true, 'thread-updated')).toBe(false)
+    expect(shouldIgnoreReplaySnapshotEvent(false, 'snapshot')).toBe(false)
   })
 
   it('deduplicates raced events and reports bounded-buffer overflow', () => {

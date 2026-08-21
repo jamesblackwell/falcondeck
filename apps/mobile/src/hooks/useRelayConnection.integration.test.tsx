@@ -601,14 +601,15 @@ describe('useRelayConnection session rotation', () => {
       await Promise.resolve()
     })
 
-    // The snapshot response loses the race to the still-running decrypt and
-    // must be replaced rather than committed as an older base.
+    // The snapshot response loses the race to the still-running decrypt.
+    // Park it until this frame finishes; do not throw it away and refetch.
     await act(async () => {
       resolveFirstSnapshot(snapshot())
       await Promise.resolve()
       await Promise.resolve()
     })
     expect(useSessionStore.getState().snapshot).toBeNull()
+    expect(callRpc).toHaveBeenCalledTimes(1)
 
     await act(async () => {
       resolveDecrypt({
@@ -617,10 +618,12 @@ describe('useRelayConnection session rotation', () => {
           assistantMessage('raced-answer', 'Recovered by replacement snapshot'),
         ),
       })
-      await vi.waitFor(() => expect(callRpc).toHaveBeenCalledTimes(2))
+      await Promise.resolve()
+      await Promise.resolve()
     })
     await vi.waitFor(() => expect(useSessionStore.getState().snapshot).not.toBeNull())
 
+    expect(callRpc).toHaveBeenCalledTimes(1)
     expect(useRelayStore.getState()._getLastReceivedSeq()).toBe(7)
   })
 
@@ -845,7 +848,11 @@ describe('useRelayConnection session rotation', () => {
       })
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
         'snapshot.current',
-        expect.anything(),
+        {
+          include_archived_threads: false,
+          include_thread_plans: false,
+          include_thread_diffs: false,
+        },
         expect.anything(),
       ))
       await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
