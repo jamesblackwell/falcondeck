@@ -60,6 +60,7 @@ mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
 mod remote_lifecycle;
+mod runtime_health;
 mod scheduled_tasks;
 mod speech;
 mod storage;
@@ -109,6 +110,8 @@ struct InnerState {
     /// Per-workspace/provider gates prevent background metadata hydration and
     /// a first user turn from spawning competing ACP processes.
     acp_runtime_gates: Mutex<AcpRuntimeGates>,
+    /// Process-tree pressure state and the global optional-runtime start cap.
+    runtime_health: runtime_health::RuntimeHealth,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     /// Serializes full state snapshots so an older concurrent snapshot cannot
     /// overwrite newer remote pairing metadata.
@@ -202,8 +205,7 @@ struct ManagedWorkspace {
     codex_session: Option<Arc<CodexSession>>,
     claude_runtime: Option<Arc<ClaudeRuntime>>,
     opencode_runtime: Option<Arc<crate::opencode::OpenCodeRuntime>>,
-    /// Live ACP agent processes keyed by provider id; normally started by
-    /// background metadata hydration, with first-turn startup as a fallback.
+    /// Live ACP agent processes keyed by provider id, started lazily on use.
     acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
     threads: HashMap<String, ManagedThread>,
 }
@@ -586,6 +588,7 @@ impl AppState {
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
                 acp_runtime_gates: Mutex::new(HashMap::new()),
+                runtime_health: runtime_health::RuntimeHealth::default(),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),

@@ -18,6 +18,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "m
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }
 serde.workspace = true
 serde_json.workspace = true
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
