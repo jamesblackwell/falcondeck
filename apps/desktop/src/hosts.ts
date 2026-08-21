@@ -42,6 +42,7 @@ import {
   type ScheduledTaskSummary,
   type SetThreadGoalPayload,
   type StartThreadPayload,
+  type SuggestThreadTitleResponse,
   type ThreadDetail,
   type ThreadDetailRequest,
   type ThreadHandle,
@@ -154,6 +155,7 @@ export type WorkspaceScopedApi = {
     queuedIds: string[],
   ): Promise<{ ok: boolean; message?: string | null }>
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
+  suggestThreadTitle(workspaceId: string, threadId: string): Promise<SuggestThreadTitleResponse>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   deleteThread(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
@@ -523,6 +525,11 @@ export class HostConnection {
         }),
       updateThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.update', payload)),
+      suggestThreadTitle: async (workspaceId, threadId) =>
+        this.rpc<SuggestThreadTitleResponse>('thread.suggestTitle', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+        }),
       archiveThread: async (workspaceId, threadId) =>
         normalizeThreadSummary(
           await this.rpc('thread.archive', { workspaceId, threadId }),

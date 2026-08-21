@@ -1530,7 +1530,36 @@ pub(super) fn is_provisional_thread_title(title: &str) -> bool {
 }
 
 pub(super) fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String {
+    format_ai_thread_title_prompt(items, None, 4)
+}
+
+/// On-demand retitling: the conversation may have moved on from the opening
+/// prompt, so this keeps the current name in view and reads more of the tail.
+pub(super) fn build_refresh_ai_thread_title_prompt(
+    items: &[ConversationItem],
+    current_title: &str,
+) -> String {
+    format_ai_thread_title_prompt(items, Some(current_title), 8)
+}
+
+fn format_ai_thread_title_prompt(
+    items: &[ConversationItem],
+    current_title: Option<&str>,
+    recent_limit: usize,
+) -> String {
     let mut excerpts = Vec::new();
+    let current_title = current_title.map(str::trim).filter(|title| {
+        !title.is_empty()
+            && !is_placeholder_thread_title(title)
+            && !is_provisional_thread_title(title)
+    });
+    if let Some(title) = current_title {
+        excerpts.push(format!(
+            "Current title: {title}\n\
+The conversation may have moved on from that name. Write a title that reflects the work happening now."
+        ));
+    }
+
     let user_messages = items
         .iter()
         .filter_map(|item| match item {
@@ -1566,7 +1595,7 @@ pub(super) fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String
             _ => None,
         })
         .filter(|text| !text.trim().is_empty())
-        .take(4)
+        .take(recent_limit)
         .collect::<Vec<_>>();
     if !recent.is_empty() {
         let ordered_recent = recent.into_iter().rev().collect::<Vec<_>>().join("\n");

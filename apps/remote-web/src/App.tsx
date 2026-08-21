@@ -3686,6 +3686,22 @@ function RemoteApp() {
     }
   }
 
+  async function handleSuggestThreadTitle(workspaceId: string, threadId: string) {
+    try {
+      const result = await callRpc<{ title?: unknown }>("thread.suggestTitle", {
+        workspace_id: workspaceId,
+        thread_id: threadId,
+      });
+      const title = typeof result.title === "string" ? result.title.trim() : "";
+      if (!title) throw new Error("Couldn't generate a title");
+      setError(null);
+      return title;
+    } catch (e) {
+      reportError(e, "Couldn't generate a title");
+      throw e instanceof Error ? e : new Error("Couldn't generate a title");
+    }
+  }
+
   // Set by "Mark as unread" so the auto-read effect does not undo it while
   // the thread is still selected.
   const suppressAutoReadRef = useRef<{
@@ -4368,6 +4384,7 @@ function RemoteApp() {
                 onNewThread={handleNewThread}
                 onArchiveThread={handleArchiveThread}
                 onRenameThread={handleRenameThread}
+                onSuggestThreadTitle={handleSuggestThreadTitle}
                 onTogglePinThread={handleTogglePinThread}
                 onMarkThreadRead={handleMarkThreadRead}
                 onMarkThreadUnread={handleMarkThreadUnread}
@@ -4427,6 +4444,7 @@ function RemoteApp() {
           onNewThread={handleNewThread}
           onArchiveThread={handleArchiveThread}
           onRenameThread={handleRenameThread}
+          onSuggestThreadTitle={handleSuggestThreadTitle}
           onTogglePinThread={handleTogglePinThread}
           onMarkThreadRead={handleMarkThreadRead}
           onMarkThreadUnread={handleMarkThreadUnread}

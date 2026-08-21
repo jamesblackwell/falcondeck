@@ -1802,6 +1802,22 @@ pub struct UpdateThreadRequest {
     pub sandbox_mode: Option<Option<String>>,
 }
 
+/// Request payload used to generate a thread title from recent conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SuggestThreadTitleRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Thread identifier being titled.
+    pub thread_id: String,
+}
+
+/// A suggested title that has not been applied yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SuggestThreadTitleResponse {
+    /// Generated title, already normalized to the same rules as auto-titling.
+    pub title: String,
+}
+
 /// Deserializes a present-but-possibly-null field into `Some(inner)`, so a
 /// missing field (`None` via `#[serde(default)]`) is distinguishable from an
 /// explicit `null` (`Some(None)`).

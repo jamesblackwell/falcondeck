@@ -53,6 +53,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.start",
     "thread.fork",
     "thread.update",
+    "thread.suggestTitle",
     "thread.archive",
     "thread.unarchive",
     "thread.delete",
@@ -1056,6 +1057,16 @@ impl AppState {
                     self.update_thread(request)
                         .await
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.suggestTitle" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.suggest_thread_title(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
                         .map_err(|error| error.to_string())
                 }
                 "workspace.connect" => {

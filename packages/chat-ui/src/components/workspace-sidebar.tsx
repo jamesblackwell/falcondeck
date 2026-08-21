@@ -91,6 +91,11 @@ export type WorkspaceSidebarProps = {
     threadId: string,
     title: string,
   ) => Promise<void> | void;
+  /** Fills the rename field from recent conversation; does not save. */
+  onSuggestThreadTitle?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<string>;
   onTogglePinThread?: (
     workspaceId: string,
     threadId: string,
@@ -526,6 +531,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onArchiveThread,
   onDeleteThread,
   onRenameThread,
+  onSuggestThreadTitle,
   onTogglePinThread,
   onMarkThreadRead,
   onMarkThreadUnread,
@@ -587,6 +593,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [renameValue, setRenameValue] = useState("");
   const [renameError, setRenameError] = useState<string | null>(null);
   const [isRenamingThread, setIsRenamingThread] = useState(false);
+  const [isSuggestingTitle, setIsSuggestingTitle] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{
     workspaceId: string;
     thread: ThreadSummary;
@@ -1038,9 +1045,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   }, []);
 
   const closeRenameDialog = useCallback(() => {
-    if (isRenamingThread) return;
+    if (isRenamingThread || isSuggestingTitle) return;
     resetRenameDialog();
-  }, [isRenamingThread, resetRenameDialog]);
+  }, [isRenamingThread, isSuggestingTitle, resetRenameDialog]);
 
   const openRenameDialog = useCallback(
     (workspaceId: string, thread: ThreadSummary) => {
@@ -1395,6 +1402,31 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [onRenameThread, renameTarget, renameValue, resetRenameDialog],
   );
 
+  const handleSuggestTitle = useCallback(async () => {
+    if (!renameTarget || !onSuggestThreadTitle || isSuggestingTitle) return;
+
+    setIsSuggestingTitle(true);
+    setRenameError(null);
+    try {
+      const title = await onSuggestThreadTitle(
+        renameTarget.workspaceId,
+        renameTarget.thread.id,
+      );
+      const nextTitle = title.trim();
+      if (!nextTitle) {
+        setRenameError("Couldn't generate a title");
+        return;
+      }
+      setRenameValue(nextTitle);
+    } catch (error) {
+      setRenameError(
+        error instanceof Error ? error.message : "Couldn't generate a title",
+      );
+    } finally {
+      setIsSuggestingTitle(false);
+    }
+  }, [isSuggestingTitle, onSuggestThreadTitle, renameTarget]);
+
   useEffect(() => {
     if (!threadContextMenu) return;
 
@@ -1466,7 +1498,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!renameTarget) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || isRenamingThread) return;
+      if (event.key !== "Escape" || isRenamingThread || isSuggestingTitle) return;
       resetRenameDialog();
     };
 
@@ -1474,7 +1506,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isRenamingThread, renameTarget, resetRenameDialog]);
+  }, [isRenamingThread, isSuggestingTitle, renameTarget, resetRenameDialog]);
 
   useEffect(() => {
     if (!deleteTarget) return;
@@ -1835,9 +1867,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         value={renameValue}
         error={renameError}
         pending={isRenamingThread}
+        suggesting={isSuggestingTitle}
         onChange={setRenameValue}
         onClose={closeRenameDialog}
         onSubmit={handleRenameSubmit}
+        onSuggestTitle={onSuggestThreadTitle ? handleSuggestTitle : undefined}
       />
       <WorkspaceContextMenu
         menuRef={workspaceContextMenuRef}

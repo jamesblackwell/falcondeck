@@ -209,4 +209,24 @@ describe("createDaemonApiClient sendTurn", () => {
       granted: true,
     });
   });
+
+  it("posts suggest-title against the thread resource", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ title: "Billing webhook" }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient(
+      "http://daemon.test",
+    ).suggestThreadTitle("workspace", "thread");
+
+    expect(result).toEqual({ title: "Billing webhook" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/workspace/threads/thread/suggest-title",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+  });
 });

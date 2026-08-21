@@ -27,11 +27,11 @@ use super::{
         is_claude_text_block_start, merge_claude_assistant_text,
     },
     conversation_helpers::{
-        ToolSettlement, build_ai_thread_title_prompt, is_placeholder_thread_title,
-        is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
-        settle_content_items, settle_tool_call_items, should_generate_ai_thread_title,
-        terminal_assistant_receipt_with_error, tool_display_metadata,
-        with_renderable_attachment_previews,
+        ToolSettlement, build_ai_thread_title_prompt, build_refresh_ai_thread_title_prompt,
+        is_placeholder_thread_title, is_provisional_thread_title, normalize_generated_thread_title,
+        sanitize_conversation_item, settle_content_items, settle_tool_call_items,
+        should_generate_ai_thread_title, terminal_assistant_receipt_with_error,
+        tool_display_metadata, with_renderable_attachment_previews,
     },
 };
 use crate::{claude::ClaudeRuntime, codex::CodexSession, error::DaemonError};
@@ -634,6 +634,66 @@ impl AppState {
             )
             .await?;
         normalize_generated_thread_title(&text)
+    }
+
+    /// On-demand title for the rename dialog. Ignores the one-shot auto-title
+    /// flags so a thread whose work has moved on can be renamed from recent
+    /// messages. Does not apply the result; the caller still confirms.
+    pub async fn suggest_thread_title(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<falcondeck_core::SuggestThreadTitleResponse, DaemonError> {
+        let title_input = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let thread = workspace
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            let has_user_message = thread
+                .items
+                .iter()
+                .any(|item| matches!(item, ConversationItem::UserMessage { .. }));
+            if !has_user_message {
+                return Err(DaemonError::BadRequest(
+                    "this thread doesn't have enough conversation to suggest a title".to_string(),
+                ));
+            }
+            AiThreadTitleInput {
+                workspace_path: thread
+                    .summary
+                    .working_directory(&workspace.summary.path)
+                    .to_string(),
+                prompt: build_refresh_ai_thread_title_prompt(&thread.items, &thread.summary.title),
+            }
+        };
+
+        let candidates = self.utility_model_candidates(workspace_id).await;
+        if candidates.is_empty() {
+            return Err(DaemonError::BadRequest(
+                "no signed-in harness available to suggest a title".to_string(),
+            ));
+        }
+        let text = self
+            .run_utility_prompt(
+                &candidates,
+                &title_input.workspace_path,
+                &title_input.prompt,
+                Duration::from_secs(25),
+            )
+            .await
+            .ok_or_else(|| {
+                DaemonError::BadRequest(
+                    "couldn't generate a title from this conversation".to_string(),
+                )
+            })?;
+        let title = normalize_generated_thread_title(&text).ok_or_else(|| {
+            DaemonError::BadRequest("couldn't generate a title from this conversation".to_string())
+        })?;
+        Ok(falcondeck_core::SuggestThreadTitleResponse { title })
     }
 
     pub(super) async fn monitor_claude_turn(

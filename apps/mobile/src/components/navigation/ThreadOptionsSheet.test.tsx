@@ -40,6 +40,7 @@ describe('ThreadOptionsSheet', () => {
 
     expect(textOf(renderer)).toContain('Rename thread')
     expect(textOf(renderer)).toContain('Save')
+    expect(textOf(renderer)).toContain('Suggest title')
     expect(onClose).not.toHaveBeenCalled()
   })
 })

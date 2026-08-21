@@ -19,8 +19,8 @@ use falcondeck_core::{
     CreateScheduledTaskRequest, ForkThreadRequest, GitCommitRequest, InteractiveResponseRequest,
     InvokeExtensionActionRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
     ShipThreadRequest, SnapshotRequest, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
-    UpdateExtensionRequest, UpdatePreferencesRequest, UpdateScheduledTaskRequest,
+    StartThreadRequest, SuggestThreadTitleResponse, ThreadDetailMode, ThreadDetailRequest,
+    UnifiedEvent, UpdateExtensionRequest, UpdatePreferencesRequest, UpdateScheduledTaskRequest,
     UpdateThreadRequest,
 };
 
@@ -154,6 +154,10 @@ pub fn router(state: AppState) -> Router {
             get(thread_detail)
                 .patch(update_thread)
                 .delete(delete_thread),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/suggest-title",
+            post(suggest_thread_title),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/archive",
@@ -573,6 +577,17 @@ async fn update_thread(
     request.workspace_id = workspace_id;
     request.thread_id = thread_id;
     Ok(Json(state.update_thread(request).await?))
+}
+
+async fn suggest_thread_title(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<SuggestThreadTitleResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .suggest_thread_title(&workspace_id, &thread_id)
+            .await?,
+    ))
 }
 
 async fn archive_thread(

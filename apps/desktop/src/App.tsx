@@ -4060,6 +4060,26 @@ function AppInner() {
     [apiFor, applyThreadHandle, setActionError, toast],
   );
 
+  const handleSuggestThreadTitle = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error("FalconDeck is still connecting");
+      try {
+        const result = await client.suggestThreadTitle(workspaceId, threadId);
+        const title = result.title.trim();
+        if (!title) throw new Error("Couldn't generate a title");
+        setActionError(null);
+        return title;
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : "Couldn't generate a title";
+        setActionError(msg);
+        throw error instanceof Error ? error : new Error(msg);
+      }
+    },
+    [apiFor, setActionError],
+  );
+
   const branchFromMessage = useCallback(
     async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
       if (!selectedWorkspace || !selectedThread) return;
@@ -5244,6 +5264,7 @@ function AppInner() {
             onArchiveThread={handleArchiveThread}
             onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}
+            onSuggestThreadTitle={handleSuggestThreadTitle}
             onTogglePinThread={handleTogglePinThread}
             onMarkThreadRead={handleMarkThreadRead}
             onMarkThreadUnread={handleMarkThreadUnread}

@@ -70,6 +70,29 @@ export function useThreadActions() {
     }
   }, [])
 
+  const suggestThreadTitle = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const relay = useRelayStore.getState()
+      try {
+        const result = (await relay._callRpc(
+          'thread.suggestTitle',
+          { workspace_id: workspaceId, thread_id: threadId },
+          { requestIdPrefix: 'mobile-thread' },
+        )) as { title?: unknown }
+        const title = typeof result?.title === 'string' ? result.title.trim() : ''
+        if (!title) throw new Error("Couldn't generate a title")
+        relay._setError(null)
+        return title
+      } catch (e) {
+        relay._setError(
+          e instanceof Error ? e.message : "Couldn't generate a title",
+        )
+        throw e
+      }
+    },
+    [],
+  )
+
   const setThreadPinned = useCallback(
     async (workspaceId: string, threadId: string, pinned: boolean) => {
       const relay = useRelayStore.getState()
@@ -282,6 +305,7 @@ export function useThreadActions() {
   return {
     archiveThread,
     renameThread,
+    suggestThreadTitle,
     setThreadPinned,
     markThreadRead,
     markThreadUnread,

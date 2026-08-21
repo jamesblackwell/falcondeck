@@ -1075,6 +1075,27 @@ describe("DesktopSidebar", () => {
     });
   });
 
+  it("fills the rename field from a suggested title", async () => {
+    const onSuggestThreadTitle = vi.fn().mockResolvedValue("Billing webhook");
+    renderSidebar({ onSuggestThreadTitle });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Suggest title" }),
+    );
+
+    await waitFor(() => {
+      expect(onSuggestThreadTitle).toHaveBeenCalledWith(
+        "workspace-1",
+        "thread-1",
+      );
+      expect(screen.getByRole("textbox", { name: "Thread title" })).toHaveValue(
+        "Billing webhook",
+      );
+    });
+  });
+
   it("archives a thread from the right-click menu", async () => {
     const { onArchiveThread } = renderSidebar();
 

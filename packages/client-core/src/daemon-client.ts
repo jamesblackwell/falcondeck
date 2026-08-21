@@ -41,6 +41,7 @@ import type {
   ThreadIsolation,
   ThreadSummary,
   TurnInputItem,
+  SuggestThreadTitleResponse,
   UpdatePreferencesPayload,
   UpdateScheduledTaskPayload,
   SetThreadGoalPayload,
@@ -504,6 +505,14 @@ export function createDaemonApiClient(baseUrl: string) {
               body: JSON.stringify(payload),
             },
           ),
+        ),
+      );
+    },
+    async suggestThreadTitle(workspaceId: string, threadId: string) {
+      return parseJson<SuggestThreadTitleResponse>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/suggest-title`,
+          { method: "POST" },
         ),
       );
     },

@@ -10,6 +10,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  Sparkles,
   SquarePen,
   Trash2,
 } from 'lucide-react'
@@ -871,21 +872,27 @@ export const RenameThreadDialog = memo(function RenameThreadDialog({
   value,
   error,
   pending,
+  suggesting,
   onChange,
   onClose,
   onSubmit,
+  onSuggestTitle,
 }: {
   target: { workspaceId: string; thread: ThreadSummary } | null
   value: string
   error: string | null
   pending: boolean
+  suggesting?: boolean
   onChange: (value: string) => void
   onClose: () => void
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void
+  onSuggestTitle?: () => void
 }) {
   if (!target || typeof document === 'undefined') {
     return null
   }
+
+  const busy = pending || Boolean(suggesting)
 
   return createPortal(
     <div
@@ -921,8 +928,22 @@ export const RenameThreadDialog = memo(function RenameThreadDialog({
             onChange={(event) => onChange(event.target.value)}
             autoFocus
             onFocus={(event) => event.currentTarget.select()}
-            disabled={pending}
+            disabled={busy}
           />
+          {onSuggestTitle ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 px-2 text-fg-muted hover:text-fg-secondary"
+              onClick={onSuggestTitle}
+              disabled={busy}
+              aria-busy={suggesting}
+            >
+              <Sparkles className="h-3.5 w-3.5 text-accent" aria-hidden />
+              {suggesting ? 'Suggesting…' : 'Suggest title'}
+            </Button>
+          ) : null}
           {error ? (
             <p className="text-[length:var(--fd-text-xs)] text-danger">
               {error}
@@ -936,11 +957,11 @@ export const RenameThreadDialog = memo(function RenameThreadDialog({
             type="button"
             variant="ghost"
             onClick={onClose}
-            disabled={pending}
+            disabled={busy}
           >
             Cancel
           </Button>
-          <Button type="submit" disabled={!value.trim()} aria-busy={pending}>
+          <Button type="submit" disabled={!value.trim() || busy} aria-busy={pending}>
             {pending ? 'Saving…' : 'Save'}
           </Button>
         </div>

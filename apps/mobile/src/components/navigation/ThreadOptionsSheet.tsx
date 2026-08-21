@@ -1,6 +1,6 @@
 import { memo, useCallback, useState } from 'react'
 import { Pressable, View } from 'react-native'
-import { Archive, ChevronRight, Pencil, Pin } from 'lucide-react-native'
+import { Archive, ChevronRight, Pencil, Pin, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -21,12 +21,12 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   onClose,
 }: ThreadOptionsSheetProps) {
   const { theme } = useUnistyles()
-  const { archiveThread, renameThread, setThreadPinned, markThreadUnread } =
+  const { archiveThread, renameThread, suggestThreadTitle, setThreadPinned, markThreadUnread } =
     useThreadActions()
   const [mode, setMode] = useState<'menu' | 'rename'>('menu')
   const [renameValue, setRenameValue] = useState(thread.title)
   const [pendingAction, setPendingAction] = useState<
-    'archive' | 'rename' | 'pin' | 'unread' | null
+    'archive' | 'rename' | 'suggest' | 'pin' | 'unread' | null
   >(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -108,6 +108,22 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
     }
   }, [onClose, renameThread, renameValue, thread.id, workspaceId])
 
+  const handleSuggestTitle = useCallback(async () => {
+    void Haptics.selectionAsync()
+    setPendingAction('suggest')
+    setActionError(null)
+    try {
+      const title = await suggestThreadTitle(workspaceId, thread.id)
+      setRenameValue(title)
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Couldn't generate a title",
+      )
+    } finally {
+      setPendingAction(null)
+    }
+  }, [suggestThreadTitle, thread.id, workspaceId])
+
   const startRename = useCallback(() => {
     void Haptics.selectionAsync()
     setMode('rename')
@@ -135,8 +151,21 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             placeholder="Thread title"
             autoFocus
             selectTextOnFocus
+            editable={pendingAction === null}
             style={styles.renameInput}
           />
+          <Pressable
+            style={styles.suggestRow}
+            accessibilityRole="button"
+            accessibilityLabel="Suggest title"
+            onPress={() => void handleSuggestTitle()}
+            disabled={pendingAction !== null}
+          >
+            <Sparkles size={theme.iconSize.sm} color={theme.colors.accent.default} />
+            <Text variant="caption" color="secondary">
+              {pendingAction === 'suggest' ? 'Suggesting…' : 'Suggest title'}
+            </Text>
+          </Pressable>
           {actionError ? (
             <Text variant="caption" color="danger" style={styles.errorText}>
               {actionError}
@@ -147,13 +176,13 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               variant="ghost"
               label="Cancel"
               onPress={onClose}
-              disabled={pendingAction === 'rename'}
+              disabled={pendingAction !== null}
             />
             <Button
               label="Save"
               onPress={() => void handleRename()}
               loading={pendingAction === 'rename'}
-              disabled={!renameValue.trim()}
+              disabled={!renameValue.trim() || pendingAction !== null}
             />
           </View>
         </>
@@ -265,6 +294,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   renameInput: {
     marginTop: theme.spacing[2],
+  },
+  suggestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
+    minHeight: theme.minTouchTarget,
   },
   actions: {
     flexDirection: 'row',

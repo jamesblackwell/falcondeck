@@ -2056,6 +2056,119 @@ tokens used\n5,767\n"
 }
 
 #[test]
+fn refresh_title_prompt_keeps_the_current_name_and_later_messages() {
+    let items = vec![
+        ConversationItem::UserMessage {
+            id: "user-1".to_string(),
+            text: "Help me set up auth".to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        },
+        ConversationItem::AssistantMessage {
+            id: "assistant-1".to_string(),
+            text: "I'll add a login form".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        },
+        ConversationItem::UserMessage {
+            id: "user-2".to_string(),
+            text: "actually let's do the billing webhook instead".to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        },
+    ];
+    let prompt =
+        super::conversation_helpers::build_refresh_ai_thread_title_prompt(&items, "Auth setup");
+    assert!(prompt.contains("Current title: Auth setup"));
+    assert!(prompt.contains("moved on from that name"));
+    assert!(prompt.contains("billing webhook"));
+}
+
+#[tokio::test]
+async fn suggest_thread_title_rejects_an_empty_conversation() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let workspace_id = "workspace-1".to_string();
+    let thread_id = "thread-1".to_string();
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some(thread_id.clone()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [(
+                thread_id.clone(),
+                super::ManagedThread::new(ThreadSummary {
+                    id: thread_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    title: "Untitled thread".to_string(),
+                    provider: AgentProvider::CODEX,
+                    native_session_id: None,
+                    provider_transport: None,
+                    handoff_from: None,
+                    origin: None,
+                    status: ThreadStatus::Idle,
+                    updated_at: Utc::now(),
+                    last_message_preview: None,
+                    latest_turn_id: None,
+                    latest_plan: None,
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    agent: ThreadAgentParams::default(),
+                    attention: ThreadAttention::default(),
+                    is_archived: false,
+                    is_pinned: false,
+                    goal: None,
+                    queued_turns: Vec::new(),
+                    variant: None,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        },
+    );
+
+    let error = app
+        .suggest_thread_title(&workspace_id, &thread_id)
+        .await
+        .expect_err("empty threads cannot be titled");
+    assert!(error.to_string().contains("enough conversation"));
+}
+
+#[test]
 fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
     // Native OpenCode projects its whole transcript once the turn goes idle,
     // so the opening-prompt preview would otherwise stand for the entire turn.

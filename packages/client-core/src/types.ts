@@ -1457,6 +1457,10 @@ export type UpdateThreadPayload = {
   sandbox_mode?: string | null;
 };
 
+export type SuggestThreadTitleResponse = {
+  title: string;
+};
+
 export type ReviewTarget =
   | { type: "uncommittedChanges" }
   | { type: "baseBranch"; branch: string }
