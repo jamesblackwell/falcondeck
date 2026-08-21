@@ -381,6 +381,12 @@ pub(crate) fn terminal_assistant_receipt(
     terminal_assistant_receipt_with_error(turn_items, terminal, created_at, turn_id_hint, None)
 }
 
+/// Id prefix for daemon-authored terminal receipts. `marks_agent_activity`
+/// keys off it: a receipt records that a turn was cut short (often by the
+/// daemon itself shutting down), not new agent output, so inserting one must
+/// not flip a read thread back to unread.
+pub(crate) const TURN_RECEIPT_ID_PREFIX: &str = "falcondeck-turn-receipt-";
+
 pub(crate) fn terminal_assistant_receipt_with_error(
     turn_items: &[ConversationItem],
     terminal: ContentLifecycle,
@@ -424,7 +430,7 @@ pub(crate) fn terminal_assistant_receipt_with_error(
             _ => None,
         })
         .or_else(|| turn_id_hint.map(str::to_string))?;
-    let id = format!("falcondeck-turn-receipt-{source_id}");
+    let id = format!("{TURN_RECEIPT_ID_PREFIX}{source_id}");
     if turn_items.iter().any(|item| {
         matches!(item, ConversationItem::AssistantMessage { id: existing, .. } if existing == &id)
     }) {

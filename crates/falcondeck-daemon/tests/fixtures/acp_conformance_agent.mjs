@@ -201,6 +201,10 @@ input.on('line', (line) => {
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: 'replayed fixture prompt' },
     })
+    update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'replayed fixture answer' },
+    })
     result(message.id, { sessionId })
     return
   }

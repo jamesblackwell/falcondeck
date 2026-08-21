@@ -27,11 +27,12 @@ use super::{
         is_claude_text_block_start, merge_claude_assistant_text,
     },
     conversation_helpers::{
-        ToolSettlement, build_ai_thread_title_prompt, build_refresh_ai_thread_title_prompt,
-        is_placeholder_thread_title, is_provisional_thread_title, normalize_generated_thread_title,
-        sanitize_conversation_item, settle_content_items, settle_tool_call_items,
-        should_generate_ai_thread_title, terminal_assistant_receipt_with_error,
-        tool_display_metadata, with_renderable_attachment_previews,
+        TURN_RECEIPT_ID_PREFIX, ToolSettlement, build_ai_thread_title_prompt,
+        build_refresh_ai_thread_title_prompt, is_placeholder_thread_title,
+        is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
+        settle_content_items, settle_tool_call_items, should_generate_ai_thread_title,
+        terminal_assistant_receipt_with_error, tool_display_metadata,
+        with_renderable_attachment_previews,
     },
 };
 use crate::{
@@ -2127,8 +2128,18 @@ pub(super) fn refresh_thread_attention(
     thread.attention.pending_question_count = pending_question_count;
 }
 
+/// Whether an item is fresh agent output for unread purposes. User messages
+/// are the user's own words; Service items and turn receipts are daemon
+/// commentary about the session (diagnostics, shutdown/interruption markers) —
+/// stamping attention for those flips read threads back to unread every time
+/// the daemon settles a dying turn, e.g. on every app quit while a turn runs.
+/// Genuine failures already demand attention through the error status.
 fn marks_agent_activity(item: &ConversationItem) -> bool {
-    !matches!(item, ConversationItem::UserMessage { .. })
+    match item {
+        ConversationItem::UserMessage { .. } | ConversationItem::Service { .. } => false,
+        ConversationItem::AssistantMessage { id, .. } => !id.starts_with(TURN_RECEIPT_ID_PREFIX),
+        _ => true,
+    }
 }
 
 /// Recognizes the stream-json event that closes a Claude turn, reporting

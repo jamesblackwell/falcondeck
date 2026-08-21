@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use falcondeck_core::{
     AgentProvider, ContentLifecycle, ConversationItem, ExtensionThreadSummary, ImageInput,
-    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome, SnapshotRequest,
-    ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary, ToolActivityKind,
-    ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem,
-    UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome, ServiceLevel,
+    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary,
+    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
+    TurnInputItem, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
 use serde_json::{Value, json};
@@ -3089,6 +3089,210 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
         .unwrap();
     assert!(!read_again.attention.unread);
     assert_eq!(read_again.attention.last_read_seq, 7);
+}
+
+/// Restores an app whose one thread is fully caught up (read seq level with
+/// agent activity), for tests that assert which item inserts flip it unread.
+async fn restored_caught_up_thread_app(
+    state_path: &std::path::Path,
+    workspace_path: &std::path::Path,
+) -> AppState {
+    std::fs::create_dir_all(workspace_path).unwrap();
+    let persisted = PersistedAppState {
+        workspaces: vec![super::PersistedWorkspaceState {
+            path: workspace_path.to_string_lossy().to_string(),
+            id: Some("workspace-unread".to_string()),
+            current_thread_id: Some("thread-1".to_string()),
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::CLAUDE),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: vec![super::PersistedThreadState {
+                thread_id: "thread-1".to_string(),
+                updated_at: Some(Utc::now()),
+                provider: Some(AgentProvider::CLAUDE),
+                native_session_id: None,
+                provider_transport: None,
+                handoff_from: None,
+                origin: None,
+                title: Some("Read thread".to_string()),
+                manual_title: false,
+                ai_title_generated: false,
+                status: Some(ThreadStatus::Idle),
+                last_error: None,
+                last_read_seq: 7,
+                last_agent_activity_seq: 7,
+                variant: None,
+                agent: ThreadAgentParams::default(),
+                goal: None,
+                queued_requests: Vec::new(),
+            }],
+        }],
+        remote: None,
+    };
+    tokio::fs::write(state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .await
+        .unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([
+            (AgentProvider::CODEX, "missing-codex".to_string()),
+            (AgentProvider::CLAUDE, "missing-claude".to_string()),
+        ]),
+        PathBuf::from(state_path),
+    );
+    app.restore_local_state().await.unwrap();
+    app
+}
+
+#[tokio::test]
+async fn daemon_authored_items_do_not_mark_threads_unread() {
+    let temp_dir = tempdir().unwrap();
+    let app = restored_caught_up_thread_app(
+        &temp_dir.path().join("daemon-state.json"),
+        &temp_dir.path().join("project-receipts"),
+    )
+    .await;
+
+    app.push_conversation_item(
+        "workspace-unread",
+        "thread-1",
+        ConversationItem::Service {
+            id: "service-1".to_string(),
+            level: ServiceLevel::Warning,
+            message: "Turn interrupted".to_string(),
+            created_at: Utc::now(),
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    let after_service = app
+        .thread_summary("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(
+        !after_service.attention.unread,
+        "a service diagnostic is daemon commentary, not fresh agent output",
+    );
+
+    app.push_conversation_item(
+        "workspace-unread",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "falcondeck-turn-receipt-turn-1".to_string(),
+            text: String::new(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Interrupted,
+            error: Some("FalconDeck was closed while this turn was running".to_string()),
+            created_at: Utc::now(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let after_receipt = app
+        .thread_summary("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(
+        !after_receipt.attention.unread,
+        "a shutdown receipt must not flip a read thread unread on relaunch",
+    );
+
+    app.push_conversation_item(
+        "workspace-unread",
+        "thread-1",
+        ConversationItem::AssistantMessage {
+            id: "assistant-1".to_string(),
+            text: "a real answer".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let after_answer = app
+        .thread_summary("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(
+        after_answer.attention.unread,
+        "genuine agent output must still mark the thread unread",
+    );
+}
+
+#[tokio::test]
+async fn settling_an_interrupted_turn_keeps_a_read_thread_read() {
+    let temp_dir = tempdir().unwrap();
+    let app = restored_caught_up_thread_app(
+        &temp_dir.path().join("daemon-state.json"),
+        &temp_dir.path().join("project-settle"),
+    )
+    .await;
+
+    // A turn was dispatched (user message only, no answer yet) when the
+    // daemon goes down: settling must leave the receipt without waking the
+    // unread dot, since the user has seen everything the agent produced.
+    app.push_conversation_item(
+        "workspace-unread",
+        "thread-1",
+        ConversationItem::UserMessage {
+            id: "user-1".to_string(),
+            text: "do the thing".to_string(),
+            attachments: Vec::new(),
+            turn_id: Some("turn-1".to_string()),
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    app.settle_turn_items_with_error(
+        "workspace-unread",
+        "thread-1",
+        Utc::now(),
+        ToolSettlement::Interrupted,
+        Some("FalconDeck was closed while this turn was running"),
+    )
+    .await;
+
+    let receipt_lifecycle = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces["workspace-unread"].threads["thread-1"]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ConversationItem::AssistantMessage { id, lifecycle, .. }
+                    if id == "falcondeck-turn-receipt-turn-1" =>
+                {
+                    Some(*lifecycle)
+                }
+                _ => None,
+            })
+    };
+    assert_eq!(
+        receipt_lifecycle,
+        Some(ContentLifecycle::Interrupted),
+        "settling must still record the interruption receipt",
+    );
+    let after = app
+        .thread_summary("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(
+        !after.attention.unread,
+        "the daemon interrupting its own turn is not new agent activity",
+    );
 }
 
 #[tokio::test]

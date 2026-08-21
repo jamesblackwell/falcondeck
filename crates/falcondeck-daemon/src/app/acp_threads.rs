@@ -2,6 +2,7 @@
 //! fallback runtime spawn, the event pump translating [`AcpEvent`]s into
 //! conversation items, and the turn lifecycle for ACP-backed threads.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -618,8 +619,15 @@ impl AppState {
         runtime: Arc<AcpRuntime>,
         mut events: mpsc::UnboundedReceiver<AcpEvent>,
     ) {
+        // Sessions whose `session/load` replay is streaming through the
+        // channel right now, bracketed by ReplayStarted/ReplayFinished. The
+        // pump is the channel's only consumer, so plain local state is enough.
+        let mut replaying_sessions: HashSet<String> = HashSet::new();
         while let Some(event) = events.recv().await {
-            if let Err(error) = self.apply_acp_event(&workspace_id, &runtime, event).await {
+            if let Err(error) = self
+                .apply_acp_event(&workspace_id, &runtime, event, &mut replaying_sessions)
+                .await
+            {
                 tracing::warn!(%error, workspace = %workspace_id, "failed to apply ACP event");
             }
         }
@@ -630,8 +638,15 @@ impl AppState {
         workspace_id: &str,
         runtime: &Arc<AcpRuntime>,
         event: AcpEvent,
+        replaying_sessions: &mut HashSet<String>,
     ) -> Result<(), DaemonError> {
         match event {
+            AcpEvent::ReplayStarted { session_id } => {
+                replaying_sessions.insert(session_id);
+            }
+            AcpEvent::ReplayFinished { session_id } => {
+                replaying_sessions.remove(&session_id);
+            }
             AcpEvent::MessageDelta {
                 session_id,
                 message_id,
@@ -643,7 +658,7 @@ impl AppState {
                 let (item_id, full_text) = runtime
                     .append_assistant_text(&session_id, message_id.as_deref(), &text)
                     .await;
-                self.push_conversation_item(
+                self.insert_acp_conversation_item(
                     workspace_id,
                     &thread_id,
                     ConversationItem::AssistantMessage {
@@ -657,6 +672,7 @@ impl AppState {
                         created_at: Utc::now(),
                     },
                     true,
+                    replaying_sessions.contains(&session_id),
                 )
                 .await?;
             }
@@ -683,7 +699,7 @@ impl AppState {
                 if is_submitted_message_echo {
                     return Ok(());
                 }
-                self.push_conversation_item(
+                self.insert_acp_conversation_item(
                     workspace_id,
                     &thread_id,
                     ConversationItem::UserMessage {
@@ -695,6 +711,7 @@ impl AppState {
                         created_at: Utc::now(),
                     },
                     true,
+                    replaying_sessions.contains(&session_id),
                 )
                 .await?;
             }
@@ -709,7 +726,7 @@ impl AppState {
                 let (item_id, content) = runtime
                     .append_thought_text(&session_id, message_id.as_deref(), &text)
                     .await;
-                self.push_conversation_item(
+                self.insert_acp_conversation_item(
                     workspace_id,
                     &thread_id,
                     ConversationItem::Reasoning {
@@ -721,6 +738,7 @@ impl AppState {
                         created_at: Utc::now(),
                     },
                     true,
+                    replaying_sessions.contains(&session_id),
                 )
                 .await?;
             }
@@ -814,6 +832,7 @@ impl AppState {
                     )
                     .await;
                 let status = normalize_acp_tool_status(&status);
+                let replay = replaying_sessions.contains(&session_id);
                 self.push_acp_tool_item(
                     workspace_id,
                     &thread_id,
@@ -824,10 +843,18 @@ impl AppState {
                         status: &status,
                         output: output.as_deref(),
                     },
+                    replay,
                 )
                 .await?;
-                self.push_acp_diff_items(workspace_id, &thread_id, &call_id, &status, &diffs)
-                    .await?;
+                self.push_acp_diff_items(
+                    workspace_id,
+                    &thread_id,
+                    &call_id,
+                    &status,
+                    &diffs,
+                    replay,
+                )
+                .await?;
             }
             AcpEvent::ToolCallUpdate {
                 session_id,
@@ -864,6 +891,7 @@ impl AppState {
                     )
                     .await;
                 let status = normalize_acp_tool_status(status.as_deref().unwrap_or("in_progress"));
+                let replay = replaying_sessions.contains(&session_id);
                 self.push_acp_tool_item(
                     workspace_id,
                     &thread_id,
@@ -874,10 +902,18 @@ impl AppState {
                         status: &status,
                         output: output.as_deref(),
                     },
+                    replay,
                 )
                 .await?;
-                self.push_acp_diff_items(workspace_id, &thread_id, &call_id, &status, &diffs)
-                    .await?;
+                self.push_acp_diff_items(
+                    workspace_id,
+                    &thread_id,
+                    &call_id,
+                    &status,
+                    &diffs,
+                    replay,
+                )
+                .await?;
             }
             AcpEvent::Plan { session_id, plan } => {
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
@@ -890,7 +926,7 @@ impl AppState {
                         thread.updated_at = Utc::now();
                     })
                     .await?;
-                self.push_conversation_item(
+                self.insert_acp_conversation_item(
                     workspace_id,
                     &thread_id,
                     ConversationItem::Plan {
@@ -899,6 +935,7 @@ impl AppState {
                         created_at: Utc::now(),
                     },
                     true,
+                    replaying_sessions.contains(&session_id),
                 )
                 .await?;
                 self.emit(
@@ -1209,6 +1246,7 @@ impl AppState {
         call_id: &str,
         status: &str,
         diffs: &[AcpDiffContent],
+        replay: bool,
     ) -> Result<(), DaemonError> {
         for (index, diff) in diffs.iter().enumerate() {
             let change_kind = if diff.old_text.is_none() {
@@ -1218,7 +1256,7 @@ impl AppState {
             };
             let lifecycle =
                 tool_display_metadata("File change", "edit", status, None, None).lifecycle;
-            self.push_conversation_item(
+            self.insert_acp_conversation_item(
                 workspace_id,
                 thread_id,
                 ConversationItem::FileChange {
@@ -1235,6 +1273,7 @@ impl AppState {
                     completed_at: (status == "completed" || status == "failed").then(Utc::now),
                 },
                 true,
+                replay,
             )
             .await?;
         }
@@ -1246,9 +1285,10 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
         item: AcpToolItem<'_>,
+        replay: bool,
     ) -> Result<(), DaemonError> {
         let display = tool_display_metadata(item.title, item.kind, item.status, None, item.output);
-        self.push_conversation_item(
+        self.insert_acp_conversation_item(
             workspace_id,
             thread_id,
             ConversationItem::ToolCall {
@@ -1265,8 +1305,29 @@ impl AppState {
                     .then(Utc::now),
             },
             true,
+            replay,
         )
         .await
+    }
+
+    /// Inserts an ACP conversation item, routing `session/load` replay through
+    /// the attention-neutral path: replayed history is recovery, not new agent
+    /// output, and must not advance the unread stamp (`replay_conversation_item`).
+    async fn insert_acp_conversation_item(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        item: ConversationItem,
+        update_existing: bool,
+        replay: bool,
+    ) -> Result<(), DaemonError> {
+        if replay {
+            self.replay_conversation_item(workspace_id, thread_id, item, update_existing)
+                .await
+        } else {
+            self.push_conversation_item(workspace_id, thread_id, item, update_existing)
+                .await
+        }
     }
 
     /// Answers a pending ACP permission request with a user decision.

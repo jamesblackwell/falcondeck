@@ -680,6 +680,15 @@ pub enum AcpEvent {
         message_id: Option<String>,
         text: String,
     },
+    /// A `session/load` request is about to stream this session's history.
+    /// Sent before the request goes out, so on the ordered event channel it
+    /// precedes every replayed notification. The pump must treat items until
+    /// the matching `ReplayFinished` as history recovery, not fresh agent
+    /// activity — otherwise every restored thread flips unread on first open.
+    ReplayStarted { session_id: String },
+    /// The `session/load` request settled (either way); replayed history for
+    /// this session has been fully enqueued and later events are live again.
+    ReplayFinished { session_id: String },
     /// A tool call started or was announced.
     ToolCall {
         session_id: String,
@@ -1988,6 +1997,14 @@ impl AcpRuntime {
         // session→thread mapping must exist before the request goes out
         // or the event pump drops the entire replayed history.
         self.register_session(thread_id, native_session).await;
+        // Bracket the replay on the ordered event channel. The read loop
+        // handles every replayed notification before it resolves this
+        // request's response, so ReplayStarted (enqueued before the request
+        // is even written) and ReplayFinished (enqueued after the response)
+        // are guaranteed to surround the replayed history at the pump.
+        let _ = self.events.send(AcpEvent::ReplayStarted {
+            session_id: native_session.to_string(),
+        });
         let loaded = self
             .request_with_timeout(
                 "session/load",
@@ -1999,6 +2016,9 @@ impl AcpRuntime {
                 ACP_SESSION_START_TIMEOUT,
             )
             .await;
+        let _ = self.events.send(AcpEvent::ReplayFinished {
+            session_id: native_session.to_string(),
+        });
         match loaded {
             Ok(result) => {
                 self.capture_session_metadata(native_session, &result).await;
@@ -3498,6 +3518,58 @@ mod tests {
                 return;
             }
         }
+    }
+
+    /// The pump decides replay-vs-live per item from these markers, so their
+    /// ordering around the replayed history is what keeps restored threads
+    /// from flipping unread on first open.
+    #[tokio::test]
+    async fn load_session_brackets_replayed_history_with_marker_events() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: "load-replay-fixture".to_string(),
+            label: "Load replay fixture".to_string(),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                "normal".to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, mut events_rx) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize");
+
+        runtime
+            .load_session(
+                "thread-load",
+                "fixture-session-1",
+                env!("CARGO_MANIFEST_DIR"),
+                &Default::default(),
+            )
+            .await
+            .expect("session/load should succeed");
+
+        assert!(matches!(
+            next_acp_event(&mut events_rx).await,
+            AcpEvent::ReplayStarted { session_id } if session_id == "fixture-session-1"
+        ));
+        assert!(matches!(
+            next_acp_event(&mut events_rx).await,
+            AcpEvent::UserMessageDelta { text, .. } if text == "replayed fixture prompt"
+        ));
+        assert!(matches!(
+            next_acp_event(&mut events_rx).await,
+            AcpEvent::MessageDelta { text, .. } if text == "replayed fixture answer"
+        ));
+        assert!(matches!(
+            next_acp_event(&mut events_rx).await,
+            AcpEvent::ReplayFinished { session_id } if session_id == "fixture-session-1"
+        ));
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
