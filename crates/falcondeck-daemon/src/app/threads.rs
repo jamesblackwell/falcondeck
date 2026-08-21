@@ -176,10 +176,15 @@ impl AppState {
         let _ = self.persist_local_state().await;
     }
 
-    pub(super) async fn session_for(
+    /// Borrows the currently attached Codex runtime without starting one.
+    ///
+    /// Passive work such as periodic metadata refreshes must use this path so
+    /// an intentionally cold workspace stays cold. User-triggered operations
+    /// use `session_for`, which layers lazy wake-up on top.
+    pub(super) async fn attached_codex_session(
         &self,
         workspace_id: &str,
-    ) -> Result<CodexSessionLease, DaemonError> {
+    ) -> Result<Option<CodexSessionLease>, DaemonError> {
         for _ in 0..2 {
             let candidate = {
                 let workspaces = self.inner.workspaces.lock().await;
@@ -189,9 +194,10 @@ impl AppState {
                 workspace.codex_session.as_ref().map(Arc::clone)
             };
 
-            if let Some(candidate) = candidate
-                && let Some(lease) = candidate.lease().await
-            {
+            let Some(candidate) = candidate else {
+                return Ok(None);
+            };
+            if let Some(lease) = candidate.lease().await {
                 // Retirement removes the map entry while holding the lease's
                 // exclusive counterpart. Rechecking identity after acquiring
                 // our shared lease closes the lookup-versus-retire race.
@@ -204,8 +210,21 @@ impl AppState {
                     .and_then(|workspace| workspace.codex_session.as_ref())
                     .is_some_and(|attached| lease.belongs_to(attached));
                 if still_attached {
-                    return Ok(lease);
+                    return Ok(Some(lease));
                 }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub(super) async fn session_for(
+        &self,
+        workspace_id: &str,
+    ) -> Result<CodexSessionLease, DaemonError> {
+        for _ in 0..2 {
+            if let Some(session) = self.attached_codex_session(workspace_id).await? {
+                return Ok(session);
             }
 
             self.wake_codex_runtime(workspace_id).await?;

@@ -3376,10 +3376,11 @@ pub(super) async fn refresh_connected_workspace_metadata(
         )
     };
 
-    // Metadata refresh is a real use of Codex. Resolve it through the same
-    // leased lazy-wake path as thread operations so a cold workspace wakes
-    // transparently and cannot retire halfway through these requests.
-    let codex_session = app.session_for(workspace_id).await.ok();
+    // Metadata refresh runs periodically in the background, so it must never
+    // revive an intentionally retired runtime. If Codex is already attached,
+    // the lease still prevents retirement halfway through these requests.
+    // User operations take the lazy-waking `session_for` path instead.
+    let codex_session = app.attached_codex_session(workspace_id).await?;
     let codex_metadata = match codex_session.as_ref() {
         Some(session) => Some(session.provider_metadata().await?),
         None => None,
@@ -5176,6 +5177,56 @@ mod tests {
 
         let outcome = try_codex_reconnect(&app, "workspace-1").await;
         assert!(matches!(outcome, CodexReconnectAttempt::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn periodic_metadata_refresh_keeps_a_retired_codex_runtime_cold() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::from([(
+                AgentProvider::CODEX,
+                "definitely-missing-codex-binary".to_string(),
+            )]),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: "workspace-1".to_string(),
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                    status: WorkspaceStatus::Ready,
+                    agents: Vec::new(),
+                    skills: Vec::new(),
+                    default_provider: AgentProvider::CODEX,
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    account: falcondeck_core::AccountSummary::default(),
+                    current_thread_id: None,
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::new(),
+            },
+        );
+
+        refresh_connected_workspace_metadata(&app, "workspace-1")
+            .await
+            .expect("passive metadata refresh should succeed without Codex");
+
+        let workspaces = app.inner.workspaces.lock().await;
+        assert!(workspaces["workspace-1"].codex_session.is_none());
+        assert!(
+            !temp_dir.path().join("codex-sqlite/workspace-1").exists(),
+            "passive refresh must not even attempt to start a cold runtime"
+        );
     }
 
     #[test]
