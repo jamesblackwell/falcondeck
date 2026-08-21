@@ -176,14 +176,10 @@ impl AppState {
         let _ = self.persist_local_state().await;
     }
 
-    /// Borrows the currently attached Codex runtime without starting one.
-    ///
-    /// Passive work such as periodic metadata refreshes must use this path so
-    /// an intentionally cold workspace stays cold. User-triggered operations
-    /// use `session_for`, which layers lazy wake-up on top.
-    pub(super) async fn attached_codex_session(
+    async fn lease_attached_codex_session(
         &self,
         workspace_id: &str,
+        records_activity: bool,
     ) -> Result<Option<CodexSessionLease>, DaemonError> {
         for _ in 0..2 {
             let candidate = {
@@ -197,7 +193,12 @@ impl AppState {
             let Some(candidate) = candidate else {
                 return Ok(None);
             };
-            if let Some(lease) = candidate.lease().await {
+            let lease = if records_activity {
+                candidate.lease().await
+            } else {
+                candidate.passive_lease().await
+            };
+            if let Some(lease) = lease {
                 // Retirement removes the map entry while holding the lease's
                 // exclusive counterpart. Rechecking identity after acquiring
                 // our shared lease closes the lookup-versus-retire race.
@@ -218,12 +219,26 @@ impl AppState {
         Ok(None)
     }
 
+    /// Borrows the currently attached Codex runtime without starting one or
+    /// extending its warm period. Passive work such as periodic metadata
+    /// refreshes must use this path so an idle workspace can become and stay
+    /// cold. User-triggered operations use `session_for` instead.
+    pub(super) async fn attached_codex_session(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<CodexSessionLease>, DaemonError> {
+        self.lease_attached_codex_session(workspace_id, false).await
+    }
+
     pub(super) async fn session_for(
         &self,
         workspace_id: &str,
     ) -> Result<CodexSessionLease, DaemonError> {
         for _ in 0..2 {
-            if let Some(session) = self.attached_codex_session(workspace_id).await? {
+            if let Some(session) = self
+                .lease_attached_codex_session(workspace_id, true)
+                .await?
+            {
                 return Ok(session);
             }
 
