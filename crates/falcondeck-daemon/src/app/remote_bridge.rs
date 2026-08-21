@@ -32,6 +32,8 @@ type RelayWriter = futures_util::stream::SplitSink<
     Message,
 >;
 
+const RELAY_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Every method the encrypted RPC dispatcher understands must be registered
 /// with the relay or it fails the call without consulting the daemon
 /// (rpc-call routes via the registration table only). The test below binds
@@ -408,13 +410,12 @@ impl AppState {
         session_id: &str,
         daemon_token: &str,
     ) -> Result<RelayWebSocketTicketResponse, DaemonError> {
-        let response = reqwest::Client::new()
-            .post(format!(
-                "{}/v1/sessions/{}/ws-ticket",
-                relay_url.trim_end_matches('/'),
-                session_id
-            ))
-            .bearer_auth(daemon_token)
+        let response = relay_ws_ticket_request(
+            &reqwest::Client::new(),
+            relay_url,
+            session_id,
+            daemon_token,
+        )
             .send()
             .await
             .map_err(|error| {
@@ -1762,6 +1763,22 @@ impl AppState {
     }
 }
 
+fn relay_ws_ticket_request(
+    client: &reqwest::Client,
+    relay_url: &str,
+    session_id: &str,
+    daemon_token: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!(
+            "{}/v1/sessions/{}/ws-ticket",
+            relay_url.trim_end_matches('/'),
+            session_id
+        ))
+        .bearer_auth(daemon_token)
+        .timeout(RELAY_HTTP_REQUEST_TIMEOUT)
+}
+
 pub(super) fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {
     let trimmed = input.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -2035,5 +2052,19 @@ mod tests {
     fn registers_snapshot_and_thread_detail_before_optional_remote_actions() {
         assert_eq!(REMOTE_RPC_METHODS.first(), Some(&"snapshot.current"));
         assert_eq!(REMOTE_RPC_METHODS.get(1), Some(&"thread.detail"));
+    }
+
+    #[test]
+    fn relay_websocket_ticket_request_has_a_bounded_deadline() {
+        let request = relay_ws_ticket_request(
+            &reqwest::Client::new(),
+            "https://connect.example/",
+            "session-1",
+            "daemon-token",
+        )
+        .build()
+        .expect("valid websocket ticket request");
+
+        assert_eq!(request.timeout(), Some(&RELAY_HTTP_REQUEST_TIMEOUT));
     }
 }
