@@ -772,7 +772,10 @@ describe('SessionListItem component', () => {
     expect(textOf(r)).toContain('5h')
   })
 
-  it('shows a green done dot for a completed thread', () => {
+  it('renders no indicator for a caught-up idle thread', () => {
+    // Matching desktop: dots are reserved for states that need the user
+    // (running, error, awaiting, unread). A finished, fully read thread
+    // gets a calm empty slot, not a "done" decoration.
     const r = renderComponent(
       <SessionListItem
         thread={thread({
@@ -794,39 +797,6 @@ describe('SessionListItem component', () => {
         onSelectThread={vi.fn()}
       />,
     )
-    expect(r.root.findByProps({ accessibilityLabel: 'Done' })).toBeDefined()
-  })
-
-  it('does not show a done dot for unread, running, or never-run threads', () => {
-    const states = [
-      thread({
-        id: 't1',
-        status: 'idle',
-        attention: {
-          level: 'unread',
-          badge_label: null,
-          unread: true,
-          pending_approval_count: 0,
-          pending_question_count: 0,
-          last_agent_activity_seq: 10,
-          last_read_seq: 5,
-        },
-      }),
-      thread({ id: 't2', status: 'running' }),
-      thread({ id: 't3', status: 'idle' }),
-    ]
-    for (const t of states) {
-      const r = renderComponent(
-        <SessionListItem
-          thread={t}
-          workspaceId="w1"
-          isSelected={false}
-          onSelectThread={vi.fn()}
-        />,
-      )
-      expect(
-        r.root.findAllByProps({ accessibilityLabel: 'Done' }).length,
-      ).toBe(0)
-    }
+    expect(r.root.findAllByProps({ accessibilityLabel: 'Done' }).length).toBe(0)
   })
 })

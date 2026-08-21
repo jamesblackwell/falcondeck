@@ -9,22 +9,6 @@ import { ActivityDiamond, Badge, Text } from '@/components/ui'
 import { formatRelativeTime } from './sessionListItem.utils'
 import { stageColor, ThreadStageMark } from './ThreadStageMark'
 
-/**
- * A thread is "done" when it finished its work cleanly: idle, no unread
- * activity, no error, and not a fresh thread that never ran. Pinned rows rely
- * on this for their green dot, but project rows use the same rule so a
- * thread's state reads identically wherever it appears.
- */
-export function isDoneThread(thread: ThreadSummary): boolean {
-  return (
-    thread.status === 'idle' &&
-    thread.last_error === null &&
-    // Only threads that actually ran: a never-started draft is not "done".
-    thread.attention.last_agent_activity_seq > 0 &&
-    thread.attention.last_agent_activity_seq <= thread.attention.last_read_seq
-  )
-}
-
 interface SessionListItemProps {
   thread: ThreadSummary
   workspaceId: string
@@ -80,11 +64,6 @@ function SessionListItemInner({
           <View style={[styles.dot, { backgroundColor: theme.colors.warning.default }]} />
         ) : presentation.showUnreadDot ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.info.default }]} />
-        ) : isDoneThread(thread) ? (
-          <View
-            style={[styles.dot, { backgroundColor: theme.colors.success.default }]}
-            accessibilityLabel="Done"
-          />
         ) : null}
       </View>
       {/* Regular, not label: Geist only ships Regular/Bold, so weight 500
