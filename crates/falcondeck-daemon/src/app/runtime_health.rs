@@ -18,8 +18,11 @@ use crate::error::DaemonError;
 use super::AppState;
 
 const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-const PRESSURE_THRESHOLD_BYTES: u64 = 1_536 * 1024 * 1024;
-const RECOVERY_THRESHOLD_BYTES: u64 = 1_280 * 1024 * 1024;
+// Six restored Codex workspaces currently settle around 1.7 GiB on macOS.
+// Leave ordinary multi-workspace use alone while catching the multi-gigabyte
+// optional-provider fan-out that caused the observed system-memory crash.
+const PRESSURE_THRESHOLD_BYTES: u64 = 2_560 * 1024 * 1024;
+const RECOVERY_THRESHOLD_BYTES: u64 = 2_048 * 1024 * 1024;
 const REQUIRED_SAMPLES: u8 = 3;
 const MAX_CONCURRENT_OPTIONAL_STARTS: usize = 2;
 const CONDITION_KEY: &str = "runtime-memory-pressure";
@@ -179,8 +182,8 @@ fn sample_process_tree() -> Result<ProcessTreeUsage, &'static str> {
     Ok(owned_process_usage(root_pid, &samples))
 }
 
-fn gibibytes(bytes: u64) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+fn gigabytes(bytes: u64) -> f64 {
+    bytes as f64 / 1_000_000_000.0
 }
 
 impl AppState {
@@ -232,7 +235,7 @@ impl AppState {
                         };
                         let message = format!(
                             "FalconDeck and its agent processes are using {:.1} GB across {} processes. {recovery}",
-                            gibibytes(usage.resident_bytes),
+                            gigabytes(usage.resident_bytes),
                             usage.process_count,
                         );
                         if let Err(error) = app.upsert_operational_condition(
