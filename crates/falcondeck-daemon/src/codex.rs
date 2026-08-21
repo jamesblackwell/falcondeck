@@ -109,6 +109,44 @@ pub(crate) fn hydrate_thread_response(
 /// requests (`turn/start`, `turn/interrupt`, ...) are not timed out here —
 /// they are protected by the disconnect drain in `read_stdout` instead.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_SQLITE_HOME_ENV: &str = "CODEX_SQLITE_HOME";
+const MAX_WORKSPACE_ID_BYTES: usize = 128;
+
+fn codex_sqlite_home(state: &AppState, workspace_id: &str) -> Result<PathBuf, DaemonError> {
+    let safe_workspace_id = !workspace_id.is_empty()
+        && workspace_id.len() <= MAX_WORKSPACE_ID_BYTES
+        && workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if !safe_workspace_id {
+        return Err(DaemonError::Process(
+            "cannot isolate Codex runtime state for an invalid workspace id".to_string(),
+        ));
+    }
+
+    let state_dir = state.state_dir().ok_or_else(|| {
+        DaemonError::Process("FalconDeck's daemon state path has no parent directory".to_string())
+    })?;
+    Ok(state_dir.join("codex-sqlite").join(workspace_id))
+}
+
+async fn configure_codex_sqlite_home(
+    command: &mut Command,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<(), DaemonError> {
+    let sqlite_home = codex_sqlite_home(state, workspace_id)?;
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .map_err(|error| {
+            DaemonError::Process(format!(
+                "failed to prepare isolated Codex runtime at {}: {error}",
+                sqlite_home.display()
+            ))
+        })?;
+    command.env(CODEX_SQLITE_HOME_ENV, sqlite_home);
+    Ok(())
+}
 
 /// Remove terminal control sequences before provider stderr enters daemon
 /// diagnostic logs. Codex uses ANSI styling even when stderr is piped.
@@ -308,6 +346,13 @@ impl CodexSession {
         for override_arg in crate::connectors::codex_config_overrides(&mcp_servers) {
             command.arg("-c").arg(override_arg);
         }
+        // Codex's SQLite runtime permits one writer process per database.
+        // FalconDeck keeps one app-server per workspace, so sharing the
+        // default database makes every process after the first exit during
+        // initialization (and also conflicts with the Codex desktop app).
+        // The session/rollout home remains unchanged; only runtime indexes are
+        // isolated and retained per stable FalconDeck workspace id.
+        configure_codex_sqlite_home(&mut command, &state, &workspace_id).await?;
         command
             .current_dir(PathBuf::from(&workspace_path))
             .stdin(Stdio::piped())
@@ -1636,6 +1681,45 @@ mod tests {
         assert!(session.is_closed());
         assert!(session.expected_exit.load(Ordering::Acquire));
         assert!(!session.reconnect_scheduled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn codex_runtime_database_is_isolated_per_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            directory.path().join("state.json"),
+        );
+        let mut command = Command::new("codex");
+
+        configure_codex_sqlite_home(&mut command, &state, "workspace-1")
+            .await
+            .unwrap();
+
+        let expected = directory.path().join("codex-sqlite/workspace-1");
+        let configured = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new(CODEX_SQLITE_HOME_ENV))
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from);
+        assert_eq!(configured.as_deref(), Some(expected.as_path()));
+        assert!(expected.is_dir());
+    }
+
+    #[test]
+    fn codex_runtime_database_rejects_unsafe_workspace_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            directory.path().join("state.json"),
+        );
+
+        let error = codex_sqlite_home(&state, "../shared").unwrap_err();
+
+        assert!(error.to_string().contains("invalid workspace id"));
     }
 
     #[test]
