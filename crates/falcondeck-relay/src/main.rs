@@ -121,6 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(bind_addr.parse::<SocketAddr>()?).await?;
     let local_addr = listener.local_addr()?;
     tracing::info!("falcondeck-relay listening on {local_addr}");
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

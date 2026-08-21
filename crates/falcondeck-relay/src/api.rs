@@ -1,7 +1,9 @@
+use std::net::{IpAddr, SocketAddr};
+
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        ConnectInfo, DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
@@ -27,7 +29,10 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(landing_page))
         .route("/health", get(health))
         .route("/v1/health", get(health))
-        .route("/v1/pairings", post(start_pairing))
+        .route(
+            "/v1/pairings",
+            post(start_pairing).layer(DefaultBodyLimit::max(PAIRING_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/v1/pairings/challenge", post(pairing_challenge))
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{pairing_id}", get(pairing_status))
@@ -56,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         )
         .with_state(state)
 }
+
+const PAIRING_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct UpdatesRequestQuery {
@@ -110,9 +117,30 @@ async fn landing_page() -> Html<&'static str> {
 
 async fn start_pairing(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<StartPairingRequest>,
 ) -> Result<Json<falcondeck_core::StartPairingResponse>, RelayError> {
+    state
+        .authorize_pairing_creation(pairing_client_ip(peer_addr, &headers))
+        .await?;
     Ok(Json(state.start_pairing(request).await?))
+}
+
+fn pairing_client_ip(peer_addr: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    // The hosted relay is reached through a loopback reverse proxy. Only that
+    // trusted hop may supply the public origin; a directly connected client
+    // cannot evade its bucket with a forged forwarding header.
+    if peer_addr.ip().is_loopback()
+        && let Some(forwarded_ip) = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.trim().parse::<IpAddr>().ok())
+    {
+        return forwarded_ip;
+    }
+    peer_addr.ip()
 }
 
 async fn pairing_challenge(
@@ -426,6 +454,48 @@ fn auth_token(headers: &HeaderMap) -> Result<String, RelayError> {
     }
 
     Err(RelayError::Unauthorized("missing bearer token".to_string()))
+}
+
+#[cfg(test)]
+mod pairing_rate_limit_tests {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::pairing_client_ip;
+
+    #[test]
+    fn direct_clients_cannot_override_their_rate_limit_identity() {
+        let peer = SocketAddr::from(([203, 0, 113, 10], 40_000));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.20"));
+
+        assert_eq!(pairing_client_ip(peer, &headers), peer.ip());
+    }
+
+    #[test]
+    fn loopback_proxy_supplies_the_public_client_identity() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.20, 127.0.0.1"),
+        );
+
+        assert_eq!(
+            pairing_client_ip(peer, &headers),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
+        );
+    }
+
+    #[test]
+    fn malformed_proxy_identity_falls_back_to_the_connected_peer() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
+
+        assert_eq!(pairing_client_ip(peer, &headers), peer.ip());
+    }
 }
 
 #[cfg(test)]

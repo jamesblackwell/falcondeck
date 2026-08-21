@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header::RETRY_AFTER},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -16,6 +16,8 @@ pub enum RelayError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    TooManyRequests(String),
     #[error("failed to load relay state: {0}")]
     StateLoad(String),
     #[error("failed to persist relay state: {0}")]
@@ -29,11 +31,12 @@ struct ErrorBody {
 
 impl IntoResponse for RelayError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             RelayError::BadRequest(_) => StatusCode::BAD_REQUEST,
             RelayError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             RelayError::NotFound(_) => StatusCode::NOT_FOUND,
             RelayError::Conflict(_) => StatusCode::CONFLICT,
+            RelayError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             RelayError::StateLoad(_) | RelayError::StatePersist(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -43,6 +46,12 @@ impl IntoResponse for RelayError {
             error: self.to_string(),
         });
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("6"));
+        }
+        response
     }
 }

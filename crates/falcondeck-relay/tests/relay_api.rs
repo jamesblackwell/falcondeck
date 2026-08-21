@@ -97,6 +97,88 @@ async fn pairing_flow_and_history_round_trip() {
 }
 
 #[tokio::test]
+async fn pairing_creation_rate_limit_rejects_before_persisting_sessions() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let invalid_request = StartPairingRequest {
+        label: None,
+        ttl_seconds: Some(300),
+        existing_session_id: None,
+        daemon_token: None,
+        daemon_bundle: None,
+    };
+
+    for _ in 0..10 {
+        let response = client
+            .post(format!("{}/v1/pairings", server.http_base))
+            .json(&invalid_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let rejected = client
+        .post(format!("{}/v1/pairings", server.http_base))
+        .json(&invalid_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        rejected
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("6"),
+    );
+    assert_eq!(server.state.health().await.active_sessions, 0);
+}
+
+#[tokio::test]
+async fn pairing_creation_rejects_labels_that_exceed_the_storage_bound() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/pairings", server.http_base))
+        .json(&StartPairingRequest {
+            label: Some("x".repeat(129)),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: None,
+        })
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response.text().await.unwrap().contains("at most 128 characters"));
+    assert_eq!(server.state.health().await.active_sessions, 0);
+}
+
+#[tokio::test]
+async fn pairing_creation_rejects_oversized_request_bodies() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/v1/pairings", server.http_base))
+        .json(&StartPairingRequest {
+            label: Some("x".repeat(32 * 1024)),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: None,
+        })
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(server.state.health().await.active_sessions, 0);
+}
+
+#[tokio::test]
 async fn additional_pairings_attach_new_devices_to_the_same_session() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -1171,6 +1253,11 @@ async fn expired_pairings_cannot_be_claimed() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    trigger_prune(&server).await;
+    let health = server.state.health().await;
+    assert_eq!(health.pending_pairings, 0);
+    assert_eq!(health.active_sessions, 0);
 }
 
 #[tokio::test]
@@ -3319,7 +3406,12 @@ async fn spawn_server_at_with_retention(
     let addr = listener.local_addr().unwrap();
     let router_state = state.clone();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router(router_state)).await.unwrap();
+        axum::serve(
+            listener,
+            router(router_state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestServer {

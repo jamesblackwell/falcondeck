@@ -1,4 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration as StdDuration, Instant},
+};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
@@ -76,6 +82,17 @@ const MAX_ACTIONS_PER_DISPATCH: usize = 64;
 const PRUNE_INTERVAL_SECONDS: u64 = 60;
 /// Upper bound on client-chosen RPC request identifiers.
 const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
+/// Starting a pairing is deliberately unauthenticated, so keep both a
+/// per-origin budget and a relay-wide safety budget ahead of durable writes.
+/// Normal desktop retries are far below these limits: an origin may burst ten
+/// requests, then recovers one request every six seconds.
+const PAIRING_REQUEST_CLIENT_BURST: u32 = 10;
+const PAIRING_REQUEST_CLIENT_REFILL: StdDuration = StdDuration::from_secs(6);
+const PAIRING_REQUEST_GLOBAL_BURST: u32 = 100;
+const PAIRING_REQUEST_GLOBAL_REFILL: StdDuration = StdDuration::from_millis(500);
+const PAIRING_REQUEST_MAX_TRACKED_ORIGINS: usize = 4_096;
+const PAIRING_REQUEST_ORIGIN_IDLE_TTL: StdDuration = StdDuration::from_secs(10 * 60);
+const MAX_PAIRING_LABEL_CHARS: usize = 128;
 
 fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
     // Once retention has removed any part of the requested window, or the
@@ -172,10 +189,130 @@ pub struct AppState {
     inner: Arc<InnerState>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PairingRateLimits {
+    client_capacity: u32,
+    client_refill: StdDuration,
+    global_capacity: u32,
+    global_refill: StdDuration,
+    max_origins: usize,
+    origin_idle_ttl: StdDuration,
+}
+
+impl Default for PairingRateLimits {
+    fn default() -> Self {
+        Self {
+            client_capacity: PAIRING_REQUEST_CLIENT_BURST,
+            client_refill: PAIRING_REQUEST_CLIENT_REFILL,
+            global_capacity: PAIRING_REQUEST_GLOBAL_BURST,
+            global_refill: PAIRING_REQUEST_GLOBAL_REFILL,
+            max_origins: PAIRING_REQUEST_MAX_TRACKED_ORIGINS,
+            origin_idle_ttl: PAIRING_REQUEST_ORIGIN_IDLE_TTL,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TokenBucket {
+    capacity: f64,
+    tokens: f64,
+    tokens_per_second: f64,
+    updated_at: Instant,
+}
+
+impl TokenBucket {
+    fn full(capacity: u32, refill: StdDuration, now: Instant) -> Self {
+        debug_assert!(capacity > 0);
+        debug_assert!(!refill.is_zero());
+        Self {
+            capacity: f64::from(capacity),
+            tokens: f64::from(capacity),
+            tokens_per_second: 1.0 / refill.as_secs_f64(),
+            updated_at: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.updated_at);
+        self.tokens =
+            (self.tokens + elapsed.as_secs_f64() * self.tokens_per_second).min(self.capacity);
+        self.updated_at = now;
+    }
+
+    fn has_token(&self) -> bool {
+        self.tokens >= 1.0
+    }
+
+    fn take(&mut self) {
+        self.tokens -= 1.0;
+    }
+}
+
+#[derive(Debug)]
+struct ClientPairingBudget {
+    bucket: TokenBucket,
+    last_seen_at: Instant,
+}
+
+#[derive(Debug)]
+struct PairingRateLimiter {
+    limits: PairingRateLimits,
+    global: TokenBucket,
+    clients: HashMap<IpAddr, ClientPairingBudget>,
+}
+
+impl PairingRateLimiter {
+    fn new(limits: PairingRateLimits, now: Instant) -> Self {
+        Self {
+            global: TokenBucket::full(limits.global_capacity, limits.global_refill, now),
+            clients: HashMap::new(),
+            limits,
+        }
+    }
+
+    fn allow(&mut self, client_ip: IpAddr, now: Instant) -> bool {
+        self.global.refill(now);
+        if !self.global.has_token() {
+            return false;
+        }
+
+        if !self.clients.contains_key(&client_ip) && self.clients.len() >= self.limits.max_origins {
+            let idle_ttl = self.limits.origin_idle_ttl;
+            self.clients
+                .retain(|_, client| now.saturating_duration_since(client.last_seen_at) < idle_ttl);
+            if self.clients.len() >= self.limits.max_origins {
+                return false;
+            }
+        }
+
+        let client = self
+            .clients
+            .entry(client_ip)
+            .or_insert_with(|| ClientPairingBudget {
+                bucket: TokenBucket::full(
+                    self.limits.client_capacity,
+                    self.limits.client_refill,
+                    now,
+                ),
+                last_seen_at: now,
+            });
+        client.last_seen_at = now;
+        client.bucket.refill(now);
+        if !client.bucket.has_token() {
+            return false;
+        }
+
+        client.bucket.take();
+        self.global.take();
+        true
+    }
+}
+
 struct InnerState {
     version: String,
     default_pairing_ttl: Duration,
     retention: RetentionConfig,
+    pairing_rate_limiter: Mutex<PairingRateLimiter>,
     store: Arc<Mutex<Store>>,
     backend: Arc<dyn crate::persistence::PersistenceBackend>,
     /// True when the backend is file-based and needs a full-state flush
@@ -597,6 +734,10 @@ impl AppState {
                 version,
                 default_pairing_ttl,
                 retention,
+                pairing_rate_limiter: Mutex::new(PairingRateLimiter::new(
+                    PairingRateLimits::default(),
+                    Instant::now(),
+                )),
                 store: Arc::new(Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
@@ -643,6 +784,15 @@ impl AppState {
         &self,
         request: StartPairingRequest,
     ) -> Result<StartPairingResponse, RelayError> {
+        if request
+            .label
+            .as_ref()
+            .is_some_and(|label| label.chars().count() > MAX_PAIRING_LABEL_CHARS)
+        {
+            return Err(RelayError::BadRequest(format!(
+                "label must be at most {MAX_PAIRING_LABEL_CHARS} characters"
+            )));
+        }
         let ttl_seconds = request
             .ttl_seconds
             .unwrap_or_else(|| self.inner.default_pairing_ttl.num_seconds().max(1) as u64);
@@ -746,6 +896,25 @@ impl AppState {
             daemon_token,
             expires_at,
         })
+    }
+
+    pub(crate) async fn authorize_pairing_creation(
+        &self,
+        client_ip: IpAddr,
+    ) -> Result<(), RelayError> {
+        if self
+            .inner
+            .pairing_rate_limiter
+            .lock()
+            .await
+            .allow(client_ip, Instant::now())
+        {
+            Ok(())
+        } else {
+            Err(RelayError::TooManyRequests(
+                "too many pairing requests; try again shortly".to_string(),
+            ))
+        }
     }
 
     /// Issues a single-use challenge that a client must sign with its
@@ -3529,9 +3698,37 @@ fn prune_state(
         keep
     });
 
+    let retained_pairing_sessions = state
+        .pairings
+        .values()
+        .map(|pairing| pairing.session_id.clone())
+        .collect::<std::collections::HashSet<_>>();
+
     state.sessions.retain(|session_id, session| {
         if live_session_ids.contains(session_id) {
             return true;
+        }
+
+        // A brand-new session exists only to reserve an unclaimed pairing.
+        // Once that pairing expires, discard the untouched reservation in the
+        // same pass instead of retaining attacker-created rows for a week.
+        let is_abandoned_pairing_reservation = !retained_pairing_sessions.contains(session_id)
+            && session.created_at == session.updated_at
+            && session.daemon_last_seen_at.is_none()
+            && session.devices.is_empty()
+            && session.device_id.is_none()
+            && session.client_token.is_none()
+            && session.client_label.is_none()
+            && session.client_public_key.is_none()
+            && session.client_last_seen_at.is_none()
+            && session.revoked_at.is_none()
+            && session.next_seq <= 1
+            && session.oldest_lost_seq == 0
+            && session.updates.is_empty()
+            && session.actions.is_empty();
+        if is_abandoned_pairing_reservation {
+            report.removed_session_ids.push(session_id.clone());
+            return false;
         }
 
         // A corrupt state file (or extreme retention config) can push these
@@ -3697,6 +3894,12 @@ fn generate_pairing_code(state: &PersistedState) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        net::{IpAddr, Ipv4Addr},
+        time::{Duration as StdDuration, Instant},
+    };
+
     use chrono::{Duration, Utc};
     use falcondeck_core::{
         EncryptedEnvelope, EncryptionVariant, MachinePresence, RelayUpdate, RelayUpdateBody,
@@ -3704,10 +3907,63 @@ mod tests {
     };
 
     use super::{
-        LiveSession, PeerHandle, REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD,
-        chunk_replay_updates, namespaced_rpc_request_id, push_dedupe_key,
-        strip_rpc_request_id_namespace, sync_messages,
+        LiveSession, PairingRateLimiter, PairingRateLimits, PairingRecord, PeerHandle,
+        PersistedState, REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD,
+        RetentionConfig, SessionRecord, chunk_replay_updates, namespaced_rpc_request_id,
+        prune_state, push_dedupe_key, strip_rpc_request_id_namespace, sync_messages,
     };
+
+    fn rate_limits(client_capacity: u32, global_capacity: u32) -> PairingRateLimits {
+        PairingRateLimits {
+            client_capacity,
+            client_refill: StdDuration::from_secs(10),
+            global_capacity,
+            global_refill: StdDuration::from_secs(10),
+            max_origins: 8,
+            origin_idle_ttl: StdDuration::from_secs(60),
+        }
+    }
+
+    fn untouched_session(now: chrono::DateTime<Utc>) -> SessionRecord {
+        SessionRecord {
+            session_id: "session-1".to_string(),
+            pairing_id: "pairing-1".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            daemon_last_seen_at: None,
+            devices: HashMap::new(),
+            device_id: None,
+            device_created_at: None,
+            client_token: None,
+            client_label: None,
+            client_public_key: None,
+            client_last_seen_at: None,
+            revoked_at: None,
+            created_at: now,
+            updated_at: now,
+            next_seq: 1,
+            oldest_lost_seq: 0,
+            updates: Vec::new(),
+            actions: HashMap::new(),
+        }
+    }
+
+    fn unclaimed_pairing(
+        now: chrono::DateTime<Utc>,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> PairingRecord {
+        PairingRecord {
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "PAIRCODE".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            label: None,
+            session_id: "session-1".to_string(),
+            device_id: None,
+            daemon_bundle: None,
+            client_bundle: None,
+            created_at: now,
+            expires_at,
+        }
+    }
 
     fn test_update(seq: u64) -> RelayUpdate {
         RelayUpdate {
@@ -3735,6 +3991,155 @@ mod tests {
 
         live.daemon_disconnected_at = Some(now - Duration::seconds(21));
         assert!(!live.daemon_reconnect_grace_active(now));
+    }
+
+    #[test]
+    fn pairing_rate_limit_recovers_without_sleeping_or_resetting_the_bucket() {
+        let now = Instant::now();
+        let client_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let mut limiter = PairingRateLimiter::new(rate_limits(2, 100), now);
+
+        assert!(limiter.allow(client_ip, now));
+        assert!(limiter.allow(client_ip, now));
+        assert!(!limiter.allow(client_ip, now));
+        assert!(limiter.allow(client_ip, now + StdDuration::from_secs(10)));
+        assert!(!limiter.allow(client_ip, now + StdDuration::from_secs(10)));
+    }
+
+    #[test]
+    fn pairing_rate_limit_keeps_client_budgets_independent() {
+        let now = Instant::now();
+        let first_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let second_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+        let mut limiter = PairingRateLimiter::new(rate_limits(1, 100), now);
+
+        assert!(limiter.allow(first_ip, now));
+        assert!(!limiter.allow(first_ip, now));
+        assert!(limiter.allow(second_ip, now));
+    }
+
+    #[test]
+    fn pairing_rate_limit_global_budget_bounds_many_origins() {
+        let now = Instant::now();
+        let mut limiter = PairingRateLimiter::new(rate_limits(10, 2), now);
+
+        assert!(limiter.allow(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), now));
+        assert!(limiter.allow(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)), now));
+        assert!(!limiter.allow(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3)), now));
+        assert!(limiter.allow(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3)),
+            now + StdDuration::from_secs(10),
+        ));
+    }
+
+    #[test]
+    fn pairing_rate_limit_discards_idle_origin_buckets_at_capacity() {
+        let now = Instant::now();
+        let mut limits = rate_limits(10, 100);
+        limits.max_origins = 1;
+        limits.origin_idle_ttl = StdDuration::from_secs(10);
+        let mut limiter = PairingRateLimiter::new(limits, now);
+        let first_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let second_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+
+        assert!(limiter.allow(first_ip, now));
+        assert!(!limiter.allow(second_ip, now));
+        assert!(limiter.allow(second_ip, now + StdDuration::from_secs(10)));
+    }
+
+    #[test]
+    fn expired_pairing_prune_removes_untouched_reserved_session() {
+        let now = Utc::now();
+        let mut state = PersistedState {
+            pairings: HashMap::from([(
+                "pairing-1".to_string(),
+                unclaimed_pairing(now, now - Duration::seconds(1)),
+            )]),
+            sessions: HashMap::from([("session-1".to_string(), untouched_session(now))]),
+        };
+
+        let report = prune_state(
+            &mut state,
+            &HashSet::new(),
+            &RetentionConfig::default(),
+            now,
+        );
+
+        assert!(state.pairings.is_empty());
+        assert!(state.sessions.is_empty());
+        assert_eq!(report.removed_pairing_ids, ["pairing-1"]);
+        assert_eq!(report.removed_session_ids, ["session-1"]);
+    }
+
+    #[test]
+    fn prune_keeps_untouched_session_while_pairing_is_claimable() {
+        let now = Utc::now();
+        let mut state = PersistedState {
+            pairings: HashMap::from([(
+                "pairing-1".to_string(),
+                unclaimed_pairing(now, now + Duration::seconds(1)),
+            )]),
+            sessions: HashMap::from([("session-1".to_string(), untouched_session(now))]),
+        };
+
+        let report = prune_state(
+            &mut state,
+            &HashSet::new(),
+            &RetentionConfig::default(),
+            now,
+        );
+
+        assert!(report.is_empty());
+        assert!(state.pairings.contains_key("pairing-1"));
+        assert!(state.sessions.contains_key("session-1"));
+    }
+
+    #[test]
+    fn expired_pairing_prune_keeps_a_session_used_by_the_daemon() {
+        let now = Utc::now();
+        let mut session = untouched_session(now);
+        session.daemon_last_seen_at = Some(now);
+        let mut state = PersistedState {
+            pairings: HashMap::from([(
+                "pairing-1".to_string(),
+                unclaimed_pairing(now, now - Duration::seconds(1)),
+            )]),
+            sessions: HashMap::from([("session-1".to_string(), session)]),
+        };
+
+        let report = prune_state(
+            &mut state,
+            &HashSet::new(),
+            &RetentionConfig::default(),
+            now,
+        );
+
+        assert!(state.pairings.is_empty());
+        assert!(state.sessions.contains_key("session-1"));
+        assert_eq!(report.removed_pairing_ids, ["pairing-1"]);
+        assert!(report.removed_session_ids.is_empty());
+    }
+
+    #[test]
+    fn expired_pairing_prune_keeps_a_previously_updated_legacy_session() {
+        let now = Utc::now();
+        let mut session = untouched_session(now);
+        session.created_at = now - Duration::minutes(10);
+        session.updated_at = now - Duration::minutes(5);
+        let mut state = PersistedState {
+            pairings: HashMap::new(),
+            sessions: HashMap::from([("session-1".to_string(), session)]),
+        };
+
+        let report = prune_state(
+            &mut state,
+            &HashSet::new(),
+            &RetentionConfig::default(),
+            now,
+        );
+
+        assert!(state.sessions.contains_key("session-1"));
+        assert!(report.removed_session_ids.is_empty());
     }
 
     #[test]
