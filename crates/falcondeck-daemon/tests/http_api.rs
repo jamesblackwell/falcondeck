@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
@@ -44,7 +45,14 @@ async fn spawn_relay(temp_dir: &TempDir) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, relay_router(state)).await.unwrap();
+        // Pairing creation is rate limited per client IP, so the relay only
+        // serves that route when connect info is available.
+        axum::serve(
+            listener,
+            relay_router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     format!("http://{addr}")
 }
@@ -157,9 +165,12 @@ async fn turn_route_accepts_json_bodies_above_axums_default_limit() {
 async fn extension_permission_grants_are_explicit_and_persisted() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
-    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+    let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
         .await
         .unwrap();
+    // The extension registry is loaded by the background restore, so the
+    // catalog is empty until it finishes.
+    daemon.wait_until_restored().await.unwrap();
     let client = reqwest::Client::new();
 
     let before = client
@@ -215,9 +226,10 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
     assert_eq!(undeclared.status(), reqwest::StatusCode::BAD_REQUEST);
     daemon.shutdown().await.unwrap();
 
-    let restored = spawn_embedded(test_config_with_state_path(state_path))
+    let mut restored = spawn_embedded(test_config_with_state_path(state_path))
         .await
         .unwrap();
+    restored.wait_until_restored().await.unwrap();
     let snapshot = client
         .get(format!("{}/api/extensions", restored.base_url()))
         .send()
