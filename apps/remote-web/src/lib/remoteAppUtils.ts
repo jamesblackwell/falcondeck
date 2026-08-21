@@ -73,6 +73,28 @@ export function clearSnapshotRaceBuffer(
  */
 export const AWAITED_ACTION_TIMEOUT_MS = 45_000
 
+/**
+ * Retry failed authoritative snapshots quickly, then back off while the
+ * desktop remains unreachable. The bound keeps recovery responsive after a
+ * long outage without creating an unbounded request loop.
+ */
+export function snapshotRetryDelayMs(
+  attempt: number,
+  baseDelayMs = 1_000,
+  maxDelayMs = 15_000,
+) {
+  const normalizedAttempt = Math.max(0, Math.floor(attempt))
+  return Math.min(baseDelayMs * 2 ** normalizedAttempt, maxDelayMs)
+}
+
+/** A sync presence is newer than every replay update below next_seq. */
+export function shouldApplyReplayPresence(
+  updateSeq: number,
+  syncedPresenceFloor: number | null,
+) {
+  return syncedPresenceFloor === null || updateSeq >= syncedPresenceFloor
+}
+
 export type ConnectionHelpState = {
   tone: 'warning' | 'danger'
   title: string

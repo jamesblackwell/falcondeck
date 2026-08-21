@@ -207,6 +207,8 @@ import {
   resumePendingActions,
   scheduleVisibilityAwareFlush,
   sendRelayMessage,
+  shouldApplyReplayPresence,
+  snapshotRetryDelayMs,
   waitForPollInterval,
   type NotificationPreference,
 } from "./lib/remoteAppUtils";
@@ -239,7 +241,6 @@ const RELAY_PING_INTERVAL_MS = 15_000;
 const RELAY_BACKOFF_RESET_MS = 10_000;
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000;
 const MAX_PENDING_SNAPSHOT_EVENTS = 1_000;
-const SNAPSHOT_REFETCH_DELAY_MS = 1_000;
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
 const NO_ATTACHMENTS: ImageInput[] = [];
@@ -538,6 +539,7 @@ function RemoteApp() {
   const suppressReconnectRef = useRef(false);
   const [connectionGeneration, setConnectionGeneration] = useState(0);
   const [snapshotRetryGeneration, setSnapshotRetryGeneration] = useState(0);
+  const snapshotRetryAttemptRef = useRef(0);
 
   useLayoutEffect(() => {
     threadDetailRef.current = threadDetail;
@@ -558,6 +560,7 @@ function RemoteApp() {
   const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([]);
   const evictedWhileParkedRef = useRef(false);
   const pendingTruncationNextSeqRef = useRef<number | null>(null);
+  const syncedPresenceFloorRef = useRef<number | null>(null);
   const pendingSnapshotEventsRef = useRef<EventEnvelope[]>([]);
   const pendingSnapshotSeqsRef = useRef(new Set<number>());
   const pendingSnapshotOverflowedRef = useRef(false);
@@ -739,6 +742,8 @@ function RemoteApp() {
     pendingEncryptedUpdatesRef.current = [];
     evictedWhileParkedRef.current = false;
     pendingTruncationNextSeqRef.current = null;
+    syncedPresenceFloorRef.current = null;
+    snapshotRetryAttemptRef.current = 0;
     pendingSnapshotEventsRef.current = [];
     pendingSnapshotSeqsRef.current.clear();
     pendingSnapshotOverflowedRef.current = false;
@@ -876,6 +881,7 @@ function RemoteApp() {
       pendingEncryptedUpdatesRef.current = [];
       evictedWhileParkedRef.current = false;
       pendingTruncationNextSeqRef.current = null;
+      syncedPresenceFloorRef.current = null;
       pendingRelayUpdatesRef.current = [];
       cancelRelayFlush();
       schedulePersistCurrentSession(
@@ -1225,6 +1231,8 @@ function RemoteApp() {
     pendingEncryptedUpdatesRef.current = [];
     evictedWhileParkedRef.current = false;
     pendingTruncationNextSeqRef.current = null;
+    syncedPresenceFloorRef.current = null;
+    snapshotRetryAttemptRef.current = 0;
     pendingSnapshotEventsRef.current = [];
     pendingSnapshotSeqsRef.current.clear();
     pendingSnapshotOverflowedRef.current = false;
@@ -1264,6 +1272,7 @@ function RemoteApp() {
       pendingEncryptedUpdatesRef.current = [];
       evictedWhileParkedRef.current = false;
       pendingTruncationNextSeqRef.current = null;
+      syncedPresenceFloorRef.current = null;
       pendingSnapshotEventsRef.current = [];
       pendingSnapshotSeqsRef.current.clear();
       pendingSnapshotOverflowedRef.current = false;
@@ -1373,6 +1382,10 @@ function RemoteApp() {
                   "Remote event backlog exceeded the safe limit",
                 );
                 return;
+              }
+              if (payload.presence) {
+                syncedPresenceFloorRef.current = payload.next_seq;
+                setMachinePresence(payload.presence);
               }
               if (payload.history_truncated) {
                 // Updates were lost server-side; rebuild derived state from a
@@ -1797,7 +1810,14 @@ function RemoteApp() {
         }
 
         if (update.body.t === "presence") {
-          nextPresence = update.body.presence;
+          if (
+            shouldApplyReplayPresence(
+              update.seq,
+              syncedPresenceFloorRef.current,
+            )
+          ) {
+            nextPresence = update.body.presence;
+          }
           advanceCursor(update.seq);
           continue;
         }
@@ -2207,10 +2227,24 @@ function RemoteApp() {
   ]);
 
   useEffect(() => {
-    if (!relayConnected || !hasSessionKey || !daemonRpcReady || snapshot) return;
+    if (!relayConnected || !hasSessionKey || !daemonRpcReady || snapshot) {
+      snapshotRetryAttemptRef.current = 0;
+      return;
+    }
 
     let cancelled = false;
     let retryTimer: number | null = null;
+    const scheduleSnapshotRetry = () => {
+      if (retryTimer !== null) return;
+      const delay = snapshotRetryDelayMs(snapshotRetryAttemptRef.current);
+      snapshotRetryAttemptRef.current += 1;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (!cancelled) {
+          setSnapshotRetryGeneration((generation) => generation + 1);
+        }
+      }, delay);
+    };
     void callRpc<DaemonSnapshot>("snapshot.current", {})
       .then((nextSnapshot) => {
         if (cancelled) return;
@@ -2218,11 +2252,7 @@ function RemoteApp() {
           // The decrypt/flush may still hold an event that has not reached the
           // replay buffer. Keep everything already buffered for the retry; the
           // cursor remains held until that buffer is applied to a snapshot.
-          retryTimer = window.setTimeout(() => {
-            if (!cancelled) {
-              setSnapshotRetryGeneration((generation) => generation + 1);
-            }
-          }, SNAPSHOT_REFETCH_DELAY_MS);
+          scheduleSnapshotRetry();
           return;
         }
         if (pendingSnapshotOverflowedRef.current) {
@@ -2232,11 +2262,7 @@ function RemoteApp() {
           pendingSnapshotEventsRef.current = [];
           pendingSnapshotSeqsRef.current.clear();
           pendingSnapshotOverflowedRef.current = false;
-          retryTimer = window.setTimeout(() => {
-            if (!cancelled) {
-              setSnapshotRetryGeneration((generation) => generation + 1);
-            }
-          }, SNAPSHOT_REFETCH_DELAY_MS);
+          scheduleSnapshotRetry();
           return;
         }
         // Replay events buffered while the RPC was in flight so they are not
@@ -2267,6 +2293,7 @@ function RemoteApp() {
             updatesByThread,
           ),
         );
+        snapshotRetryAttemptRef.current = 0;
         setError(null);
       })
       .catch((e) => {
@@ -2274,6 +2301,7 @@ function RemoteApp() {
         setError(
           e instanceof Error ? e.message : "Failed to load remote snapshot",
         );
+        scheduleSnapshotRetry();
       });
 
     return () => {

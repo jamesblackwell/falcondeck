@@ -19,8 +19,36 @@ import {
   resumePendingActions,
   resolveRestoredSelection,
   scheduleVisibilityAwareFlush,
+  shouldApplyReplayPresence,
+  snapshotRetryDelayMs,
   urlWithoutPairingParams,
 } from './remoteAppUtils'
+
+describe('snapshotRetryDelayMs', () => {
+  it.each([
+    [0, 1_000],
+    [1, 2_000],
+    [2, 4_000],
+    [20, 15_000],
+    [-1, 1_000],
+  ])('returns a bounded retry delay for attempt %s', (attempt, expected) => {
+    expect(snapshotRetryDelayMs(attempt)).toBe(expected)
+  })
+})
+
+describe('shouldApplyReplayPresence', () => {
+  it('accepts replay presence before an authoritative sync is received', () => {
+    expect(shouldApplyReplayPresence(1, null)).toBe(true)
+  })
+
+  it('rejects replay presence older than the sync next-sequence floor', () => {
+    expect(shouldApplyReplayPresence(6, 7)).toBe(false)
+  })
+
+  it('accepts presence at or after the sync next-sequence floor', () => {
+    expect(shouldApplyReplayPresence(7, 7)).toBe(true)
+  })
+})
 
 function snapshotWith(
   workspaceIds: string[],
