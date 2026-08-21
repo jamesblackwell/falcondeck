@@ -102,6 +102,25 @@ describe('useDaemonConnection thread restoration', () => {
     expect(result.current.remoteStatus).toBeNull()
   })
 
+  it('keeps polling after an inactive status so external relay enablement is discovered', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mocks.remoteStatus.mockResolvedValue({ status: 'inactive' })
+      const { result } = renderHook(() => useDaemonConnection())
+
+      await waitFor(() => expect(result.current.remoteStatus?.status).toBe('inactive'))
+      mocks.remoteStatus.mockClear().mockResolvedValue({ status: 'connected' })
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      await waitFor(() => expect(result.current.remoteStatus?.status).toBe('connected'))
+      expect(mocks.remoteStatus).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('waits for workspace hydration before fetching a restored thread detail', async () => {
     const { result } = renderHook(() => useDaemonConnection())
 

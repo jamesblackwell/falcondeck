@@ -735,7 +735,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
   // Poll remote status
   useEffect(() => {
-    if (!api || remoteStatus?.status === 'inactive') return
+    if (!api) return
     let inFlight = false
     const refresh = () => {
       if (inFlight) return
@@ -750,7 +750,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     refresh()
     const interval = window.setInterval(refresh, 2000)
     return () => window.clearInterval(interval)
-  }, [api, remoteStatus?.status])
+  }, [api])
 
   // Refresh git on workspace change
    
