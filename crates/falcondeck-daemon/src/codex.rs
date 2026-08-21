@@ -666,28 +666,16 @@ impl CodexSession {
             .elapsed()
     }
 
-    async fn lease_inner(self: &Arc<Self>, records_activity: bool) -> Option<CodexSessionLease> {
+    pub(crate) async fn lease(self: &Arc<Self>) -> Option<CodexSessionLease> {
         let guard = Arc::clone(&self.lifecycle_gate).read_owned().await;
         if self.is_closed() {
             return None;
         }
-        if records_activity {
-            self.touch();
-        }
+        self.touch();
         Some(CodexSessionLease {
             session: Arc::clone(self),
             _guard: guard,
         })
-    }
-
-    pub(crate) async fn lease(self: &Arc<Self>) -> Option<CodexSessionLease> {
-        self.lease_inner(true).await
-    }
-
-    /// Protects a passive read from retirement without extending the warm
-    /// period. Background refreshes should not count as user activity.
-    pub(crate) async fn passive_lease(self: &Arc<Self>) -> Option<CodexSessionLease> {
-        self.lease_inner(false).await
     }
 
     pub(crate) async fn retirement_guard(self: &Arc<Self>) -> OwnedRwLockWriteGuard<()> {
@@ -1816,31 +1804,6 @@ mod tests {
             .expect("retirement should proceed when the operation completes")
             .expect("retirement waiter should stay alive");
         waiter.await.unwrap();
-
-        session.shutdown().await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn passive_lease_does_not_extend_the_idle_deadline() {
-        let (_directory, session) = sleeping_test_session();
-        *session
-            .last_activity
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Instant::now() - Duration::from_secs(60);
-
-        let idle_before = session.idle_for();
-        let passive = session
-            .passive_lease()
-            .await
-            .expect("session should be live");
-        assert!(session.idle_for() >= idle_before);
-        drop(passive);
-
-        let active = session.lease().await.expect("session should be live");
-        assert!(session.idle_for() < Duration::from_secs(1));
-        drop(active);
 
         session.shutdown().await.unwrap();
     }
