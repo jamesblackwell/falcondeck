@@ -266,6 +266,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.reorder",
     "workspace.connect",
     "workspace.remove",
+    "provider.hydrate",
     "workspace.files",
     "workspace.file.read",
     "workspace.file.write",
@@ -1308,6 +1309,15 @@ impl AppState {
                             serde_json::to_value(response).map_err(DaemonError::from)
                         })
                         .map_err(|error| error.to_string())
+                }
+                "provider.hydrate" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let provider = required(&["provider"])?;
+                    self.schedule_provider_metadata_hydration(
+                        &workspace_id,
+                        &falcondeck_core::AgentProvider::new(provider),
+                    );
+                    Ok(serde_json::json!({ "ok": true }))
                 }
                 "workspace.files" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;

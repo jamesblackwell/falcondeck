@@ -41,6 +41,109 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Hydrates one provider's model/config catalog in the background because
+    /// the user explicitly selected that provider in a composer.
+    ///
+    /// Optional providers stay lazy at workspace attach (starting every
+    /// configured provider for every restored workspace multiplies idle
+    /// process trees and can exhaust memory), but a harness the user just
+    /// picked must fill its model picker without needing a first prompt.
+    /// Selection is the bounded trigger: one provider, one workspace, gated
+    /// by the same startup permit as any other optional runtime.
+    pub(crate) fn schedule_provider_metadata_hydration(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+    ) {
+        let provider = provider.clone();
+        // Codex and Claude publish their catalogs through their own connect
+        // paths; only ACP/native providers hydrate lazily.
+        let is_acp = self
+            .fresh_acp_provider_configs()
+            .iter()
+            .any(|config| config.id.eq_ignore_ascii_case(provider.as_str()));
+        if !is_acp {
+            return;
+        }
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        tokio::spawn(async move {
+            if provider.as_str().eq_ignore_ascii_case("grok") {
+                app.seed_grok_placeholder_catalog(&workspace_id).await;
+            }
+            if provider.as_str().eq_ignore_ascii_case("opencode")
+                && let Some(config) = app.opencode_config()
+                && super::opencode_threads::requested_native_transport(&config)
+            {
+                // Spawning the native server publishes its catalog as a side
+                // effect; nothing else to do on success.
+                match app.opencode_runtime_for(&workspace_id).await {
+                    Ok(_) => return,
+                    Err(error) => {
+                        tracing::info!(
+                            %error,
+                            "native OpenCode metadata hydration failed"
+                        );
+                        app.set_opencode_native_available(&workspace_id, false)
+                            .await;
+                        if matches!(config.transport, crate::acp::ProviderTransport::Native) {
+                            return;
+                        }
+                        // Auto mode falls through to the ACP handshake below.
+                    }
+                }
+            }
+            if let Err(error) = app.acp_runtime_for(&workspace_id, &provider).await {
+                tracing::info!(
+                    provider = %provider,
+                    %error,
+                    "ACP provider metadata hydration skipped"
+                );
+            }
+        });
+    }
+
+    /// Fills an empty Grok catalog before ACP connect so the composer is
+    /// usable while `grok agent stdio` starts. Live handshake replaces it.
+    async fn seed_grok_placeholder_catalog(&self, workspace_id: &str) {
+        let changed = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(agent) = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("grok"))
+            else {
+                return;
+            };
+            let mut changed = false;
+            if agent.models.is_empty() {
+                agent.models = crate::acp::grok_placeholder_models();
+                changed = true;
+            }
+            if agent.capabilities.permission_modes.is_empty() {
+                agent.capabilities.permission_modes =
+                    crate::acp::grok_placeholder_permission_modes();
+                agent.capabilities.supports_images = true;
+                changed = true;
+            }
+            changed
+        };
+        if !changed {
+            return;
+        }
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+    }
+
     /// Rehydrates a restored ACP thread's transcript in the background.
     ///
     /// ACP threads survive a daemon restart only as persisted summaries —

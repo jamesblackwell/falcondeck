@@ -125,6 +125,8 @@ pub struct OpenCodeRuntime {
     password: String,
     client: reqwest::Client,
     child: Mutex<Child>,
+    /// OS pid of the `opencode serve` child, for the crash-orphan registry.
+    server_pid: Option<u32>,
     /// Recent `level=ERROR` lines from the server's own log.
     ///
     /// OpenCode reports a turn that dies before its first step — an
@@ -178,6 +180,10 @@ impl OpenCodeRuntime {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // In-process cleanup only. A daemon that dies without dropping the
+        // runtime still orphans the server, which is what the pid registry
+        // (`register_server_process`/`reap_orphaned_servers`) is for.
+        command.kill_on_drop(true);
         strip_terminal_advertising_env(&mut command);
         let mut child = command.spawn().map_err(|error| {
             DaemonError::Process(format!(
@@ -206,6 +212,7 @@ impl OpenCodeRuntime {
             }
         };
         let stderr = child.stderr.take();
+        let server_pid = child.id();
         let runtime = Arc::new(Self {
             base_url: format!("http://127.0.0.1:{port}"),
             password,
@@ -216,6 +223,7 @@ impl OpenCodeRuntime {
                     DaemonError::Process(format!("could not build OpenCode HTTP client: {error}"))
                 })?,
             child: Mutex::new(child),
+            server_pid,
             server_errors: Mutex::new(Vec::new()),
             runner_models: Mutex::new(None),
         });
@@ -338,8 +346,9 @@ impl OpenCodeRuntime {
     }
 
     /// The session's effective model as `provider/model`, or `None` when the
-    /// session defers to OpenCode's own default — which the v2 runner resolves
-    /// inside its own registry, so an absent model never needs gating.
+    /// session has no model set. `None` is itself a blocking condition (see
+    /// [`native_model_block_reason`]): a runner with no resolvable model
+    /// admits prompts and then silently never runs them.
     pub async fn session_model_ref(&self, session_id: &str) -> Result<Option<String>, DaemonError> {
         let session = self
             .request(
@@ -716,7 +725,9 @@ impl OpenCodeRuntime {
         }
     }
 
-    async fn messages_since(
+    /// Messages from the admitted user message onward. Public so the turn
+    /// monitor can stream the partial transcript while the runner works.
+    pub async fn messages_since(
         &self,
         session_id: &str,
         message_id: &str,
@@ -810,6 +821,11 @@ impl OpenCodeRuntime {
         )
         .await
         .map(|_| ())
+    }
+
+    /// OS pid of the `opencode serve` child, for the crash-orphan registry.
+    pub fn server_pid(&self) -> Option<u32> {
+        self.server_pid
     }
 
     pub async fn shutdown(&self) {
@@ -1151,8 +1167,15 @@ pub fn runner_variant<'a>(effort: Option<&'a str>, model: Option<&RunnerModel>) 
 }
 
 /// Why the v2 runner cannot execute the session's model, or `None` when it
-/// can. A session without an explicit model passes: the runner resolves its
-/// default from its own registry.
+/// can.
+///
+/// A session without an explicit model is blocked too. On an install with no
+/// configured default (`model` absent from opencode.json), OpenCode 1.18.19
+/// admits the prompt and then does nothing at all — no step event, no
+/// assistant record, not even a server error log line — so the turn just
+/// times out as "no assistant response" (observed live 2026-08-21, session
+/// ses_fdc7fe965ffe…). Blocking sends default-model threads over ACP, where
+/// OpenCode's own adapter picks a usable model.
 ///
 /// Both halves are dynamic where OpenCode lets them be: membership comes from
 /// the runner's own registry, so a release that teaches the v2 runner to
@@ -1168,7 +1191,14 @@ pub fn native_model_block_reason(
                 .to_string(),
         );
     }
-    let model_id = session_model?;
+    let Some(model_id) = session_model else {
+        return Some(
+            "the session has no model set, and OpenCode's native runner silently ignores a \
+             prompt it cannot resolve a model for; pick a model, or configure a default in \
+             opencode.json"
+                .to_string(),
+        );
+    };
     let Some(model) = runner_models.get(model_id) else {
         return Some(format!(
             "OpenCode's native runner does not list the model '{model_id}' \
@@ -1390,6 +1420,107 @@ fn summarize_server_error(line: &str) -> String {
         .or_else(|| line.split_once("cause=\"").map(|(_, rest)| rest))
         .unwrap_or(line);
     cause.trim_end_matches(['"', ' ']).trim().to_string()
+}
+
+/// Crash-orphan registry for `opencode serve` children.
+///
+/// `opencode serve` does not exit when its parent dies, so a daemon that goes
+/// down ungracefully (crash, force-quit of the desktop app, SIGKILL) strands
+/// every server it spawned — observed live as ~55 orphans holding ~5GB, which
+/// is exactly the memory pressure that forced optional providers lazy. Each
+/// spawn records `{server_pid, daemon_pid}` here; the next daemon startup
+/// kills entries whose owning daemon is gone. Graceful shutdown paths and
+/// `kill_on_drop` still handle the in-process cases.
+const SERVER_REGISTRY_FILE: &str = "opencode-servers.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct RegisteredServer {
+    server_pid: u32,
+    daemon_pid: u32,
+}
+
+fn load_server_registry(state_dir: &std::path::Path) -> Vec<RegisteredServer> {
+    std::fs::read(state_dir.join(SERVER_REGISTRY_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn store_server_registry(state_dir: &std::path::Path, entries: &[RegisteredServer]) {
+    if let Ok(bytes) = serde_json::to_vec(entries) {
+        let _ = std::fs::write(state_dir.join(SERVER_REGISTRY_FILE), bytes);
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Whether the pid still names an `opencode … serve` process. Guards the
+/// reaper against pid reuse: a recycled pid must never get the kill.
+fn is_opencode_serve_process(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    let command = String::from_utf8_lossy(&output.stdout);
+    command.contains("opencode") && command.contains(" serve")
+}
+
+/// Records a freshly spawned server against this daemon process.
+pub fn register_server_process(state_dir: &std::path::Path, server_pid: u32) {
+    let mut entries = load_server_registry(state_dir);
+    entries.retain(|entry| entry.server_pid != server_pid && process_alive(entry.server_pid));
+    entries.push(RegisteredServer {
+        server_pid,
+        daemon_pid: std::process::id(),
+    });
+    store_server_registry(state_dir, &entries);
+}
+
+/// Kills servers whose owning daemon is gone. Run once at daemon startup,
+/// off the readiness path (it shells out to `ps`/`kill`).
+pub async fn reap_orphaned_servers(state_dir: &std::path::Path) {
+    let state_dir = state_dir.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        let entries = load_server_registry(&state_dir);
+        let mut kept = Vec::new();
+        let mut reaped = 0usize;
+        for entry in entries {
+            if entry.daemon_pid != std::process::id() && process_alive(entry.daemon_pid) {
+                // Another live daemon owns this server; leave both alone.
+                kept.push(entry);
+                continue;
+            }
+            if entry.daemon_pid != std::process::id()
+                && is_opencode_serve_process(entry.server_pid)
+            {
+                let _ = std::process::Command::new("kill")
+                    .arg(entry.server_pid.to_string())
+                    .status();
+                reaped += 1;
+            }
+            // Dead server, recycled pid, or now-killed orphan: drop the entry.
+        }
+        store_server_registry(&state_dir, &kept);
+        reaped
+    })
+    .await;
+    match result {
+        Ok(reaped) if reaped > 0 => {
+            tracing::info!(reaped, "reaped orphaned OpenCode servers from prior daemons");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "OpenCode orphan reap task failed"),
+    }
 }
 
 fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> Value {
@@ -1987,9 +2118,12 @@ mod tests {
             native_model_block_reason(Some("opencode/grok-code"), &registry),
             None
         );
-        // No explicit model: the runner resolves its default from its own
-        // registry, so there is nothing to gate.
-        assert_eq!(native_model_block_reason(None, &registry), None);
+        // No explicit model: on an install with no configured default the
+        // runner admits the prompt and then silently does nothing, so the
+        // session must not pin to the native transport (ACP picks a model).
+        let reason = native_model_block_reason(None, &registry)
+            .expect("a session without a model must be blocked");
+        assert!(reason.contains("no model set"), "{reason}");
         // A registered model whose API the runner does not implement is
         // admitted and then dies in SessionRunnerModel.resolve; it must be
         // blocked before admission with a reason that names the API.

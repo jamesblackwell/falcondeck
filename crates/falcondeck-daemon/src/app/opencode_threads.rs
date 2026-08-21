@@ -118,6 +118,9 @@ impl AppState {
                 return Err(DaemonError::NotFound("workspace not found".to_string()));
             }
         }
+        if let (Some(state_dir), Some(server_pid)) = (self.state_dir(), runtime.server_pid()) {
+            crate::opencode::register_server_process(&state_dir, server_pid);
+        }
         if let Err(error) = self
             .publish_opencode_native_metadata(workspace_id, &runtime)
             .await
@@ -429,6 +432,8 @@ pub(super) async fn start_opencode_turn(
     let _ = app
         .with_managed_thread_mut(workspace_id, thread_id, |thread| {
             thread.opencode_turn_in_flight = true;
+            // A stale request from a previous turn must not cancel this one.
+            thread.opencode_interrupt_requested = false;
         })
         .await;
     // The admission's sequence number scopes the event stream to this turn;
@@ -445,6 +450,8 @@ pub(super) async fn start_opencode_turn(
             let wait = runtime.wait_until_idle(&session_id, &message_id, after_seq);
             tokio::pin!(wait);
             let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
+            let mut projection = tokio::time::interval(std::time::Duration::from_millis(1500));
+            let mut projected = std::collections::HashMap::<String, Value>::new();
             let current_messages = loop {
                 tokio::select! {
                     result = &mut wait => {
@@ -472,20 +479,113 @@ pub(super) async fn start_opencode_turn(
                         let pending = runtime.pending_questions(&session_id).await?;
                         surface_questions(&app, &workspace_id, &thread_id, &pending).await?;
                     }
+                    _ = projection.tick() => {
+                        // Stream the partial transcript while the runner
+                        // works: without this a long turn shows "Thinking…"
+                        // until it ends and reads as hung. Only messages that
+                        // changed since the last tick are re-projected, so
+                        // clients see one update per new item, not a replay
+                        // of the whole turn every interval. Best effort: a
+                        // fetch or projection failure here settles with the
+                        // turn, never fails it.
+                        let Ok(messages) =
+                            runtime.messages_since(&session_id, &message_id).await
+                        else {
+                            continue;
+                        };
+                        let mut changed = Vec::new();
+                        for message in &messages {
+                            let Some(id) = message.get("id").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            if projected.get(id) == Some(message) {
+                                continue;
+                            }
+                            projected.insert(id.to_string(), message.clone());
+                            // Message-level errors settle with the turn. A
+                            // user-requested interrupt lands here as a
+                            // "Provider turn interrupted" error the instant
+                            // OpenCode acknowledges it, and projecting that
+                            // would put a red failure card on a clean stop.
+                            let mut message = message.clone();
+                            if let Some(message) = message.as_object_mut() {
+                                message.remove("error");
+                            }
+                            changed.push(message);
+                        }
+                        if changed.is_empty() {
+                            continue;
+                        }
+                        if let Err(error) =
+                            project_messages(&app, &workspace_id, &thread_id, &changed, false)
+                                .await
+                        {
+                            tracing::debug!(
+                                %error,
+                                "mid-turn OpenCode projection deferred to turn end"
+                            );
+                        }
+                    }
                 }
             };
             project_messages(&app, &workspace_id, &thread_id, &current_messages, false).await
         }
         .await;
-        let (status, error, settlement) = match outcome {
-            Ok(()) => (ThreadStatus::Idle, None, ToolSettlement::Completed),
+        let mut interrupted = false;
+        let _ = app
+            .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                interrupted = std::mem::take(&mut thread.opencode_interrupt_requested);
+            })
+            .await;
+        let (status, error, settlement, transcript_synced) = match outcome {
+            Ok(()) => (ThreadStatus::Idle, None, ToolSettlement::Completed, true),
+            Err(_) if interrupted => {
+                // The user stopped the turn; OpenCode acknowledges with a
+                // `step.failed` ("Provider turn interrupted"). Keep the
+                // partial transcript and settle quietly instead of reporting
+                // a failed turn.
+                let mut projected = false;
+                if let Ok(mut messages) = runtime.messages_since(&session_id, &message_id).await {
+                    // The stored assistant message carries the cancellation
+                    // as a message-level error; projecting it would render
+                    // the stop the user asked for as a red failure.
+                    for message in &mut messages {
+                        if let Some(message) = message.as_object_mut() {
+                            message.remove("error");
+                        }
+                    }
+                    match project_messages(&app, &workspace_id, &thread_id, &messages, false).await
+                    {
+                        Ok(()) => projected = true,
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                "post-interrupt OpenCode projection incomplete"
+                            );
+                        }
+                    }
+                }
+                app.push_conversation_diagnostic(
+                    &workspace_id,
+                    &thread_id,
+                    ServiceLevel::Info,
+                    "Turn interrupted".to_string(),
+                    Some(format!("opencode-interrupt-{message_id}")),
+                )
+                .await;
+                // A successfully projected interruption is a synced
+                // transcript: leaving it unsynced would make the next detail
+                // read rehydrate from OpenCode storage and resurface the
+                // cancellation as a red provider error.
+                (ThreadStatus::Idle, None, ToolSettlement::Interrupted, projected)
+            }
             Err(error) => (
                 ThreadStatus::Error,
                 Some(error.to_string()),
                 ToolSettlement::Failed,
+                false,
             ),
         };
-        let transcript_synced = error.is_none();
         let settled_at = Utc::now();
         app.settle_turn_items_with_error(
             &workspace_id,

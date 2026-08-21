@@ -630,6 +630,16 @@ impl ProviderRuntime {
                         .and_then(|thread| thread.summary.native_session_id.clone())
                 };
                 if let Some(session_id) = native_session {
+                    // Flag first: OpenCode acknowledges the interrupt as a
+                    // `step.failed` on the event stream, and the turn monitor
+                    // must already know to settle it as an interruption.
+                    let _ = app
+                        .with_managed_thread_mut(workspace_id, thread_id, |thread| {
+                            if thread.opencode_turn_in_flight {
+                                thread.opencode_interrupt_requested = true;
+                            }
+                        })
+                        .await;
                     return app
                         .opencode_runtime_for(workspace_id)
                         .await?

@@ -144,6 +144,10 @@ pub fn router(state: AppState) -> Router {
             "/api/workspaces/{workspace_id}/collaboration-modes",
             get(collaboration_modes),
         )
+        .route(
+            "/api/workspaces/{workspace_id}/providers/{provider}/hydrate",
+            post(hydrate_provider),
+        )
         .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/fork",
@@ -536,6 +540,23 @@ async fn collaboration_modes(
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Vec<falcondeck_core::CollaborationModeSummary>>, DaemonError> {
     Ok(Json(state.collaboration_modes(&workspace_id).await?))
+}
+
+/// Warms one provider's model/config catalog because the user selected it in
+/// a composer. Fire-and-forget: the refreshed catalog arrives as a
+/// `WorkspaceUpdated`/`Snapshot` event once the provider handshake finishes.
+async fn hydrate_provider(
+    State(state): State<AppState>,
+    Path((workspace_id, provider)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    state.schedule_provider_metadata_hydration(
+        &workspace_id,
+        &falcondeck_core::AgentProvider::new(provider),
+    );
+    Ok(Json(falcondeck_core::CommandResponse {
+        ok: true,
+        message: Some("provider hydration scheduled".to_string()),
+    }))
 }
 
 async fn start_thread(

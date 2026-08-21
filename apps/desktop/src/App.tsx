@@ -2278,6 +2278,23 @@ function AppInner() {
     ],
   );
 
+  // Optional providers start lazily in the daemon; a new-thread composer
+  // aimed at one is the signal to warm its runtime so the model picker fills
+  // in without needing a first prompt. Covers both an explicit harness
+  // switch and a composer that restores with the provider already selected.
+  // Once per workspace+provider: the daemon reuses a live runtime, so a
+  // repeat would only cost a no-op round trip.
+  const hydratedProvidersRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (selectedThread || !selectedWorkspace || !selectedProvider) return;
+    const key = `${selectedWorkspace.id}:${selectedProvider}`;
+    if (hydratedProvidersRef.current.has(key)) return;
+    hydratedProvidersRef.current.add(key);
+    apiFor(selectedWorkspace.id)
+      ?.hydrateProvider?.(selectedWorkspace.id, selectedProvider)
+      .catch(() => {});
+  }, [apiFor, selectedProvider, selectedThread, selectedWorkspace]);
+
   const handleHandoffProviderSelect = useCallback(
     async (provider: AgentProvider) => {
       if (

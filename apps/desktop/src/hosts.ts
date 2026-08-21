@@ -133,6 +133,7 @@ export type WorkspaceScopedApi = {
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
+  hydrateProvider(workspaceId: string, provider: string): Promise<{ ok: boolean; message?: string | null }>
   removeQueuedTurn(
     workspaceId: string,
     threadId: string,
@@ -498,6 +499,8 @@ export class HostConnection {
       sendTurn: (payload) => this.rpc('turn.start', payload),
       interruptTurn: (workspaceId, threadId) =>
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
+      hydrateProvider: (workspaceId, provider) =>
+        this.rpc('provider.hydrate', { workspace_id: workspaceId, provider }),
       removeQueuedTurn: (workspaceId, threadId, queuedId) =>
         this.rpc('thread.queue.remove', {
           workspace_id: workspaceId,

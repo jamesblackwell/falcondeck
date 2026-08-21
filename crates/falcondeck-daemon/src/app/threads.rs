@@ -1923,6 +1923,7 @@ impl ManagedThread {
             requires_resume: false,
             native_transcript_synced: false,
             opencode_turn_in_flight: false,
+            opencode_interrupt_requested: false,
             queued_requests: Vec::new(),
             dispatching_request: None,
             pending_opencode_steer: None,

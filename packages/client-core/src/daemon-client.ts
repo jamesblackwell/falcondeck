@@ -523,6 +523,19 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
+    /**
+     * Warms a lazily-started provider's model catalog because the user
+     * selected it in a composer. The refreshed catalog arrives as a
+     * workspace/snapshot event once the provider handshake completes.
+     */
+    async hydrateProvider(workspaceId: string, provider: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/providers/${encodeURIComponent(provider)}/hydrate`,
+          { method: "POST" },
+        ),
+      );
+    },
     async archiveThread(workspaceId: string, threadId: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(

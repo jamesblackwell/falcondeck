@@ -250,6 +250,11 @@ struct ManagedThread {
     /// verbatim after an ungraceful daemon death — so hydration eligibility
     /// must key off this flag, not the status, for waiting threads.
     opencode_turn_in_flight: bool,
+    /// True once the user asked to interrupt the in-flight native OpenCode
+    /// turn. OpenCode reports its own cancellation as a `step.failed`
+    /// ("Provider turn interrupted"), which must settle as an interruption
+    /// with the partial transcript kept, not as a failed turn.
+    opencode_interrupt_requested: bool,
     /// Full requests behind `summary.queued_turns`, same order, matched by
     /// the summary entry's id. Persisted before an enqueue is acknowledged.
     queued_requests: Vec<QueuedTurnRequest>,
