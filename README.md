@@ -15,7 +15,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/readme-hero.png" width="1200" alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer" />
+  <img src="assets/readme-header.webp" width="1200" alt="FalconDeck coordinating fictional AI coding-agent activity across desktop, browser, and mobile clients" />
 </p>
 
 FalconDeck is open-source infrastructure for companies that run with AI. It starts with coding agents and gives you one place to see workspaces, follow live turns, review diffs, answer questions, and approve actions. The same context stays available when you step away from your desk.
