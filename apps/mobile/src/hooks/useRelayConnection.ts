@@ -687,6 +687,10 @@ export function useRelayConnection() {
       // event otherwise reaches into the live run and cancels its retry
       // chains.
       if (!isCurrent || !shouldReconnect || !useRelayStore.getState().sessionId) return
+      // A connection timeout explicitly schedules recovery because native
+      // WebSocket implementations may ignore close() while CONNECTING. If
+      // onclose arrives as well, keep the existing retry for this failure.
+      if (reconnectTimer.current !== null) return
       clearSocketTimers()
       realtimeAudioPlayer.stop()
       relay._setConnectionStatus('disconnected')
@@ -783,8 +787,8 @@ export function useRelayConnection() {
         connectTimeout = setTimeout(() => {
           connectTimeout = null
           if (socket.readyState !== WebSocket.OPEN) {
-            // close() on a CONNECTING socket fires onclose → scheduleReconnect.
             socket.close()
+            scheduleReconnect()
           }
         }, WEBSOCKET_CONNECT_TIMEOUT_MS)
 

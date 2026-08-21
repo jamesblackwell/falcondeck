@@ -113,6 +113,63 @@ describe('useRelayConnection session rotation', () => {
     useRelayStore.getState()._callRpc = originalCallRpc
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('reconnects when a connecting socket ignores close and schedules only one retry', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'timeout-ticket' }) } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useRelayStore.getState().setPairingCode('CONNECT-TIMEOUT')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    vi.useFakeTimers()
+    renderRelayConnection()
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(TestWebSocket.instances).toHaveLength(1)
+
+    const timedOutSocket = TestWebSocket.instances[0]!
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000)
+    })
+    expect(timedOutSocket.close).toHaveBeenCalledOnce()
+
+    // Some native implementations report onclose later even though close()
+    // did nothing during CONNECTING. That delayed callback must not create a
+    // second backoff timer for the same failed socket.
+    act(() => timedOutSocket.onclose?.())
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(TestWebSocket.instances).toHaveLength(2)
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).includes('/ws-ticket')),
+    ).toHaveLength(2)
   })
 
   it('closes the old socket and reconnects with only the new session credentials', async () => {
