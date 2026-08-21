@@ -93,11 +93,7 @@ pub(super) async fn connect_workspace_internal(
                     let should_refresh_metadata = workspace.has_runtime();
                     drop(workspaces);
                     if should_refresh_metadata {
-                        let result = refresh_connected_workspace_metadata(app, &existing_id).await;
-                        if result.is_ok() {
-                            app.schedule_acp_metadata_hydration(&existing_id);
-                        }
-                        return result;
+                        return refresh_connected_workspace_metadata(app, &existing_id).await;
                     }
                     app.persist_local_state().await?;
                     return Ok(summary);
@@ -427,7 +423,11 @@ pub(super) async fn connect_workspace_internal(
     );
 
     app.persist_local_state().await?;
-    app.schedule_acp_metadata_hydration(&workspace_id);
+    // Keep optional provider runtimes lazy. Starting every configured ACP or
+    // native provider for every restored workspace multiplies idle process
+    // trees and can exhaust memory before the user selects one. Placeholder
+    // catalogs above keep the composer usable; first provider use performs
+    // the real handshake and publishes negotiated metadata.
     app.backfill_provider_preview_titles(&workspace_id, PREVIEW_TITLE_BACKFILL_LIMIT)
         .await;
     for thread_id in persisted_thread_states

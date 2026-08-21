@@ -103,13 +103,24 @@ impl AppState {
             .map(|workspace| workspace.summary.path.clone())
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
         let runtime = OpenCodeRuntime::spawn(&config.command, &workspace_path, &config.env).await?;
-        let mut workspaces = self.inner.workspaces.lock().await;
-        if let Some(workspace) = workspaces.get_mut(workspace_id) {
-            workspace.opencode_runtime = Some(Arc::clone(&runtime));
-        } else {
-            drop(workspaces);
-            runtime.shutdown().await;
-            return Err(DaemonError::NotFound("workspace not found".to_string()));
+        {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            if let Some(workspace) = workspaces.get_mut(workspace_id) {
+                workspace.opencode_runtime = Some(Arc::clone(&runtime));
+            } else {
+                drop(workspaces);
+                runtime.shutdown().await;
+                return Err(DaemonError::NotFound("workspace not found".to_string()));
+            }
+        }
+        if let Err(error) = self
+            .publish_opencode_native_metadata(workspace_id, &runtime)
+            .await
+        {
+            // A real turn performs its own compatibility checks and can fall
+            // back to ACP. Catalog refinement is useful but must not make the
+            // selected provider unavailable.
+            tracing::info!(%error, "native OpenCode metadata unavailable after startup");
         }
         Ok(runtime)
     }
@@ -140,14 +151,13 @@ impl AppState {
         };
     }
 
-    /// Starts the native server early enough to populate a fresh composer's
-    /// model and agent controls. Only normalized catalog fields leave this
-    /// module; the raw provider response can contain credentials.
-    pub(super) async fn refresh_opencode_native_metadata(
+    /// Publishes normalized metadata after the user first starts OpenCode.
+    /// Raw provider responses can contain credentials and stay in this module.
+    async fn publish_opencode_native_metadata(
         &self,
         workspace_id: &str,
+        runtime: &Arc<OpenCodeRuntime>,
     ) -> Result<(), DaemonError> {
-        let runtime = self.opencode_runtime_for(workspace_id).await?;
         runtime.validate_contract().await?;
         let (catalog, agents) = tokio::try_join!(runtime.provider_catalog(), runtime.agents())?;
         let models = parse_native_models(&catalog)?;
