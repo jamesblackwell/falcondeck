@@ -1579,50 +1579,51 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   return (
     <SidebarShell className={className}>
       {showHeader ? (
-      <SidebarHeader
-        className={headerClassName}
-        // Restores window dragging over the traffic-light row on desktop.
-        data-tauri-drag-region="deep"
-      >
-        {title || onSearch ? (
-        <div
-          className={
-            title
-              ? "flex items-center justify-between"
-              : "flex items-center justify-end"
-          }
+        <SidebarHeader
+          className={headerClassName}
+          // Restores window dragging over the traffic-light row on desktop.
+          data-tauri-drag-region="deep"
         >
-          {title ? (
-            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
-              {title}
-            </span>
+          {title || onSearch ? (
+            <div
+              className={
+                title
+                  ? "flex items-center justify-between"
+                  : "flex items-center justify-end"
+              }
+            >
+              {title ? (
+                <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
+                  {title}
+                </span>
+              ) : null}
+              {onSearch ? (
+                <Tooltip label="Search" shortcut={searchShortcut}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    onClick={onSearch}
+                    aria-label="Search"
+                  >
+                    <Search aria-hidden="true" className="h-4 w-4" />
+                  </Button>
+                </Tooltip>
+              ) : null}
+            </div>
           ) : null}
-          {onSearch ? (
-            <Tooltip label="Search" shortcut={searchShortcut}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={onSearch}
-                aria-label="Search"
-              >
-                <Search aria-hidden="true" className="h-4 w-4" />
-              </Button>
-            </Tooltip>
-          ) : null}
-        </div>
-        ) : null}
 
-        {visibleErrors.map((error) => (
-          <p
-            key={error}
-            className="text-[length:var(--fd-text-xs)] text-warning"
-          >
-            {error}
-          </p>
-        ))}
-      </SidebarHeader>
+          {visibleErrors.map((error) => (
+            <p
+              key={error}
+              className="text-[length:var(--fd-text-xs)] text-warning"
+            >
+              {error}
+            </p>
+          ))}
+        </SidebarHeader>
+      ) : null}
 
       <SidebarContent className={contentClassName}>
         {newThreadRow || topNavigation ? (
