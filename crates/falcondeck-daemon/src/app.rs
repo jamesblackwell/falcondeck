@@ -165,6 +165,9 @@ struct InnerState {
     /// Cached OpenRouter speech credential from the daemon secret store.
     speech_credentials: speech::SpeechCredentialCache,
     remote: Mutex<RemoteBridgeState>,
+    /// Coalesces at-least-once relay delivery for mutating RPCs across bridge
+    /// reconnects so an action cannot execute twice in one daemon process.
+    remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
     /// a job is meaningless across a daemon restart, since the background task
     /// driving it is gone.
@@ -627,6 +630,7 @@ impl AppState {
                     trusted_client_bundles: Vec::new(),
                     unresumed_remote: None,
                 }),
+                remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator::default(),
                 provision_jobs: Mutex::new(HashMap::new()),
                 harness_cache: StdMutex::new(HashMap::new()),
                 harness_jobs: Mutex::new(HashMap::new()),

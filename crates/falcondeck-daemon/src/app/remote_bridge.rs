@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::atomic::Ordering};
+use std::{collections::HashMap, future::Future, sync::atomic::Ordering};
 
 use chrono::Utc;
 use falcondeck_core::{
@@ -15,7 +15,7 @@ use falcondeck_core::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, oneshot, Mutex},
     time::{Duration, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -33,6 +33,153 @@ type RelayWriter = futures_util::stream::SplitSink<
 >;
 
 const RELAY_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const REMOTE_RPC_DEDUPE_TTL: Duration = Duration::from_secs(120);
+const REMOTE_RPC_DEDUPE_MAX_ENTRIES: usize = 256;
+const REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES: usize = 256 * 1024;
+
+type RemoteRpcOutcome = Result<RelayClientMessage, String>;
+
+enum RemoteRpcDedupeEntry {
+    InFlight(Vec<oneshot::Sender<RemoteRpcOutcome>>),
+    Completed {
+        outcome: Option<RemoteRpcOutcome>,
+        completed_at: tokio::time::Instant,
+    },
+}
+
+#[derive(Debug, PartialEq)]
+enum RemoteRpcDedupeResult {
+    Outcome(RemoteRpcOutcome),
+    CompletedWithoutReplay,
+    AtCapacity,
+}
+
+#[derive(Default)]
+pub(super) struct RemoteRpcDeduplicator {
+    entries: Mutex<HashMap<String, RemoteRpcDedupeEntry>>,
+}
+
+impl RemoteRpcDeduplicator {
+    async fn execute<F, Fut>(&self, request_id: String, operation: F) -> RemoteRpcDedupeResult
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = RemoteRpcOutcome>,
+    {
+        enum Claim {
+            Execute,
+            Wait(oneshot::Receiver<RemoteRpcOutcome>),
+            Cached(RemoteRpcOutcome),
+            CompletedWithoutReplay,
+            AtCapacity,
+        }
+
+        let claim = {
+            let now = tokio::time::Instant::now();
+            let mut entries = self.entries.lock().await;
+            entries.retain(|_, entry| {
+                matches!(entry, RemoteRpcDedupeEntry::InFlight(_))
+                    || matches!(
+                        entry,
+                        RemoteRpcDedupeEntry::Completed { completed_at, .. }
+                            if now.duration_since(*completed_at) < REMOTE_RPC_DEDUPE_TTL
+                    )
+            });
+            if let Some(entry) = entries.get_mut(&request_id) {
+                match entry {
+                    RemoteRpcDedupeEntry::InFlight(waiters) => {
+                        let (sender, receiver) = oneshot::channel();
+                        waiters.push(sender);
+                        Claim::Wait(receiver)
+                    }
+                    RemoteRpcDedupeEntry::Completed {
+                        outcome: Some(outcome),
+                        ..
+                    } => Claim::Cached(outcome.clone()),
+                    RemoteRpcDedupeEntry::Completed { outcome: None, .. } => {
+                        Claim::CompletedWithoutReplay
+                    }
+                }
+            } else if entries.len() >= REMOTE_RPC_DEDUPE_MAX_ENTRIES {
+                Claim::AtCapacity
+            } else {
+                entries.insert(
+                    request_id.clone(),
+                    RemoteRpcDedupeEntry::InFlight(Vec::new()),
+                );
+                Claim::Execute
+            }
+        };
+
+        match claim {
+            Claim::Wait(receiver) => match receiver.await {
+                Ok(outcome) => RemoteRpcDedupeResult::Outcome(outcome),
+                Err(_) => RemoteRpcDedupeResult::Outcome(Err(
+                    "remote rpc execution ended before producing a result".to_string(),
+                )),
+            },
+            Claim::Cached(outcome) => RemoteRpcDedupeResult::Outcome(outcome),
+            Claim::CompletedWithoutReplay => RemoteRpcDedupeResult::CompletedWithoutReplay,
+            Claim::AtCapacity => RemoteRpcDedupeResult::AtCapacity,
+            Claim::Execute => {
+                let outcome = operation().await;
+                let replayable =
+                    remote_rpc_outcome_size(&outcome) <= REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES;
+                let waiters = {
+                    let mut entries = self.entries.lock().await;
+                    let waiters = match entries.remove(&request_id) {
+                        Some(RemoteRpcDedupeEntry::InFlight(waiters)) => waiters,
+                        _ => Vec::new(),
+                    };
+                    entries.insert(
+                        request_id,
+                        RemoteRpcDedupeEntry::Completed {
+                            outcome: replayable.then(|| outcome.clone()),
+                            completed_at: tokio::time::Instant::now(),
+                        },
+                    );
+                    waiters
+                };
+                for waiter in waiters {
+                    let _ = waiter.send(outcome.clone());
+                }
+                RemoteRpcDedupeResult::Outcome(outcome)
+            }
+        }
+    }
+}
+
+fn remote_rpc_outcome_size(outcome: &RemoteRpcOutcome) -> usize {
+    match outcome {
+        Ok(message) => serde_json::to_vec(message)
+            .map(|encoded| encoded.len())
+            .unwrap_or(REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES + 1),
+        Err(message) => message.len(),
+    }
+}
+
+fn remote_rpc_is_read_only(method: &str) -> bool {
+    matches!(
+        method,
+        "snapshot.current"
+            | "thread.detail"
+            | "preferences.read"
+            | "speech.status"
+            | "speech.models"
+            | "workspace.files"
+            | "workspace.file.read"
+            | "git.status"
+            | "git.diff"
+            | "connectors.read"
+            | "providers.read"
+            | "providers.usage"
+            | "harnesses.read"
+            | "harnesses.job"
+            | "extensions.read"
+            | "scheduled.list"
+            | "scheduled.detail"
+            | "scheduled.runs"
+    )
+}
 
 /// Every method the encrypted RPC dispatcher understands must be registered
 /// with the relay or it fails the call without consulting the daemon
@@ -570,8 +717,33 @@ impl AppState {
                     .map_err(|error| format!("rpc outbox closed: {error}"));
             }
         };
-        let rpc_result = self.dispatch_remote_rpc(&method, params).await;
-        let message = self.remote_rpc_result_message(data_key, request_id, rpc_result)?;
+        let message = if remote_rpc_is_read_only(&method) {
+            let rpc_result = self.dispatch_remote_rpc(&method, params).await;
+            self.remote_rpc_result_message(data_key, request_id, rpc_result)?
+        } else {
+            let response_request_id = request_id.clone();
+            match self
+                .inner
+                .remote_rpc_deduplicator
+                .execute(request_id.clone(), || async {
+                    let rpc_result = self.dispatch_remote_rpc(&method, params).await;
+                    self.remote_rpc_result_message(data_key, response_request_id, rpc_result)
+                })
+                .await
+            {
+                RemoteRpcDedupeResult::Outcome(outcome) => outcome?,
+                RemoteRpcDedupeResult::CompletedWithoutReplay => self.remote_rpc_result_message(
+                    data_key,
+                    request_id,
+                    Err("This action already completed, but its response was too large to replay. Refresh before trying again.".to_string()),
+                )?,
+                RemoteRpcDedupeResult::AtCapacity => self.remote_rpc_result_message(
+                    data_key,
+                    request_id,
+                    Err("The desktop is handling too many remote actions. Try again in a moment.".to_string()),
+                )?,
+            }
+        };
         outbox
             .send(message)
             .map_err(|error| format!("rpc outbox closed: {error}"))
@@ -2066,5 +2238,119 @@ mod tests {
         .expect("valid websocket ticket request");
 
         assert_eq!(request.timeout(), Some(&RELAY_HTTP_REQUEST_TIMEOUT));
+    }
+
+    #[tokio::test]
+    async fn remote_rpc_deduplicator_coalesces_in_flight_and_completed_requests() {
+        let deduplicator = std::sync::Arc::new(RemoteRpcDeduplicator::default());
+        let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let expected = RelayClientMessage::Ephemeral {
+            body: json!({ "result": "leader" }),
+        };
+
+        let leader = {
+            let deduplicator = deduplicator.clone();
+            let executions = executions.clone();
+            let started = started.clone();
+            let release = release.clone();
+            let expected = expected.clone();
+            tokio::spawn(async move {
+                deduplicator
+                    .execute("request-1".to_string(), move || async move {
+                        executions.fetch_add(1, Ordering::SeqCst);
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(expected)
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+
+        let follower = {
+            let deduplicator = deduplicator.clone();
+            let executions = executions.clone();
+            tokio::spawn(async move {
+                deduplicator
+                    .execute("request-1".to_string(), move || async move {
+                        executions.fetch_add(1, Ordering::SeqCst);
+                        Ok(RelayClientMessage::Ping)
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        release.notify_waiters();
+        let leader_result = leader.await.expect("leader task");
+        let follower_result = follower.await.expect("follower task");
+        assert_eq!(
+            (leader_result, follower_result),
+            (
+                RemoteRpcDedupeResult::Outcome(Ok(expected.clone())),
+                RemoteRpcDedupeResult::Outcome(Ok(expected.clone())),
+            )
+        );
+
+        let cached = deduplicator
+            .execute("request-1".to_string(), {
+                let executions = executions.clone();
+                move || async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(RelayClientMessage::Ping)
+                }
+            })
+            .await;
+        assert_eq!(cached, RemoteRpcDedupeResult::Outcome(Ok(expected)));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_rpc_deduplicator_suppresses_oversized_completed_replays() {
+        let deduplicator = RemoteRpcDeduplicator::default();
+        let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let large_message = RelayClientMessage::Ephemeral {
+            body: json!({ "payload": "x".repeat(REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES + 1) }),
+        };
+
+        let first = deduplicator
+            .execute("large-request".to_string(), {
+                let executions = executions.clone();
+                let large_message = large_message.clone();
+                move || async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(large_message)
+                }
+            })
+            .await;
+        assert!(matches!(first, RemoteRpcDedupeResult::Outcome(Ok(_))));
+
+        let duplicate = deduplicator
+            .execute("large-request".to_string(), {
+                let executions = executions.clone();
+                move || async move {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(RelayClientMessage::Ping)
+                }
+            })
+            .await;
+        assert!(matches!(
+            duplicate,
+            RemoteRpcDedupeResult::CompletedWithoutReplay
+        ));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mutating_remote_rpc_methods_are_deduplicated() {
+        assert!(!remote_rpc_is_read_only("turn.start"));
+    }
+
+    #[test]
+    fn snapshot_remote_rpc_remains_read_only() {
+        assert!(remote_rpc_is_read_only("snapshot.current"));
     }
 }
