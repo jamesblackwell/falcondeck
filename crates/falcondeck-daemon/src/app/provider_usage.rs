@@ -7,6 +7,10 @@
 //! are used as-is — the daemon never refreshes another tool's credentials,
 //! because rotating a refresh token out from under the owning CLI breaks its
 //! next run.
+//!
+//! Tests swap the live transport for fixtures, which leaves the real HTTP and
+//! credential helpers unreachable in that build.
+#![cfg_attr(test, allow(dead_code))]
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,6 +22,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
 use falcondeck_core::{AgentProvider, ProviderUsage, ProviderUsageOverview, ProviderUsageWindow};
 use serde_json::Value;
+#[cfg(not(test))]
 use tokio::fs;
 
 use super::AppState;

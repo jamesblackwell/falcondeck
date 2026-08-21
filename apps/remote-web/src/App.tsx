@@ -87,7 +87,6 @@ import {
   threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
-  workspaceProviderLabel,
   workspaceProviderOptions,
   threadForSelection,
   type AgentProvider,

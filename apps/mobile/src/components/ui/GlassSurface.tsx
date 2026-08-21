@@ -9,7 +9,6 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 // registry whether the view actually exists before using it.
 let NativeBlurView: ComponentType<Record<string, unknown>> | null = null
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const installed = requireOptionalNativeModule('ExpoBlurView') !== null
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   NativeBlurView = installed ? (require('expo-blur').BlurView ?? null) : null

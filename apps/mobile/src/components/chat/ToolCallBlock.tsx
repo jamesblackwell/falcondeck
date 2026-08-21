@@ -170,8 +170,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
   const label = useMemo(
     () => toolCallLabel(item),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the title, detail
-    // and head of the output are all toolCallLabel reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- title, detail and the head of the output are all toolCallLabel reads.
     [item.title, item.output, item.detail],
   );
 
