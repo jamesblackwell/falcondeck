@@ -56,7 +56,7 @@ export const DiffView = memo(function DiffView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex h-11 items-center gap-2 border-b border-border-subtle px-3">
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border-subtle px-3">
         <Button
           type="button"
           variant="ghost"

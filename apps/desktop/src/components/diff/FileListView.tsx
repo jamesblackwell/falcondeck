@@ -122,52 +122,10 @@ export const FileListView = memo(function FileListView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="border-b border-border-subtle px-3 pb-2 pt-2">
-        <div className="flex h-7 items-center gap-2">
-          <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">Review</p>
-          {/* The overview spells the branch out in its own row. */}
-          {branch && visibleTab !== 'info' ? (
-            <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
-              <GitBranch aria-hidden="true" className="h-3 w-3 shrink-0" />
-              <span className="truncate">{branch}</span>
-            </div>
-          ) : null}
-          <div className="ml-auto" />
-          {visibleTab === 'changes' && onStartReview && entries.length > 0 ? (
-            <button
-              type="button"
-              onClick={onStartReview}
-              disabled={isReviewPending}
-              title="Review uncommitted changes"
-              aria-label="Review uncommitted changes"
-              aria-busy={isReviewPending}
-              className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
-            >
-              {isReviewPending ? (
-                <ActivityDiamond tone="current" />
-              ) : (
-                <ScanSearch aria-hidden="true" className="h-3.5 w-3.5" />
-              )}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={visibleTab === 'files' ? onRefreshFiles : onRefresh}
-            disabled={activeLoading}
-            title={`Refresh ${visibleTab}`}
-            aria-label={`Refresh ${visibleTab}`}
-            aria-busy={activeLoading}
-            className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
-          >
-            {activeLoading ? (
-              <ActivityDiamond tone="current" />
-            ) : (
-              <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
-            )}
-          </button>
-        </div>
-
-        <div className="mt-1 flex items-center gap-1 border-b border-border-subtle">
+      {/* h-12 matches the sidebar and session headers so the borders run as
+          one continuous line across the window. */}
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border-subtle px-3">
+        <div className="flex h-full shrink-0 items-center gap-1">
           {tabs.map((tab) => (
             <button
               key={tab}
@@ -177,7 +135,7 @@ export const FileListView = memo(function FileListView({
                 setQuery('')
               }}
               aria-pressed={visibleTab === tab}
-              className={`fd-focus -mb-px border-b px-2 py-1.5 text-[length:var(--fd-text-sm)] font-medium capitalize transition-colors ${
+              className={`fd-focus flex h-full items-center border-b-2 px-2 pt-px text-[length:var(--fd-text-sm)] font-medium capitalize transition-colors ${
                 visibleTab === tab
                   ? 'border-accent text-fg-primary'
                   : 'border-transparent text-fg-muted hover:text-fg-secondary'
@@ -192,9 +150,51 @@ export const FileListView = memo(function FileListView({
             </button>
           ))}
         </div>
+        <div className="ml-auto" />
+        {/* The overview spells the branch out in its own row. */}
+        {branch && visibleTab !== 'info' ? (
+          <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+            <GitBranch aria-hidden="true" className="h-3 w-3 shrink-0" />
+            <span className="truncate">{branch}</span>
+          </div>
+        ) : null}
+        {visibleTab === 'changes' && onStartReview && entries.length > 0 ? (
+          <button
+            type="button"
+            onClick={onStartReview}
+            disabled={isReviewPending}
+            title="Review uncommitted changes"
+            aria-label="Review uncommitted changes"
+            aria-busy={isReviewPending}
+            className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+          >
+            {isReviewPending ? (
+              <ActivityDiamond tone="current" />
+            ) : (
+              <ScanSearch aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={visibleTab === 'files' ? onRefreshFiles : onRefresh}
+          disabled={activeLoading}
+          title={`Refresh ${visibleTab}`}
+          aria-label={`Refresh ${visibleTab}`}
+          aria-busy={activeLoading}
+          className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+        >
+          {activeLoading ? (
+            <ActivityDiamond tone="current" />
+          ) : (
+            <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
+        </button>
+      </div>
 
-        {visibleTab === 'info' ? null : (
-          <label className="mt-2 flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-0 px-2 focus-within:border-border-strong">
+      {visibleTab === 'info' ? null : (
+        <div className="border-b border-border-subtle px-3 py-2">
+          <label className="flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-0 px-2 focus-within:border-border-strong">
             <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
             <span className="sr-only">Filter {visibleTab}</span>
             <input
@@ -214,8 +214,8 @@ export const FileListView = memo(function FileListView({
               </button>
             ) : null}
           </label>
-        )}
-      </div>
+        </div>
+      )}
 
       <div
         ref={rows.containerRef}
