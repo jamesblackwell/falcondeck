@@ -119,6 +119,7 @@ import {
   workspaceSendBlockReason,
 } from "./app-utils";
 import { isTauriDesktop, openActivityWindow, openExternalUrl } from "./api";
+import { RuntimeHealthNotifier } from "./components/RuntimeHealthNotifier";
 import { activityTailStore, threadTailKey } from "./activity-tails";
 import {
   ACTIVITY_WINDOW_EVENTS,
@@ -5210,6 +5211,7 @@ function AppInner() {
 
   return (
     <>
+      <RuntimeHealthNotifier conditions={snapshot?.operational_conditions} />
       {paletteRequest.key > 0 ? (
         <Suspense fallback={null}>
           <CommandPalette
