@@ -1,4 +1,8 @@
-use std::{collections::HashMap, future::Future, sync::atomic::Ordering};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{Mutex, MutexGuard, atomic::Ordering},
+};
 
 use chrono::Utc;
 use falcondeck_core::{
@@ -15,7 +19,7 @@ use falcondeck_core::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
-    sync::{broadcast, mpsc, oneshot, Mutex},
+    sync::{broadcast, mpsc, oneshot},
     time::{Duration, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -59,7 +63,60 @@ pub(super) struct RemoteRpcDeduplicator {
     entries: Mutex<HashMap<String, RemoteRpcDedupeEntry>>,
 }
 
+struct RemoteRpcExecutionGuard<'a> {
+    deduplicator: &'a RemoteRpcDeduplicator,
+    request_id: Option<String>,
+}
+
+impl RemoteRpcExecutionGuard<'_> {
+    fn complete(
+        mut self,
+        outcome: Option<RemoteRpcOutcome>,
+    ) -> Vec<oneshot::Sender<RemoteRpcOutcome>> {
+        let request_id = self
+            .request_id
+            .take()
+            .expect("an armed rpc execution guard has a request id");
+        let mut entries = self.deduplicator.lock_entries();
+        let waiters = match entries.remove(&request_id) {
+            Some(RemoteRpcDedupeEntry::InFlight(waiters)) => waiters,
+            _ => Vec::new(),
+        };
+        entries.insert(
+            request_id,
+            RemoteRpcDedupeEntry::Completed {
+                outcome,
+                completed_at: tokio::time::Instant::now(),
+            },
+        );
+        waiters
+    }
+}
+
+impl Drop for RemoteRpcExecutionGuard<'_> {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let mut entries = self.deduplicator.lock_entries();
+        if matches!(
+            entries.get(&request_id),
+            Some(RemoteRpcDedupeEntry::InFlight(_))
+        ) {
+            // Dropping the stored senders wakes every follower with a closed
+            // channel. A reconnect can then claim and execute this id again.
+            entries.remove(&request_id);
+        }
+    }
+}
+
 impl RemoteRpcDeduplicator {
+    fn lock_entries(&self) -> MutexGuard<'_, HashMap<String, RemoteRpcDedupeEntry>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     async fn execute<F, Fut>(&self, request_id: String, operation: F) -> RemoteRpcDedupeResult
     where
         F: FnOnce() -> Fut,
@@ -75,7 +132,7 @@ impl RemoteRpcDeduplicator {
 
         let claim = {
             let now = tokio::time::Instant::now();
-            let mut entries = self.entries.lock().await;
+            let mut entries = self.lock_entries();
             entries.retain(|_, entry| {
                 matches!(entry, RemoteRpcDedupeEntry::InFlight(_))
                     || matches!(
@@ -121,24 +178,14 @@ impl RemoteRpcDeduplicator {
             Claim::CompletedWithoutReplay => RemoteRpcDedupeResult::CompletedWithoutReplay,
             Claim::AtCapacity => RemoteRpcDedupeResult::AtCapacity,
             Claim::Execute => {
+                let execution = RemoteRpcExecutionGuard {
+                    deduplicator: self,
+                    request_id: Some(request_id),
+                };
                 let outcome = operation().await;
                 let replayable =
                     remote_rpc_outcome_size(&outcome) <= REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES;
-                let waiters = {
-                    let mut entries = self.entries.lock().await;
-                    let waiters = match entries.remove(&request_id) {
-                        Some(RemoteRpcDedupeEntry::InFlight(waiters)) => waiters,
-                        _ => Vec::new(),
-                    };
-                    entries.insert(
-                        request_id,
-                        RemoteRpcDedupeEntry::Completed {
-                            outcome: replayable.then(|| outcome.clone()),
-                            completed_at: tokio::time::Instant::now(),
-                        },
-                    );
-                    waiters
-                };
+                let waiters = execution.complete(replayable.then(|| outcome.clone()));
                 for waiter in waiters {
                     let _ = waiter.send(outcome.clone());
                 }
@@ -2342,6 +2389,86 @@ mod tests {
             RemoteRpcDedupeResult::CompletedWithoutReplay
         ));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remote_rpc_deduplicator_releases_a_cancelled_leader_and_its_followers() {
+        let deduplicator = std::sync::Arc::new(RemoteRpcDeduplicator::default());
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let leader = {
+            let deduplicator = deduplicator.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                deduplicator
+                    .execute("cancelled-request".to_string(), move || async move {
+                        started.notify_one();
+                        std::future::pending::<RemoteRpcOutcome>().await
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+
+        let follower = {
+            let deduplicator = deduplicator.clone();
+            tokio::spawn(async move {
+                deduplicator
+                    .execute("cancelled-request".to_string(), || async {
+                        Ok(RelayClientMessage::Ping)
+                    })
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let follower_registered = {
+                    let entries = deduplicator.lock_entries();
+                    matches!(
+                        entries.get("cancelled-request"),
+                        Some(RemoteRpcDedupeEntry::InFlight(waiters)) if waiters.len() == 1
+                    )
+                };
+                if follower_registered {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("follower should join the in-flight request");
+
+        leader.abort();
+        assert!(
+            leader
+                .await
+                .expect_err("leader should be cancelled")
+                .is_cancelled()
+        );
+        let follower_result = timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower should be released")
+            .expect("follower task should not panic");
+        assert!(matches!(
+            follower_result,
+            RemoteRpcDedupeResult::Outcome(Err(message))
+                if message.contains("ended before producing a result")
+        ));
+        assert!(
+            !deduplicator
+                .lock_entries()
+                .contains_key("cancelled-request")
+        );
+
+        let retry = deduplicator
+            .execute("cancelled-request".to_string(), || async {
+                Ok(RelayClientMessage::Ping)
+            })
+            .await;
+        assert_eq!(
+            retry,
+            RemoteRpcDedupeResult::Outcome(Ok(RelayClientMessage::Ping))
+        );
     }
 
     #[test]
