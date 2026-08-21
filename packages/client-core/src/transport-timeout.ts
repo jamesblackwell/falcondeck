@@ -8,15 +8,32 @@ export async function fetchWithTimeout(
   timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  let abortSource: 'caller' | 'timeout' | null = null
+  const callerSignal = init?.signal
+  const abortFromCaller = () => {
+    if (abortSource !== null) return
+    abortSource = 'caller'
+    controller.abort()
+  }
+  if (callerSignal?.aborted) {
+    abortFromCaller()
+  } else {
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  }
+  const timeout = setTimeout(() => {
+    if (abortSource !== null) return
+    abortSource = 'timeout'
+    controller.abort()
+  }, timeoutMs)
   try {
     return await fetch(url, { ...init, signal: controller.signal })
   } catch (error) {
-    if (controller.signal.aborted) {
+    if (abortSource === 'timeout') {
       throw new Error('Request timed out; check your connection and try again')
     }
     throw error
   } finally {
     clearTimeout(timeout)
+    callerSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
