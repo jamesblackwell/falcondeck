@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use falcondeck_core::{
-    AgentProvider, ApprovalDecision, ContentLifecycle, ConversationFileChange, ConversationItem,
-    InteractiveRequest, InteractiveRequestKind, ModelSummary, PlanApprovalOutcome, ServiceLevel,
-    ThreadStatus, ThreadTokenUsage, TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
+    AgentProvider, ApprovalDecision, AssistantMessagePhase, ContentLifecycle,
+    ConversationFileChange, ConversationItem, InteractiveRequest, InteractiveRequestKind,
+    ModelSummary, PlanApprovalOutcome, ServiceLevel, ThreadStatus, ThreadTokenUsage,
+    TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -1265,13 +1266,57 @@ fn latest_user_message_contains_echo(items: &[ConversationItem], echoed_text: &s
     if echoed_text.is_empty() {
         return false;
     }
-    let Some(ConversationItem::UserMessage { text, .. }) = items.last() else {
+    let Some(user_index) = items
+        .iter()
+        .rposition(|item| matches!(item, ConversationItem::UserMessage { .. }))
+    else {
         return false;
     };
-    text.starts_with(echoed_text)
+    let ConversationItem::UserMessage { text, .. } = &items[user_index] else {
+        return false;
+    };
+    if !(text.starts_with(echoed_text)
         || echoed_text
             .strip_prefix(text.as_str())
-            .is_some_and(is_attachment_placeholder_remainder)
+            .is_some_and(is_attachment_placeholder_remainder))
+    {
+        return false;
+    }
+    let later = &items[user_index + 1..];
+    // Grok (and other ACP agents) echo the submitted prompt as
+    // `user_message_chunk`. That can arrive after thoughts, tools, or a
+    // `session/cancel` receipt — `items.last()` is then no longer the user
+    // message, so a last-item-only check would record a duplicate bubble.
+    // An interrupt receipt still belongs to this turn; suppress the echo.
+    // A completed terminal answer without an interrupt means session/load
+    // replay has moved on to a later historical prompt.
+    if later.iter().any(is_interrupt_receipt) {
+        return true;
+    }
+    !later.iter().any(is_completed_terminal_answer)
+}
+
+fn is_interrupt_receipt(item: &ConversationItem) -> bool {
+    matches!(
+        item,
+        ConversationItem::AssistantMessage {
+            lifecycle: ContentLifecycle::Interrupted,
+            ..
+        }
+    )
+}
+
+fn is_completed_terminal_answer(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::AssistantMessage {
+            phase, lifecycle, ..
+        } => {
+            !matches!(phase, Some(AssistantMessagePhase::Commentary))
+                && *lifecycle == ContentLifecycle::Complete
+        }
+        ConversationItem::CodeReview { lifecycle, .. } => *lifecycle == ContentLifecycle::Complete,
+        _ => false,
+    }
 }
 
 /// Whether `remainder` is only the placeholder labels that
@@ -2014,7 +2059,7 @@ mod tests {
     use chrono::Utc;
 
     use super::{default_acp_mode, latest_user_message_contains_echo};
-    use falcondeck_core::ConversationItem;
+    use falcondeck_core::{ContentLifecycle, ConversationItem};
 
     fn user_message(text: &str) -> ConversationItem {
         ConversationItem::UserMessage {
@@ -2023,6 +2068,19 @@ mod tests {
             attachments: Vec::new(),
             turn_id: None,
             previous_turn_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn assistant(id: &str, text: &str, lifecycle: ContentLifecycle) -> ConversationItem {
+        ConversationItem::AssistantMessage {
+            id: id.to_string(),
+            text: text.to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle,
+            error: None,
             created_at: Utc::now(),
         }
     }
@@ -2076,21 +2134,75 @@ mod tests {
     fn latest_user_message_contains_echo_does_not_match_after_agent_activity() {
         let items = vec![
             user_message("Previous prompt"),
-            ConversationItem::AssistantMessage {
-                id: "assistant-message".to_string(),
-                text: "Previous answer".to_string(),
-                phase: None,
-                memory_citation: None,
-                citations: Vec::new(),
-                lifecycle: falcondeck_core::ContentLifecycle::Complete,
-                error: None,
-                created_at: Utc::now(),
-            },
+            assistant(
+                "assistant-message",
+                "Previous answer",
+                ContentLifecycle::Complete,
+            ),
         ];
 
         assert!(!latest_user_message_contains_echo(
             &items,
             "Previous prompt"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_matches_after_interrupt_receipt() {
+        let items = vec![
+            user_message("Map the onboarding flow"),
+            assistant(
+                "falcondeck-turn-receipt-submitted-user-message",
+                "",
+                ContentLifecycle::Interrupted,
+            ),
+        ];
+
+        assert!(latest_user_message_contains_echo(
+            &items,
+            "Map the onboarding flow"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_matches_after_thought() {
+        let items = vec![
+            user_message("Map the onboarding flow"),
+            ConversationItem::Reasoning {
+                id: "thought-1".to_string(),
+                summary: None,
+                content: "I'll inspect the wizard steps.".to_string(),
+                lifecycle: ContentLifecycle::Streaming,
+                duration_ms: None,
+                created_at: Utc::now(),
+            },
+        ];
+
+        assert!(latest_user_message_contains_echo(
+            &items,
+            "Map the onboarding flow"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_matches_after_interrupt_with_progress() {
+        let items = vec![
+            user_message("Map the onboarding flow"),
+            assistant(
+                "progress-1",
+                "Looking at the wizard…",
+                ContentLifecycle::Complete,
+            ),
+            assistant(
+                "falcondeck-turn-receipt-submitted-user-message",
+                "",
+                ContentLifecycle::Interrupted,
+            ),
+        ];
+
+        assert!(latest_user_message_contains_echo(
+            &items,
+            "Map the onboarding flow"
         ));
     }
 
