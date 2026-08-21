@@ -1661,6 +1661,7 @@ export type ClaimPairingRequest = {
   label?: string | null;
   client_bundle?: PairingPublicKeyBundle | null;
   challenge_signature: string;
+  pairing_authority_signature?: string | null;
 };
 
 export type ClaimPairingResponse = {
@@ -1670,6 +1671,7 @@ export type ClaimPairingResponse = {
   client_token: string;
   trusted_device: TrustedDevice;
   daemon_bundle?: PairingPublicKeyBundle | null;
+  pairing_authority?: PairingAuthority | null;
 };
 
 export type EncryptionVariant = "data_key_v1";
@@ -1681,6 +1683,11 @@ export type PairingPublicKeyBundle = {
   public_key: string;
   identity_public_key: string;
   signature: string;
+};
+
+export type PairingAuthority = {
+  public_key: string;
+  daemon_bundle_signature: string;
 };
 
 export type WrappedDataKey = {

@@ -10,4 +10,4 @@ pub mod error;
 pub(crate) mod persistence;
 
 pub use api::router;
-pub use app::{AppState, RetentionConfig};
+pub use app::{AppState, BudgetedRelayMessage, RetentionConfig};

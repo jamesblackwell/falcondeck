@@ -427,6 +427,9 @@ struct RemoteBridgeState {
     /// this list, so a compromised relay cannot mint its own bundle and be
     /// handed the key.
     trusted_client_bundles: Vec<PairingPublicKeyBundle>,
+    /// Device-indexed bundles let revocation rotate the data key for every
+    /// remaining device without ever re-wrapping it to the revoked one.
+    trusted_client_devices: HashMap<String, PairingPublicKeyBundle>,
     /// Persisted remote state that failed to resume (e.g. a transient
     /// secure-storage error at startup). Held so `persist_local_state` can
     /// round-trip it instead of writing `remote: null` — which would
@@ -553,6 +556,8 @@ struct PersistedRemoteState {
     data_key_base64: Option<String>,
     #[serde(default)]
     trusted_client_bundles: Vec<PairingPublicKeyBundle>,
+    #[serde(default)]
+    trusted_client_devices: HashMap<String, PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -561,12 +566,17 @@ struct PersistedRemoteSecrets {
     data_key_base64: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum RemoteBridgeCommand {
     PublishBootstrap {
         // Boxed to keep the enum small; NotifyAttention is sent far more often.
         pairing: Box<RemotePairingState>,
         client_bundle: Box<PairingPublicKeyBundle>,
+    },
+    RotateSessionKey {
+        pairing: Box<RemotePairingState>,
+        client_bundles: Vec<PairingPublicKeyBundle>,
+        completed: oneshot::Sender<Result<(), String>>,
     },
     /// Ask the relay to push a generic attention notification to trusted
     /// devices that are not currently connected.
@@ -662,6 +672,7 @@ impl AppState {
                     pairing_watch_task: None,
                     command_tx: None,
                     trusted_client_bundles: Vec::new(),
+                    trusted_client_devices: HashMap::new(),
                     unresumed_remote: None,
                 }),
                 remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator::default(),

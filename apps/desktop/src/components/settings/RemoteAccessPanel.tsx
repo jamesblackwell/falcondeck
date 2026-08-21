@@ -171,9 +171,9 @@ export function RemoteAccessPanel({
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                    Pairing code
+                    Secure pairing code
                   </p>
-                  <p className="mt-2 font-mono text-[length:var(--fd-text-xl)] font-semibold tracking-[0.16em] text-fg-primary">
+                  <p className="mt-2 break-all font-mono text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
                     {remoteStatus?.pairing?.pairing_code ?? 'No active code'}
                   </p>
                 </div>

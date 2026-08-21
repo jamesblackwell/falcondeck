@@ -12,6 +12,7 @@ export * from "./remote-session";
 export * from "./remote-rpc";
 export * from "./transport-timeout";
 export * from "./remote-host-client";
+export * from "./relay-url";
 export * from "./collaboration";
 export * from "./composer-persistence";
 export * from "./thread-attention";

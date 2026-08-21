@@ -26,6 +26,7 @@ import { isThreadSortMode } from '@falcondeck/client-core'
 export const STORAGE_KEY = 'falcondeck.remote.session.v1'
 export const PENDING_ACTIONS_KEY = 'falcondeck.remote.pending-actions.v1'
 export const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
+export const SESSION_SECRETS_STORAGE_KEY = 'falcondeck.remote.session-secrets.v1'
 export const SELECTION_STORAGE_KEY = 'falcondeck.remote.selection.v1'
 export const NOTIFICATIONS_STORAGE_KEY = 'falcondeck.remote.notifications.v1'
 export const THREAD_SORT_STORAGE_KEY = 'falcondeck.remote.thread-sort.v1'
@@ -296,11 +297,57 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
     if (!parsed || typeof parsed !== 'object') return null
     if (parsed.version !== REMOTE_SESSION_STORAGE_VERSION) {
       window.localStorage.removeItem(STORAGE_KEY)
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
       return null
     }
-    return parsed
+    let secretsRaw = window.sessionStorage.getItem(SESSION_SECRETS_STORAGE_KEY)
+    if (!secretsRaw && typeof parsed.clientSecretKey === 'string' && parsed.clientSecretKey) {
+      // Migrate legacy localStorage secrets into tab-scoped storage without
+      // forcing an already-open client to pair again.
+      secretsRaw = JSON.stringify({
+        sessionId: parsed.sessionId,
+        clientSecretKey: parsed.clientSecretKey,
+        dataKey: typeof parsed.dataKey === 'string' ? parsed.dataKey : null,
+      })
+      window.sessionStorage.setItem(SESSION_SECRETS_STORAGE_KEY, secretsRaw)
+      const { clientSecretKey: _clientSecretKey, dataKey: _dataKey, ...metadata } = parsed
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(metadata))
+    }
+    if (!secretsRaw) {
+      // Metadata may belong to another open tab. This tab cannot resume it,
+      // but must not erase shared state that the owning tab can still use.
+      return null
+    }
+    let secrets: {
+      sessionId?: unknown
+      clientSecretKey?: unknown
+      dataKey?: unknown
+    }
+    try {
+      secrets = JSON.parse(secretsRaw) as typeof secrets
+    } catch {
+      // The durable metadata is shared by tabs, while these secrets belong
+      // only to this tab. Never erase another tab's valid session because
+      // this tab's sessionStorage entry is corrupt.
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return null
+    }
+    if (
+      secrets.sessionId !== parsed.sessionId ||
+      typeof secrets.clientSecretKey !== 'string' ||
+      !secrets.clientSecretKey
+    ) {
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return null
+    }
+    return {
+      ...parsed,
+      clientSecretKey: secrets.clientSecretKey,
+      dataKey: typeof secrets.dataKey === 'string' ? secrets.dataKey : null,
+    }
   } catch {
     window.localStorage.removeItem(STORAGE_KEY)
+    window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
     return null
   }
 }
@@ -309,15 +356,22 @@ export function persistRemoteSession(value: PersistedRemoteSession | null) {
   try {
     if (!value) {
       window.localStorage.removeItem(STORAGE_KEY)
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
       return
     }
 
+    const { clientSecretKey, dataKey, ...metadata } = value
+    window.sessionStorage.setItem(
+      SESSION_SECRETS_STORAGE_KEY,
+      JSON.stringify({ sessionId: value.sessionId, clientSecretKey, dataKey: dataKey ?? null }),
+    )
     window.localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        ...value,
+        ...metadata,
+        pairingCode: '',
         version: REMOTE_SESSION_STORAGE_VERSION,
-      } satisfies PersistedRemoteSession),
+      }),
     )
   } catch {
     // Ignore local persistence failures and keep the live session running.
@@ -414,13 +468,21 @@ export function canWarmStartFromSnapshotCache(
 
 export function loadOrCreateClientKeyPair() {
   try {
-    const stored = window.localStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
+    let stored = window.sessionStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
+    if (!stored) {
+      // One-time migration from releases that persisted the box secret in
+      // localStorage. It becomes tab-scoped as soon as this version runs.
+      stored = window.localStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
+      window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+      if (stored) window.sessionStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, stored)
+    }
     if (stored) {
       return restoreBoxKeyPair(stored)
     }
   } catch {
     try {
       window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+      window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
     } catch {
       // Ignore storage cleanup failures.
     }
@@ -428,7 +490,7 @@ export function loadOrCreateClientKeyPair() {
 
   const generated = generateBoxKeyPair()
   try {
-    window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(generated))
+    window.sessionStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(generated))
   } catch {
     // Ignore storage failures and keep the in-memory keypair.
   }
@@ -474,6 +536,13 @@ export function clearStoredRemoteState() {
   ]) {
     try {
       window.localStorage.removeItem(key)
+    } catch {
+      // Ignore storage failures; the reload still gives a fresh page.
+    }
+  }
+  for (const key of [CLIENT_KEYPAIR_STORAGE_KEY, SESSION_SECRETS_STORAGE_KEY]) {
+    try {
+      window.sessionStorage.removeItem(key)
     } catch {
       // Ignore storage failures; the reload still gives a fresh page.
     }

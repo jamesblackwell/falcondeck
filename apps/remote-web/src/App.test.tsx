@@ -84,6 +84,7 @@ function sendOnlineSync(socket: TestWebSocket, updates: unknown[] = []) {
 
 afterEach(() => {
   window.localStorage.clear();
+  window.sessionStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -99,13 +100,13 @@ describe("App", () => {
     expect(
       screen.getByRole("heading", { name: "FalconDeck Remote" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Pairing code")).toHaveValue("");
+    expect(screen.getByLabelText("Secure pairing code")).toHaveValue("");
   });
 
   it("prefills the code from a pairing link", () => {
     window.history.replaceState({}, "", "/?code=ABCD1234");
     render(<App />);
-    expect(screen.getByLabelText("Pairing code")).toHaveValue("ABCD1234");
+    expect(screen.getByLabelText("Secure pairing code")).toHaveValue("ABCD1234");
     window.history.replaceState({}, "", "/");
   });
 

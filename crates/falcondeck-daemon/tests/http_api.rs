@@ -8,6 +8,7 @@ use falcondeck_core::{
     RemoteStatusResponse, StartRemotePairingRequest, WorkspaceStatus,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle,
+        decode_secure_pairing_code, sign_pairing_authority_client_bundle,
         sign_pairing_claim_challenge,
     },
 };
@@ -743,6 +744,117 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
 }
 
 #[tokio::test]
+async fn revoking_remote_device_rotates_the_key_only_for_remaining_devices() {
+    let relay_dir = tempfile::tempdir().unwrap();
+    let relay_base = spawn_relay(&relay_dir).await;
+    let mut daemon = spawn_embedded(test_config()).await.unwrap();
+    daemon.wait_until_restored().await.unwrap();
+    let client = reqwest::Client::new();
+
+    let first_remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let first_key_pair = LocalBoxKeyPair::generate();
+    let first_public_key = first_key_pair.public_key_base64().to_string();
+    let first_claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &first_remote.pairing.unwrap().pairing_code,
+        "revoked-phone",
+        &first_key_pair,
+    )
+    .await;
+    wait_for_connected(&client, &daemon.base_url(), "revocation setup").await;
+
+    let second_remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let second_key_pair = LocalBoxKeyPair::generate();
+    let second_public_key = second_key_pair.public_key_base64().to_string();
+    let second_claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &second_remote.pairing.unwrap().pairing_code,
+        "remaining-tablet",
+        &second_key_pair,
+    )
+    .await;
+    wait_for_trusted_device_count(&client, &daemon.base_url(), 2).await;
+
+    let before = wait_for_device_bootstrap(
+        &client,
+        &relay_base,
+        &second_claim.session_id,
+        &second_claim.client_token,
+        &second_public_key,
+    )
+    .await;
+    let first_bootstrap_count = count_device_bootstraps(&before, &first_public_key);
+    let second_bootstrap_count = count_device_bootstraps(&before, &second_public_key);
+    let old_data_key = latest_device_data_key(&before, &second_public_key, &second_key_pair);
+
+    let revoke = client
+        .delete(format!(
+            "{}/api/remote/devices/{}",
+            daemon.base_url(),
+            first_claim.device_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoke.status(), reqwest::StatusCode::OK);
+
+    let after = wait_for_device_bootstrap_count(
+        &client,
+        &relay_base,
+        &second_claim.session_id,
+        &second_claim.client_token,
+        &second_public_key,
+        second_bootstrap_count + 1,
+    )
+    .await;
+    let new_data_key = latest_device_data_key(&after, &second_public_key, &second_key_pair);
+    assert_ne!(
+        new_data_key, old_data_key,
+        "revocation must rotate the session key"
+    );
+    assert_eq!(
+        count_device_bootstraps(&after, &first_public_key),
+        first_bootstrap_count,
+        "the revoked device must not receive the rotated key"
+    );
+
+    let revoked_response = client
+        .get(format!(
+            "{relay_base}/v1/sessions/{}/updates?after_seq=0",
+            first_claim.session_id
+        ))
+        .bearer_auth(&first_claim.client_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked_response.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral_channel() {
     use futures_util::SinkExt;
 
@@ -878,10 +990,12 @@ async fn claim_pairing_with_challenge(
     label: &str,
     key_pair: &LocalBoxKeyPair,
 ) -> ClaimPairingResponse {
+    let (relay_pairing_code, pairing_authority_secret) =
+        decode_secure_pairing_code(pairing_code).unwrap();
     let challenge = client
         .post(format!("{relay_base}/v1/pairings/challenge"))
         .json(&PairingChallengeRequest {
-            pairing_code: pairing_code.to_string(),
+            pairing_code: relay_pairing_code.clone(),
         })
         .send()
         .await
@@ -890,16 +1004,26 @@ async fn claim_pairing_with_challenge(
         .await
         .unwrap();
     let identity = LocalIdentityKeyPair::from_box_key_pair(key_pair);
+    let client_bundle = build_pairing_public_key_bundle(key_pair);
     client
         .post(format!("{relay_base}/v1/pairings/claim"))
         .json(&ClaimPairingRequest {
-            pairing_code: pairing_code.to_string(),
+            pairing_code: relay_pairing_code.clone(),
             label: Some(label.to_string()),
-            client_bundle: Some(build_pairing_public_key_bundle(key_pair)),
+            client_bundle: Some(client_bundle.clone()),
             challenge_signature: sign_pairing_claim_challenge(
                 &identity,
-                pairing_code,
+                &relay_pairing_code,
                 &challenge.challenge,
+            ),
+            pairing_authority_signature: Some(
+                sign_pairing_authority_client_bundle(
+                    &pairing_authority_secret,
+                    &relay_pairing_code,
+                    &challenge.challenge,
+                    &client_bundle,
+                )
+                .unwrap(),
             ),
         })
         .send()
@@ -1009,4 +1133,46 @@ async fn wait_for_device_bootstrap(
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     panic!("relay never published bootstrap material for the new trusted device");
+}
+
+async fn wait_for_device_bootstrap_count(
+    client: &reqwest::Client,
+    relay_base: &str,
+    session_id: &str,
+    client_token: &str,
+    expected_client_public_key: &str,
+    expected_count: usize,
+) -> RelayUpdatesResponse {
+    for _ in 0..40 {
+        let updates = fetch_relay_updates(client, relay_base, session_id, client_token).await;
+        if count_device_bootstraps(&updates, expected_client_public_key) >= expected_count {
+            return updates;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("relay never published the rotated bootstrap material");
+}
+
+fn latest_device_data_key(
+    updates: &RelayUpdatesResponse,
+    client_public_key: &str,
+    client_key_pair: &LocalBoxKeyPair,
+) -> [u8; 32] {
+    updates
+        .updates
+        .iter()
+        .rev()
+        .find_map(|update| match &update.body {
+            RelayUpdateBody::SessionBootstrap { material }
+                if material.client_public_key == client_public_key =>
+            {
+                Some(
+                    client_key_pair
+                        .unwrap_data_key(&material.client_wrapped_data_key)
+                        .expect("client should unwrap its bootstrap"),
+                )
+            }
+            _ => None,
+        })
+        .expect("device bootstrap should exist")
 }

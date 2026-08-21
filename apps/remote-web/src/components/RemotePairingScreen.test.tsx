@@ -28,21 +28,23 @@ afterEach(() => {
 describe('RemotePairingScreen', () => {
   it('labels the pairing code field', () => {
     renderScreen()
-    const field = screen.getByLabelText('Pairing code')
+    const field = screen.getByLabelText('Secure pairing code')
     expect(field).toHaveValue('ABCD1234')
     expect(field.closest('.fd-safe-area-padded')).toBeInTheDocument()
   })
 
   it('submits on Enter from the code field', () => {
     const { onConnect } = renderScreen()
-    fireEvent.submit(screen.getByLabelText('Pairing code').closest('form')!)
+    fireEvent.submit(screen.getByLabelText('Secure pairing code').closest('form')!)
     expect(onConnect).toHaveBeenCalledTimes(1)
   })
 
-  it('uppercases what the user types', () => {
+  it('uppercases only the human-readable prefix and preserves the authority secret', () => {
     const { props } = renderScreen({ pairingCode: '' })
-    fireEvent.change(screen.getByLabelText('Pairing code'), { target: { value: 'abcd' } })
-    expect(props.onPairingCodeChange).toHaveBeenCalledWith('ABCD')
+    fireEvent.change(screen.getByLabelText('Secure pairing code'), {
+      target: { value: 'abcd.AbCd_-90' },
+    })
+    expect(props.onPairingCodeChange).toHaveBeenCalledWith('ABCD.AbCd_-90')
   })
 
   it('will not submit without a code', () => {

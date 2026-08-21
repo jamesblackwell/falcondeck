@@ -3,14 +3,18 @@
 FalconDeck ships pointed at the hosted relay, `https://connect.falcondeck.com`.
 Every client (desktop, iOS, remote web) and every enrolled server daemon can
 instead use a relay you run yourself — the relay is a single Rust binary with
-no external dependencies, and because every payload is end-to-end encrypted
-between your devices, the relay operator (you, or us) can never read message
-content either way. Self-hosting is about custody and availability, not an
-extra security tier.
+no mandatory external dependencies. Payloads are end-to-end encrypted between
+your devices, and the QR/link-only pairing authority prevents an active relay
+from silently substituting endpoint keys. A relay operator still sees routing
+metadata and controls availability and retained replay, so self-hosting is
+primarily about custody, metadata, and availability rather than message-content
+confidentiality.
 
 ## What the relay does
 
-- Brokers pairing between daemons and devices (challenge-signed claims).
+- Brokers pairing between daemons and devices. Relay challenges prove client
+  key possession, while a secret present only in the desktop QR/link
+  authenticates both endpoint key bundles.
 - Stores an encrypted, sequence-numbered update log per session so clients
   can disconnect and replay what they missed.
 - Forwards encrypted RPC calls from clients to the owning daemon.
@@ -19,9 +23,10 @@ extra security tier.
 - Serves `/dist/` — prebuilt daemon binaries used by the desktop app's
   one-click server provisioning.
 
-It never sees plaintext: updates, RPC params, and results are sealed with a
-per-session data key exchanged between your devices via NaCl box; the relay
-stores and forwards ciphertext.
+It never sees message plaintext: updates, RPC params, and results are sealed
+with a per-session data key exchanged between your devices via NaCl box; the
+relay stores and forwards ciphertext. Device revocation rotates that data key
+for the remaining trusted devices.
 
 ## Running it
 
@@ -36,6 +41,16 @@ FALCONDECK_RELAY_STATE_DIR=/var/lib/falcondeck-relay \
 Put TLS in front of it (Caddy, nginx, or a cloud load balancer) — clients
 require `https://` in production. WebSockets must be forwarded
 (`/v1/updates/ws`).
+
+Set `FALCONDECK_RELAY_CORS_ORIGINS` to a comma-separated list of the browser
+origins allowed to call the relay. Native clients are unaffected by CORS. The
+file-backed state is written atomically with mode `0600`, and bearer tokens are
+stored as SHA-256 verifiers rather than reusable plaintext credentials.
+
+The built-in Postgres client currently permits only loopback or Unix-socket
+database hosts because it uses a non-TLS connection. Keep Postgres co-located;
+remote database URLs fail closed instead of sending relay credentials over an
+unencrypted network.
 
 The repo's own deployment is a working reference: `deploy.sh` +
 `ansible/` provision the hosted relay (systemd unit, nginx TLS termination,
@@ -82,6 +97,12 @@ this) with `FALCONDECK_STATE_PATH` and `FALCONDECK_SECRET_FILE` set under
   fresh snapshot, not re-pair).
 - Multiple FalconDeck installs can share one relay; sessions are isolated by
   pairing-derived keys.
+- Treat the complete QR/link pairing grant as a secret. The short relay lookup
+  code alone is intentionally insufficient, and older incomplete codes must be
+  replaced by starting a fresh pairing.
+- The hosted remote web client keeps the box key and session data key in
+  per-tab `sessionStorage`; closing the tab requires fresh pairing. Durable
+  `localStorage` contains routing/session metadata and the bearer token only.
 - Push delivery is disabled by setting `FALCONDECK_RELAY_EXPO_PUSH_URL` to an
   empty value. By default the relay sends through Expo, which handles the
   APNs/FCM provider credentials associated with the mobile app. Set

@@ -227,7 +227,7 @@ export default function PairScreen() {
                 <View style={styles.divider}>
                   <View style={styles.dividerLine} />
                   <Text variant="caption" color="muted" size="2xs">
-                    OR ENTER CODE
+                    OR PASTE SECURE CODE
                   </Text>
                   <View style={styles.dividerLine} />
                 </View>
@@ -235,10 +235,10 @@ export default function PairScreen() {
                 <Input
                   value={pairingCode}
                   onChangeText={setPairingCode}
-                  placeholder="Pairing code"
-                  accessibilityLabel="Pairing code"
-                  accessibilityHint="Enter the code shown by FalconDeck on your desktop"
-                  autoCapitalize="characters"
+                  placeholder="Secure pairing code"
+                  accessibilityLabel="Secure pairing code"
+                  accessibilityHint="Paste the complete secure code shown by FalconDeck on your desktop"
+                  autoCapitalize="none"
                   autoCorrect={false}
                   style={styles.codeInput}
                 />

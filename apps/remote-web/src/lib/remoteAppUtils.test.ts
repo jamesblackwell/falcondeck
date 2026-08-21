@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { DaemonSnapshot } from '@falcondeck/client-core'
+import {
+  generateBoxKeyPair,
+  REMOTE_SESSION_STORAGE_VERSION,
+  secretKeyToBase64,
+  type DaemonSnapshot,
+} from '@falcondeck/client-core'
 
 import {
   AwaitedActionTimeoutError,
@@ -11,8 +16,10 @@ import {
   deriveConnectionHelpState,
   loadPersistedRemoteSnapshot,
   loadNotificationPreference,
+  loadPersistedRemoteSession,
   loadPersistedSelection,
   persistNotificationPreference,
+  persistRemoteSession,
   persistRemoteSnapshot,
   persistSelection,
   postThreadNotification,
@@ -23,6 +30,90 @@ import {
   snapshotRetryDelayMs,
   urlWithoutPairingParams,
 } from './remoteAppUtils'
+
+afterEach(() => {
+  window.localStorage.clear()
+  window.sessionStorage.clear()
+})
+
+describe('remote session secret persistence', () => {
+  it('keeps cryptographic keys out of durable localStorage', () => {
+    const clientSecretKey = secretKeyToBase64(generateBoxKeyPair())
+    const dataKey = 'data-key-material'
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: 'PAIR-CODE',
+      sessionId: 'session-1',
+      clientToken: 'client-token',
+      clientSecretKey,
+      dataKey,
+    })
+
+    const durable = window.localStorage.getItem('falcondeck.remote.session.v1') ?? ''
+    expect(durable).not.toContain(clientSecretKey)
+    expect(durable).not.toContain(dataKey)
+    expect(durable).not.toContain('PAIR-CODE')
+    expect(loadPersistedRemoteSession()).toMatchObject({ clientSecretKey, dataKey })
+  })
+
+  it('does not resume durable metadata after tab secrets are gone', () => {
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-1',
+      clientToken: 'client-token',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    window.sessionStorage.clear()
+
+    expect(loadPersistedRemoteSession()).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).not.toBeNull()
+  })
+
+  it('never combines another tab session metadata with stale cryptographic keys', () => {
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-1',
+      clientToken: 'client-token-1',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    const staleSecrets = window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')
+
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-2',
+      clientToken: 'client-token-2',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    window.sessionStorage.setItem('falcondeck.remote.session-secrets.v1', staleSecrets!)
+
+    expect(loadPersistedRemoteSession()).toBeNull()
+    expect(window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).toContain('session-2')
+  })
+
+  it('discards corrupt tab secrets without erasing shared durable metadata', () => {
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-1',
+      clientToken: 'client-token',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    window.sessionStorage.setItem('falcondeck.remote.session-secrets.v1', '{not-json')
+
+    expect(loadPersistedRemoteSession()).toBeNull()
+    expect(window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).toContain('session-1')
+  })
+})
 
 describe('snapshotRetryDelayMs', () => {
   it.each([

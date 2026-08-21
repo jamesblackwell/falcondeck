@@ -23,6 +23,7 @@ import {
   DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
   decryptJsonBatch,
+  decodeSecurePairingCode,
   deriveThreadAttentionPresentation,
   deriveExtensionPanels,
   deriveExtensionSidebarFilters,
@@ -46,6 +47,7 @@ import {
   mergeFailedComposerDraft,
   mergeThreadDetailPage,
   normalizeDaemonSnapshot,
+  normalizeRelayUrl,
   normalizePreferences,
   normalizeThreadDetail,
   normalizeThreadHandle,
@@ -65,6 +67,7 @@ import {
   resolveRelayTruncationCursor,
   resolveServiceTier,
   restoreBoxKeyPair,
+  tryNormalizeRelayUrl,
   relayReconnectDelayMs,
   selectedSkillsFromText,
   serviceTierForTurn,
@@ -80,8 +83,10 @@ import {
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
   signPairingClaimChallenge,
+  signPairingAuthorityClientBundle,
   REMOTE_SESSION_STORAGE_VERSION,
   verifyPairingPublicKeyBundle,
+  verifyPairingAuthorityDaemonBundle,
   verifySessionKeyMaterial,
   workspaceAgentCapabilities,
   threadAgentCapabilities,
@@ -317,11 +322,13 @@ function RemoteApp() {
   // durable relay state, so the persisted relay cursor remains authoritative
   // for replay and prevents skipped conversation/action updates.
   const initialReplayCursor = persistedSession?.lastReceivedSeq ?? 0;
-  const [relayUrl, setRelayUrl] = useState(
-    params.get("relay") ??
-      persistedSession?.relayUrl ??
-      import.meta.env.VITE_FALCONDECK_RELAY_URL ??
-      "https://connect.falcondeck.com",
+  const [relayUrl, setRelayUrl] = useState(() =>
+    tryNormalizeRelayUrl(
+      params.get("relay") ??
+        persistedSession?.relayUrl ??
+        import.meta.env.VITE_FALCONDECK_RELAY_URL ??
+        DEFAULT_REMOTE_RELAY_URL,
+    ) ?? DEFAULT_REMOTE_RELAY_URL,
   );
   const [pairingCode, setPairingCode] = useState(
     params.get("code") ?? persistedSession?.pairingCode ?? "",
@@ -767,6 +774,7 @@ function RemoteApp() {
     restoredSelectionRef.current = false;
     clearPendingActionIds();
     window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
+    window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
     setPairingId(null);
     setSessionId(null);
     setDeviceId(null);
@@ -913,7 +921,7 @@ function RemoteApp() {
         clientKeyPairRef.current = restoreBoxKeyPair(
           initialPersistedSession.clientSecretKey,
         );
-        window.localStorage.setItem(
+        window.sessionStorage.setItem(
           CLIENT_KEYPAIR_STORAGE_KEY,
           initialPersistedSession.clientSecretKey,
         );
@@ -2384,10 +2392,12 @@ function RemoteApp() {
     suppressReconnectRef.current = false;
     abortPendingActionPolls();
     const keyPair = clientKeyPairRef.current ?? generateBoxKeyPair();
-    const relayBase = relayUrl.replace(/\/$/, "");
-    // The relay normalizes pairing codes to uppercase; sign the exact string
-    // the relay verifies against.
-    const normalizedPairingCode = pairingCode.trim().toUpperCase();
+    const relayBase = normalizeRelayUrl(relayUrl);
+    setRelayUrl(relayBase);
+    const {
+      pairingCode: normalizedPairingCode,
+      authoritySecret,
+    } = decodeSecurePairingCode(pairingCode);
 
     // Claims are challenge-bound: fetch a single-use challenge and prove
     // possession of the identity secret key by signing it.
@@ -2417,17 +2427,24 @@ function RemoteApp() {
       return;
     }
 
+    const clientBundle = buildPairingPublicKeyBundle(keyPair);
     const response = await fetchWithTimeout(`${relayBase}/v1/pairings/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         pairing_code: normalizedPairingCode,
         label: getDeviceLabel(),
-        client_bundle: buildPairingPublicKeyBundle(keyPair),
+        client_bundle: clientBundle,
         challenge_signature: signPairingClaimChallenge(
           keyPair,
           normalizedPairingCode,
           challenge.challenge,
+        ),
+        pairing_authority_signature: signPairingAuthorityClientBundle(
+          authoritySecret,
+          normalizedPairingCode,
+          challenge.challenge,
+          clientBundle,
         ),
       } satisfies ClaimPairingRequest),
     });
@@ -2443,6 +2460,10 @@ function RemoteApp() {
       setError("Relay claim response is missing daemon key material");
       return;
     }
+    if (!claim.pairing_authority) {
+      setError("Relay claim response is missing secure pairing authority");
+      return;
+    }
     try {
       verifyPairingPublicKeyBundle(claim.daemon_bundle);
     } catch (e) {
@@ -2453,8 +2474,24 @@ function RemoteApp() {
       );
       return;
     }
+    try {
+      verifyPairingAuthorityDaemonBundle(
+        authoritySecret,
+        claim.pairing_authority.public_key,
+        claim.daemon_bundle,
+        claim.pairing_authority.daemon_bundle_signature,
+      );
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : "Relay claim response failed secure pairing verification",
+      );
+      return;
+    }
     clientKeyPairRef.current = keyPair;
-    window.localStorage.setItem(
+    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
+    window.sessionStorage.setItem(
       CLIENT_KEYPAIR_STORAGE_KEY,
       secretKeyToBase64(keyPair),
     );
@@ -2482,6 +2519,7 @@ function RemoteApp() {
     setSessionId(claim.session_id);
     setDeviceId(claim.device_id);
     setClientToken(claim.client_token);
+    setPairingCode("");
     lastReceivedSeqRef.current = 0;
     setMachinePresence(null);
     setSnapshot(null);
@@ -2491,8 +2529,8 @@ function RemoteApp() {
     setError(null);
     persistRemoteSession({
       version: REMOTE_SESSION_STORAGE_VERSION,
-      relayUrl: relayUrl.trim(),
-      pairingCode: pairingCode.trim(),
+      relayUrl: relayBase,
+      pairingCode: "",
       pairingId: claim.pairing_id,
       sessionId: claim.session_id,
       deviceId: claim.device_id,

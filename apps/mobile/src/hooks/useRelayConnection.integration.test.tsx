@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   buildPairingPublicKeyBundle,
   generateBoxKeyPair,
+  signPairingAuthorityDaemonBundle,
   type EncryptedEnvelope,
 } from '@falcondeck/client-core'
 
@@ -23,6 +24,11 @@ import { useRelayConnection } from './useRelayConnection'
 const originalFailPendingRpcs = useRelayStore.getState()._failPendingRpcs
 const originalDecryptJson = useRelayStore.getState()._decryptJson
 const originalCallRpc = useRelayStore.getState()._callRpc
+const TEST_AUTHORITY_SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
+
+function securePairingCode(code: string) {
+  return `${code}.${TEST_AUTHORITY_SECRET}`
+}
 
 class TestWebSocket {
   static readonly CONNECTING = 0
@@ -48,6 +54,8 @@ class TestWebSocket {
 }
 
 function claimResponse(index: number) {
+  const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
+  const authority = signPairingAuthorityDaemonBundle(TEST_AUTHORITY_SECRET, daemonBundle)
   return {
     pairing_id: `pairing-${index}`,
     session_id: `session-${index}`,
@@ -62,7 +70,11 @@ function claimResponse(index: number) {
       last_seen_at: '2026-08-09T12:00:00Z',
       revoked_at: null,
     },
-    daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
+    daemon_bundle: daemonBundle,
+    pairing_authority: {
+      public_key: authority.publicKey,
+      daemon_bundle_signature: authority.signature,
+    },
   }
 }
 
@@ -135,7 +147,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('CONNECT-TIMEOUT')
+    useRelayStore.getState().setPairingCode(securePairingCode('CONNECT-TIMEOUT'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -197,7 +209,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('FIRST')
+    useRelayStore.getState().setPairingCode(securePairingCode('FIRST'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -218,7 +230,7 @@ describe('useRelayConnection session rotation', () => {
       }),
     )
 
-    useRelayStore.getState().setPairingCode('SECOND')
+    useRelayStore.getState().setPairingCode(securePairingCode('SECOND'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -265,7 +277,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('FIRST')
+    useRelayStore.getState().setPairingCode(securePairingCode('FIRST'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -278,7 +290,7 @@ describe('useRelayConnection session rotation', () => {
       )
     })
 
-    useRelayStore.getState().setPairingCode('SECOND')
+    useRelayStore.getState().setPairingCode(securePairingCode('SECOND'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -325,7 +337,7 @@ describe('useRelayConnection session rotation', () => {
     vi.stubGlobal('requestAnimationFrame', requestFrame)
     vi.stubGlobal('cancelAnimationFrame', cancelFrame)
 
-    useRelayStore.getState().setPairingCode('FIRST')
+    useRelayStore.getState().setPairingCode(securePairingCode('FIRST'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -369,7 +381,7 @@ describe('useRelayConnection session rotation', () => {
     })
     expect(queuedFrame).not.toBeNull()
 
-    useRelayStore.getState().setPairingCode('SECOND')
+    useRelayStore.getState().setPairingCode(securePairingCode('SECOND'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -411,7 +423,7 @@ describe('useRelayConnection session rotation', () => {
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
 
-    useRelayStore.getState().setPairingCode('FRAME')
+    useRelayStore.getState().setPairingCode(securePairingCode('FRAME'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -517,7 +529,7 @@ describe('useRelayConnection session rotation', () => {
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
 
-    useRelayStore.getState().setPairingCode('SNAPSHOT-RACE')
+    useRelayStore.getState().setPairingCode(securePairingCode('SNAPSHOT-RACE'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -641,7 +653,7 @@ describe('useRelayConnection session rotation', () => {
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
 
-    useRelayStore.getState().setPairingCode('TRUNCATED')
+    useRelayStore.getState().setPairingCode(securePairingCode('TRUNCATED'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -719,7 +731,7 @@ describe('useRelayConnection session rotation', () => {
     }))
     vi.stubGlobal('cancelAnimationFrame', vi.fn())
 
-    useRelayStore.getState().setPairingCode('PRESENCE')
+    useRelayStore.getState().setPairingCode(securePairingCode('PRESENCE'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -795,7 +807,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('WARM-START')
+    useRelayStore.getState().setPairingCode(securePairingCode('WARM-START'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -863,7 +875,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('FLAP-RETRY')
+    useRelayStore.getState().setPairingCode(securePairingCode('FLAP-RETRY'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })
@@ -947,7 +959,7 @@ describe('useRelayConnection session rotation', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    useRelayStore.getState().setPairingCode('DEFERRED')
+    useRelayStore.getState().setPairingCode(securePairingCode('DEFERRED'))
     await act(async () => {
       await useRelayStore.getState().claimPairing()
     })

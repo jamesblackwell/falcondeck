@@ -4,7 +4,10 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::{RngCore, rngs::OsRng};
@@ -283,6 +286,167 @@ fn pairing_claim_challenge_signing_payload(pairing_code: &str, challenge: &str) 
     format!("falcondeck-pairing-claim-v1\n{pairing_code}\n{challenge}").into_bytes()
 }
 
+fn pairing_authority_daemon_bundle_payload(
+    authority_public_key: &str,
+    bundle: &PairingPublicKeyBundle,
+) -> Vec<u8> {
+    format!(
+        "falcondeck-pairing-authority-daemon-v1\n{authority_public_key}\ndata_key_v1\ned25519_v1\n{}\n{}",
+        bundle.public_key, bundle.identity_public_key
+    )
+    .into_bytes()
+}
+
+fn pairing_authority_client_bundle_payload(
+    pairing_code: &str,
+    challenge: &str,
+    bundle: &PairingPublicKeyBundle,
+) -> Vec<u8> {
+    format!(
+        "falcondeck-pairing-authority-client-v1\n{pairing_code}\n{challenge}\ndata_key_v1\ned25519_v1\n{}\n{}",
+        bundle.public_key, bundle.identity_public_key
+    )
+    .into_bytes()
+}
+
+fn pairing_authority_inputs_are_malformed(values: &[&str]) -> bool {
+    values
+        .iter()
+        .any(|value| value.is_empty() || value.contains(['\n', '\r']))
+}
+
+fn pairing_authority_identity(secret: &str) -> Result<LocalIdentityKeyPair, CryptoError> {
+    let bytes = BASE64_URL
+        .decode(secret)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+    let seed = <[u8; DATA_KEY_LEN]>::try_from(bytes.as_slice())
+        .map_err(|_| CryptoError::InvalidKeyMaterial)?;
+    Ok(LocalIdentityKeyPair::from_seed(&seed))
+}
+
+/// Generates the QR/link-only secret used to authenticate both sides of a
+/// pairing independently of the relay.
+pub fn generate_pairing_authority_secret() -> String {
+    let mut secret = [0u8; DATA_KEY_LEN];
+    OsRng.fill_bytes(&mut secret);
+    BASE64_URL.encode(secret)
+}
+
+/// Returns the public authority key derived from a pairing secret.
+pub fn pairing_authority_public_key(secret: &str) -> Result<String, CryptoError> {
+    Ok(pairing_authority_identity(secret)?
+        .public_key_base64()
+        .to_string())
+}
+
+/// Appends the QR/link-only authority secret to the short relay lookup code.
+pub fn encode_secure_pairing_code(pairing_code: &str, authority_secret: &str) -> String {
+    format!("{pairing_code}.{authority_secret}")
+}
+
+/// Splits a secure pairing grant into the short relay lookup code and the
+/// out-of-band authority secret.
+pub fn decode_secure_pairing_code(value: &str) -> Result<(String, String), CryptoError> {
+    let (pairing_code, authority_secret) = value
+        .trim()
+        .split_once('.')
+        .ok_or(CryptoError::InvalidKeyMaterial)?;
+    if pairing_authority_inputs_are_malformed(&[pairing_code, authority_secret]) {
+        return Err(CryptoError::InvalidKeyMaterial);
+    }
+    // Fully validate the secret now so malformed grants fail before network
+    // requests are made.
+    pairing_authority_identity(authority_secret)?;
+    Ok((pairing_code.to_uppercase(), authority_secret.to_string()))
+}
+
+/// Signs the daemon bundle with the QR/link pairing authority.
+pub fn sign_pairing_authority_daemon_bundle(
+    authority_secret: &str,
+    bundle: &PairingPublicKeyBundle,
+) -> Result<String, CryptoError> {
+    let identity = pairing_authority_identity(authority_secret)?;
+    Ok(
+        identity.sign_bytes(&pairing_authority_daemon_bundle_payload(
+            identity.public_key_base64(),
+            bundle,
+        )),
+    )
+}
+
+/// Verifies the QR/link authority signature on a daemon bundle.
+pub fn verify_pairing_authority_daemon_bundle(
+    authority_public_key: &str,
+    bundle: &PairingPublicKeyBundle,
+    signature: &str,
+) -> Result<(), CryptoError> {
+    if pairing_authority_inputs_are_malformed(&[
+        authority_public_key,
+        &bundle.public_key,
+        &bundle.identity_public_key,
+        signature,
+    ]) {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let public_key = decode_signing_public_key(authority_public_key)?;
+    let signature = decode_signature(signature)?;
+    public_key
+        .verify(
+            &pairing_authority_daemon_bundle_payload(authority_public_key, bundle),
+            &signature,
+        )
+        .map_err(|_| CryptoError::InvalidSignature)
+}
+
+/// Signs a client bundle and relay challenge with the QR/link authority.
+pub fn sign_pairing_authority_client_bundle(
+    authority_secret: &str,
+    pairing_code: &str,
+    challenge: &str,
+    bundle: &PairingPublicKeyBundle,
+) -> Result<String, CryptoError> {
+    if pairing_authority_inputs_are_malformed(&[
+        pairing_code,
+        challenge,
+        &bundle.public_key,
+        &bundle.identity_public_key,
+    ]) {
+        return Err(CryptoError::InvalidSignature);
+    }
+    Ok(pairing_authority_identity(authority_secret)?.sign_bytes(
+        &pairing_authority_client_bundle_payload(pairing_code, challenge, bundle),
+    ))
+}
+
+/// Verifies that the QR/link pairing authority approved this exact client
+/// bundle for the relay-issued challenge.
+pub fn verify_pairing_authority_client_bundle(
+    authority_public_key: &str,
+    pairing_code: &str,
+    challenge: &str,
+    bundle: &PairingPublicKeyBundle,
+    signature: &str,
+) -> Result<(), CryptoError> {
+    if pairing_authority_inputs_are_malformed(&[
+        authority_public_key,
+        pairing_code,
+        challenge,
+        &bundle.public_key,
+        &bundle.identity_public_key,
+        signature,
+    ]) {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let public_key = decode_signing_public_key(authority_public_key)?;
+    let signature = decode_signature(signature)?;
+    public_key
+        .verify(
+            &pairing_authority_client_bundle_payload(pairing_code, challenge, bundle),
+            &signature,
+        )
+        .map_err(|_| CryptoError::InvalidSignature)
+}
+
 /// The claim payload joins its fields with `\n`; a pairing code or challenge
 /// embedding CR/LF would let one signature verify for a different
 /// `(code, challenge)` pair, so such inputs must never be signed or accepted.
@@ -541,6 +705,71 @@ mod tests {
     }
 
     #[test]
+    fn pairing_authority_binds_both_key_bundles_without_revealing_its_secret() {
+        let secret = generate_pairing_authority_secret();
+        let authority_public_key = pairing_authority_public_key(&secret).unwrap();
+        assert!(!authority_public_key.contains(&secret));
+
+        let daemon_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+        let daemon_signature =
+            sign_pairing_authority_daemon_bundle(&secret, &daemon_bundle).unwrap();
+        verify_pairing_authority_daemon_bundle(
+            &authority_public_key,
+            &daemon_bundle,
+            &daemon_signature,
+        )
+        .unwrap();
+
+        let client_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+        let client_signature = sign_pairing_authority_client_bundle(
+            &secret,
+            "PAIRCODE1234",
+            "challenge",
+            &client_bundle,
+        )
+        .unwrap();
+        verify_pairing_authority_client_bundle(
+            &authority_public_key,
+            "PAIRCODE1234",
+            "challenge",
+            &client_bundle,
+            &client_signature,
+        )
+        .unwrap();
+
+        let attacker_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+        assert!(
+            verify_pairing_authority_daemon_bundle(
+                &authority_public_key,
+                &attacker_bundle,
+                &daemon_signature,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_pairing_authority_client_bundle(
+                &authority_public_key,
+                "PAIRCODE1234",
+                "challenge",
+                &attacker_bundle,
+                &client_signature,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn secure_pairing_code_round_trips_and_rejects_missing_authority() {
+        let secret = generate_pairing_authority_secret();
+        let grant = encode_secure_pairing_code("PAIRCODE1234", &secret);
+        assert_eq!(
+            decode_secure_pairing_code(&grant).unwrap(),
+            ("PAIRCODE1234".to_string(), secret)
+        );
+        assert!(decode_secure_pairing_code("PAIRCODE1234").is_err());
+    }
+
+    #[test]
     fn wrapped_data_key_round_trip() {
         let _daemon = LocalBoxKeyPair::generate();
         let client = LocalBoxKeyPair::generate();
@@ -717,6 +946,38 @@ mod tests {
                 &signature,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn pairing_authority_matches_the_typescript_cross_language_vector() {
+        let authority_secret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let daemon =
+            LocalBoxKeyPair::from_secret_key_base64("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+                .unwrap();
+        let client =
+            LocalBoxKeyPair::from_secret_key_base64("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=")
+                .unwrap();
+        let daemon_bundle = build_pairing_public_key_bundle(&daemon);
+        let client_bundle = build_pairing_public_key_bundle(&client);
+
+        assert_eq!(
+            pairing_authority_public_key(authority_secret).unwrap(),
+            "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik="
+        );
+        assert_eq!(
+            sign_pairing_authority_daemon_bundle(authority_secret, &daemon_bundle).unwrap(),
+            "wCrI7qKJO0uifk2BqDXX8ZfxfDNk0yf/E4ozPZe02COc9CvyO+LT1M/n8PzWxwr1r4e+O4JllSXRAv6KcHB/Ag=="
+        );
+        assert_eq!(
+            sign_pairing_authority_client_bundle(
+                authority_secret,
+                "PAIRCODE",
+                "Q0hBTExFTkdF",
+                &client_bundle,
+            )
+            .unwrap(),
+            "DVq/C16oRCP/BgAGVEJm1wvVWk4GGcQvkFfDfsQOYDVowyvvopxP3v+dh3KwFYzX/lbNUs73c55mZIhq4YI6CA=="
         );
     }
 

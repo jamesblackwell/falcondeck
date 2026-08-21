@@ -19,6 +19,8 @@ import {
   identityPublicKeyToBase64,
   deriveIdentityKeyPair,
   secretKeyToBase64,
+  decodeSecurePairingCode,
+  signPairingAuthorityClientBundle,
   signPairingClaimChallenge,
   bootstrapSessionCrypto,
   encryptJson,
@@ -26,9 +28,12 @@ import {
   bytesToBase64,
   base64ToBytes,
   verifyPairingPublicKeyBundle,
+  verifyPairingAuthorityDaemonBundle,
   verifySessionKeyMaterial,
   RELAY_RPC_TIMEOUT_MS,
   relayRpcFailureMessage,
+  normalizeRelayUrl,
+  normalizePairingCodeInput,
   REMOTE_SESSION_STORAGE_VERSION,
   type ClaimPairingRequest,
   type ClaimPairingResponse,
@@ -243,7 +248,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   syncDiagnostics: emptySyncDiagnostics(),
 
   setRelayUrl: (url) => set({ relayUrl: url }),
-  setPairingCode: (code) => set({ pairingCode: code.toUpperCase() }),
+  setPairingCode: (code) => set({ pairingCode: normalizePairingCodeInput(code) }),
 
   claimPairing: async () => {
     const { relayUrl, pairingCode } = get()
@@ -265,10 +270,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     }
 
     try {
-      const relayBase = relayUrl.replace(/\/$/, '')
-      // The relay normalizes pairing codes to uppercase; sign the exact
-      // string the relay verifies against.
-      const normalizedPairingCode = pairingCode.trim().toUpperCase()
+      const relayBase = normalizeRelayUrl(relayUrl)
+      const {
+        pairingCode: normalizedPairingCode,
+        authoritySecret,
+      } = decodeSecurePairingCode(pairingCode)
 
       // Claims are challenge-bound: fetch a single-use challenge and prove
       // possession of the identity secret key by signing it.
@@ -307,6 +313,12 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
           label: Device.deviceName ?? `FalconDeck ${Platform.OS === 'ios' ? 'iPhone' : 'Android'}`,
           client_bundle: clientBundle,
           challenge_signature: signPairingClaimChallenge(keyPair, normalizedPairingCode, challenge.challenge),
+          pairing_authority_signature: signPairingAuthorityClientBundle(
+            authoritySecret,
+            normalizedPairingCode,
+            challenge.challenge,
+            clientBundle,
+          ),
         } satisfies ClaimPairingRequest),
       })
 
@@ -329,7 +341,16 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       if (!claim.daemon_bundle) {
         throw new Error('Relay claim response is missing daemon key material')
       }
+      if (!claim.pairing_authority) {
+        throw new Error('Relay claim response is missing secure pairing authority')
+      }
       verifyPairingPublicKeyBundle(claim.daemon_bundle)
+      verifyPairingAuthorityDaemonBundle(
+        authoritySecret,
+        claim.pairing_authority.public_key,
+        claim.daemon_bundle,
+        claim.pairing_authority.daemon_bundle_signature,
+      )
 
       // Persist to secure storage. Any stored data key belongs to the
       // previous session and must not survive into this pairing; the
@@ -353,8 +374,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       // Persist non-secret session data to MMKV
       setJson('relay.session', {
         version: REMOTE_SESSION_STORAGE_VERSION,
-        relayUrl: relayUrl.trim(),
-        pairingCode: pairingCode.trim(),
+        relayUrl: relayBase,
+        pairingCode: '',
         pairingId: claim.pairing_id,
         sessionId: claim.session_id,
         deviceId: claim.device_id,
@@ -364,6 +385,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       } satisfies PersistedRelay)
 
       set({
+        relayUrl: relayBase,
+        pairingCode: '',
         sessionId: claim.session_id,
         deviceId: claim.device_id,
         connectionStatus: 'connecting',
@@ -449,6 +472,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     }
 
     try {
+      const relayUrl = normalizeRelayUrl(persisted.relayUrl)
       _clientKeyPair = restoreBoxKeyPair(secretKey)
       _clientToken = clientToken
       _lastReceivedSeq = persisted.lastReceivedSeq ?? 0
@@ -461,7 +485,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         : null
 
       set({
-        relayUrl: persisted.relayUrl,
+        relayUrl,
         pairingCode: persisted.pairingCode,
         sessionId: persisted.sessionId,
         deviceId: persisted.deviceId,

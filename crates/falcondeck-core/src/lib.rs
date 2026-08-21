@@ -4287,6 +4287,17 @@ pub struct PairingPublicKeyBundle {
     pub signature: String,
 }
 
+/// Out-of-band authority that binds a daemon key bundle to the pairing grant.
+/// The secret half is carried only in the QR/link; the relay sees this public
+/// verification material but cannot mint a replacement daemon or client key.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingAuthority {
+    /// Ed25519 public key derived from the QR/link pairing secret.
+    pub public_key: String,
+    /// Authority signature binding the daemon public-key bundle.
+    pub daemon_bundle_signature: String,
+}
+
 /// Encrypted data key for a specific pairing participant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WrappedDataKey {
@@ -4378,6 +4389,9 @@ pub struct StartPairingRequest {
     pub daemon_token: Option<String>,
     /// Optional daemon public key bundle.
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
+    /// Public verification material for the out-of-band pairing secret.
+    #[serde(default)]
+    pub pairing_authority: Option<PairingAuthority>,
 }
 
 /// Response returned after creating a relay pairing.
@@ -4423,6 +4437,10 @@ pub struct ClaimPairingRequest {
     /// Base64-encoded Ed25519 signature over the relay-issued claim
     /// challenge, proving possession of the bundle's identity secret key.
     pub challenge_signature: String,
+    /// Signature made with the QR/link pairing secret, binding the relay
+    /// challenge to this exact client key bundle.
+    #[serde(default)]
+    pub pairing_authority_signature: Option<String>,
 }
 
 /// Response returned after a client claims a pairing.
@@ -4440,6 +4458,9 @@ pub struct ClaimPairingResponse {
     pub trusted_device: TrustedDevice,
     /// Daemon public key bundle, if available.
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
+    /// Authority material used to authenticate the daemon bundle.
+    #[serde(default)]
+    pub pairing_authority: Option<PairingAuthority>,
 }
 
 /// Current status of a pairing code.
@@ -4461,6 +4482,15 @@ pub struct PairingStatusResponse {
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
     /// Client public key bundle, if available.
     pub client_bundle: Option<PairingPublicKeyBundle>,
+    /// Authority material used to authenticate the daemon bundle.
+    #[serde(default)]
+    pub pairing_authority: Option<PairingAuthority>,
+    /// Relay challenge signed by the pairing authority at claim time.
+    #[serde(default)]
+    pub claim_challenge: Option<String>,
+    /// Authority signature binding `claim_challenge` to `client_bundle`.
+    #[serde(default)]
+    pub pairing_authority_signature: Option<String>,
 }
 
 /// Lifecycle state of a pairing.

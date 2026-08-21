@@ -79,17 +79,17 @@ function PairingCard({
       </div>
 
       <div className="rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-3 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
+        <div className="flex items-start justify-between gap-3">
+          <div className="shrink-0">
             <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
-              Pairing code
+              Secure pairing code
             </p>
             <p className="mt-0.5 text-[length:var(--fd-text-2xs)] text-fg-muted">
-              Use this only if you need to type the code manually.
+              Paste the complete code if you cannot scan the QR.
             </p>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[length:var(--fd-text-sm)] font-semibold tracking-[0.2em] text-fg-primary">
+          <div className="flex min-w-0 items-start gap-1.5">
+            <span className="break-all text-right font-mono text-[length:var(--fd-text-xs)] font-semibold text-fg-primary">
               {code}
             </span>
             <CopyButton text={code} />

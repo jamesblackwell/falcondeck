@@ -1,9 +1,13 @@
 use chrono::Utc;
 use falcondeck_core::{
-    PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession,
-    RemoteStatusResponse, StartPairingRequest, StartPairingResponse, StartRemotePairingRequest,
+    PairingAuthority, PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus,
+    RemotePairingSession, RemoteStatusResponse, StartPairingRequest, StartPairingResponse,
+    StartRemotePairingRequest,
     crypto::{
-        LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key,
+        LocalBoxKeyPair, build_pairing_public_key_bundle, decode_secure_pairing_code,
+        encode_secure_pairing_code, generate_data_key, generate_pairing_authority_secret,
+        pairing_authority_public_key, sign_pairing_authority_daemon_bundle,
+        verify_pairing_authority_client_bundle, verify_pairing_authority_daemon_bundle,
         verify_pairing_public_key_bundle,
     },
 };
@@ -183,6 +187,7 @@ impl AppState {
         remote.last_error = None;
         remote.command_tx = None;
         remote.trusted_client_bundles.clear();
+        remote.trusted_client_devices.clear();
         remote.unresumed_remote = None;
     }
 
@@ -283,6 +288,24 @@ impl AppState {
                     None,
                 )
             };
+        let daemon_bundle = build_pairing_public_key_bundle(&local_key_pair);
+        let pairing_authority_secret = generate_pairing_authority_secret();
+        let pairing_authority = PairingAuthority {
+            public_key: pairing_authority_public_key(&pairing_authority_secret).map_err(
+                |error| {
+                    DaemonError::Rpc(format!("failed to build secure pairing authority: {error}"))
+                },
+            )?,
+            daemon_bundle_signature: sign_pairing_authority_daemon_bundle(
+                &pairing_authority_secret,
+                &daemon_bundle,
+            )
+            .map_err(|error| {
+                DaemonError::Rpc(format!(
+                    "failed to authenticate daemon pairing keys: {error}"
+                ))
+            })?,
+        };
         let response = client
             .post(format!("{relay_url}/v1/pairings"))
             .json(&StartPairingRequest {
@@ -290,7 +313,8 @@ impl AppState {
                 ttl_seconds: Some(600),
                 existing_session_id: existing_session_id.clone(),
                 daemon_token: existing_daemon_token.clone(),
-                daemon_bundle: Some(build_pairing_public_key_bundle(&local_key_pair)),
+                daemon_bundle: Some(daemon_bundle),
+                pairing_authority: Some(pairing_authority),
             })
             .send()
             .await
@@ -317,7 +341,10 @@ impl AppState {
         // claimed phone then hung on "Securing session…" forever.
         let new_pairing_state = RemotePairingState {
             pairing_id: pairing.pairing_id.clone(),
-            pairing_code: pairing.pairing_code.clone(),
+            pairing_code: encode_secure_pairing_code(
+                &pairing.pairing_code,
+                &pairing_authority_secret,
+            ),
             session_id: Some(pairing.session_id.clone()),
             device_id: None,
             trusted_at: None,
@@ -377,6 +404,7 @@ impl AppState {
                     // A brand-new pairing mints fresh key material; bundles
                     // trusted for the previous session must not carry over.
                     remote.trusted_client_bundles.clear();
+                    remote.trusted_client_devices.clear();
                 }
                 remote.pairing = Some(new_pairing_state.clone());
                 self.spawn_remote_bridge_locked(&mut remote, relay_url, pairing.daemon_token);
@@ -427,6 +455,111 @@ impl AppState {
             return Err(DaemonError::Rpc(
                 relay_request_error(response, "remote device revoke request").await,
             ));
+        }
+
+        let (rotation_command, rotation_completed) = {
+            let mut remote = self.inner.remote.lock().await;
+            let (pairing, client_bundles) = match rotate_remote_session_key(&mut remote, device_id)
+            {
+                Ok(rotation) => rotation,
+                Err(error) => {
+                    // Relay revocation has already succeeded. Stop the
+                    // bridge rather than risk publishing more ciphertext
+                    // under a key retained by the revoked device.
+                    if let Some(task) = remote.task.take() {
+                        task.abort();
+                    }
+                    remote.command_tx = None;
+                    remote.status = RemoteConnectionStatus::Error;
+                    remote.last_error = Some(error.to_string());
+                    return Err(error);
+                }
+            };
+            if let Some(command_tx) = remote.command_tx.clone() {
+                let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+                (
+                    Some((
+                        command_tx,
+                        RemoteBridgeCommand::RotateSessionKey {
+                            pairing: Box::new(pairing),
+                            client_bundles,
+                            completed: completed_tx,
+                        },
+                    )),
+                    Some(completed_rx),
+                )
+            } else {
+                (None, None)
+            }
+        };
+
+        // Durably replace the old data key before publishing any ciphertext
+        // under the new one. A crash can then only require re-bootstrap; it
+        // cannot silently restore the revoked device's key.
+        if let Err(error) = self.persist_local_state().await {
+            // Fail closed. Publishing with an undurable rotation could restore
+            // the revoked device's old key after a crash. Removing the secret
+            // store entry also prevents a stale on-disk metadata snapshot from
+            // reconnecting with that key after restart; the user can safely
+            // establish a fresh pairing once storage is healthy.
+            let secure_storage_key = {
+                let mut remote = self.inner.remote.lock().await;
+                if let Some(task) = remote.task.take() {
+                    task.abort();
+                }
+                remote.command_tx = None;
+                remote.status = RemoteConnectionStatus::Error;
+                remote.last_error = Some(format!(
+                    "Remote access stopped because the rotated session key could not be saved: {error}"
+                ));
+                remote.pairing.as_ref().map(|pairing| {
+                    remote_secret_storage_key(
+                        &relay_url,
+                        &pairing.pairing_id,
+                        pairing.session_id.as_deref(),
+                    )
+                })
+            };
+            if let Some(secure_storage_key) = secure_storage_key
+                && let Err(delete_error) = delete_remote_secrets_async(secure_storage_key).await
+            {
+                tracing::warn!(%delete_error, "failed to remove stale remote secrets after key-rotation persistence failure");
+            }
+            return Err(error);
+        }
+
+        let mut restart_for_rotation = false;
+        if let Some((command_tx, command)) = rotation_command {
+            if command_tx.send(command).is_err() {
+                restart_for_rotation = true;
+            } else if let Some(rotation_completed) = rotation_completed {
+                match tokio::time::timeout(Duration::from_secs(20), rotation_completed).await {
+                    Ok(Ok(Ok(()))) => {}
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(%error, "key rotation publish failed; restarting relay bridge");
+                        restart_for_rotation = true;
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        tracing::warn!(
+                            "key rotation publish did not complete; restarting relay bridge"
+                        );
+                        restart_for_rotation = true;
+                    }
+                }
+            }
+        } else {
+            restart_for_rotation = true;
+        }
+
+        if restart_for_rotation {
+            let mut remote = self.inner.remote.lock().await;
+            if let Some(task) = remote.task.take() {
+                task.abort();
+            }
+            remote.command_tx = None;
+            remote.status = RemoteConnectionStatus::Connecting;
+            remote.last_error = None;
+            self.spawn_remote_bridge_locked(&mut remote, relay_url, daemon_token);
         }
 
         Ok(self.remote_status().await)
@@ -511,6 +644,7 @@ impl AppState {
                         remote.daemon_token = None;
                         remote.pairing = None;
                         remote.trusted_client_bundles.clear();
+                        remote.trusted_client_devices.clear();
                     }
                     drop(remote);
                     let _ = self.persist_local_state().await;
@@ -602,7 +736,7 @@ impl AppState {
         &self,
         relay_url: String,
         daemon_token: String,
-        pairing: RemotePairingState,
+        mut pairing: RemotePairingState,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
         // If we already have a trusted device with a session, skip polling the
@@ -661,6 +795,8 @@ impl AppState {
                             "relay pairing returned an invalid client bundle: {error}"
                         ))
                     })?;
+                    verify_pairing_status_authority(&pairing, &response)
+                        .map_err(RemoteBridgeError::Persistent)?;
                 }
 
                 if response.status == falcondeck_core::PairingStatus::Expired {
@@ -701,18 +837,27 @@ impl AppState {
             }
         };
 
+        // The authority secret is a one-use pairing grant. Once the daemon has
+        // verified the claimed client, neither reconnect nor bootstrap needs
+        // it, so do not retain it in memory or persisted desktop state.
+        pairing.pairing_code.clear();
+
         {
             let mut remote = self.inner.remote.lock().await;
             remote.status = RemoteConnectionStatus::DeviceTrusted;
             if let Some(current_pairing) = remote.pairing.as_mut() {
                 current_pairing.device_id = Some(device_id.clone());
                 current_pairing.client_bundle = client_bundle.clone();
+                current_pairing.pairing_code.clear();
                 if current_pairing.trusted_at.is_none() {
                     current_pairing.trusted_at = Some(Utc::now());
                 }
             }
             if let Some(bundle) = client_bundle.as_ref() {
                 remember_trusted_client_bundle(&mut remote.trusted_client_bundles, bundle);
+                remote
+                    .trusted_client_devices
+                    .insert(device_id.clone(), bundle.clone());
             }
             remote.last_error = None;
         }
@@ -816,6 +961,25 @@ impl AppState {
                 continue;
             }
 
+            if response.client_bundle.is_some() {
+                let pending_pairing = {
+                    let remote = self.inner.remote.lock().await;
+                    remote
+                        .pending_pairing
+                        .as_ref()
+                        .filter(|pairing| pairing.pairing_id == pairing_id)
+                        .cloned()
+                };
+                let Some(pending_pairing) = pending_pairing else {
+                    return;
+                };
+                if let Err(error) = verify_pairing_status_authority(&pending_pairing, &response) {
+                    self.set_pairing_watch_error(&relay_url, &daemon_token, &pairing_id, error)
+                        .await;
+                    return;
+                }
+            }
+
             if !self
                 .pairing_watch_still_current(&relay_url, &daemon_token, &pairing_id)
                 .await
@@ -915,17 +1079,24 @@ impl AppState {
                                 &mut remote.trusted_client_bundles,
                                 &client_bundle,
                             );
+                            remote
+                                .trusted_client_devices
+                                .insert(device_id.clone(), client_bundle.clone());
                             (None, true)
                         } else {
                             let Some(current_pairing) = remote.pending_pairing.as_mut() else {
                                 return;
                             };
                             current_pairing.session_id = Some(session_id);
-                            current_pairing.device_id = Some(device_id);
+                            current_pairing.device_id = Some(device_id.clone());
                             current_pairing.client_bundle = Some(client_bundle.clone());
                             if current_pairing.trusted_at.is_none() {
                                 current_pairing.trusted_at = Some(Utc::now());
                             }
+                            // The signed claim has consumed the one-use
+                            // authority grant. Bootstrap only needs the key
+                            // bundles and session data key from here onward.
+                            current_pairing.pairing_code.clear();
                             let pairing_snapshot = current_pairing.clone();
                             remote.pending_pairing = None;
                             remote.pairing_watch_task = None;
@@ -933,6 +1104,9 @@ impl AppState {
                                 &mut remote.trusted_client_bundles,
                                 &client_bundle,
                             );
+                            remote
+                                .trusted_client_devices
+                                .insert(device_id, client_bundle.clone());
                             if let Some(command_tx) = remote.command_tx.clone() {
                                 remote.last_error = None;
                                 (
@@ -999,6 +1173,7 @@ impl AppState {
             DaemonError::BadRequest(format!("invalid persisted relay data key: {error}"))
         })?;
         let mut trusted_client_bundles = remote.trusted_client_bundles.clone();
+        let mut trusted_client_devices = remote.trusted_client_devices.clone();
         let pairing = RemotePairingState {
             pairing_id: remote.pairing_id,
             pairing_code: remote.pairing_code,
@@ -1016,6 +1191,9 @@ impl AppState {
         // installs persisted before the list existed keep keyless recovery.
         if let Some(bundle) = pairing.client_bundle.as_ref() {
             remember_trusted_client_bundle(&mut trusted_client_bundles, bundle);
+            if let Some(device_id) = pairing.device_id.as_ref() {
+                trusted_client_devices.insert(device_id.clone(), bundle.clone());
+            }
         }
 
         {
@@ -1035,6 +1213,7 @@ impl AppState {
             current.pairing = Some(pairing.clone());
             current.pending_pairing = None;
             current.trusted_client_bundles = trusted_client_bundles;
+            current.trusted_client_devices = trusted_client_devices;
             current.last_error = None;
             current.unresumed_remote = None;
             self.spawn_remote_bridge_locked(&mut current, relay_url, daemon_token);
@@ -1042,6 +1221,43 @@ impl AppState {
 
         Ok(())
     }
+}
+
+/// Removes every bootstrap route to a revoked device and rotates the shared
+/// data key. This is kept as one synchronous state transition so callers can
+/// persist and publish only internally consistent state.
+pub(super) fn rotate_remote_session_key(
+    remote: &mut RemoteBridgeState,
+    revoked_device_id: &str,
+) -> Result<(RemotePairingState, Vec<PairingPublicKeyBundle>), DaemonError> {
+    remote.trusted_client_devices.remove(revoked_device_id);
+    // The older vector had no device ids. Rebuild it solely from the indexed
+    // records so an unidentifiable legacy/revoked bundle can never receive
+    // the rotated key through request-bootstrap.
+    remote.trusted_client_bundles = remote.trusted_client_devices.values().cloned().collect();
+
+    let remaining_primary = remote
+        .trusted_client_devices
+        .iter()
+        .next()
+        .map(|(device_id, bundle)| (device_id.clone(), bundle.clone()));
+    let pairing = remote
+        .pairing
+        .as_mut()
+        .ok_or_else(|| DaemonError::Rpc("remote pairing state is missing".to_string()))?;
+    pairing.data_key = generate_data_key();
+    if pairing.device_id.as_deref() == Some(revoked_device_id) {
+        if let Some((remaining_device_id, remaining_bundle)) = remaining_primary {
+            pairing.device_id = Some(remaining_device_id);
+            pairing.client_bundle = Some(remaining_bundle);
+        } else {
+            // Keep the established session marker so the bridge can
+            // reconnect, but never re-bootstrap the revoked primary.
+            pairing.client_bundle = None;
+        }
+    }
+
+    Ok((pairing.clone(), remote.trusted_client_bundles.clone()))
 }
 
 impl RemotePairingState {
@@ -1053,6 +1269,56 @@ impl RemotePairingState {
             expires_at: self.expires_at,
         }
     }
+}
+
+fn verify_pairing_status_authority(
+    pairing: &RemotePairingState,
+    response: &PairingStatusResponse,
+) -> Result<(), String> {
+    let client_bundle = response
+        .client_bundle
+        .as_ref()
+        .ok_or_else(|| "relay pairing omitted client key material".to_string())?;
+    let (relay_pairing_code, authority_secret) = decode_secure_pairing_code(&pairing.pairing_code)
+        .map_err(|_| "pending pairing has no secure authority; start a new pairing".to_string())?;
+    let expected_authority_public_key = pairing_authority_public_key(&authority_secret)
+        .map_err(|error| format!("pending pairing authority is invalid: {error}"))?;
+    let authority = response
+        .pairing_authority
+        .as_ref()
+        .ok_or_else(|| "relay pairing omitted its secure authority".to_string())?;
+    if authority.public_key != expected_authority_public_key {
+        return Err("relay pairing returned an unexpected secure authority".to_string());
+    }
+    let daemon_bundle = response
+        .daemon_bundle
+        .as_ref()
+        .ok_or_else(|| "relay pairing omitted daemon key material".to_string())?;
+    verify_pairing_authority_daemon_bundle(
+        &authority.public_key,
+        daemon_bundle,
+        &authority.daemon_bundle_signature,
+    )
+    .map_err(|_| "relay pairing substituted daemon key material".to_string())?;
+    if daemon_bundle != &build_pairing_public_key_bundle(&pairing.local_key_pair) {
+        return Err("relay pairing daemon key material does not match this daemon".to_string());
+    }
+    let claim_challenge = response
+        .claim_challenge
+        .as_deref()
+        .ok_or_else(|| "relay pairing omitted the secure claim challenge".to_string())?;
+    let authority_signature = response
+        .pairing_authority_signature
+        .as_deref()
+        .ok_or_else(|| "relay pairing omitted the secure client proof".to_string())?;
+    verify_pairing_authority_client_bundle(
+        &expected_authority_public_key,
+        &relay_pairing_code,
+        claim_challenge,
+        client_bundle,
+        authority_signature,
+    )
+    .map_err(|_| "relay pairing substituted client key material".to_string())
 }
 
 pub(super) fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusResponse {

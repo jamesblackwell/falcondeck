@@ -23,7 +23,12 @@ FalconDeck is built the Unix way. Small, composable pieces that do one thing wel
 
 **Sessions belong to the agents, not to us.** FalconDeck reads from native session storage and uses native resume mechanisms. No custom conversation database. Users move freely between FalconDeck, the CLI, VS Code, or any other tool.
 
-**The relay is a dumb pipe.** E2E encrypted. The server never sees plaintext. It just forwards bytes between daemon and client. This means the relay can be hosted by anyone without trust implications.
+**The relay is a blind transport for message content.** Payloads are E2E
+encrypted and pairing keys are authenticated by a secret carried only in the
+desktop QR/link, so even an active relay cannot silently substitute its own
+keys. A relay operator can still observe routing metadata, deny service, and
+control replay availability; self-hosting therefore changes availability and
+metadata trust, but not message-content confidentiality.
 
 ## Deployment Modes
 
@@ -112,7 +117,7 @@ Desktop daemon <-> Relay server (E2E encrypted) <-> Mobile/web client
 ```
 
 - Desktop daemon manages agent processes and connects to relay via WebSocket
-- Relay is a blind pipe — E2E encrypted, server never sees plaintext
+- Relay is a blind content transport — E2E encrypted, server never sees plaintext
 - Mobile/web clients connect to the same relay
 - Unified event stream: both agent types look identical to remote clients
 - Permissions forwarded to remote client for approval
@@ -123,9 +128,12 @@ Desktop daemon <-> Relay server (E2E encrypted) <-> Mobile/web client
 
 QR code pairing — no account required.
 
-- Daemon generates a pairing code, mobile client scans it
-- Devices exchange encryption keys during pairing
-- Relay never stores identity — it just forwards encrypted bytes
+- Daemon generates a short relay lookup code plus a QR/link-only pairing
+  authority secret; clients must scan or paste the complete secure grant
+- The authority secret authenticates the daemon bundle, client bundle, and
+  relay challenge; both endpoints independently reject key substitution
+- Relay stores public device keys and routing metadata, but not the authority
+  secret or plaintext message content
 - No signup, no email, no OAuth for v1
 - Accounts only needed later for cross-device persistence, teams, or billing
 
@@ -144,6 +152,8 @@ Adopt Happy's proven scheme:
 - NaCl XSalsa20-Poly1305 + AES-256-GCM with per-session data keys
 - Data keys wrapped via libsodium box encryption
 - Per-session keys limit blast radius of any compromise
+- Revoking a device rotates the session data key and bootstraps it only to
+  remaining trusted device bundles
 - Libraries available for all targets: Rust (sodiumoxide), React Native (react-native-libsodium), web (tweetnacl/libsodium.js)
 
 ### Permission Forwarding

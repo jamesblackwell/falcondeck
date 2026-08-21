@@ -2,6 +2,7 @@ import type {
   ConversationItem,
   DaemonSnapshot,
 } from './types'
+import { tryNormalizeRelayUrl } from './relay-url'
 
 export const DEFAULT_REMOTE_RELAY_URL = 'https://connect.falcondeck.com'
 export const REMOTE_SESSION_STORAGE_VERSION = 2
@@ -91,6 +92,10 @@ export function shouldReusePersistedRemoteSession(
   if (persistedSession.version !== REMOTE_SESSION_STORAGE_VERSION) {
     return null
   }
+  const persistedRelayUrl = tryNormalizeRelayUrl(persistedSession.relayUrl)
+  if (!persistedRelayUrl || persistedRelayUrl !== persistedSession.relayUrl.replace(/\/$/, '')) {
+    return null
+  }
 
   const queryRelayUrl = params.get('relay')
   const queryPairingCode = params.get('code')
@@ -101,7 +106,10 @@ export function shouldReusePersistedRemoteSession(
     return null
   }
 
-  if (effectiveQueryRelayUrl && effectiveQueryRelayUrl !== persistedSession.relayUrl) {
+  if (
+    effectiveQueryRelayUrl &&
+    tryNormalizeRelayUrl(effectiveQueryRelayUrl) !== persistedRelayUrl
+  ) {
     return null
   }
 

@@ -3,6 +3,16 @@
 
   tls {{ falcondeck_tls_email }}
 
+  header {
+    Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; media-src 'self' blob: https:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    Strict-Transport-Security "max-age=31536000"
+    -Server
+  }
+
   root * /var/www/falcondeck-app
   @app_assets path /assets/*
   header @app_assets Cache-Control "public, max-age=31536000, immutable"
@@ -16,6 +26,13 @@
   encode zstd gzip
 
   tls {{ falcondeck_tls_email }}
+
+  header {
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    Strict-Transport-Security "max-age=31536000"
+    -Server
+  }
 
   handle_path /dist/* {
     root * {{ falcondeck_dist_dir }}

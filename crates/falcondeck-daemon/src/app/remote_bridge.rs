@@ -41,7 +41,22 @@ const REMOTE_RPC_DEDUPE_TTL: Duration = Duration::from_secs(120);
 const REMOTE_RPC_DEDUPE_MAX_ENTRIES: usize = 256;
 const REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES: usize = 256 * 1024;
 
-type RemoteRpcOutcome = Result<RelayClientMessage, String>;
+/// Cache the logical RPC outcome, not a transport message encrypted with the
+/// session key that happened to be current when the operation completed. A
+/// device revocation rotates that key; retries must be encryptable with the
+/// new key instead of replaying undecryptable old ciphertext.
+type RemoteRpcOutcome = Result<Value, String>;
+
+struct RemoteRpcOutboxMessage {
+    key_generation: u64,
+    message: RelayClientMessage,
+}
+
+impl RemoteRpcOutboxMessage {
+    fn into_current_message(self, current_key_generation: u64) -> Option<RelayClientMessage> {
+        (self.key_generation == current_key_generation).then_some(self.message)
+    }
+}
 
 enum RemoteRpcDedupeEntry {
     InFlight(Vec<oneshot::Sender<RemoteRpcOutcome>>),
@@ -197,7 +212,7 @@ impl RemoteRpcDeduplicator {
 
 fn remote_rpc_outcome_size(outcome: &RemoteRpcOutcome) -> usize {
     match outcome {
-        Ok(message) => serde_json::to_vec(message)
+        Ok(value) => serde_json::to_vec(value)
             .map(|encoded| encoded.len())
             .unwrap_or(REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES + 1),
         Err(message) => message.len(),
@@ -302,7 +317,7 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
         session_id: String,
-        pairing: RemotePairingState,
+        mut pairing: RemotePairingState,
         client_bundle: Option<PairingPublicKeyBundle>,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
@@ -399,7 +414,8 @@ impl AppState {
         // Concurrent RPC results funnel through this outbox so the select
         // loop stays the only writer to the socket while request handling
         // itself runs on per-RPC tasks.
-        let (rpc_outbox, mut rpc_outbox_rx) = mpsc::unbounded_channel::<RelayClientMessage>();
+        let (rpc_outbox, mut rpc_outbox_rx) = mpsc::unbounded_channel::<RemoteRpcOutboxMessage>();
+        let mut key_generation = 0u64;
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -444,6 +460,40 @@ impl AppState {
                             RemoteBridgeCommand::PublishBootstrap { pairing, client_bundle } => {
                                 self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
                             }
+                            RemoteBridgeCommand::RotateSessionKey {
+                                pairing: next_pairing,
+                                client_bundles,
+                                completed,
+                            } => {
+                                key_generation = key_generation.wrapping_add(1);
+                                pairing = *next_pairing;
+                                let result = async {
+                                    for client_bundle in &client_bundles {
+                                        self.publish_session_bootstrap(
+                                            &mut writer,
+                                            &pairing,
+                                            client_bundle,
+                                        )
+                                        .await?;
+                                    }
+                                    self.publish_remote_snapshot(
+                                        &mut writer,
+                                        &pairing.data_key,
+                                        self.snapshot().await,
+                                    )
+                                    .await
+                                }
+                                .await;
+                                match result {
+                                    Ok(()) => {
+                                        let _ = completed.send(Ok(()));
+                                    }
+                                    Err(error) => {
+                                        let _ = completed.send(Err(error.clone()));
+                                        return Err(RemoteBridgeError::Transient(error));
+                                    }
+                                }
+                            }
                             RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id } => {
                                 send_relay_message(
                                     &mut writer,
@@ -454,7 +504,9 @@ impl AppState {
                     }
                 }
                 rpc_message = rpc_outbox_rx.recv() => {
-                    if let Some(message) = rpc_message {
+                    if let Some(rpc_message) = rpc_message
+                        && let Some(message) = rpc_message.into_current_message(key_generation)
+                    {
                         send_relay_message(&mut writer, &message).await?;
                     }
                 }
@@ -480,10 +532,18 @@ impl AppState {
                                     // forwarding) for all paired devices.
                                     let app = self.clone();
                                     let data_key = pairing.data_key;
+                                    let rpc_key_generation = key_generation;
                                     let outbox = rpc_outbox.clone();
                                     tokio::spawn(async move {
                                         if let Err(error) = app
-                                            .handle_remote_rpc(&outbox, &data_key, request_id, method, params)
+                                            .handle_remote_rpc(
+                                                &outbox,
+                                                rpc_key_generation,
+                                                &data_key,
+                                                request_id,
+                                                method,
+                                                params,
+                                            )
                                             .await
                                         {
                                             tracing::warn!(%error, "remote rpc handling failed");
@@ -605,17 +665,13 @@ impl AppState {
         session_id: &str,
         daemon_token: &str,
     ) -> Result<RelayWebSocketTicketResponse, DaemonError> {
-        let response = relay_ws_ticket_request(
-            &reqwest::Client::new(),
-            relay_url,
-            session_id,
-            daemon_token,
-        )
-            .send()
-            .await
-            .map_err(|error| {
-                DaemonError::Rpc(format!("failed to fetch relay websocket ticket: {error}"))
-            })?;
+        let response =
+            relay_ws_ticket_request(&reqwest::Client::new(), relay_url, session_id, daemon_token)
+                .send()
+                .await
+                .map_err(|error| {
+                    DaemonError::Rpc(format!("failed to fetch relay websocket ticket: {error}"))
+                })?;
         let response = if response.status().is_success() {
             response
         } else {
@@ -745,7 +801,8 @@ impl AppState {
     /// bridge outbox so socket writes stay serialized on the loop.
     async fn handle_remote_rpc(
         &self,
-        outbox: &mpsc::UnboundedSender<RelayClientMessage>,
+        outbox: &mpsc::UnboundedSender<RemoteRpcOutboxMessage>,
+        key_generation: u64,
         data_key: &[u8; 32],
         request_id: String,
         method: String,
@@ -761,39 +818,41 @@ impl AppState {
                     Err("invalid remote rpc payload".to_string()),
                 )?;
                 return outbox
-                    .send(message)
+                    .send(RemoteRpcOutboxMessage {
+                        key_generation,
+                        message,
+                    })
                     .map_err(|error| format!("rpc outbox closed: {error}"));
             }
         };
-        let message = if remote_rpc_is_read_only(&method) {
-            let rpc_result = self.dispatch_remote_rpc(&method, params).await;
-            self.remote_rpc_result_message(data_key, request_id, rpc_result)?
+        let rpc_result = if remote_rpc_is_read_only(&method) {
+            self.dispatch_remote_rpc(&method, params).await
         } else {
-            let response_request_id = request_id.clone();
             match self
                 .inner
                 .remote_rpc_deduplicator
                 .execute(request_id.clone(), || async {
-                    let rpc_result = self.dispatch_remote_rpc(&method, params).await;
-                    self.remote_rpc_result_message(data_key, response_request_id, rpc_result)
+                    self.dispatch_remote_rpc(&method, params).await
                 })
                 .await
             {
-                RemoteRpcDedupeResult::Outcome(outcome) => outcome?,
-                RemoteRpcDedupeResult::CompletedWithoutReplay => self.remote_rpc_result_message(
-                    data_key,
-                    request_id,
-                    Err("This action already completed, but its response was too large to replay. Refresh before trying again.".to_string()),
-                )?,
-                RemoteRpcDedupeResult::AtCapacity => self.remote_rpc_result_message(
-                    data_key,
-                    request_id,
-                    Err("The desktop is handling too many remote actions. Try again in a moment.".to_string()),
-                )?,
+                RemoteRpcDedupeResult::Outcome(outcome) => outcome,
+                RemoteRpcDedupeResult::CompletedWithoutReplay => Err(
+                    "This action already completed, but its response was too large to replay. Refresh before trying again."
+                        .to_string(),
+                ),
+                RemoteRpcDedupeResult::AtCapacity => Err(
+                    "The desktop is handling too many remote actions. Try again in a moment."
+                        .to_string(),
+                ),
             }
         };
+        let message = self.remote_rpc_result_message(data_key, request_id, rpc_result)?;
         outbox
-            .send(message)
+            .send(RemoteRpcOutboxMessage {
+                key_generation,
+                message,
+            })
             .map_err(|error| format!("rpc outbox closed: {error}"))
     }
 
@@ -2009,16 +2068,31 @@ fn relay_ws_ticket_request(
 }
 
 pub(super) fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {
-    let trimmed = input.trim().trim_end_matches('/');
+    let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(DaemonError::BadRequest("relay_url is required".to_string()));
     }
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| {
+        DaemonError::BadRequest("relay_url must be a valid absolute URL".to_string())
+    })?;
+    let is_loopback = parsed
+        .host_str()
+        .is_some_and(|host| matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]"));
+    if parsed.scheme() != "https" && !(parsed.scheme() == "http" && is_loopback) {
         return Err(DaemonError::BadRequest(
-            "relay_url must start with http:// or https://".to_string(),
+            "relay_url must use HTTPS (HTTP is allowed only for loopback development)".to_string(),
         ));
     }
-    Ok(trimmed.to_string())
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(DaemonError::BadRequest(
+            "relay_url must not contain credentials, a query, or a fragment".to_string(),
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
 }
 
 pub(super) fn relay_ws_url(relay_url: &str, session_id: &str, ticket: &str) -> String {
@@ -2037,7 +2111,10 @@ pub(super) fn relay_url_looks_legacy_loopback(relay_url: &str) -> bool {
         return false;
     };
 
-    matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+    )
 }
 
 pub(super) fn host_label() -> String {
@@ -2297,15 +2374,40 @@ mod tests {
         assert_eq!(request.timeout(), Some(&RELAY_HTTP_REQUEST_TIMEOUT));
     }
 
+    #[test]
+    fn relay_urls_require_https_except_on_loopback() {
+        assert_eq!(
+            normalize_relay_url(" https://connect.example/ ").unwrap(),
+            "https://connect.example"
+        );
+        assert_eq!(
+            normalize_relay_url("http://127.0.0.1:8787/").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            normalize_relay_url("http://[::1]:8787/").unwrap(),
+            "http://[::1]:8787"
+        );
+        for insecure in [
+            "http://connect.example",
+            "http://192.0.2.10:8787",
+            "https://user:secret@connect.example",
+            "https://connect.example?token=secret",
+        ] {
+            assert!(
+                normalize_relay_url(insecure).is_err(),
+                "expected insecure relay URL to be rejected: {insecure}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn remote_rpc_deduplicator_coalesces_in_flight_and_completed_requests() {
         let deduplicator = std::sync::Arc::new(RemoteRpcDeduplicator::default());
         let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
-        let expected = RelayClientMessage::Ephemeral {
-            body: json!({ "result": "leader" }),
-        };
+        let expected = json!({ "result": "leader" });
 
         let leader = {
             let deduplicator = deduplicator.clone();
@@ -2333,7 +2435,7 @@ mod tests {
                 deduplicator
                     .execute("request-1".to_string(), move || async move {
                         executions.fetch_add(1, Ordering::SeqCst);
-                        Ok(RelayClientMessage::Ping)
+                        Ok(json!({ "result": "follower" }))
                     })
                     .await
             })
@@ -2357,7 +2459,7 @@ mod tests {
                 let executions = executions.clone();
                 move || async move {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(RelayClientMessage::Ping)
+                    Ok(json!({ "result": "cached-operation" }))
                 }
             })
             .await;
@@ -2369,9 +2471,8 @@ mod tests {
     async fn remote_rpc_deduplicator_suppresses_oversized_completed_replays() {
         let deduplicator = RemoteRpcDeduplicator::default();
         let executions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let large_message = RelayClientMessage::Ephemeral {
-            body: json!({ "payload": "x".repeat(REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES + 1) }),
-        };
+        let large_message =
+            json!({ "payload": "x".repeat(REMOTE_RPC_DEDUPE_MAX_RESULT_BYTES + 1) });
 
         let first = deduplicator
             .execute("large-request".to_string(), {
@@ -2390,7 +2491,7 @@ mod tests {
                 let executions = executions.clone();
                 move || async move {
                     executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(RelayClientMessage::Ping)
+                    Ok(json!({ "result": "must-not-run" }))
                 }
             })
             .await;
@@ -2399,6 +2500,24 @@ mod tests {
             RemoteRpcDedupeResult::CompletedWithoutReplay
         ));
         assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn remote_rpc_outbox_drops_ciphertext_from_an_old_key_generation() {
+        let stale = RemoteRpcOutboxMessage {
+            key_generation: 3,
+            message: RelayClientMessage::Ping,
+        };
+        assert!(stale.into_current_message(4).is_none());
+
+        let current = RemoteRpcOutboxMessage {
+            key_generation: 4,
+            message: RelayClientMessage::Ping,
+        };
+        assert_eq!(
+            current.into_current_message(4),
+            Some(RelayClientMessage::Ping)
+        );
     }
 
     #[tokio::test]
@@ -2425,7 +2544,7 @@ mod tests {
             tokio::spawn(async move {
                 deduplicator
                     .execute("cancelled-request".to_string(), || async {
-                        Ok(RelayClientMessage::Ping)
+                        Ok(json!({ "result": "follower" }))
                     })
                     .await
             })
@@ -2472,12 +2591,12 @@ mod tests {
 
         let retry = deduplicator
             .execute("cancelled-request".to_string(), || async {
-                Ok(RelayClientMessage::Ping)
+                Ok(json!({ "result": "retry" }))
             })
             .await;
         assert_eq!(
             retry,
-            RemoteRpcDedupeResult::Outcome(Ok(RelayClientMessage::Ping))
+            RemoteRpcDedupeResult::Outcome(Ok(json!({ "result": "retry" })))
         );
     }
 

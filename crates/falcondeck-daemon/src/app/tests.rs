@@ -2506,6 +2506,7 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2528,6 +2529,104 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
             .as_ref()
             .map(|bundle| bundle.public_key.as_str())
     );
+}
+
+#[test]
+fn revoking_primary_device_rotates_key_and_rebuilds_bootstrap_allowlist() {
+    let revoked_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    let remaining_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    let old_data_key = generate_data_key();
+    let pairing = super::RemotePairingState {
+        pairing_id: "pairing-1".to_string(),
+        pairing_code: "ABCDEFGHJKLM.authority".to_string(),
+        session_id: Some("session-1".to_string()),
+        device_id: Some("revoked-device".to_string()),
+        trusted_at: Some(Utc::now()),
+        expires_at: Utc::now() + Duration::minutes(10),
+        client_bundle: Some(revoked_bundle.clone()),
+        local_key_pair: LocalBoxKeyPair::generate(),
+        data_key: old_data_key,
+    };
+    let mut trusted_client_devices = HashMap::new();
+    trusted_client_devices.insert("revoked-device".to_string(), revoked_bundle.clone());
+    trusted_client_devices.insert("remaining-device".to_string(), remaining_bundle.clone());
+    let mut remote = super::RemoteBridgeState {
+        status: falcondeck_core::RemoteConnectionStatus::Connected,
+        relay_url: Some("https://connect.falcondeck.com".to_string()),
+        pairing: Some(pairing),
+        pending_pairing: None,
+        daemon_token: Some("daemon-token".to_string()),
+        last_error: None,
+        task: None,
+        pairing_watch_task: None,
+        command_tx: None,
+        // Include a legacy unindexed entry to prove rotation drops it too.
+        trusted_client_bundles: vec![
+            revoked_bundle.clone(),
+            remaining_bundle.clone(),
+            build_pairing_public_key_bundle(&LocalBoxKeyPair::generate()),
+        ],
+        trusted_client_devices,
+        unresumed_remote: None,
+    };
+
+    let (rotated_pairing, bootstrap_bundles) =
+        super::rotate_remote_session_key(&mut remote, "revoked-device").unwrap();
+
+    assert_ne!(rotated_pairing.data_key, old_data_key);
+    assert_eq!(
+        rotated_pairing.device_id.as_deref(),
+        Some("remaining-device")
+    );
+    assert_eq!(
+        rotated_pairing.client_bundle,
+        Some(remaining_bundle.clone())
+    );
+    assert_eq!(bootstrap_bundles, vec![remaining_bundle.clone()]);
+    assert_eq!(remote.trusted_client_bundles, vec![remaining_bundle]);
+    assert!(!remote.trusted_client_devices.contains_key("revoked-device"));
+}
+
+#[test]
+fn revoking_last_device_never_reuses_its_bootstrap_bundle() {
+    let revoked_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    let old_data_key = generate_data_key();
+    let pairing = super::RemotePairingState {
+        pairing_id: "pairing-1".to_string(),
+        pairing_code: "ABCDEFGHJKLM.authority".to_string(),
+        session_id: Some("session-1".to_string()),
+        device_id: Some("revoked-device".to_string()),
+        trusted_at: Some(Utc::now()),
+        expires_at: Utc::now() + Duration::minutes(10),
+        client_bundle: Some(revoked_bundle.clone()),
+        local_key_pair: LocalBoxKeyPair::generate(),
+        data_key: old_data_key,
+    };
+    let mut trusted_client_devices = HashMap::new();
+    trusted_client_devices.insert("revoked-device".to_string(), revoked_bundle.clone());
+    let mut remote = super::RemoteBridgeState {
+        status: falcondeck_core::RemoteConnectionStatus::Connected,
+        relay_url: Some("https://connect.falcondeck.com".to_string()),
+        pairing: Some(pairing),
+        pending_pairing: None,
+        daemon_token: Some("daemon-token".to_string()),
+        last_error: None,
+        task: None,
+        pairing_watch_task: None,
+        command_tx: None,
+        trusted_client_bundles: vec![revoked_bundle],
+        trusted_client_devices,
+        unresumed_remote: None,
+    };
+
+    let (rotated_pairing, bootstrap_bundles) =
+        super::rotate_remote_session_key(&mut remote, "revoked-device").unwrap();
+
+    assert_ne!(rotated_pairing.data_key, old_data_key);
+    assert!(rotated_pairing.client_bundle.is_none());
+    assert!(bootstrap_bundles.is_empty());
+    assert!(remote.trusted_client_bundles.is_empty());
+    assert!(remote.trusted_client_devices.is_empty());
 }
 
 #[tokio::test]
@@ -2554,6 +2653,7 @@ async fn remote_status_stops_offering_a_claimed_pairing_code() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2596,6 +2696,7 @@ async fn remote_status_still_offers_an_unclaimed_pairing_code() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2640,6 +2741,7 @@ fn reconnect_attempt_ignores_pending_additional_pairing_state() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2676,6 +2778,7 @@ async fn finished_remote_tasks_are_pruned_before_pairing_logic() {
         pairing_watch_task: Some(finished_watch_task),
         command_tx: Some(command_tx),
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2732,6 +2835,7 @@ async fn reconcile_remote_runtime_state_clears_orphaned_additional_pairing() {
         pairing_watch_task: Some(running_watch_task),
         command_tx: Some(command_tx),
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2777,6 +2881,7 @@ fn remote_status_response_hides_stale_unclaimed_pairing_without_a_live_bridge() 
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2821,6 +2926,7 @@ fn remote_status_response_hides_stale_trusted_pairing_without_a_live_bridge() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        trusted_client_devices: HashMap::new(),
         unresumed_remote: None,
     };
 
@@ -2863,6 +2969,7 @@ async fn restore_skips_expired_unclaimed_remote_pairing() {
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
             trusted_client_bundles: Vec::new(),
+            trusted_client_devices: HashMap::new(),
         }),
     };
 
@@ -3776,6 +3883,7 @@ async fn restore_skips_legacy_loopback_remote_pairing() {
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
             trusted_client_bundles: Vec::new(),
+            trusted_client_devices: HashMap::new(),
         }),
     };
 
@@ -3828,6 +3936,7 @@ async fn restore_skips_trusted_remote_with_legacy_unsigned_client_key() {
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
             trusted_client_bundles: Vec::new(),
+            trusted_client_devices: HashMap::new(),
         }),
     };
 
@@ -3941,6 +4050,7 @@ async fn restore_reads_remote_secrets_from_secure_storage() {
             local_secret_key_base64: None,
             data_key_base64: None,
             trusted_client_bundles: Vec::new(),
+            trusted_client_devices: HashMap::new(),
         }),
     };
 
@@ -3999,6 +4109,7 @@ async fn restore_keeps_trusted_remote_without_client_bundle() {
             local_secret_key_base64: None,
             data_key_base64: None,
             trusted_client_bundles: Vec::new(),
+            trusted_client_devices: HashMap::new(),
         }),
     };
 

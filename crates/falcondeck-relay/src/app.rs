@@ -9,29 +9,36 @@ use std::{
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, MachinePresence,
-    PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle, PairingStatus,
-    PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus, RelayClientMessage,
-    RelayHealthResponse, RelayPeerRole, RelayRpcFailureCode, RelayServerMessage, RelayUpdate,
-    RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest, StartPairingResponse,
-    SubmitQueuedActionRequest, SyncCursor, TrustedDevice, TrustedDeviceStatus,
-    TrustedDevicesResponse,
+    PairingAuthority, PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle,
+    PairingStatus, PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus,
+    RelayClientMessage, RelayHealthResponse, RelayPeerRole, RelayRpcFailureCode,
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
+    StartPairingResponse, SubmitQueuedActionRequest, SyncCursor, TrustedDevice,
+    TrustedDeviceStatus, TrustedDevicesResponse,
     crypto::{
-        generate_pairing_challenge, verify_pairing_claim_challenge,
+        generate_pairing_challenge, verify_pairing_authority_client_bundle,
+        verify_pairing_authority_daemon_bundle, verify_pairing_claim_challenge,
         verify_pairing_public_key_bundle,
     },
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
+/// A count-bounded channel alone can retain gigabytes when each encrypted
+/// frame is near the websocket limit. Every peer also receives this aggregate
+/// byte budget; permits are released only after the socket writer consumes or
+/// drops the queued message.
+const PEER_QUEUE_MAX_BYTES: usize = 32 << 20;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 /// Keep replay responses small enough that a slow client can process a
 /// reconnect incrementally. A single unusually large encrypted update is
-/// still sent on its own; the websocket's 16 MiB cap remains the final guard.
+/// still sent on its own; the websocket's 24 MiB cap remains the final guard.
 const WS_SYNC_CHUNK_MAX_UPDATES: usize = 128;
 const WS_SYNC_CHUNK_MAX_BYTES: usize = 512 << 10;
 /// Reconnect replay is only a fast-path. Beyond this window clients rebuild
@@ -82,6 +89,12 @@ const MAX_ACTIONS_PER_DISPATCH: usize = 64;
 const PRUNE_INTERVAL_SECONDS: u64 = 60;
 /// Upper bound on client-chosen RPC request identifiers.
 const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
+const MAX_RPC_METHOD_LENGTH: usize = 128;
+const MAX_ACTION_TYPE_LENGTH: usize = 128;
+const MAX_IDEMPOTENCY_KEY_LENGTH: usize = 256;
+const MAX_PUSH_TOKEN_LENGTH: usize = 4_096;
+const MAX_LOGGED_ERROR_LENGTH: usize = 4_096;
+const MAX_NOTIFICATION_FIELD_LENGTH: usize = 256;
 /// Starting a pairing is deliberately unauthenticated, so keep both a
 /// per-origin budget and a relay-wide safety budget ahead of durable writes.
 /// Normal desktop retries are far below these limits: an origin may burst ten
@@ -93,6 +106,7 @@ const PAIRING_REQUEST_GLOBAL_REFILL: StdDuration = StdDuration::from_millis(500)
 const PAIRING_REQUEST_MAX_TRACKED_ORIGINS: usize = 4_096;
 const PAIRING_REQUEST_ORIGIN_IDLE_TTL: StdDuration = StdDuration::from_secs(10 * 60);
 const MAX_PAIRING_LABEL_CHARS: usize = 128;
+const SECRET_VERIFIER_PREFIX: &str = "sha256:v1:";
 
 fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
     // Once retention has removed any part of the requested window, or the
@@ -313,6 +327,7 @@ struct InnerState {
     default_pairing_ttl: Duration,
     retention: RetentionConfig,
     pairing_rate_limiter: Mutex<PairingRateLimiter>,
+    pairing_attempt_rate_limiter: Mutex<PairingRateLimiter>,
     store: Arc<Mutex<Store>>,
     backend: Arc<dyn crate::persistence::PersistenceBackend>,
     /// True when the backend is file-based and needs a full-state flush
@@ -334,6 +349,14 @@ struct InnerState {
 
 struct Store {
     data: PersistedState,
+    /// Pairing codes are stored as one-way verifiers and indexed for bounded
+    /// unauthenticated challenge/claim lookup.
+    pairing_ids_by_code: HashMap<String, String>,
+    /// Plain bearer tokens exist only in memory so an idempotent re-claim can
+    /// return the same credential during this relay process. Persisted state
+    /// contains only one-way verifiers; after restart a proven re-claim
+    /// rotates the token.
+    issued_client_tokens: HashMap<(String, String), String>,
     live_sessions: HashMap<String, LiveSession>,
     ws_tickets: HashMap<String, WebSocketTicket>,
     /// Outstanding single-use claim challenges keyed by pairing id.
@@ -371,6 +394,12 @@ pub(crate) struct PairingRecord {
     pub(crate) device_id: Option<String>,
     pub(crate) daemon_bundle: Option<PairingPublicKeyBundle>,
     pub(crate) client_bundle: Option<PairingPublicKeyBundle>,
+    #[serde(default)]
+    pub(crate) pairing_authority: Option<PairingAuthority>,
+    #[serde(default)]
+    pub(crate) claim_challenge: Option<String>,
+    #[serde(default)]
+    pub(crate) pairing_authority_signature: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) expires_at: DateTime<Utc>,
 }
@@ -527,7 +556,7 @@ impl LiveSession {
     fn take_expired_rpcs(
         &mut self,
         now: DateTime<Utc>,
-    ) -> Vec<(String, String, String, mpsc::Sender<RelayServerMessage>)> {
+    ) -> Vec<(String, String, String, PeerQueue)> {
         let expired_request_ids = self
             .pending_rpc
             .iter()
@@ -580,7 +609,58 @@ pub(crate) struct QueuedActionRecord {
 struct PeerHandle {
     role: RelayPeerRole,
     device_id: Option<String>,
-    tx: mpsc::Sender<RelayServerMessage>,
+    tx: PeerQueue,
+}
+
+pub struct BudgetedRelayMessage {
+    message: RelayServerMessage,
+    _byte_permit: OwnedSemaphorePermit,
+}
+
+impl BudgetedRelayMessage {
+    pub fn message(&self) -> &RelayServerMessage {
+        &self.message
+    }
+}
+
+#[derive(Clone)]
+struct PeerQueue {
+    tx: mpsc::Sender<BudgetedRelayMessage>,
+    available_bytes: Arc<Semaphore>,
+}
+
+impl PeerQueue {
+    fn new(capacity: usize) -> (Self, mpsc::Receiver<BudgetedRelayMessage>) {
+        Self::new_with_byte_budget(capacity, PEER_QUEUE_MAX_BYTES)
+    }
+
+    fn new_with_byte_budget(
+        capacity: usize,
+        max_bytes: usize,
+    ) -> (Self, mpsc::Receiver<BudgetedRelayMessage>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            Self {
+                tx,
+                available_bytes: Arc::new(Semaphore::new(max_bytes)),
+            },
+            rx,
+        )
+    }
+
+    fn try_send(&self, message: RelayServerMessage) -> Result<(), ()> {
+        let message_bytes = serde_json::to_vec(&message).map_err(|_| ())?.len().max(1);
+        let permits = u32::try_from(message_bytes).map_err(|_| ())?;
+        let permit = Arc::clone(&self.available_bytes)
+            .try_acquire_many_owned(permits)
+            .map_err(|_| ())?;
+        self.tx
+            .try_send(BudgetedRelayMessage {
+                message,
+                _byte_permit: permit,
+            })
+            .map_err(|_| ())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -626,11 +706,12 @@ impl AppState {
             session.migrate_legacy_device_fields();
             session.ensure_next_seq();
         }
+        let credentials_normalized = normalize_persisted_secrets(&mut data);
         let normalized = normalize_in_flight_actions(&mut data);
         let backend = Arc::new(crate::persistence::FileBackend::new(state_path));
         let state = Self::from_parts(version, default_pairing_ttl, retention, data, backend, true);
         let pruned = !state.prune_expired_state().await?.is_empty();
-        if normalized || pruned {
+        if credentials_normalized || normalized || pruned {
             state.persist_current().await?;
         }
         state.spawn_prune_task();
@@ -667,6 +748,7 @@ impl AppState {
             session.migrate_legacy_device_fields();
             session.ensure_next_seq();
         }
+        let credentials_normalized = normalize_persisted_secrets(&mut data);
         let normalized = normalize_in_flight_actions(&mut data);
         let normalized_action_sessions = normalized.then(|| {
             data.sessions
@@ -701,6 +783,9 @@ impl AppState {
                     .await?;
             }
         }
+        if credentials_normalized {
+            state.persist_normalized_credentials().await?;
+        }
         // Use the same targeted deletes as the background pass. A full
         // Postgres rewrite here bloated the replay table on every startup.
         state.prune_retained_state().await?;
@@ -729,6 +814,11 @@ impl AppState {
         let push_access_token = std::env::var("FALCONDECK_RELAY_EXPO_ACCESS_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let pairing_ids_by_code = data
+            .pairings
+            .iter()
+            .map(|(pairing_id, pairing)| (pairing.pairing_code.clone(), pairing_id.clone()))
+            .collect();
         Self {
             inner: Arc::new(InnerState {
                 version,
@@ -738,8 +828,14 @@ impl AppState {
                     PairingRateLimits::default(),
                     Instant::now(),
                 )),
+                pairing_attempt_rate_limiter: Mutex::new(PairingRateLimiter::new(
+                    PairingRateLimits::default(),
+                    Instant::now(),
+                )),
                 store: Arc::new(Mutex::new(Store {
                     data,
+                    pairing_ids_by_code,
+                    issued_client_tokens: HashMap::new(),
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
                     pairing_challenges: HashMap::new(),
@@ -784,14 +880,8 @@ impl AppState {
         &self,
         request: StartPairingRequest,
     ) -> Result<StartPairingResponse, RelayError> {
-        if request
-            .label
-            .as_ref()
-            .is_some_and(|label| label.chars().count() > MAX_PAIRING_LABEL_CHARS)
-        {
-            return Err(RelayError::BadRequest(format!(
-                "label must be at most {MAX_PAIRING_LABEL_CHARS} characters"
-            )));
+        if let Some(label) = request.label.as_deref() {
+            validate_bounded_text("label", label, MAX_PAIRING_LABEL_CHARS, true)?;
         }
         let ttl_seconds = request
             .ttl_seconds
@@ -811,6 +901,23 @@ impl AppState {
                 RelayError::BadRequest("daemon_bundle signature is invalid".to_string())
             })?;
         }
+        let pairing_authority = request
+            .pairing_authority
+            .as_ref()
+            .ok_or_else(|| RelayError::BadRequest("pairing_authority is required".to_string()))?;
+        let daemon_bundle = request.daemon_bundle.as_ref().ok_or_else(|| {
+            RelayError::BadRequest("daemon_bundle with a public key is required".to_string())
+        })?;
+        verify_pairing_authority_daemon_bundle(
+            &pairing_authority.public_key,
+            daemon_bundle,
+            &pairing_authority.daemon_bundle_signature,
+        )
+        .map_err(|_| {
+            RelayError::BadRequest(
+                "pairing_authority does not authenticate daemon_bundle".to_string(),
+            )
+        })?;
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(ttl_seconds as i64);
@@ -821,7 +928,8 @@ impl AppState {
 
         let (session_snapshot, pairing_snapshot) = {
             let mut store = self.inner.store.lock().await;
-            pairing_code = generate_pairing_code(&store.data);
+            pairing_code = generate_pairing_code(&store.pairing_ids_by_code);
+            let pairing_code_verifier = secret_verifier(&pairing_code);
             let session_snapshot;
             if let Some(existing_session_id) = request.existing_session_id.as_ref() {
                 let session = store
@@ -832,18 +940,18 @@ impl AppState {
                 let provided_token = request.daemon_token.as_deref().ok_or_else(|| {
                     RelayError::Unauthorized("daemon token is required".to_string())
                 })?;
-                if !constant_time_eq(&session.daemon_token, provided_token) {
+                if !verify_secret(&session.daemon_token, provided_token) {
                     return Err(RelayError::Unauthorized("invalid daemon token".to_string()));
                 }
                 session.updated_at = now;
                 session_id = existing_session_id.clone();
-                daemon_token = session.daemon_token.clone();
+                daemon_token = provided_token.to_string();
                 session_snapshot = session.meta();
             } else {
                 let session = SessionRecord {
                     session_id: session_id.clone(),
                     pairing_id: pairing_id.clone(),
-                    daemon_token: daemon_token.clone(),
+                    daemon_token: secret_verifier(&daemon_token),
                     daemon_last_seen_at: None,
                     devices: HashMap::new(),
                     device_id: None,
@@ -865,13 +973,16 @@ impl AppState {
             }
             let pairing = PairingRecord {
                 pairing_id: pairing_id.clone(),
-                pairing_code: pairing_code.clone(),
-                daemon_token: daemon_token.clone(),
+                pairing_code: pairing_code_verifier.clone(),
+                daemon_token: secret_verifier(&daemon_token),
                 label: request.label,
                 session_id: session_id.clone(),
                 device_id: None,
                 daemon_bundle: request.daemon_bundle,
                 client_bundle: None,
+                pairing_authority: request.pairing_authority,
+                claim_challenge: None,
+                pairing_authority_signature: None,
                 created_at: now,
                 expires_at,
             };
@@ -879,6 +990,9 @@ impl AppState {
                 .data
                 .pairings
                 .insert(pairing_id.clone(), pairing.clone());
+            store
+                .pairing_ids_by_code
+                .insert(pairing_code_verifier, pairing_id.clone());
             (session_snapshot, pairing)
         };
 
@@ -917,6 +1031,25 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn authorize_pairing_attempt(
+        &self,
+        client_ip: IpAddr,
+    ) -> Result<(), RelayError> {
+        if self
+            .inner
+            .pairing_attempt_rate_limiter
+            .lock()
+            .await
+            .allow(client_ip, Instant::now())
+        {
+            Ok(())
+        } else {
+            Err(RelayError::TooManyRequests(
+                "too many pairing attempts; try again shortly".to_string(),
+            ))
+        }
+    }
+
     /// Issues a single-use challenge that a client must sign with its
     /// identity secret key before `claim_pairing` accepts the claim. The
     /// pairing code is the capability here, exactly as for the claim itself.
@@ -925,12 +1058,9 @@ impl AppState {
         request: PairingChallengeRequest,
     ) -> Result<PairingChallengeResponse, RelayError> {
         let pairing_code = request.pairing_code.trim().to_uppercase();
-        if pairing_code.is_empty() {
-            return Err(RelayError::BadRequest(
-                "pairing_code is required".to_string(),
-            ));
-        }
+        validate_bounded_text("pairing_code", &pairing_code, 128, false)?;
 
+        let code_verifier = secret_verifier(&pairing_code);
         let now = Utc::now();
         let mut store = self.inner.store.lock().await;
         store
@@ -940,13 +1070,10 @@ impl AppState {
         // background sweep removes them; claimed pairings stay addressable
         // so re-claims keep their existing expiry semantics.
         let (pairing_id, expires_at) = store
-            .data
-            .pairings
-            .values()
-            .find(|pairing| {
-                constant_time_eq(&pairing.pairing_code, &pairing_code)
-                    && (pairing.device_id.is_some() || pairing.expires_at > now)
-            })
+            .pairing_ids_by_code
+            .get(&code_verifier)
+            .and_then(|pairing_id| store.data.pairings.get(pairing_id))
+            .filter(|pairing| pairing.device_id.is_some() || pairing.expires_at > now)
             .map(|pairing| (pairing.pairing_id.clone(), pairing.expires_at))
             .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
         if expires_at <= now {
@@ -975,10 +1102,9 @@ impl AppState {
         request: ClaimPairingRequest,
     ) -> Result<ClaimPairingResponse, RelayError> {
         let pairing_code = request.pairing_code.trim().to_uppercase();
-        if pairing_code.is_empty() {
-            return Err(RelayError::BadRequest(
-                "pairing_code is required".to_string(),
-            ));
+        validate_bounded_text("pairing_code", &pairing_code, 128, false)?;
+        if let Some(label) = request.label.as_deref() {
+            validate_bounded_text("label", label, MAX_PAIRING_LABEL_CHARS, true)?;
         }
         let Some(client_bundle) = request.client_bundle.as_ref() else {
             return Err(RelayError::BadRequest(
@@ -986,6 +1112,7 @@ impl AppState {
             ));
         };
 
+        let code_verifier = secret_verifier(&pairing_code);
         let now = Utc::now();
         let claimed_public_key = request
             .client_bundle
@@ -997,21 +1124,18 @@ impl AppState {
             // the background sweep removes them; claimed pairings fall
             // through to the expiry check below.
             let pairing_id = store
-                .data
-                .pairings
-                .iter()
-                .find_map(|(pairing_id, pairing)| {
-                    (constant_time_eq(&pairing.pairing_code, &pairing_code)
-                        && (pairing.device_id.is_some() || pairing.expires_at > now))
-                        .then_some(pairing_id.clone())
-                })
+                .pairing_ids_by_code
+                .get(&code_verifier)
+                .and_then(|pairing_id| store.data.pairings.get(pairing_id))
+                .filter(|pairing| pairing.device_id.is_some() || pairing.expires_at > now)
+                .map(|pairing| pairing.pairing_id.clone())
                 .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
             let (
                 session_id,
                 claimed_device_id,
                 stored_client_bundle,
                 daemon_bundle,
-                pairing_snapshot,
+                pairing_authority,
             ) = {
                 let pairing = store
                     .data
@@ -1026,7 +1150,7 @@ impl AppState {
                     pairing.device_id.clone(),
                     pairing.client_bundle.clone(),
                     pairing.daemon_bundle.clone(),
-                    pairing.clone(),
+                    pairing.pairing_authority.clone(),
                 )
             };
 
@@ -1057,13 +1181,56 @@ impl AppState {
             .map_err(|_| {
                 RelayError::Unauthorized("pairing challenge signature is invalid".to_string())
             })?;
+            let pairing_authority = pairing_authority.ok_or_else(|| {
+                RelayError::Conflict(
+                    "pairing was created without a secure authority; start a new pairing"
+                        .to_string(),
+                )
+            })?;
+            let pairing_authority_signature = request
+                .pairing_authority_signature
+                .as_deref()
+                .ok_or_else(|| {
+                    RelayError::Unauthorized(
+                        "secure pairing authority signature is required".to_string(),
+                    )
+                })?;
+            verify_pairing_authority_client_bundle(
+                &pairing_authority.public_key,
+                &pairing_code,
+                &challenge.challenge,
+                client_bundle,
+                pairing_authority_signature,
+            )
+            .map_err(|_| {
+                RelayError::Unauthorized(
+                    "secure pairing authority signature is invalid".to_string(),
+                )
+            })?;
+            let pairing_snapshot = {
+                let pairing = store
+                    .data
+                    .pairings
+                    .get_mut(&pairing_id)
+                    .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
+                pairing.claim_challenge = Some(challenge.challenge.clone());
+                pairing.pairing_authority_signature = Some(pairing_authority_signature.to_string());
+                pairing.clone()
+            };
 
+            let cached_client_tokens = store
+                .issued_client_tokens
+                .iter()
+                .filter_map(|((cached_session_id, device_id), token)| {
+                    (cached_session_id == &session_id).then_some((device_id.clone(), token.clone()))
+                })
+                .collect::<HashMap<_, _>>();
             let session = store
                 .data
                 .sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
-            if let Some(claimed_device_id) = claimed_device_id {
+            let outcome = if let Some(claimed_device_id) = claimed_device_id {
                 // Re-attaching to an already-claimed pairing requires the
                 // existing device to be active, its stored identity key
                 // (when present) to match the claimer's, and the box key to
@@ -1097,7 +1264,11 @@ impl AppState {
                     ));
                 }
 
-                let client_token = {
+                let client_token = cached_client_tokens
+                    .get(&claimed_device_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("client-{}", Uuid::new_v4().simple()));
+                {
                     let existing =
                         session.devices.get_mut(&claimed_device_id).ok_or_else(|| {
                             RelayError::NotFound("existing trusted device not found".to_string())
@@ -1111,8 +1282,11 @@ impl AppState {
                         existing.identity_public_key =
                             Some(client_bundle.identity_public_key.clone());
                     }
-                    existing.client_token.clone()
-                };
+                    // A verifier cannot be converted back into its bearer
+                    // token. Reuse the process-local token when available;
+                    // after restart, a proven re-claim rotates it.
+                    existing.client_token = secret_verifier(&client_token);
+                }
                 session.updated_at = now;
                 session.clear_legacy_device_fields();
 
@@ -1134,6 +1308,7 @@ impl AppState {
                         client_token,
                         trusted_device,
                         daemon_bundle,
+                        pairing_authority: Some(pairing_authority.clone()),
                     },
                     session_snapshot,
                     pairing_snapshot,
@@ -1170,7 +1345,12 @@ impl AppState {
                         existing.identity_public_key =
                             Some(client_bundle.identity_public_key.clone());
                     }
-                    (existing_device_id, existing.client_token.clone())
+                    let client_token = cached_client_tokens
+                        .get(&existing_device_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("client-{}", Uuid::new_v4().simple()));
+                    existing.client_token = secret_verifier(&client_token);
+                    (existing_device_id, client_token)
                 } else {
                     let device_id = format!("device-{}", Uuid::new_v4().simple());
                     let client_token = format!("client-{}", Uuid::new_v4().simple());
@@ -1178,7 +1358,7 @@ impl AppState {
                         device_id.clone(),
                         TrustedDeviceRecord {
                             device_id: device_id.clone(),
-                            client_token: client_token.clone(),
+                            client_token: secret_verifier(&client_token),
                             label: request.label.clone(),
                             public_key: claimed_public_key.clone(),
                             identity_public_key: Some(client_bundle.identity_public_key.clone()),
@@ -1220,12 +1400,18 @@ impl AppState {
                         client_token,
                         trusted_device,
                         daemon_bundle,
+                        pairing_authority: Some(pairing_authority.clone()),
                     },
                     session_snapshot,
                     pairing_snapshot,
                     device_snapshot,
                 )
-            }
+            };
+            store.issued_client_tokens.insert(
+                (outcome.0.session_id.clone(), outcome.0.device_id.clone()),
+                outcome.0.client_token.clone(),
+            );
+            outcome
         };
 
         self.persist_pairing_state(
@@ -1255,7 +1441,7 @@ impl AppState {
             .get(pairing_id)
             .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
 
-        if !constant_time_eq(&pairing.daemon_token, daemon_token) {
+        if !verify_secret(&pairing.daemon_token, daemon_token) {
             return Err(RelayError::Unauthorized("invalid daemon token".to_string()));
         }
 
@@ -1268,6 +1454,9 @@ impl AppState {
             expires_at: pairing.expires_at,
             daemon_bundle: pairing.daemon_bundle.clone(),
             client_bundle: pairing.client_bundle.clone(),
+            pairing_authority: pairing.pairing_authority.clone(),
+            claim_challenge: pairing.claim_challenge.clone(),
+            pairing_authority_signature: pairing.pairing_authority_signature.clone(),
         })
     }
 
@@ -1317,13 +1506,13 @@ impl AppState {
             .data
             .sessions
             .get_mut(session_id)
-            .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+            .ok_or_else(|| RelayError::Unauthorized("invalid session token".to_string()))?;
         session.migrate_legacy_device_fields();
 
-        let (role, device_id) = if constant_time_eq(&session.daemon_token, token) {
+        let (role, device_id) = if verify_secret(&session.daemon_token, token) {
             (RelayPeerRole::Daemon, None)
         } else if let Some(device) = session.devices.values().find(|device| {
-            constant_time_eq(&device.client_token, token) && device.revoked_at.is_none()
+            verify_secret(&device.client_token, token) && device.revoked_at.is_none()
         }) {
             (RelayPeerRole::Client, Some(device.device_id.clone()))
         } else {
@@ -1423,12 +1612,12 @@ impl AppState {
     ) -> Result<
         (
             String,
-            mpsc::Receiver<RelayServerMessage>,
+            mpsc::Receiver<BudgetedRelayMessage>,
             RelayServerMessage,
         ),
         RelayError,
     > {
-        let (tx, rx) = mpsc::channel(PEER_QUEUE_CAPACITY);
+        let (tx, rx) = PeerQueue::new(PEER_QUEUE_CAPACITY);
         let mut store = self.inner.store.lock().await;
         let session = store
             .data
@@ -1704,6 +1893,7 @@ impl AppState {
                         "only daemon peers may register rpc handlers".to_string(),
                     ));
                 }
+                validate_bounded_text("rpc method", &method, MAX_RPC_METHOD_LENGTH, false)?;
                 self.register_rpc_method(session_id, peer_id, method).await;
             }
             RelayClientMessage::RpcUnregister { method } => {
@@ -1712,6 +1902,7 @@ impl AppState {
                         "only daemon peers may unregister rpc handlers".to_string(),
                     ));
                 }
+                validate_bounded_text("rpc method", &method, MAX_RPC_METHOD_LENGTH, false)?;
                 self.unregister_rpc_method(session_id, peer_id, method)
                     .await;
             }
@@ -1725,11 +1916,13 @@ impl AppState {
                         "only client peers may initiate rpc calls".to_string(),
                     ));
                 }
-                if request_id.len() > MAX_RPC_REQUEST_ID_LENGTH {
-                    return Err(RelayError::BadRequest(format!(
-                        "rpc request_id must not exceed {MAX_RPC_REQUEST_ID_LENGTH} characters"
-                    )));
-                }
+                validate_bounded_text(
+                    "rpc request_id",
+                    &request_id,
+                    MAX_RPC_REQUEST_ID_LENGTH,
+                    false,
+                )?;
+                validate_bounded_text("rpc method", &method, MAX_RPC_METHOD_LENGTH, false)?;
                 self.forward_rpc_call(session_id, peer_id, request_id, method, params)
                     .await;
             }
@@ -1744,6 +1937,12 @@ impl AppState {
                         "only daemon peers may resolve rpc calls".to_string(),
                     ));
                 }
+                validate_bounded_text(
+                    "rpc request_id",
+                    &request_id,
+                    MAX_RPC_REQUEST_ID_LENGTH,
+                    false,
+                )?;
                 self.resolve_rpc(session_id, peer_id, request_id, ok, result, error)
                     .await;
             }
@@ -1757,6 +1956,10 @@ impl AppState {
                     return Err(RelayError::Unauthorized(
                         "only daemon peers may update queued actions".to_string(),
                     ));
+                }
+                validate_bounded_text("action_id", &action_id, 128, false)?;
+                if let Some(error) = error.as_deref() {
+                    validate_bounded_text("action error", error, MAX_LOGGED_ERROR_LENGTH, true)?;
                 }
                 self.update_action(session_id, peer_id, &action_id, status, error, result)
                     .await?;
@@ -1773,6 +1976,20 @@ impl AppState {
                     return Err(RelayError::Unauthorized(
                         "only daemon peers may request push notifications".to_string(),
                     ));
+                }
+                for (name, value) in [
+                    ("notification kind", Some(kind.as_str())),
+                    ("workspace_id", workspace_id.as_deref()),
+                    ("thread_id", thread_id.as_deref()),
+                ] {
+                    if let Some(value) = value {
+                        validate_bounded_text(
+                            name,
+                            value,
+                            MAX_NOTIFICATION_FIELD_LENGTH,
+                            name != "notification kind",
+                        )?;
+                    }
                 }
                 self.dispatch_push_notifications(session_id, kind, workspace_id, thread_id)
                     .await;
@@ -2141,7 +2358,7 @@ impl AppState {
     fn notify_expired_rpcs(
         &self,
         session_id: &str,
-        expired: Vec<(String, String, String, mpsc::Sender<RelayServerMessage>)>,
+        expired: Vec<(String, String, String, PeerQueue)>,
     ) {
         for (request_id, method, requester_peer_id, tx) in expired {
             warn!(
@@ -2235,6 +2452,18 @@ impl AppState {
         token: &str,
         request: SubmitQueuedActionRequest,
     ) -> Result<QueuedRemoteAction, RelayError> {
+        validate_bounded_text(
+            "action_type",
+            &request.action_type,
+            MAX_ACTION_TYPE_LENGTH,
+            false,
+        )?;
+        validate_bounded_text(
+            "idempotency_key",
+            &request.idempotency_key,
+            MAX_IDEMPOTENCY_KEY_LENGTH,
+            false,
+        )?;
         let auth = self.authenticate_session(session_id, token).await?;
         if !matches!(auth.role, RelayPeerRole::Client) {
             return Err(RelayError::Unauthorized(
@@ -2434,6 +2663,9 @@ impl AppState {
                 session.updated_at = Utc::now();
                 session_snapshot = session.meta();
             }
+            store
+                .issued_client_tokens
+                .remove(&(session_id.to_string(), device_id.to_string()));
             let revoked_peer_ids = store
                 .live_sessions
                 .get(session_id)
@@ -2486,6 +2718,9 @@ impl AppState {
         device_id: &str,
         push_token: Option<String>,
     ) -> Result<(), RelayError> {
+        if let Some(push_token) = push_token.as_deref() {
+            validate_bounded_text("push_token", push_token, MAX_PUSH_TOKEN_LENGTH, true)?;
+        }
         let auth = self.authenticate_session(session_id, token).await?;
         if matches!(auth.role, RelayPeerRole::Client)
             && auth.device_id.as_deref() != Some(device_id)
@@ -3135,15 +3370,16 @@ impl AppState {
         &self,
         session_id: &str,
         peer_id: &str,
-        tx: &mpsc::Sender<RelayServerMessage>,
+        tx: &PeerQueue,
         message: RelayServerMessage,
     ) {
         match tx.try_send(message) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            Err(()) => {
                 warn!(
                     session_id,
-                    peer_id, "disconnecting slow relay peer after outbound queue overflow"
+                    peer_id,
+                    "disconnecting slow relay peer after outbound queue count/byte overflow or closure"
                 );
                 let state = self.clone();
                 let session_id = session_id.to_string();
@@ -3152,15 +3388,49 @@ impl AppState {
                     state.unregister_peer(&session_id, &peer_id).await;
                 });
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                let state = self.clone();
-                let session_id = session_id.to_string();
-                let peer_id = peer_id.to_string();
-                tokio::spawn(async move {
-                    state.unregister_peer(&session_id, &peer_id).await;
-                });
+        }
+    }
+
+    async fn persist_normalized_credentials(&self) -> Result<(), RelayError> {
+        if self.inner.needs_flush {
+            return self.persist_current().await;
+        }
+        let (sessions, pairings) = {
+            let store = self.inner.store.lock().await;
+            let sessions = store
+                .data
+                .sessions
+                .values()
+                .map(|session| {
+                    (
+                        session.meta(),
+                        session.devices.values().cloned().collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let pairings = store.data.pairings.values().cloned().collect::<Vec<_>>();
+            (sessions, pairings)
+        };
+
+        for (session, devices) in &sessions {
+            self.inner
+                .backend
+                .persist_pairing(Some(session), None)
+                .await?;
+            for device in devices {
+                self.inner
+                    .backend
+                    .persist_device(session, Some(device))
+                    .await?;
             }
         }
+        for pairing in &pairings {
+            self.inner
+                .backend
+                .persist_pairing(None, Some(pairing))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn persist_pairing_state(
@@ -3256,12 +3526,43 @@ impl AppState {
                 !live.peers.is_empty() || live.daemon_reconnect_grace_active(now)
             });
             let live_session_ids = store.live_sessions.keys().cloned().collect();
-            prune_state(
+            let report = prune_state(
                 &mut store.data,
                 &live_session_ids,
                 &self.inner.retention,
                 now,
-            )
+            );
+            let valid_pairing_ids = store
+                .data
+                .pairings
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+            store
+                .pairing_challenges
+                .retain(|pairing_id, _| valid_pairing_ids.contains(pairing_id));
+            store.pairing_ids_by_code = store
+                .data
+                .pairings
+                .iter()
+                .map(|(pairing_id, pairing)| (pairing.pairing_code.clone(), pairing_id.clone()))
+                .collect();
+            let trusted_devices = store
+                .data
+                .sessions
+                .iter()
+                .flat_map(|(session_id, session)| {
+                    session
+                        .devices
+                        .values()
+                        .filter(|device| device.revoked_at.is_none())
+                        .map(|device| (session_id.clone(), device.device_id.clone()))
+                })
+                .collect::<std::collections::HashSet<_>>();
+            store
+                .issued_client_tokens
+                .retain(|key, _| trusted_devices.contains(key));
+            report
         };
         Ok(report)
     }
@@ -3833,6 +4134,75 @@ pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
+fn secret_verifier(secret: &str) -> String {
+    let digest = Sha256::digest(secret.as_bytes());
+    let mut encoded = String::with_capacity(SECRET_VERIFIER_PREFIX.len() + digest.len() * 2);
+    encoded.push_str(SECRET_VERIFIER_PREFIX);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+fn verify_secret(stored_verifier: &str, candidate: &str) -> bool {
+    if stored_verifier.starts_with(SECRET_VERIFIER_PREFIX) {
+        constant_time_eq(stored_verifier, &secret_verifier(candidate))
+    } else {
+        // Migration compatibility for credentials written by older relay
+        // versions. Startup normalization replaces these values immediately.
+        constant_time_eq(stored_verifier, candidate)
+    }
+}
+
+fn validate_bounded_text(
+    field: &str,
+    value: &str,
+    max_chars: usize,
+    allow_empty: bool,
+) -> Result<(), RelayError> {
+    let character_count = value.chars().count();
+    if !allow_empty && character_count == 0 {
+        return Err(RelayError::BadRequest(format!("{field} is required")));
+    }
+    if character_count > max_chars {
+        return Err(RelayError::BadRequest(format!(
+            "{field} must be at most {max_chars} characters"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(RelayError::BadRequest(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_persisted_secrets(state: &mut PersistedState) -> bool {
+    let mut changed = false;
+    for pairing in state.pairings.values_mut() {
+        for value in [&mut pairing.pairing_code, &mut pairing.daemon_token] {
+            if !value.starts_with(SECRET_VERIFIER_PREFIX) {
+                *value = secret_verifier(value);
+                changed = true;
+            }
+        }
+    }
+    for session in state.sessions.values_mut() {
+        if !session.daemon_token.starts_with(SECRET_VERIFIER_PREFIX) {
+            session.daemon_token = secret_verifier(&session.daemon_token);
+            changed = true;
+        }
+        for device in session.devices.values_mut() {
+            if !device.client_token.starts_with(SECRET_VERIFIER_PREFIX) {
+                device.client_token = secret_verifier(&device.client_token);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 // Persistence functions moved to crate::persistence module.
 
 fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
@@ -3865,7 +4235,7 @@ fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
     changed
 }
 
-fn generate_pairing_code(state: &PersistedState) -> String {
+fn generate_pairing_code(pairing_ids_by_code: &HashMap<String, String>) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     for _ in 0..16 {
         let bytes = *Uuid::new_v4().as_bytes();
@@ -3874,11 +4244,7 @@ fn generate_pairing_code(state: &PersistedState) -> String {
             .take(12)
             .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
             .collect::<String>();
-        if state
-            .pairings
-            .values()
-            .all(|pairing| pairing.pairing_code != candidate)
-        {
+        if !pairing_ids_by_code.contains_key(&secret_verifier(&candidate)) {
             return candidate;
         }
     }
@@ -3907,10 +4273,11 @@ mod tests {
     };
 
     use super::{
-        LiveSession, PairingRateLimiter, PairingRateLimits, PairingRecord, PeerHandle,
+        LiveSession, PairingRateLimiter, PairingRateLimits, PairingRecord, PeerHandle, PeerQueue,
         PersistedState, REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD,
         RetentionConfig, SessionRecord, chunk_replay_updates, namespaced_rpc_request_id,
-        prune_state, push_dedupe_key, strip_rpc_request_id_namespace, sync_messages,
+        normalize_persisted_secrets, prune_state, push_dedupe_key, secret_verifier,
+        strip_rpc_request_id_namespace, sync_messages, verify_secret,
     };
 
     fn rate_limits(client_capacity: u32, global_capacity: u32) -> PairingRateLimits {
@@ -3922,6 +4289,58 @@ mod tests {
             max_origins: 8,
             origin_idle_ttl: StdDuration::from_secs(60),
         }
+    }
+
+    #[test]
+    fn persisted_secret_verifiers_are_one_way_and_migration_safe() {
+        let verifier = secret_verifier("client-secret");
+        assert!(verifier.starts_with("sha256:v1:"));
+        assert!(!verifier.contains("client-secret"));
+        assert!(verify_secret(&verifier, "client-secret"));
+        assert!(!verify_secret(&verifier, "wrong-secret"));
+        assert!(
+            !verify_secret(&verifier, &verifier),
+            "a persisted verifier must never be accepted as a bearer token"
+        );
+        assert!(verify_secret("legacy-secret", "legacy-secret"));
+    }
+
+    #[test]
+    fn startup_normalization_hashes_all_persisted_capabilities() {
+        let now = Utc::now();
+        let mut state = PersistedState::default();
+        let mut session = untouched_session(now);
+        session.devices.insert(
+            "device-1".to_string(),
+            super::TrustedDeviceRecord {
+                device_id: "device-1".to_string(),
+                client_token: "client-secret".to_string(),
+                label: None,
+                public_key: None,
+                identity_public_key: None,
+                created_at: now,
+                last_seen_at: None,
+                revoked_at: None,
+                push_token: None,
+            },
+        );
+        state.sessions.insert(session.session_id.clone(), session);
+        state.pairings.insert(
+            "pairing-1".to_string(),
+            unclaimed_pairing(now, now + Duration::minutes(5)),
+        );
+
+        assert!(normalize_persisted_secrets(&mut state));
+        let session = &state.sessions["session-1"];
+        let pairing = &state.pairings["pairing-1"];
+        assert!(verify_secret(&session.daemon_token, "daemon-token"));
+        assert!(verify_secret(
+            &session.devices["device-1"].client_token,
+            "client-secret"
+        ));
+        assert!(verify_secret(&pairing.pairing_code, "PAIRCODE"));
+        assert!(verify_secret(&pairing.daemon_token, "daemon-token"));
+        assert!(!normalize_persisted_secrets(&mut state));
     }
 
     fn untouched_session(now: chrono::DateTime<Utc>) -> SessionRecord {
@@ -3960,6 +4379,9 @@ mod tests {
             device_id: None,
             daemon_bundle: None,
             client_bundle: None,
+            pairing_authority: None,
+            claim_challenge: None,
+            pairing_authority_signature: None,
             created_at: now,
             expires_at,
         }
@@ -4270,8 +4692,26 @@ mod tests {
     }
 
     #[test]
+    fn peer_queue_enforces_aggregate_bytes_and_releases_budget_after_receive() {
+        let message = falcondeck_core::RelayServerMessage::Error {
+            message: "bounded-message".repeat(8),
+        };
+        let encoded_bytes = serde_json::to_vec(&message).unwrap().len();
+        let (queue, mut rx) = PeerQueue::new_with_byte_budget(4, encoded_bytes);
+
+        assert!(queue.try_send(message.clone()).is_ok());
+        assert!(queue.try_send(message.clone()).is_err());
+
+        let received = rx.try_recv().expect("first queued message");
+        assert_eq!(received.message(), &message);
+        drop(received);
+
+        assert!(queue.try_send(message).is_ok());
+    }
+
+    #[test]
     fn daemon_presence_is_not_sync_ready_until_snapshot_and_thread_detail_are_owned() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (tx, _rx) = PeerQueue::new(1);
         let mut live = LiveSession::default();
         live.peers.insert(
             "daemon-1".to_string(),
@@ -4299,7 +4739,7 @@ mod tests {
 
     #[test]
     fn rpc_routing_prefers_the_newest_live_daemon_owner() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (tx, _rx) = PeerQueue::new(1);
         let mut live = LiveSession::default();
         for peer_id in ["daemon-1", "daemon-2"] {
             live.peers.insert(
@@ -4325,7 +4765,7 @@ mod tests {
 
     #[test]
     fn action_routing_prefers_the_newest_live_daemon_peer() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let (tx, _rx) = PeerQueue::new(1);
         let mut live = LiveSession::default();
         for peer_id in ["daemon-1", "daemon-2"] {
             live.peers.insert(

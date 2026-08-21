@@ -3,13 +3,15 @@ use std::{net::SocketAddr, path::PathBuf};
 use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
-    IdentityVariant, PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle,
-    PairingStatus, PairingStatusResponse, RelayClientMessage, RelayServerMessage, RelayUpdate,
-    RelayUpdateBody, RelayUpdatesResponse, RelayWebSocketTicketResponse, StartPairingRequest,
-    StartPairingResponse, SubmitQueuedActionRequest, TrustedDevicesResponse,
+    IdentityVariant, PairingAuthority, PairingChallengeRequest, PairingChallengeResponse,
+    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
+    RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
+    SubmitQueuedActionRequest, TrustedDevicesResponse,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, encrypt_json,
-        generate_data_key, sign_pairing_claim_challenge,
+        generate_data_key, pairing_authority_public_key, sign_pairing_authority_client_bundle,
+        sign_pairing_authority_daemon_bundle, sign_pairing_claim_challenge,
     },
 };
 use falcondeck_relay::{AppState, RetentionConfig, router};
@@ -46,6 +48,7 @@ async fn pairing_flow_and_history_round_trip() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -106,6 +109,7 @@ async fn pairing_creation_rate_limit_rejects_before_persisting_sessions() {
         existing_session_id: None,
         daemon_token: None,
         daemon_bundle: None,
+        pairing_authority: None,
     };
 
     for _ in 0..10 {
@@ -136,6 +140,33 @@ async fn pairing_creation_rate_limit_rejects_before_persisting_sessions() {
 }
 
 #[tokio::test]
+async fn unauthenticated_pairing_attempts_are_rate_limited() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let invalid_request = PairingChallengeRequest {
+        pairing_code: "DOES-NOT-EXIST".to_string(),
+    };
+
+    for _ in 0..10 {
+        let response = client
+            .post(format!("{}/v1/pairings/challenge", server.http_base))
+            .json(&invalid_request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    let rejected = client
+        .post(format!("{}/v1/pairings/challenge", server.http_base))
+        .json(&invalid_request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn pairing_creation_rejects_labels_that_exceed_the_storage_bound() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -147,13 +178,20 @@ async fn pairing_creation_rejects_labels_that_exceed_the_storage_bound() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: None,
+            pairing_authority: None,
         })
         .send()
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(response.text().await.unwrap().contains("at most 128 characters"));
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("at most 128 characters")
+    );
     assert_eq!(server.state.health().await.active_sessions, 0);
 }
 
@@ -169,6 +207,7 @@ async fn pairing_creation_rejects_oversized_request_bodies() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: None,
+            pairing_authority: None,
         })
         .send()
         .await
@@ -193,6 +232,7 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
             existing_session_id: Some(pairing.session_id.clone()),
             daemon_token: Some(pairing.daemon_token.clone()),
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -317,6 +357,7 @@ async fn a_device_cannot_revoke_a_different_device() {
             existing_session_id: Some(pairing.session_id.clone()),
             daemon_token: Some(pairing.daemon_token.clone()),
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -357,6 +398,7 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -380,6 +422,7 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
             existing_session_id: Some(first_pairing.session_id.clone()),
             daemon_token: Some(first_pairing.daemon_token.clone()),
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -426,6 +469,7 @@ async fn reclaiming_the_same_pairing_code_with_the_same_client_key_is_idempotent
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1214,6 +1258,7 @@ async fn expired_pairings_cannot_be_claimed() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1266,6 +1311,7 @@ async fn claims_without_a_challenge_are_rejected() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1311,6 +1357,7 @@ async fn claims_signed_by_a_different_identity_key_are_rejected() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1321,6 +1368,13 @@ async fn claims_signed_by_a_different_identity_key_are_rejected() {
     let stolen_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
     let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
     let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let pairing_authority_signature = sign_pairing_authority_client_bundle(
+        TEST_PAIRING_AUTHORITY_SECRET,
+        &pairing.pairing_code,
+        &challenge.challenge,
+        &stolen_bundle,
+    )
+    .unwrap();
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
         .json(&ClaimPairingRequest {
@@ -1332,6 +1386,7 @@ async fn claims_signed_by_a_different_identity_key_are_rejected() {
                 &pairing.pairing_code,
                 &challenge.challenge,
             ),
+            pairing_authority_signature: Some(pairing_authority_signature),
         })
         .send()
         .await
@@ -1354,6 +1409,7 @@ async fn pairing_claim_challenges_are_single_use() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1402,6 +1458,7 @@ async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1423,6 +1480,13 @@ async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
     let stolen_bundle = build_pairing_public_key_bundle(&victim_key_pair);
     let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
     let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let pairing_authority_signature = sign_pairing_authority_client_bundle(
+        TEST_PAIRING_AUTHORITY_SECRET,
+        &pairing.pairing_code,
+        &challenge.challenge,
+        &stolen_bundle,
+    )
+    .unwrap();
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
         .json(&ClaimPairingRequest {
@@ -1434,6 +1498,7 @@ async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
                 &pairing.pairing_code,
                 &challenge.challenge,
             ),
+            pairing_authority_signature: Some(pairing_authority_signature),
         })
         .send()
         .await
@@ -1481,6 +1546,7 @@ async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device(
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -1503,6 +1569,13 @@ async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device(
     let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
     let forged_bundle = forged_bundle_for(&victim_key_pair, &attacker_identity);
     let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let pairing_authority_signature = sign_pairing_authority_client_bundle(
+        TEST_PAIRING_AUTHORITY_SECRET,
+        &pairing.pairing_code,
+        &challenge.challenge,
+        &forged_bundle,
+    )
+    .unwrap();
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
         .json(&ClaimPairingRequest {
@@ -1514,6 +1587,7 @@ async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device(
                 &pairing.pairing_code,
                 &challenge.challenge,
             ),
+            pairing_authority_signature: Some(pairing_authority_signature),
         })
         .send()
         .await
@@ -1574,6 +1648,7 @@ async fn revoked_devices_cannot_reclaim_a_dead_client_token() {
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -2451,7 +2526,9 @@ async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Unknown/pruned sessions and invalid bearer tokens intentionally share
+    // one response so the endpoint does not become a session-id oracle.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -2770,6 +2847,7 @@ async fn queued_action_idempotency_is_scoped_per_device() {
             existing_session_id: Some(pairing.session_id.clone()),
             daemon_token: Some(pairing.daemon_token.clone()),
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -3006,6 +3084,7 @@ async fn duplicate_request_ids_from_different_devices_do_not_collide() {
             existing_session_id: Some(pairing.session_id.clone()),
             daemon_token: Some(pairing.daemon_token.clone()),
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -3146,6 +3225,7 @@ async fn create_claimed_session(
             existing_session_id: None,
             daemon_token: None,
             daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
         },
         None,
     )
@@ -3189,11 +3269,21 @@ fn signed_claim_request(
     key_pair: &LocalBoxKeyPair,
 ) -> ClaimPairingRequest {
     let identity = LocalIdentityKeyPair::from_box_key_pair(key_pair);
+    let client_bundle = build_pairing_public_key_bundle(key_pair);
     ClaimPairingRequest {
         pairing_code: pairing_code.to_string(),
         label: label.map(str::to_string),
-        client_bundle: Some(build_pairing_public_key_bundle(key_pair)),
+        client_bundle: Some(client_bundle.clone()),
         challenge_signature: sign_pairing_claim_challenge(&identity, pairing_code, challenge),
+        pairing_authority_signature: Some(
+            sign_pairing_authority_client_bundle(
+                TEST_PAIRING_AUTHORITY_SECRET,
+                pairing_code,
+                challenge,
+                &client_bundle,
+            )
+            .unwrap(),
+        ),
     }
 }
 
@@ -3422,9 +3512,24 @@ fn format_addr(addr: SocketAddr) -> String {
     }
 }
 
+const TEST_PAIRING_AUTHORITY_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TEST_DAEMON_BOX_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 fn test_bundle() -> PairingPublicKeyBundle {
-    let key_pair = LocalBoxKeyPair::generate();
+    let key_pair = LocalBoxKeyPair::from_secret_key_base64(TEST_DAEMON_BOX_SECRET).unwrap();
     build_pairing_public_key_bundle(&key_pair)
+}
+
+fn test_pairing_authority() -> PairingAuthority {
+    let daemon_bundle = test_bundle();
+    PairingAuthority {
+        public_key: pairing_authority_public_key(TEST_PAIRING_AUTHORITY_SECRET).unwrap(),
+        daemon_bundle_signature: sign_pairing_authority_daemon_bundle(
+            TEST_PAIRING_AUTHORITY_SECRET,
+            &daemon_bundle,
+        )
+        .unwrap(),
+    }
 }
 
 /// Builds a validly self-signed bundle that pairs the given box public key

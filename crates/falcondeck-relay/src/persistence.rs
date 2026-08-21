@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, sync::Mutex, task::JoinHandle};
-use tokio_postgres::{Client as PostgresClient, NoTls};
+use tokio::{fs, io::AsyncWriteExt, sync::Mutex, task::JoinHandle};
+use tokio_postgres::{Client as PostgresClient, Config as PostgresConfig, NoTls, config::Host};
 use tracing::warn;
 
 use crate::error::RelayError;
@@ -261,6 +261,7 @@ pub(crate) struct PostgresBackend {
 
 impl PostgresBackend {
     pub(crate) async fn connect(database_url: &str) -> Result<Self, RelayError> {
+        require_local_postgres_without_tls(database_url)?;
         let (client, connection) = tokio_postgres::connect(database_url, NoTls)
             .await
             .map_err(|error| RelayError::StateLoad(error.to_string()))?;
@@ -351,6 +352,32 @@ impl PostgresBackend {
             warn!(deleted, "pruned retained replay before loading relay state");
         }
         Ok(deleted)
+    }
+}
+
+/// `NoTls` is only safe for a local database connection. Refuse a remote
+/// database rather than silently sending relay credentials and replay data in
+/// cleartext. TLS support can be added later without weakening this default.
+fn require_local_postgres_without_tls(database_url: &str) -> Result<(), RelayError> {
+    let config: PostgresConfig = database_url
+        .parse()
+        .map_err(|error| RelayError::StateLoad(format!("invalid PostgreSQL URL: {error}")))?;
+    let is_local = config.get_hosts().iter().all(|host| match host {
+        Host::Unix(_) => true,
+        Host::Tcp(host) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }
+    });
+    if is_local {
+        Ok(())
+    } else {
+        Err(RelayError::StateLoad(
+            "remote PostgreSQL connections require TLS; configure a local/Unix-socket database or add TLS support"
+                .to_string(),
+        ))
     }
 }
 
@@ -554,8 +581,29 @@ async fn persist_state_to_file(path: &Path, state: &PersistedState) -> Result<()
     let json = serde_json::to_vec_pretty(state)
         .map_err(|error| RelayError::StatePersist(error.to_string()))?;
     let result = async {
-        fs::write(&tmp_path, json).await?;
-        fs::rename(&tmp_path, path).await
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path).await?;
+        file.write_all(&json).await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&tmp_path, path).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+            // Make the rename durable too. Syncing only the file contents can
+            // still lose the directory entry if the host crashes immediately
+            // after the atomic replacement.
+            if let Some(parent) = path.parent() {
+                fs::File::open(parent).await?.sync_all().await?;
+            }
+        }
+        Ok::<(), std::io::Error>(())
     }
     .await;
     if let Err(error) = result {
@@ -646,9 +694,15 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 device_id TEXT NULL,
                 daemon_bundle JSONB NULL,
                 client_bundle JSONB NULL,
+                pairing_authority JSONB NULL,
+                claim_challenge TEXT NULL,
+                pairing_authority_signature TEXT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 expires_at TIMESTAMPTZ NOT NULL
             );
+            ALTER TABLE relay_pairings ADD COLUMN IF NOT EXISTS pairing_authority JSONB NULL;
+            ALTER TABLE relay_pairings ADD COLUMN IF NOT EXISTS claim_challenge TEXT NULL;
+            ALTER TABLE relay_pairings ADD COLUMN IF NOT EXISTS pairing_authority_signature TEXT NULL;
             CREATE TABLE IF NOT EXISTS relay_devices (
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
                 device_id TEXT NOT NULL,
@@ -785,7 +839,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at FROM relay_pairings",
+            "SELECT pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, pairing_authority, claim_challenge, pairing_authority_signature, created_at, expires_at FROM relay_pairings",
             &[],
         )
         .await
@@ -800,6 +854,9 @@ async fn load_postgres_state_from_client(
             device_id: row.get("device_id"),
             daemon_bundle: decode_optional_json_field(row.get("daemon_bundle"))?,
             client_bundle: decode_optional_json_field(row.get("client_bundle"))?,
+            pairing_authority: decode_optional_json_field(row.get("pairing_authority"))?,
+            claim_challenge: row.get("claim_challenge"),
+            pairing_authority_signature: row.get("pairing_authority_signature"),
             created_at: row.get("created_at"),
             expires_at: row.get("expires_at"),
         };
@@ -902,8 +959,8 @@ async fn upsert_pairing(
 ) -> Result<(), RelayError> {
     client
         .execute(
-            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, pairing_authority, claim_challenge, pairing_authority_signature, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
              ON CONFLICT (pairing_id) DO UPDATE SET
                pairing_code = EXCLUDED.pairing_code,
                daemon_token = EXCLUDED.daemon_token,
@@ -912,6 +969,9 @@ async fn upsert_pairing(
                device_id = EXCLUDED.device_id,
                daemon_bundle = EXCLUDED.daemon_bundle,
                client_bundle = EXCLUDED.client_bundle,
+               pairing_authority = EXCLUDED.pairing_authority,
+               claim_challenge = EXCLUDED.claim_challenge,
+               pairing_authority_signature = EXCLUDED.pairing_authority_signature,
                created_at = EXCLUDED.created_at,
                expires_at = EXCLUDED.expires_at",
             &[
@@ -923,6 +983,9 @@ async fn upsert_pairing(
                 &pairing.device_id,
                 &encode_optional_json_field(pairing.daemon_bundle.as_ref())?,
                 &encode_optional_json_field(pairing.client_bundle.as_ref())?,
+                &encode_optional_json_field(pairing.pairing_authority.as_ref())?,
+                &pairing.claim_challenge,
+                &pairing.pairing_authority_signature,
                 &pairing.created_at,
                 &pairing.expires_at,
             ],
@@ -1139,8 +1202,8 @@ async fn flush_postgres_state(
 
     for pairing in state.pairings.values() {
         tx.execute(
-            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, pairing_authority, claim_challenge, pairing_authority_signature, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
             &[
                 &pairing.pairing_id,
                 &pairing.pairing_code,
@@ -1150,6 +1213,9 @@ async fn flush_postgres_state(
                 &pairing.device_id,
                 &encode_optional_json_field(pairing.daemon_bundle.as_ref())?,
                 &encode_optional_json_field(pairing.client_bundle.as_ref())?,
+                &encode_optional_json_field(pairing.pairing_authority.as_ref())?,
+                &pairing.claim_challenge,
+                &pairing.pairing_authority_signature,
                 &pairing.created_at,
                 &pairing.expires_at,
             ],
@@ -1220,6 +1286,57 @@ pub(crate) fn queued_action_status_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_tls_postgres_accepts_only_local_hosts() {
+        for url in [
+            "postgresql://relay@localhost/falcondeck",
+            "postgresql://relay@127.0.0.1/falcondeck",
+            "postgresql://relay@[::1]/falcondeck",
+            "host=/var/run/postgresql dbname=falcondeck user=relay",
+        ] {
+            require_local_postgres_without_tls(url).unwrap_or_else(|error| {
+                panic!("expected local URL to be accepted ({url}): {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn no_tls_postgres_rejects_remote_hosts() {
+        for url in [
+            "postgresql://relay@db.example.com/falcondeck",
+            "postgresql://relay@192.0.2.10/falcondeck",
+        ] {
+            let error = require_local_postgres_without_tls(url)
+                .expect_err("remote NoTls PostgreSQL must be rejected");
+            assert!(error.to_string().contains("require TLS"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_state_is_always_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("relay-state.json");
+        fs::write(&path, b"stale").await.expect("seed state file");
+        fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .expect("make seeded state permissive");
+
+        persist_state_to_file(&path, &PersistedState::default())
+            .await
+            .expect("persist state");
+
+        let mode = fs::metadata(&path)
+            .await
+            .expect("state metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     /// This test uses temporary tables on an explicitly supplied PostgreSQL
     /// instance so it exercises PostgreSQL's real parser and window/CTE

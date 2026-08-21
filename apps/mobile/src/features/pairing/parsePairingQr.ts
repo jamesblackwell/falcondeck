@@ -1,24 +1,16 @@
-import { DEFAULT_REMOTE_RELAY_URL } from '@falcondeck/client-core'
+import {
+  DEFAULT_REMOTE_RELAY_URL,
+  normalizePairingCodeInput,
+  tryNormalizeRelayUrl,
+} from '@falcondeck/client-core'
 
 export type ParsedPairingQr = {
   relayUrl: string
   pairingCode: string
 }
 
-function normalizeRelayUrl(value: string) {
-  try {
-    const url = new URL(value.trim())
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      return null
-    }
-    return url.toString().replace(/\/$/, '')
-  } catch {
-    return null
-  }
-}
-
 function normalizePairingCode(value: string) {
-  return value.trim().toUpperCase()
+  return normalizePairingCodeInput(value.trim())
 }
 
 function parseFromUrl(value: string) {
@@ -31,7 +23,7 @@ function parseFromUrl(value: string) {
     }
 
     const relayUrlParam = url.searchParams.get('relay')?.trim()
-    const relayUrl = relayUrlParam ? normalizeRelayUrl(relayUrlParam) : DEFAULT_REMOTE_RELAY_URL
+    const relayUrl = relayUrlParam ? tryNormalizeRelayUrl(relayUrlParam) : DEFAULT_REMOTE_RELAY_URL
     if (!relayUrl) {
       return null
     }
@@ -56,7 +48,7 @@ export function parsePairingQr(value: string): ParsedPairingQr | null {
     return parsedUrl
   }
 
-  if (/^[A-Z0-9-]{4,}$/i.test(trimmed)) {
+  if (/^[A-Z0-9._-]{4,}$/i.test(trimmed)) {
     return {
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: normalizePairingCode(trimmed),

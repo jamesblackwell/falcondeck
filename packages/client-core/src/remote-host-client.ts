@@ -13,6 +13,7 @@ import {
   bytesToBase64,
   decryptJson,
   decryptJsonBatch,
+  decodeSecurePairingCode,
   deriveIdentityKeyPair,
   encryptJson,
   generateBoxKeyPair,
@@ -21,6 +22,8 @@ import {
   restoreBoxKeyPair,
   secretKeyToBase64,
   signPairingClaimChallenge,
+  signPairingAuthorityClientBundle,
+  verifyPairingAuthorityDaemonBundle,
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
   type BoxKeyPair,
@@ -36,6 +39,7 @@ import {
 } from './remote-session'
 import { RELAY_RPC_TIMEOUT_MS, relayRpcFailureMessage } from './remote-rpc'
 import { fetchWithTimeout, WEBSOCKET_CONNECT_TIMEOUT_MS } from './transport-timeout'
+import { normalizeRelayUrl } from './relay-url'
 import type {
   ClaimPairingRequest,
   ClaimPairingResponse,
@@ -82,7 +86,7 @@ export function encryptedRpcErrorMessage(payload: unknown) {
 }
 
 function relayHttpBase(relayUrl: string) {
-  return relayUrl.trim().replace(/\/$/, '')
+  return normalizeRelayUrl(relayUrl)
 }
 
 function relayWsBase(relayUrl: string) {
@@ -113,7 +117,8 @@ export async function claimHostPairing(options: {
   const relayBase = relayHttpBase(options.relayUrl)
   // The relay normalizes pairing codes to uppercase; sign the exact string
   // the relay verifies against.
-  const pairingCode = options.pairingCode.trim().toUpperCase()
+  const { pairingCode, authoritySecret } = decodeSecurePairingCode(options.pairingCode)
+  const clientBundle = buildPairingPublicKeyBundle(keyPair)
 
   // Claims are challenge-bound: fetch a single-use challenge and prove
   // possession of the identity secret key by signing it.
@@ -132,19 +137,32 @@ export async function claimHostPairing(options: {
     body: JSON.stringify({
       pairing_code: pairingCode,
       label: options.deviceLabel,
-      client_bundle: buildPairingPublicKeyBundle(keyPair),
+      client_bundle: clientBundle,
       challenge_signature: signPairingClaimChallenge(keyPair, pairingCode, challenge.challenge),
+      pairing_authority_signature: signPairingAuthorityClientBundle(
+        authoritySecret,
+        pairingCode,
+        challenge.challenge,
+        clientBundle,
+      ),
     } satisfies ClaimPairingRequest),
   })
   if (!claimResponse.ok) throw new Error(await relayErrorMessage(claimResponse))
   const claim = (await claimResponse.json()) as ClaimPairingResponse
   if (!claim.daemon_bundle) throw new Error('Relay claim response is missing daemon key material')
+  if (!claim.pairing_authority) throw new Error('Relay claim response is missing secure pairing authority')
   verifyPairingPublicKeyBundle(claim.daemon_bundle)
+  verifyPairingAuthorityDaemonBundle(
+    authoritySecret,
+    claim.pairing_authority.public_key,
+    claim.daemon_bundle,
+    claim.pairing_authority.daemon_bundle_signature,
+  )
 
   return {
     version: REMOTE_SESSION_STORAGE_VERSION,
     relayUrl: relayBase,
-    pairingCode,
+    pairingCode: '',
     pairingId: claim.pairing_id,
     sessionId: claim.session_id,
     deviceId: claim.device_id,

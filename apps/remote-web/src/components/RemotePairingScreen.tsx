@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 
+import { normalizePairingCodeInput } from '@falcondeck/client-core'
 import { ActivityDiamond, Button, Input } from '@falcondeck/ui'
 
 import { ChevronDown, Lock, Smartphone } from 'lucide-react'
@@ -66,19 +67,19 @@ export function RemotePairingScreen({
               htmlFor={codeFieldId}
               className="block text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.16em] text-fg-muted"
             >
-              Pairing code
+              Secure pairing code
             </label>
             <Input
               id={codeFieldId}
               value={pairingCode}
-              onChange={(event) => onPairingCodeChange(event.target.value.toUpperCase())}
-              placeholder="ABCD-1234"
+              onChange={(event) => onPairingCodeChange(normalizePairingCodeInput(event.target.value))}
+              placeholder="Paste secure code"
               autoComplete="one-time-code"
-              autoCapitalize="characters"
+              autoCapitalize="none"
               autoCorrect="off"
               spellCheck={false}
               autoFocus
-              className="text-center font-mono tracking-widest"
+              className="font-mono"
             />
           </div>
 

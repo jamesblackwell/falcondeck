@@ -198,13 +198,15 @@ describe('mobile app screens', () => {
     const renderer = renderComponent(<PairScreen />)
     const scrollView = renderer.root.findByType('ScrollView' as any)
     const pairingCode = renderer.root.find(
-      (node) => node.props.accessibilityLabel === 'Pairing code',
+      (node) => node.props.accessibilityLabel === 'Secure pairing code',
     )
     const advanced = renderer.root.find(
       (node) => node.props.accessibilityLabel === 'Advanced settings',
     )
 
     expect(pairingCode.props.accessibilityHint).toContain('desktop')
+    expect(pairingCode.props.autoCapitalize).toBe('none')
+    expect(pairingCode.props.autoCorrect).toBe(false)
     expect(scrollView.props.keyboardShouldPersistTaps).toBe('handled')
     expect(scrollView.props.contentInsetAdjustmentBehavior).toBe('automatic')
     expect(scrollView.props.automaticallyAdjustKeyboardInsets).toBe(true)

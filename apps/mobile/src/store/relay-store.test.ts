@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { buildPairingPublicKeyBundle, generateBoxKeyPair } from '@falcondeck/client-core'
+import {
+  buildPairingPublicKeyBundle,
+  generateBoxKeyPair,
+  signPairingAuthorityDaemonBundle,
+} from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { useSessionStore } from './session-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
@@ -8,7 +12,22 @@ import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
 /// Claims are now a two-step challenge → claim flow; mock both relay
 /// endpoints so claimPairing can complete.
+const TEST_AUTHORITY_SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
+
+function securePairingCode(code: string) {
+  return `${code}.${TEST_AUTHORITY_SECRET}`
+}
+
 function mockPairingFetch(claim: Record<string, unknown>) {
+  const daemonBundle = claim.daemon_bundle as ReturnType<typeof buildPairingPublicKeyBundle>
+  const authority = signPairingAuthorityDaemonBundle(TEST_AUTHORITY_SECRET, daemonBundle)
+  const authenticatedClaim = {
+    ...claim,
+    pairing_authority: {
+      public_key: authority.publicKey,
+      daemon_bundle_signature: authority.signature,
+    },
+  }
   return vi.fn().mockImplementation(async (url: string) => {
     if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
       return {
@@ -16,7 +35,7 @@ function mockPairingFetch(claim: Record<string, unknown>) {
         json: async () => ({ pairing_id: 'pairing-1', challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
       }
     }
-    return { ok: true, json: async () => claim }
+    return { ok: true, json: async () => authenticatedClaim }
   })
 }
 
@@ -73,6 +92,11 @@ describe('relay-store', () => {
     it('uppercases the pairing code', () => {
       useRelayStore.getState().setPairingCode('abcd-1234')
       expect(useRelayStore.getState().pairingCode).toBe('ABCD-1234')
+    })
+
+    it('preserves the case-sensitive authority secret', () => {
+      useRelayStore.getState().setPairingCode('abcd-1234.AbCd_-90')
+      expect(useRelayStore.getState().pairingCode).toBe('ABCD-1234.AbCd_-90')
     })
   })
 
@@ -140,7 +164,7 @@ describe('relay-store', () => {
     it('sets error on network failure', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('TEST-CODE')
+      setPairingCode(securePairingCode('TEST-CODE'))
 
       // Mock fetch to fail
       globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'))
@@ -155,7 +179,7 @@ describe('relay-store', () => {
     it('sets error on non-OK response', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('BAD-CODE')
+      setPairingCode(securePairingCode('BAD-CODE'))
 
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: false,
@@ -173,7 +197,7 @@ describe('relay-store', () => {
     it('transitions to connecting on successful claim', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('GOOD-CODE')
+      setPairingCode(securePairingCode('GOOD-CODE'))
 
       globalThis.fetch = mockPairingFetch({
         pairing_id: 'pairing-1',
@@ -205,7 +229,7 @@ describe('relay-store', () => {
       const { setRelayUrl, setPairingCode, claimPairing, _setSessionCrypto, _getSessionCrypto } =
         useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('GOOD-CODE')
+      setPairingCode(securePairingCode('GOOD-CODE'))
       _setSessionCrypto({
         dataKey: new Uint8Array(32),
         material: null,
@@ -259,7 +283,7 @@ describe('relay-store', () => {
     it('clears the relay push token before dropping the client token', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('GOOD-CODE')
+      setPairingCode(securePairingCode('GOOD-CODE'))
 
       globalThis.fetch = mockPairingFetch({
         pairing_id: 'pairing-1',

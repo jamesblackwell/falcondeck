@@ -235,6 +235,115 @@ function pairingClaimChallengeSigningPayload(pairingCode: string, challenge: str
   return signingPayloadBytes(`falcondeck-pairing-claim-v1\n${pairingCode}\n${challenge}`)
 }
 
+function pairingAuthorityIdentity(authoritySecret: string) {
+  const padded = authoritySecret.replace(/-/g, '+').replace(/_/g, '/')
+    .padEnd(Math.ceil(authoritySecret.length / 4) * 4, '=')
+  const seed = base64ToBytes(padded)
+  if (seed.length !== DATA_KEY_BYTES) {
+    throw new Error('Secure pairing code has invalid authority material')
+  }
+  return nacl.sign.keyPair.fromSeed(seed)
+}
+
+function pairingAuthorityDaemonBundlePayload(
+  authorityPublicKey: string,
+  bundle: PairingPublicKeyBundle,
+) {
+  return signingPayloadBytes(
+    `falcondeck-pairing-authority-daemon-v1\n${authorityPublicKey}\ndata_key_v1\ned25519_v1\n${bundle.public_key}\n${bundle.identity_public_key}`,
+  )
+}
+
+function pairingAuthorityClientBundlePayload(
+  pairingCode: string,
+  challenge: string,
+  bundle: PairingPublicKeyBundle,
+) {
+  return signingPayloadBytes(
+    `falcondeck-pairing-authority-client-v1\n${pairingCode}\n${challenge}\ndata_key_v1\ned25519_v1\n${bundle.public_key}\n${bundle.identity_public_key}`,
+  )
+}
+
+/** Uppercase only the relay lookup prefix; the authority suffix is base64url
+ * and must retain its exact case while a user scans, pastes, or types it. */
+export function normalizePairingCodeInput(value: string) {
+  const separator = value.indexOf('.')
+  return separator < 0
+    ? value.toUpperCase()
+    : `${value.slice(0, separator).toUpperCase()}.${value.slice(separator + 1)}`
+}
+
+export function decodeSecurePairingCode(value: string) {
+  const normalized = normalizePairingCodeInput(value.trim())
+  const separator = normalized.indexOf('.')
+  if (separator <= 0) {
+    throw new Error('This pairing code is incomplete. Scan or paste the secure pairing link from the desktop.')
+  }
+  const pairingCode = normalized.slice(0, separator)
+  const authoritySecret = normalized.slice(separator + 1)
+  const authority = pairingAuthorityIdentity(authoritySecret)
+  return {
+    pairingCode,
+    authoritySecret,
+    authorityPublicKey: bytesToBase64(authority.publicKey),
+  }
+}
+
+export function signPairingAuthorityClientBundle(
+  authoritySecret: string,
+  pairingCode: string,
+  challenge: string,
+  bundle: PairingPublicKeyBundle,
+) {
+  const authority = pairingAuthorityIdentity(authoritySecret)
+  return bytesToBase64(
+    nacl.sign.detached(
+      pairingAuthorityClientBundlePayload(pairingCode, challenge, bundle),
+      authority.secretKey,
+    ),
+  )
+}
+
+export function signPairingAuthorityDaemonBundle(
+  authoritySecret: string,
+  bundle: PairingPublicKeyBundle,
+) {
+  const authority = pairingAuthorityIdentity(authoritySecret)
+  const publicKey = bytesToBase64(authority.publicKey)
+  return {
+    publicKey,
+    signature: bytesToBase64(
+      nacl.sign.detached(
+        pairingAuthorityDaemonBundlePayload(publicKey, bundle),
+        authority.secretKey,
+      ),
+    ),
+  }
+}
+
+export function verifyPairingAuthorityDaemonBundle(
+  authoritySecret: string,
+  authorityPublicKey: string,
+  bundle: PairingPublicKeyBundle,
+  signatureBase64: string,
+) {
+  const authority = pairingAuthorityIdentity(authoritySecret)
+  if (bytesToBase64(authority.publicKey) !== authorityPublicKey) {
+    throw new Error('Relay returned an unexpected pairing authority')
+  }
+  const signature = base64ToBytes(signatureBase64)
+  if (
+    signature.length !== SIGNATURE_BYTES ||
+    !nacl.sign.detached.verify(
+      pairingAuthorityDaemonBundlePayload(authorityPublicKey, bundle),
+      signature,
+      authority.publicKey,
+    )
+  ) {
+    throw new Error('Relay returned daemon keys that are not authenticated by the pairing link')
+  }
+}
+
 /**
  * Signs a relay-issued pairing claim challenge with the identity key derived
  * from the local box key pair, proving possession of the bundle's identity

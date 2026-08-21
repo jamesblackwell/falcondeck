@@ -8,6 +8,7 @@ import {
   buildPairingPublicKeyBundle,
   generateBoxKeyPair,
   secretKeyToBase64,
+  signPairingAuthorityDaemonBundle,
   bytesToBase64,
   verifyPairingClaimChallenge,
 } from '@falcondeck/client-core'
@@ -23,9 +24,23 @@ import {
 } from '@/storage/secure'
 
 const TEST_CHALLENGE = 'dGVzdC1jaGFsbGVuZ2U='
+const TEST_AUTHORITY_SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
+
+function securePairingCode(code: string) {
+  return `${code}.${TEST_AUTHORITY_SECRET}`
+}
 
 /// Claims are a two-step challenge → claim flow; serve both relay endpoints.
 function mockPairingFetch(claim: Record<string, unknown>) {
+  const daemonBundle = claim.daemon_bundle as ReturnType<typeof buildPairingPublicKeyBundle>
+  const authority = signPairingAuthorityDaemonBundle(TEST_AUTHORITY_SECRET, daemonBundle)
+  const authenticatedClaim = {
+    ...claim,
+    pairing_authority: {
+      public_key: authority.publicKey,
+      daemon_bundle_signature: authority.signature,
+    },
+  }
   return vi.fn().mockImplementation(async (url: string) => {
     if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
       return {
@@ -33,7 +48,7 @@ function mockPairingFetch(claim: Record<string, unknown>) {
         json: async () => ({ pairing_id: 'pairing-1', challenge: TEST_CHALLENGE }),
       }
     }
-    return { ok: true, json: async () => claim }
+    return { ok: true, json: async () => authenticatedClaim }
   })
 }
 
@@ -171,7 +186,7 @@ describe('relay-store edge cases', () => {
     it('persists current session state to MMKV', async () => {
       const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
       useRelayStore.getState().setRelayUrl('https://relay.test')
-      useRelayStore.getState().setPairingCode('ABCD')
+      useRelayStore.getState().setPairingCode(securePairingCode('ABCD'))
       globalThis.fetch = mockPairingFetch({
         pairing_id: 'pairing-1',
         session_id: 'session-xyz',
@@ -196,7 +211,7 @@ describe('relay-store edge cases', () => {
       expect(persisted).toBeTruthy()
       expect(persisted.version).toBe(REMOTE_SESSION_STORAGE_VERSION)
       expect(persisted.sessionId).toBe('session-xyz')
-      expect(persisted.pairingCode).toBe('ABCD')
+      expect(persisted.pairingCode).toBe('')
     })
 
     it('skips persist when sessionId is null', () => {
@@ -289,7 +304,7 @@ describe('relay-store edge cases', () => {
     it('sends correct POST body with public key', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')
-      setPairingCode('TEST-CODE')
+      setPairingCode(securePairingCode('TEST-CODE'))
 
       let capturedChallengeBody: any = null
       let capturedBody: any = null
@@ -354,7 +369,7 @@ describe('relay-store edge cases', () => {
     it('POSTs the challenge then the claim to the correct endpoints', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test/')
-      setPairingCode('CODE')
+      setPairingCode(securePairingCode('CODE'))
 
       const capturedUrls: string[] = []
       const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())

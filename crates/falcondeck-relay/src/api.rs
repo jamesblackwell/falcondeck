@@ -6,13 +6,13 @@ use axum::{
         ConnectInfo, DefaultBodyLimit, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::HeaderMap,
+    http::{HeaderMap, HeaderValue, Method, header},
     response::{Html, IntoResponse},
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
-use tower_http::cors::{Any, CorsLayer};
+use serde::{Deserialize, Serialize};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use falcondeck_core::{
     ClaimPairingRequest, PairingChallengeRequest, RelayClientMessage, RelayServerMessage,
@@ -33,8 +33,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/pairings",
             post(start_pairing).layer(DefaultBodyLimit::max(PAIRING_REQUEST_BODY_LIMIT_BYTES)),
         )
-        .route("/v1/pairings/challenge", post(pairing_challenge))
-        .route("/v1/pairings/claim", post(claim_pairing))
+        .route(
+            "/v1/pairings/challenge",
+            post(pairing_challenge).layer(DefaultBodyLimit::max(PAIRING_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/pairings/claim",
+            post(claim_pairing).layer(DefaultBodyLimit::max(PAIRING_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/v1/pairings/{pairing_id}", get(pairing_status))
         .route("/v1/sessions/{session_id}/updates", get(session_updates))
         .route("/v1/sessions/{session_id}/actions", post(submit_action))
@@ -53,13 +59,29 @@ pub fn router(state: AppState) -> Router {
             post(register_push_token),
         )
         .route("/v1/updates/ws", get(updates_ws))
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(relay_cors_layer())
         .with_state(state)
+}
+
+fn relay_cors_layer() -> CorsLayer {
+    let configured = std::env::var("FALCONDECK_RELAY_CORS_ORIGINS")
+        .unwrap_or_else(|_| "https://app.falcondeck.com".to_string());
+    let mut origins = configured
+        .split(',')
+        .filter_map(|origin| origin.trim().parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    // Common local web-development origins. Native mobile and the daemon do
+    // not send browser Origin headers and are unaffected by this allowlist.
+    for origin in ["http://localhost:5173", "http://127.0.0.1:5173"] {
+        origins.push(HeaderValue::from_static(origin));
+    }
+    origins.sort_unstable();
+    origins.dedup();
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
 }
 
 const PAIRING_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
@@ -75,8 +97,13 @@ struct WebSocketQuery {
     ticket: String,
 }
 
-async fn health(State(state): State<AppState>) -> Json<falcondeck_core::RelayHealthResponse> {
-    Json(state.health().await)
+#[derive(Serialize)]
+struct RelayLivenessResponse {
+    ok: bool,
+}
+
+async fn health() -> Json<RelayLivenessResponse> {
+    Json(RelayLivenessResponse { ok: true })
 }
 
 const RELAY_LANDING_PAGE: &str = r##"<!doctype html>
@@ -145,15 +172,25 @@ fn pairing_client_ip(peer_addr: SocketAddr, headers: &HeaderMap) -> IpAddr {
 
 async fn pairing_challenge(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<PairingChallengeRequest>,
 ) -> Result<Json<falcondeck_core::PairingChallengeResponse>, RelayError> {
+    state
+        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers))
+        .await?;
     Ok(Json(state.create_pairing_challenge(request).await?))
 }
 
 async fn claim_pairing(
     State(state): State<AppState>,
+    ConnectInfo(peer_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<ClaimPairingRequest>,
 ) -> Result<Json<falcondeck_core::ClaimPairingResponse>, RelayError> {
+    state
+        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers))
+        .await?;
     Ok(Json(state.claim_pairing(request).await?))
 }
 
@@ -262,7 +299,7 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
             maybe_message = rx.recv() => {
                 match maybe_message {
                     Some(message) => {
-                        if send_message_with_timeout(&mut sender, &message).await.is_err() {
+                        if send_message_with_timeout(&mut sender, message.message()).await.is_err() {
                             break;
                         }
                     }
