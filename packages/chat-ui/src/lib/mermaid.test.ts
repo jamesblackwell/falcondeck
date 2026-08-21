@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const initialize = vi.fn()
-const render = vi.fn(async () => ({ svg: '<svg data-testid="mermaid-svg"></svg>' }))
+const render = vi.fn(async (_id: string, _source: string) => ({
+  svg: '<svg data-testid="mermaid-svg"></svg>',
+}))
 
 vi.mock('mermaid', () => ({
   default: {
