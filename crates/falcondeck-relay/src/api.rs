@@ -135,7 +135,7 @@ fn pairing_client_ip(peer_addr: SocketAddr, headers: &HeaderMap) -> IpAddr {
         && let Some(forwarded_ip) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.rsplit(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
     {
         return forwarded_ip;
@@ -474,12 +474,12 @@ mod pairing_rate_limit_tests {
     }
 
     #[test]
-    fn loopback_proxy_supplies_the_public_client_identity() {
+    fn loopback_proxy_uses_the_nearest_forwarded_client_identity() {
         let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
-            HeaderValue::from_static("198.51.100.20, 127.0.0.1"),
+            HeaderValue::from_static("203.0.113.99, 198.51.100.20"),
         );
 
         assert_eq!(
