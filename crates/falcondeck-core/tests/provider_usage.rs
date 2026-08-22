@@ -87,7 +87,8 @@ fn provider_usage_overview_round_trips() {
             "plan_label": "Plus",
             "windows": []
         },
-        "claude_code": { "status": "unauthenticated" }
+        "claude_code": { "status": "unauthenticated" },
+        "grok": { "status": "not_installed" }
     });
 
     let overview: ProviderUsageOverview =
@@ -97,4 +98,15 @@ fn provider_usage_overview_round_trips() {
         serde_json::to_value(overview).expect("serialized overview"),
         payload
     );
+}
+
+#[test]
+fn provider_usage_overview_defaults_missing_grok() {
+    let overview: ProviderUsageOverview = serde_json::from_value(json!({
+        "codex": { "status": "unauthenticated" },
+        "claude_code": { "status": "not_installed" }
+    }))
+    .expect("overview");
+
+    assert_eq!(overview.grok, ProviderUsage::NotInstalled);
 }

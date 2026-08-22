@@ -104,6 +104,8 @@ export type ProviderUsage =
 export type ProviderUsageOverview = {
   codex: ProviderUsage;
   claude_code: ProviderUsage;
+  /** Older daemons omit this field; treat missing as not installed. */
+  grok?: ProviderUsage;
 };
 
 export type AgentCapabilitySummary = {

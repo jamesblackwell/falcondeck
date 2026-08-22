@@ -21,6 +21,7 @@ describe("createDaemonApiClient sendTurn", () => {
         ],
       },
       claude_code: { status: "unauthenticated" },
+      grok: { status: "not_installed" },
     };
     const fetchMock = vi.fn<typeof fetch>(
       async () =>
@@ -30,7 +31,8 @@ describe("createDaemonApiClient sendTurn", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await createDaemonApiClient("http://daemon.test").providerUsage();
+    const result =
+      await createDaemonApiClient("http://daemon.test").providerUsage();
 
     expect(result).toEqual(overview);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(

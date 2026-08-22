@@ -1,12 +1,13 @@
 //! Live subscription usage snapshots for supported harnesses.
 //!
 //! Reads the same read-only dashboards the harness CLIs expose: Codex queries
-//! the ChatGPT usage endpoint with the token from `~/.codex/auth.json`, and
-//! Claude Code queries the Anthropic OAuth usage endpoint with the token from
-//! the CLI's keychain entry (macOS) or `~/.claude/.credentials.json`. Tokens
-//! are used as-is — the daemon never refreshes another tool's credentials,
-//! because rotating a refresh token out from under the owning CLI breaks its
-//! next run.
+//! the ChatGPT usage endpoint with the token from `~/.codex/auth.json`, Claude
+//! Code queries the Anthropic OAuth usage endpoint with the token from the
+//! CLI's keychain entry (macOS) or `~/.claude/.credentials.json`, and Grok
+//! Build queries the CLI-proxy billing endpoint with the token from
+//! `~/.grok/auth.json`. Tokens are used as-is — the daemon never refreshes
+//! another tool's credentials, because rotating a refresh token out from under
+//! the owning CLI breaks its next run.
 //!
 //! Tests swap the live transport for fixtures, which leaves the real HTTP and
 //! credential helpers unreachable in that build.
@@ -44,6 +45,10 @@ const KEYCHAIN_FIND_COMMAND: &str = "find-generic-password";
 const CLAUDE_OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
 const CLAUDE_USER_AGENT: &str = "claude-code/2.1.0";
 
+const GROK_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const GROK_SETTINGS_URL: &str = "https://cli-chat-proxy.grok.com/v1/settings";
+const GROK_TOKEN_AUTH_HEADER: &str = "xai-grok-cli";
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -73,6 +78,10 @@ fn non_empty_string(value: Option<&Value>) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .map(str::to_string)
+}
+
+fn json_field<'a>(value: &'a Value, camel: &str, snake: &str) -> Option<&'a Value> {
+    value.get(camel).or_else(|| value.get(snake))
 }
 
 /// JSON response shape shared by both usage endpoints.
@@ -835,16 +844,244 @@ async fn fetch_claude_usage() -> ProviderUsage {
 }
 
 // ---------------------------------------------------------------------------
+// Grok Build (xAI SuperGrok) usage
+// ---------------------------------------------------------------------------
+
+struct GrokCredentials {
+    access_token: String,
+    account_email: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    auth_mode: Option<String>,
+}
+
+fn grok_auth_path() -> Option<PathBuf> {
+    let home = std::env::var_os("GROK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))?;
+    Some(home.join("auth.json"))
+}
+
+fn grok_entry(value: &Value) -> Option<GrokCredentials> {
+    let access_token = non_empty_string(value.get("key"))?;
+    let expires_at = non_empty_string(value.get("expires_at")).and_then(|raw| {
+        DateTime::parse_from_rfc3339(&raw)
+            .ok()
+            .map(|datetime| datetime.with_timezone(&Utc))
+    });
+    Some(GrokCredentials {
+        access_token,
+        account_email: non_empty_string(value.get("email")),
+        expires_at,
+        auth_mode: non_empty_string(value.get("auth_mode")),
+    })
+}
+
+/// SuperGrok OIDC entries are keyed `https://auth.x.ai::<client-id>`. Legacy
+/// session files use `https://accounts.x.ai/sign-in`.
+fn parse_grok_auth(raw: &str) -> Option<GrokCredentials> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let object = value.as_object()?;
+    let mut preferred = None;
+    let mut fallback = None;
+    for (key, entry) in object {
+        let Some(credentials) = grok_entry(entry) else {
+            continue;
+        };
+        if key.starts_with("https://auth.x.ai") {
+            preferred.get_or_insert(credentials);
+        } else {
+            fallback.get_or_insert(credentials);
+        }
+    }
+    preferred.or(fallback)
+}
+
+fn grok_fallback_plan(auth_mode: Option<&str>) -> Option<String> {
+    match auth_mode {
+        Some(mode) if mode.eq_ignore_ascii_case("oidc") => Some("SuperGrok".to_string()),
+        _ => None,
+    }
+}
+
+fn grok_plan_from_settings(raw: &Value) -> Option<String> {
+    non_empty_string(json_field(
+        raw,
+        "subscription_tier_display",
+        "subscription_tier",
+    ))
+}
+
+fn grok_window_label(period_type: Option<&str>) -> &'static str {
+    match period_type {
+        Some("USAGE_PERIOD_TYPE_WEEKLY") => "Weekly limit",
+        Some("USAGE_PERIOD_TYPE_MONTHLY") => "Monthly limit",
+        Some("USAGE_PERIOD_TYPE_DAILY") => "Daily limit",
+        _ => "Credits",
+    }
+}
+
+fn grok_object_val(value: Option<&Value>) -> Option<f64> {
+    let value = value?;
+    value
+        .as_f64()
+        .or_else(|| value.get("val").and_then(Value::as_f64))
+}
+
+fn grok_credit_percent(config: &Value) -> Option<f64> {
+    if let Some(percent) =
+        json_field(config, "creditUsagePercent", "credit_usage_percent").and_then(Value::as_f64)
+    {
+        return percent.is_finite().then_some(percent);
+    }
+    let used = grok_object_val(json_field(config, "onDemandUsed", "on_demand_used"));
+    let cap = grok_object_val(json_field(config, "onDemandCap", "on_demand_cap"));
+    match (used, cap) {
+        (Some(used), Some(cap)) if cap > 0.0 && used.is_finite() && cap.is_finite() => {
+            Some(used / cap * 100.0)
+        }
+        _ => None,
+    }
+}
+
+fn grok_resets_at(config: &Value) -> Option<String> {
+    let period_end = json_field(config, "currentPeriod", "current_period")
+        .and_then(|period| json_field(period, "end", "end"))
+        .and_then(Value::as_str);
+    let billing_end =
+        json_field(config, "billingPeriodEnd", "billing_period_end").and_then(Value::as_str);
+    normalize_iso_timestamp(period_end).or_else(|| normalize_iso_timestamp(billing_end))
+}
+
+fn grok_headers(access_token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("authorization", format!("Bearer {access_token}")),
+        ("x-xai-token-auth", GROK_TOKEN_AUTH_HEADER.to_string()),
+        ("accept", "application/json".to_string()),
+        ("user-agent", "falcondeck-daemon".to_string()),
+    ]
+}
+
+fn normalize_grok_usage(
+    raw: &Value,
+    account_email: Option<String>,
+    plan_label: Option<String>,
+) -> ProviderUsage {
+    let malformed = || ProviderUsage::Error {
+        message: "Grok usage response was malformed.".to_string(),
+        plan_label: plan_label.clone(),
+        account_email: account_email.clone(),
+    };
+    let Some(config) = raw.get("config").filter(|config| config.is_object()) else {
+        return malformed();
+    };
+    let mut windows = Vec::new();
+    if let Some(percent) = grok_credit_percent(config) {
+        let period_type = json_field(config, "currentPeriod", "current_period")
+            .and_then(|period| json_field(period, "type", "type"))
+            .and_then(Value::as_str);
+        windows.push(ProviderUsageWindow {
+            label: grok_window_label(period_type).to_string(),
+            used_percent: clamp_percent(percent),
+            resets_at: grok_resets_at(config),
+            cost: None,
+        });
+    }
+    ProviderUsage::Ok {
+        account_email,
+        plan_label,
+        windows,
+    }
+}
+
+async fn fetch_grok_usage() -> ProviderUsage {
+    let Some(raw) = read_grok_auth_raw().await else {
+        return ProviderUsage::Unauthenticated;
+    };
+    let Some(credentials) = parse_grok_auth(&raw) else {
+        return ProviderUsage::Unauthenticated;
+    };
+    if credentials
+        .expires_at
+        .is_some_and(|expires_at| Utc::now() >= expires_at)
+    {
+        return ProviderUsage::Expired;
+    }
+
+    let headers = grok_headers(&credentials.access_token);
+    let known_plan = grok_fallback_plan(credentials.auth_mode.as_deref());
+    let known_email = credentials.account_email.clone();
+    let (billing, settings) = tokio::join!(
+        fetch_usage_json(GROK_BILLING_URL, &headers),
+        fetch_usage_json(GROK_SETTINGS_URL, &headers),
+    );
+    let plan_label = settings
+        .ok()
+        .and_then(|response| response.body)
+        .as_ref()
+        .and_then(grok_plan_from_settings)
+        .or(known_plan.clone());
+
+    let Ok(response) = billing else {
+        return ProviderUsage::Error {
+            message: "Grok usage request failed.".to_string(),
+            plan_label,
+            account_email: known_email,
+        };
+    };
+    match response.status {
+        401 => ProviderUsage::Expired,
+        429 => ProviderUsage::Error {
+            message: "Grok usage is rate limited right now. Try again shortly.".to_string(),
+            plan_label,
+            account_email: known_email,
+        },
+        status if !(200..300).contains(&status) => ProviderUsage::Error {
+            message: format!("Grok usage request failed (HTTP {status})."),
+            plan_label,
+            account_email: known_email,
+        },
+        _ => match response.body {
+            Some(body) => normalize_grok_usage(&body, known_email, plan_label),
+            None => ProviderUsage::Error {
+                message: "Grok usage response was malformed.".to_string(),
+                plan_label,
+                account_email: known_email,
+            },
+        },
+    }
+}
+
+#[cfg(not(test))]
+async fn read_grok_auth_raw() -> Option<String> {
+    let raw = fs::read_to_string(grok_auth_path()?).await.ok()?;
+    let trimmed = raw.trim().to_string();
+    parse_grok_auth(&trimmed).is_some().then_some(trimmed)
+}
+
+#[cfg(test)]
+async fn read_grok_auth_raw() -> Option<String> {
+    test_grok_auth_file().lock().unwrap().clone()
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    /// Reads live usage snapshots for the local Codex and Claude Code
+    /// Reads live usage snapshots for the local Codex, Claude Code, and Grok
     /// subscriptions. Each provider resolves independently so one failing
-    /// never blanks the other.
+    /// never blanks the others.
     pub async fn provider_usage_overview(&self) -> ProviderUsageOverview {
-        let (codex, claude_code) = tokio::join!(self.codex_usage(), self.claude_code_usage());
-        ProviderUsageOverview { codex, claude_code }
+        let (codex, claude_code, grok) = tokio::join!(
+            self.codex_usage(),
+            self.claude_code_usage(),
+            self.grok_usage()
+        );
+        ProviderUsageOverview {
+            codex,
+            claude_code,
+            grok,
+        }
     }
 
     async fn codex_usage(&self) -> ProviderUsage {
@@ -865,6 +1102,16 @@ impl AppState {
             return ProviderUsage::NotInstalled;
         }
         fetch_claude_usage().await
+    }
+
+    async fn grok_usage(&self) -> ProviderUsage {
+        if !crate::agent_binary::agent_binary_available_cached(
+            "grok",
+            &self.provider_bin(&AgentProvider::GROK),
+        ) {
+            return ProviderUsage::NotInstalled;
+        }
+        fetch_grok_usage().await
     }
 }
 
@@ -893,6 +1140,12 @@ fn test_claude_credentials_file() -> &'static StdMutex<Option<String>> {
 
 #[cfg(test)]
 fn test_claude_account_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn test_grok_auth_file() -> &'static StdMutex<Option<String>> {
     static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
     FILE.get_or_init(|| StdMutex::new(None))
 }
@@ -940,6 +1193,7 @@ mod tests {
         *test_codex_auth_file().lock().unwrap() = None;
         *test_claude_credentials_file().lock().unwrap() = None;
         *test_claude_account_file().lock().unwrap() = None;
+        *test_grok_auth_file().lock().unwrap() = None;
     }
 
     fn fake_codex_jwt(account_id: &str, email: Option<&str>, fedramp: bool) -> String {
@@ -1450,5 +1704,239 @@ mod tests {
             }
             other => panic!("expected ok variant, got {other:?}"),
         }
+    }
+
+    fn grok_auth_json(token: &str, email: &str, expires_at: &str) -> String {
+        json!({
+            "https://auth.x.ai::client": {
+                "key": token,
+                "auth_mode": "oidc",
+                "email": email,
+                "expires_at": expires_at,
+            }
+        })
+        .to_string()
+    }
+
+    fn future_expiry() -> String {
+        (Utc::now() + chrono::Duration::hours(6)).to_rfc3339_opts(SecondsFormat::Millis, true)
+    }
+
+    fn past_expiry() -> String {
+        (Utc::now() - chrono::Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Millis, true)
+    }
+
+    #[test]
+    fn parse_grok_auth_prefers_auth_xai_entries() {
+        let raw = json!({
+            "https://accounts.x.ai/sign-in": {
+                "key": "legacy-token",
+                "auth_mode": "session",
+                "email": "legacy@example.com",
+                "expires_at": future_expiry(),
+            },
+            "https://auth.x.ai::client": {
+                "key": "oidc-token",
+                "auth_mode": "oidc",
+                "email": "james@example.com",
+                "expires_at": future_expiry(),
+            }
+        })
+        .to_string();
+        let credentials = parse_grok_auth(&raw).expect("credentials");
+        assert_eq!(credentials.access_token, "oidc-token");
+        assert_eq!(
+            credentials.account_email.as_deref(),
+            Some("james@example.com")
+        );
+        assert_eq!(credentials.auth_mode.as_deref(), Some("oidc"));
+    }
+
+    #[test]
+    fn grok_window_labels_follow_period_type() {
+        assert_eq!(
+            grok_window_label(Some("USAGE_PERIOD_TYPE_WEEKLY")),
+            "Weekly limit"
+        );
+        assert_eq!(
+            grok_window_label(Some("USAGE_PERIOD_TYPE_MONTHLY")),
+            "Monthly limit"
+        );
+        assert_eq!(grok_window_label(None), "Credits");
+    }
+
+    #[test]
+    fn normalize_grok_usage_maps_weekly_percent_and_reset() {
+        let raw = json!({
+            "config": {
+                "creditUsagePercent": 49.4,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-08-23T11:52:18.016069+00:00"
+                }
+            }
+        });
+        assert_eq!(
+            normalize_grok_usage(
+                &raw,
+                Some("james@example.com".to_string()),
+                Some("SuperGrok Heavy".to_string()),
+            ),
+            ProviderUsage::Ok {
+                account_email: Some("james@example.com".to_string()),
+                plan_label: Some("SuperGrok Heavy".to_string()),
+                windows: vec![ProviderUsageWindow {
+                    label: "Weekly limit".to_string(),
+                    used_percent: 49,
+                    resets_at: Some("2026-08-23T11:52:18.016Z".to_string()),
+                    cost: None,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_grok_usage_falls_back_to_on_demand_ratio() {
+        let raw = json!({
+            "config": {
+                "onDemandUsed": { "val": 25 },
+                "onDemandCap": { "val": 100 },
+                "billingPeriodEnd": "2026-09-01T00:00:00Z"
+            }
+        });
+        match normalize_grok_usage(&raw, None, None) {
+            ProviderUsage::Ok { windows, .. } => {
+                assert_eq!(windows[0].used_percent, 25);
+                assert_eq!(windows[0].label, "Credits");
+                assert_eq!(
+                    windows[0].resets_at.as_deref(),
+                    Some("2026-09-01T00:00:00.000Z")
+                );
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_grok_usage_allows_missing_percent() {
+        assert_eq!(
+            normalize_grok_usage(
+                &json!({ "config": {} }),
+                None,
+                Some("SuperGrok".to_string())
+            ),
+            ProviderUsage::Ok {
+                account_email: None,
+                plan_label: Some("SuperGrok".to_string()),
+                windows: Vec::new(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn grok_usage_reports_unauthenticated_without_credentials() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        assert_eq!(fetch_grok_usage().await, ProviderUsage::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn grok_usage_reports_expired_for_stale_tokens() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_grok_auth_file().lock().unwrap() =
+            Some(grok_auth_json("token", "james@example.com", &past_expiry()));
+        assert_eq!(fetch_grok_usage().await, ProviderUsage::Expired);
+    }
+
+    #[tokio::test]
+    async fn grok_usage_reports_expired_on_401() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_grok_auth_file().lock().unwrap() = Some(grok_auth_json(
+            "token",
+            "james@example.com",
+            &future_expiry(),
+        ));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(GROK_BILLING_URL.to_string(), error_response(401));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(GROK_SETTINGS_URL.to_string(), error_response(401));
+        assert_eq!(fetch_grok_usage().await, ProviderUsage::Expired);
+    }
+
+    #[tokio::test]
+    async fn grok_usage_keeps_known_plan_on_http_errors() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_grok_auth_file().lock().unwrap() = Some(grok_auth_json(
+            "token",
+            "james@example.com",
+            &future_expiry(),
+        ));
+        test_http_fixtures().lock().unwrap().insert(
+            GROK_SETTINGS_URL.to_string(),
+            ok_response(json!({ "subscription_tier_display": "SuperGrok Heavy" })),
+        );
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(GROK_BILLING_URL.to_string(), error_response(503));
+        match fetch_grok_usage().await {
+            ProviderUsage::Error {
+                message,
+                plan_label,
+                account_email,
+            } => {
+                assert!(message.contains("HTTP 503"));
+                assert_eq!(plan_label.as_deref(), Some("SuperGrok Heavy"));
+                assert_eq!(account_email.as_deref(), Some("james@example.com"));
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grok_usage_normalizes_a_successful_response() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_grok_auth_file().lock().unwrap() = Some(grok_auth_json(
+            "token",
+            "james@example.com",
+            &future_expiry(),
+        ));
+        test_http_fixtures().lock().unwrap().insert(
+            GROK_BILLING_URL.to_string(),
+            ok_response(json!({
+                "config": {
+                    "creditUsagePercent": 12.0,
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "end": "2026-08-23T11:52:18Z"
+                    }
+                }
+            })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            GROK_SETTINGS_URL.to_string(),
+            ok_response(json!({ "subscription_tier_display": "SuperGrok Heavy" })),
+        );
+        assert_eq!(
+            fetch_grok_usage().await,
+            ProviderUsage::Ok {
+                account_email: Some("james@example.com".to_string()),
+                plan_label: Some("SuperGrok Heavy".to_string()),
+                windows: vec![ProviderUsageWindow {
+                    label: "Weekly limit".to_string(),
+                    used_percent: 12,
+                    resets_at: Some("2026-08-23T11:52:18.000Z".to_string()),
+                    cost: None,
+                }],
+            }
+        );
     }
 }

@@ -173,8 +173,8 @@ fn default_utility_provider_order() -> Vec<AgentProvider> {
         AgentProvider::CLAUDE,
         AgentProvider::CODEX,
         AgentProvider::AGY,
-        AgentProvider::new("opencode"),
-        AgentProvider::new("grok"),
+        AgentProvider::OPENCODE,
+        AgentProvider::GROK,
     ]
 }
 
@@ -2596,6 +2596,8 @@ impl AgentProvider {
     pub const AGY: Self = Self(std::borrow::Cow::Borrowed("agy"));
     /// OpenCode-backed agent sessions (native runner or ACP).
     pub const OPENCODE: Self = Self(std::borrow::Cow::Borrowed("opencode"));
+    /// Grok Build (xAI) sessions, typically over ACP.
+    pub const GROK: Self = Self(std::borrow::Cow::Borrowed("grok"));
 
     /// Creates a provider id from an arbitrary string.
     pub fn new(id: impl Into<String>) -> Self {
@@ -3299,7 +3301,7 @@ pub struct ProviderUsageCost {
 /// Live usage snapshot for one provider subscription. Discriminated on
 /// `status` so clients can render the windows, a sign-in hint, or an error
 /// without inventing placeholder numbers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ProviderUsage {
     /// Usage was read. `account_email` and `plan_label` are null when the
@@ -3317,6 +3319,7 @@ pub enum ProviderUsage {
         windows: Vec<ProviderUsageWindow>,
     },
     /// The harness CLI is not installed on this host.
+    #[default]
     NotInstalled,
     /// No local credentials: the harness CLI is not signed in.
     Unauthenticated,
@@ -3346,6 +3349,12 @@ pub struct ProviderUsageOverview {
     pub codex: ProviderUsage,
     /// Claude Code (Anthropic subscription) usage.
     pub claude_code: ProviderUsage,
+    /// Grok Build (xAI SuperGrok subscription) usage.
+    ///
+    /// Older daemons omit this field; clients treat the default as
+    /// `not_installed` so a missing Grok snapshot never blanks Codex/Claude.
+    #[serde(default)]
+    pub grok: ProviderUsage,
 }
 
 /// Summary of a single thread within a workspace.

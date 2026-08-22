@@ -42,6 +42,7 @@ function overviewWith(overrides: Partial<ProviderUsageOverview>): ProviderUsageO
         },
       ],
     },
+    grok: { status: 'not_installed' },
     ...overrides,
   }
 }
@@ -69,6 +70,48 @@ describe('UsagePanel', () => {
     expect(screen.getAllByText('41% used').length).toBe(1)
     expect(screen.getAllByRole('progressbar', { name: 'Current session' }).length).toBe(2)
     expect(screen.getByRole('progressbar', { name: 'Weekly limit' })).toBeInTheDocument()
+  })
+
+  it('renders Grok weekly usage when the harness is installed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            grok: {
+              status: 'ok',
+              account_email: 'james@example.com',
+              plan_label: 'SuperGrok Heavy',
+              windows: [
+                {
+                  label: 'Weekly limit',
+                  used_percent: 49,
+                  resets_at: '2099-08-23T11:52:18.000Z',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Grok')).toBeInTheDocument()
+    expect(screen.getByText('SuperGrok Heavy')).toBeInTheDocument()
+    expect(screen.getByText('james@example.com')).toBeInTheDocument()
+    expect(screen.getByText('49% used')).toBeInTheDocument()
+  })
+
+  it('hides Grok when an older daemon omits the field', async () => {
+    const payload = overviewWith({})
+    delete payload.grok
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)))
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    expect(screen.queryByText('Grok')).toBeNull()
   })
 
   it('hides providers that are not installed', async () => {

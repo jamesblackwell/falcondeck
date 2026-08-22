@@ -30,10 +30,10 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, agy, opencode, gemini, pi, and cursor. Each entry declares its npm
+   claude, agy, opencode, gemini, pi, grok, and cursor. Each entry declares its npm
    package (for latest-version lookups), upgrade command, and optional auth
    probe. Adding a harness means adding one struct — the panel, RPC, and
-   per-host probing pick it up automatically. Cursor and Antigravity ship via
+   per-host probing pick it up automatically. Cursor, Antigravity, and Grok ship via
    their own install scripts (no npm package, so no latest-version check).
    Cursor's `--version` prints a bare commit hash, which the version parser
    treats as "no version".
@@ -67,7 +67,7 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
-subscription usage snapshots for Codex and Claude Code, surfaced in
+subscription usage snapshots for Codex, Claude Code, and Grok, surfaced in
 Settings → Usage. Types live in `falcondeck-core` (`ProviderUsageOverview`)
 and `client-core`; the daemon implementation is
 `crates/falcondeck-daemon/src/app/provider_usage.rs`.
@@ -80,9 +80,13 @@ and `client-core`; the daemon implementation is
   endpoint. Expired tokens report `expired` — the daemon never refreshes
   another tool's credentials, because rotating the CLI's refresh token
   breaks its next run.
+- Grok reads `~/.grok/auth.json` (`GROK_HOME` respected) and calls the
+  CLI-proxy billing endpoint (`/v1/billing?format=credits`) plus `/v1/settings`
+  for the plan badge. Expired tokens report `expired` — same no-refresh rule.
+  Older daemons omit the `grok` field; clients treat that as `not_installed`.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the
-  other. Errors still carry the locally-known plan and account.
+  others. Errors still carry the locally-known plan and account.
 - Local machine only: usage reads the daemon host's credential stores, so
   the endpoint ignores SSH-host scoping.
 

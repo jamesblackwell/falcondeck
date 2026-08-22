@@ -53,6 +53,13 @@ const PROVIDERS: ProviderConfig[] = [
     signInHint: 'Run `claude` to sign in and see your usage.',
     expiredHint: 'Your Claude session expired. Run `claude`, then reload usage.',
   },
+  {
+    key: 'grok',
+    providerId: 'grok',
+    name: 'Grok',
+    signInHint: 'Run `grok login` to sign in and see your usage.',
+    expiredHint: 'Your Grok session expired. Run `grok login`, then reload usage.',
+  },
 ]
 
 function barColorClass(usedPercent: number): string {
@@ -206,17 +213,19 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
     void fetchOverview('initial')
   }, [fetchOverview])
 
-  const visibleProviders = PROVIDERS.filter(
-    (config) => overview?.[config.key]?.status !== 'not_installed',
-  )
+  const visibleProviders = PROVIDERS.filter((config) => {
+    const usage = overview?.[config.key]
+    // Older daemons omit `grok`; treat a missing snapshot as not installed.
+    return usage != null && usage.status !== 'not_installed'
+  })
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Usage</h1>
         <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          How much of your Codex and Claude Code subscriptions you&apos;ve used on this Mac.
-          Credentials stay with each CLI — FalconDeck only reads the numbers.
+          How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this
+          Mac. Credentials stay with each CLI — FalconDeck only reads the numbers.
         </p>
       </div>
 
@@ -258,7 +267,7 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
           ) : visibleProviders.length === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
               <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-                No supported harnesses detected yet. Install Codex or Claude Code to see
+                No supported harnesses detected yet. Install Codex, Claude Code, or Grok to see
                 subscription usage.
               </p>
             </div>

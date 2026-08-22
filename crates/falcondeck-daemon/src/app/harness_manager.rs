@@ -128,6 +128,16 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         builtin: false,
     },
     KnownHarness {
+        id: "grok",
+        label: "Grok",
+        bin: "grok",
+        // Distributed through xAI's install script, not npm.
+        npm_package: None,
+        upgrade_command: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
+        auth_probe: None,
+        builtin: false,
+    },
+    KnownHarness {
         id: "cursor",
         label: "Cursor",
         bin: "cursor-agent",
@@ -611,6 +621,7 @@ fn classify_install_source(path: &str) -> &'static str {
         "cargo"
     } else if path.contains(".local/bin")
         || path.contains(".opencode/bin")
+        || path.contains(".grok/bin")
         || path.contains(".codex/packages/standalone")
     {
         "local"
@@ -855,6 +866,11 @@ mod tests {
         assert_eq!(
             classify_install_source("/Users/x/.opencode/bin/opencode"),
             "local"
+        );
+        assert_eq!(classify_install_source("/Users/x/.grok/bin/grok"), "local");
+        assert_eq!(
+            parse_version("grok 1.0.5 (5115b46bc909) [stable]"),
+            Some("1.0.5".to_string())
         );
         assert_eq!(
             classify_install_source("/Users/x/.codex/packages/standalone/releases/0.147.0/codex"),
