@@ -63,7 +63,13 @@ import {
   clearSecureSession,
 } from '@/storage/secure'
 import { clearMobileSessionCache } from '@/storage/mobile-session-cache'
-import { logConnection } from './connection-log-store'
+import {
+  abandonConnectionActions,
+  beginConnectionAction,
+  endConnectionAction,
+  hasInFlightConnectionAction,
+  logConnection,
+} from './connection-log-store'
 import { useSessionStore } from './session-store'
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -254,7 +260,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     const { relayUrl, pairingCode } = get()
     if (!relayUrl.trim() || !pairingCode.trim()) return
 
-    logConnection('info', 'Claiming pairing with the relay…')
+    beginConnectionAction('pairing', 'info', 'Claiming pairing with the relay…')
     set({ connectionStatus: 'claiming', error: null })
 
     // Reuse the stored identity keypair when one exists: the relay dedupes
@@ -411,6 +417,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         hasSyncedOnce: false,
         syncDiagnostics: emptySyncDiagnostics(),
       })
+    } finally {
+      endConnectionAction('pairing')
     }
   },
 
@@ -526,6 +534,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
 
   disconnect: async () => {
+    abandonConnectionActions()
     logConnection('warn', 'Disconnecting this device from the relay…')
     // Best-effort: ask the relay to stop pushing to this device while we still
     // hold the client token the call needs. Fire-and-forget — clearPushToken
@@ -570,14 +579,29 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   // Internal accessors
   _setConnectionStatus: (status) => {
     const previous = get().connectionStatus
+    if (status === 'connecting' && !hasInFlightConnectionAction('socket')) {
+      beginConnectionAction('socket', 'info', 'Relay: connecting')
+    }
     if (previous !== status) {
-      logConnection(
-        status === 'encrypted' || status === 'connected' ? 'success' : 'info',
-        `Relay: ${status.replace('_', ' ')}`,
-        status === 'connected'
-          ? 'Socket is up; waiting for the session key.'
-          : undefined,
-      )
+      if (status === 'connected') {
+        endConnectionAction('socket')
+        beginConnectionAction(
+          'session-key',
+          'success',
+          'Relay: connected',
+          'Socket is up; waiting for the session key.',
+        )
+      } else if (status === 'encrypted') {
+        endConnectionAction('socket')
+        endConnectionAction('session-key')
+        endConnectionAction('bootstrap')
+        logConnection('success', 'Relay: encrypted')
+      } else if (status === 'disconnected' || status === 'not_connected') {
+        abandonConnectionActions()
+        logConnection('info', `Relay: ${status.replace('_', ' ')}`)
+      } else if (status !== 'connecting') {
+        logConnection('info', `Relay: ${status.replace('_', ' ')}`)
+      }
     }
     set({
       connectionStatus: status,
@@ -609,7 +633,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _setSyncing: (isSyncing) => set({ isSyncing }),
   _startSyncAttempt: () => {
     const attempt = get().syncDiagnostics.attempt + 1
-    logConnection('info', `Fetching project list (attempt ${attempt})`)
+    beginConnectionAction(
+      'snapshot',
+      'info',
+      `Fetching project list (attempt ${attempt})`,
+    )
     set((state) => {
       const now = Date.now()
       return {
@@ -626,6 +654,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
   _setSyncRetry: (error, nextRetryAt) => {
     if (error) {
+      endConnectionAction('snapshot')
       logConnection(
         'warn',
         nextRetryAt !== null ? 'Sync failed; will retry' : 'Sync failed',
@@ -657,6 +686,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     })),
   _finishSync: () => {
     const now = Date.now()
+    endConnectionAction('snapshot')
     logConnection('success', 'Projects synced.')
     set({
       isSyncing: false,
@@ -670,6 +700,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _setSessionCrypto: (crypto) => {
     _sessionCrypto = crypto
     if (crypto) {
+      endConnectionAction('bootstrap')
+      endConnectionAction('session-key')
       logConnection('success', 'Session key installed — channel is encrypted.')
     }
     set((state) => ({

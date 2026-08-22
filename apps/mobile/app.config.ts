@@ -139,6 +139,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       },
     ],
     './plugins/withLibz',
+    // Holds the relay WebSocket across a short iOS app switch (~30s).
+    // Native AppDelegate change — needs a binary rebuild, not an OTA.
+    './plugins/withRelayBackgroundHold',
   ],
   experiments: {
     typedRoutes: true,

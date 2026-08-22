@@ -4,6 +4,7 @@ import {
   bufferSnapshotRaceEvent,
   canCheckpointReplayCursor,
   isInvalidSavedSessionError,
+  shouldPingRelayOnLeavingForeground,
   shouldReconnectOnAppForeground,
   shouldIgnoreReplaySnapshotEvent,
   shouldParkSnapshotApplication,
@@ -25,11 +26,28 @@ describe('foreground reconnect trigger', () => {
     expect(shouldReconnectOnAppForeground('active', WebSocket.OPEN)).toBe(false)
   })
 
-  it('does nothing when leaving the foreground — the OS tears the socket down', () => {
+  it('does not reconnect just because the app left the foreground', () => {
     expect(shouldReconnectOnAppForeground('background', WebSocket.CLOSED)).toBe(false)
     expect(shouldReconnectOnAppForeground('background', null)).toBe(false)
     expect(shouldReconnectOnAppForeground('inactive', WebSocket.OPEN)).toBe(false)
     expect(shouldReconnectOnAppForeground('inactive', null)).toBe(false)
+  })
+})
+
+describe('background relay ping', () => {
+  it('pings when leaving the foreground with a live socket', () => {
+    expect(shouldPingRelayOnLeavingForeground('inactive', WebSocket.OPEN)).toBe(true)
+    expect(shouldPingRelayOnLeavingForeground('background', WebSocket.OPEN)).toBe(true)
+  })
+
+  it('does not ping when the socket is already dead', () => {
+    expect(shouldPingRelayOnLeavingForeground('background', WebSocket.CLOSED)).toBe(false)
+    expect(shouldPingRelayOnLeavingForeground('background', WebSocket.CONNECTING)).toBe(false)
+    expect(shouldPingRelayOnLeavingForeground('background', null)).toBe(false)
+  })
+
+  it('does not ping when becoming active — that path reconnects if needed', () => {
+    expect(shouldPingRelayOnLeavingForeground('active', WebSocket.OPEN)).toBe(false)
   })
 })
 

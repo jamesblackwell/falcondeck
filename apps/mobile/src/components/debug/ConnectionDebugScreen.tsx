@@ -11,9 +11,12 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { shouldAutoShowConnectionDebug } from '@/lib/session-status'
 import { useConnectionLogStore, useRelayStore } from '@/store'
-import type {
-  ConnectionLogEntry,
-  ConnectionLogLevel,
+import {
+  connectionActionDurationMs,
+  formatConnectionDurationMs,
+  isConnectionActionInFlight,
+  type ConnectionLogEntry,
+  type ConnectionLogLevel,
 } from '@/store/connection-log-store'
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
 import { ActivityDiamond } from '@/components/ui/ActivityDiamond'
@@ -44,7 +47,13 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function LogLine({ entry }: { entry: ConnectionLogEntry }) {
+function LogLine({
+  entry,
+  now,
+}: {
+  entry: ConnectionLogEntry
+  now: number
+}) {
   const { theme } = useUnistyles()
   const color: Record<ConnectionLogLevel, string> = {
     info: theme.colors.fg.secondary,
@@ -52,16 +61,34 @@ function LogLine({ entry }: { entry: ConnectionLogEntry }) {
     warn: theme.colors.warning.default,
     error: theme.colors.danger.default,
   }
+  const inFlight = isConnectionActionInFlight(entry)
+  const durationMs = connectionActionDurationMs(entry, now)
   return (
     <View style={styles.logLine}>
       <Text variant="mono" size="2xs" color="faint">
         {formatClock(entry.at)}
       </Text>
       <View style={styles.logBody}>
-        <Text variant="mono" size="2xs" style={{ color: color[entry.level] }}>
-          {entry.message}
-          {entry.count && entry.count > 1 ? ` ×${entry.count}` : ''}
-        </Text>
+        <View style={styles.logHeadline}>
+          <Text
+            variant="mono"
+            size="2xs"
+            style={[styles.logMessage, { color: color[entry.level] }]}
+          >
+            {entry.message}
+            {entry.count && entry.count > 1 ? ` ×${entry.count}` : ''}
+          </Text>
+          {durationMs != null ? (
+            <Text
+              variant="mono"
+              size="2xs"
+              color={inFlight ? 'info' : 'faint'}
+              style={styles.logDuration}
+            >
+              {formatConnectionDurationMs(durationMs)}
+            </Text>
+          ) : null}
+        </View>
         {entry.detail ? (
           <Text variant="mono" size="2xs" color="muted">
             {entry.detail}
@@ -80,6 +107,7 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
   const hide = useConnectionLogStore((s) => s.hide)
   const show = useConnectionLogStore((s) => s.show)
   const status = useSessionSyncStatus()
+  const hasInFlight = entries.some(isConnectionActionInFlight)
 
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
@@ -117,13 +145,15 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
   }, [visible])
 
   // One shared clock so elapsed/retry countdowns tick without per-row timers.
+  // In-flight rows want tenths of a second; idle only needs the retry countdown.
   const [now, setNow] = useState(() => Date.now())
+  const liveClock = hasInFlight || status.isBusy
   useEffect(() => {
     if (!visible) return
     setNow(Date.now())
-    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    const timer = setInterval(() => setNow(Date.now()), liveClock ? 100 : 1_000)
     return () => clearInterval(timer)
-  }, [visible])
+  }, [visible, liveClock])
 
   const logRef = useRef<ScrollView>(null)
   const lastEntryId = entries.length ? entries[entries.length - 1].id : null
@@ -133,10 +163,10 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
     }
   }, [visible, lastEntryId])
 
-  const elapsedSeconds =
+  const elapsedLabel =
     status.syncStartedAt === null
       ? null
-      : Math.max(0, Math.floor((now - status.syncStartedAt) / 1_000))
+      : formatConnectionDurationMs(now - status.syncStartedAt)
   const retrySeconds =
     status.nextRetryAt === null
       ? null
@@ -273,8 +303,8 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
               </Text>
               {status.isBusy ? (
                 <>
-                  {status.syncStartedAt !== null ? (
-                    <Row label="Waiting" value={`${elapsedSeconds}s`} />
+                  {elapsedLabel !== null ? (
+                    <Row label="Waiting" value={elapsedLabel} />
                   ) : null}
                   {status.syncAttempt > 0 ? (
                     <Row label="Attempt" value={String(status.syncAttempt)} />
@@ -311,7 +341,9 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
                   No connection activity recorded yet.
                 </Text>
               ) : (
-                entries.map((entry) => <LogLine key={entry.id} entry={entry} />)
+                entries.map((entry) => (
+                  <LogLine key={entry.id} entry={entry} now={now} />
+                ))
               )}
             </ScrollView>
           ) : null}
@@ -398,5 +430,17 @@ const styles = StyleSheet.create((theme) => ({
   logBody: {
     flex: 1,
     gap: 1,
+  },
+  logHeadline: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: theme.spacing[2],
+  },
+  logMessage: {
+    flex: 1,
+  },
+  logDuration: {
+    flexShrink: 0,
+    fontVariant: ['tabular-nums'],
   },
 }))

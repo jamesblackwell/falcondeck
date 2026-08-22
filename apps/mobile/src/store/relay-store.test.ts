@@ -7,6 +7,10 @@ import {
 } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { useSessionStore } from './session-store'
+import {
+  isConnectionActionInFlight,
+  useConnectionLogStore,
+} from './connection-log-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
@@ -144,6 +148,60 @@ describe('relay-store', () => {
       expect(diagnostics.lastErrorAt).toBeNull()
       expect(diagnostics.nextRetryAt).toBeNull()
       expect(diagnostics.lastSuccessAt).toBe(lastSuccessAt)
+    })
+
+    it('times snapshot fetches in the connection log', () => {
+      useConnectionLogStore.setState({
+        entries: [],
+        visible: false,
+        dismissedForRun: false,
+      })
+      const store = useRelayStore.getState()
+      store._startSyncAttempt()
+      const fetching = useConnectionLogStore.getState().entries.at(-1)
+      expect(fetching).toMatchObject({
+        message: 'Fetching project list (attempt 1)',
+        action: 'snapshot',
+      })
+      expect(fetching && isConnectionActionInFlight(fetching)).toBe(true)
+
+      store._finishSync()
+      const entries = useConnectionLogStore.getState().entries
+      const snapshot = entries.find((entry) => entry.action === 'snapshot')
+      expect(snapshot && isConnectionActionInFlight(snapshot)).toBe(false)
+      expect(entries.at(-1)).toMatchObject({ message: 'Projects synced.' })
+    })
+
+    it('times the relay handshake in the connection log', () => {
+      useConnectionLogStore.setState({
+        entries: [],
+        visible: false,
+        dismissedForRun: false,
+      })
+      const store = useRelayStore.getState()
+      store._setConnectionStatus('connecting')
+      expect(useConnectionLogStore.getState().entries.at(-1)).toMatchObject({
+        message: 'Relay: connecting',
+        action: 'socket',
+      })
+
+      store._setConnectionStatus('connected')
+      const entries = useConnectionLogStore.getState().entries
+      const socket = entries.find((entry) => entry.action === 'socket')
+      expect(socket && isConnectionActionInFlight(socket)).toBe(false)
+      expect(entries.at(-1)).toMatchObject({
+        message: 'Relay: connected',
+        action: 'session-key',
+      })
+
+      store._setConnectionStatus('encrypted')
+      const keyed = useConnectionLogStore.getState().entries.find(
+        (entry) => entry.action === 'session-key',
+      )
+      expect(keyed && isConnectionActionInFlight(keyed)).toBe(false)
+      expect(useConnectionLogStore.getState().entries.at(-1)).toMatchObject({
+        message: 'Relay: encrypted',
+      })
     })
   })
 

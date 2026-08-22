@@ -25,7 +25,13 @@ import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken, isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { realtimeAudioPlayer } from '@/lib/realtime-audio-player'
-import { logConnection } from '@/store/connection-log-store'
+import {
+  abandonConnectionActions,
+  beginConnectionAction,
+  endConnectionAction,
+  hasInFlightConnectionAction,
+  logConnection,
+} from '@/store/connection-log-store'
 import { persistSessionCacheNow, useRelayStore, useSessionStore } from '@/store'
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
@@ -42,10 +48,11 @@ const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 // instead of using this delay.
 const SNAPSHOT_REFETCH_DELAY_MS = 1_000
 /**
- * iOS kills the relay socket when the app backgrounds; waiting for the dead
- * socket to error plus the backoff delay makes resume feel slow. When the app
- * returns to the foreground and the socket is not OPEN, reconnect immediately.
- * Transitions away from 'active' do nothing — the OS tears the socket down.
+ * iOS still suspends the app after a short background window; if that killed
+ * the socket, waiting for the dead socket to error plus the backoff delay
+ * makes resume feel slow. When the app returns to the foreground and the
+ * socket is not OPEN, reconnect immediately. A healthy OPEN socket is a
+ * successful hold — do nothing.
  */
 export function shouldReconnectOnAppForeground(
   nextAppState: string,
@@ -53,6 +60,29 @@ export function shouldReconnectOnAppForeground(
 ) {
   return nextAppState === 'active' && socketReadyState !== WebSocket.OPEN
 }
+
+/**
+ * One ping as we leave the foreground resets the relay's 45s silence timeout
+ * so the native ~30s background task can keep the existing socket, even if
+ * JS timers freeze while backgrounded.
+ */
+export function shouldPingRelayOnLeavingForeground(
+  nextAppState: string,
+  socketReadyState: number | null,
+) {
+  return nextAppState !== 'active' && socketReadyState === WebSocket.OPEN
+}
+
+function sendRelayPing(socket: WebSocket | null) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false
+  try {
+    socket.send(JSON.stringify({ type: 'ping' }))
+    return true
+  } catch {
+    return false
+  }
+}
+
 /**
  * Matches only the relay's own structured error strings (exact, anchored) for
  * conditions that permanently invalidate the saved session. Substring or
@@ -694,6 +724,9 @@ export function useRelayConnection() {
         ? `ws://${relayUrl.slice('http://'.length)}`
         : relayUrl
 
+    // Freeze leftover spans from the previous run so a dropped handshake
+    // cannot keep ticking after this connection attempt starts.
+    abandonConnectionActions()
     relay._setConnectionStatus('connecting')
     relay._setMachinePresence(null)
     relay._setError(null)
@@ -764,11 +797,16 @@ export function useRelayConnection() {
       if (!isCurrent || !shouldReconnect) return
       const current = useRelayStore.getState()
       if (current._getSessionCrypto()) return
-      logConnection(
-        'info',
-        'Asking desktop to republish the session key…',
-        'The encrypted channel needs it before anything can sync.',
-      )
+      // One span for the whole wait: 30s retries keep the same live timer
+      // instead of stacking a new row each round.
+      if (!hasInFlightConnectionAction('bootstrap')) {
+        beginConnectionAction(
+          'bootstrap',
+          'info',
+          'Asking desktop to republish the session key…',
+          'The encrypted channel needs it before anything can sync.',
+        )
+      }
       current._requestBootstrap()
       bootstrapRetryTimer = setTimeout(() => {
         bootstrapRetryTimer = null
@@ -844,11 +882,17 @@ export function useRelayConnection() {
       useRelayStore.getState()._setError(message)
     }
 
-    // iOS kills the socket on background; on foreground, skip the dead-socket
-    // error + backoff dance and reconnect right away. Leaving 'active' does
-    // nothing — the OS tears the socket down naturally.
+    // Native code asks iOS for ~30s of background time so a short app switch
+    // can keep this socket. Ping immediately: JS timers may freeze, and the
+    // relay drops silent peers after 45s. If the socket is still dead when
+    // we return, skip backoff and reconnect right away.
     const appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
       if (!isCurrent || !shouldReconnect) return
+      if (shouldPingRelayOnLeavingForeground(nextAppState, activeSocket?.readyState ?? null)) {
+        if (sendRelayPing(activeSocket) && nextAppState === 'background') {
+          logConnection('info', 'App left the foreground; pinging the relay to hold the session.')
+        }
+      }
       if (!shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null)) return
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
@@ -893,12 +937,11 @@ export function useRelayConnection() {
             clearTimeout(connectTimeout)
             connectTimeout = null
           }
+          endConnectionAction('socket')
           logConnection('success', 'Relay socket connected.')
           // The relay drops peers that stay silent for 45s.
           pingInterval = setInterval(() => {
-            if (socket.readyState === WebSocket.OPEN) {
-              socket.send(JSON.stringify({ type: 'ping' }))
-            }
+            sendRelayPing(socket)
           }, RELAY_PING_INTERVAL_MS)
           // Resetting backoff immediately would defeat it when the relay
           // closes the socket right after the handshake.
@@ -1079,6 +1122,7 @@ export function useRelayConnection() {
         }
         // Reconnect handles it; the toast would flash on every retry of an
         // outage the connecting banner is already narrating.
+        endConnectionAction('socket')
         logConnection('error', 'Could not reach the relay', message)
         scheduleReconnect()
       })
@@ -1086,6 +1130,7 @@ export function useRelayConnection() {
     return () => {
       isCurrent = false
       shouldReconnect = false
+      abandonConnectionActions()
       realtimeAudioPlayer.stop()
       appStateSubscription.remove()
       clearSocketTimers()
