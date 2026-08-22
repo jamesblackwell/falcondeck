@@ -6,6 +6,7 @@ import {
   decodeSecurePairingCode,
   decryptJson,
   decryptJsonBatch,
+  decryptToUtf8,
   encryptJson,
   generateBoxKeyPair,
   normalizePairingCodeInput,
@@ -60,6 +61,20 @@ describe('AES session key reuse', () => {
     expect(results[0]).toMatchObject({ status: 'fulfilled', value: { value: 1 } })
     expect(results[1]).toMatchObject({ status: 'rejected' })
     expect(results[2]).toMatchObject({ status: 'fulfilled', value: { value: 3 } })
+  })
+
+  it('decrypts to utf8 so callers can skip JSON.parse of a sole snapshot', async () => {
+    const key = new Uint8Array(32).fill(47)
+    const envelope = await encryptJson(key, {
+      kind: 'daemon-event',
+      event: { event: { type: 'snapshot' } },
+    })
+    const text = await decryptToUtf8(key, envelope)
+    expect(text).toContain('"type":"snapshot"')
+    expect(await decryptJson(key, envelope)).toEqual({
+      kind: 'daemon-event',
+      event: { event: { type: 'snapshot' } },
+    })
   })
 })
 

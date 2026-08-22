@@ -4,6 +4,7 @@ import {
   bufferSnapshotRaceEvent,
   canCheckpointReplayCursor,
   isInvalidSavedSessionError,
+  selectPresenceFromRelayBatch,
   shouldPingRelayOnLeavingForeground,
   shouldReconnectOnAppForeground,
   shouldIgnoreReplaySnapshotEvent,
@@ -103,6 +104,54 @@ describe('snapshot race recovery', () => {
     expect(shouldIgnoreReplaySnapshotEvent(true, 'snapshot')).toBe(true)
     expect(shouldIgnoreReplaySnapshotEvent(true, 'thread-updated')).toBe(false)
     expect(shouldIgnoreReplaySnapshotEvent(false, 'snapshot')).toBe(false)
+  })
+
+  it('reads plaintext presence before decrypt so snapshot.current can start first', () => {
+    const presence = {
+      session_id: 'session-1',
+      daemon_connected: true,
+      daemon_rpc_ready: true,
+      last_seen_at: '2026-08-22T12:00:00Z',
+    }
+    expect(
+      selectPresenceFromRelayBatch(
+        [
+          { seq: 3, body: { t: 'encrypted' } },
+          { seq: 4, body: { t: 'presence', presence } },
+          {
+            seq: 5,
+            body: {
+              t: 'presence',
+              presence: { ...presence, daemon_connected: false },
+            },
+          },
+        ],
+        null,
+      ),
+    ).toEqual({ ...presence, daemon_connected: false })
+
+    expect(
+      selectPresenceFromRelayBatch(
+        [
+          { seq: 4, body: { t: 'presence', presence } },
+          {
+            seq: 5,
+            body: {
+              t: 'presence',
+              presence: { ...presence, daemon_connected: false },
+            },
+          },
+        ],
+        5,
+      ),
+    ).toEqual({ ...presence, daemon_connected: false })
+
+    expect(
+      selectPresenceFromRelayBatch(
+        [{ seq: 4, body: { t: 'presence', presence } }],
+        5,
+      ),
+    ).toBeUndefined()
   })
 
   it('deduplicates raced events and reports bounded-buffer overflow', () => {

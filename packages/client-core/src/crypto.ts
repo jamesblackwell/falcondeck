@@ -464,14 +464,25 @@ export async function encryptJson(dataKey: Uint8Array, value: unknown): Promise<
   }
 }
 
-export async function decryptJson<T>(dataKey: Uint8Array, envelope: EncryptedEnvelope): Promise<T> {
+export async function decryptToUtf8(
+  dataKey: Uint8Array,
+  envelope: EncryptedEnvelope,
+): Promise<string> {
   ensureVariant(envelope.encryption_variant)
   const bundle = base64ToBytes(envelope.ciphertext)
   ensureContentBundle(bundle)
   const nonce = bundle.slice(1, 1 + AES_NONCE_BYTES)
   const ciphertext = bundle.slice(1 + AES_NONCE_BYTES)
   const plaintext = await decryptAesGcm(dataKey, nonce, ciphertext)
-  return JSON.parse(decoder.decode(plaintext)) as T
+  return decoder.decode(plaintext)
+}
+
+export async function decryptJson<T>(dataKey: Uint8Array, envelope: EncryptedEnvelope): Promise<T> {
+  return JSON.parse(await decryptToUtf8(dataKey, envelope)) as T
+}
+
+export function decryptUtf8Batch(dataKey: Uint8Array, envelopes: EncryptedEnvelope[]) {
+  return Promise.allSettled(envelopes.map((envelope) => decryptToUtf8(dataKey, envelope)))
 }
 
 export function decryptJsonBatch<T>(dataKey: Uint8Array, envelopes: EncryptedEnvelope[]) {

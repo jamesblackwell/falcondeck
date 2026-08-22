@@ -22,7 +22,8 @@ import {
   currentTurnPlan,
   DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
-  decryptJsonBatch,
+  decryptUtf8Batch,
+  encryptedPayloadIsSoleSnapshotEvent,
   decodeSecurePairingCode,
   deriveThreadAttentionPresentation,
   deriveExtensionPanels,
@@ -68,7 +69,14 @@ import {
   resolveServiceTier,
   restoreBoxKeyPair,
   tryNormalizeRelayUrl,
+  RELAY_DISPLAY_FRAME_MAX_ENCRYPTED,
   relayReconnectDelayMs,
+  returnUnprocessedRelayUpdates,
+  selectPresenceFromRelayBatch,
+  shouldIgnoreReplaySnapshotEvent,
+  shouldYieldBeforeRelayDisplayFlush,
+  shouldYieldRelayDisplayFrame,
+  yieldRelayDisplayFrame,
   selectedSkillsFromText,
   serviceTierForTurn,
   speechSynthesisBlob,
@@ -584,6 +592,7 @@ function RemoteApp() {
   const pendingSnapshotOverflowedRef = useRef(false);
   const pendingSnapshotCursorRef = useRef<number | null>(null);
   const snapshotPresentRef = useRef(false);
+  const snapshotRequestInFlightRef = useRef(false);
   const lastReceivedSeqRef = useRef(initialReplayCursor);
   const pendingSessionPersistRef =
     useRef<Partial<PersistedRemoteSession> | null>(null);
@@ -1762,6 +1771,21 @@ function RemoteApp() {
       let nextPresence: MachinePresence | null | undefined;
       let highestConsumedSeq: number | null = null;
       let deferredBootstrapSeq: number | null = null;
+      const flushStartedAt = Date.now();
+
+      const batchPresence = selectPresenceFromRelayBatch(
+        batch,
+        syncedPresenceFloorRef.current,
+      );
+      if (batchPresence !== undefined) {
+        nextPresence = batchPresence;
+        setMachinePresence(batchPresence);
+      }
+
+      if (shouldYieldBeforeRelayDisplayFlush(batch.length)) {
+        await yieldRelayDisplayFrame();
+        if (flushGeneration !== relayFlushGenerationRef.current) return;
+      }
 
       // The cursor may only advance for updates that were actually consumed;
       // otherwise a parked or failed update can never be replayed by a later
@@ -1918,19 +1942,17 @@ function RemoteApp() {
 
         const encryptedRun = [update];
         const envelopes = [update.body.envelope];
-        while (true) {
+        while (encryptedRun.length < RELAY_DISPLAY_FRAME_MAX_ENCRYPTED) {
           const nextUpdate = batch[index + 1];
           if (!nextUpdate || nextUpdate.body.t !== "encrypted") break;
           encryptedRun.push(nextUpdate);
           envelopes.push(nextUpdate.body.envelope);
           index += 1;
         }
-        const decryptedRun = await decryptJsonBatch<unknown>(
-          sc.dataKey,
-          envelopes,
-        );
+        const decryptedRun = await decryptUtf8Batch(sc.dataKey, envelopes);
         if (flushGeneration !== relayFlushGenerationRef.current) return;
 
+        const skipReplaySnapshots = snapshotRequestInFlightRef.current;
         decryptedRun.forEach((result, runIndex) => {
           const encryptedUpdate = encryptedRun[runIndex]!;
           if (result.status === "rejected") {
@@ -1943,13 +1965,54 @@ function RemoteApp() {
             );
             return;
           }
+          const text = result.value;
+          if (
+            skipReplaySnapshots &&
+            encryptedPayloadIsSoleSnapshotEvent(text)
+          ) {
+            advanceCursor(encryptedUpdate.seq);
+            return;
+          }
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(text);
+          } catch (error) {
+            setError(
+              error instanceof Error
+                ? error.message
+                : "Failed to decrypt relay update",
+            );
+            return;
+          }
           advanceCursor(encryptedUpdate.seq);
-          const events = parseDaemonEvents(result.value);
+          const events = parseDaemonEvents(parsed);
           for (const event of events) {
+            if (
+              shouldIgnoreReplaySnapshotEvent(
+                skipReplaySnapshots,
+                event.event.type,
+              )
+            ) {
+              continue;
+            }
             realtimeAudioPlayer.handleEvent(event);
             daemonEvents.push(event);
           }
         });
+
+        if (
+          shouldYieldRelayDisplayFrame(
+            flushStartedAt,
+            Date.now(),
+            batch.length - index - 1,
+          )
+        ) {
+          returnUnprocessedRelayUpdates(
+            pendingRelayUpdatesRef.current,
+            batch.slice(index + 1),
+          );
+          break;
+        }
       }
 
       if (deferredBootstrapSeq !== null) {
@@ -2279,8 +2342,11 @@ function RemoteApp() {
   useEffect(() => {
     if (!relayConnected || !hasSessionKey || !daemonRpcReady || snapshot) {
       snapshotRetryAttemptRef.current = 0;
+      snapshotRequestInFlightRef.current = false;
       return;
     }
+
+    snapshotRequestInFlightRef.current = true;
 
     let cancelled = false;
     let retryTimer: number | null = null;
@@ -2295,7 +2361,11 @@ function RemoteApp() {
         }
       }, delay);
     };
-    void callRpc<DaemonSnapshot>("snapshot.current", {})
+    void callRpc<DaemonSnapshot>("snapshot.current", {
+      include_archived_threads: false,
+      include_thread_plans: false,
+      include_thread_diffs: false,
+    })
       .then((nextSnapshot) => {
         if (cancelled) return;
         if (relayFlushInProgressRef.current) {
@@ -2344,10 +2414,12 @@ function RemoteApp() {
           ),
         );
         snapshotRetryAttemptRef.current = 0;
+        snapshotRequestInFlightRef.current = false;
         setError(null);
       })
       .catch((e) => {
         if (cancelled) return;
+        snapshotRequestInFlightRef.current = false;
         setError(
           e instanceof Error ? e.message : "Failed to load remote snapshot",
         );
@@ -2356,6 +2428,7 @@ function RemoteApp() {
 
     return () => {
       cancelled = true;
+      snapshotRequestInFlightRef.current = false;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
   }, [

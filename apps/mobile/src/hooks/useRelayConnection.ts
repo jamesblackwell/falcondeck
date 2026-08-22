@@ -3,13 +3,22 @@ import { AppState } from 'react-native'
 
 import {
   captureRelayDisplayFrame,
+  decryptToUtf8,
   encryptedDaemonEventEnvelope,
+  encryptedPayloadIsSoleSnapshotEvent,
   normalizeDaemonSnapshot,
   parseDaemonEvents as parseRemoteDaemonEvents,
   publicKeyToBase64,
   relayBacklogWouldOverflow,
   relayReconnectDelayMs,
   resolveRelayTruncationCursor,
+  returnUnprocessedRelayUpdates,
+  selectPresenceFromRelayBatch,
+  shouldIgnoreReplaySnapshotEvent,
+  shouldPersistRelayFlushCursor,
+  shouldYieldBeforeRelayDisplayFlush,
+  shouldYieldRelayDisplayFrame,
+  yieldRelayDisplayFrame,
   WEBSOCKET_CONNECT_TIMEOUT_MS,
 } from '@falcondeck/client-core'
 import type {
@@ -33,6 +42,11 @@ import {
   logConnection,
 } from '@/store/connection-log-store'
 import { persistSessionCacheNow, useRelayStore, useSessionStore } from '@/store'
+
+export {
+  selectPresenceFromRelayBatch,
+  shouldIgnoreReplaySnapshotEvent,
+}
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
 const RELAY_PING_INTERVAL_MS = 15_000
@@ -117,23 +131,6 @@ export function shouldParkSnapshotApplication(
   pendingUpdateCount: number,
 ) {
   return relayFlushInProgress || pendingUpdateCount > 0
-}
-
-/**
- * Durable full-snapshot events on the replay log are the recovery amplifier:
- * a daemon restart publishes one per workspace connect. While snapshot.current
- * is in flight the RPC is the base, so re-applying those envelopes would
- * hitch the JS thread and replace the slim RPC result with a full snapshot
- * (plans, diffs, archived threads). The envelope is opaque until decrypt, so
- * this only skips apply, not decrypt. A workspace restore that lands in this
- * same window can wait for the next live event; buffering the envelope would
- * undo the slim payload.
- */
-export function shouldIgnoreReplaySnapshotEvent(
-  snapshotRequestInFlight: boolean,
-  eventType: string,
-) {
-  return snapshotRequestInFlight && eventType === 'snapshot'
 }
 
 /**
@@ -251,7 +248,8 @@ export function useRelayConnection() {
     if (
       pendingEncrypted.current.length > 0 ||
       pendingSnapshotEvents.current.length > 0 ||
-      snapshotRaceOverflowed.current
+      snapshotRaceOverflowed.current ||
+      !shouldPersistRelayFlushCursor(pendingRelayUpdates.current.length)
     ) return
 
     const snapshotCursor = pendingSnapshotCursor.current
@@ -460,6 +458,29 @@ export function useRelayConnection() {
         let nextPresence: MachinePresence | null | undefined = undefined
         let shouldPersistCursor = false
         let deferredBootstrapSeq: number | null = null
+        const flushStartedAt = Date.now()
+
+        // Presence is plaintext. Apply it and start snapshot.current before
+        // decrypting replay so fat snapshot envelopes skip apply this turn.
+        const batchPresence = selectPresenceFromRelayBatch(
+          batch,
+          syncedPresenceFloor.current,
+        )
+        if (batchPresence !== undefined) {
+          nextPresence = batchPresence
+          relay._setMachinePresence(batchPresence)
+        }
+        if (
+          relay._getSessionCrypto() &&
+          (needsAuthoritativeSnapshot() || snapshotWaitingForDaemon.current)
+        ) {
+          void requestSnapshot()
+        }
+
+        if (shouldYieldBeforeRelayDisplayFlush(batch.length)) {
+          await yieldRelayDisplayFrame()
+          if (flushGeneration !== relayFlushGeneration.current) return
+        }
 
         // The cursor may only advance for updates that were actually consumed;
         // otherwise a parked or failed update can never be replayed by a later
@@ -500,8 +521,14 @@ export function useRelayConnection() {
             if (deferredBootstrapSeq === null) {
               advanceCursor(update.seq)
             }
-            if (snapshotAfterCrypto.current && relay._getSessionCrypto()) {
-              snapshotAfterCrypto.current = false
+            const mustSnapshotAfterCrypto = snapshotAfterCrypto.current
+            if (snapshotAfterCrypto.current) snapshotAfterCrypto.current = false
+            if (
+              relay._getSessionCrypto() &&
+              (mustSnapshotAfterCrypto ||
+                needsAuthoritativeSnapshot() ||
+                snapshotWaitingForDaemon.current)
+            ) {
               void requestSnapshot()
             }
             continue
@@ -543,7 +570,37 @@ export function useRelayConnection() {
           }
 
           try {
-            const decrypted = await relay._decryptJson(update.body.envelope)
+            let decrypted: unknown
+            try {
+              const text = await decryptToUtf8(
+                sessionCrypto.dataKey,
+                update.body.envelope,
+              )
+              if (
+                snapshotRequestInFlight.current &&
+                encryptedPayloadIsSoleSnapshotEvent(text)
+              ) {
+                if (flushGeneration !== relayFlushGeneration.current) return
+                advanceCursor(update.seq)
+                if (
+                  shouldYieldRelayDisplayFrame(
+                    flushStartedAt,
+                    Date.now(),
+                    batch.length - index - 1,
+                  )
+                ) {
+                  returnUnprocessedRelayUpdates(
+                    pendingRelayUpdates.current,
+                    batch.slice(index + 1),
+                  )
+                  break
+                }
+                continue
+              }
+              decrypted = JSON.parse(text)
+            } catch {
+              decrypted = await relay._decryptJson(update.body.envelope)
+            }
             if (flushGeneration !== relayFlushGeneration.current) return
             advanceCursor(update.seq)
             const events = parseRemoteDaemonEvents(decrypted)
@@ -574,6 +631,20 @@ export function useRelayConnection() {
             // accepted trade-off over stalling the stream.
             relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
           }
+
+          if (
+            shouldYieldRelayDisplayFrame(
+              flushStartedAt,
+              Date.now(),
+              batch.length - index - 1,
+            )
+          ) {
+            returnUnprocessedRelayUpdates(
+              pendingRelayUpdates.current,
+              batch.slice(index + 1),
+            )
+            break
+          }
         }
 
         if (deferredBootstrapSeq !== null) {
@@ -594,6 +665,7 @@ export function useRelayConnection() {
 
         if (
           shouldPersistCursor &&
+          shouldPersistRelayFlushCursor(pendingRelayUpdates.current.length) &&
           canCheckpointReplayCursor({
             authoritativeSnapshot: !!useSessionStore.getState().snapshot,
             snapshotRequestInFlight: snapshotRequestInFlight.current,
