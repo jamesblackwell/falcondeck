@@ -1714,32 +1714,6 @@ body {
   background: var(--fd-tone);
 }
 
-/* Selection reticle. The selected card is *targeted*, not merely highlighted:
-   four corner brackets drawn inside the card, so the sections keep their flat
-   grid and nothing shifts as the cursor moves. Always the accent — the
-   reticle is the cursor, not the lane, and it has to stay findable over a
-   neutral running card as readily as over a red failed one. */
-.fd-reticle::before {
-  --fd-reticle-arm: linear-gradient(var(--fd-accent), var(--fd-accent));
-  content: "";
-  position: absolute;
-  inset: 3px;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity var(--fd-duration-fast) var(--fd-ease-default);
-  background-image: var(--fd-reticle-arm), var(--fd-reticle-arm),
-    var(--fd-reticle-arm), var(--fd-reticle-arm), var(--fd-reticle-arm),
-    var(--fd-reticle-arm), var(--fd-reticle-arm), var(--fd-reticle-arm);
-  background-repeat: no-repeat;
-  background-size: 11px 1px, 1px 11px, 11px 1px, 1px 11px, 11px 1px, 1px 11px,
-    11px 1px, 1px 11px;
-  background-position: top left, top left, top right, top right, bottom left,
-    bottom left, bottom right, bottom right;
-}
-.fd-reticle[data-selected="true"]::before {
-  opacity: 1;
-}
-
 /* Streaming cursor for a card's tail readout. A block that blinks where the
    next token will land — the one piece of motion in Activity, and the only
    honest way to tell "still writing" from "stopped mid-sentence". */

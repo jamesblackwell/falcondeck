@@ -636,7 +636,7 @@ const ActivityRow = memo(
       <article
         style={{ "--fd-tone": meta.toneVar } as CSSProperties}
         className={cn(
-          "fd-tone-edge fd-terminal-card fd-reticle group flex flex-col rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1",
+          "fd-tone-edge fd-terminal-card group flex flex-col rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1",
           // A terminal you can actually read. Running threads get the taller
           // frame because they are the ones still producing lines; a finished
           // run has said what it is going to say, and matching its height to
@@ -898,7 +898,10 @@ const RecentTrail = memo(function RecentTrail({
             }
             aria-expanded={expanded}
             aria-controls="activity-recent-list"
-            className="fd-reticle relative"
+            className={cn(
+              selectedKey === RECENT_TOGGLE_KEY &&
+                "bg-[color:var(--fd-interactive-hover)] text-fg-primary",
+            )}
             onClick={onToggle}
           >
             {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
@@ -1045,9 +1048,9 @@ export const ActivityView = memo(function ActivityView({
     return rows;
   }, [recentEntries.length, sections, visibleRecentEntries]);
 
-  // Arrive keyboard-ready with the same reticle used after navigation. Keep
-  // Escape meaningful by doing this only once, rather than restoring a
-  // selection every time it is deliberately cleared.
+  // Arrive keyboard-ready with the first row selected. Keep Escape
+  // meaningful by doing this only once, rather than restoring a selection
+  // every time it is deliberately cleared.
   useEffect(() => {
     if (initializedSelectionRef.current || selectable.length === 0) return;
     initializedSelectionRef.current = true;
