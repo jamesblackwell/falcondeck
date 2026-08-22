@@ -88,6 +88,8 @@ interface ChatInputProps {
   onSelectServiceTier?: (tier: string | null) => void
   /** True while the selected thread has an in-flight turn. */
   isRunning?: boolean
+  /** True while the harness model catalog is still hydrating. */
+  modelsLoading?: boolean
   /** True while an interrupt request is in flight. */
   isStopping?: boolean
   capabilities?: AgentCapabilitySummary
@@ -144,6 +146,7 @@ export const ChatInput = memo(function ChatInput({
   onSelectServiceTier,
   isRunning = false,
   isStopping = false,
+  modelsLoading = false,
   capabilities = NO_AGENT_CAPABILITIES,
   selectedPermissionMode = null,
   selectedSandboxMode = null,
@@ -663,6 +666,7 @@ export const ChatInput = memo(function ChatInput({
               onSelectPermissionMode={onSelectPermissionMode}
               onSelectSandboxMode={onSelectSandboxMode}
               showModePickers={false}
+              modelsLoading={modelsLoading}
             />
           </View>
           <View style={styles.footerActions}>

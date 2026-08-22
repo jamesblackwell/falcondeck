@@ -97,6 +97,10 @@ import {
   pickImageInputsFromLibrary,
 } from "@/features/thread/imageInputs";
 import {
+  loadCachedModels,
+  persistCachedModels,
+} from "@/storage/model-catalog-cache";
+import {
   getWorkspaceTitle,
   shouldShowThinkingIndicator,
 } from "@/features/thread/threadScreen";
@@ -393,12 +397,32 @@ export default function HomeScreen() {
     [activeProvider, workspace],
   );
 
+  // While the live catalog is empty, fall back to the last known list for
+  // this workspace+provider so the pickers are usable immediately. Fresh
+  // non-empty lists always win and refresh the cache.
+  const cachedModels = useMemo(
+    () =>
+      workspace && models.length === 0
+        ? loadCachedModels(workspace.id, activeProvider)
+        : [],
+    [activeProvider, models.length, workspace],
+  );
+  const effectiveModels = models.length > 0 ? models : cachedModels;
+
+  useEffect(() => {
+    if (workspace && models.length > 0) {
+      persistCachedModels(workspace.id, activeProvider, models);
+    }
+  }, [activeProvider, models, workspace]);
+
   // Compute effort options from the selected model's supported_reasoning_efforts
   const resolvedModel = useMemo(() => {
     if (selectedModel)
-      return models.find((m) => m.id === selectedModel) ?? null;
-    return models.find((m) => m.is_default) ?? models[0] ?? null;
-  }, [models, selectedModel]);
+      return effectiveModels.find((m) => m.id === selectedModel) ?? null;
+    return (
+      effectiveModels.find((m) => m.is_default) ?? effectiveModels[0] ?? null
+    );
+  }, [effectiveModels, selectedModel]);
 
   const effortOptions = useMemo(() => {
     const supported =
@@ -1373,7 +1397,10 @@ export default function HomeScreen() {
           }
           attachments={attachments}
           skills={workspace?.skills ?? []}
-          models={models}
+          // No live or cached models means the harness catalog is still
+          // hydrating (the daemon fills OpenCode's list via a later snapshot).
+          modelsLoading={Boolean(workspace) && effectiveModels.length === 0}
+          models={effectiveModels}
           selectedModel={selectedModel}
           selectedEffort={selectedEffort}
           effortOptions={effortOptions}

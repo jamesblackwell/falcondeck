@@ -58,6 +58,8 @@ interface InputToolbarProps {
   onSelectSandboxMode?: (mode: string | null) => void
   /** Advanced modes can move into the composer's plus menu on narrow screens. */
   showModePickers?: boolean
+  /** True while the harness catalog is still hydrating; shows placeholder chips. */
+  modelsLoading?: boolean
 }
 
 function capitalize(s: string) {
@@ -99,6 +101,7 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectPermissionMode,
   onSelectSandboxMode,
   showModePickers = true,
+  modelsLoading = false,
 }: InputToolbarProps) {
   const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
@@ -271,11 +274,11 @@ export const InputToolbar = memo(function InputToolbar({
           />
         ) : null}
 
-        {models.length > 0 ? (
+        {models.length > 0 || modelsLoading ? (
           <Chip
-            label={modelDisplayLabel}
+            label={modelsLoading && models.length === 0 ? 'Loading…' : modelDisplayLabel}
             accessibilityLabel="Model"
-            disabled={disabled}
+            disabled={disabled || (modelsLoading && models.length === 0)}
             onPress={openModelSheet}
           />
         ) : null}
@@ -283,7 +286,7 @@ export const InputToolbar = memo(function InputToolbar({
         <Chip
           label={currentEffortLabel}
           accessibilityLabel="Reasoning effort"
-          disabled={disabled}
+          disabled={disabled || modelsLoading}
           onPress={openEffortSheet}
         />
 
