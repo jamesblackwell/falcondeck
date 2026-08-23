@@ -1971,6 +1971,7 @@ impl AppState {
                 kind,
                 workspace_id,
                 thread_id,
+                thread_title,
             } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
@@ -1981,6 +1982,7 @@ impl AppState {
                     ("notification kind", Some(kind.as_str())),
                     ("workspace_id", workspace_id.as_deref()),
                     ("thread_id", thread_id.as_deref()),
+                    ("thread_title", thread_title.as_deref()),
                 ] {
                     if let Some(value) = value {
                         validate_bounded_text(
@@ -1991,8 +1993,14 @@ impl AppState {
                         )?;
                     }
                 }
-                self.dispatch_push_notifications(session_id, kind, workspace_id, thread_id)
-                    .await;
+                self.dispatch_push_notifications(
+                    session_id,
+                    kind,
+                    workspace_id,
+                    thread_id,
+                    thread_title,
+                )
+                .await;
             }
         }
 
@@ -2758,15 +2766,16 @@ impl AppState {
         Ok(())
     }
 
-    /// Send a generic attention push to every active trusted device that has
-    /// a push token and is not currently connected. The push carries no
-    /// conversation content — only routing identifiers.
+    /// Send an attention push to every active trusted device that has a push
+    /// token and is not currently connected. The thread title is intentionally
+    /// visible to the relay and push service so the OS can render it.
     async fn dispatch_push_notifications(
         &self,
         session_id: &str,
         kind: String,
         workspace_id: Option<String>,
         thread_id: Option<String>,
+        thread_title: Option<String>,
     ) {
         let endpoint = self.inner.push_endpoint.clone();
         if endpoint.trim().is_empty() {
@@ -2811,13 +2820,7 @@ impl AppState {
             recipients
         };
 
-        let (title, body) = match kind.as_str() {
-            "approval" => ("FalconDeck", "An agent is waiting for your approval"),
-            "question" => ("FalconDeck", "An agent asked you a question"),
-            "turn-complete" => ("FalconDeck", "An agent finished its turn"),
-            "turn-error" => ("FalconDeck", "An agent turn failed"),
-            _ => ("FalconDeck", "An agent needs your attention"),
-        };
+        let (title, body) = push_notification_content(&kind, thread_title.as_deref());
         for recipient_chunk in recipients.chunks(EXPO_MAX_MESSAGES_PER_REQUEST) {
             let chunk_recipients = recipient_chunk.to_vec();
             let messages = chunk_recipients
@@ -4178,6 +4181,21 @@ fn validate_bounded_text(
     Ok(())
 }
 
+fn push_notification_content<'a>(
+    kind: &str,
+    thread_title: Option<&'a str>,
+) -> (&'a str, &'static str) {
+    let title = thread_title.unwrap_or("FalconDeck");
+    let body = match kind {
+        "approval" => "An agent is waiting for your approval",
+        "question" => "An agent asked you a question",
+        "turn-complete" => "An agent finished its turn",
+        "turn-error" => "An agent turn failed",
+        _ => "An agent needs your attention",
+    };
+    (title, body)
+}
+
 fn normalize_persisted_secrets(state: &mut PersistedState) -> bool {
     let mut changed = false;
     for pairing in state.pairings.values_mut() {
@@ -4276,8 +4294,8 @@ mod tests {
         LiveSession, PairingRateLimiter, PairingRateLimits, PairingRecord, PeerHandle, PeerQueue,
         PersistedState, REQUIRED_SYNC_RPC_METHOD, REQUIRED_THREAD_DETAIL_RPC_METHOD,
         RetentionConfig, SessionRecord, chunk_replay_updates, namespaced_rpc_request_id,
-        normalize_persisted_secrets, prune_state, push_dedupe_key, secret_verifier,
-        strip_rpc_request_id_namespace, sync_messages, verify_secret,
+        normalize_persisted_secrets, prune_state, push_dedupe_key, push_notification_content,
+        secret_verifier, strip_rpc_request_id_namespace, sync_messages, verify_secret,
     };
 
     fn rate_limits(client_capacity: u32, global_capacity: u32) -> PairingRateLimits {
@@ -4303,6 +4321,18 @@ mod tests {
             "a persisted verifier must never be accepted as a bearer token"
         );
         assert!(verify_secret("legacy-secret", "legacy-secret"));
+    }
+
+    #[test]
+    fn push_notifications_identify_the_thread_and_keep_the_attention_copy() {
+        assert_eq!(
+            push_notification_content("turn-complete", Some("Improve push notifications")),
+            ("Improve push notifications", "An agent finished its turn")
+        );
+        assert_eq!(
+            push_notification_content("question", None),
+            ("FalconDeck", "An agent asked you a question")
+        );
     }
 
     #[test]

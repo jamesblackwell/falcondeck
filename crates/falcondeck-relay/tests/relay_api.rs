@@ -2480,6 +2480,7 @@ async fn client_peers_cannot_request_push_notifications() {
             kind: "approval".to_string(),
             workspace_id: None,
             thread_id: None,
+            thread_title: None,
         },
     )
     .await;

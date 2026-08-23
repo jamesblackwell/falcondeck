@@ -508,9 +508,22 @@ impl AppState {
                                 }
                             }
                             RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id } => {
+                                let thread_title = match (&workspace_id, &thread_id) {
+                                    (Some(workspace_id), Some(thread_id)) => self
+                                        .thread_summary(workspace_id, thread_id)
+                                        .await
+                                        .ok()
+                                        .and_then(|thread| notification_thread_title(&thread.title)),
+                                    _ => None,
+                                };
                                 send_relay_message(
                                     &mut writer,
-                                    &RelayClientMessage::Notify { kind, workspace_id, thread_id },
+                                    &RelayClientMessage::Notify {
+                                        kind,
+                                        workspace_id,
+                                        thread_id,
+                                        thread_title,
+                                    },
                                 ).await?;
                             }
                         }
@@ -2133,6 +2146,19 @@ impl AppState {
     }
 }
 
+fn notification_thread_title(title: &str) -> Option<String> {
+    const MAX_TITLE_CHARS: usize = 256;
+
+    let title = title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_TITLE_CHARS)
+        .collect::<String>();
+    (!title.is_empty()).then_some(title)
+}
+
 fn relay_ws_ticket_request(
     client: &reqwest::Client,
     relay_url: &str,
@@ -2318,6 +2344,22 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_titles_are_trimmed_sanitized_and_bounded() {
+        assert_eq!(
+            notification_thread_title("  Improve\n push notifications  ").as_deref(),
+            Some("Improve push notifications")
+        );
+        assert_eq!(notification_thread_title("\n\t"), None);
+        assert_eq!(
+            notification_thread_title(&"a".repeat(300))
+                .expect("non-empty title")
+                .chars()
+                .count(),
+            256
+        );
+    }
 
     #[test]
     fn durable_events_keep_the_legacy_single_event_envelope() {

@@ -39,6 +39,8 @@ export interface PushNotificationData {
   kind?: string
 }
 
+export type NotificationDestinationHandler = () => void
+
 /**
  * User preference for agent-attention pushes. Defaults to enabled so paired
  * devices get alerts without any setup.
@@ -275,12 +277,16 @@ function wasResponseAlreadyHandled(response: Notifications.NotificationResponse)
  * Subscribe to notification taps. Returns the subscription (or null when the
  * native module is unavailable) — callers must remove it on cleanup.
  */
-export function addNotificationResponseListener(): { remove: () => void } | null {
+export function addNotificationResponseListener(
+  openDestination?: NotificationDestinationHandler,
+): { remove: () => void } | null {
   try {
     return Notifications.addNotificationResponseReceivedListener((response) => {
       try {
         rememberHandledResponse(response)
-        handleNotificationTapData(dataFromResponse(response))
+        if (handleNotificationTapData(dataFromResponse(response))) {
+          openDestination?.()
+        }
       } catch (error) {
         console.warn('Failed to handle notification tap', error)
       }
@@ -303,14 +309,18 @@ export function __resetInitialNotificationResponseForTests(): void {
  * it). Call once the stores have hydrated so the selection is not clobbered.
  * Skips responses already handled in this or an earlier app run.
  */
-export async function processInitialNotificationResponse(): Promise<void> {
+export async function processInitialNotificationResponse(
+  openDestination?: NotificationDestinationHandler,
+): Promise<void> {
   if (initialResponseProcessed) return
   initialResponseProcessed = true
   try {
     const response = await Notifications.getLastNotificationResponseAsync()
     if (!response || wasResponseAlreadyHandled(response)) return
     rememberHandledResponse(response)
-    handleNotificationTapData(dataFromResponse(response))
+    if (handleNotificationTapData(dataFromResponse(response))) {
+      openDestination?.()
+    }
     // Where the installed SDK supports it, also clear the stored response so
     // even an identifier-less response cannot replay on the next cold start.
     const clearLastResponse = (

@@ -23,10 +23,13 @@ confidentiality.
 - Serves `/dist/` — prebuilt daemon binaries used by the desktop app's
   one-click server provisioning.
 
-It never sees message plaintext: updates, RPC params, and results are sealed
-with a per-session data key exchanged between your devices via NaCl box; the
-relay stores and forwards ciphertext. Device revocation rotates that data key
-for the remaining trusted devices.
+It never sees message plaintext in updates or RPCs: those payloads are sealed
+with a per-session data key exchanged between your devices via NaCl box, and
+the relay stores and forwards ciphertext. Push notification requests expose
+the thread title and routing metadata to the relay and Expo Push Service so
+the OS can identify the conversation; they contain no transcript or message
+preview. Device revocation rotates the data key for the remaining trusted
+devices.
 
 ## Running it
 

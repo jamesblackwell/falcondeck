@@ -4864,9 +4864,9 @@ pub enum RelayClientMessage {
         /// Optional encrypted result payload.
         result: Option<EncryptedEnvelope>,
     },
-    /// Ask the relay to push a generic attention notification to trusted
-    /// devices that are not currently connected. Daemon-only; carries no
-    /// conversation content so the relay's zero-plaintext posture holds.
+    /// Ask the relay to push an attention notification to trusted devices
+    /// that are not currently connected. Daemon-only; routing identifiers and
+    /// the optional display title are sent as push-service-visible metadata.
     Notify {
         /// Attention kind, e.g. `approval` or `question`.
         kind: String,
@@ -4874,6 +4874,8 @@ pub enum RelayClientMessage {
         workspace_id: Option<String>,
         /// Thread the attention belongs to, for client-side routing.
         thread_id: Option<String>,
+        /// User-visible thread title shown by the system notification.
+        thread_title: Option<String>,
     },
 }
 

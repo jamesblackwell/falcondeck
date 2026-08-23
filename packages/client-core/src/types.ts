@@ -1840,6 +1840,7 @@ export type RelayClientMessage =
       kind: string;
       workspace_id?: string | null;
       thread_id?: string | null;
+      thread_title?: string | null;
     };
 
 export type SpeechCredentialStatus = {

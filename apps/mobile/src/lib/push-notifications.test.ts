@@ -392,29 +392,44 @@ describe('push-notifications', () => {
   describe('notification response listeners', () => {
     it('routes taps delivered to the response listener', () => {
       const selectThread = vi.fn()
+      const openDestination = vi.fn()
       useSessionStore.setState({ selectThread })
 
-      const subscription = addNotificationResponseListener()
+      const subscription = addNotificationResponseListener(openDestination)
       expect(subscription).not.toBeNull()
 
       __emitResponse(tapResponse({ workspaceId: 'w1', threadId: 't1', kind: 'approval' }))
       expect(selectThread).toHaveBeenCalledWith('w1', 't1')
+      expect(openDestination).toHaveBeenCalledOnce()
 
       subscription!.remove()
       __emitResponse(tapResponse({ workspaceId: 'w2', threadId: 't2', kind: 'approval' }))
       expect(selectThread).toHaveBeenCalledTimes(1)
+      expect(openDestination).toHaveBeenCalledTimes(1)
     })
 
     it('processes the notification that cold-started the app exactly once', async () => {
       const selectThread = vi.fn()
+      const openDestination = vi.fn()
       useSessionStore.setState({ selectThread })
       __setLastResponse(tapResponse({ workspaceId: 'w1', threadId: 't1', kind: 'question' }))
 
-      await processInitialNotificationResponse()
-      await processInitialNotificationResponse()
+      await processInitialNotificationResponse(openDestination)
+      await processInitialNotificationResponse(openDestination)
 
       expect(selectThread).toHaveBeenCalledTimes(1)
       expect(selectThread).toHaveBeenCalledWith('w1', 't1')
+      expect(openDestination).toHaveBeenCalledOnce()
+    })
+
+    it('does not navigate when a notification has no routable destination', () => {
+      const openDestination = vi.fn()
+      const subscription = addNotificationResponseListener(openDestination)
+
+      __emitResponse(tapResponse({ kind: 'turn-complete' }))
+
+      expect(openDestination).not.toHaveBeenCalled()
+      subscription!.remove()
     })
 
     it('does not replay a stale response on the next cold start', async () => {

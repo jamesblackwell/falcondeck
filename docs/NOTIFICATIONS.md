@@ -16,7 +16,7 @@ store or an inbox. The current semantic events are:
 The daemon already emits the underlying interactive-request, thread-status,
 turn-lifecycle, and service/error events. A future calm attention screen can
 consume those same primitives and retain richer history; push payloads should
-remain small and generic.
+remain small.
 
 The packaged macOS desktop app delivers these attention events through
 `UNUserNotificationCenter`, so FalconDeck requests real system authorization,
@@ -38,9 +38,11 @@ agent provider
   -> iOS / Android notification
 ```
 
-The relay never receives conversation content. Push data contains only the
-session, workspace, thread, and semantic kind needed for a tap to open the
-right context.
+Push data contains the session, workspace, thread, and semantic kind needed
+for a tap to open the right context. It also includes the thread title so the
+OS notification can identify the conversation. Unlike encrypted updates and
+RPC payloads, that title is visible to the relay, Expo Push Service, and the
+device notification service; no transcript or message preview is included.
 
 The relay suppresses a push to a device with a live relay connection. The
 desktop also publishes a short activity lease to the daemon; when enabled,

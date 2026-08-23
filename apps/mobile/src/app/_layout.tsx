@@ -1,10 +1,10 @@
 import '@/theme/unistyles'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
 import { useUnistyles } from 'react-native-unistyles'
-import { Slot } from 'expo-router'
+import { Slot, useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as SplashScreen from 'expo-splash-screen'
 
@@ -29,7 +29,12 @@ void ensureAndroidNotificationChannel()
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false)
   const { rt } = useUnistyles()
+  const router = useRouter()
   useRelayConnection()
+
+  const openNotificationDestination = useCallback(() => {
+    router.navigate('/(app)')
+  }, [router])
 
   useEffect(() => {
     // Only after stores hydrate — a tap handled earlier would have its
@@ -38,18 +43,18 @@ export default function RootLayout() {
     // notification response, which processInitialNotificationResponse below
     // picks up (deduped, so already-handled taps are not replayed).
     if (!isReady) return
-    const subscription = addNotificationResponseListener()
+    const subscription = addNotificationResponseListener(openNotificationDestination)
     return () => {
       subscription?.remove()
     }
-  }, [isReady])
+  }, [isReady, openNotificationDestination])
 
   useEffect(() => {
     // Only after stores hydrate — otherwise cache restoration would clobber
     // the workspace/thread selection made from the launching notification.
     if (!isReady) return
-    void processInitialNotificationResponse()
-  }, [isReady])
+    void processInitialNotificationResponse(openNotificationDestination)
+  }, [isReady, openNotificationDestination])
 
   useEffect(() => {
     async function restore() {
