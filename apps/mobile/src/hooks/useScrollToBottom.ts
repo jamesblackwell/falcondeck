@@ -26,9 +26,18 @@ function distanceFromBottom(event: NativeSyntheticEvent<NativeScrollEvent>) {
  * reader: scroll up a screen or two, get dragged back down.
  *
  * So the pin is explicit: this hook follows the tail until a drag starts, and
- * re-arms only when the user deliberately returns to the bottom — ends a drag
- * or momentum there — or taps the jump button. While following, `onContentSizeChange`
- * pins the viewport as content grows; while not following, nothing scrolls at all.
+ * re-arms only when the user deliberately returns to the bottom — ends a
+ * downward drag or downward fling there, or taps the jump button. An upward
+ * drag does not re-arm on release or on momentum, even if it settles a few
+ * pixels from the tail; that small gap is how you start reading back, and
+ * snapping it shut feels like the list is fighting you.
+ *
+ * While following, content-size changes pin instantly through the native
+ * scroller. FlashList.scrollToEnd is animated and defers its native call with
+ * setTimeout(0), so a late markdown/actions/mermaid layout after the turn
+ * finishes can start a glide that keeps running after the reader has already
+ * grabbed the list. Instant native pinning cannot wrestle a drag, and a drag
+ * start cancels any jump-button glide still in flight.
  */
 export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
@@ -36,9 +45,21 @@ export function useScrollToBottom<T>() {
   const showJumpButtonRef = useRef(false)
   const isFollowingRef = useRef(true)
   const dragStartOffsetRef = useRef<number | null>(null)
+  const suppressFollowResumeRef = useRef(false)
 
   const setFollowing = useCallback((next: boolean) => {
     isFollowingRef.current = next
+  }, [])
+
+  const pinToBottomInstant = useCallback(() => {
+    const list = listRef.current
+    if (!list) return
+    const native = list.getNativeScrollRef?.()
+    if (native && typeof native.scrollToEnd === 'function') {
+      native.scrollToEnd({ animated: false })
+      return
+    }
+    list.scrollToEnd({ animated: false })
   }, [])
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -51,13 +72,19 @@ export function useScrollToBottom<T>() {
 
   const onScrollBeginDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      dragStartOffsetRef.current = event.nativeEvent.contentOffset.y
+      const offset = event.nativeEvent.contentOffset.y
+      dragStartOffsetRef.current = offset
+      suppressFollowResumeRef.current = false
       setFollowing(false)
+      // Kill an in-flight jump-button (or leftover) glide so the finger owns
+      // the position from the first frame of the drag.
+      listRef.current?.scrollToOffset({ offset, animated: false })
     },
     [setFollowing],
   )
 
   const resumeFollowing = useCallback(() => {
+    suppressFollowResumeRef.current = false
     setFollowing(true)
     listRef.current?.scrollToEnd({ animated: true })
   }, [setFollowing])
@@ -68,8 +95,11 @@ export function useScrollToBottom<T>() {
       dragStartOffsetRef.current = null
       // Only resume when the drag ended near the bottom AND wasn't a net
       // upward pull — resuming on an upward fling's release would scrollToEnd
-      // right over the gesture this hook exists to protect.
+      // right over the gesture this hook exists to protect. Momentum must
+      // honour the same veto: it fires after endDrag and used to snap a
+      // 20–40px read-back shut because it still looked "near the tail".
       if (dragStart !== null && event.nativeEvent.contentOffset.y < dragStart) {
+        suppressFollowResumeRef.current = true
         return
       }
       if (distanceFromBottom(event) <= RESUME_FOLLOW_OFFSET) {
@@ -81,6 +111,7 @@ export function useScrollToBottom<T>() {
 
   const onMomentumScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (suppressFollowResumeRef.current) return
       if (
         !isFollowingRef.current &&
         distanceFromBottom(event) <= RESUME_FOLLOW_OFFSET
@@ -98,17 +129,22 @@ export function useScrollToBottom<T>() {
    */
   const onContentSizeChange = useCallback(() => {
     if (!isFollowingRef.current) return
-    listRef.current?.scrollToEnd({ animated: true })
-  }, [])
+    pinToBottomInstant()
+  }, [pinToBottomInstant])
 
   const scrollToBottom = useCallback(
     (animated = true) => {
       showJumpButtonRef.current = false
       setShowJumpButton(false)
+      suppressFollowResumeRef.current = false
       setFollowing(true)
-      listRef.current?.scrollToEnd({ animated })
+      if (animated) {
+        listRef.current?.scrollToEnd({ animated: true })
+        return
+      }
+      pinToBottomInstant()
     },
-    [setFollowing],
+    [pinToBottomInstant, setFollowing],
   )
 
   /**
@@ -139,6 +175,7 @@ export function useScrollToBottom<T>() {
   const resetScrollState = useCallback(() => {
     showJumpButtonRef.current = false
     setShowJumpButton(false)
+    suppressFollowResumeRef.current = false
     setFollowing(true)
   }, [setFollowing])
 

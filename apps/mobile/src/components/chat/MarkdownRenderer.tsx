@@ -831,15 +831,19 @@ export const MarkdownRenderer = memo(
     interpretDirectives = true,
     highlightCommands = false,
   }: MarkdownRendererProps) {
-    const deferredText = useDeferredValue(text);
+    const deferredStreamingText = useDeferredValue(text);
+    // Defer parsing only while tokens are arriving. After the turn settles,
+    // the deferred tree would paint stale and then grow the row — a height
+    // correction the transcript list reads as a yank toward the tail.
+    const renderedText = streaming ? deferredStreamingText : text;
     const renderedBlocks = useMemo(() => {
       const segments = interpretDirectives
-        ? splitAgentMessageSegments(deferredText, streaming)
-        : [{ kind: "markdown" as const, text: deferredText }];
+        ? splitAgentMessageSegments(renderedText, streaming)
+        : [{ kind: "markdown" as const, text: renderedText }];
       // Definitions apply across directive boundaries. Parse the clean full
       // message once for the lookup, then render each Markdown segment in
       // order around the native annotations.
-      const cleanTree = parseMarkdown(stripAgentDirectiveLines(deferredText));
+      const cleanTree = parseMarkdown(stripAgentDirectiveLines(renderedText));
       const definitions = buildMarkdownDefinitions(cleanTree);
       const definitionFooter = markdownDefinitionFooter(cleanTree);
       const blocks: ReactNode[] = [];
@@ -875,7 +879,7 @@ export const MarkdownRenderer = memo(
         );
       });
       return blocks;
-    }, [deferredText, highlightCommands, interpretDirectives, streaming]);
+    }, [highlightCommands, interpretDirectives, renderedText, streaming]);
 
     return <View style={styles.container}>{renderedBlocks}</View>;
   },

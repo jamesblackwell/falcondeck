@@ -28,11 +28,19 @@ function renderHook() {
 
   renderComponent(<Harness />)
   const scrollToEnd = vi.fn()
+  const nativeScrollToEnd = vi.fn()
+  const scrollToOffset = vi.fn()
   value!.listRef.current = {
     scrollToEnd,
-    scrollToOffset: vi.fn(),
+    scrollToOffset,
+    getNativeScrollRef: () => ({ scrollToEnd: nativeScrollToEnd }),
   } as any
-  return { get value() { return value! }, scrollToEnd }
+  return {
+    get value() { return value! },
+    scrollToEnd,
+    nativeScrollToEnd,
+    scrollToOffset,
+  }
 }
 
 describe('useScrollToBottom', () => {
@@ -47,7 +55,8 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.scrollToBottom(false)
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
     expect(hook.value.showJumpButton).toBe(false)
   })
 
@@ -65,6 +74,7 @@ describe('useScrollToBottom', () => {
 
     expect(hook.value.showJumpButton).toBe(false)
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
   it('leaves FlashList autoscroll disabled so its sticky near-bottom flag never fires', () => {
@@ -84,7 +94,41 @@ describe('useScrollToBottom', () => {
       hook.value.onContentSizeChange()
     })
 
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('falls back to FlashList.scrollToEnd when the native scroller is missing', () => {
+    const hook = renderHook()
+    hook.value.listRef.current = {
+      scrollToEnd: hook.scrollToEnd,
+      scrollToOffset: hook.scrollToOffset,
+    } as any
+
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+
+    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: false })
+  })
+
+  it('cancels an in-flight glide the moment a drag starts', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.scrollToBottom()
+    })
     expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(420))
+    })
+    expect(hook.scrollToOffset).toHaveBeenCalledWith({ offset: 420, animated: false })
+
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
   it('stops pinning the moment a drag starts, however much content arrives', () => {
@@ -99,6 +143,7 @@ describe('useScrollToBottom', () => {
     })
 
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
   it('does not resume following when a drag ends after a net upward pull, even near the bottom', () => {
@@ -113,6 +158,23 @@ describe('useScrollToBottom', () => {
       hook.value.onContentSizeChange()
     })
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('does not re-arm following when an upward fling settles near the bottom', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(470))
+      hook.value.onMomentumScrollEnd(scrollEvent(470))
+    })
+
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
   it('resumes following when a drag ends near the bottom without pulling up', () => {
@@ -173,7 +235,8 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.onContentSizeChange()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(2)
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(500))
@@ -182,7 +245,7 @@ describe('useScrollToBottom', () => {
       hook.value.resetScrollState()
       hook.value.onContentSizeChange()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(3)
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(2)
   })
 
   it('snaps a send to the tail when the reader is hovering just above it', () => {
@@ -200,11 +263,12 @@ describe('useScrollToBottom', () => {
     })
     expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
 
-    // Re-armed: streamed content keeps pinning.
+    // Re-armed: streamed content keeps pinning instantly, not as a glide.
     act(() => {
       hook.value.onContentSizeChange()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(2)
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
   })
 
   it('leaves a send alone for a reader deep enough that the jump button shows', () => {
@@ -222,6 +286,7 @@ describe('useScrollToBottom', () => {
       hook.value.onContentSizeChange()
     })
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
   it('snaps a refreshed thread to the tail only for a reader who has not scrolled away', () => {
@@ -232,7 +297,8 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.scrollToBottomIfFollowing(false)
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
 
     // Scrolled back through the history: the same refresh — a reconnect, a
     // workspace reselect — must not drag them to the bottom.
@@ -243,6 +309,6 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.scrollToBottomIfFollowing(false)
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
   })
 })
