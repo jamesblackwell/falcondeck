@@ -11,6 +11,7 @@ use falcondeck_core::{
     RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial, SnapshotRequest,
     StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest,
+    control::{ControlExecuteRequest, ControlGetRequest, ControlOrigin, ControlRequestContext},
     crypto::{
         LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
         verify_pairing_public_key_bundle,
@@ -223,6 +224,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
     matches!(
         method,
         "snapshot.current"
+            | "control.get"
             | "thread.detail"
             | "preferences.read"
             | "speech.status"
@@ -257,6 +259,11 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.detail",
     "preferences.read",
     "preferences.update",
+    // The control service owns the current automations UI. Keep these generic
+    // methods beside other daemon-level state so every paired client uses the
+    // same validation, revisions, audit log, and state-change events.
+    "control.get",
+    "control.execute",
     "speech.status",
     "speech.models",
     "speech.transcribe",
@@ -988,6 +995,32 @@ impl AppState {
                 }
                 "preferences.read" => serde_json::to_value(self.preferences().await)
                     .map_err(|error| format!("failed to serialize preferences: {error}")),
+                "control.get" => {
+                    let request = serde_json::from_value::<ControlGetRequest>(params.clone())
+                        .map_err(|error| format!("invalid control read payload: {error}"))?;
+                    let context = ControlRequestContext {
+                        origin: ControlOrigin::RemoteRpc,
+                        ..ControlRequestContext::default()
+                    };
+                    serde_json::to_value(
+                        self.control_get(request, &context)
+                            .await
+                            .map_err(|error| error.0.message)?,
+                    )
+                    .map_err(|error| format!("failed to serialize control read: {error}"))
+                }
+                "control.execute" => {
+                    let request =
+                        serde_json::from_value::<ControlExecuteRequest>(params.clone()).map_err(
+                            |error| format!("invalid control operation payload: {error}"),
+                        )?;
+                    let context = ControlRequestContext {
+                        origin: ControlOrigin::RemoteRpc,
+                        ..ControlRequestContext::default()
+                    };
+                    serde_json::to_value(self.control_execute(request, &context).await)
+                        .map_err(|error| format!("failed to serialize control result: {error}"))
+                }
                 "speech.status" => serde_json::to_value(
                     self.speech_credential_status()
                         .await
@@ -2652,10 +2685,12 @@ mod tests {
     #[test]
     fn mutating_remote_rpc_methods_are_deduplicated() {
         assert!(!remote_rpc_is_read_only("turn.start"));
+        assert!(!remote_rpc_is_read_only("control.execute"));
     }
 
     #[test]
     fn snapshot_remote_rpc_remains_read_only() {
         assert!(remote_rpc_is_read_only("snapshot.current"));
+        assert!(remote_rpc_is_read_only("control.get"));
     }
 }

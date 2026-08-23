@@ -118,6 +118,22 @@ and owns no state itself.
   subscribes to `control-state-changed` events, so conversational changes
   appear immediately.
 
+## Mobile
+
+- **Sidebar → Automations** exposes the same list, editor, pause/resume,
+  run-now, history, and delete operations as desktop.
+- Mobile sends generic `control.get` and `control.execute` RPCs through the
+  existing end-to-end encrypted relay channel. The daemon attaches the
+  `remote_rpc` origin and remains the only writer, so validation, revisions,
+  idempotency, audit records, and scheduler wakeups are identical to desktop.
+- Definitions, settings, and recently opened run histories are cached in
+  session-scoped MMKV storage. The cached list renders immediately on launch
+  and remains read-only while the daemon is offline; a stale-while-revalidate
+  fetch replaces it when RPC readiness returns.
+- Unified `control-state-changed` events invalidate the affected mobile view.
+  Bursts are coalesced before refetching, and full automation instructions
+  remain detail-only rather than entering the daemon snapshot or relay replay.
+
 ## Persistence and bounds
 
 State lives in `~/.falcondeck/agent-control.json` beside the daemon state
@@ -152,6 +168,8 @@ crates/falcondeck-daemon/src/control/
   redaction.rs secret redaction
   mcp.rs       the stdio MCP server (`falcondeck-daemon mcp`)
 apps/desktop/src/components/…                 settings + automations panels
+apps/mobile/src/features/automations/          mobile payloads + event invalidation
+apps/mobile/src/store/automation-store.ts      relay reads/mutations + MMKV cache
 packages/client-core/src/control.ts            TS types and normalizers
 ```
 
@@ -162,6 +180,8 @@ Rules that keep the design honest:
 2. One source of behaviour: the desktop UI and the MCP tools call the same
    control service through the same three HTTP routes
    (`/api/control/search|get|execute`).
+   Paired clients reach `get` and `execute` through equivalent encrypted
+   relay RPC registrations.
 3. Automations invoke agents through the existing thread/turn machinery —
    there is no separate conversation store.
 4. Automations store canonical workspace paths; runtime workspace ids appear

@@ -126,6 +126,18 @@ describe("SidebarView component", () => {
     settings.props.onPress();
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
+  it("opens automations from the persistent footer", () => {
+    const onOpenAutomations = vi.fn();
+    const r = renderComponent(
+      <SidebarView {...base} onOpenAutomations={onOpenAutomations} />,
+    );
+    const automations = r.root.find(
+      (node) => node.props.accessibilityLabel === "Automations",
+    );
+    expect(textOf(r)).toContain("Automations");
+    automations.props.onPress();
+    expect(onOpenAutomations).toHaveBeenCalledTimes(1);
+  });
   it("starts a thread from a row above the project list", () => {
     const onNewThread = vi.fn();
     const groups: ProjectGroup[] = [

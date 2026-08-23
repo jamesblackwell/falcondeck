@@ -34,6 +34,7 @@ import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken, isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { realtimeAudioPlayer } from '@/lib/realtime-audio-player'
+import { publishControlStateChanges } from '@/features/automations/control-events'
 import {
   abandonConnectionActions,
   beginConnectionAction,
@@ -274,7 +275,7 @@ export function useRelayConnection() {
 
   const applyAuthoritativeSnapshot = useCallback((nextSnapshot: DaemonSnapshot) => {
     const racedEvents = pendingSnapshotEvents.current
-    useSessionStore.getState().applyDaemonEvents([
+    const events: EventEnvelope[] = [
       {
         seq: 0,
         emitted_at: new Date().toISOString(),
@@ -283,7 +284,9 @@ export function useRelayConnection() {
         event: { type: 'snapshot', snapshot: nextSnapshot },
       },
       ...racedEvents,
-    ])
+    ]
+    useSessionStore.getState().applyDaemonEvents(events)
+    publishControlStateChanges(events)
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
@@ -659,6 +662,7 @@ export function useRelayConnection() {
 
         if (daemonEvents.length > 0) {
           useSessionStore.getState().applyDaemonEvents(daemonEvents)
+          publishControlStateChanges(daemonEvents)
         }
 
         checkpointPendingSnapshotCursor()

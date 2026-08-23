@@ -12,6 +12,7 @@ import Animated from "react-native-reanimated";
 import { FlashList } from "@shopify/flash-list";
 import {
   ArrowUpDown,
+  CalendarClock,
   ChevronDown,
   FolderClosed,
   FolderOpen,
@@ -73,6 +74,7 @@ interface SidebarViewProps {
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread: (workspaceId: string) => void;
   onOpenSettings?: () => void;
+  onOpenAutomations?: () => void;
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void;
   threadTagsById?: Record<string, ThreadTag[]>;
@@ -146,6 +148,7 @@ export const SidebarView = memo(function SidebarView({
   onSelectThread,
   onNewThread,
   onOpenSettings,
+  onOpenAutomations,
   onClose,
   threadTagsById,
   threadTagOptions = [],
@@ -633,31 +636,53 @@ export const SidebarView = memo(function SidebarView({
         )}
       </View>
 
-      {onOpenSettings ? (
+      {onOpenSettings || onOpenAutomations ? (
         <View
           style={[
             styles.footer,
             { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) },
           ]}
         >
-          <Pressable
-            style={({ pressed }) => [
-              styles.settingsRow,
-              pressed ? styles.settingsRowPressed : undefined,
-            ]}
-            onPress={onOpenSettings}
-            accessibilityRole="button"
-            accessibilityLabel="Settings"
-            accessibilityHint="Opens mobile settings"
-          >
-            <Settings
-              size={theme.iconSize.sm}
-              color={theme.colors.fg.secondary}
-            />
-            <Text variant="label" color="secondary" weight="medium">
-              Settings
-            </Text>
-          </Pressable>
+          {onOpenAutomations ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.settingsRow,
+                pressed ? styles.settingsRowPressed : undefined,
+              ]}
+              onPress={onOpenAutomations}
+              accessibilityRole="button"
+              accessibilityLabel="Automations"
+              accessibilityHint="Opens scheduled agent automations"
+            >
+              <CalendarClock
+                size={theme.iconSize.sm}
+                color={theme.colors.fg.secondary}
+              />
+              <Text variant="label" color="secondary" weight="medium">
+                Automations
+              </Text>
+            </Pressable>
+          ) : null}
+          {onOpenSettings ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.settingsRow,
+                pressed ? styles.settingsRowPressed : undefined,
+              ]}
+              onPress={onOpenSettings}
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+              accessibilityHint="Opens mobile settings"
+            >
+              <Settings
+                size={theme.iconSize.sm}
+                color={theme.colors.fg.secondary}
+              />
+              <Text variant="label" color="secondary" weight="medium">
+                Settings
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 

@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from "react";
 import { Drawer } from "expo-router/drawer";
-import { Redirect, useRouter } from "expo-router";
+import { Redirect, useRouter, type Href } from "expo-router";
 import { DrawerActions } from "@react-navigation/native";
 import type { DrawerContentComponentProps } from "@react-navigation/drawer";
 
@@ -74,6 +74,10 @@ export default function AppLayout() {
     router.navigate("/(app)/settings");
   }, [router]);
 
+  const handleOpenAutomations = useCallback(() => {
+    router.navigate("/(app)/automations" as Href);
+  }, [router]);
+
   // The drawer covers the whole screen, so there is no scrim left to tap:
   // closing it has to come from a control inside the sidebar.
   const renderDrawerContent = useCallback(
@@ -85,6 +89,7 @@ export default function AppLayout() {
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
         onOpenSettings={handleOpenSettings}
+        onOpenAutomations={handleOpenAutomations}
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
         threadTagsById={threadTags.byThreadId}
         threadTagOptions={threadTags.tags}
@@ -101,6 +106,7 @@ export default function AppLayout() {
       handleSelectThread,
       handleNewThread,
       handleOpenSettings,
+      handleOpenAutomations,
       selectedThreadId,
       selectedWorkspaceId,
       threadTags.byThreadId,

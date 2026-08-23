@@ -19,3 +19,4 @@ export {
   useCollapseLongUserMessages,
 } from './session-store'
 export { useUIStore } from './ui-store'
+export { AutomationControlError, useAutomationStore } from './automation-store'
