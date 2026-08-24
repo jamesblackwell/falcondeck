@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   Badge,
@@ -84,6 +84,10 @@ type LibraryViewId = (typeof LIBRARY_VIEWS)[number]['id']
 export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) {
   const [libraryView, setLibraryView] = useState<LibraryViewId>('installed')
   const [pluginType, setPluginType] = useState<PluginTypeId>('skills')
+  const [skillsRevision, setSkillsRevision] = useState(0)
+  const handleSkillsChanged = useCallback(() => {
+    setSkillsRevision((revision) => revision + 1)
+  }, [])
 
   return (
     <section className="h-full min-h-0 overflow-y-auto bg-surface-1 px-8 py-10 text-fg-primary">
@@ -126,7 +130,13 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
         </header>
 
         {libraryView === 'browse' ? (
-          <SkillsSection view="browse" baseUrl={baseUrl} onToast={onToast} />
+          <SkillsSection
+            view="browse"
+            baseUrl={baseUrl}
+            revision={skillsRevision}
+            onSkillsChanged={handleSkillsChanged}
+            onToast={onToast}
+          />
         ) : (
           <div className="mt-8">
             <div
@@ -155,7 +165,13 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
             </div>
 
             {pluginType === 'skills' ? (
-              <SkillsSection view="installed" baseUrl={baseUrl} onToast={onToast} />
+              <SkillsSection
+                view="installed"
+                baseUrl={baseUrl}
+                revision={skillsRevision}
+                onSkillsChanged={handleSkillsChanged}
+                onToast={onToast}
+              />
             ) : (
               <div className="mt-8">
                 <ConnectorsPanel
@@ -175,21 +191,32 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
 function SkillsSection({
   view,
   baseUrl,
+  revision,
+  onSkillsChanged,
   onToast,
-}: Pick<PluginsViewProps, 'baseUrl' | 'onToast'> & { view: 'installed' | 'browse' }) {
+}: Pick<PluginsViewProps, 'baseUrl' | 'onToast'> & {
+  view: 'installed' | 'browse'
+  revision: number
+  onSkillsChanged: () => void
+}) {
   const [library, setLibrary] = useState<LibraryOverview | null>(null)
   const [libraryError, setLibraryError] = useState<string | null>(null)
+  const [isLoadingLibrary, setIsLoadingLibrary] = useState(Boolean(baseUrl))
   const [query, setQuery] = useState('')
   const [registry, setRegistry] = useState<RegistryResult | null>(null)
   const [registryError, setRegistryError] = useState<string | null>(null)
-  const [isSearching, setIsSearching] = useState(false)
+  const [isSearching, setIsSearching] = useState(view === 'browse' && Boolean(baseUrl))
   const [busySkillId, setBusySkillId] = useState<string | null>(null)
   const loadGeneration = useRef(0)
   const searchGeneration = useRef(0)
 
   const loadLibrary = useCallback(async () => {
-    if (!baseUrl) return
+    if (!baseUrl) {
+      setIsLoadingLibrary(false)
+      return
+    }
     const generation = ++loadGeneration.current
+    setIsLoadingLibrary(true)
     setLibraryError(null)
     try {
       const response = await fetch(`${baseUrl}/api/skills`)
@@ -200,13 +227,15 @@ function SkillsSection({
     } catch (error) {
       if (generation !== loadGeneration.current) return
       setLibraryError(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (generation === loadGeneration.current) setIsLoadingLibrary(false)
     }
   }, [baseUrl])
 
   useEffect(() => {
     if (view !== 'installed') return
     void loadLibrary()
-  }, [loadLibrary, view])
+  }, [loadLibrary, revision, view])
 
   const searchRegistry = useCallback(
     async (searchQuery: string) => {
@@ -237,7 +266,7 @@ function SkillsSection({
       void searchRegistry(query.trim())
     }, 300)
     return () => window.clearTimeout(handle)
-  }, [query, searchRegistry, view])
+  }, [query, revision, searchRegistry, view])
 
   const handleInstall = useCallback(
     async (skill: RegistrySkill) => {
@@ -258,7 +287,8 @@ function SkillsSection({
           title: `Installed /${skill.skillId}`,
           description: 'Available to every agent in new turns.',
         })
-        await searchRegistry(query.trim())
+        setIsSearching(true)
+        onSkillsChanged()
       } catch (error) {
         onToast({
           variant: 'danger',
@@ -269,7 +299,7 @@ function SkillsSection({
         setBusySkillId(null)
       }
     },
-    [baseUrl, onToast, query, searchRegistry],
+    [baseUrl, onSkillsChanged, onToast],
   )
 
   const handleUninstall = useCallback(
@@ -286,7 +316,8 @@ function SkillsSection({
           throw new Error(body || falconDeckHttpError(response.status))
         }
         onToast({ variant: 'success', title: `Removed /${skill.name}` })
-        await loadLibrary()
+        setIsLoadingLibrary(true)
+        onSkillsChanged()
       } catch (error) {
         onToast({
           variant: 'danger',
@@ -297,17 +328,15 @@ function SkillsSection({
         setBusySkillId(null)
       }
     },
-    [baseUrl, loadLibrary, onToast],
+    [baseUrl, onSkillsChanged, onToast],
   )
 
   const installedSkills = library?.skills ?? []
   const registrySkills = registry?.skills ?? []
   const trimmedQuery = query.trim()
 
-  const browseCaption = useMemo(() => {
-    if (trimmedQuery.length >= 2) return `Results for “${trimmedQuery}”`
-    return 'Trending on skills.sh'
-  }, [trimmedQuery])
+  const browseCaption =
+    trimmedQuery.length >= 2 ? `Results for “${trimmedQuery}”` : 'Trending on skills.sh'
 
   if (view === 'installed') {
     return (
@@ -330,6 +359,10 @@ function SkillsSection({
         </div>
         {libraryError ? (
           <p className="mt-3 text-[length:var(--fd-text-sm)] text-danger">{libraryError}</p>
+        ) : isLoadingLibrary && !library ? (
+          <p className="mt-3 text-[length:var(--fd-text-sm)] text-fg-muted">
+            Loading installed skills…
+          </p>
         ) : installedSkills.length === 0 ? (
           <Card variant="flat" className="mt-3">
             <CardContent>
@@ -366,7 +399,7 @@ function SkillsSection({
                         variant="ghost"
                         size="icon"
                         aria-label={`Remove /${skill.name}`}
-                        disabled={busySkillId === skill.name}
+                        disabled={isLoadingLibrary || busySkillId === skill.name}
                         onClick={() => void handleUninstall(skill)}
                       >
                         <Trash2 aria-hidden="true" className="h-4 w-4 text-danger" />
@@ -466,7 +499,7 @@ function SkillsSection({
                         <Button
                           size="sm"
                           variant="secondary"
-                          disabled={busySkillId === skill.id}
+                          disabled={isSearching || busySkillId === skill.id}
                           onClick={() => void handleInstall(skill)}
                         >
                           <Download aria-hidden="true" className="h-3.5 w-3.5" />

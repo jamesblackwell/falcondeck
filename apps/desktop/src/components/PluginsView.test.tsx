@@ -83,6 +83,7 @@ describe('PluginsView', () => {
       <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
     )
 
+    expect(screen.getByText('Loading installed skills…')).toBeInTheDocument()
     expect(await screen.findByText('/grill-me')).toBeInTheDocument()
     expect(screen.getByText('/hand-rolled')).toBeInTheDocument()
     expect(screen.getByLabelText('Remove /grill-me')).toBeInTheDocument()
@@ -110,6 +111,7 @@ describe('PluginsView', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
 
+    expect(screen.queryByText('Nothing to browse right now')).not.toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Browse skills' })).toBeInTheDocument()
     expect(screen.queryByRole('tablist', { name: 'Installed plugin types' }))
       .not.toBeInTheDocument()
@@ -154,6 +156,72 @@ describe('PluginsView', () => {
       source: 'vercel-labs/skills',
       skill: 'find-skills',
     })
+  })
+
+  it('refreshes Installed when an install finishes after switching views', async () => {
+    let resolveInstall!: (response: Response) => void
+    const installResponse = new Promise<Response>((resolve) => {
+      resolveInstall = resolve
+    })
+    let libraryLoads = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/skills/install')) return installResponse
+      if (url.includes('/api/skills/registry')) {
+        return new Response(JSON.stringify(REGISTRY), { status: 200 })
+      }
+      if (url.endsWith('/api/skills')) {
+        libraryLoads += 1
+        return new Response(JSON.stringify(LIBRARY), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
+    )
+    await screen.findByText('/hand-rolled')
+    fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
+    fireEvent.click(await screen.findByRole('button', { name: /Install/ }))
+    fireEvent.click(screen.getByRole('tab', { name: /Installed/ }))
+    await waitFor(() => expect(libraryLoads).toBe(2))
+
+    resolveInstall(new Response(null, { status: 200 }))
+
+    await waitFor(() => expect(libraryLoads).toBe(3))
+  })
+
+  it('refreshes Browse when an uninstall finishes after switching views', async () => {
+    let resolveUninstall!: (response: Response) => void
+    const uninstallResponse = new Promise<Response>((resolve) => {
+      resolveUninstall = resolve
+    })
+    let registryLoads = 0
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (init?.method === 'DELETE') return uninstallResponse
+      if (url.includes('/api/skills/registry')) {
+        registryLoads += 1
+        return new Response(JSON.stringify(REGISTRY), { status: 200 })
+      }
+      if (url.endsWith('/api/skills')) {
+        return new Response(JSON.stringify(LIBRARY), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(
+      <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
+    )
+    fireEvent.click(await screen.findByLabelText('Remove /grill-me'))
+    fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
+    await waitFor(() => expect(registryLoads).toBe(1))
+
+    resolveUninstall(new Response(null, { status: 200 }))
+
+    await waitFor(() => expect(registryLoads).toBe(2))
   })
 
   it('switches to the MCP servers section', async () => {
