@@ -3103,6 +3103,7 @@ function AppInner() {
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
@@ -3117,6 +3118,7 @@ function AppInner() {
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
@@ -3131,6 +3133,7 @@ function AppInner() {
       setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(null);

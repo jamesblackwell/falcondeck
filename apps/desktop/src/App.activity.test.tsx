@@ -310,6 +310,22 @@ describe("Activity takeover wiring", () => {
     );
   });
 
+  it("leaves Plugins when starting a new thread", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Plugins" }));
+    expect(
+      await screen.findByRole("heading", { name: "Plugins" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+
+    expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Plugins" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("preserves an existing new-thread draft as scheduling notes", async () => {
     window.localStorage.setItem(
       "falcondeck.desktop.composer-drafts.v1",
