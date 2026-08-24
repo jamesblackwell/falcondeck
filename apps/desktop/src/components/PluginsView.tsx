@@ -60,60 +60,111 @@ function formatInstallCount(installs: number) {
   return String(installs)
 }
 
-const SECTIONS = [
+const PLUGIN_TYPES = [
   { id: 'skills', label: 'Skills', icon: BookOpenText },
   { id: 'mcp', label: 'MCP servers', icon: Plug },
 ] as const
 
-type SectionId = (typeof SECTIONS)[number]['id']
+const LIBRARY_VIEWS = [
+  {
+    id: 'installed',
+    label: 'Installed',
+    description: 'Manage skills and MCP servers already available to your agents.',
+  },
+  {
+    id: 'browse',
+    label: 'Browse',
+    description: 'Discover and install skills from the community directory.',
+  },
+] as const
+
+type PluginTypeId = (typeof PLUGIN_TYPES)[number]['id']
+type LibraryViewId = (typeof LIBRARY_VIEWS)[number]['id']
 
 export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) {
-  const [section, setSection] = useState<SectionId>('skills')
+  const [libraryView, setLibraryView] = useState<LibraryViewId>('installed')
+  const [pluginType, setPluginType] = useState<PluginTypeId>('skills')
 
   return (
     <section className="h-full min-h-0 overflow-y-auto bg-surface-1 px-8 py-10 text-fg-primary">
       <div className="mx-auto w-full max-w-4xl">
-        <header className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="flex items-center gap-3 text-3xl font-semibold tracking-tight">
-              <Puzzle aria-hidden="true" className="h-7 w-7 text-accent" />
-              Plugins
-            </h1>
-            <p className="mt-2 text-fg-secondary">
-              Skills and MCP servers your agents can use, across every harness.
-            </p>
-          </div>
+        <header>
+          <h1 className="flex items-center gap-3 text-3xl font-semibold tracking-tight">
+            <Puzzle aria-hidden="true" className="h-7 w-7 text-accent" />
+            Plugins
+          </h1>
+          <p className="mt-2 text-fg-secondary">
+            Manage what your agents can use, or discover new skills.
+          </p>
+
           <div
             role="tablist"
-            aria-label="Plugin sections"
-            className="flex items-center gap-1 rounded-[var(--fd-radius-lg)] bg-surface-2 p-1"
+            aria-label="Plugin library"
+            className="mt-6 grid grid-cols-2 gap-2"
           >
-            {SECTIONS.map(({ id, label, icon: Icon }) => (
+            {LIBRARY_VIEWS.map(({ id, label, description }) => (
               <button
                 key={id}
                 type="button"
                 role="tab"
-                aria-selected={section === id}
-                onClick={() => setSection(id)}
+                aria-selected={libraryView === id}
+                onClick={() => setLibraryView(id)}
                 className={cn(
-                  'fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-1.5 text-[length:var(--fd-text-sm)] transition-colors',
-                  section === id
-                    ? 'bg-surface-0 font-medium text-fg-primary shadow-[var(--fd-shadow-sm)]'
-                    : 'text-fg-secondary hover:text-fg-primary',
+                  'fd-focus rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors',
+                  libraryView === id
+                    ? 'border-border-strong bg-surface-2'
+                    : 'border-border-subtle bg-surface-1 hover:bg-surface-2',
                 )}
               >
-                <Icon aria-hidden="true" className="h-4 w-4" />
-                {label}
+                <span className="block font-medium text-fg-primary">{label}</span>
+                <span className="mt-1 block text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  {description}
+                </span>
               </button>
             ))}
           </div>
         </header>
 
-        {section === 'skills' ? (
-          <SkillsSection baseUrl={baseUrl} onToast={onToast} />
+        {libraryView === 'browse' ? (
+          <SkillsSection view="browse" baseUrl={baseUrl} onToast={onToast} />
         ) : (
           <div className="mt-8">
-            <ConnectorsPanel baseUrl={baseUrl} workspaces={workspaces} onToast={onToast} />
+            <div
+              role="tablist"
+              aria-label="Installed plugin types"
+              className="flex w-fit items-center gap-1 rounded-[var(--fd-radius-lg)] bg-surface-2 p-1"
+            >
+              {PLUGIN_TYPES.map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={pluginType === id}
+                  onClick={() => setPluginType(id)}
+                  className={cn(
+                    'fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-1.5 text-[length:var(--fd-text-sm)] transition-colors',
+                    pluginType === id
+                      ? 'bg-surface-0 font-medium text-fg-primary shadow-[var(--fd-shadow-sm)]'
+                      : 'text-fg-secondary hover:text-fg-primary',
+                  )}
+                >
+                  <Icon aria-hidden="true" className="h-4 w-4" />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {pluginType === 'skills' ? (
+              <SkillsSection view="installed" baseUrl={baseUrl} onToast={onToast} />
+            ) : (
+              <div className="mt-8">
+                <ConnectorsPanel
+                  baseUrl={baseUrl}
+                  workspaces={workspaces}
+                  onToast={onToast}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -122,9 +173,10 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
 }
 
 function SkillsSection({
+  view,
   baseUrl,
   onToast,
-}: Pick<PluginsViewProps, 'baseUrl' | 'onToast'>) {
+}: Pick<PluginsViewProps, 'baseUrl' | 'onToast'> & { view: 'installed' | 'browse' }) {
   const [library, setLibrary] = useState<LibraryOverview | null>(null)
   const [libraryError, setLibraryError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -152,8 +204,9 @@ function SkillsSection({
   }, [baseUrl])
 
   useEffect(() => {
+    if (view !== 'installed') return
     void loadLibrary()
-  }, [loadLibrary])
+  }, [loadLibrary, view])
 
   const searchRegistry = useCallback(
     async (searchQuery: string) => {
@@ -179,11 +232,12 @@ function SkillsSection({
   )
 
   useEffect(() => {
+    if (view !== 'browse') return
     const handle = window.setTimeout(() => {
       void searchRegistry(query.trim())
     }, 300)
     return () => window.clearTimeout(handle)
-  }, [query, searchRegistry])
+  }, [query, searchRegistry, view])
 
   const handleInstall = useCallback(
     async (skill: RegistrySkill) => {
@@ -204,7 +258,6 @@ function SkillsSection({
           title: `Installed /${skill.skillId}`,
           description: 'Available to every agent in new turns.',
         })
-        await loadLibrary()
         await searchRegistry(query.trim())
       } catch (error) {
         onToast({
@@ -216,7 +269,7 @@ function SkillsSection({
         setBusySkillId(null)
       }
     },
-    [baseUrl, loadLibrary, onToast, query, searchRegistry],
+    [baseUrl, onToast, query, searchRegistry],
   )
 
   const handleUninstall = useCallback(
@@ -234,7 +287,6 @@ function SkillsSection({
         }
         onToast({ variant: 'success', title: `Removed /${skill.name}` })
         await loadLibrary()
-        await searchRegistry(query.trim())
       } catch (error) {
         onToast({
           variant: 'danger',
@@ -245,7 +297,7 @@ function SkillsSection({
         setBusySkillId(null)
       }
     },
-    [baseUrl, loadLibrary, onToast, query, searchRegistry],
+    [baseUrl, loadLibrary, onToast],
   )
 
   const installedSkills = library?.skills ?? []
@@ -257,15 +309,15 @@ function SkillsSection({
     return 'Trending on skills.sh'
   }, [trimmedQuery])
 
-  return (
-    <div className="mt-8 flex flex-col gap-10">
-      <section aria-labelledby="installed-skills-heading">
+  if (view === 'installed') {
+    return (
+      <section aria-labelledby="installed-skills-heading" className="mt-8">
         <div className="flex items-baseline justify-between gap-3">
           <h2
             id="installed-skills-heading"
             className="text-[length:var(--fd-text-lg)] font-semibold"
           >
-            Installed
+            Installed skills
           </h2>
           {library ? (
             <span
@@ -334,11 +386,17 @@ function SkillsSection({
           </ul>
         )}
       </section>
+    )
+  }
 
-      <section aria-labelledby="browse-skills-heading">
-        <h2 id="browse-skills-heading" className="text-[length:var(--fd-text-lg)] font-semibold">
-          Browse
-        </h2>
+  return (
+    <section aria-labelledby="browse-skills-heading" className="mt-8">
+      <h2
+        id="browse-skills-heading"
+        className="text-[length:var(--fd-text-lg)] font-semibold"
+      >
+        Browse skills
+      </h2>
         <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
           Skills from the open{' '}
           <a
@@ -430,7 +488,6 @@ function SkillsSection({
             ))}
           </ul>
         )}
-      </section>
-    </div>
+    </section>
   )
 }

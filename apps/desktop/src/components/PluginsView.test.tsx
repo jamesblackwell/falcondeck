@@ -89,12 +89,39 @@ describe('PluginsView', () => {
     expect(screen.queryByLabelText('Remove /hand-rolled')).not.toBeInTheDocument()
   })
 
+  it('exposes Installed and Browse as the primary plugin navigation', async () => {
+    stubFetch()
+    render(
+      <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
+    )
+
+    expect(screen.getByText('Manage what your agents can use, or discover new skills.'))
+      .toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /Installed/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(screen.getByRole('tab', { name: /Browse/ })).toHaveAttribute(
+      'aria-selected',
+      'false',
+    )
+    expect(screen.getByRole('tablist', { name: 'Installed plugin types' }))
+      .toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
+
+    expect(await screen.findByRole('heading', { name: 'Browse skills' })).toBeInTheDocument()
+    expect(screen.queryByRole('tablist', { name: 'Installed plugin types' }))
+      .not.toBeInTheDocument()
+  })
+
   it('shows trending registry results with install state', async () => {
     stubFetch()
     render(
       <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
     )
 
+    fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
     expect(await screen.findByText('/find-skills')).toBeInTheDocument()
     expect(screen.getByText('Trending on skills.sh')).toBeInTheDocument()
     expect(screen.getByText('3.0M installs')).toBeInTheDocument()
@@ -111,6 +138,7 @@ describe('PluginsView', () => {
       <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={onToast} />,
     )
 
+    fireEvent.click(screen.getByRole('tab', { name: /Browse/ }))
     fireEvent.click(await screen.findByRole('button', { name: /Install/ }))
     await waitFor(() =>
       expect(onToast).toHaveBeenCalledWith(
@@ -136,7 +164,7 @@ describe('PluginsView', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'MCP servers' }))
     await waitFor(() =>
-      expect(screen.queryByText('Trending on skills.sh')).not.toBeInTheDocument(),
+      expect(screen.getByRole('heading', { name: 'Connectors' })).toBeInTheDocument(),
     )
   })
 })
