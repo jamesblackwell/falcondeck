@@ -778,6 +778,7 @@ export function useRelayConnection() {
   useEffect(() => {
     const relay = useRelayStore.getState()
     if (!sessionId) return
+    if (sessionId === 'demo-session') return
 
     const clientToken = relay._getClientToken()
     if (!clientToken) return

@@ -346,6 +346,12 @@ export function useSessionActions() {
     ) => {
       const relay = useRelayStore.getState();
       const session = useSessionStore.getState();
+      if (relay.sessionId === "demo-session") {
+        return session.threadDetail?.workspace.id === workspaceId &&
+          session.threadDetail.thread.id === threadId
+          ? session.threadDetail
+          : null;
+      }
       const history = session.threadHistory[threadId];
       const beforeItemId = options?.older
         ? (history?.oldestItemId ?? null)
@@ -461,6 +467,7 @@ export function useSessionActions() {
    */
   const prefetchRecentThreadDetails = useCallback(async () => {
     const relay = useRelayStore.getState();
+    if (relay.sessionId === "demo-session") return;
     if (!relay._getSessionCrypto()) return;
     const session = useSessionStore.getState();
     if (!session.snapshot) return;

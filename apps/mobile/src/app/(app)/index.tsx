@@ -185,6 +185,7 @@ export default function HomeScreen() {
   );
   const syncStatus = useSessionSyncStatus();
   const daemonRpcReady = isDaemonRpcReady(machinePresence);
+  const isDemoMode = sessionId === "demo-session";
   const {
     attachments,
     draft,
@@ -1382,7 +1383,7 @@ export default function HomeScreen() {
           onPasteImage={handlePasteImage}
           onTakePhoto={handleTakePhoto}
           onRemoveAttachment={removeAttachment}
-          disabled={!workspace}
+          disabled={!workspace || isDemoMode}
           sendDisabled={
             isSubmitting || !isEncrypted || Boolean(attachmentSendBlockReason)
           }
