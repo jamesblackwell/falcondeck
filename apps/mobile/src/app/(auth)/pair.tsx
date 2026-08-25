@@ -76,6 +76,11 @@ export default function PairScreen() {
     void claimPairing()
   }, [claimPairing, isSecuringSession, pairingCode, router])
 
+  const handleExploreDemo = useCallback(() => {
+    enterDemoMode()
+    router.replace('/(app)')
+  }, [router])
+
   const handleScanPress = useCallback(async () => {
     hasHandledScanRef.current = false
     if (!permission?.granted) {
@@ -251,6 +256,17 @@ export default function PairScreen() {
                   onPress={handleConnect}
                 />
 
+                <Button
+                  variant="ghost"
+                  label="Explore a demo"
+                  onPress={handleExploreDemo}
+                  disabled={isClaiming}
+                />
+
+                <Text variant="caption" color="muted" style={styles.demoHint}>
+                  Browse a sample workspace without connecting to a desktop.
+                </Text>
+
                 {error ? (
                   <Text
                     variant="caption"
@@ -372,6 +388,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   error: {
     textAlign: 'center',
+  },
+  demoHint: {
+    textAlign: 'center',
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
   bottom: {
     alignItems: 'center',
