@@ -4,7 +4,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'FalconDeck',
   slug: 'falcondeck-mobile',
-  version: '0.1.0',
+  version: '1.0',
   scheme: 'falcondeck',
   orientation: 'default',
   userInterfaceStyle: 'automatic',
@@ -36,7 +36,11 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       UIBackgroundModes: ['audio'],
     },
     config: {
-      usesNonExemptEncryption: false,
+      // FalconDeck implements end-to-end session encryption with bundled
+      // cryptographic libraries, not only the operating system's transport
+      // security. Keep this true so App Store Connect asks the required
+      // export-compliance questions instead of making a false exemption claim.
+      usesNonExemptEncryption: true,
     },
   },
   android: {
