@@ -14,6 +14,8 @@ export function enterDemoMode() {
     connectionStatus: 'encrypted',
     isConnected: true,
     isEncrypted: true,
+    isSyncing: false,
+    hasSyncedOnce: true,
     machinePresence: {
       session_id: 'demo-session',
       daemon_connected: true,
