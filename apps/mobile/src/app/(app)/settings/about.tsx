@@ -1,4 +1,4 @@
-import { ScrollView } from 'react-native'
+import { Linking, ScrollView } from 'react-native'
 import Constants from 'expo-constants'
 
 import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/settings'
@@ -18,6 +18,19 @@ export default function AboutSettingsScreen() {
       >
         <SettingsRow label="Version" value={version} />
         <SettingsRow label="Build" value={build ? String(build) : '—'} />
+      </SettingsSection>
+      <SettingsSection title="Legal">
+        <SettingsRow
+          label="Privacy Policy"
+          detail="How FalconDeck handles connection, session, and optional feature data."
+          onPress={() => void Linking.openURL('https://falcondeck.com/privacy')}
+          accessibilityHint="Opens FalconDeck's Privacy Policy"
+        />
+        <SettingsRow
+          label="Terms of Use"
+          onPress={() => void Linking.openURL('https://falcondeck.com/terms')}
+          accessibilityHint="Opens FalconDeck's Terms of Use"
+        />
       </SettingsSection>
     </ScrollView>
   )

@@ -75,6 +75,50 @@ svg {
   border-right: 1px solid var(--site-frame-border);
 }
 
+.legal-page {
+  width: min(760px, calc(100% - (var(--site-gutter) * 2)));
+  margin: 0 auto;
+  padding: 88px 0 96px;
+}
+
+.legal-page h1 {
+  max-width: 680px;
+  margin: 16px 0 10px;
+  font-size: clamp(42px, 7vw, 68px);
+  letter-spacing: -0.05em;
+  line-height: 0.98;
+}
+
+.legal-page__updated {
+  margin: 0 0 48px;
+  color: var(--fd-fg-2);
+  font-size: 14px;
+}
+
+.legal-copy {
+  color: var(--fd-fg-1);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.legal-copy p {
+  margin: 0 0 22px;
+}
+
+.legal-copy h2 {
+  margin: 42px 0 12px;
+  color: var(--fd-fg-0);
+  font-size: 20px;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.legal-copy a {
+  color: var(--fd-accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .site-rail {
   position: absolute;
   top: 0;
