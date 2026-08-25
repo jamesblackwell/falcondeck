@@ -34,6 +34,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // is backgrounded, like a music player. Requires a native rebuild.
     infoPlist: {
       UIBackgroundModes: ['audio'],
+      // Apple validates this exact Info.plist key during upload. FalconDeck
+      // bundles end-to-end session encryption, so it must not claim an
+      // encryption exemption.
+      ITSAppUsesNonExemptEncryption: true,
     },
     config: {
       // FalconDeck implements end-to-end session encryption with bundled
