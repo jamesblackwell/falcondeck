@@ -142,6 +142,11 @@ const EXIT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 /// message) before the turn is treated as unable to accept input.
 const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
+/// Maximum time a daemon shutdown gives active Claude turns to finish their
+/// SessionEnd hooks after SIGTERM. This is a ceiling, not a required delay.
+const SHUTDOWN_GRACE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+const SHUTDOWN_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(50);
+
 pub struct ClaudeRuntime {
     workspace_path: String,
     claude_bin: String,
@@ -578,6 +583,10 @@ impl ClaudeRuntime {
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         let mut active = self.active_turns.lock().await;
+        if active.is_empty() {
+            return Ok(());
+        }
+
         for turn in active.values_mut() {
             // EOF and SIGTERM together: the CLI now outlives its stdout, so
             // the signal alone is what stops a turn mid-flight, and the close
@@ -585,8 +594,25 @@ impl ClaudeRuntime {
             turn.input.close().await;
             let _ = request_graceful_stop(&mut turn.child);
         }
-        // Give the CLI a moment to flush session state before hard-killing.
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // SIGTERM lets Claude run SessionEnd hooks and persist its session.
+        // Poll so a turn that exits promptly does not make the app wait out
+        // the whole grace period; still hard-kill anything alive at its end.
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        loop {
+            let any_turn_still_running = active
+                .values_mut()
+                .any(|turn| turn.child.try_wait().ok().flatten().is_none());
+            if !any_turn_still_running {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(SHUTDOWN_POLL_INTERVAL.min(remaining)).await;
+        }
+
         for turn in active.values_mut() {
             if turn.child.try_wait().ok().flatten().is_none() {
                 let _ = turn.child.start_kill();
@@ -2321,6 +2347,24 @@ mod tests {
             runtime.interrupted_turns.lock().await.contains("thread-1"),
             "a spawn in progress must observe the user's stop"
         );
+    }
+
+    #[tokio::test]
+    async fn shutting_down_an_idle_runtime_skips_the_grace_period() {
+        let runtime = ClaudeRuntime {
+            workspace_path: "/tmp/project".to_string(),
+            claude_bin: "claude".to_string(),
+            active_turns: Mutex::new(HashMap::new()),
+            interrupted_turns: Mutex::new(HashSet::new()),
+            turn_locks: Mutex::new(HashMap::new()),
+            next_turn_generation: std::sync::atomic::AtomicU64::new(1),
+        };
+
+        // This checks a real timing contract: idle runtime shutdown must not
+        // wait for the 500 ms grace that is reserved for live child processes.
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(250), runtime.shutdown()).await;
+        assert!(matches!(result, Ok(Ok(()))));
     }
 
     #[test]

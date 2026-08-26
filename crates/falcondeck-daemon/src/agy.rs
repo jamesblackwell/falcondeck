@@ -37,6 +37,10 @@ const INTERRUPT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(
 const EXIT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 const PROBE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(15);
+/// Maximum time a daemon shutdown gives an active Antigravity turn to finish
+/// after SIGTERM. This is a ceiling, not a required delay.
+const SHUTDOWN_GRACE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
+const SHUTDOWN_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_millis(50);
 /// Headless default is five minutes, which is too short for a coding turn.
 const PRINT_TIMEOUT: &str = "24h";
 
@@ -502,11 +506,32 @@ impl AgyRuntime {
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         let mut active = self.active_turns.lock().await;
+        if active.is_empty() {
+            return Ok(());
+        }
+
         for turn in active.values_mut() {
             turn.input.close().await;
             let _ = request_graceful_stop(&mut turn.child);
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Let a SIGTERM finish naturally, but do not make the desktop wait a
+        // fixed half second once every active process has already exited.
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+        loop {
+            let any_turn_still_running = active
+                .values_mut()
+                .any(|turn| turn.child.try_wait().ok().flatten().is_none());
+            if !any_turn_still_running {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::time::sleep(SHUTDOWN_POLL_INTERVAL.min(remaining)).await;
+        }
+
         for turn in active.values_mut() {
             if turn.child.try_wait().ok().flatten().is_none() {
                 let _ = turn.child.start_kill();
@@ -1168,6 +1193,24 @@ pub fn tool_step_title(step_type: &str, tool_name: Option<&str>, subagent: Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutting_down_an_idle_runtime_skips_the_grace_period() {
+        let runtime = AgyRuntime {
+            workspace_path: "/tmp/project".to_string(),
+            agy_bin: "agy".to_string(),
+            active_turns: Mutex::new(HashMap::new()),
+            interrupted_turns: Mutex::new(HashSet::new()),
+            turn_locks: Mutex::new(HashMap::new()),
+            next_turn_generation: std::sync::atomic::AtomicU64::new(1),
+        };
+
+        // This checks a real timing contract: idle runtime shutdown must not
+        // wait for the 500 ms grace that is reserved for live child processes.
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(250), runtime.shutdown()).await;
+        assert!(matches!(result, Ok(Ok(()))));
+    }
 
     #[test]
     fn models_table_splits_on_tabs_and_picks_a_medium_default() {
