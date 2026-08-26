@@ -2,9 +2,12 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
-  type DragEvent,
+  type MouseEvent,
+  type PointerEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import {
   defineExtensionApp,
@@ -23,6 +26,16 @@ type BoardState = {
   threadStages: Record<string, string>;
 };
 
+type CardDrag = {
+  pointerId: number;
+  threadId: string;
+  title: string;
+  startX: number;
+  startY: number;
+  active: boolean;
+  dropStageId: string | null;
+};
+
 const COLOR_CLASSES: Record<string, string> = {
   gray: "bg-fg-muted",
   red: "bg-danger",
@@ -33,6 +46,28 @@ const COLOR_CLASSES: Record<string, string> = {
   purple: "bg-accent",
   pink: "bg-accent",
 };
+
+// HTML5 drag-and-drop does not deliver drop events in the Tauri webview.
+const CARD_DRAG_THRESHOLD_PX = 4;
+
+function stageIdAtPoint(
+  columns: Map<string, HTMLElement>,
+  clientX: number,
+  clientY: number,
+): string | null {
+  for (const [stageId, node] of columns) {
+    const rect = node.getBoundingClientRect();
+    if (
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom
+    ) {
+      return stageId;
+    }
+  }
+  return null;
+}
 
 function parseStageCatalog(value: unknown): Stage[] | null {
   if (!Array.isArray(value)) return null;
@@ -88,6 +123,19 @@ function KanbanBoard({
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<{
+    threadId: string;
+    title: string;
+  } | null>(null);
+  const [dropStageId, setDropStageId] = useState<string | null>(null);
+  const [dragPosition, setDragPosition] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const dragRef = useRef<CardDrag | null>(null);
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  const columnRefs = useRef(new Map<string, HTMLElement>());
+  const suppressThreadOpenRef = useRef(false);
   const canReadThreads = hasPermission("threads:read");
 
   useEffect(() => {
@@ -203,15 +251,85 @@ function KanbanBoard({
     [board.threadStages, invokeAction],
   );
 
-  const handleDrop = useCallback(
-    (event: DragEvent<HTMLElement>, stageId: string) => {
-      event.preventDefault();
-      const threadId = event.dataTransfer.getData(
-        "application/x-falcondeck-thread",
+  const handleCardPointerDown = useCallback(
+    (
+      thread: ExtensionAppThreadSummary,
+      event: PointerEvent<HTMLButtonElement>,
+    ) => {
+      if (event.button !== 0 || event.isPrimary === false) return;
+      dragRef.current = {
+        pointerId: event.pointerId,
+        threadId: thread.id,
+        title: thread.title || "Untitled thread",
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        dropStageId: null,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [],
+  );
+
+  const handleCardPointerMove = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const distance = Math.hypot(
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
       );
-      if (threadId) void moveThread(threadId, stageId);
+      if (!drag.active) {
+        if (distance < CARD_DRAG_THRESHOLD_PX) return;
+        drag.active = true;
+        suppressThreadOpenRef.current = true;
+        setDragging({ threadId: drag.threadId, title: drag.title });
+        setDragPosition({ x: event.clientX, y: event.clientY });
+      } else if (ghostRef.current) {
+        ghostRef.current.style.left = `${event.clientX + 12}px`;
+        ghostRef.current.style.top = `${event.clientY + 12}px`;
+      }
+      event.preventDefault();
+      const nextStageId = stageIdAtPoint(
+        columnRefs.current,
+        event.clientX,
+        event.clientY,
+      );
+      if (drag.dropStageId === nextStageId) return;
+      drag.dropStageId = nextStageId;
+      setDropStageId(nextStageId);
+    },
+    [],
+  );
+
+  const finishCardDrag = useCallback(
+    (event: PointerEvent<HTMLButtonElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      dragRef.current = null;
+      setDragging(null);
+      setDropStageId(null);
+      setDragPosition(null);
+      if (!drag.active) return;
+      window.setTimeout(() => {
+        suppressThreadOpenRef.current = false;
+      }, 0);
+      if (drag.dropStageId === null) return;
+      void moveThread(drag.threadId, drag.dropStageId);
     },
     [moveThread],
+  );
+
+  const handleCardClickCapture = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      if (!suppressThreadOpenRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    [],
   );
 
   if (!canReadThreads) {
@@ -249,13 +367,22 @@ function KanbanBoard({
         <div className="flex h-full min-w-max gap-4">
           {columns.map((column) => {
             const columnThreads = threadsByStage.get(column.id) ?? [];
+            const isDropTarget =
+              dragging != null && dropStageId === column.id;
             return (
               <section
                 key={column.id}
+                ref={(node) => {
+                  if (node) columnRefs.current.set(column.id, node);
+                  else columnRefs.current.delete(column.id);
+                }}
                 aria-label={column.label}
-                className="flex h-full w-72 flex-col rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1"
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => handleDrop(event, column.id)}
+                data-kanban-drop-active={isDropTarget ? "true" : undefined}
+                className={`flex h-full w-72 flex-col rounded-[var(--fd-radius-lg)] border bg-surface-1 ${
+                  isDropTarget
+                    ? "border-accent"
+                    : "border-border-subtle"
+                }`}
               >
                 <header className="flex items-center gap-2 border-b border-border-subtle px-3 py-3">
                   <span
@@ -270,35 +397,60 @@ function KanbanBoard({
                   </span>
                 </header>
                 <div className="min-h-24 flex-1 space-y-2 overflow-y-auto p-2">
-                  {columnThreads.map((thread) => (
-                    <button
-                      key={thread.id}
-                      type="button"
-                      draggable
-                      onDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData(
-                          "application/x-falcondeck-thread",
-                          thread.id,
-                        );
-                      }}
-                      onClick={() => openThread(thread.workspaceId, thread.id)}
-                      className="fd-focus w-full rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-3 text-left shadow-sm transition-colors hover:border-border-default hover:bg-surface-3"
-                    >
-                      <span className="line-clamp-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                        {thread.title || "Untitled thread"}
-                      </span>
-                      <span className="mt-2 block text-[length:var(--fd-text-xs)] capitalize text-fg-muted">
-                        {thread.status.replaceAll("_", " ")}
-                      </span>
-                    </button>
-                  ))}
+                  {columnThreads.map((thread) => {
+                    const isDragged = dragging?.threadId === thread.id;
+                    return (
+                      <button
+                        key={thread.id}
+                        type="button"
+                        aria-grabbed={isDragged ? true : undefined}
+                        onPointerDown={(event) =>
+                          handleCardPointerDown(thread, event)
+                        }
+                        onPointerMove={handleCardPointerMove}
+                        onPointerUp={finishCardDrag}
+                        onPointerCancel={finishCardDrag}
+                        onClickCapture={handleCardClickCapture}
+                        onDragStart={(event) => event.preventDefault()}
+                        onClick={() =>
+                          openThread(thread.workspaceId, thread.id)
+                        }
+                        style={{ touchAction: "none" }}
+                        className={`fd-focus w-full cursor-grab select-none rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-3 text-left shadow-sm transition-colors hover:border-border-default hover:bg-surface-3 active:cursor-grabbing ${
+                          isDragged ? "cursor-grabbing opacity-50" : ""
+                        }`}
+                      >
+                        <span className="line-clamp-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                          {thread.title || "Untitled thread"}
+                        </span>
+                        <span className="mt-2 block text-[length:var(--fd-text-xs)] capitalize text-fg-muted">
+                          {thread.status.replaceAll("_", " ")}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </section>
             );
           })}
         </div>
       </div>
+      {dragging && dragPosition
+        ? createPortal(
+            <div
+              ref={ghostRef}
+              aria-hidden="true"
+              className="pointer-events-none fixed z-[100] max-w-64 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-3 py-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)]"
+              style={{
+                left: dragPosition.x + 12,
+                top: dragPosition.y + 12,
+              }}
+            >
+              <span className="line-clamp-2">{dragging.title}</span>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

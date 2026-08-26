@@ -15,6 +15,99 @@ const THREAD = {
   pendingQuestionCount: 0,
 };
 
+const OTHER_THREAD = {
+  ...THREAD,
+  id: "thread-2",
+  title: "Review the board",
+};
+
+function boardInvokeAction(threadStages: Record<string, string>) {
+  return vi.fn(async (_actionId: string, input?: unknown) => ({
+    result:
+      (input as { operation?: string } | undefined)?.operation === "read"
+        ? {
+            stages: [
+              { id: "backlog", label: "Backlog", color: "gray" },
+              { id: "done", label: "Done", color: "green" },
+            ],
+            threadStages,
+          }
+        : {},
+    updatedViews: [],
+  }));
+}
+
+function mockPointerCapture(element: HTMLElement) {
+  Object.defineProperty(element, "setPointerCapture", { value: vi.fn() });
+  Object.defineProperty(element, "hasPointerCapture", {
+    value: vi.fn(() => true),
+  });
+  Object.defineProperty(element, "releasePointerCapture", { value: vi.fn() });
+}
+
+function mockColumnRect(
+  element: HTMLElement,
+  rect: { left: number; right: number; top: number; bottom: number },
+) {
+  Object.defineProperty(element, "getBoundingClientRect", {
+    value: () => ({
+      ...rect,
+      width: rect.right - rect.left,
+      height: rect.bottom - rect.top,
+      x: rect.left,
+      y: rect.top,
+      toJSON: () => {},
+    }),
+  });
+}
+
+async function renderBoard(
+  threads: typeof THREAD[],
+  threadStages: Record<string, string>,
+  openThread = vi.fn(),
+) {
+  const registration = collectExtensionApp(kanbanApp).panels[0]!;
+  const Component = registration.component;
+  const invokeAction = boardInvokeAction(threadStages);
+  render(
+    <Component
+      extensionId="falcondeck.thread-tags"
+      threads={threads}
+      views={[]}
+      hasPermission={(permission) => permission === "threads:read"}
+      invokeAction={invokeAction}
+      openThread={openThread}
+    />,
+  );
+  await screen.findByRole("button", { name: /Build the board/ });
+  return { invokeAction, openThread };
+}
+
+function dragCardToColumn(card: HTMLElement, column: HTMLElement) {
+  mockPointerCapture(card);
+  mockColumnRect(column, { left: 400, right: 700, top: 0, bottom: 400 });
+  fireEvent.pointerDown(card, {
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    clientX: 10,
+    clientY: 10,
+  });
+  fireEvent.pointerMove(card, {
+    pointerId: 1,
+    isPrimary: true,
+    clientX: 450,
+    clientY: 50,
+  });
+  fireEvent.pointerUp(card, {
+    pointerId: 1,
+    isPrimary: true,
+    button: 0,
+    clientX: 450,
+    clientY: 50,
+  });
+}
+
 describe("Kanban trusted frontend", () => {
   it("explains the denied thread-summary permission", () => {
     const registration = collectExtensionApp(kanbanApp).panels[0]!;
@@ -37,43 +130,11 @@ describe("Kanban trusted frontend", () => {
   });
 
   it("moves a thread between stage columns through the public action bridge", async () => {
-    const registration = collectExtensionApp(kanbanApp).panels[0]!;
-    const Component = registration.component;
-    const invokeAction = vi.fn(async (_actionId: string, input?: unknown) => ({
-      result:
-        (input as { operation?: string } | undefined)?.operation === "read"
-          ? {
-              stages: [
-                { id: "backlog", label: "Backlog", color: "gray" },
-                { id: "done", label: "Done", color: "green" },
-              ],
-              threadStages: { "thread-1": "backlog" },
-            }
-          : {},
-      updatedViews: [],
-    }));
-
-    render(
-      <Component
-        extensionId="falcondeck.thread-tags"
-        threads={[THREAD]}
-        views={[]}
-        hasPermission={(permission) => permission === "threads:read"}
-        invokeAction={invokeAction}
-        openThread={vi.fn()}
-      />,
-    );
-
-    const card = await screen.findByRole("button", { name: /Build the board/ });
-    const transfer = {
-      effectAllowed: "none",
-      setData: vi.fn(),
-      getData: vi.fn(() => "thread-1"),
-    };
-    fireEvent.dragStart(card, { dataTransfer: transfer });
-    fireEvent.drop(screen.getByRole("region", { name: "Done" }), {
-      dataTransfer: transfer,
+    const { invokeAction } = await renderBoard([THREAD], {
+      "thread-1": "backlog",
     });
+    const card = screen.getByRole("button", { name: /Build the board/ });
+    dragCardToColumn(card, screen.getByRole("region", { name: "Done" }));
 
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith(
@@ -82,6 +143,51 @@ describe("Kanban trusted frontend", () => {
         { kind: "thread", id: "thread-1" },
       ),
     );
+  });
+
+  it("moves a thread released over a card in another column", async () => {
+    const openThread = vi.fn();
+    const { invokeAction } = await renderBoard(
+      [THREAD, OTHER_THREAD],
+      { "thread-1": "backlog", "thread-2": "done" },
+      openThread,
+    );
+    const source = screen.getByRole("button", { name: /Build the board/ });
+    dragCardToColumn(source, screen.getByRole("region", { name: "Done" }));
+    fireEvent.click(source);
+
+    await waitFor(() =>
+      expect(invokeAction).toHaveBeenCalledWith(
+        "manage-tags",
+        { operation: "set_thread_stage", stageId: "done" },
+        { kind: "thread", id: "thread-1" },
+      ),
+    );
+    expect(openThread).not.toHaveBeenCalled();
+  });
+
+  it("opens a thread on click when the pointer did not drag", async () => {
+    const openThread = vi.fn();
+    await renderBoard([THREAD], { "thread-1": "backlog" }, openThread);
+    const card = screen.getByRole("button", { name: /Build the board/ });
+    mockPointerCapture(card);
+    fireEvent.pointerDown(card, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    });
+    fireEvent.pointerUp(card, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 11,
+      clientY: 11,
+    });
+    fireEvent.click(card);
+
+    expect(openThread).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
   it("adds stage columns from synchronized tag-index updates", async () => {
