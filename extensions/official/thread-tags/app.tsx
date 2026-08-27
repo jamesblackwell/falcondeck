@@ -49,6 +49,26 @@ const COLOR_CLASSES: Record<string, string> = {
 
 // HTML5 drag-and-drop does not deliver drop events in the Tauri webview.
 const CARD_DRAG_THRESHOLD_PX = 4;
+// Staged cards always render; the unstaged inbox would otherwise grow one
+// card per session forever, so it only surfaces recent activity.
+const UNSTAGED_MAX_AGE_DAYS = 7;
+const UNSTAGED_MAX_CARDS = 100;
+const PROJECT_FILTER_STORAGE_KEY = "falcondeck.kanban.project-filter";
+
+function byRecency(
+  a: ExtensionAppThreadSummary,
+  b: ExtensionAppThreadSummary,
+): number {
+  return (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0);
+}
+
+function readStoredProjectFilter(): string | null {
+  try {
+    return window.localStorage.getItem(PROJECT_FILTER_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 function stageIdAtPoint(
   columns: Map<string, HTMLElement>,
@@ -112,6 +132,7 @@ function parseBoardState(value: unknown): BoardState {
 
 function KanbanBoard({
   threads,
+  workspaces = [],
   views,
   hasPermission,
   invokeAction,
@@ -136,7 +157,23 @@ function KanbanBoard({
   const ghostRef = useRef<HTMLDivElement | null>(null);
   const columnRefs = useRef(new Map<string, HTMLElement>());
   const suppressThreadOpenRef = useRef(false);
+  const [projectFilter, setProjectFilter] = useState<string | null>(
+    readStoredProjectFilter,
+  );
   const canReadThreads = hasPermission("threads:read");
+
+  const selectProject = useCallback((workspaceId: string | null) => {
+    setProjectFilter(workspaceId);
+    try {
+      if (workspaceId) {
+        window.localStorage.setItem(PROJECT_FILTER_STORAGE_KEY, workspaceId);
+      } else {
+        window.localStorage.removeItem(PROJECT_FILTER_STORAGE_KEY);
+      }
+    } catch {
+      // Storage failures only lose persistence, not the in-session filter.
+    }
+  }, []);
 
   useEffect(() => {
     if (!canReadThreads) {
@@ -208,16 +245,48 @@ function KanbanBoard({
     () => [{ id: "", label: "No stage", color: "gray" }, ...board.stages],
     [board.stages],
   );
-  const threadsByStage = useMemo(() => {
+  const projectOptions = useMemo(() => {
+    const threadCounts = new Map<string, number>();
+    for (const thread of threads) {
+      threadCounts.set(
+        thread.workspaceId,
+        (threadCounts.get(thread.workspaceId) ?? 0) + 1,
+      );
+    }
+    return workspaces.filter((workspace) => threadCounts.has(workspace.id));
+  }, [threads, workspaces]);
+  const activeProject = useMemo(
+    () =>
+      projectFilter &&
+      projectOptions.some((workspace) => workspace.id === projectFilter)
+        ? projectFilter
+        : null,
+    [projectFilter, projectOptions],
+  );
+  const { threadsByStage, hiddenUnstagedCount } = useMemo(() => {
     const grouped = new Map<string, ExtensionAppThreadSummary[]>();
     for (const column of columns) grouped.set(column.id, []);
-    for (const thread of threads) {
+    const visible = activeProject
+      ? threads.filter((thread) => thread.workspaceId === activeProject)
+      : threads;
+    const unstaged: ExtensionAppThreadSummary[] = [];
+    for (const thread of visible) {
       const stageId = board.threadStages[thread.id] ?? "";
-      const target = grouped.has(stageId) ? stageId : "";
-      grouped.get(target)?.push(thread);
+      if (stageId && grouped.has(stageId)) grouped.get(stageId)?.push(thread);
+      else unstaged.push(thread);
     }
-    return grouped;
-  }, [board.threadStages, columns, threads]);
+    for (const list of grouped.values()) list.sort(byRecency);
+    unstaged.sort(byRecency);
+    const cutoff = Date.now() - UNSTAGED_MAX_AGE_DAYS * 86_400_000;
+    const recent = unstaged
+      .slice(0, UNSTAGED_MAX_CARDS)
+      .filter((thread) => (Date.parse(thread.updatedAt) || 0) >= cutoff);
+    grouped.set("", recent);
+    return {
+      threadsByStage: grouped,
+      hiddenUnstagedCount: unstaged.length - recent.length,
+    };
+  }, [activeProject, board.threadStages, columns, threads]);
 
   const moveThread = useCallback(
     async (threadId: string, stageId: string) => {
@@ -363,6 +432,45 @@ function KanbanBoard({
           {error}
         </div>
       ) : null}
+      {projectOptions.length > 1 ? (
+        <div
+          role="toolbar"
+          aria-label="Filter by project"
+          className="flex flex-wrap items-center gap-1.5 border-b border-border-subtle px-5 py-2.5"
+        >
+          <button
+            type="button"
+            aria-pressed={activeProject === null}
+            onClick={() => selectProject(null)}
+            className={`fd-focus rounded-full border px-3 py-1 text-[length:var(--fd-text-xs)] font-medium transition-colors ${
+              activeProject === null
+                ? "border-accent bg-accent/10 text-accent"
+                : "border-border-subtle text-fg-secondary hover:border-border-default hover:text-fg-primary"
+            }`}
+          >
+            All projects
+          </button>
+          {projectOptions.map((workspace) => (
+            <button
+              key={workspace.id}
+              type="button"
+              aria-pressed={activeProject === workspace.id}
+              onClick={() =>
+                selectProject(
+                  activeProject === workspace.id ? null : workspace.id,
+                )
+              }
+              className={`fd-focus max-w-48 truncate rounded-full border px-3 py-1 text-[length:var(--fd-text-xs)] font-medium transition-colors ${
+                activeProject === workspace.id
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-border-subtle text-fg-secondary hover:border-border-default hover:text-fg-primary"
+              }`}
+            >
+              {workspace.name}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-x-auto overflow-y-hidden p-5">
         <div className="flex h-full min-w-max gap-4">
           {columns.map((column) => {
@@ -429,6 +537,13 @@ function KanbanBoard({
                       </button>
                     );
                   })}
+                  {column.id === "" && hiddenUnstagedCount > 0 ? (
+                    <p className="px-1 pb-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+                      {hiddenUnstagedCount} older{" "}
+                      {hiddenUnstagedCount === 1 ? "thread" : "threads"} hidden
+                      — move a card to a stage to keep it on the board
+                    </p>
+                  ) : null}
                 </div>
               </section>
             );

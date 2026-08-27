@@ -12,6 +12,13 @@ export type ExtensionAppView = {
   updatedAt: string;
 };
 
+export type ExtensionAppWorkspaceSummary = {
+  id: string;
+  /** Display name (folder basename); full filesystem paths are never shared. */
+  name: string;
+  kind?: "project" | "casual";
+};
+
 export type ExtensionAppThreadSummary = {
   id: string;
   workspaceId: string;
@@ -30,6 +37,8 @@ export type ExtensionAppActionResponse = {
 export type ExtensionAppPanelProps = {
   extensionId: string;
   threads: readonly ExtensionAppThreadSummary[];
+  /** Absent when the host predates workspace summaries. */
+  workspaces?: readonly ExtensionAppWorkspaceSummary[];
   views: readonly ExtensionAppView[];
   hasPermission(permission: string): boolean;
   invokeAction(

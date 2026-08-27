@@ -31,12 +31,16 @@ const STAGES = [
   { id: "done", label: "Done", color: "green" },
 ];
 
-const thread = (id: string, title: string) => ({
+const thread = (
+  id: string,
+  title: string,
+  { workspaceId = "workspace-1", daysAgo = 0 } = {},
+) => ({
   id,
-  workspaceId: "workspace-1",
+  workspaceId,
   title,
   status: "idle",
-  updatedAt: new Date().toISOString(),
+  updatedAt: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
   pendingApprovalCount: 0,
   pendingQuestionCount: 0,
 });
@@ -74,6 +78,14 @@ createRoot(document.getElementById("root")!).render(
           thread("thread-1", "Build the board"),
           thread("thread-2", "Review the board"),
           thread("thread-3", "Ship the board"),
+          thread("thread-4", "Miner physics pass", {
+            workspaceId: "workspace-2",
+          }),
+          thread("thread-5", "Stale forgotten session", { daysAgo: 30 }),
+        ]}
+        workspaces={[
+          { id: "workspace-1", name: "falcondeck" },
+          { id: "workspace-2", name: "miner" },
         ]}
         views={[]}
         hasPermission={(permission) => permission === "threads:read"}

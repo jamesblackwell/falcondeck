@@ -5647,6 +5647,7 @@ function AppInner() {
                         registration={registration}
                         extension={extension}
                         threads={ownerSnapshot.threads}
+                        workspaces={ownerSnapshot.workspaces}
                         views={ownerSnapshot.extensions.views}
                         onClose={() => setActiveExtensionPanelKey(null)}
                         onOpenThread={handleSelectThread}

@@ -13,6 +13,7 @@ import type {
   ExtensionSummary,
   ExtensionView,
   ThreadSummary,
+  WorkspaceSummary,
 } from "@falcondeck/client-core";
 import type {
   ExtensionAppActionResponse,
@@ -62,6 +63,7 @@ export function ExtensionAppPanel({
   registration,
   extension,
   threads,
+  workspaces = [],
   views,
   onInvokeAction,
   onOpenThread,
@@ -71,6 +73,7 @@ export function ExtensionAppPanel({
   registration: ExtensionAppPanelRegistration;
   extension: ExtensionSummary;
   threads: readonly ThreadSummary[];
+  workspaces?: readonly WorkspaceSummary[];
   views: readonly ExtensionView[];
   onInvokeAction(
     panel: ExtensionPanelDefinition,
@@ -97,6 +100,18 @@ export function ExtensionAppPanel({
           }))
         : [],
     [hasThreadRead, threads],
+  );
+  // Share the folder basename only; the full path stays with the host.
+  const appWorkspaces = useMemo(
+    () =>
+      hasThreadRead
+        ? workspaces.map((workspace) => ({
+            id: workspace.id,
+            name: workspace.path.split("/").pop() || workspace.path,
+            kind: workspace.kind,
+          }))
+        : [],
+    [hasThreadRead, workspaces],
   );
   const appViews = useMemo(
     () =>
@@ -149,6 +164,7 @@ export function ExtensionAppPanel({
         <Component
           extensionId={extension.id}
           threads={appThreads}
+          workspaces={appWorkspaces}
           views={appViews}
           hasPermission={hasPermission}
           invokeAction={invokeAction}
