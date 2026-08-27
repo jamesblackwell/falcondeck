@@ -12,7 +12,9 @@ falcondeck-core = { path = "../falcondeck-core" }
 futures-util.workspace = true
 iana-time-zone = "0.1.65"
 keyring = "4.1.6"
+portable-pty = "0.9"
 regex.workspace = true
+sha2 = "0.10"
 schemars.workspace = true
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "rustls", "http2", "stream"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }

@@ -65,3 +65,53 @@
 body {
   margin: 0;
 }
+
+/* Terminal palette. Surfaces and foreground follow the active app theme via
+   the shared tokens; the 16 ANSI colors are concrete values tuned per
+   light/dark because terminal output needs fixed hue contrast. The terminal
+   re-reads these on data-theme/data-palette changes. */
+:root {
+  --terminal-bg: var(--fd-bg-0);
+  --terminal-fg: var(--fd-fg-1);
+  --terminal-cursor: var(--fd-fg-0);
+  --terminal-selection: var(--fd-accent-muted);
+  --terminal-ansi-0: #3f4451;
+  --terminal-ansi-1: #e06c75;
+  --terminal-ansi-2: #98c379;
+  --terminal-ansi-3: #e5c07b;
+  --terminal-ansi-4: #61afef;
+  --terminal-ansi-5: #c678dd;
+  --terminal-ansi-6: #56b6c2;
+  --terminal-ansi-7: #d7dae0;
+  --terminal-ansi-8: #4f5666;
+  --terminal-ansi-9: #ef7c86;
+  --terminal-ansi-10: #a9d48b;
+  --terminal-ansi-11: #eed284;
+  --terminal-ansi-12: #7cbdf4;
+  --terminal-ansi-13: #d694e5;
+  --terminal-ansi-14: #6fc7d3;
+  --terminal-ansi-15: #e6e6e6;
+}
+
+:root[data-theme="light"] {
+  --terminal-bg: var(--fd-bg-0);
+  --terminal-fg: var(--fd-fg-1);
+  --terminal-cursor: var(--fd-fg-0);
+  --terminal-selection: var(--fd-accent-muted);
+  --terminal-ansi-0: #24292e;
+  --terminal-ansi-1: #d73a49;
+  --terminal-ansi-2: #22863a;
+  --terminal-ansi-3: #b08800;
+  --terminal-ansi-4: #0366d6;
+  --terminal-ansi-5: #6f42c1;
+  --terminal-ansi-6: #1b7c83;
+  --terminal-ansi-7: #6a737d;
+  --terminal-ansi-8: #57606a;
+  --terminal-ansi-9: #b3232f;
+  --terminal-ansi-10: #176f2c;
+  --terminal-ansi-11: #8a6d00;
+  --terminal-ansi-12: #0550ae;
+  --terminal-ansi-13: #5a32a3;
+  --terminal-ansi-14: #126068;
+  --terminal-ansi-15: #24292f;
+}

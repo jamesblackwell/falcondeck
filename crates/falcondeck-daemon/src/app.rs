@@ -209,6 +209,9 @@ struct InnerState {
     /// returns without waiting on it; the set collapses concurrent opens of
     /// the same thread into one app-server round trip.
     codex_goal_refreshes_in_flight: StdMutex<HashSet<(String, String)>>,
+    /// Live terminal sessions. Runtime-only: shells die with the daemon and
+    /// nothing is persisted.
+    terminals: Arc<crate::terminal::TerminalManager>,
 }
 
 struct ManagedWorkspace {
@@ -690,6 +693,7 @@ impl AppState {
                 acp_hydrations_started: StdMutex::new(HashSet::new()),
                 acp_hydration_reloads: StdMutex::new(HashSet::new()),
                 codex_goal_refreshes_in_flight: StdMutex::new(HashSet::new()),
+                terminals: Arc::new(crate::terminal::TerminalManager::new()),
             }),
         }
     }
@@ -709,6 +713,21 @@ impl AppState {
     /// The daemon-owned agent control service.
     pub fn control(&self) -> &crate::control::ControlService {
         &self.inner.control
+    }
+
+    /// Live terminal sessions owned by this daemon.
+    pub fn terminals(&self) -> &Arc<crate::terminal::TerminalManager> {
+        &self.inner.terminals
+    }
+
+    /// Resolves a workspace's on-disk path for terminal sessions.
+    pub async fn terminal_workspace_path(&self, workspace_id: &str) -> Option<String> {
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .map(|workspace| workspace.summary.path.clone())
     }
 
     /// Loads the agent control store. A degraded store (malformed or
@@ -1386,6 +1405,7 @@ impl AppState {
         // Flag first: reconnect/respawn paths check this before spawning new
         // agent processes, so nothing new starts while we tear down.
         self.inner.shutting_down.store(true, Ordering::Release);
+        self.inner.terminals.shutdown_all().await;
         self.inner.scheduled_notify.notify_waiters();
         scheduled_tasks::interrupt_active_runs(self).await?;
         let snapshots = {

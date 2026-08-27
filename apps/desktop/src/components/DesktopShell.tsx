@@ -12,10 +12,20 @@ export type DesktopShellProps = {
   sidebar: React.ReactNode
   main: React.ReactNode
   rail?: React.ReactNode
+  bottom?: React.ReactNode
   sidebarVisible?: boolean
   railVisible?: boolean
   onSidebarCollapsedByDrag?: () => void
   onRailCollapsedByDrag?: () => void
+}
+
+const BOTTOM_PANEL_DEFAULT_HEIGHT = 320
+const BOTTOM_PANEL_MIN_HEIGHT = 140
+const BOTTOM_PANEL_MAX_VIEWPORT_SHARE = 0.7
+
+function clampBottomHeight(height: number): number {
+  const max = Math.round(window.innerHeight * BOTTOM_PANEL_MAX_VIEWPORT_SHARE)
+  return Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.min(max, height))
 }
 
 /**
@@ -40,10 +50,54 @@ function useToggleAnimation(keys: unknown[]) {
   return animating
 }
 
+/** Drag handle growing the bottom panel upward; shrink when dragged down. */
+function BottomResizeHandle({
+  height,
+  onHeightChange,
+}: {
+  height: number
+  onHeightChange: (height: number) => void
+}) {
+  const dragState = React.useRef<{ pointerId: number; startY: number; startHeight: number } | null>(
+    null,
+  )
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    dragState.current = { pointerId: event.pointerId, startY: event.clientY, startHeight: height }
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragState.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    onHeightChange(clampBottomHeight(drag.startHeight + (drag.startY - event.clientY)))
+  }
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragState.current?.pointerId !== event.pointerId) return
+    dragState.current = null
+    event.currentTarget.releasePointerCapture(event.pointerId)
+  }
+
+  return (
+    <div
+      data-bottom-panel-resize=""
+      role="separator"
+      aria-orientation="horizontal"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      className="h-1 shrink-0 cursor-row-resize bg-border-subtle hover:bg-border-default"
+    />
+  )
+}
+
 export function DesktopShell({
   sidebar,
   main,
   rail,
+  bottom,
   sidebarVisible = true,
   railVisible = true,
   onSidebarCollapsedByDrag,
@@ -51,6 +105,7 @@ export function DesktopShell({
 }: DesktopShellProps) {
   const railOpen = Boolean(rail) && railVisible
   const animating = useToggleAnimation([sidebarVisible, railOpen])
+  const [bottomHeight, setBottomHeight] = React.useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
 
   // The rail's contents poll git state, so they are torn down once the close
   // animation has finished rather than kept alive behind a zero-width panel.
@@ -64,7 +119,7 @@ export function DesktopShell({
     return () => clearTimeout(timer)
   }, [railOpen])
 
-  return (
+  const shell = (
     <ResizableShell animating={animating}>
       <ResizableSidePanel
         id="sidebar"
@@ -97,5 +152,17 @@ export function DesktopShell({
         {rail && railMounted ? rail : null}
       </ResizableSidePanel>
     </ResizableShell>
+  )
+
+  if (!bottom) return shell
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col [&>*]:min-h-0">{shell}</div>
+      <BottomResizeHandle height={bottomHeight} onHeightChange={setBottomHeight} />
+      <div style={{ height: bottomHeight }} className="min-h-0 shrink-0 overflow-hidden">
+        {bottom}
+      </div>
+    </div>
   )
 }

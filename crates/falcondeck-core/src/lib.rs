@@ -9,6 +9,8 @@
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
+/// Terminal session contract for daemon-owned PTY sessions.
+pub mod terminal;
 
 use std::collections::BTreeMap;
 

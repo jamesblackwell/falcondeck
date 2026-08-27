@@ -1847,3 +1847,46 @@ export type SpeechCredentialStatus = {
   configured: boolean;
   storage: "daemon_secret_store";
 };
+
+export type TerminalSessionInfo = {
+  id: string;
+  workspace_id: string;
+  shell: string;
+  title: string;
+  cwd: string;
+  cols: number;
+  rows: number;
+  created_at: string;
+};
+
+export type OpenTerminalPayload = {
+  cols: number;
+  rows: number;
+};
+
+export type TerminalOpenedResponse = {
+  session: TerminalSessionInfo;
+};
+
+export type TerminalListResponse = {
+  sessions: TerminalSessionInfo[];
+};
+
+/** One scrollback chunk with its position in the session's chunk sequence. */
+export type TerminalChunk = {
+  seq: number;
+  data_base64: string;
+};
+
+export type TerminalClientFrame =
+  | { type: "terminal_input"; data_base64: string }
+  | { type: "terminal_resize"; cols: number; rows: number }
+  | { type: "terminal_ping" };
+
+export type TerminalServerFrame =
+  | { type: "terminal_attached"; session: TerminalSessionInfo; next_seq: number }
+  | { type: "terminal_replay"; chunk: TerminalChunk }
+  | { type: "terminal_output"; chunk: TerminalChunk }
+  | { type: "terminal_exited"; exit_code: number | null }
+  | { type: "terminal_error"; message: string }
+  | { type: "terminal_pong" };

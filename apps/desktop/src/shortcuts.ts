@@ -6,6 +6,7 @@ export type ShortcutCommandId =
   | 'commandPalette'
   | 'openSettings'
   | 'openActivity'
+  | 'openUsage'
   | 'openKeyboardShortcuts'
   | 'openProject'
   | 'newThread'
@@ -17,6 +18,7 @@ export type ShortcutCommandId =
   | 'nextThread'
   | 'toggleSidebar'
   | 'toggleChanges'
+  | 'toggleTerminal'
   | 'increaseTextSize'
   | 'decreaseTextSize'
   | 'resetTextSize'
@@ -52,6 +54,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'commandPalette', label: 'Command menu', description: 'Search chats and available commands', category: 'App', context: 'global', defaults: ['Mod+K', 'Mod+Shift+P'] },
   { id: 'openSettings', label: 'Settings', description: 'Open FalconDeck settings', category: 'App', context: 'global', defaults: ['Mod+,'] },
   { id: 'openActivity', label: 'Activity', description: 'Open the cross-project attention queue', category: 'App', context: 'global', defaults: ['Mod+U'] },
+  { id: 'openUsage', label: 'Usage', description: 'Open subscription usage and limits', category: 'App', context: 'global', defaults: ['Mod+Shift+U'] },
   // "?" is the cross-app convention for the shortcut sheet (GitHub, Slack, Linear).
   // It is safe as a bare key because the global handler ignores editable targets,
   // and ⌘? stays bound for the macOS Help-menu muscle memory.
@@ -66,6 +69,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'nextThread', label: 'Next chat', description: 'Select the next visible chat', category: 'Navigation', context: 'global', defaults: ['Mod+Shift+]'] },
   { id: 'toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide projects and chats', category: 'View', context: 'global', defaults: ['Mod+B'] },
   { id: 'toggleChanges', label: 'Toggle changes panel', description: 'Show or hide the changes panel', category: 'View', context: 'global', defaults: ['Mod+Alt+B'] },
+  { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'View', context: 'global', defaults: ['Mod+J'] },
   { id: 'increaseTextSize', label: 'Increase text size', description: 'Increase the interface text scale', category: 'View', context: 'global', defaults: ['Mod+=', 'Mod+Shift+Plus'] },
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },

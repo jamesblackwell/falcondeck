@@ -40,6 +40,8 @@ describe('keyboard shortcuts', () => {
     expect(commandForEvent('composer', key('Enter', { metaKey: true }))).toBe('invertFollowUp')
     expect(commandForEvent('global', key('k', { metaKey: true }))).toBe('commandPalette')
     expect(commandForEvent('global', key('u', { metaKey: true }))).toBe('openActivity')
+    expect(commandForEvent('global', key('u', { metaKey: true, shiftKey: true }))).toBe('openUsage')
+    expect(commandForEvent('global', key('j', { metaKey: true }))).toBe('toggleTerminal')
     expect(commandForEvent('global', key('?', { metaKey: true, shiftKey: true }))).toBe('openKeyboardShortcuts')
     expect(commandForEvent('global', key('Enter', { metaKey: true }))).toBeNull()
   })
@@ -75,6 +77,8 @@ describe('keyboard shortcuts', () => {
     expect(shortcutHint('openActivity')).toBe('⌘U')
     expect(shortcutHintTokens('openActivity')).toEqual(['⌘', 'U'])
     expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity (⌘U)')
+    expect(shortcutHint('openUsage')).toBe('⌘⇧U')
+    expect(shortcutHintTokens('openUsage')).toEqual(['⌘', '⇧', 'U'])
 
     setShortcutBindings('openActivity', [])
     expect(shortcutHint('openActivity')).toBeNull()

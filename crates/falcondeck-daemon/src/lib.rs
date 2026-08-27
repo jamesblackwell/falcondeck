@@ -28,6 +28,7 @@ mod skill_library;
 mod skills;
 mod ssh_config;
 pub mod stdio_helper;
+mod terminal;
 mod variant;
 mod workspace_files;
 

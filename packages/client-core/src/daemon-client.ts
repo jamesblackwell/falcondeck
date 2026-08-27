@@ -33,6 +33,8 @@ import type {
   SpeechCredentialStatus,
   ProviderUsageOverview,
   SelectedSkillReference,
+  TerminalListResponse,
+  TerminalOpenedResponse,
   FalconDeckPreferences,
   ThreadDetail,
   ThreadDetailRequest,
@@ -848,6 +850,43 @@ export function createDaemonApiClient(baseUrl: string) {
           `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}`,
           { method: "DELETE" },
         ),
+      );
+    },
+    async listTerminals(workspaceId: string) {
+      return parseJson<TerminalListResponse>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/terminals`,
+        ),
+      );
+    },
+    async openTerminal(
+      workspaceId: string,
+      payload: { cols: number; rows: number },
+    ) {
+      return parseJson<TerminalOpenedResponse>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/terminals`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        ),
+      );
+    },
+    async closeTerminal(terminalId: string) {
+      return parseJson<{ ok: boolean }>(
+        await fetch(
+          `${baseUrl}/api/terminals/${encodeURIComponent(terminalId)}/close`,
+          { method: "POST" },
+        ),
+      );
+    },
+    /** Per-terminal stream: attach, replay, input, resize. */
+    terminalSocketUrl(terminalId: string, sinceSeq = 0) {
+      return (
+        baseUrl.replace(/^http/, "ws") +
+        `/api/terminals/${encodeURIComponent(terminalId)}/ws?since_seq=${sinceSeq}`
       );
     },
     connectEvents(onEvent: (event: EventEnvelope) => void) {

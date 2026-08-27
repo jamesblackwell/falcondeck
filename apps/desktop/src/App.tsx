@@ -258,6 +258,11 @@ const PluginsView = lazy(() =>
     default: module.PluginsView,
   })),
 );
+const TerminalPanel = lazy(() =>
+  import("./components/TerminalPanel").then((module) => ({
+    default: module.TerminalPanel,
+  })),
+);
 export default function App() {
   return (
     <ToastProvider>
@@ -435,6 +440,7 @@ function AppInner() {
   const resumePromptSettledRef = useRef(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
+  const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [isExtensionsOpen, setIsExtensionsOpen] = useState(false);
   const [isPluginsOpen, setIsPluginsOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
@@ -5228,6 +5234,9 @@ function AppInner() {
         case "toggleSidebar":
           toggleSidebar();
           break;
+        case "toggleTerminal":
+          setIsTerminalOpen((current) => !current);
+          break;
         case "toggleChanges":
           toggleRail();
           break;
@@ -5947,6 +5956,13 @@ function AppInner() {
         railVisible={railVisible}
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}
+        bottom={
+          isTerminalOpen ? (
+            <Suspense fallback={null}>
+              <TerminalPanel baseUrl={baseUrl} workspaceId={selectedWorkspaceId} />
+            </Suspense>
+          ) : undefined
+        }
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
       {isOnboardingActive ? (

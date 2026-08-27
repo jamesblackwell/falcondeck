@@ -22,6 +22,10 @@ use falcondeck_core::{
     StartThreadRequest, SuggestThreadTitleResponse, ThreadDetailMode, ThreadDetailRequest,
     UnifiedEvent, UpdateExtensionRequest, UpdatePreferencesRequest, UpdateScheduledTaskRequest,
     UpdateThreadRequest,
+    terminal::{
+        OpenTerminalRequest, TerminalClientFrame, TerminalListResponse, TerminalOpenedResponse,
+        TerminalServerFrame,
+    },
 };
 
 use crate::{
@@ -287,6 +291,12 @@ pub fn router(state: AppState) -> Router {
             post(git_checkout),
         )
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
+        .route(
+            "/api/workspaces/{workspace_id}/terminals",
+            get(list_terminals).post(open_terminal),
+        )
+        .route("/api/terminals/{terminal_id}/close", post(close_terminal))
+        .route("/api/terminals/{terminal_id}/ws", get(terminal_ws))
         .layer(
             CorsLayer::new()
                 .allow_origin(ALLOWED_BROWSER_ORIGINS.map(HeaderValue::from_static))
@@ -1242,6 +1252,108 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+async fn list_terminals(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Json<TerminalListResponse> {
+    Json(TerminalListResponse {
+        sessions: state.terminals().list(&workspace_id),
+    })
+}
+
+async fn open_terminal(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<OpenTerminalRequest>,
+) -> Result<Json<TerminalOpenedResponse>, DaemonError> {
+    let Some(cwd) = state.terminal_workspace_path(&workspace_id).await else {
+        return Err(DaemonError::NotFound(format!(
+            "workspace not found: {workspace_id}"
+        )));
+    };
+    let session = state
+        .terminals()
+        .open(&workspace_id, &cwd, request.cols, request.rows)
+        .map_err(DaemonError::BadRequest)?;
+    Ok(Json(TerminalOpenedResponse { session }))
+}
+
+async fn close_terminal(
+    State(state): State<AppState>,
+    Path(terminal_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    if !state.terminals().close(&terminal_id) {
+        return Err(DaemonError::NotFound(format!(
+            "terminal session not found: {terminal_id}"
+        )));
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TerminalWsQuery {
+    since_seq: Option<u64>,
+}
+
+async fn terminal_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(terminal_id): Path<String>,
+    Query(query): Query<TerminalWsQuery>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| {
+        terminal_socket(socket, state, terminal_id, query.since_seq.unwrap_or(0))
+    })
+}
+
+/// Streams one terminal session: daemon frames out, client frames in. A
+/// socket dropping only detaches the client — the PTY stays alive so the
+/// next attach replays whatever it missed.
+async fn terminal_socket(
+    mut socket: WebSocket,
+    state: AppState,
+    terminal_id: String,
+    since_seq: u64,
+) {
+    let Some((_info, mut receiver, client_id)) = state.terminals().attach(&terminal_id, since_seq)
+    else {
+        let error = TerminalServerFrame::TerminalError {
+            message: format!("terminal session not found: {terminal_id}"),
+        };
+        let _ = socket
+            .send(Message::Text(
+                serde_json::to_string(&error).unwrap_or_default().into(),
+            ))
+            .await;
+        return;
+    };
+
+    loop {
+        tokio::select! {
+            frame = receiver.recv() => {
+                let Some(frame) = frame else { break; };
+                let Ok(text) = serde_json::to_string(&frame) else { continue; };
+                if socket.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            message = socket.next() => {
+                let Some(Ok(message)) = message else { break; };
+                match message {
+                    Message::Text(text) => {
+                        if let Ok(frame) = serde_json::from_str::<TerminalClientFrame>(&text) {
+                            state.terminals().handle_client_frame(&terminal_id, &frame);
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    state.terminals().detach(&terminal_id, client_id);
 }
 
 /// Builds the control request context from internal headers. Local callers
