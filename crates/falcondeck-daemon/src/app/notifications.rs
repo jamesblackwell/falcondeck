@@ -2880,7 +2880,7 @@ pub(super) async fn ingest_server_request(
     method: &str,
     params: Value,
 ) -> Result<(), DaemonError> {
-    if method.ends_with("requestApproval") || method == "item/tool/requestUserInput" {
+    if crate::codex::server_request_expects_result(method) {
         let request_id = normalize_request_id(&raw_id);
         let request = if method.ends_with("requestApproval") {
             InteractiveRequest {

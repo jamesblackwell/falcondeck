@@ -30,7 +30,7 @@ use super::{
     workspace_ops::{sandbox_policy_payload, send_turn},
 };
 use crate::{
-    codex::{extract_thread_id, extract_thread_title},
+    codex::{extract_thread_id, extract_thread_title, thread_start_params, turn_start_params},
     error::DaemonError,
 };
 
@@ -151,18 +151,19 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let mut params = json!({
-                    "cwd": spec.cwd,
-                    "model": spec.model_id,
-                    "sandbox": spec.sandbox_mode,
-                    "approvalPolicy": spec.approval_policy
-                });
-                if let Some(instructions) =
-                    app.agent_context_instructions(&AgentProvider::CODEX).await
-                {
-                    params["developerInstructions"] = json!(instructions);
-                }
-                let result = session.send_request("thread/start", params).await?;
+                let instructions = app.agent_context_instructions(&AgentProvider::CODEX).await;
+                let result = session
+                    .send_request(
+                        "thread/start",
+                        thread_start_params(
+                            spec.cwd,
+                            spec.model_id,
+                            spec.sandbox_mode,
+                            spec.approval_policy,
+                            instructions.as_deref(),
+                        ),
+                    )
+                    .await?;
                 Ok(StartedThread {
                     thread_id: extract_thread_id(&result).ok_or_else(|| {
                         DaemonError::Rpc("thread/start did not return a thread id".to_string())
@@ -334,19 +335,19 @@ impl ProviderRuntime {
                 session
                     .send_request(
                         "turn/start",
-                        json!({
-                            "threadId": spec.thread_id,
-                            "input": codex_inputs(spec.inputs, spec.selected_skills),
-                            "cwd": cwd,
-                            "model": spec.requested_model_id,
-                            "effort": spec.requested_reasoning_effort,
-                            "collaborationMode": collaboration_mode,
-                            "sandboxPolicy": sandbox_policy_payload(
-                                spec.thread.agent.sandbox_mode.as_deref()
+                        turn_start_params(
+                            spec.thread_id,
+                            codex_inputs(spec.inputs, spec.selected_skills),
+                            Some(&cwd),
+                            spec.requested_model_id,
+                            spec.requested_reasoning_effort,
+                            collaboration_mode,
+                            sandbox_policy_payload(
+                                spec.thread.agent.sandbox_mode.as_deref(),
                             ),
-                            "approvalPolicy": spec.approval_policy,
-                            "serviceTier": spec.service_tier
-                        }),
+                            Some(spec.approval_policy),
+                            spec.service_tier,
+                        ),
                     )
                     .await?;
                 Ok(())

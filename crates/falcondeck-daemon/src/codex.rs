@@ -107,6 +107,130 @@ pub(crate) fn hydrate_thread_response(
     }
 }
 
+/// Build `thread/start` params for current Codex app-server (0.150.x).
+///
+/// `effort` is not a `ThreadStartParams` field — turn-level effort is the
+/// authority. `baseInstructions` is the large system prompt; FalconDeck uses
+/// the small `developerInstructions` append instead. Thread-level `sandbox`
+/// and `approvalPolicy` use config-style spellings (`on-request`,
+/// `workspace-write`), not the camelCase dialect older app-servers accepted.
+pub(crate) fn thread_start_params(
+    cwd: &str,
+    model: Option<&str>,
+    sandbox_mode: Option<&str>,
+    approval_policy: &str,
+    developer_instructions: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "cwd": cwd,
+        "approvalPolicy": app_server_approval_policy(approval_policy),
+    });
+    insert_optional_str(&mut params, "model", model);
+    if let Some(sandbox) = sandbox_mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params["sandbox"] = json!(app_server_sandbox_mode(sandbox));
+    }
+    insert_optional_str(&mut params, "developerInstructions", developer_instructions);
+    params
+}
+
+/// Build `thread/resume` params.
+///
+/// `baseInstructions` is omitted: the app-server preserves the original
+/// instructions across resume (upstream test
+/// `resume_switches_models_preserves_base_instructions`). Resending them
+/// wastes thousands of tokens on every reconnect. `effort` is not a resume
+/// field. `developerInstructions` is a short FalconDeck append, re-sent so an
+/// agent-control setting change applies on the next resume.
+pub(crate) fn thread_resume_params(
+    thread_id: &str,
+    cwd: &str,
+    developer_instructions: Option<&str>,
+) -> Value {
+    let mut params = json!({ "threadId": thread_id, "cwd": cwd });
+    insert_optional_str(&mut params, "developerInstructions", developer_instructions);
+    params
+}
+
+/// Build `turn/start` params. Effort belongs here, not on thread start/resume.
+/// App-server v2 `turn/start` does not accept a `config` override bag —
+/// thread-level config changes take effect on `thread/start` or
+/// `thread/resume`. Null optional overrides are omitted so they do not clear
+/// the thread's current model, effort, or sandbox.
+pub(crate) fn turn_start_params(
+    thread_id: &str,
+    input: Vec<Value>,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    collaboration_mode: Value,
+    sandbox_policy: Value,
+    approval_policy: Option<&str>,
+    service_tier: Option<&str>,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": input,
+    });
+    insert_optional_str(&mut params, "cwd", cwd);
+    insert_optional_str(&mut params, "model", model);
+    insert_optional_str(&mut params, "effort", effort);
+    insert_optional_value(&mut params, "collaborationMode", collaboration_mode);
+    insert_optional_value(&mut params, "sandboxPolicy", sandbox_policy);
+    if let Some(policy) = approval_policy
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        params["approvalPolicy"] = json!(app_server_approval_policy(policy));
+    }
+    insert_optional_str(&mut params, "serviceTier", service_tier);
+    params
+}
+
+/// Server→client methods FalconDeck answers with a result. Unimplemented
+/// methods, including `item/tool/call`, must still get a JSON-RPC error or
+/// the app-server stalls the turn.
+pub(crate) fn server_request_expects_result(method: &str) -> bool {
+    method.ends_with("requestApproval") || method == "item/tool/requestUserInput"
+}
+
+/// Config-style `AskForApproval` spelling for current Codex app-server. camelCase
+/// aliases are accepted from stored thread state; `unlessTrusted` maps to
+/// `"untrusted"`, not `"unlessTrusted"`.
+pub(crate) fn app_server_approval_policy(value: &str) -> &str {
+    match value.trim() {
+        "onRequest" | "on-request" | "onFailure" | "on-failure" => "on-request",
+        "unlessTrusted" | "unless-trusted" | "untrusted" => "untrusted",
+        "never" => "never",
+        other => other,
+    }
+}
+
+/// Config-style `SandboxMode` spelling for `thread/start` / `thread/resume`.
+/// Turn-level `sandboxPolicy` is a separate camelCase tagged object.
+pub(crate) fn app_server_sandbox_mode(value: &str) -> &str {
+    match value.trim() {
+        "readOnly" | "read-only" => "read-only",
+        "workspaceWrite" | "workspace-write" => "workspace-write",
+        "dangerFullAccess" | "danger-full-access" => "danger-full-access",
+        other => other,
+    }
+}
+
+fn insert_optional_str(params: &mut Value, key: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        params[key] = json!(value);
+    }
+}
+
+fn insert_optional_value(params: &mut Value, key: &str, value: Value) {
+    if !value.is_null() {
+        params[key] = value;
+    }
+}
+
 /// Upper bound for control-plane requests (initialize, account/model/thread
 /// listing, resume). These are bounded operations; a missing response means the
 /// app-server is wedged and callers must not hang forever. Turn-scoped
@@ -811,15 +935,15 @@ impl CodexSession {
     }
 
     pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
-        let mut params = json!({ "threadId": thread_id, "cwd": cwd });
-        if let Some(instructions) = self
+        let instructions = self
             .state
             .agent_context_instructions(&AgentProvider::CODEX)
-            .await
-        {
-            params["developerInstructions"] = json!(instructions);
-        }
-        self.send_control_request("thread/resume", params).await
+            .await;
+        self.send_control_request(
+            "thread/resume",
+            thread_resume_params(thread_id, cwd, instructions.as_deref()),
+        )
+        .await
     }
 
     pub async fn respond_to_request(
@@ -1701,6 +1825,114 @@ mod tests {
     use falcondeck_core::ToolHistoryMode;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn thread_start_params_omit_base_instructions_and_effort() {
+        let params = thread_start_params(
+            "/tmp/project",
+            Some("gpt-5.4"),
+            Some("workspace-write"),
+            "on-request",
+            Some("keep FalconDeck control short"),
+        );
+        assert!(params.get("baseInstructions").is_none());
+        assert!(params.get("effort").is_none());
+        assert!(params.get("config").is_none());
+        assert_eq!(
+            params["developerInstructions"],
+            "keep FalconDeck control short"
+        );
+        assert_eq!(params["sandbox"], "workspace-write");
+        assert_eq!(params["approvalPolicy"], "on-request");
+    }
+
+    #[test]
+    fn thread_resume_params_omit_base_instructions_and_effort() {
+        let params = thread_resume_params(
+            "thread-1",
+            "/tmp/project",
+            Some("keep FalconDeck control short"),
+        );
+        assert!(params.get("baseInstructions").is_none());
+        assert!(params.get("effort").is_none());
+        assert!(params.get("config").is_none());
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(
+            params["developerInstructions"],
+            "keep FalconDeck control short"
+        );
+    }
+
+    #[test]
+    fn turn_start_params_include_effort_and_omit_config_bag() {
+        let params = turn_start_params(
+            "thread-1",
+            vec![json!({ "type": "text", "text": "hi" })],
+            Some("/tmp/project"),
+            Some("gpt-5.4"),
+            Some("high"),
+            json!({ "mode": "default", "settings": { "model": "gpt-5.4" } }),
+            json!({ "type": "workspaceWrite" }),
+            Some("never"),
+            Some("priority"),
+        );
+        assert_eq!(params["effort"], "high");
+        assert!(params.get("config").is_none());
+        assert_eq!(params["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["serviceTier"], "priority");
+    }
+
+    #[test]
+    fn turn_start_params_omit_null_overrides() {
+        let params = turn_start_params(
+            "thread-1",
+            vec![json!({ "type": "text", "text": "hi" })],
+            None,
+            None,
+            None,
+            Value::Null,
+            Value::Null,
+            None,
+            None,
+        );
+        assert!(params.get("model").is_none());
+        assert!(params.get("effort").is_none());
+        assert!(params.get("collaborationMode").is_none());
+        assert!(params.get("sandboxPolicy").is_none());
+        assert!(params.get("approvalPolicy").is_none());
+        assert!(params.get("serviceTier").is_none());
+        assert!(params.get("cwd").is_none());
+    }
+
+    #[test]
+    fn app_server_approval_policy_maps_unless_trusted_to_untrusted() {
+        assert_eq!(app_server_approval_policy("unlessTrusted"), "untrusted");
+        assert_eq!(app_server_approval_policy("onRequest"), "on-request");
+        assert_eq!(app_server_approval_policy("never"), "never");
+    }
+
+    #[test]
+    fn app_server_sandbox_mode_uses_config_style_on_thread_requests() {
+        assert_eq!(app_server_sandbox_mode("workspaceWrite"), "workspace-write");
+        assert_eq!(app_server_sandbox_mode("readOnly"), "read-only");
+        assert_eq!(
+            app_server_sandbox_mode("dangerFullAccess"),
+            "danger-full-access"
+        );
+    }
+
+    #[test]
+    fn server_request_expects_result_for_approvals_and_questions() {
+        assert!(server_request_expects_result(
+            "item/commandExecution/requestApproval"
+        ));
+        assert!(server_request_expects_result("item/tool/requestUserInput"));
+        assert!(!server_request_expects_result("item/tool/call"));
+        assert!(!server_request_expects_result(
+            "account/chatgptAuthTokens/refresh"
+        ));
+    }
 
     #[cfg(unix)]
     fn sleeping_test_session() -> (tempfile::TempDir, Arc<CodexSession>) {
