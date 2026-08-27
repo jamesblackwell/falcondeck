@@ -138,16 +138,21 @@ Privacy Policy: https://falcondeck.com/privacy
 
 ## Screenshots
 
-Use five iPhone portraits in this order. Each has a bold benefit caption above
-an iPhone frame, while the screen inside the frame is FalconDeck's actual iOS
-interface. Keep the on-device UI readable; marketing overlays may highlight it
-but must not obscure it.
+Use four iPhone portraits in this order. The marketing shell is deliberately
+plain: a flat `#09090b` canvas, `#f4f4f6` heading, no public logo or tagline,
+and one front-on app screen window. The screen inside it is FalconDeck's actual
+iOS interface. Keep it readable; marketing overlays may highlight it but must
+not obscure it.
 
-1. "Review work from anywhere" — conversation with agent output and tool call
-2. "See every task at a glance" — projects and thread sidebar
-3. "Start a new task from anywhere" — workspace composer
-4. "Your desktop, in your pocket" — pairing and built-in demo entry
-5. "Make FalconDeck yours" — settings
+1. "Keep work moving / from anywhere" — conversation with agent output and tool call
+2. "Every project / one place" — projects and thread sidebar
+3. "Connect to your / desktop agent" — QR and secure-code pairing
+4. "Stay in control / on the go" — settings
+
+Do not show the demo banner, sample-workspace call to action, self-hosted relay
+controls, or any "simulated" wording in product-page screenshots. Those exist
+for App Review, and are explained in the review notes, rather than being a
+customer-facing feature claim.
 
 First-pass iPhone candidates live in `docs/app-store-assets/iphone-6.9/`.
 They are PNG, opaque, and exactly 1290 x 2796 pixels: an accepted 6.9-inch
