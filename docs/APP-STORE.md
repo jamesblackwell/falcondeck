@@ -138,15 +138,29 @@ Privacy Policy: https://falcondeck.com/privacy
 
 ## Screenshots
 
-Take these from the demo workspace so nothing real is exposed and the frames
-match what a reviewer sees. Follow the same shape as the four-panel layout used
-across this category: a bold caption above a device frame.
+Use five iPhone portraits in this order. Each has a bold benefit caption above
+an iPhone frame, while the screen inside the frame is FalconDeck's actual iOS
+interface. Keep the on-device UI readable; marketing overlays may highlight it
+but must not obscure it.
 
-1. Conversation with tool calls — "Your session, wherever you are"
-2. File diff view — "Review the changes before they land"
-3. Permission request with approve and decline — "Nothing runs without you"
-4. Sidebar of workspaces and threads — "Every project, one place"
-5. Voice dictation in the composer — "Talk to it while you walk"
+1. "Review work from anywhere" — conversation with agent output and tool call
+2. "See every task at a glance" — projects and thread sidebar
+3. "Start a new task from anywhere" — workspace composer
+4. "Your desktop, in your pocket" — pairing and built-in demo entry
+5. "Make FalconDeck yours" — settings
 
-Screenshots must come from the iOS app. Do not include desktop screenshots or
-any other platform's UI in the set (Guideline 2.3.10).
+First-pass iPhone candidates live in `docs/app-store-assets/iphone-6.9/`.
+They are PNG, opaque, and exactly 1290 x 2796 pixels: an accepted 6.9-inch
+portrait target. App Store Connect scales this required size for smaller
+iPhones, so we do not need a separate set for every iPhone model.
+
+FalconDeck currently supports iPad, so App Store Connect also requires at
+least one 13-inch iPad screenshot. The truthful native iPad pairing and demo
+entry capture is `docs/app-store-assets/ipad-13/01-demo-entry.jpg`, at the
+required 2064 x 2752 pixels. More iPad screenshots are optional.
+
+Apple allows one to ten JPEG or PNG screenshots per device family and does not
+allow alpha/transparency. Review all generated compositions against the
+shipped build before upload: device frames and captions are fine, but the
+underlying screen must accurately represent the app. Do not include desktop or
+another platform's UI (Guideline 2.3.10).
