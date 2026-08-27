@@ -1,3 +1,5 @@
+import { SettingsPage, SettingsPageHeader } from "@falcondeck/ui";
+
 import { DictationSetup, type DictationSetupToast } from "../DictationSetup";
 
 type SpeechSettingsPanelProps = {
@@ -10,17 +12,12 @@ export function SpeechSettingsPanel({
   onToast,
 }: SpeechSettingsPanelProps) {
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-          Speech
-        </h1>
-        <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-muted">
-          Dictate on this computer or configure cloud transcription for paired
-          devices.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Speech"
+        description="Dictate on this computer or configure cloud transcription for paired devices."
+      />
       <DictationSetup baseUrl={baseUrl} onToast={onToast} />
-    </div>
+    </SettingsPage>
   );
 }

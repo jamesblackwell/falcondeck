@@ -45,11 +45,11 @@ describe('SettingsView deep links', () => {
     expect(screen.getByRole('heading', { name: 'Appearance' })).toBeInTheDocument()
 
     rerender(<SettingsView {...props} initialSection="keyboard" />)
-    expect(screen.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /Appearance/ }))
     expect(screen.getByRole('heading', { name: 'Appearance' })).toBeInTheDocument()
     rerender(<SettingsView {...props} initialSection="keyboard" sectionRequestKey={1} />)
-    expect(screen.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
   })
 })

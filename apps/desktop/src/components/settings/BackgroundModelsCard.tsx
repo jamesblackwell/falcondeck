@@ -3,15 +3,7 @@ import type {
   UpdatePreferencesPayload,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@falcondeck/ui'
+import { Badge, Button, SettingsSection } from '@falcondeck/ui'
 import { ArrowDown, ArrowUp, RotateCcw } from 'lucide-react'
 
 const DEFAULT_PROVIDER_ORDER = ['claude', 'codex', 'opencode', 'grok']
@@ -73,35 +65,29 @@ export function BackgroundModelsCard({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <CardTitle>Background Models</CardTitle>
-            <CardDescription>
-              FalconDeck runs its own short, tool-free jobs — currently thread titles —
-              on the first provider below that is installed and signed in. Pick each provider&apos;s
-              cheapest model; leave a model blank to use that CLI&apos;s own default.
-            </CardDescription>
-          </div>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() =>
-              onUpdatePreferences({
-                utility_models: {
-                  provider_order: DEFAULT_PROVIDER_ORDER,
-                  models: DEFAULT_MODELS,
-                },
-              })
-            }
-          >
-            <RotateCcw className="h-4 w-4" />
-            Reset
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+    <SettingsSection
+      title="Background models"
+      description="FalconDeck runs its own short, tool-free jobs — currently thread titles — on the first provider below that is installed and signed in. Pick each provider's cheapest model; leave a model blank to use that CLI's own default."
+      actions={
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() =>
+            onUpdatePreferences({
+              utility_models: {
+                provider_order: DEFAULT_PROVIDER_ORDER,
+                models: DEFAULT_MODELS,
+              },
+            })
+          }
+        >
+          <RotateCcw className="h-4 w-4" />
+          Reset
+        </Button>
+      }
+      contentClassName="space-y-2"
+    >
         {order.map((provider, index) => {
           const agent = agentFor(provider)
           const ready = agent?.account.status === 'ready'
@@ -109,7 +95,7 @@ export function BackgroundModelsCard({
           return (
             <div
               key={provider}
-              className="flex flex-wrap items-center gap-3 rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4"
+              className="flex flex-wrap items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-4 py-3"
             >
               <div className="flex min-w-[10rem] flex-1 items-center gap-3">
                 <span className="text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted">
@@ -172,7 +158,6 @@ export function BackgroundModelsCard({
             </div>
           )
         })}
-      </CardContent>
-    </Card>
+    </SettingsSection>
   )
 }

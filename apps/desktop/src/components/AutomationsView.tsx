@@ -16,6 +16,8 @@ import {
   CardHeader,
   CardTitle,
   Input,
+  SettingsPage,
+  SettingsPageHeader,
   Textarea,
 } from "@falcondeck/ui";
 import { CalendarClock, Pause, Play, Plus, Trash2, X } from "lucide-react";
@@ -333,27 +335,21 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
   );
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-            Automations
-          </h1>
-          <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-            Scheduled agent instructions stored by this daemon. Automations run through the same
-            threads and turns as everything else, and they keep running when conversational
-            control is disabled.
-          </p>
-        </div>
-        <Button
-          onClick={() =>
-            setEditor({ kind: "create", draft: emptyDraft(settings) })
-          }
-        >
-          <Plus className="h-4 w-4" />
-          New automation
-        </Button>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Automations"
+        description="Scheduled agent instructions stored by this daemon. Automations run through the same threads and turns as everything else, and they keep running when conversational control is disabled."
+        actions={
+          <Button
+            onClick={() =>
+              setEditor({ kind: "create", draft: emptyDraft(settings) })
+            }
+          >
+            <Plus className="h-4 w-4" />
+            New automation
+          </Button>
+        }
+      />
 
       {loadError ? (
         <div className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3">
@@ -600,7 +596,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
           }}
         />
       ) : null}
-    </div>
+    </SettingsPage>
   );
 }
 

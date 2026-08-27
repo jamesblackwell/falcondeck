@@ -5,15 +5,14 @@ import {
   ActivityDiamond,
   Badge,
   Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
+  Field,
   Input,
-  cn,
+  SegmentedControl,
+  SettingList,
+  SettingsSection,
+  SwitchRow,
 } from "@falcondeck/ui";
-import { ExternalLink, KeyRound, Mic, ShieldCheck, Trash2 } from "lucide-react";
+import { ExternalLink, KeyRound, ShieldCheck, Trash2 } from "lucide-react";
 
 import {
   readDictationAudioDevices,
@@ -44,69 +43,13 @@ type DictationSetupProps = {
 };
 
 const SELECT_CLASS =
-  "fd-focus h-10 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary";
+  "fd-focus h-9 w-full max-w-md rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary";
 
 const PERMISSION_LABELS: Record<DictationPermission, string> = {
   microphone: "microphone access",
   speech_recognition: "Speech Recognition",
   accessibility: "Accessibility",
 };
-
-function PermissionBadge({
-  label,
-  granted,
-}: {
-  label: string;
-  granted: boolean;
-}) {
-  return (
-    <Badge variant={granted ? "success" : "warning"} dot>
-      {label}: {granted ? "Ready" : "Needed"}
-    </Badge>
-  );
-}
-
-function ChoiceGroup<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: Array<{ value: T; label: string }>;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div className="space-y-2">
-      <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-        {label}
-      </span>
-      <div
-        className="grid grid-cols-2 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 p-1"
-        role="group"
-        aria-label={label}
-      >
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={value === option.value}
-            onClick={() => onChange(option.value)}
-            className={cn(
-              "fd-focus rounded-[var(--fd-radius-md)] px-3 py-2 text-[length:var(--fd-text-sm)] font-medium transition-colors",
-              value === option.value
-                ? "bg-surface-3 text-fg-primary shadow-sm"
-                : "text-fg-muted hover:text-fg-primary",
-            )}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export function DictationSetup({
   baseUrl,
@@ -256,47 +199,83 @@ export function DictationSetup({
     (device) => device.isDefault,
   )?.name;
 
-  return (
-    <div className={compact ? "space-y-4" : "space-y-6"}>
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Mic aria-hidden="true" className="h-4 w-4" />
-            Desktop dictation
-          </CardTitle>
-          <CardDescription>
-            Dictate into the app under your cursor while FalconDeck is running.
-            Audio is deleted after a confirmed transcript is pasted.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
-          <button
-            type="button"
-            aria-pressed={settings.enabled}
-            onClick={() => setEnabled(!settings.enabled)}
-            className={cn(
-              "fd-focus flex w-full items-center justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors",
-              settings.enabled
-                ? "border-accent/40 bg-accent-dim"
-                : "border-border-subtle bg-surface-2 hover:bg-surface-3",
-            )}
-          >
-            <span>
-              <span className="block text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                Enable system-wide dictation
-              </span>
-              <span className="mt-1 block text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                Escape cancels an active recording.
-              </span>
-            </span>
-            <Badge variant={settings.enabled ? "success" : "default"} dot>
-              {settings.enabled ? "On" : "Off"}
-            </Badge>
-          </button>
+  const permissionsSupported = isTauriDesktop() && permissions?.supported;
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <ChoiceGroup
-              label="Activation"
+  return (
+    <div className={compact ? "space-y-4" : "space-y-5"}>
+      <SettingsSection
+        title="Desktop dictation"
+        description="Dictate into the app under your cursor while FalconDeck is running. Audio is deleted after a confirmed transcript is pasted."
+        actions={
+          permissionsSupported ? (
+            <Badge variant={permissionsReady ? "success" : "warning"} dot>
+              {permissionsReady ? "Ready" : "Permissions needed"}
+            </Badge>
+          ) : null
+        }
+      >
+        {permissionsSupported && !permissionsReady ? (
+          <div className="space-y-3 rounded-[var(--fd-radius-lg)] border border-warning/25 bg-warning-muted px-4 py-3">
+            <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+              macOS needs to grant{" "}
+              {nextPermission
+                ? PERMISSION_LABELS[nextPermission]
+                : "the remaining permissions"}{" "}
+              before dictation can run.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={permissionBusy}
+                onClick={() => void requestPermission()}
+              >
+                {permissionBusy ? <ActivityDiamond size="sm" /> : null}
+                {nextPermission
+                  ? `Allow ${PERMISSION_LABELS[nextPermission]}`
+                  : "Check permissions"}
+              </Button>
+              {!permissions.accessibility ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    void import("@tauri-apps/api/core").then(({ invoke }) =>
+                      invoke("open_dictation_accessibility_settings"),
+                    )
+                  }
+                >
+                  <ExternalLink aria-hidden="true" className="h-4 w-4" />
+                  Open Accessibility settings
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        <SettingList>
+          <SwitchRow
+            title="System-wide dictation"
+            description="Hold or press your shortcut in any app. Escape cancels an active recording."
+            checked={settings.enabled}
+            onCheckedChange={setEnabled}
+          />
+          <SwitchRow
+            title="Re-paste last transcript with ⌘⇧V"
+            description="If a transcript missed the composer — say the cursor moved — press ⌘⇧V inside FalconDeck to insert it again."
+            checked={settings.repasteShortcutEnabled}
+            onCheckedChange={(repasteShortcutEnabled) =>
+              updateSettings({ repasteShortcutEnabled })
+            }
+          />
+        </SettingList>
+
+        <div className="grid gap-5 sm:grid-cols-2">
+          <Field label="Activation">
+            <SegmentedControl
+              ariaLabel="Activation"
               value={settings.activation}
               options={[
                 { value: "hold", label: "Hold to dictate" },
@@ -304,108 +283,69 @@ export function DictationSetup({
               ]}
               onChange={(activation) => updateSettings({ activation })}
             />
-            <div className="space-y-2">
-              <label
-                htmlFor="dictation-shortcut"
-                className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
-              >
-                Shortcut key
-              </label>
-              <select
-                id="dictation-shortcut"
-                className={SELECT_CLASS}
-                value={settings.shortcut}
-                onChange={(event) =>
-                  updateSettings({
-                    shortcut: event.target
-                      .value as DictationSettings["shortcut"],
-                  })
-                }
-              >
-                <option value="right_command">Right Command</option>
-                <option value="left_function">Left Function (fn)</option>
-              </select>
-              <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                Regular Command shortcuts continue to work; dictation starts
-                only when the key is held by itself.
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            aria-pressed={settings.repasteShortcutEnabled}
-            onClick={() =>
-              updateSettings({
-                repasteShortcutEnabled: !settings.repasteShortcutEnabled,
-              })
-            }
-            className={cn(
-              "fd-focus flex w-full items-center justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors",
-              settings.repasteShortcutEnabled
-                ? "border-accent/40 bg-accent-dim"
-                : "border-border-subtle bg-surface-2 hover:bg-surface-3",
-            )}
+          </Field>
+          <Field
+            label="Shortcut key"
+            htmlFor="dictation-shortcut"
+            hint="Regular Command shortcuts keep working; dictation starts only when the key is held by itself."
           >
-            <span>
-              <span className="block text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                Re-paste last transcript with ⌘⇧V
-              </span>
-              <span className="mt-1 block text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                If a transcript missed the composer — say the cursor moved —
-                press ⌘⇧V inside FalconDeck to insert it again.
-              </span>
-            </span>
-            <Badge
-              variant={settings.repasteShortcutEnabled ? "success" : "default"}
-              dot
-            >
-              {settings.repasteShortcutEnabled ? "On" : "Off"}
-            </Badge>
-          </button>
-
-          <div className="space-y-2">
-            <label
-              htmlFor="dictation-microphone"
-              className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
-            >
-              Microphone
-            </label>
             <select
-              id="dictation-microphone"
+              id="dictation-shortcut"
               className={SELECT_CLASS}
-              value={settings.inputDeviceId ?? ""}
+              value={settings.shortcut}
               onChange={(event) =>
-                updateSettings({ inputDeviceId: event.target.value || null })
+                updateSettings({
+                  shortcut: event.target.value as DictationSettings["shortcut"],
+                })
               }
             >
-              <option value="">
-                System default
-                {defaultAudioDeviceName ? ` (${defaultAudioDeviceName})` : ""}
-              </option>
-              {settings.inputDeviceId &&
-              !audioDevices.some(
-                (device) => device.id === settings.inputDeviceId,
-              ) ? (
-                <option value={settings.inputDeviceId}>
-                  Selected microphone unavailable — using system default
-                </option>
-              ) : null}
-              {audioDevices.map((device) => (
-                <option key={device.id} value={device.id}>
-                  {device.name}
-                </option>
-              ))}
+              <option value="right_command">Right Command</option>
+              <option value="left_function">Left Function (fn)</option>
             </select>
-            <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-              FalconDeck captures from this input only and does not change your
-              audio output. Choosing a non-headset mic avoids Bluetooth headset
-              mode while you dictate.
-            </p>
-          </div>
+          </Field>
+        </div>
 
-          <ChoiceGroup
-            label="Transcription"
+        <Field
+          label="Microphone"
+          htmlFor="dictation-microphone"
+          hint="FalconDeck captures from this input only and never changes your audio output. A non-headset mic avoids Bluetooth headset mode while you dictate."
+        >
+          <select
+            id="dictation-microphone"
+            className={SELECT_CLASS}
+            value={settings.inputDeviceId ?? ""}
+            onChange={(event) =>
+              updateSettings({ inputDeviceId: event.target.value || null })
+            }
+          >
+            <option value="">
+              System default
+              {defaultAudioDeviceName ? ` (${defaultAudioDeviceName})` : ""}
+            </option>
+            {settings.inputDeviceId &&
+            !audioDevices.some(
+              (device) => device.id === settings.inputDeviceId,
+            ) ? (
+              <option value={settings.inputDeviceId}>
+                Selected microphone unavailable — using system default
+              </option>
+            ) : null}
+            {audioDevices.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Transcription"
+        description="Where recorded audio is turned into text. Apple Speech runs entirely on this Mac; OpenRouter sends audio from the daemon to a cloud model."
+      >
+        <Field label="Engine">
+          <SegmentedControl
+            ariaLabel="Transcription"
             value={settings.provider}
             options={[
               { value: "system", label: "Apple Speech" },
@@ -413,15 +353,11 @@ export function DictationSetup({
             ]}
             onChange={(provider) => updateSettings({ provider })}
           />
+        </Field>
 
-          {settings.provider === "open_router" ? (
-            <div className="space-y-2">
-              <label
-                htmlFor="dictation-model"
-                className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
-              >
-                Transcription model
-              </label>
+        {settings.provider === "open_router" ? (
+          <div className="space-y-5 border-t border-border-subtle pt-5">
+            <Field label="Model" htmlFor="dictation-model">
               <select
                 id="dictation-model"
                 className={SELECT_CLASS}
@@ -439,134 +375,81 @@ export function DictationSetup({
                   </option>
                 ))}
               </select>
-            </div>
-          ) : null}
+            </Field>
 
-          {isTauriDesktop() && permissions?.supported ? (
-            <div className="space-y-3 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-3">
-              <div className="flex flex-wrap gap-2">
-                <PermissionBadge
-                  label="Microphone"
-                  granted={permissions.microphone === "granted"}
-                />
-                <PermissionBadge
-                  label="Accessibility"
-                  granted={permissions.accessibility}
-                />
-                {settings.provider === "system" ? (
-                  <PermissionBadge
-                    label="Speech Recognition"
-                    granted={permissions.speechRecognition === "granted"}
-                  />
-                ) : null}
-              </div>
-              {!permissionsReady ? (
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={permissionBusy}
-                    onClick={() => void requestPermission()}
-                  >
-                    {permissionBusy ? <ActivityDiamond size="sm" /> : null}
-                    {nextPermission
-                      ? `Allow ${PERMISSION_LABELS[nextPermission]}`
-                      : "Check permissions"}
-                  </Button>
-                  {!permissions.accessibility ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() =>
-                        void import("@tauri-apps/api/core").then(({ invoke }) =>
-                          invoke("open_dictation_accessibility_settings"),
-                        )
-                      }
-                    >
-                      <ExternalLink aria-hidden="true" className="h-4 w-4" />
-                      Open Accessibility settings
-                    </Button>
-                  ) : null}
-                </div>
-              ) : (
-                <p className="flex items-center gap-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                  <ShieldCheck
+            <Field
+              label={
+                <span className="flex items-center gap-2">
+                  <KeyRound
                     aria-hidden="true"
-                    className="h-4 w-4 text-success"
+                    className="h-3.5 w-3.5 text-fg-muted"
                   />
-                  Ready to dictate
-                </p>
-              )}
-            </div>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <KeyRound aria-hidden="true" className="h-4 w-4" />
-            OpenRouter
-          </CardTitle>
-          <CardDescription>
-            Optional cloud transcription. The daemon sends audio directly to
-            OpenRouter and keeps the key on this computer.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-3 py-2 text-[length:var(--fd-text-sm)]">
-            <ShieldCheck aria-hidden="true" className="h-4 w-4 text-success" />
-            <span className="text-fg-secondary">
-              {configured === null
-                ? "Checking speech credentials…"
-                : configured
-                  ? "Configured on this computer"
-                  : "No OpenRouter key configured"}
-            </span>
-          </div>
-          <div className="space-y-2">
-            <label
+                  API key
+                </span>
+              }
               htmlFor={
                 compact ? "onboarding-openrouter-key" : "openrouter-speech-key"
               }
-              className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
+              hint="Stored on this computer only. The daemon calls OpenRouter directly — paired devices never see the key."
             >
-              {configured ? "Replace API key" : "API key"}
-            </label>
-            <Input
-              id={
-                compact ? "onboarding-openrouter-key" : "openrouter-speech-key"
-              }
-              type="password"
-              value={apiKey}
-              onChange={(event) => setApiKey(event.target.value)}
-              placeholder="sk-or-v1-…"
-              autoComplete="off"
-              spellCheck={false}
-            />
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  id={
+                    compact
+                      ? "onboarding-openrouter-key"
+                      : "openrouter-speech-key"
+                  }
+                  className="max-w-md flex-1"
+                  type="password"
+                  value={apiKey}
+                  onChange={(event) => setApiKey(event.target.value)}
+                  placeholder={
+                    configured ? "Replace key — sk-or-v1-…" : "sk-or-v1-…"
+                  }
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <Button
+                  onClick={() => void saveKey()}
+                  disabled={credentialBusy || !apiKey.trim() || !baseUrl}
+                >
+                  {credentialBusy ? "Saving…" : "Save key"}
+                </Button>
+              </div>
+              <div className="flex items-center gap-2 pt-0.5 text-[length:var(--fd-text-xs)]">
+                {configured === null ? (
+                  <span className="text-fg-muted">
+                    Checking speech credentials…
+                  </span>
+                ) : configured ? (
+                  <>
+                    <ShieldCheck
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 text-success"
+                    />
+                    <span className="text-fg-secondary">
+                      Key configured on this computer
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void removeKey()}
+                      disabled={credentialBusy}
+                    >
+                      <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                      Remove
+                    </Button>
+                  </>
+                ) : (
+                  <span className="text-fg-muted">
+                    No OpenRouter key configured
+                  </span>
+                )}
+              </div>
+            </Field>
           </div>
-          <div className="flex justify-end gap-2">
-            {configured ? (
-              <Button
-                variant="ghost"
-                onClick={() => void removeKey()}
-                disabled={credentialBusy}
-              >
-                <Trash2 aria-hidden="true" className="h-4 w-4" />
-                Remove
-              </Button>
-            ) : null}
-            <Button
-              onClick={() => void saveKey()}
-              disabled={credentialBusy || !apiKey.trim() || !baseUrl}
-            >
-              {credentialBusy ? "Saving…" : "Save key"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        ) : null}
+      </SettingsSection>
     </div>
   );
 }

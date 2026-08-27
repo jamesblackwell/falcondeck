@@ -104,7 +104,9 @@ describe("AgentControlPanel", () => {
     const { user } = await renderPanel();
     void user;
 
-    const toggle = await screen.findByRole("button", { name: /enabled/i });
+    const toggle = await screen.findByRole("switch", {
+      name: "Agent control enabled",
+    });
     fireEvent.click(toggle);
     await waitFor(() => {
       const execute = calls.find((call) => call.url === "/api/control/execute");
@@ -154,10 +156,10 @@ describe("AgentControlPanel", () => {
   it("renders and sends confirmation preferences", async () => {
     const { calls } = stubControlFetch();
     render(<AgentControlPanel baseUrl="http://daemon.test" onToast={onToast} />);
-    const destructive = await screen.findByRole("button", {
+    const destructive = await screen.findByRole("switch", {
       name: "Confirm destructive operations",
     });
-    expect(destructive.textContent).toContain("Asking");
+    expect(destructive.getAttribute("aria-checked")).toBe("true");
     fireEvent.click(destructive);
     await waitFor(() => {
       const execute = calls.find((call) => call.url === "/api/control/execute");

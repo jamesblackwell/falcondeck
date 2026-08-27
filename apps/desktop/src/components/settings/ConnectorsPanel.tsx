@@ -5,6 +5,8 @@ import {
   Badge,
   Button,
   Card,
+  SettingsPage,
+  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
@@ -189,16 +191,11 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
   }, [overview, isWorkspaceScope, ready])
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-          Connectors
-        </h1>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          MCP servers give your agents tools. Configure a server once and every agent — Claude,
-          Codex, and any custom provider — can use it.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Connectors"
+        description="MCP servers give your agents tools. Configure a server once and every agent — Claude, Codex, and any custom provider — can use it."
+      />
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -338,7 +335,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
         <code>&lt;workspace&gt;/.falcondeck/connectors.json</code>. Changes apply on the next turn —
         no restart needed. See docs/CONNECTORS.md for the format.
       </p>
-    </div>
+    </SettingsPage>
   )
 }
 

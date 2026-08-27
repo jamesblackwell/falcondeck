@@ -6,6 +6,10 @@ import {
   Badge,
   Button,
   Card,
+
+  SettingsPage,
+
+  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
@@ -81,14 +85,11 @@ export function ServersPanel({ baseUrl, manager, hosts, onToast }: ServersPanelP
   const [isAdding, setIsAdding] = useState(false)
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Servers</h1>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          Run agents on remote machines. FalconDeck installs its daemon over SSH; sessions run on
-          the server and stream back here — they keep running when this Mac sleeps.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Servers"
+        description="Run agents on remote machines. FalconDeck installs its daemon over SSH; sessions run on the server and stream back here — they keep running when this Mac sleeps."
+      />
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -126,7 +127,7 @@ export function ServersPanel({ baseUrl, manager, hosts, onToast }: ServersPanelP
           )}
         </CardContent>
       </Card>
-    </div>
+    </SettingsPage>
   )
 }
 

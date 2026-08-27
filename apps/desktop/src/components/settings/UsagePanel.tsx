@@ -6,6 +6,8 @@ import {
   Badge,
   Button,
   Card,
+  SettingsPage,
+  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
@@ -220,14 +222,11 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
   })
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Usage</h1>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this
-          Mac. Credentials stay with each CLI — FalconDeck only reads the numbers.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Usage"
+        description="How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
+      />
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -317,6 +316,6 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
           )}
         </CardContent>
       </Card>
-    </div>
+    </SettingsPage>
   )
 }

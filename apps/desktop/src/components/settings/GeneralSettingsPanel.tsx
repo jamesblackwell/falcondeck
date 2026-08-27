@@ -4,13 +4,22 @@ import type {
   WorkspaceSummary,
 } from '@falcondeck/client-core'
 import { normalizePreferences } from '@falcondeck/client-core'
-import { ActivityDiamond, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, cn } from '@falcondeck/ui'
+import {
+  ActivityDiamond,
+  Badge,
+  Button,
+  OptionCard,
+  SettingList,
+  SettingsPage,
+  SettingsPageHeader,
+  SettingsSection,
+  SwitchRow,
+} from '@falcondeck/ui'
 
 import { Download, FolderSync, RotateCcw } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 import { BackgroundModelsCard } from './BackgroundModelsCard'
-import { PreferenceToggle } from './PreferenceToggle'
 import {
   formatDateTime,
   formatRelative,
@@ -70,168 +79,154 @@ export function GeneralSettingsPanel({
           }
 
   return (
-    <div className="space-y-6">
-      <header className="space-y-2">
-        <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
-          Settings
-        </p>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-          General
-        </h1>
-        <p className="max-w-2xl text-[length:var(--fd-text-sm)] text-fg-tertiary">
-          FalconDeck stores these preferences in a daemon-owned `falcondeck.json` file so desktop
-          and remote surfaces stay aligned.
-        </p>
-      </header>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="General"
+        description="Updates, notifications, and how conversations read. These preferences live in a daemon-owned falcondeck.json so desktop and remote surfaces stay aligned."
+      />
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-1">
-              <CardTitle>App Updates</CardTitle>
-              <CardDescription>
-                FalconDeck checks GitHub Releases on launch and every 4 hours while the app stays open.
-              </CardDescription>
-            </div>
-            <Badge variant={updateBadgeVariant(updater.status)} dot>
-              {updateStatusLabel(updater.status)}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-2">
-            <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
-              <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                Current version
-              </p>
-              <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
-                {updater.currentVersion ?? 'Unknown'}
-              </p>
-              <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">Channel: stable</p>
-            </div>
-            <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
-              <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                Last checked
-              </p>
-              <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
-                {formatRelative(updater.lastCheckedAt)}
-              </p>
-              <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-                {updater.lastCheckedAt ? formatDateTime(updater.lastCheckedAt) : 'No checks yet'}
-              </p>
-            </div>
-          </div>
-
+      <SettingsSection
+        title="Updates"
+        description="FalconDeck checks GitHub Releases on launch and every 4 hours while the app stays open."
+        actions={
+          <Badge variant={updateBadgeVariant(updater.status)} dot>
+            {updateStatusLabel(updater.status)}
+          </Badge>
+        }
+        contentClassName="space-y-4"
+      >
+        <div className="grid gap-3 md:grid-cols-2">
           <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                  {updater.availableVersion
-                    ? `FalconDeck ${updater.availableVersion} is ready`
-                    : updater.status === 'upToDate'
-                      ? 'You are on the latest stable release'
-                      : 'Updater status'}
-                </p>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                  {updater.status === 'downloaded'
-                    ? 'The update is downloaded. Restart FalconDeck to install it cleanly with the embedded daemon.'
-                    : updater.status === 'downloading'
-                      ? `Downloading the release bundle${updaterProgressPercent !== null ? ` (${updaterProgressPercent}%)` : ''}.`
-                      : updater.status === 'available'
-                        ? 'Download the signed release and install it on restart.'
-                        : updater.errorMessage ?? 'Background checks stay quiet unless a new release is available.'}
-                </p>
-              </div>
-              <Button type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
-                {isChecking || isDownloading ? (
-                  <ActivityDiamond size="md" tone="current" />
-                ) : (
-                  <primaryAction.icon className="h-4 w-4" />
-                )}
-                {primaryAction.label}
-              </Button>
-            </div>
-            {isDownloading ? (
-              <div className="mt-4 space-y-2">
-                <div className="h-2 overflow-hidden rounded-full bg-surface-3">
-                  <div
-                    className="h-full rounded-full bg-accent transition-[width]"
-                    style={{ width: `${updaterProgressPercent ?? 8}%` }}
-                  />
-                </div>
-                <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                  {updater.totalBytes
-                    ? `${Math.round(updater.downloadedBytes / 1024 / 1024)}MB of ${Math.round(updater.totalBytes / 1024 / 1024)}MB`
-                    : 'Calculating download size…'}
-                </p>
-              </div>
-            ) : null}
-            {updater.notes ? (
-              <div className="mt-4 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-3">
-                <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                  Release notes
-                </p>
-                <p className="mt-2 whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary">
-                  {updater.notes}
-                </p>
-                {updater.publishedAt ? (
-                  <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
-                    Published {formatDateTime(updater.publishedAt)}
-                  </p>
-                ) : null}
-              </div>
-            ) : null}
+            <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+              Current version
+            </p>
+            <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+              {updater.currentVersion ?? 'Unknown'}
+            </p>
+            <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">Channel: stable</p>
           </div>
-        </CardContent>
-      </Card>
+          <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
+            <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+              Last checked
+            </p>
+            <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+              {formatRelative(updater.lastCheckedAt)}
+            </p>
+            <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">
+              {updater.lastCheckedAt ? formatDateTime(updater.lastCheckedAt) : 'No checks yet'}
+            </p>
+          </div>
+        </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Notifications</CardTitle>
-          <CardDescription>
-            Keep attention signals useful across desktop and mobile. These preferences are stored
-            by the daemon and sync to every paired client.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <PreferenceToggle
-            label="Agent attention notifications"
+        <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                {updater.availableVersion
+                  ? `FalconDeck ${updater.availableVersion} is ready`
+                  : updater.status === 'upToDate'
+                    ? 'You are on the latest stable release'
+                    : 'Updater status'}
+              </p>
+              <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                {updater.status === 'downloaded'
+                  ? 'The update is downloaded. Restart FalconDeck to install it cleanly with the embedded daemon.'
+                  : updater.status === 'downloading'
+                    ? `Downloading the release bundle${updaterProgressPercent !== null ? ` (${updaterProgressPercent}%)` : ''}.`
+                    : updater.status === 'available'
+                      ? 'Download the signed release and install it on restart.'
+                      : (updater.errorMessage ??
+                        'Background checks stay quiet unless a new release is available.')}
+              </p>
+            </div>
+            <Button type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
+              {isChecking || isDownloading ? (
+                <ActivityDiamond size="md" tone="current" />
+              ) : (
+                <primaryAction.icon className="h-4 w-4" />
+              )}
+              {primaryAction.label}
+            </Button>
+          </div>
+          {isDownloading ? (
+            <div className="mt-4 space-y-2">
+              <div className="h-2 overflow-hidden rounded-full bg-surface-3">
+                <div
+                  className="h-full rounded-full bg-accent transition-[width]"
+                  style={{ width: `${updaterProgressPercent ?? 8}%` }}
+                />
+              </div>
+              <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                {updater.totalBytes
+                  ? `${Math.round(updater.downloadedBytes / 1024 / 1024)}MB of ${Math.round(updater.totalBytes / 1024 / 1024)}MB`
+                  : 'Calculating download size…'}
+              </p>
+            </div>
+          ) : null}
+          {updater.notes ? (
+            <div className="mt-4 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-3">
+              <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+                Release notes
+              </p>
+              <p className="mt-2 whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary">
+                {updater.notes}
+              </p>
+              {updater.publishedAt ? (
+                <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
+                  Published {formatDateTime(updater.publishedAt)}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Notifications"
+        description="Attention signals across desktop and mobile. Stored by the daemon and synced to every paired client."
+        contentClassName="pt-1"
+      >
+        <SettingList>
+          <SwitchRow
+            title="Agent attention notifications"
             description="Allow FalconDeck to notify paired devices about important agent events."
-            enabled={current.notifications.enabled}
-            onToggle={(next) => onUpdatePreferences({ notifications: { enabled: next } })}
+            checked={current.notifications.enabled}
+            onCheckedChange={(next) => onUpdatePreferences({ notifications: { enabled: next } })}
           />
-          <PreferenceToggle
-            label="Completed turns"
+          <SwitchRow
+            title="Completed turns"
             description="Notify when an agent finishes a turn while you are away from this desktop."
-            enabled={current.notifications.notify_on_turn_complete}
-            onToggle={(next) =>
+            checked={current.notifications.notify_on_turn_complete}
+            onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_turn_complete: next } })
             }
           />
-          <PreferenceToggle
-            label="Approvals and questions"
+          <SwitchRow
+            title="Approvals and questions"
             description="Notify when an agent is blocked waiting for your decision or answer."
-            enabled={current.notifications.notify_on_input_required}
-            onToggle={(next) =>
+            checked={current.notifications.notify_on_input_required}
+            onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { notify_on_input_required: next } })
             }
           />
-          <PreferenceToggle
-            label="Failed turns"
+          <SwitchRow
+            title="Failed turns"
             description="Notify when an agent turn ends with an error that may need investigation."
-            enabled={current.notifications.notify_on_error}
-            onToggle={(next) => onUpdatePreferences({ notifications: { notify_on_error: next } })}
+            checked={current.notifications.notify_on_error}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ notifications: { notify_on_error: next } })
+            }
           />
-          <PreferenceToggle
-            label="Suppress pushes while desktop is active"
+          <SwitchRow
+            title="Suppress pushes while desktop is active"
             description="Avoid sending a phone push while this desktop window is focused; the activity lease expires automatically when it is not."
-            enabled={current.notifications.suppress_when_desktop_active}
-            onToggle={(next) =>
+            checked={current.notifications.suppress_when_desktop_active}
+            onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })
             }
           />
-        </CardContent>
-      </Card>
+        </SettingList>
+      </SettingsSection>
 
       <BackgroundModelsCard
         workspace={workspace}
@@ -239,185 +234,150 @@ export function GeneralSettingsPanel({
         onUpdatePreferences={onUpdatePreferences}
       />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Conversation Density</CardTitle>
-          <CardDescription>
-            Choose how much raw tool detail the thread should show by default.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          {TOOL_DETAIL_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              aria-pressed={current.conversation.tool_details_mode === option.value}
-              onClick={() => onUpdatePreferences({ conversation: { tool_details_mode: option.value } })}
-              className={cn(
-                'rounded-[var(--fd-radius-xl)] border p-4 text-left transition-colors',
-                current.conversation.tool_details_mode === option.value
-                  ? 'border-accent/50 bg-accent/10'
-                  : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
-              )}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                  {option.label}
-                </p>
-                <Badge
-                  variant={current.conversation.tool_details_mode === option.value ? 'success' : 'default'}
-                >
-                  {current.conversation.tool_details_mode === option.value ? 'Selected' : 'Available'}
-                </Badge>
-              </div>
-              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                {option.description}
-              </p>
-            </button>
-          ))}
-        </CardContent>
-      </Card>
+      <SettingsSection
+        title="Conversation density"
+        description="How much raw tool detail a thread shows by default."
+        contentClassName="grid gap-3 md:grid-cols-2"
+      >
+        {TOOL_DETAIL_OPTIONS.map((option) => (
+          <OptionCard
+            key={option.value}
+            label={option.label}
+            description={option.description}
+            selected={current.conversation.tool_details_mode === option.value}
+            onSelect={() =>
+              onUpdatePreferences({ conversation: { tool_details_mode: option.value } })
+            }
+          />
+        ))}
+      </SettingsSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Thinking</CardTitle>
-          <CardDescription>
-            How reasoning blocks reveal themselves in the transcript. Stored on this device until
-            the daemon carries the setting.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          {THINKING_DISPLAY_OPTIONS.map((option) => {
-            const selected = current.conversation.thinking_display === option.value
-            return (
-              <button
-                key={option.value}
-                type="button"
-                aria-pressed={selected}
-                onClick={() =>
-                  onUpdatePreferences({ conversation: { thinking_display: option.value } })
-                }
-                className={cn(
-                  'rounded-[var(--fd-radius-xl)] border p-4 text-left transition-colors',
-                  selected
-                    ? 'border-accent/50 bg-accent/10'
-                    : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
-                )}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                    {option.label}
-                  </p>
-                  <Badge variant={selected ? 'success' : 'default'}>
-                    {selected ? 'Selected' : 'Available'}
-                  </Badge>
-                </div>
-                <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                  {option.description}
-                </p>
-              </button>
-            )
-          })}
-        </CardContent>
-      </Card>
+      <SettingsSection
+        title="Thinking"
+        description="How reasoning blocks reveal themselves in the transcript. Stored on this device until the daemon carries the setting."
+        contentClassName="grid gap-3 md:grid-cols-2"
+      >
+        {THINKING_DISPLAY_OPTIONS.map((option) => (
+          <OptionCard
+            key={option.value}
+            label={option.label}
+            description={option.description}
+            selected={current.conversation.thinking_display === option.value}
+            onSelect={() =>
+              onUpdatePreferences({ conversation: { thinking_display: option.value } })
+            }
+          />
+        ))}
+      </SettingsSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Auto-Expand Rules</CardTitle>
-          <CardDescription>
-            Keep risky or high-signal artifacts obvious even when read-only chatter is grouped.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <PreferenceToggle
-            label="Group read-only tool bursts"
+      <SettingsSection
+        title="Auto-expand rules"
+        description="Keep risky or high-signal artifacts obvious even when read-only chatter is grouped."
+        contentClassName="pt-1"
+      >
+        <SettingList>
+          <SwitchRow
+            title="Group read-only tool bursts"
             description="Collapse consecutive file reads, searches, and similar inspection commands into a compact summary row."
-            enabled={current.conversation.group_read_only_tools}
-            onToggle={(next) => onUpdatePreferences({ conversation: { group_read_only_tools: next } })}
+            checked={current.conversation.group_read_only_tools}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { group_read_only_tools: next } })
+            }
           />
-          <PreferenceToggle
-            label="Collapse long messages you send"
+          <SwitchRow
+            title="Collapse long messages you send"
             description="Clamp a pasted wall of text to a few lines with a Show more fade. Handoff prompts especially benefit."
-            enabled={current.conversation.collapse_long_user_messages}
-            onToggle={(next) => onUpdatePreferences({ conversation: { collapse_long_user_messages: next } })}
+            checked={current.conversation.collapse_long_user_messages}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { collapse_long_user_messages: next } })
+            }
           />
-          <PreferenceToggle
-            label="Show expand/collapse all controls"
+          <SwitchRow
+            title="Show expand/collapse all controls"
             description="Expose quick thread-level controls above the conversation when tool cards are present."
-            enabled={current.conversation.show_expand_all_controls}
-            onToggle={(next) => onUpdatePreferences({ conversation: { show_expand_all_controls: next } })}
+            checked={current.conversation.show_expand_all_controls}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { show_expand_all_controls: next } })
+            }
           />
-          <PreferenceToggle
-            label="Auto-open approvals"
+          <SwitchRow
+            title="Auto-open approvals"
             description="Always expand approval-related artifacts so side effects stay obvious."
-            enabled={current.conversation.auto_expand.approvals}
-            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { approvals: next } } })}
+            checked={current.conversation.auto_expand.approvals}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { auto_expand: { approvals: next } } })
+            }
           />
-          <PreferenceToggle
-            label="Auto-open errors"
+          <SwitchRow
+            title="Auto-open errors"
             description="Surface and expand failed calls immediately in the summarizing views. The collapsed view always folds them in — the agent still explains failures that blocked it."
-            enabled={current.conversation.auto_expand.errors}
-            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { errors: next } } })}
+            checked={current.conversation.auto_expand.errors}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { auto_expand: { errors: next } } })
+            }
           />
-          <PreferenceToggle
-            label="Auto-open failed tests"
+          <SwitchRow
+            title="Auto-open failed tests"
             description="Keep failing test runs visible and expanded even when successful inspection bursts are collapsed."
-            enabled={current.conversation.auto_expand.failed_tests}
-            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { failed_tests: next } } })}
+            checked={current.conversation.auto_expand.failed_tests}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { auto_expand: { failed_tests: next } } })
+            }
           />
-          <PreferenceToggle
-            label="Auto-open the first diff"
+          <SwitchRow
+            title="Auto-open the first diff"
             description="Keep the first patch in a thread visible even when inspection noise is collapsed."
-            enabled={current.conversation.auto_expand.first_diff}
-            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { first_diff: next } } })}
+            checked={current.conversation.auto_expand.first_diff}
+            onCheckedChange={(next) =>
+              onUpdatePreferences({ conversation: { auto_expand: { first_diff: next } } })
+            }
           />
-        </CardContent>
-      </Card>
+        </SettingList>
+      </SettingsSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Agent Status</CardTitle>
-          <CardDescription>
-            Provider-specific readiness for each connected agent lives here so the composer toggle has real operational context behind it.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          {(workspace?.agents ?? []).map((agent) => (
-            <div
-              key={agent.provider}
-              className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4"
-            >
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-[length:var(--fd-text-sm)] font-medium capitalize text-fg-primary">
-                  {agent.provider}
-                </p>
-                <Badge
-                  variant={
-                    agent.account.status === 'ready'
-                      ? 'success'
-                      : agent.account.status === 'needs_auth'
-                        ? 'warning'
-                        : 'default'
-                  }
-                  dot
-                >
-                  {agent.account.status === 'ready'
-                    ? 'Ready'
-                    : agent.account.status === 'needs_auth'
-                      ? 'Needs auth'
-                      : 'Unknown'}
-                </Badge>
-              </div>
-              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">{agent.account.label}</p>
-              <p className="mt-3 text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                {agent.models.length} model options
+      <SettingsSection
+        title="Agent status"
+        description="Provider-specific readiness for each connected agent, so the composer toggle has real operational context behind it."
+        contentClassName="grid gap-3 md:grid-cols-2"
+      >
+        {(workspace?.agents ?? []).map((agent) => (
+          <div
+            key={agent.provider}
+            className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[length:var(--fd-text-sm)] font-medium capitalize text-fg-primary">
+                {agent.provider}
               </p>
+              <Badge
+                variant={
+                  agent.account.status === 'ready'
+                    ? 'success'
+                    : agent.account.status === 'needs_auth'
+                      ? 'warning'
+                      : 'default'
+                }
+                dot
+              >
+                {agent.account.status === 'ready'
+                  ? 'Ready'
+                  : agent.account.status === 'needs_auth'
+                    ? 'Needs auth'
+                    : 'Unknown'}
+              </Badge>
             </div>
-          ))}
-        </CardContent>
-        {workspace?.last_error && /could not find|could not be started|failed to start/i.test(workspace.last_error) ? (
-          <CardContent className="pt-0">
-            <div className="rounded-[var(--fd-radius-xl)] border border-warning/20 bg-warning/10 p-4">
+            <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+              {agent.account.label}
+            </p>
+            <p className="mt-3 text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+              {agent.models.length} model options
+            </p>
+          </div>
+        ))}
+        {workspace?.last_error &&
+        /could not find|could not be started|failed to start/i.test(workspace.last_error) ? (
+          <div className="md:col-span-2">
+            <div className="rounded-[var(--fd-radius-lg)] border border-warning/25 bg-warning-muted p-4">
               <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                 FalconDeck could not launch one of the local agent CLIs
               </p>
@@ -431,24 +391,18 @@ export function GeneralSettingsPanel({
                 {workspace.last_error}
               </p>
             </div>
-          </CardContent>
+          </div>
         ) : null}
-      </Card>
+      </SettingsSection>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>First-Run Onboarding</CardTitle>
-          <CardDescription>
-            Replay the welcome wizard as a new install would see it. Only the device-local
-            onboarding flag is reset — projects, conversations, keys, and daemon state are untouched.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button type="button" variant="ghost" onClick={onShowOnboardingAtNextLaunch}>
-            Show onboarding at next launch
-          </Button>
-        </CardContent>
-      </Card>
-    </div>
+      <SettingsSection
+        title="First-run onboarding"
+        description="Replay the welcome wizard as a new install would see it. Only the device-local onboarding flag is reset — projects, conversations, keys, and daemon state are untouched."
+      >
+        <Button type="button" variant="outline" onClick={onShowOnboardingAtNextLaunch}>
+          Show onboarding at next launch
+        </Button>
+      </SettingsSection>
+    </SettingsPage>
   )
 }

@@ -5,6 +5,10 @@ import {
   Badge,
   Button,
   Card,
+
+  SettingsPage,
+
+  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
@@ -146,15 +150,11 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
   )
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Agents</h1>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          FalconDeck orchestrates agents; it doesn&apos;t replace them. Codex and Claude are built
-          in — any CLI speaking the Agent Client Protocol (OpenCode, Grok, Gemini CLI, …) can be
-          added here. Changes apply immediately, no restart needed.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Agents"
+        description="FalconDeck orchestrates agents; it doesn&apos;t replace them. Codex and Claude are built in — any CLI speaking the Agent Client Protocol (OpenCode, Grok, Pi, Cursor, …) can be added here. Changes apply immediately, no restart needed."
+      />
 
       <Card>
         <CardHeader>
@@ -382,7 +382,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
           )}
         </CardContent>
       </Card>
-    </div>
+    </SettingsPage>
   )
 }
 

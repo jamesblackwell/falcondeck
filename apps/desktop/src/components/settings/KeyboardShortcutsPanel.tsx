@@ -1,7 +1,13 @@
 import { useMemo, useRef, useState } from 'react'
 import { Keyboard, Plus, RotateCcw, Search, X } from 'lucide-react'
 
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle, cn } from '@falcondeck/ui'
+import {
+  Button,
+  SegmentedControl,
+  SettingsPage,
+  SettingsPageHeader,
+  SettingsSection,
+} from '@falcondeck/ui'
 
 import {
   SHORTCUT_DEFINITIONS,
@@ -57,7 +63,9 @@ function ShortcutRecorder({
     <div className="mt-3 rounded-[var(--fd-radius-lg)] border border-accent/40 bg-accent-muted p-3">
       <div className="flex items-center gap-3">
         <div className="flex min-h-9 flex-1 items-center">
-          {preview ? <Keycaps shortcut={preview} /> : (
+          {preview ? (
+            <Keycaps shortcut={preview} />
+          ) : (
             <span className="text-[length:var(--fd-text-sm)] text-fg-secondary">
               Press the shortcut you want…
             </span>
@@ -76,7 +84,9 @@ function ShortcutRecorder({
         >
           Save
         </Button>
-        <Button ref={cancelRef} type="button" size="sm" variant="ghost" onClick={onDone}>Cancel</Button>
+        <Button ref={cancelRef} type="button" size="sm" variant="ghost" onClick={onDone}>
+          Cancel
+        </Button>
       </div>
       <input
         ref={inputRef}
@@ -85,13 +95,25 @@ function ShortcutRecorder({
         className="pointer-events-none absolute h-px w-px opacity-0"
         onKeyDown={(event) => {
           event.stopPropagation()
-          if (event.key === 'Tab' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+          if (
+            event.key === 'Tab' &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.shiftKey
+          ) {
             event.preventDefault()
             ;(canSave ? saveRef.current : cancelRef.current)?.focus()
             return
           }
           event.preventDefault()
-          if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+          if (
+            event.key === 'Escape' &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.shiftKey
+          ) {
             onDone()
             return
           }
@@ -99,7 +121,9 @@ function ShortcutRecorder({
         }}
       />
       {validation ? (
-        <p role="alert" className="mt-2 text-[length:var(--fd-text-xs)] text-danger">{validation}</p>
+        <p role="alert" className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
+          {validation}
+        </p>
       ) : conflict ? (
         <p role="alert" className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
           Already used by {conflict.label}.
@@ -126,53 +150,38 @@ export function KeyboardShortcutsPanel() {
     return SHORTCUT_DEFINITIONS.filter((definition) => {
       if (keystrokeQuery) return bindingsFor(definition.id, settings).includes(keystrokeQuery)
       if (!text) return true
-      return `${definition.label} ${definition.description} ${definition.category}`.toLowerCase().includes(text)
+      return `${definition.label} ${definition.description} ${definition.category}`
+        .toLowerCase()
+        .includes(text)
     })
   }, [keystrokeQuery, query, settings])
 
   return (
-    <div className="space-y-6">
-      <header className="space-y-2">
-        <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">Settings</p>
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Keyboard Shortcuts</h1>
-            <p className="mt-2 max-w-2xl text-[length:var(--fd-text-sm)] text-fg-tertiary">
-              Mac-first defaults, fully yours. Add more than one binding, remove any default, or reset a command whenever you like.
-            </p>
-          </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Keyboard shortcuts"
+        description="Mac-first defaults, fully yours. Add more than one binding, remove any default, or reset a command whenever you like."
+        actions={
           <Button type="button" variant="secondary" onClick={resetAllShortcuts}>
             <RotateCcw className="h-4 w-4" aria-hidden="true" /> Reset all
           </Button>
-        </div>
-      </header>
+        }
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Running follow-ups</CardTitle>
-          <CardDescription>
-            Choose what Send does while an agent is working. “Invert Queue / Steer” uses the other behavior once.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="inline-flex rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 p-1" role="group" aria-label="Default follow-up behavior">
-            {(['queue', 'steer'] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={settings.followUpBehavior === value}
-                onClick={() => setFollowUpBehavior(value)}
-                className={cn(
-                  'fd-focus rounded-[var(--fd-radius-md)] px-4 py-2 text-[length:var(--fd-text-sm)] font-medium transition-colors',
-                  settings.followUpBehavior === value ? 'bg-surface-3 text-fg-primary shadow-sm' : 'text-fg-muted hover:text-fg-primary',
-                )}
-              >
-                {value === 'queue' ? 'Queue' : 'Steer'}
-              </button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+      <SettingsSection
+        title="Running follow-ups"
+        description="Choose what Send does while an agent is working. “Invert Queue / Steer” uses the other behavior once."
+      >
+        <SegmentedControl
+          ariaLabel="Default follow-up behavior"
+          value={settings.followUpBehavior}
+          options={[
+            { value: 'queue', label: 'Queue' },
+            { value: 'steer', label: 'Steer' },
+          ]}
+          onChange={setFollowUpBehavior}
+        />
+      </SettingsSection>
 
       <div className="sticky top-0 z-10 -mx-2 flex flex-wrap gap-2 bg-surface-1/95 px-2 py-3 backdrop-blur">
         <label className="fd-focus-within flex min-w-64 flex-1 items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 px-3">
@@ -180,7 +189,10 @@ export function KeyboardShortcutsPanel() {
           <input
             ref={commandSearchRef}
             value={query}
-            onChange={(event) => { setQuery(event.target.value); setKeystrokeQuery(null) }}
+            onChange={(event) => {
+              setQuery(event.target.value)
+              setKeystrokeQuery(null)
+            }}
             placeholder="Search commands…"
             aria-label="Search shortcut commands"
             className="h-10 w-full bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted"
@@ -195,7 +207,13 @@ export function KeyboardShortcutsPanel() {
           {keystrokeQuery ? <Keycaps shortcut={keystrokeQuery} /> : 'Find by keys'}
         </Button>
         {keystrokeQuery ? (
-          <Button type="button" variant="ghost" size="icon" aria-label="Clear keystroke search" onClick={() => setKeystrokeQuery(null)}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Clear keystroke search"
+            onClick={() => setKeystrokeQuery(null)}
+          >
             <X className="h-4 w-4" />
           </Button>
         ) : null}
@@ -214,7 +232,10 @@ export function KeyboardShortcutsPanel() {
               return
             }
             const shortcut = shortcutFromEvent(event.nativeEvent)
-            if (shortcut) { setKeystrokeQuery(shortcut); setQuery('') }
+            if (shortcut) {
+              setKeystrokeQuery(shortcut)
+              setQuery('')
+            }
           }}
         />
       </div>
@@ -222,8 +243,12 @@ export function KeyboardShortcutsPanel() {
       {visible.length === 0 ? (
         <div className="rounded-[var(--fd-radius-xl)] border border-dashed border-border-default px-6 py-12 text-center">
           <Keyboard className="mx-auto h-6 w-6 text-fg-muted" aria-hidden="true" />
-          <p className="mt-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">No shortcuts found</p>
-          <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">Try another command name or key combination.</p>
+          <p className="mt-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+            No shortcuts found
+          </p>
+          <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+            Try another command name or key combination.
+          </p>
         </div>
       ) : null}
 
@@ -232,33 +257,59 @@ export function KeyboardShortcutsPanel() {
         if (definitions.length === 0) return null
         return (
           <section key={category} aria-labelledby={`shortcuts-${category}`}>
-            <h2 id={`shortcuts-${category}`} className="mb-2 px-1 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.18em] text-fg-muted">
+            <h2
+              id={`shortcuts-${category}`}
+              className="mb-2 px-1 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.18em] text-fg-muted"
+            >
               {category}
             </h2>
             <div className="divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
               {definitions.map((definition) => {
                 const currentBindings = bindingsFor(definition.id, settings)
-                const customized = Object.prototype.hasOwnProperty.call(settings.bindings, definition.id)
+                const customized = Object.prototype.hasOwnProperty.call(
+                  settings.bindings,
+                  definition.id,
+                )
                 return (
                   <div key={definition.id} className="px-4 py-3.5">
                     <div className="flex items-center gap-4">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{definition.label}</p>
-                          {customized ? <span className="text-[length:var(--fd-text-2xs)] text-accent">Customized</span> : null}
+                          <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                            {definition.label}
+                          </p>
+                          {customized ? (
+                            <span className="text-[length:var(--fd-text-2xs)] text-accent">
+                              Customized
+                            </span>
+                          ) : null}
                         </div>
-                        <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">{definition.description}</p>
+                        <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+                          {definition.description}
+                        </p>
                       </div>
                       <div className="flex max-w-[48%] flex-wrap items-center justify-end gap-2">
-                        {currentBindings.length === 0 ? <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Unassigned</span> : null}
+                        {currentBindings.length === 0 ? (
+                          <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                            Unassigned
+                          </span>
+                        ) : null}
                         {currentBindings.map((shortcut) => (
-                          <span key={shortcut} className="inline-flex items-center gap-1 rounded-[var(--fd-radius-md)] bg-surface-1 p-1 pl-1.5">
+                          <span
+                            key={shortcut}
+                            className="inline-flex items-center gap-1 rounded-[var(--fd-radius-md)] bg-surface-1 p-1 pl-1.5"
+                          >
                             <Keycaps shortcut={shortcut} />
                             <button
                               type="button"
                               className="fd-focus rounded p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
                               aria-label={`Remove ${shortcut} from ${definition.label}`}
-                              onClick={() => setShortcutBindings(definition.id, currentBindings.filter((item) => item !== shortcut))}
+                              onClick={() =>
+                                setShortcutBindings(
+                                  definition.id,
+                                  currentBindings.filter((item) => item !== shortcut),
+                                )
+                              }
                             >
                               <X className="h-3 w-3" />
                             </button>
@@ -284,7 +335,12 @@ export function KeyboardShortcutsPanel() {
                         ) : null}
                       </div>
                     </div>
-                    {recording === definition.id ? <ShortcutRecorder commandId={definition.id} onDone={() => setRecording(null)} /> : null}
+                    {recording === definition.id ? (
+                      <ShortcutRecorder
+                        commandId={definition.id}
+                        onDone={() => setRecording(null)}
+                      />
+                    ) : null}
                   </div>
                 )
               })}
@@ -292,6 +348,6 @@ export function KeyboardShortcutsPanel() {
           </section>
         )
       })}
-    </div>
+    </SettingsPage>
   )
 }

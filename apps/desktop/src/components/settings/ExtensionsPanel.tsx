@@ -2,7 +2,14 @@ import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
 
 import type { ExtensionSnapshot } from "@falcondeck/client-core";
-import { ActivityDiamond, Badge, Button, Input } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  Badge,
+  Button,
+  Input,
+  SettingsPage,
+  SettingsPageHeader,
+} from "@falcondeck/ui";
 
 function permissionPresentation(permission: string) {
   if (permission === "threads:read") {
@@ -94,16 +101,11 @@ export function ExtensionsPanel({
   };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-          Extensions
-        </h1>
-        <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-muted">
-          Manage extensions installed on this FalconDeck. Official extensions
-          are built and maintained by FalconDeck.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Extensions"
+        description="Manage extensions installed on this FalconDeck. Official extensions are built and maintained by FalconDeck."
+      />
       <label className="relative block max-w-xl">
         <Search
           aria-hidden="true"
@@ -281,6 +283,6 @@ export function ExtensionsPanel({
           </p>
         ) : null}
       </div>
-    </div>
+    </SettingsPage>
   );
 }

@@ -6,6 +6,10 @@ import {
   Badge,
   Button,
   Card,
+
+  SettingsPage,
+
+  SettingsPageHeader,
   CardContent,
   CardDescription,
   CardHeader,
@@ -285,15 +289,11 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   const harnesses = overview?.harnesses ?? []
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">Harnesses</h1>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-          FalconDeck orchestrates coding CLIs — Codex, Claude Code, OpenCode, and friends — but
-          doesn&apos;t ship them. This panel shows where each is installed, whether it&apos;s
-          current, and can run the upgrade for you, locally or on a connected server.
-        </p>
-      </div>
+    <SettingsPage>
+      <SettingsPageHeader
+        title="Harnesses"
+        description="FalconDeck orchestrates coding CLIs — Codex, Claude Code, OpenCode, and friends — but doesn&apos;t ship them. This panel shows where each is installed, whether it&apos;s current, and can run the upgrade for you, locally or on a connected server."
+      />
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">
@@ -456,6 +456,6 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           Add a server in Settings → Servers to manage harnesses on other machines.
         </p>
       ) : null}
-    </div>
+    </SettingsPage>
   )
 }

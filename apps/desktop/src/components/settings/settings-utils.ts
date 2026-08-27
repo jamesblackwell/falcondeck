@@ -59,7 +59,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   },
   {
     id: "keyboard",
-    label: "Keyboard Shortcuts",
+    label: "Keyboard shortcuts",
     description: "Customize every command",
     icon: Keyboard,
   },
@@ -119,7 +119,7 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   },
   {
     id: "remote",
-    label: "Remote Access",
+    label: "Remote access",
     description: "Pairing, devices, and relay status",
     icon: Wifi,
   },
