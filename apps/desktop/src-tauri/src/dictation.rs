@@ -11,7 +11,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
 
 const DICTATION_WINDOW_LABEL: &str = "dictation";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -19,6 +19,13 @@ const DICTATION_EVENT: &str = "falcondeck://dictation-state";
 const DICTATION_LEVEL_EVENT: &str = "falcondeck://dictation-level";
 const DICTATION_INSERT_EVENT: &str = "falcondeck://dictation-insert";
 const MAX_RECORDING_BYTES: u64 = 8 * 1024 * 1024;
+// Overlay geometry in logical points. The pill is a compact status strip; the
+// failure card needs the wider, taller box so its message and buttons lay out
+// on one line each.
+const OVERLAY_PILL_WIDTH: f64 = 504.0;
+const OVERLAY_PILL_HEIGHT: f64 = 84.0;
+const OVERLAY_FAILED_WIDTH: f64 = 720.0;
+const OVERLAY_FAILED_HEIGHT: f64 = 156.0;
 const OPENROUTER_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(75);
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -190,7 +197,7 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("dictation-window.html".into()),
     )
     .title("FalconDeck Dictation")
-    .inner_size(720.0, 156.0)
+    .inner_size(OVERLAY_PILL_WIDTH, OVERLAY_PILL_HEIGHT)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -204,7 +211,10 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
     .focusable(false)
     .visible(false)
     .build()
-    .map(|_| ())
+    .map(|window| {
+        // Armed only for the failure card, which is the one state with buttons.
+        let _ = window.set_ignore_cursor_events(true);
+    })
     .map_err(|error| error.to_string())
 }
 
@@ -442,7 +452,33 @@ pub fn shutdown() {
     }
 }
 
-fn position_overlay(app: &AppHandle) {
+fn overlay_size(failed: bool) -> (f64, f64) {
+    if failed {
+        (OVERLAY_FAILED_WIDTH, OVERLAY_FAILED_HEIGHT)
+    } else {
+        (OVERLAY_PILL_WIDTH, OVERLAY_PILL_HEIGHT)
+    }
+}
+
+/// Sizes and (dis)arms the overlay for a state. The pill states have no
+/// controls, so the window ignores the cursor entirely — otherwise clicks in the
+/// transparent padding around the pill land on a FalconDeck window and activate
+/// the app. The failure card has buttons, so it takes clicks back. Every switch
+/// into the failure card also re-shows the overlay, so this never leaves the
+/// wider box sitting off-centre.
+fn set_overlay_mode(app: &AppHandle, failed: bool) {
+    let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) else {
+        return;
+    };
+    let (width, height) = overlay_size(failed);
+    let _ = window.set_size(LogicalSize::new(width, height));
+    let _ = window.set_ignore_cursor_events(!failed);
+}
+
+/// `width` is the logical width just requested; reading `outer_size()` back
+/// immediately after a resize can still report the previous size and would
+/// centre the overlay off by the difference.
+fn position_overlay(app: &AppHandle, width: f64) {
     let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) else {
         return;
     };
@@ -455,19 +491,21 @@ fn position_overlay(app: &AppHandle) {
                 .flatten()
         })
         .or_else(|| app.primary_monitor().ok().flatten());
-    let (Ok(window_size), Some(monitor)) = (window.outer_size(), monitor) else {
+    let Some(monitor) = monitor else {
         return;
     };
+    let scale = monitor.scale_factor();
+    let window_width = (width * scale).round() as u32;
     let work_area = monitor.work_area();
-    let x = work_area.position.x
-        + ((work_area.size.width.saturating_sub(window_size.width)) / 2) as i32;
-    let top_gap = (12.0 * monitor.scale_factor()).round() as i32;
+    let x = work_area.position.x + ((work_area.size.width.saturating_sub(window_width)) / 2) as i32;
+    let top_gap = (12.0 * scale).round() as i32;
     let y = work_area.position.y + top_gap;
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn show_overlay(app: &AppHandle) {
-    position_overlay(app);
+fn show_overlay(app: &AppHandle, failed: bool) {
+    set_overlay_mode(app, failed);
+    position_overlay(app, overlay_size(failed).0);
     if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
         let _ = window.show();
     }
@@ -486,6 +524,7 @@ fn hide_overlay_after(app: AppHandle, generation: u64, delay: Duration) {
 }
 
 fn emit_event(app: &AppHandle, event: DictationEvent) {
+    set_overlay_mode(app, event.state == "failed");
     let _ = app.emit(DICTATION_EVENT, &event);
 }
 
@@ -502,7 +541,7 @@ fn emit_failure_with_transcript(
     transcript: Option<String>,
 ) {
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-    show_overlay(app);
+    show_overlay(app, true);
     emit_event(
         app,
         DictationEvent {
@@ -695,7 +734,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
     match kind {
         event_kind::RECORDING => {
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-            show_overlay(&app);
+            show_overlay(&app, false);
             emit_event(
                 &app,
                 DictationEvent {
