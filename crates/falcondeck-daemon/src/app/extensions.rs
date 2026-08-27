@@ -25,6 +25,8 @@ const MAX_PUBLISHED_VIEWS_PER_ACTION: usize = 256;
 const MAX_EXTENSION_VIEW_STATE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCOPE_KIND_CHARS: usize = 64;
 const MAX_SCOPE_ID_CHARS: usize = 512;
+const LEGACY_SCRATCH_PAD_ID: &str = "falcondeck.scratch-pad";
+const NOTES_ID: &str = "falcondeck.notes";
 const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -163,6 +165,7 @@ impl ExtensionRegistry {
             }
             Err(error) => return Err(error.into()),
         };
+        migrate_scratch_pad_to_notes(&mut self.persisted);
         self.discover().await?;
         self.persist().await
     }
@@ -208,18 +211,18 @@ impl ExtensionRegistry {
                 ),
                 (
                     self.root
-                        .join("official/scratch-pad/falcondeck.extension.json"),
+                        .join("official/notes/falcondeck.extension.json"),
                     include_str!(
-                        "../../../../extensions/official/scratch-pad/falcondeck.extension.json"
+                        "../../../../extensions/official/notes/falcondeck.extension.json"
                     ),
                 ),
                 (
-                    self.root.join("official/scratch-pad/server.ts"),
-                    include_str!("../../../../extensions/official/scratch-pad/server.ts"),
+                    self.root.join("official/notes/server.ts"),
+                    include_str!("../../../../extensions/official/notes/server.ts"),
                 ),
                 (
-                    self.root.join("official/scratch-pad/app.tsx"),
-                    include_str!("../../../../extensions/official/scratch-pad/app.tsx"),
+                    self.root.join("official/notes/app.tsx"),
+                    include_str!("../../../../extensions/official/notes/app.tsx"),
                 ),
                 (
                     self.root
@@ -246,6 +249,9 @@ impl ExtensionRegistry {
                     include_str!("../../../../extensions/official/mini-zen/server.ts"),
                 ),
             ]);
+            // Scratch pad shipped as its own package directory; nothing reads
+            // it once the catalog points at Notes, so clear it out.
+            let _ = tokio::fs::remove_dir_all(self.root.join("official/scratch-pad")).await;
         }
         for (path, contents) in assets {
             write_bundled_asset(&canonical_state_dir, &path, contents).await?;
@@ -920,6 +926,24 @@ async fn read_bounded_text(path: &Path, limit: u64, label: &str) -> Result<Strin
         )));
     }
     Ok(contents)
+}
+
+/// Scratch pad became Notes in 0.3.0. Its persisted enablement, permission
+/// grants, and stored documents carry over to the new id so an upgrade keeps
+/// the user's writing; stale views are dropped and republished on first use.
+fn migrate_scratch_pad_to_notes(state: &mut PersistedExtensionState) {
+    if let Some(enabled) = state.enabled.remove(LEGACY_SCRATCH_PAD_ID) {
+        state.enabled.entry(NOTES_ID.to_string()).or_insert(enabled);
+    }
+    if let Some(grants) = state.grants.remove(LEGACY_SCRATCH_PAD_ID) {
+        state.grants.entry(NOTES_ID.to_string()).or_insert(grants);
+    }
+    if let Some(storage) = state.storage.remove(LEGACY_SCRATCH_PAD_ID) {
+        state.storage.entry(NOTES_ID.to_string()).or_insert(storage);
+    }
+    state
+        .views
+        .retain(|_, view| view.extension_id != LEGACY_SCRATCH_PAD_ID);
 }
 
 fn extension_view_key(
@@ -1632,9 +1656,9 @@ mod tests {
     fn manifest_accepts_known_panel_icons_and_rejects_unknown_ones() {
         let mut manifest = manifest();
         manifest.contributes.panels = vec![ExtensionViewContribution {
-            id: "pad".to_string(),
-            title: Some("Scratch pad".to_string()),
-            view: "scratch-pad".to_string(),
+            id: "notes".to_string(),
+            title: Some("Notes".to_string()),
+            view: "notes".to_string(),
             icon: Some("notebook-pen".to_string()),
             ui: None,
         }];
@@ -1899,16 +1923,16 @@ mod tests {
         assert_eq!(kanban.contributes.panels.len(), 1);
         assert_eq!(kanban.permissions, [THREADS_READ_PERMISSION]);
 
-        let scratch_pad = snapshot
+        let notes = snapshot
             .catalog
             .iter()
-            .find(|extension| extension.id == "falcondeck.scratch-pad")
-            .expect("Scratch pad should be bundled");
-        assert!(scratch_pad.enabled);
-        assert_eq!(scratch_pad.name, "Scratch pad");
-        assert_eq!(scratch_pad.status, ExtensionStatus::Active);
-        assert_eq!(scratch_pad.contributes.panels.len(), 1);
-        assert!(scratch_pad.permissions.is_empty());
+            .find(|extension| extension.id == "falcondeck.notes")
+            .expect("Notes should be bundled");
+        assert!(notes.enabled);
+        assert_eq!(notes.name, "Notes");
+        assert_eq!(notes.status, ExtensionStatus::Active);
+        assert_eq!(notes.contributes.panels.len(), 1);
+        assert!(notes.permissions.is_empty());
 
         let mini_zen = snapshot
             .catalog
@@ -2003,6 +2027,57 @@ mod tests {
                 .granted_permissions
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn scratch_pad_state_carries_over_to_notes() {
+        let mut state = PersistedExtensionState::default();
+        state.enabled.insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
+        state.storage.insert(
+            LEGACY_SCRATCH_PAD_ID.to_string(),
+            BTreeMap::from([("pad".to_string(), serde_json::json!("# Keep me"))]),
+        );
+        state.views.insert(
+            "stale".to_string(),
+            ExtensionView {
+                extension_id: LEGACY_SCRATCH_PAD_ID.to_string(),
+                view_id: "scratch-pad".to_string(),
+                scope: None,
+                value: serde_json::json!({}),
+                updated_at: Utc::now(),
+            },
+        );
+
+        migrate_scratch_pad_to_notes(&mut state);
+
+        assert!(!state.enabled.contains_key(LEGACY_SCRATCH_PAD_ID));
+        assert_eq!(state.enabled.get(NOTES_ID), Some(&false));
+        assert_eq!(
+            state.storage.get(NOTES_ID).and_then(|pad| pad.get("pad")),
+            Some(&serde_json::json!("# Keep me"))
+        );
+        assert!(state.views.is_empty());
+    }
+
+    #[test]
+    fn migration_keeps_notes_state_when_both_ids_are_present() {
+        let mut state = PersistedExtensionState::default();
+        state.enabled.insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
+        state.enabled.insert(NOTES_ID.to_string(), true);
+        state.storage.insert(
+            LEGACY_SCRATCH_PAD_ID.to_string(),
+            BTreeMap::from([("pad".to_string(), serde_json::json!("old"))]),
+        );
+        state.storage.insert(
+            NOTES_ID.to_string(),
+            BTreeMap::from([("library".to_string(), serde_json::json!([]))]),
+        );
+
+        migrate_scratch_pad_to_notes(&mut state);
+
+        assert_eq!(state.enabled.get(NOTES_ID), Some(&true));
+        assert!(state.storage[NOTES_ID].contains_key("library"));
+        assert!(!state.storage.contains_key(LEGACY_SCRATCH_PAD_ID));
     }
 
     const FOLLOW_UPS: &str = "falcondeck.follow-up-suggestions";

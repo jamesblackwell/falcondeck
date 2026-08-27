@@ -1,8 +1,8 @@
 {
   "$schema": "../../../schemas/extension-manifest.schema.json",
-  "id": "falcondeck.scratch-pad",
-  "name": "Scratch pad",
-  "version": "0.2.0",
+  "id": "falcondeck.notes",
+  "name": "Notes",
+  "version": "0.3.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -17,9 +17,9 @@
     ],
     "panels": [
       {
-        "id": "pad",
-        "title": "Scratch pad",
-        "view": "scratch-pad",
+        "id": "library",
+        "title": "Notes",
+        "view": "notes",
         "icon": "notebook-pen",
         "ui": {
           "version": 1,
@@ -29,20 +29,20 @@
             "children": [
               {
                 "type": "text",
-                "text": "Scratch pad",
+                "text": "Notes",
                 "style": "heading"
               },
               {
                 "type": "text",
-                "text": "A quiet place for a Markdown note.",
+                "text": "A quiet place for Markdown notes.",
                 "tone": "muted"
               },
               { "type": "divider" },
               {
                 "type": "state",
                 "state": "empty",
-                "title": "Empty",
-                "description": "Open Scratch pad on desktop or in the browser to write."
+                "title": "No notes yet",
+                "description": "Open Notes on desktop or in the browser to write."
               }
             ]
           }

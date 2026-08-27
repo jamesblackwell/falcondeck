@@ -13,7 +13,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 ### Implemented baseline
 
-- bundled catalog and manifest discovery, with Kanban and Scratch pad enabled
+- bundled catalog and manifest discovery, with Kanban and Notes enabled
   by default;
 - checked-in manifest schema and machine-readable validation diagnostics;
 - daemon-owned enablement, namespaced JSON storage, bounded view projections,
@@ -40,9 +40,9 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   reduction, local HTTP and relay RPC mutation, and desktop grant controls;
 - the bundled, disabled-by-default Mini Zen proof extension, using public event,
   thread-summary, storage, and panel APIs with a useful pre-grant fallback;
-- the bundled, enabled-by-default Scratch pad notes panel, using private
-  storage, a declared action, and a trusted React editor on desktop and
-  remote web;
+- the bundled, enabled-by-default Notes panel, using private storage, a
+  declared action, and a trusted React editor — a note list beside a Markdown
+  editor — on desktop and remote web;
 - optional host-owned panel icons from a bounded Lucide name allowlist,
   rendered in desktop and remote-web sidebar navigation;
 - `packages/extension-testing`, with deterministic public-SDK activation,
@@ -151,7 +151,7 @@ crates/
 extensions/
   official/
     thread-tags/
-    scratch-pad/
+    notes/
     follow-up-suggestions/
   examples/
     hello-panel/
@@ -200,8 +200,9 @@ extension cannot declare itself trusted or default-enabled in its manifest.
 Initial policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
-- `falcondeck.scratch-pad`: bundled and enabled by default as a personal
-  Markdown notes panel. It requests no permissions.
+- `falcondeck.notes`: bundled and enabled by default as a personal Markdown
+  notes panel. It requests no permissions. It replaced `falcondeck.scratch-pad`
+  in 0.3.0; the daemon moves that id's persisted state across on restore.
 - `falcondeck.mini-zen`: bundled but disabled by default so enabling the
   opinionated panel remains an explicit choice; its requested `threads:read`
   permission is still denied until separately granted.
@@ -439,7 +440,7 @@ v0.1 limits action input to 64 KiB, each published view to 16 KiB, one action
 to 256 publications, retained view state to 4 MiB per extension, and a host
 response to 2 MiB. Large-data on-demand fetching is planned; until it exists,
 extensions must publish summaries rather than payloads near these ceilings.
-This split lets clients render tags or scratch-pad summaries while the host
+This split lets clients render tags or note summaries while the host
 restarts without broadcasting private data.
 
 ## 8. Declarative UI
@@ -847,7 +848,7 @@ Gate:
 
 ### Phase 6 — expand from demonstrated demand
 
-Candidates include richer Scratch pad agent sharing, settings, conversation cards,
+Candidates include richer Notes agent sharing, settings, conversation cards,
 automations, agent tools, schedules, and notifications. Each new capability
 needs a permission, limits, fake-host support, client fallback, and official or
 example consumer.

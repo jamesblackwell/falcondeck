@@ -75,9 +75,9 @@ fn panel_contributions_use_the_public_camel_case_wire_shape() {
 fn panel_icons_round_trip_on_the_public_wire_shape() {
     let contributions: ExtensionContributions = serde_json::from_value(json!({
         "panels": [{
-            "id": "pad",
-            "title": "Scratch pad",
-            "view": "scratch-pad",
+            "id": "notes",
+            "title": "Notes",
+            "view": "notes",
             "icon": "notebook-pen"
         }]
     }))

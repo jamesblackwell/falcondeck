@@ -38,9 +38,9 @@ test("official Mini Zen panel declarative UI validates", () => {
   assert.deepEqual(result.output, { ok: true, diagnostics: [] });
 });
 
-test("official Scratch pad frontend and declarative UI validate", () => {
+test("official Notes frontend and declarative UI validate", () => {
   const result = validate(
-    resolve(repositoryRoot, "extensions/official/scratch-pad"),
+    resolve(repositoryRoot, "extensions/official/notes"),
   );
 
   assert.equal(result.status, 0);
