@@ -48,6 +48,7 @@ import {
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
+import { handleDemoRpc, isDemoSession } from '@/features/demo/demoRpc'
 import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken } from '@/lib/push-notifications'
@@ -764,6 +765,12 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       timeoutMs?: number
     },
   ) => {
+    // Demo mode has no socket and no session key; answer locally instead of
+    // failing every call on encryption.
+    if (isDemoSession(get().sessionId)) {
+      return handleDemoRpc<T>(method, params)
+    }
+
     const requestId = `${options?.requestIdPrefix ?? 'mobile-rpc'}-${_rpcRequestCounter++}`
     const encrypted = await get()._encryptJson(params)
 

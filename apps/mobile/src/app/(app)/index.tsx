@@ -91,6 +91,7 @@ import {
 } from "@/components/chat";
 import { ConnectionHeader, ThreadOptionsSheet } from "@/components/navigation";
 import { ConnectionDebugScreen } from "@/components/debug/ConnectionDebugScreen";
+import { DemoBanner } from "@/features/demo/DemoBanner";
 import {
   pasteImageInputFromClipboard,
   pickImageInputFromCamera,
@@ -1209,6 +1210,8 @@ export default function HomeScreen() {
           />
         </View>
       </View>
+
+      <DemoBanner />
 
       <SyncBanner status={syncStatus} />
 

@@ -17,6 +17,8 @@ import type {
 } from '@falcondeck/client-core'
 
 export const DEMO_PAIRING_CODE = 'DEMO-MODE'
+export const DEMO_SESSION_ID = 'demo-session'
+export const DEMO_WORKSPACE_ID = 'demo-workspace'
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
 
@@ -26,7 +28,7 @@ const REASONING_EFFORTS: ReasoningEffortOption[] = [
   { reasoning_effort: 'high', description: 'Thorough reasoning' },
 ]
 
-const DEMO_AGENT: ThreadAgentParams = {
+export const DEMO_AGENT: ThreadAgentParams = {
   model_id: 'claude-sonnet-4-6',
   reasoning_effort: 'medium',
   collaboration_mode_id: null,
@@ -34,7 +36,7 @@ const DEMO_AGENT: ThreadAgentParams = {
   service_tier: null,
 }
 
-function makeAttention(seq: number): ThreadAttention {
+export function makeAttention(seq: number): ThreadAttention {
   return {
     level: 'none',
     badge_label: null,
@@ -46,7 +48,7 @@ function makeAttention(seq: number): ThreadAttention {
   }
 }
 
-const demoWorkspace: WorkspaceSummary = {
+export const demoWorkspace: WorkspaceSummary = {
   id: 'demo-workspace',
   path: '/Users/demo/my-project',
   status: 'ready',
@@ -82,6 +84,7 @@ const demoThreads: ThreadSummary[] = [
     attention: makeAttention(10),
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     queued_turns: [],
     variant: null,
@@ -103,6 +106,7 @@ const demoThreads: ThreadSummary[] = [
     attention: makeAttention(5),
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     queued_turns: [],
     variant: null,
@@ -172,3 +176,26 @@ export const demoConversationItems: ConversationItem[] = [
   { kind: 'tool_call', id: 'tc-7', title: 'bash: npm test', tool_kind: 'bash', status: 'completed', output: 'PASS src/routes/auth.test.ts\n  ✓ registers a new user (45ms)\n  ✓ rejects duplicate email (12ms)\n  ✓ logs in with valid credentials (38ms)\n  ✓ rejects invalid password (8ms)\n  ✓ refreshes access token (22ms)\n\nTest Suites: 1 passed, 1 total\nTests:       5 passed, 5 total', exit_code: 0, display: sideEffect('command_output'), created_at: ago(2), completed_at: ago(2) },
   { kind: 'assistant_message', id: 'msg-5', text: 'All 5 tests pass. Authentication is working correctly with JWT tokens, bcrypt password hashing, and refresh token rotation.', created_at: ago(1) },
 ]
+
+const demoMigrationItems: ConversationItem[] = [
+  { kind: 'user_message', id: 'mig-1', text: 'The latest migration fails on staging. Can you take a look?', attachments: [], created_at: ago(52) },
+  { kind: 'assistant_message', id: 'mig-2', text: "Let me check the migration history and the failing statement.", created_at: ago(51) },
+  { kind: 'tool_call', id: 'mig-tc-1', title: 'Read migrations/0007_add_sessions.sql', tool_kind: 'read', status: 'completed', output: 'ALTER TABLE sessions ADD COLUMN device_id UUID NOT NULL;', exit_code: null, display: readOnly, created_at: ago(51), completed_at: ago(51) },
+  { kind: 'assistant_message', id: 'mig-3', text: 'The column is added as `NOT NULL` without a default, so it fails on any table that already has rows. I\'ll backfill first, then add the constraint.', created_at: ago(50) },
+  { kind: 'tool_call', id: 'mig-tc-2', title: 'Edit migrations/0007_add_sessions.sql', tool_kind: 'edit', status: 'completed', output: null, exit_code: null, display: sideEffect('diff'), created_at: ago(48), completed_at: ago(48) },
+  { kind: 'tool_call', id: 'mig-tc-3', title: 'bash: npm run migrate', tool_kind: 'bash', status: 'completed', output: 'Applying 0007_add_sessions.sql\nBackfilled 1,284 rows\nMigration complete in 820ms', exit_code: 0, display: sideEffect('command_output'), created_at: ago(46), completed_at: ago(46) },
+  { kind: 'assistant_message', id: 'mig-4', text: 'Migration applied successfully. The column is backfilled from the existing device records and the `NOT NULL` constraint is now in place.', created_at: ago(45) },
+]
+
+/** Seeded transcript per demo thread, so every thread in the sidebar opens with content. */
+export const demoThreadItems: Record<string, ConversationItem[]> = {
+  'demo-thread-1': demoConversationItems,
+  'demo-thread-2': demoMigrationItems,
+}
+
+/**
+ * The demo workspace has no daemon behind it, so a sent message is answered
+ * locally. App Store review requires the app to do something on its own.
+ */
+export const DEMO_ASSISTANT_REPLY =
+  "Hello — this is a response from the demo workspace.\n\nThere's no desktop agent connected right now, so nothing here touches real files. Pair with FalconDeck on your Mac to run an actual coding agent from your phone."

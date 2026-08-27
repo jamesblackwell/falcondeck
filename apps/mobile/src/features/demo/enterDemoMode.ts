@@ -4,12 +4,12 @@
  */
 import { useRelayStore } from '@/store/relay-store'
 import { useSessionStore } from '@/store/session-store'
-import { demoSnapshot, demoConversationItems } from './demoData'
+import { DEMO_SESSION_ID, demoSnapshot, demoThreadItems } from './demoData'
 
 export function enterDemoMode() {
   // Set relay store to appear connected and encrypted
   useRelayStore.setState({
-    sessionId: 'demo-session',
+    sessionId: DEMO_SESSION_ID,
     deviceId: 'demo-device',
     connectionStatus: 'encrypted',
     isConnected: true,
@@ -17,7 +17,7 @@ export function enterDemoMode() {
     isSyncing: false,
     hasSyncedOnce: true,
     machinePresence: {
-      session_id: 'demo-session',
+      session_id: DEMO_SESSION_ID,
       daemon_connected: true,
       last_seen_at: new Date().toISOString(),
     },
@@ -34,15 +34,20 @@ export function enterDemoMode() {
     event: { type: 'snapshot', snapshot: demoSnapshot },
   })
 
-  // Select the first thread and inject conversation items
+  // Seed every thread so the sidebar never opens onto an empty conversation —
+  // demo mode has no daemon to fetch a transcript from.
   session.selectThread('demo-workspace', 'demo-thread-1')
-  session.setThreadDetail({
-    workspace: demoSnapshot.workspaces[0]!,
-    thread: demoSnapshot.threads[0]!,
-    items: demoConversationItems,
-    has_older: false,
-    oldest_item_id: demoConversationItems[0]?.id ?? null,
-    newest_item_id: demoConversationItems.at(-1)?.id ?? null,
-    is_partial: false,
-  })
+  for (const thread of demoSnapshot.threads) {
+    const items = demoThreadItems[thread.id]
+    if (!items) continue
+    session.setThreadDetail({
+      workspace: demoSnapshot.workspaces[0]!,
+      thread,
+      items,
+      has_older: false,
+      oldest_item_id: items[0]?.id ?? null,
+      newest_item_id: items.at(-1)?.id ?? null,
+      is_partial: false,
+    })
+  }
 }
