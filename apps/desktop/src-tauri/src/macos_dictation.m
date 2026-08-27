@@ -48,6 +48,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
+// Set only while the overlay's Undo button restarts a recording, so the new
+// take keeps the target the cancelled one captured.
+@property(nonatomic) BOOL keepPasteTarget;
 // Provider used for the retained recording; -1 when unknown (no recording,
 // or a recording that predates this field).
 @property(nonatomic) NSInteger retainedProvider;
@@ -379,7 +382,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // Keep the insertion target stable while transcription runs. In particular,
   // the dictation overlay must not cause a later paste to be routed back
   // through FalconDeck's global event stream or into a newly focused app.
-  [self capturePasteTarget];
+  if (!self.keepPasteTarget) [self capturePasteTarget];
 
   NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.m4a",
                                              NSUUID.UUID.UUIDString];
@@ -752,6 +755,26 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
 }
 
+// Undo from the overlay after a cancelled take. Clicking the overlay can pull
+// FalconDeck to the front, so this deliberately skips -capturePasteTarget and
+// hands focus back to the app the writer was dictating into; recapturing would
+// aim the next transcript at FalconDeck itself.
+- (void)restartRecordingKeepingTarget {
+  pid_t target = self.pasteTargetProcessIdentifier;
+  BOOL targetIsAnotherApp =
+      target > 0 && target != NSProcessInfo.processInfo.processIdentifier;
+  if (targetIsAnotherApp &&
+      NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier ==
+          NSProcessInfo.processInfo.processIdentifier) {
+    NSRunningApplication *previous =
+        [NSRunningApplication runningApplicationWithProcessIdentifier:target];
+    [previous activateWithOptions:0];
+  }
+  self.keepPasteTarget = target > 0;
+  [self startRecording];
+  self.keepPasteTarget = NO;
+}
+
 - (void)discardLastRecording {
   if (self.recording) {
     [self cancelRecording];
@@ -941,6 +964,12 @@ void fd_dictation_stop(void) {
 void fd_dictation_cancel(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
     [[FDDictationController sharedController] cancelRecording];
+  });
+}
+
+void fd_dictation_restart(void) {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [[FDDictationController sharedController] restartRecordingKeepingTarget];
   });
 }
 

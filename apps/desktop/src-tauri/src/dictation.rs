@@ -27,6 +27,9 @@ const OVERLAY_PILL_HEIGHT: f64 = 84.0;
 const OVERLAY_FAILED_WIDTH: f64 = 720.0;
 const OVERLAY_FAILED_HEIGHT: f64 = 156.0;
 const OPENROUTER_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(75);
+// How long the cancelled pill stays up offering Undo. Mirrored by
+// UNDO_WINDOW_SECONDS in DictationOverlay.tsx, which counts it down.
+const CANCEL_UNDO_WINDOW: Duration = Duration::from_secs(10);
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static CONFIG: LazyLock<RwLock<DictationConfiguration>> =
@@ -172,6 +175,7 @@ unsafe extern "C" {
     fn fd_dictation_speech_permission() -> i32;
     fn fd_dictation_accessibility_permission() -> bool;
     fn fd_dictation_start();
+    fn fd_dictation_restart();
     fn fd_dictation_stop();
     fn fd_dictation_cancel();
     fn fd_dictation_retry();
@@ -376,6 +380,19 @@ pub fn start_dictation() -> Result<(), String> {
     Err("System-wide dictation is currently available on macOS only.".to_string())
 }
 
+/// Restarts recording after a cancelled take without recapturing the paste
+/// target, so the next transcript still lands where the writer was typing.
+#[tauri::command]
+pub fn restart_dictation() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        fd_dictation_restart();
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("System-wide dictation is currently available on macOS only.".to_string())
+}
+
 #[tauri::command]
 pub fn stop_dictation() {
     #[cfg(target_os = "macos")]
@@ -460,19 +477,19 @@ fn overlay_size(failed: bool) -> (f64, f64) {
     }
 }
 
-/// Sizes and (dis)arms the overlay for a state. The pill states have no
+/// Sizes and (dis)arms the overlay for a state. Most pill states have no
 /// controls, so the window ignores the cursor entirely — otherwise clicks in the
 /// transparent padding around the pill land on a FalconDeck window and activate
-/// the app. The failure card has buttons, so it takes clicks back. Every switch
-/// into the failure card also re-shows the overlay, so this never leaves the
-/// wider box sitting off-centre.
-fn set_overlay_mode(app: &AppHandle, failed: bool) {
+/// the app. The failure card and the cancelled pill carry buttons, so they take
+/// clicks back. Every switch into the failure card also re-shows the overlay, so
+/// this never leaves the wider box sitting off-centre.
+fn set_overlay_mode(app: &AppHandle, state: &str) {
     let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) else {
         return;
     };
-    let (width, height) = overlay_size(failed);
+    let (width, height) = overlay_size(state == "failed");
     let _ = window.set_size(LogicalSize::new(width, height));
-    let _ = window.set_ignore_cursor_events(!failed);
+    let _ = window.set_ignore_cursor_events(!matches!(state, "failed" | "cancelled"));
 }
 
 /// `width` is the logical width just requested; reading `outer_size()` back
@@ -503,9 +520,9 @@ fn position_overlay(app: &AppHandle, width: f64) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn show_overlay(app: &AppHandle, failed: bool) {
-    set_overlay_mode(app, failed);
-    position_overlay(app, overlay_size(failed).0);
+fn show_overlay(app: &AppHandle, state: &str) {
+    set_overlay_mode(app, state);
+    position_overlay(app, overlay_size(state == "failed").0);
     if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
         let _ = window.show();
     }
@@ -524,7 +541,7 @@ fn hide_overlay_after(app: AppHandle, generation: u64, delay: Duration) {
 }
 
 fn emit_event(app: &AppHandle, event: DictationEvent) {
-    set_overlay_mode(app, event.state == "failed");
+    set_overlay_mode(app, event.state);
     let _ = app.emit(DICTATION_EVENT, &event);
 }
 
@@ -541,7 +558,7 @@ fn emit_failure_with_transcript(
     transcript: Option<String>,
 ) {
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-    show_overlay(app, true);
+    show_overlay(app, "failed");
     emit_event(
         app,
         DictationEvent {
@@ -734,7 +751,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
     match kind {
         event_kind::RECORDING => {
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-            show_overlay(&app, false);
+            show_overlay(&app, "recording");
             emit_event(
                 &app,
                 DictationEvent {
@@ -780,7 +797,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     retained_audio: false,
                 },
             );
-            hide_overlay_after(app, generation, Duration::from_millis(650));
+            hide_overlay_after(app, generation, CANCEL_UNDO_WINDOW);
         }
         event_kind::AUDIO_READY => {
             let path = PathBuf::from(payload);

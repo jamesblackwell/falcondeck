@@ -23,6 +23,9 @@ const INITIAL_EVENT: DictationEvent = {
 };
 
 const LEVEL_EVENT = "falcondeck://dictation-level";
+// Mirrors CANCEL_UNDO_WINDOW in dictation.rs, which hides the window when it
+// runs out. Counting the same span down here keeps the deadline visible.
+const UNDO_WINDOW_SECONDS = 10;
 const SAMPLE_INTERVAL_MS = 45;
 const MAX_SAMPLES = 180;
 
@@ -144,9 +147,23 @@ function LiveWaveform() {
 export function DictationOverlay() {
   const [event, setEvent] = useState<DictationEvent>(INITIAL_EVENT);
   const [copied, setCopied] = useState(false);
+  const [undoSecondsLeft, setUndoSecondsLeft] = useState(UNDO_WINDOW_SECONDS);
 
   useEffect(() => {
     setCopied(false);
+  }, [event]);
+
+  // Wall-clock rather than a tick count, so a throttled timer cannot promise
+  // more time than the window actually has left.
+  useEffect(() => {
+    if (event.state !== "cancelled") return;
+    setUndoSecondsLeft(UNDO_WINDOW_SECONDS);
+    const startedAt = Date.now();
+    const interval = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      setUndoSecondsLeft(Math.max(0, UNDO_WINDOW_SECONDS - elapsed));
+    }, 250);
+    return () => window.clearInterval(interval);
   }, [event]);
 
   useEffect(() => {
@@ -280,9 +297,23 @@ export function DictationOverlay() {
               {label}
             </span>
             {event.state === "recording" ? <LiveWaveform /> : null}
-            <span className="shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
-              {event.state === "recording" ? "Esc to cancel" : ""}
-            </span>
+            {event.state === "cancelled" ? (
+              <button
+                type="button"
+                className="fd-focus ml-auto inline-flex shrink-0 items-center gap-2 rounded-full border border-border-default px-3 py-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-primary hover:bg-surface-3"
+                onClick={() => void invoke("restart_dictation")}
+              >
+                <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+                Undo
+                <span className="font-mono text-fg-muted">
+                  {undoSecondsLeft}s
+                </span>
+              </button>
+            ) : (
+              <span className="ml-auto shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+                {event.state === "recording" ? "Esc to cancel" : ""}
+              </span>
+            )}
           </>
         )}
       </section>
