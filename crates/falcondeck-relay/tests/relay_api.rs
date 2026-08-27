@@ -99,6 +99,79 @@ async fn pairing_flow_and_history_round_trip() {
     assert_eq!(updates.next_seq, 1);
 }
 
+/// A PostgreSQL restart used to leave the relay answering every pairing
+/// request with `500 failed to persist relay state: connection closed` until
+/// the relay process was restarted by hand.
+#[tokio::test]
+#[ignore = "set FALCONDECK_RELAY_TEST_DATABASE_URL to run the PostgreSQL integration test"]
+async fn pairing_survives_a_postgres_connection_drop() {
+    let database_url = std::env::var("FALCONDECK_RELAY_TEST_DATABASE_URL")
+        .expect("FALCONDECK_RELAY_TEST_DATABASE_URL is required");
+    let server = spawn_postgres_server(&database_url).await;
+    let client = reqwest::Client::new();
+
+    let before = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("Before restart".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
+        },
+        None,
+    )
+    .await;
+
+    terminate_other_postgres_backends(&database_url).await;
+
+    let after = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("After restart".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+            pairing_authority: Some(test_pairing_authority()),
+        },
+        None,
+    )
+    .await;
+    assert_ne!(before.pairing_id, after.pairing_id);
+
+    let status = get_json::<PairingStatusResponse>(
+        &client,
+        &format!("{}/v1/pairings/{}", server.http_base, after.pairing_id),
+        Some(&after.daemon_token),
+    )
+    .await;
+    assert_eq!(status.status, PairingStatus::Pending);
+}
+
+/// Cut every relay-held connection the way a PostgreSQL restart does.
+async fn terminate_other_postgres_backends(database_url: &str) {
+    let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
+        .await
+        .expect("connect terminator session");
+    let task = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    client
+        .query(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+             WHERE datname = current_database() AND pid <> pg_backend_pid()",
+            &[],
+        )
+        .await
+        .expect("terminate relay backend connections");
+    drop(client);
+    let _ = task.await;
+}
+
 #[tokio::test]
 async fn pairing_creation_rate_limit_rejects_before_persisting_sessions() {
     let server = spawn_server().await;
@@ -3460,6 +3533,18 @@ async fn spawn_server() -> TestServer {
     server
 }
 
+async fn spawn_postgres_server(database_url: &str) -> TestServer {
+    let state = AppState::load_postgres_with_retention(
+        "test".to_string(),
+        database_url.to_string(),
+        Duration::seconds(300),
+        RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
+    serve_state(state).await
+}
+
 async fn spawn_server_at(state_path: PathBuf) -> TestServer {
     spawn_server_at_with_retention(state_path, RetentionConfig::default()).await
 }
@@ -3485,6 +3570,10 @@ async fn spawn_server_at_with_retention(
     .await
     .unwrap();
 
+    serve_state(state).await
+}
+
+async fn serve_state(state: AppState) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let router_state = state.clone();

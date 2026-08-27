@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -256,24 +260,85 @@ impl FileBackend {
 // ── Postgres backend ─────────────────────────────────────────────────
 
 pub(crate) struct PostgresBackend {
+    /// Kept so a dropped connection can be re-established: PostgreSQL
+    /// restarts (package upgrades, operator restarts) otherwise wedge the
+    /// relay into failing every write with "connection closed" until the
+    /// relay process itself is restarted.
+    database_url: String,
     client: Mutex<PostgresClient>,
+    /// Bumped every time a connection is re-established. Writes attempted
+    /// while the connection was down never reached PostgreSQL, so the
+    /// in-memory state has to be flushed wholesale before the stored rows
+    /// are trustworthy again.
+    reconnect_epoch: AtomicU64,
+    /// Highest reconnect epoch a caller has already re-flushed.
+    resynced_epoch: AtomicU64,
+}
+
+/// Run statements against a live client, reconnecting and retrying once if
+/// the connection died underneath them. A closure-based helper would have to
+/// quantify the client borrow with a higher-ranked bound, which then rejects
+/// the request-scoped references the bodies also capture.
+macro_rules! with_reconnect {
+    ($backend:expr, |$client:ident| $body:block) => {{
+        let backend = $backend;
+        let mut guard = backend.locked_client().await?;
+        let outcome = {
+            let $client = &mut *guard;
+            async move { $body }.await
+        };
+        match outcome {
+            Err(error) if connection_lost(&guard, &error).await => {
+                warn!("postgres relay connection lost mid-statement: {error}; reconnecting");
+                *guard = connect_postgres_client(&backend.database_url).await?;
+                backend.reconnect_epoch.fetch_add(1, Ordering::SeqCst);
+                let $client = &mut *guard;
+                async move { $body }.await
+            }
+            outcome => outcome,
+        }
+    }};
 }
 
 impl PostgresBackend {
     pub(crate) async fn connect(database_url: &str) -> Result<Self, RelayError> {
         require_local_postgres_without_tls(database_url)?;
-        let (client, connection) = tokio_postgres::connect(database_url, NoTls)
-            .await
-            .map_err(|error| RelayError::StateLoad(error.to_string()))?;
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                warn!("postgres relay connection ended: {error}");
-            }
-        });
+        let client = connect_postgres_client(database_url).await?;
         init_postgres_schema(&client).await?;
         Ok(Self {
+            database_url: database_url.to_string(),
             client: Mutex::new(client),
+            reconnect_epoch: AtomicU64::new(0),
+            resynced_epoch: AtomicU64::new(0),
         })
+    }
+
+    /// The reconnect epoch still awaiting a full re-flush, if any. Callers
+    /// that hold the authoritative in-memory state use this to repair
+    /// everything an outage dropped.
+    pub(crate) fn pending_resync_epoch(&self) -> Option<u64> {
+        let epoch = self.reconnect_epoch.load(Ordering::SeqCst);
+        (epoch > self.resynced_epoch.load(Ordering::SeqCst)).then_some(epoch)
+    }
+
+    /// Record that the state was re-flushed for `epoch`. A reconnect that
+    /// happened during the flush bumps the epoch past this one and so stays
+    /// pending.
+    pub(crate) fn mark_resynced(&self, epoch: u64) {
+        self.resynced_epoch.fetch_max(epoch, Ordering::SeqCst);
+    }
+
+    /// Lock the client, replacing it first if its connection task has ended.
+    async fn locked_client(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, PostgresClient>, RelayError> {
+        let mut guard = self.client.lock().await;
+        if guard.is_closed() {
+            warn!("postgres relay connection is closed; reconnecting");
+            *guard = connect_postgres_client(&self.database_url).await?;
+            self.reconnect_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(guard)
     }
 
     /// Enforce replay retention before rows are decoded into memory. The
@@ -289,7 +354,7 @@ impl PostgresBackend {
             .unwrap_or(DateTime::<Utc>::MIN_UTC);
         let max_updates = i64::try_from(retention.max_updates_per_session).unwrap_or(i64::MAX);
         let max_bytes = i64::try_from(retention.max_update_bytes_per_session).unwrap_or(i64::MAX);
-        let client = self.client.lock().await;
+        let client = self.locked_client().await?;
         let deleted = client
             .execute(
                 r"
@@ -355,6 +420,43 @@ impl PostgresBackend {
     }
 }
 
+/// How long a failed statement waits for the client to admit its connection
+/// died before the failure is treated as an ordinary query error.
+const CONNECTION_LOSS_SETTLE: Duration = Duration::from_millis(100);
+
+/// Whether a failed statement lost its connection rather than hitting a query
+/// error. A server-side termination (PostgreSQL restart, `pg_terminate_backend`)
+/// surfaces on the statement as an opaque db error, and the client only reports
+/// `is_closed` once its background connection task has processed the shutdown —
+/// so give that task a moment to settle instead of mistaking a dead connection
+/// for a rejected statement.
+async fn connection_lost(client: &PostgresClient, error: &RelayError) -> bool {
+    if client.is_closed() || error.to_string().contains("connection closed") {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + CONNECTION_LOSS_SETTLE;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        if client.is_closed() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Open a client and drive its connection task in the background.
+async fn connect_postgres_client(database_url: &str) -> Result<PostgresClient, RelayError> {
+    let (client, connection) = tokio_postgres::connect(database_url, NoTls)
+        .await
+        .map_err(|error| RelayError::StateLoad(error.to_string()))?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            warn!("postgres relay connection ended: {error}");
+        }
+    });
+    Ok(client)
+}
+
 /// `NoTls` is only safe for a local database connection. Refuse a remote
 /// database rather than silently sending relay credentials and replay data in
 /// cleartext. TLS support can be added later without weakening this default.
@@ -392,14 +494,15 @@ impl PersistenceBackend for PostgresBackend {
         session: Option<&SessionMeta>,
         pairing: Option<&PairingRecord>,
     ) -> Result<(), RelayError> {
-        let mut client = self.client.lock().await;
-        if let Some(session) = session {
-            upsert_session(&mut client, session).await?;
-        }
-        if let Some(pairing) = pairing {
-            upsert_pairing(&mut client, pairing).await?;
-        }
-        Ok(())
+        with_reconnect!(self, |client| {
+            if let Some(session) = session {
+                upsert_session(client, session).await?;
+            }
+            if let Some(pairing) = pairing {
+                upsert_pairing(client, pairing).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn persist_device(
@@ -407,26 +510,28 @@ impl PersistenceBackend for PostgresBackend {
         session: &SessionMeta,
         device: Option<&TrustedDeviceRecord>,
     ) -> Result<(), RelayError> {
-        let mut client = self.client.lock().await;
-        upsert_session(&mut client, session).await?;
-        if let Some(device) = device {
-            upsert_device(&mut client, &session.session_id, device).await?;
-        }
-        Ok(())
+        with_reconnect!(self, |client| {
+            upsert_session(client, session).await?;
+            if let Some(device) = device {
+                upsert_device(client, &session.session_id, device).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn remove_device(&self, session_id: &str, device_id: &str) -> Result<(), RelayError> {
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "DELETE FROM relay_devices WHERE session_id = $1 AND device_id = $2",
-                &[&session_id, &device_id],
-            )
-            .await
-            .map_err(|error| {
-                RelayError::StatePersist(format!("failed to delete device: {error}"))
-            })?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_devices WHERE session_id = $1 AND device_id = $2",
+                    &[&session_id, &device_id],
+                )
+                .await
+                .map_err(|error| {
+                    RelayError::StatePersist(format!("failed to delete device: {error}"))
+                })?;
+            Ok(())
+        })
     }
 
     async fn persist_action(
@@ -434,12 +539,13 @@ impl PersistenceBackend for PostgresBackend {
         session: &SessionMeta,
         actions: &[QueuedActionRecord],
     ) -> Result<(), RelayError> {
-        let mut client = self.client.lock().await;
-        upsert_session(&mut client, session).await?;
-        for action in actions {
-            upsert_action(&mut client, action).await?;
-        }
-        Ok(())
+        with_reconnect!(self, |client| {
+            upsert_session(client, session).await?;
+            for action in actions {
+                upsert_action(client, action).await?;
+            }
+            Ok(())
+        })
     }
 
     async fn persist_update(
@@ -447,10 +553,11 @@ impl PersistenceBackend for PostgresBackend {
         session: &SessionMeta,
         update: &RelayUpdate,
     ) -> Result<(), RelayError> {
-        let mut client = self.client.lock().await;
-        upsert_session(&mut client, session).await?;
-        upsert_relay_update(&mut client, &session.session_id, update).await?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            upsert_session(client, session).await?;
+            upsert_relay_update(client, &session.session_id, update).await?;
+            Ok(())
+        })
     }
 
     async fn remove_updates(
@@ -461,15 +568,16 @@ impl PersistenceBackend for PostgresBackend {
         if update_ids.is_empty() {
             return Ok(());
         }
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "DELETE FROM relay_updates WHERE session_id = $1 AND update_id = ANY($2)",
-                &[&session_id, &update_ids],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_updates WHERE session_id = $1 AND update_id = ANY($2)",
+                    &[&session_id, &update_ids],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
     }
 
     async fn prune_updates(
@@ -479,66 +587,69 @@ impl PersistenceBackend for PostgresBackend {
     ) -> Result<(), RelayError> {
         let oldest = i64::try_from(oldest_retained_seq)
             .map_err(|_| RelayError::StatePersist("update sequence overflow".to_string()))?;
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "DELETE FROM relay_updates WHERE session_id = $1 AND seq < $2",
-                &[&session_id, &oldest],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_updates WHERE session_id = $1 AND seq < $2",
+                    &[&session_id, &oldest],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
     }
 
     async fn remove_sessions(&self, session_ids: &[String]) -> Result<(), RelayError> {
         if session_ids.is_empty() {
             return Ok(());
         }
-        let client = self.client.lock().await;
         // Devices, updates, actions, and pairings cascade on delete.
-        client
-            .execute(
-                "DELETE FROM relay_sessions WHERE session_id = ANY($1)",
-                &[&session_ids],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_sessions WHERE session_id = ANY($1)",
+                    &[&session_ids],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
     }
 
     async fn remove_pairings(&self, pairing_ids: &[String]) -> Result<(), RelayError> {
         if pairing_ids.is_empty() {
             return Ok(());
         }
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "DELETE FROM relay_pairings WHERE pairing_id = ANY($1)",
-                &[&pairing_ids],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_pairings WHERE pairing_id = ANY($1)",
+                    &[&pairing_ids],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
     }
 
     async fn remove_actions(&self, action_ids: &[String]) -> Result<(), RelayError> {
         if action_ids.is_empty() {
             return Ok(());
         }
-        let client = self.client.lock().await;
-        client
-            .execute(
-                "DELETE FROM relay_actions WHERE action_id = ANY($1)",
-                &[&action_ids],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        Ok(())
+        with_reconnect!(self, |client| {
+            client
+                .execute(
+                    "DELETE FROM relay_actions WHERE action_id = ANY($1)",
+                    &[&action_ids],
+                )
+                .await
+                .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+            Ok(())
+        })
     }
 
     async fn flush_all(&self, state: &PersistedState) -> Result<(), RelayError> {
-        let mut client = self.client.lock().await;
-        flush_postgres_state(&mut client, state).await
+        with_reconnect!(self, |client| { flush_postgres_state(client, state).await })
     }
 }
 
@@ -563,7 +674,7 @@ pub(crate) async fn load_file_state(path: &Path) -> Result<PersistedState, Relay
 pub(crate) async fn load_postgres_state(
     backend: &PostgresBackend,
 ) -> Result<PersistedState, RelayError> {
-    let client = backend.client.lock().await;
+    let client = backend.locked_client().await?;
     load_postgres_state_from_client(&client).await
 }
 
@@ -1338,6 +1449,87 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
+    /// A PostgreSQL restart used to wedge the relay permanently: the single
+    /// client was never replaced, so every later write failed with
+    /// "connection closed" until the relay process itself restarted.
+    #[tokio::test]
+    #[ignore = "set FALCONDECK_RELAY_TEST_DATABASE_URL to run the PostgreSQL integration test"]
+    async fn postgres_backend_reconnects_after_the_connection_drops() {
+        let database_url = std::env::var("FALCONDECK_RELAY_TEST_DATABASE_URL")
+            .expect("FALCONDECK_RELAY_TEST_DATABASE_URL is required");
+        let backend = PostgresBackend::connect(&database_url)
+            .await
+            .expect("connect relay PostgreSQL backend");
+
+        let now = Utc::now();
+        let session = SessionMeta {
+            session_id: format!("reconnect-{}", uuid::Uuid::new_v4().simple()),
+            pairing_id: "reconnect-pairing".to_string(),
+            daemon_token: "reconnect-token".to_string(),
+            daemon_last_seen_at: None,
+            created_at: now,
+            updated_at: now,
+            next_seq: 1,
+            oldest_lost_seq: 0,
+        };
+        backend
+            .persist_pairing(Some(&session), None)
+            .await
+            .expect("persist session before the connection drops");
+        assert_eq!(backend.pending_resync_epoch(), None);
+
+        let backend_pid: i32 = {
+            let client = backend.client.lock().await;
+            client
+                .query_one("SELECT pg_backend_pid()", &[])
+                .await
+                .expect("read backend pid")
+                .get(0)
+        };
+        let (killer, connection) = tokio_postgres::connect(&database_url, NoTls)
+            .await
+            .expect("connect killer session");
+        let killer_task = tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        killer
+            .query("SELECT pg_terminate_backend($1)", &[&backend_pid])
+            .await
+            .expect("terminate the relay backend connection");
+
+        backend
+            .persist_pairing(Some(&session), None)
+            .await
+            .expect("persist session after the connection drops");
+        assert!(
+            backend.pending_resync_epoch().is_some(),
+            "a reconnect must ask the caller to re-flush state lost during the outage"
+        );
+
+        {
+            let client = backend.client.lock().await;
+            let stored: i64 = client
+                .query_one(
+                    "SELECT COUNT(*) FROM relay_sessions WHERE session_id = $1",
+                    &[&session.session_id],
+                )
+                .await
+                .expect("count persisted session")
+                .get(0);
+            assert_eq!(stored, 1);
+            client
+                .execute(
+                    "DELETE FROM relay_sessions WHERE session_id = $1",
+                    &[&session.session_id],
+                )
+                .await
+                .expect("clean up persisted session");
+        }
+
+        drop(killer);
+        let _ = killer_task.await;
+    }
+
     /// This test uses temporary tables on an explicitly supplied PostgreSQL
     /// instance so it exercises PostgreSQL's real parser and window/CTE
     /// semantics without touching durable schemas or rows.
@@ -1386,7 +1578,10 @@ mod tests {
             .expect("create PostgreSQL pruning fixtures");
 
         let backend = PostgresBackend {
+            database_url: database_url.clone(),
             client: Mutex::new(client),
+            reconnect_epoch: AtomicU64::new(0),
+            resynced_epoch: AtomicU64::new(0),
         };
         let retention = RetentionConfig {
             update_retention: chrono::Duration::days(7),

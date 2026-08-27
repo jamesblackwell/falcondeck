@@ -3577,6 +3577,27 @@ impl AppState {
         self.prune_retained_state().await.map(|_| ())
     }
 
+    /// A PostgreSQL reconnect means every write attempted during the outage
+    /// was lost, so re-flush the authoritative in-memory state before the
+    /// stored rows are trusted again (a relay restart loads from them).
+    async fn resync_after_reconnect(&self) -> Result<(), RelayError> {
+        let Some(backend) = self
+            .inner
+            .backend
+            .as_any()
+            .downcast_ref::<crate::persistence::PostgresBackend>()
+        else {
+            return Ok(());
+        };
+        let Some(epoch) = backend.pending_resync_epoch() else {
+            return Ok(());
+        };
+        warn!("re-flushing relay state after a PostgreSQL reconnect");
+        self.persist_current().await?;
+        backend.mark_resynced(epoch);
+        Ok(())
+    }
+
     async fn prune_retained_state(&self) -> Result<bool, RelayError> {
         let report = self.prune_expired_state().await?;
         if report.is_empty() {
@@ -3630,6 +3651,9 @@ impl AppState {
                     break;
                 };
                 let state = AppState { inner };
+                if let Err(error) = state.resync_after_reconnect().await {
+                    warn!(%error, "failed to re-flush relay state after reconnect");
+                }
                 if let Err(error) = state.prune_retained_state().await {
                     warn!(%error, "failed to prune retained relay state");
                 }
