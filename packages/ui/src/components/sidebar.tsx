@@ -7,7 +7,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
   return (
     <aside
       className={cn(
-        'flex h-full min-h-0 flex-col bg-surface-1',
+        'fd-type-scope fd-scope-sidebar flex h-full min-h-0 flex-col bg-surface-1',
         className,
       )}
       {...props}

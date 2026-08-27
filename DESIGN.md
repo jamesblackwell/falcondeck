@@ -105,6 +105,17 @@ Web:
   via `--font-mono` / `--fd-font-mono`)
 - The `--fd-text-*` sizes multiply by `--fd-font-scale`, which the text-size
   setting overrides; size text with the tokens so user scaling keeps working.
+- Per-surface typography: appearance settings can also set `--fd-font-chat`
+  plus `--fd-scale-{sidebar,chat,code}` and `--fd-weight-{ui,sidebar,chat,code}`.
+  The sidebar and conversation roots carry `fd-type-scope fd-scope-sidebar|chat`
+  (styles.css), which re-derives the `--fd-text-*` tokens with the surface
+  multiplier folded in — new surfaces that should follow a per-surface size
+  need the same pair of classes, not a bespoke calc. Code sizing rides on
+  `code`/`kbd`/`samp` elements at zero specificity, so an explicit size class
+  on a code element opts out unless it multiplies by `--fd-scale-code` itself.
+- Lexend is bundled alongside Geist in `apps/desktop/public/fonts`; every other
+  preset resolves against locally installed fonts with graceful fallbacks, and
+  "Custom" passes a sanitized typed family name straight into the stack.
 
 Mobile:
 

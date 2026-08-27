@@ -824,7 +824,7 @@ export const Conversation = memo(function Conversation({
 
   return (
     <FileDiffProvider onOpenFile={onOpenFile}>
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="fd-type-scope fd-scope-chat flex min-h-0 flex-1 flex-col">
         <div className="relative min-h-0 flex-1">
           <div
             ref={scrollRef}

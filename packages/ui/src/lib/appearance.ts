@@ -45,17 +45,50 @@ export type DarkColorThemeSetting =
   | 'solarized-dark'
   | 'tokyo-night'
 export type ColorThemeSetting = LightColorThemeSetting | DarkColorThemeSetting
-export type SansFontSetting = 'geist' | 'system' | 'serif'
-export type MonoFontSetting = 'geist-mono' | 'system-mono'
+export type SansFontSetting =
+  | 'geist'
+  | 'lexend'
+  | 'inter'
+  | 'system'
+  | 'rounded'
+  | 'avenir'
+  | 'helvetica'
+  | 'new-york'
+  | 'serif'
+  | 'custom'
+export type MonoFontSetting =
+  | 'geist-mono'
+  | 'system-mono'
+  | 'jetbrains-mono'
+  | 'fira-code'
+  | 'cascadia'
+  | 'menlo'
+  | 'custom'
+/** Chat can follow the interface font or pick its own face. */
+export type ChatFontSetting = 'match' | SansFontSetting
 
 export type AppearanceSettings = {
   theme: ThemeSetting
   lightColorTheme: LightColorThemeSetting
   darkColorTheme: DarkColorThemeSetting
   sansFont: SansFontSetting
+  /** Family name typed by the user; used when sansFont === 'custom'. */
+  sansFontCustom: string
+  chatFont: ChatFontSetting
+  chatFontCustom: string
   monoFont: MonoFontSetting
+  monoFontCustom: string
   /** Multiplier applied to the --fd-text-* scale. */
   fontScale: number
+  /** Per-surface multipliers layered on top of fontScale. 1 = no change. */
+  sidebarScale: number
+  chatScale: number
+  codeScale: number
+  /** Base font weights per surface; 0 = leave the theme default alone. */
+  uiWeight: number
+  sidebarWeight: number
+  chatWeight: number
+  codeWeight: number
 }
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
@@ -63,8 +96,19 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   lightColorTheme: 'falcon-light',
   darkColorTheme: 'falcon-dark',
   sansFont: 'geist',
+  sansFontCustom: '',
+  chatFont: 'match',
+  chatFontCustom: '',
   monoFont: 'geist-mono',
+  monoFontCustom: '',
   fontScale: 1.05,
+  sidebarScale: 1,
+  chatScale: 1,
+  codeScale: 1,
+  uiWeight: 0,
+  sidebarWeight: 0,
+  chatWeight: 0,
+  codeWeight: 0,
 }
 
 export const THEME_OPTIONS: Array<{ value: ThemeSetting; label: string; description: string }> = [
@@ -278,42 +322,124 @@ const LEGACY_PALETTE_THEMES: Record<
   'tokyo-night': { light: 'tokyo-night-light', dark: 'tokyo-night' },
 }
 
-export const SANS_FONT_OPTIONS: Array<{
-  value: SansFontSetting
+export type FontOption<V extends string> = {
+  value: V
   label: string
   stack: string
-}> = [
+  /** Shown as the row's second line in the picker. */
+  description: string
+}
+
+/**
+ * Geist and Lexend ship with the app; everything else resolves against fonts
+ * installed on this machine and falls back gracefully when absent. 'custom'
+ * is a sentinel — the stack comes from the typed family name at apply time.
+ */
+export const SANS_FONT_OPTIONS: Array<FontOption<SansFontSetting>> = [
   {
     value: 'geist',
     label: 'Geist',
+    description: 'The FalconDeck default. Bundled.',
     stack: '"Geist", "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif',
+  },
+  {
+    value: 'lexend',
+    label: 'Lexend',
+    description: 'Designed for reading proficiency. Bundled.',
+    stack: '"Lexend", "Geist", system-ui, sans-serif',
+  },
+  {
+    value: 'inter',
+    label: 'Inter',
+    description: 'The screen-UI workhorse. Uses your installed copy.',
+    stack: '"Inter", "Geist", system-ui, sans-serif',
   },
   {
     value: 'system',
     label: 'System',
+    description: 'SF Pro — whatever this device considers native.',
     stack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif',
   },
   {
+    value: 'rounded',
+    label: 'SF Rounded',
+    description: 'The system face with rounded terminals.',
+    stack: 'ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif',
+  },
+  {
+    value: 'avenir',
+    label: 'Avenir Next',
+    description: 'Geometric humanist classic, ships with macOS.',
+    stack: '"Avenir Next", Avenir, "Segoe UI", system-ui, sans-serif',
+  },
+  {
+    value: 'helvetica',
+    label: 'Helvetica Neue',
+    description: 'The grotesque standard, ships with macOS.',
+    stack: '"Helvetica Neue", Helvetica, Arial, system-ui, sans-serif',
+  },
+  {
+    value: 'new-york',
+    label: 'New York',
+    description: 'The system serif, tuned for screens.',
+    stack: 'ui-serif, "New York", Georgia, serif',
+  },
+  {
     value: 'serif',
-    label: 'Serif',
+    label: 'Book Serif',
+    description: 'Iowan / Palatino — an old-style reading face.',
     stack: '"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif',
+  },
+  {
+    value: 'custom',
+    label: 'Custom…',
+    description: 'Type the name of any font installed on this Mac.',
+    stack: 'var(--fd-font-sans)',
   },
 ]
 
-export const MONO_FONT_OPTIONS: Array<{
-  value: MonoFontSetting
-  label: string
-  stack: string
-}> = [
+export const MONO_FONT_OPTIONS: Array<FontOption<MonoFontSetting>> = [
   {
     value: 'geist-mono',
     label: 'Geist Mono',
+    description: 'The FalconDeck default. Bundled.',
     stack: '"Geist Mono", "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace',
   },
   {
     value: 'system-mono',
     label: 'System',
+    description: 'SF Mono / Menlo — the native terminal face.',
     stack: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+  },
+  {
+    value: 'jetbrains-mono',
+    label: 'JetBrains Mono',
+    description: 'Tall x-height, ligatures. Uses your installed copy.',
+    stack: '"JetBrains Mono", "Geist Mono", ui-monospace, monospace',
+  },
+  {
+    value: 'fira-code',
+    label: 'Fira Code',
+    description: 'Ligature pioneer. Uses your installed copy.',
+    stack: '"Fira Code", "Geist Mono", ui-monospace, monospace',
+  },
+  {
+    value: 'cascadia',
+    label: 'Cascadia Code',
+    description: 'Microsoft’s terminal face. Uses your installed copy.',
+    stack: '"Cascadia Code", "Geist Mono", ui-monospace, monospace',
+  },
+  {
+    value: 'menlo',
+    label: 'Menlo',
+    description: 'The pre-SF Mono macOS classic.',
+    stack: 'Menlo, Monaco, ui-monospace, monospace',
+  },
+  {
+    value: 'custom',
+    label: 'Custom…',
+    description: 'Type the name of any monospace font installed here.',
+    stack: 'var(--fd-font-mono)',
   },
 ]
 
@@ -324,8 +450,78 @@ export const FONT_SCALE_OPTIONS: Array<{ value: number; label: string }> = [
   { value: 1.25, label: 'Extra large' },
 ]
 
+/** Per-surface size multipliers, layered on the global text size. */
+export const SURFACE_SCALE_OPTIONS: Array<{ value: number; label: string }> = [
+  { value: 0.9, label: '90%' },
+  { value: 0.95, label: '95%' },
+  { value: 1, label: '100%' },
+  { value: 1.05, label: '105%' },
+  { value: 1.1, label: '110%' },
+  { value: 1.15, label: '115%' },
+]
+
+/** Base-weight overrides. Headings and labels keep their heavier weights. */
+export const FONT_WEIGHT_OPTIONS: Array<{ value: number; label: string }> = [
+  { value: 0, label: 'Default' },
+  { value: 300, label: 'Light' },
+  { value: 350, label: 'Book' },
+  { value: 400, label: 'Regular' },
+  { value: 450, label: 'Text' },
+  { value: 500, label: 'Medium' },
+]
+
+/**
+ * A typed family name travels into a CSS font-family value, so it is reduced
+ * to characters that can never terminate the declaration or smuggle in a url().
+ */
+export function sanitizeFontName(name: unknown): string {
+  if (typeof name !== 'string') return ''
+  return name.replace(/[^\w \-.]/g, '').trim().slice(0, 64)
+}
+
+function presetStack<V extends string>(
+  options: Array<FontOption<V>>,
+  value: V,
+): string | null {
+  const option = options.find((o) => o.value === value)
+  return option && option.value !== 'custom' ? option.stack : null
+}
+
+/** The concrete font-family value for a sans choice, or null for the default. */
+export function resolveSansStack(
+  setting: SansFontSetting,
+  customName: string,
+): string | null {
+  if (setting === 'custom') {
+    const name = sanitizeFontName(customName)
+    return name ? `"${name}", "Geist", system-ui, sans-serif` : null
+  }
+  return presetStack(SANS_FONT_OPTIONS, setting)
+}
+
+export function resolveMonoStack(
+  setting: MonoFontSetting,
+  customName: string,
+): string | null {
+  if (setting === 'custom') {
+    const name = sanitizeFontName(customName)
+    return name ? `"${name}", "Geist Mono", ui-monospace, monospace` : null
+  }
+  return presetStack(MONO_FONT_OPTIONS, setting)
+}
+
 const STORAGE_KEY = 'fd-appearance'
 const DARK_QUERY = '(prefers-color-scheme: dark)'
+
+function normalizeScale(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 1
+  return Math.min(1.3, Math.max(0.8, value))
+}
+
+function normalizeWeight(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 0
+  return Math.min(900, Math.max(100, Math.round(value / 50) * 50))
+}
 
 export function normalizeAppearance(value: unknown): AppearanceSettings {
   if (!value || typeof value !== 'object') return { ...DEFAULT_APPEARANCE }
@@ -347,12 +543,26 @@ export function normalizeAppearance(value: unknown): AppearanceSettings {
     sansFont: SANS_FONT_OPTIONS.some((o) => o.value === raw.sansFont)
       ? (raw.sansFont as SansFontSetting)
       : 'geist',
+    sansFontCustom: sanitizeFontName(raw.sansFontCustom),
+    chatFont:
+      raw.chatFont === 'match' || SANS_FONT_OPTIONS.some((o) => o.value === raw.chatFont)
+        ? (raw.chatFont as ChatFontSetting)
+        : 'match',
+    chatFontCustom: sanitizeFontName(raw.chatFontCustom),
     monoFont: MONO_FONT_OPTIONS.some((o) => o.value === raw.monoFont)
       ? (raw.monoFont as MonoFontSetting)
       : 'geist-mono',
+    monoFontCustom: sanitizeFontName(raw.monoFontCustom),
     fontScale: FONT_SCALE_OPTIONS.some((o) => o.value === raw.fontScale)
       ? (raw.fontScale as number)
       : DEFAULT_APPEARANCE.fontScale,
+    sidebarScale: normalizeScale(raw.sidebarScale),
+    chatScale: normalizeScale(raw.chatScale),
+    codeScale: normalizeScale(raw.codeScale),
+    uiWeight: normalizeWeight(raw.uiWeight),
+    sidebarWeight: normalizeWeight(raw.sidebarWeight),
+    chatWeight: normalizeWeight(raw.chatWeight),
+    codeWeight: normalizeWeight(raw.codeWeight),
   }
 }
 
@@ -406,19 +616,30 @@ function applyAppearance(settings: AppearanceSettings) {
     root.dataset.palette = colorTheme.palette
   }
 
-  const sans = SANS_FONT_OPTIONS.find((o) => o.value === settings.sansFont)
-  const mono = MONO_FONT_OPTIONS.find((o) => o.value === settings.monoFont)
-  if (settings.sansFont !== 'geist' && sans) {
-    root.style.setProperty('--fd-font-sans', sans.stack)
-  } else {
-    root.style.removeProperty('--fd-font-sans')
+  const setOrRemove = (property: string, value: string | null) => {
+    if (value === null) root.style.removeProperty(property)
+    else root.style.setProperty(property, value)
   }
-  if (settings.monoFont !== 'geist-mono' && mono) {
-    root.style.setProperty('--fd-font-mono', mono.stack)
-  } else {
-    root.style.removeProperty('--fd-font-mono')
-  }
+
+  const sansStack = resolveSansStack(settings.sansFont, settings.sansFontCustom)
+  setOrRemove('--fd-font-sans', settings.sansFont === 'geist' ? null : sansStack)
+  setOrRemove(
+    '--fd-font-chat',
+    settings.chatFont === 'match'
+      ? null
+      : resolveSansStack(settings.chatFont, settings.chatFontCustom),
+  )
+  const monoStack = resolveMonoStack(settings.monoFont, settings.monoFontCustom)
+  setOrRemove('--fd-font-mono', settings.monoFont === 'geist-mono' ? null : monoStack)
+
   root.style.setProperty('--fd-font-scale', String(settings.fontScale))
+  setOrRemove('--fd-scale-sidebar', settings.sidebarScale === 1 ? null : String(settings.sidebarScale))
+  setOrRemove('--fd-scale-chat', settings.chatScale === 1 ? null : String(settings.chatScale))
+  setOrRemove('--fd-scale-code', settings.codeScale === 1 ? null : String(settings.codeScale))
+  setOrRemove('--fd-weight-ui', settings.uiWeight === 0 ? null : String(settings.uiWeight))
+  setOrRemove('--fd-weight-sidebar', settings.sidebarWeight === 0 ? null : String(settings.sidebarWeight))
+  setOrRemove('--fd-weight-chat', settings.chatWeight === 0 ? null : String(settings.chatWeight))
+  setOrRemove('--fd-weight-code', settings.codeWeight === 0 ? null : String(settings.codeWeight))
 }
 
 /* --- Tiny external store so any component can read/update settings --- */
@@ -508,13 +729,8 @@ export function previewAppearance(patch: Partial<AppearanceSettings> | null) {
 }
 
 function sameAppearance(a: AppearanceSettings, b: AppearanceSettings): boolean {
-  return (
-    a.theme === b.theme &&
-    a.lightColorTheme === b.lightColorTheme &&
-    a.darkColorTheme === b.darkColorTheme &&
-    a.sansFont === b.sansFont &&
-    a.monoFont === b.monoFont &&
-    a.fontScale === b.fontScale
+  return (Object.keys(DEFAULT_APPEARANCE) as Array<keyof AppearanceSettings>).every(
+    (key) => a[key] === b[key],
   )
 }
 

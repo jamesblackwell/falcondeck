@@ -239,6 +239,10 @@
   --fd-text-2xl: calc(26px * var(--fd-font-scale));
   --fd-text-3xl: calc(32px * var(--fd-font-scale));
 
+  /* Neutral until a .fd-scope-* container overrides it; keeping it defined at
+     the root means the .fd-type-scope calc below never hits a missing var. */
+  --fd-scope-scale: 1;
+
   --fd-leading-tight: 1.25;
   --fd-leading-normal: 1.5;
   --fd-leading-relaxed: 1.65;
@@ -1281,12 +1285,55 @@ body {
   background: var(--fd-bg-0);
   color: var(--fd-fg-0);
   font-family: var(--font-sans);
+  /* Appearance settings can shift the app's base weight; headings and labels
+     keep their heavier weights via their own rules. */
+  font-weight: var(--fd-weight-ui, 400);
   font-size: var(--fd-text-base);
   line-height: var(--fd-leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* === Per-surface typography scopes ===
+   Custom properties resolve where they are declared, so overriding
+   --fd-font-scale on a container cannot recompute the root's --fd-text-*
+   tokens. A scope re-declares the token set with its own multiplier folded
+   in; pair `fd-type-scope` with one of the fd-scope-* classes on a container
+   and every --fd-text-* consumer inside it resizes together. */
+.fd-type-scope {
+  --fd-text-2xs: calc(11px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-xs: calc(12px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-sm: calc(14px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-base: calc(15px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-md: calc(16px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-lg: calc(18px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-xl: calc(22px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-2xl: calc(26px * var(--fd-font-scale) * var(--fd-scope-scale));
+  --fd-text-3xl: calc(32px * var(--fd-font-scale) * var(--fd-scope-scale));
+  font-size: calc(1em * var(--fd-scope-scale));
+}
+
+.fd-scope-sidebar {
+  --fd-scope-scale: var(--fd-scale-sidebar, 1);
+  font-weight: var(--fd-weight-sidebar, inherit);
+}
+
+.fd-scope-chat {
+  --fd-scope-scale: var(--fd-scale-chat, 1);
+  font-family: var(--fd-font-chat, var(--font-sans));
+  font-weight: var(--fd-weight-chat, inherit);
+}
+
+/* Code sizing rides on the element so it composes with the chat scope: 1em is
+   whatever the surrounding text resolved to, then the code multiplier applies.
+   Zero-specificity so any explicit size class on a code element still wins. */
+:where(code, kbd, samp) {
+  font-size: calc(1em * var(--fd-scale-code, 1));
+}
+:where(pre, code, kbd, samp, .font-mono, .fd-type-mono) {
+  font-weight: var(--fd-weight-code, inherit);
 }
 
 /* === Semantic typography ===

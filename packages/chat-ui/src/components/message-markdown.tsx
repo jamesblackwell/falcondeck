@@ -251,7 +251,7 @@ function markdownCodeComponent(highlight: boolean) {
       // [overflow-wrap:anywhere] breaks a long identifier only when it cannot
       // fit; break-all shattered every one of them mid-token. The 1px block
       // padding keeps inline code from inflating the line box in dense prose.
-      <code className="[overflow-wrap:anywhere] rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-px font-mono text-[0.9em]">
+      <code className="[overflow-wrap:anywhere] rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-px font-mono text-[length:calc(0.9em*var(--fd-scale-code,1))]">
         {children}
       </code>
     );

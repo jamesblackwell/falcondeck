@@ -115,4 +115,35 @@ describe("color palettes", () => {
       darkColorTheme: "dracula",
     });
   });
+
+  it("keeps typed font names CSS-safe and clamps surface tweaks", () => {
+    expect(
+      normalizeAppearance({
+        sansFont: "custom",
+        sansFontCustom: 'Lexend"; } body { url(evil)',
+        chatFont: "serif",
+        chatScale: 9,
+        codeScale: 0.1,
+        sidebarWeight: 437,
+        uiWeight: -20,
+      }),
+    ).toMatchObject({
+      sansFont: "custom",
+      sansFontCustom: "Lexend  body  urlevil",
+      chatFont: "serif",
+      chatScale: 1.3,
+      codeScale: 0.8,
+      sidebarWeight: 450,
+      uiWeight: 0,
+    });
+  });
+
+  it("defaults unknown font choices and leaves chat matching the interface", () => {
+    expect(normalizeAppearance({ sansFont: "comic-sans", chatFont: "wide" })).toMatchObject({
+      sansFont: "geist",
+      chatFont: "match",
+      sidebarScale: 1,
+      chatWeight: 0,
+    });
+  });
 });
