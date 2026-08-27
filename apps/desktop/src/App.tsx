@@ -487,6 +487,7 @@ function AppInner() {
   const [isStopping, setIsStopping] = useState(false);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const handleSetThreadStage = useCallback(
     async (
       workspaceId: string,
@@ -5384,11 +5385,17 @@ function AppInner() {
   ]);
   const sidebarErrors = useMemo(
     () =>
-      [connectionError, actionError].filter((value): value is string =>
-        Boolean(value),
+      [connectionError, actionError].filter(
+        (value): value is string => Boolean(value) && value !== dismissedError,
       ),
-    [actionError, connectionError],
+    [actionError, connectionError, dismissedError],
   );
+  const handleDismissSidebarError = useCallback((error: string) => {
+    // Connection errors are derived from live state, so remember the
+    // dismissed text; a different message still surfaces.
+    setDismissedError(error);
+    setActionError((current) => (current === error ? null : current));
+  }, []);
   const activeMainViewId = isActivityOpen
     ? "core.activity"
     : isScheduledOpen
@@ -5488,6 +5495,7 @@ function AppInner() {
               ),
             )}
             errors={sidebarErrors}
+            onDismissError={handleDismissSidebarError}
             threadTagsById={threadTags.byThreadId}
             threadTagOptions={threadTags.tags}
             extensionSidebarFilters={extensionSidebarFilters}

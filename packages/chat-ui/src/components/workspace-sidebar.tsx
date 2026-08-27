@@ -7,6 +7,7 @@ import {
   FolderPlus,
   Plus,
   Search,
+  X,
 } from "lucide-react";
 
 import {
@@ -145,6 +146,9 @@ export type WorkspaceSidebarProps = {
    *  titlebar is just window controls and search. */
   title?: string;
   errors?: string[];
+  /** Dismiss handler for an error banner. Omit to render the banners
+   *  without a close affordance. */
+  onDismissError?: (error: string) => void;
   emptyState?: SidebarEmptyState;
   footer?: React.ReactNode;
   /** First-class navigation rendered before pinned threads and projects. */
@@ -559,6 +563,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   isAddingProject = false,
   title,
   errors = [],
+  onDismissError,
   emptyState = {
     title: "No projects",
     description: "Add a project folder to get started.",
@@ -1571,10 +1576,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const visibleErrors = errors.filter(Boolean);
   const showHeader =
-    Boolean(title) ||
-    Boolean(onSearch) ||
-    visibleErrors.length > 0 ||
-    Boolean(headerClassName);
+    Boolean(title) || Boolean(onSearch) || Boolean(headerClassName);
 
   return (
     <SidebarShell className={className}>
@@ -1613,19 +1615,39 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               ) : null}
             </div>
           ) : null}
-
-          {visibleErrors.map((error) => (
-            <p
-              key={error}
-              className="text-[length:var(--fd-text-xs)] text-warning"
-            >
-              {error}
-            </p>
-          ))}
         </SidebarHeader>
       ) : null}
 
       <SidebarContent className={contentClassName}>
+        {visibleErrors.length > 0 ? (
+          // Errors sit in the scrolling body, not the titlebar row: that row
+          // is a fixed-height drag region beside the traffic lights, so a
+          // wrapped message used to collide with the window controls.
+          <div className="mb-3 flex flex-col gap-2" role="status">
+            {visibleErrors.map((error) => (
+              <div
+                key={error}
+                className="flex items-start gap-2 rounded-[var(--fd-radius-md)] border border-warning/20 bg-warning-muted px-3 py-2 text-[length:var(--fd-text-xs)] text-warning"
+              >
+                <span className="min-w-0 flex-1 break-words">{error}</span>
+                {onDismissError ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="-mr-1 -mt-0.5 h-5 w-5 shrink-0 text-warning hover:text-warning"
+                    onClick={() => {
+                      onDismissError(error);
+                    }}
+                    aria-label="Dismiss error"
+                  >
+                    <X aria-hidden="true" className="h-3.5 w-3.5" />
+                  </Button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {newThreadRow || topNavigation ? (
           <nav className="mb-4">
             {newThreadRow}

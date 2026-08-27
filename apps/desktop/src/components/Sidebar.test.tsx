@@ -207,6 +207,31 @@ describe("DesktopSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps errors out of the titlebar row and lets them be dismissed", () => {
+    const onDismissError = vi.fn();
+    renderSidebar({
+      onSearch: vi.fn(),
+      onDismissError,
+      errors: [
+        "remote device revoke request failed with status 500 Internal Server Error",
+      ],
+    });
+
+    const error = screen.getByText(/remote device revoke request failed/);
+    // The header is a fixed-height drag region beside the traffic lights, so
+    // a wrapped error there collided with the window controls.
+    const search = screen.getByRole("button", { name: "Search" });
+    expect(search.parentElement).not.toContainElement(error);
+    expect(search.compareDocumentPosition(error)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss error" }));
+    expect(onDismissError).toHaveBeenCalledWith(
+      "remote device revoke request failed with status 500 Internal Server Error",
+    );
+  });
+
   it("opens search from the header and adds projects from the Projects heading", () => {
     const onSearch = vi.fn();
     const onAddProject = vi.fn();
