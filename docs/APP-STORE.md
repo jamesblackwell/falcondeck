@@ -82,21 +82,10 @@ Guideline 2.3.1 rejects generic review notes, so this stays specific. Paste as
 written and keep the demo steps accurate against the shipped build.
 
 ```
-WHAT THIS APP IS
+HOW TO REVIEW THE APP
 
-FalconDeck lets users follow and steer coding-agent sessions from a native iOS
-interface. Agent work runs on the user's own Mac; this app displays the
-session, sends instructions, and answers permission prompts.
-
-No code is downloaded, interpreted, or executed on the iOS device. All agent
-work runs on the user's own Mac. This is not a remote desktop or screen
-mirroring app; there is no host screen streaming and the iOS interface is
-native.
-
-HOW TO REVIEW WITHOUT A MAC
-
-The app includes a built-in demo workspace for review. It requires no pairing,
-account, or network:
+FalconDeck includes a fully interactive built-in demo workspace. It requires
+no sign-in, pairing, desktop setup, or network connection:
 
 1. Launch FalconDeck
 2. On the welcome screen, tap "Explore demo workspace"
@@ -107,6 +96,18 @@ clearly labelled simulated reply after a short delay. A banner at the top
 identifies the demo and provides a route back to pairing.
 
 To leave demo mode, tap "Pair a desktop" in that banner.
+
+HOW FALCONDECK WORKS
+
+FalconDeck is a native iOS interface for following and steering coding-agent
+sessions. In ordinary use, a user pairs their phone with a FalconDeck agent
+session running in their own development environment. The Mac handles agent
+execution; the iOS app shows the live session, lets the user send instructions,
+and lets them respond to approval prompts.
+
+No code is downloaded, interpreted, or executed on the iOS device. This is not
+a remote desktop or screen-mirroring app: there is no host-screen streaming and
+the iOS interface is native.
 
 ABOUT THE PAIRING SCREEN
 
