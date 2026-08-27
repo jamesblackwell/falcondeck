@@ -17,6 +17,7 @@ typedef NS_ENUM(int32_t, FDEventKind) {
   FDEventAudioLevel = 7,
   FDEventSelfInsert = 8,
   FDEventPasteFailed = 9,
+  FDEventCancelledRetained = 11,
 };
 
 #endif

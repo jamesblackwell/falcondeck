@@ -61,6 +61,7 @@ mod event_kind {
     pub const AUDIO_LEVEL: i32 = 7;
     pub const SELF_INSERT: i32 = 8;
     pub const PASTE_FAILED: i32 = 9;
+    pub const CANCELLED_RETAINED: i32 = 11;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -175,7 +176,7 @@ unsafe extern "C" {
     fn fd_dictation_speech_permission() -> i32;
     fn fd_dictation_accessibility_permission() -> bool;
     fn fd_dictation_start();
-    fn fd_dictation_restart();
+    fn fd_dictation_drop_cancelled();
     fn fd_dictation_stop();
     fn fd_dictation_cancel();
     fn fd_dictation_retry();
@@ -380,19 +381,6 @@ pub fn start_dictation() -> Result<(), String> {
     Err("System-wide dictation is currently available on macOS only.".to_string())
 }
 
-/// Restarts recording after a cancelled take without recapturing the paste
-/// target, so the next transcript still lands where the writer was typing.
-#[tauri::command]
-pub fn restart_dictation() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        fd_dictation_restart();
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    Err("System-wide dictation is currently available on macOS only.".to_string())
-}
-
 #[tauri::command]
 pub fn stop_dictation() {
     #[cfg(target_os = "macos")]
@@ -410,8 +398,12 @@ pub fn cancel_dictation() {
     }
 }
 
+/// Also drives the overlay's Undo button. Bumping the generation retires the
+/// pending undo-window task, so the audio this is about to transcribe is not
+/// deleted out from under it.
 #[tauri::command]
 pub fn retry_dictation() {
+    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
     #[cfg(target_os = "macos")]
     unsafe {
         fd_dictation_retry();
@@ -477,19 +469,24 @@ fn overlay_size(failed: bool) -> (f64, f64) {
     }
 }
 
+/// Only the states that carry buttons take clicks: the failure card, and a
+/// cancelled pill that still has audio to undo.
+fn overlay_takes_clicks(event: &DictationEvent) -> bool {
+    event.state == "failed" || (event.state == "cancelled" && event.retained_audio)
+}
+
 /// Sizes and (dis)arms the overlay for a state. Most pill states have no
 /// controls, so the window ignores the cursor entirely — otherwise clicks in the
 /// transparent padding around the pill land on a FalconDeck window and activate
-/// the app. The failure card and the cancelled pill carry buttons, so they take
-/// clicks back. Every switch into the failure card also re-shows the overlay, so
+/// the app. Every switch into the failure card also re-shows the overlay, so
 /// this never leaves the wider box sitting off-centre.
-fn set_overlay_mode(app: &AppHandle, state: &str) {
+fn set_overlay_mode(app: &AppHandle, state: &str, takes_clicks: bool) {
     let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) else {
         return;
     };
     let (width, height) = overlay_size(state == "failed");
     let _ = window.set_size(LogicalSize::new(width, height));
-    let _ = window.set_ignore_cursor_events(!matches!(state, "failed" | "cancelled"));
+    let _ = window.set_ignore_cursor_events(!takes_clicks);
 }
 
 /// `width` is the logical width just requested; reading `outer_size()` back
@@ -521,7 +518,7 @@ fn position_overlay(app: &AppHandle, width: f64) {
 }
 
 fn show_overlay(app: &AppHandle, state: &str) {
-    set_overlay_mode(app, state);
+    set_overlay_mode(app, state, state == "failed");
     position_overlay(app, overlay_size(state == "failed").0);
     if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
         let _ = window.show();
@@ -540,8 +537,26 @@ fn hide_overlay_after(app: AppHandle, generation: u64, delay: Duration) {
     });
 }
 
+/// The cancelled take stays on disk only while the overlay still offers Undo;
+/// when the window closes, the audio goes with it.
+fn close_undo_window_after(app: AppHandle, generation: u64, delay: Duration) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        if SESSION_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
+            let _ = window.hide();
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            fd_dictation_drop_cancelled();
+        }
+    });
+}
+
 fn emit_event(app: &AppHandle, event: DictationEvent) {
-    set_overlay_mode(app, event.state);
+    set_overlay_mode(app, event.state, overlay_takes_clicks(&event));
     let _ = app.emit(DICTATION_EVENT, &event);
 }
 
@@ -797,7 +812,22 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     retained_audio: false,
                 },
             );
-            hide_overlay_after(app, generation, CANCEL_UNDO_WINDOW);
+            hide_overlay_after(app, generation, Duration::from_millis(650));
+        }
+        // Esc during a take: the audio survives for the undo window, so the
+        // pill stays up long enough to offer it back.
+        event_kind::CANCELLED_RETAINED => {
+            let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+            emit_event(
+                &app,
+                DictationEvent {
+                    state: "cancelled",
+                    text: None,
+                    error: None,
+                    retained_audio: true,
+                },
+            );
+            close_undo_window_after(app, generation, CANCEL_UNDO_WINDOW);
         }
         event_kind::AUDIO_READY => {
             let path = PathBuf::from(payload);
@@ -873,6 +903,7 @@ mod tests {
             ("AudioLevel", super::event_kind::AUDIO_LEVEL),
             ("SelfInsert", super::event_kind::SELF_INSERT),
             ("PasteFailed", super::event_kind::PASTE_FAILED),
+            ("CancelledRetained", super::event_kind::CANCELLED_RETAINED),
         ];
         for (name, value) in expected {
             assert!(

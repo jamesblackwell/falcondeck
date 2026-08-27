@@ -624,7 +624,6 @@ pub fn run() {
             dictation::dictation_permission_status,
             dictation::request_dictation_permission,
             dictation::start_dictation,
-            dictation::restart_dictation,
             dictation::stop_dictation,
             dictation::cancel_dictation,
             dictation::retry_dictation,

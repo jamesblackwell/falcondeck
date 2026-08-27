@@ -156,7 +156,7 @@ export function DictationOverlay() {
   // Wall-clock rather than a tick count, so a throttled timer cannot promise
   // more time than the window actually has left.
   useEffect(() => {
-    if (event.state !== "cancelled") return;
+    if (event.state !== "cancelled" || !event.retainedAudio) return;
     setUndoSecondsLeft(UNDO_WINDOW_SECONDS);
     const startedAt = Date.now();
     const interval = window.setInterval(() => {
@@ -297,11 +297,11 @@ export function DictationOverlay() {
               {label}
             </span>
             {event.state === "recording" ? <LiveWaveform /> : null}
-            {event.state === "cancelled" ? (
+            {event.state === "cancelled" && event.retainedAudio ? (
               <button
                 type="button"
                 className="fd-focus ml-auto inline-flex shrink-0 items-center gap-2 rounded-full border border-border-default px-3 py-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-primary hover:bg-surface-3"
-                onClick={() => void invoke("restart_dictation")}
+                onClick={() => void invoke("retry_dictation")}
               >
                 <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
                 Undo

@@ -48,7 +48,7 @@ describe("DictationOverlay", () => {
 
     await emit("falcondeck://dictation-state", {
       state: "cancelled",
-      retainedAudio: false,
+      retainedAudio: true,
     });
 
     const undo = await screen.findByRole("button", { name: /undo/i });
@@ -62,7 +62,19 @@ describe("DictationOverlay", () => {
     await act(async () => {
       fireEvent.click(undo);
     });
-    expect(invoked).toContain("restart_dictation");
+    expect(invoked).toContain("retry_dictation");
+  });
+
+  it("skips undo when the cancelled take kept no audio", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "cancelled",
+      retainedAudio: false,
+    });
+
+    expect(screen.getByText("Cancelled")).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("keeps the recording pill free of controls", async () => {

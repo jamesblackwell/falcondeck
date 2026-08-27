@@ -48,9 +48,10 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
-// Set only while the overlay's Undo button restarts a recording, so the new
-// take keeps the target the cancelled one captured.
-@property(nonatomic) BOOL keepPasteTarget;
+// A cancelled take's audio outlives the cancel while the overlay still offers
+// Undo, so Esc stays recoverable. Held in memory only, and dropped from Rust
+// when the undo window closes.
+@property(nonatomic) BOOL cancelledRecordingPending;
 // Provider used for the retained recording; -1 when unknown (no recording,
 // or a recording that predates this field).
 @property(nonatomic) NSInteger retainedProvider;
@@ -87,6 +88,8 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
 - (void)surfaceRetainedRecordingIfNeeded;
 - (void)capturePasteTarget;
+- (void)dropCancelledRecording;
+- (void)returnFocusToPasteTarget;
 @end
 
 static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
@@ -342,6 +345,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)startRecording {
   if (!self.enabled || self.recording || self.stopping) return;
+  [self dropCancelledRecording];
   if (self.recordingURL &&
       [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
     FDEmit(FDEventFailedRetained,
@@ -382,7 +386,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // Keep the insertion target stable while transcription runs. In particular,
   // the dictation overlay must not cause a later paste to be routed back
   // through FalconDeck's global event stream or into a newly focused app.
-  if (!self.keepPasteTarget) [self capturePasteTarget];
+  [self capturePasteTarget];
 
   NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.m4a",
                                              NSUUID.UUID.UUIDString];
@@ -525,9 +529,24 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     self.stopping = NO;
     NSURL *url = self.recordingURL ?: outputFileURL;
     if (self.cancelling) {
+      self.cancelling = NO;
+      NSNumber *cancelledSize = url
+          ? [[[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil]
+                objectForKey:NSFileSize]
+          : nil;
+      if (url && cancelledSize.unsignedLongLongValue > 0) {
+        // Hold what was said up to the Esc so the overlay can undo it, but keep
+        // the path out of NSUserDefaults: a persisted cancelled take would come
+        // back after a relaunch as a recording "waiting to be transcribed".
+        [self setRetainedRecordingURL:nil provider:0];
+        self.recordingURL = url;
+        self.retainedProvider = self.recordingProvider;
+        self.cancelledRecordingPending = YES;
+        FDEmit(FDEventCancelledRetained, @"");
+        return;
+      }
       if (url) [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
       [self setRetainedRecordingURL:nil provider:0];
-      self.cancelling = NO;
       FDEmit(FDEventCancelled, @"");
       return;
     }
@@ -733,6 +752,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
   // Retry with the provider that recorded the audio; only legacy recordings
   // without a stored provider fall back to the current setting.
+  self.cancelledRecordingPending = NO;
+  [self returnFocusToPasteTarget];
   FDProvider provider =
       self.retainedProvider >= 0 ? (FDProvider)self.retainedProvider : self.provider;
   if (@available(macOS 10.15, *)) {
@@ -755,24 +776,26 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
 }
 
-// Undo from the overlay after a cancelled take. Clicking the overlay can pull
-// FalconDeck to the front, so this deliberately skips -capturePasteTarget and
-// hands focus back to the app the writer was dictating into; recapturing would
-// aim the next transcript at FalconDeck itself.
-- (void)restartRecordingKeepingTarget {
-  pid_t target = self.pasteTargetProcessIdentifier;
-  BOOL targetIsAnotherApp =
-      target > 0 && target != NSProcessInfo.processInfo.processIdentifier;
-  if (targetIsAnotherApp &&
-      NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier ==
-          NSProcessInfo.processInfo.processIdentifier) {
-    NSRunningApplication *previous =
-        [NSRunningApplication runningApplicationWithProcessIdentifier:target];
-    [previous activateWithOptions:0];
+// Deletes the audio held for the undo window. Rust calls this when the window
+// closes; -startRecording and -shutdown call it so the take cannot linger.
+- (void)dropCancelledRecording {
+  if (!self.cancelledRecordingPending) return;
+  self.cancelledRecordingPending = NO;
+  if (self.recordingURL) {
+    [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
   }
-  self.keepPasteTarget = target > 0;
-  [self startRecording];
-  self.keepPasteTarget = NO;
+  [self setRetainedRecordingURL:nil provider:0];
+}
+
+// Clicking the overlay pulls FalconDeck to the front. Hand focus back to the
+// app the transcript is bound for, so the writer keeps their place.
+- (void)returnFocusToPasteTarget {
+  pid_t target = self.pasteTargetProcessIdentifier;
+  pid_t own = NSProcessInfo.processInfo.processIdentifier;
+  if (target <= 0 || target == own) return;
+  if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != own) return;
+  [[NSRunningApplication runningApplicationWithProcessIdentifier:target]
+      activateWithOptions:0];
 }
 
 - (void)discardLastRecording {
@@ -780,6 +803,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     [self cancelRecording];
     return;
   }
+  self.cancelledRecordingPending = NO;
   if (@available(macOS 10.15, *)) {
     self.speechGeneration += 1;
     [self.speechTask cancel];
@@ -802,6 +826,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 // whenever dictation is (re-)enabled and the controller is idle.
 - (void)surfaceRetainedRecordingIfNeeded {
   if (!self.enabled || self.recording || self.stopping) return;
+  if (self.cancelledRecordingPending) return;
   if (@available(macOS 10.15, *)) {
     if (self.speechTask) return;
   }
@@ -814,6 +839,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)shutdown {
   [NSNotificationCenter.defaultCenter removeObserver:self];
+  [self dropCancelledRecording];
   [self stopAudioLevelMeter];
   if (@available(macOS 10.15, *)) {
     self.speechGeneration += 1;
@@ -967,9 +993,9 @@ void fd_dictation_cancel(void) {
   });
 }
 
-void fd_dictation_restart(void) {
+void fd_dictation_drop_cancelled(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
-    [[FDDictationController sharedController] restartRecordingKeepingTarget];
+    [[FDDictationController sharedController] dropCancelledRecording];
   });
 }
 
