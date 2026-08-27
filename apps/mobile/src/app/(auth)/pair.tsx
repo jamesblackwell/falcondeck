@@ -3,7 +3,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
-  ScrollView,
   View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -168,13 +167,7 @@ export default function PairScreen() {
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView
-        style={styles.container}
-        contentContainerStyle={styles.scrollContent}
-        contentInsetAdjustmentBehavior="automatic"
-        keyboardShouldPersistTaps="handled"
-        automaticallyAdjustKeyboardInsets
-      >
+      <View style={styles.container}>
         <View style={styles.content}>
           <View style={styles.hero}>
             <Text
@@ -257,14 +250,14 @@ export default function PairScreen() {
                 />
 
                 <Button
-                  variant="ghost"
-                  label="Explore a demo"
+                  variant="outline"
+                  label="Explore demo workspace"
                   onPress={handleExploreDemo}
                   disabled={isClaiming}
                 />
 
                 <Text variant="caption" color="muted" style={styles.demoHint}>
-                  Browse a sample workspace without connecting to a desktop.
+                  No desktop available? Browse a sample workspace without pairing or signing in.
                 </Text>
 
                 {error ? (
@@ -286,12 +279,18 @@ export default function PairScreen() {
         <View style={styles.bottom}>
           {!isSecuringSession && showAdvanced ? (
             <View style={styles.advancedPanel}>
+              <Text variant="label" color="secondary" style={styles.advancedLabel}>
+                Relay server URL
+              </Text>
+              <Text variant="caption" color="muted" style={styles.advancedHint}>
+                Only change this when using a self-hosted FalconDeck relay.
+              </Text>
               <Input
                 value={relayUrl}
                 onChangeText={setRelayUrl}
-                placeholder="Relay URL"
+                placeholder="https://relay.example.com"
                 accessibilityLabel="Relay URL"
-                accessibilityHint="Enter the FalconDeck relay server address"
+                accessibilityHint="Enter the address of your self-hosted FalconDeck relay server"
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
@@ -304,12 +303,15 @@ export default function PairScreen() {
             onPress={() => setShowAdvanced(!showAdvanced)}
             disabled={isSecuringSession}
             accessibilityRole="button"
-            accessibilityLabel="Advanced settings"
+            accessibilityLabel="Self-hosted relay settings"
             accessibilityHint={showAdvanced ? 'Hides relay server settings' : 'Shows relay server settings'}
-            accessibilityState={{ disabled: isSecuringSession, expanded: showAdvanced }}
+            accessibilityState={{
+              disabled: isSecuringSession,
+              expanded: showAdvanced,
+            }}
           >
             <Text variant="caption" color="muted" size="2xs">
-              Advanced
+              Self-hosted relay settings
             </Text>
             {showAdvanced ? (
               <ChevronUp size={12} color={theme.colors.fg.muted} />
@@ -325,7 +327,7 @@ export default function PairScreen() {
             </Text>
           </View>
         </View>
-      </ScrollView>
+      </View>
     </KeyboardAvoidingView>
   )
 }
@@ -335,9 +337,6 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[0],
-  },
-  scrollContent: {
-    flexGrow: 1,
     paddingHorizontal: theme.spacing[6],
   },
   content: {
@@ -401,6 +400,13 @@ const styles = StyleSheet.create((theme) => ({
   advancedPanel: {
     width: '100%',
     maxWidth: 320,
+    gap: theme.spacing[1],
+  },
+  advancedLabel: {
+    alignSelf: 'flex-start',
+  },
+  advancedHint: {
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
   advancedToggle: {
     flexDirection: 'row',
