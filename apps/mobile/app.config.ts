@@ -34,17 +34,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // is backgrounded, like a music player. Requires a native rebuild.
     infoPlist: {
       UIBackgroundModes: ['audio'],
-      // Apple validates this exact Info.plist key during upload. FalconDeck
-      // bundles end-to-end session encryption, so it must not claim an
-      // encryption exemption.
-      ITSAppUsesNonExemptEncryption: true,
+      // FalconDeck uses standard cryptography only. With France excluded from
+      // distribution, Apple classifies that as exempt from export-compliance
+      // documentation, so no App Store Connect compliance code is required.
+      ITSAppUsesNonExemptEncryption: false,
     },
     config: {
-      // FalconDeck implements end-to-end session encryption with bundled
-      // cryptographic libraries, not only the operating system's transport
-      // security. Keep this true so App Store Connect asks the required
-      // export-compliance questions instead of making a false exemption claim.
-      usesNonExemptEncryption: true,
+      usesNonExemptEncryption: false,
     },
   },
   android: {
