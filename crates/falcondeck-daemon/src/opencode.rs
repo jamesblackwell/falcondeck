@@ -236,7 +236,7 @@ impl OpenCodeRuntime {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::debug!(%line, "OpenCode server stderr");
-                    if !line.contains("level=ERROR") {
+                    if !native_stderr_is_error(&line) {
                         continue;
                     }
                     let Some(runtime) = errors.upgrade() else {
@@ -276,6 +276,16 @@ impl OpenCodeRuntime {
     /// reports nothing over HTTP; these lines are the only account of why.
     pub async fn recent_server_errors(&self) -> Vec<String> {
         self.server_errors.lock().await.clone()
+    }
+
+    async fn silent_empty_turn_cause(&self) -> Option<String> {
+        self.recent_server_errors()
+            .await
+            .last()
+            .cloned()
+            .map(|cause| {
+                format!("OpenCode completed with no assistant text; OpenCode reported: {cause}")
+            })
     }
 
     pub async fn create_session(
@@ -565,6 +575,14 @@ impl OpenCodeRuntime {
                 continue;
             };
             if messages_are_settled(&messages) {
+                // OpenCode can store a completed empty assistant while the
+                // real API failure only appears on stderr. Treat that like
+                // idle-without-output so the turn is not a blank success.
+                if assistant_turn_lacks_visible_output(&messages)
+                    && let Some(cause) = self.silent_empty_turn_cause().await
+                {
+                    return Err(DaemonError::Rpc(cause));
+                }
                 return Ok(messages);
             }
             if self.has_pending_input(session_id).await {
@@ -1026,6 +1044,41 @@ fn session_is_active(value: &Value, session_id: &str) -> Result<bool, DaemonErro
                     .to_string(),
             )
         })
+}
+
+fn native_stderr_is_error(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("level=error")
+        || lower.contains("stream error")
+        || lower.contains("ai_apicallerror")
+}
+
+fn native_content_is_visible(content: &Value) -> bool {
+    match content.get("type").and_then(Value::as_str) {
+        Some("text") | Some("reasoning") => content
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty()),
+        Some("tool") => true,
+        _ => false,
+    }
+}
+
+fn assistant_turn_lacks_visible_output(messages: &[Value]) -> bool {
+    let Some(message) = messages
+        .iter()
+        .rev()
+        .find(|message| message.get("type").and_then(Value::as_str) == Some("assistant"))
+    else {
+        return true;
+    };
+    if message.get("error").is_some_and(|error| !error.is_null()) {
+        return false;
+    }
+    let Some(contents) = message.get("content").and_then(Value::as_array) else {
+        return true;
+    };
+    !contents.iter().any(native_content_is_visible)
 }
 
 fn messages_are_settled(messages: &[Value]) -> bool {
@@ -1843,6 +1896,20 @@ mod tests {
             json!({ "id": "msg_assistant", "type": "assistant", "error": { "name": "APIError" } }),
         ];
         assert!(messages_are_settled(&failed));
+        assert!(!assistant_turn_lacks_visible_output(&failed));
+
+        let empty_completed = vec![json!({
+            "id": "msg_empty",
+            "type": "assistant",
+            "time": { "created": 1, "completed": 2 },
+            "content": [{ "type": "text", "text": "" }]
+        })];
+        assert!(messages_are_settled(&empty_completed));
+        assert!(assistant_turn_lacks_visible_output(&empty_completed));
+        assert!(native_stderr_is_error(
+            r#"timestamp=2026-06-27T15:45:21.351Z level=ERROR message="stream error" error.error="AI_APICallError: Authentication Failed""#
+        ));
+        assert!(!native_stderr_is_error("info: idle"));
     }
 
     #[test]

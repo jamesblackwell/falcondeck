@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
@@ -570,6 +570,197 @@ pub(crate) fn rpc_error_data_text(data: &Value) -> Option<String> {
     })
 }
 
+/// Stderr markers OpenCode uses for API failures that never become JSON-RPC
+/// errors. The prompt RPC still returns a successful `stopReason`.
+const OPENCODE_STDERR_ERROR_MARKERS: [&str; 3] = ["level=error", "stream error", "ai_apicallerror"];
+const OPENCODE_STDERR_DIAGNOSTIC_LIMIT: usize = 360;
+/// JSON-RPC stdout can settle before the stderr task reads the matching
+/// error line. A short wait is enough for the pipe; this is not a stall.
+const ACP_STDERR_DRAIN: Duration = Duration::from_millis(150);
+
+fn truncate_diagnostic(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let taken: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{taken}…")
+    } else {
+        taken
+    }
+}
+
+fn shell_style_key_value(line: &str, key: &str) -> Option<String> {
+    let rest = line.split_once(&format!("{key}="))?.1;
+    if let Some(rest) = rest.strip_prefix('"') {
+        let mut value = String::new();
+        let mut escaped = false;
+        for character in rest.chars() {
+            if escaped {
+                value.push(character);
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                return Some(value);
+            } else {
+                value.push(character);
+            }
+        }
+        return None;
+    }
+    let value = rest.split_whitespace().next().unwrap_or(rest);
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn opencode_stderr_error_summary(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    if !OPENCODE_STDERR_ERROR_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+    let extracted = shell_style_key_value(line, "error.error")
+        .or_else(|| shell_style_key_value(line, "error"))
+        .unwrap_or_else(|| line.trim().to_string());
+    let cleaned = extracted
+        .strip_prefix("AI_APICallError:")
+        .or_else(|| extracted.strip_prefix("APICallError:"))
+        .unwrap_or(extracted.as_str())
+        .trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(truncate_diagnostic(
+            cleaned,
+            OPENCODE_STDERR_DIAGNOSTIC_LIMIT,
+        ))
+    }
+}
+
+fn json_u64_field(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(|entry| {
+        entry
+            .as_u64()
+            .or_else(|| entry.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| entry.as_str().and_then(|text| text.parse().ok()))
+    })
+}
+
+fn prompt_usage_indicates_no_model_tokens(response: &Value) -> bool {
+    let Some(usage) = response.get("usage") else {
+        return false;
+    };
+    if let Some(total) = json_u64_field(usage, "totalTokens") {
+        return total == 0;
+    }
+    let input = json_u64_field(usage, "inputTokens");
+    let output = json_u64_field(usage, "outputTokens");
+    if input.is_some() || output.is_some() {
+        return input.unwrap_or(0) == 0 && output.unwrap_or(0) == 0;
+    }
+    false
+}
+
+fn is_successful_empty_prompt_stop_reason(stop_reason: &str) -> bool {
+    matches!(
+        stop_reason.trim().to_ascii_lowercase().as_str(),
+        "end_turn" | "stop" | "completed" | "complete" | ""
+    )
+}
+
+fn acp_text_blocks_to_string(blocks: &[Value]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(Value::as_str) != Some("text") {
+                return None;
+            }
+            block.get("text").and_then(Value::as_str)
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn wrap_xml_messages(tag: &str, texts: &[String]) -> String {
+    let inner = texts
+        .iter()
+        .enumerate()
+        .map(|(index, text)| format!("<message index=\"{}\">\n{text}\n</message>", index + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("<{tag}>\n{inner}\n</{tag}>")
+}
+
+fn non_text_content_blocks(blocks: &[Value]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) != Some("text"))
+        .cloned()
+        .collect()
+}
+
+/// Re-sends cancelled user text with the steering prompt. ACP has no steer
+/// verb; cancel + re-prompt is the only path, and some providers drop the
+/// cancelled prompt from their own conversation history.
+fn bundle_cancelled_acp_prompt(interrupted: &[Vec<Value>], steering: Vec<Value>) -> Vec<Value> {
+    let steering_text = acp_text_blocks_to_string(&steering);
+    let mut seen = HashSet::new();
+    let interrupted_texts = interrupted
+        .iter()
+        .map(|blocks| acp_text_blocks_to_string(blocks))
+        .filter(|text| !text.is_empty() && text != &steering_text && seen.insert(text.clone()))
+        .collect::<Vec<_>>();
+    if interrupted_texts.is_empty() {
+        return steering;
+    }
+    let interrupted_section = wrap_xml_messages("interrupted_user_messages", &interrupted_texts);
+    let steering_texts = if steering_text.is_empty() {
+        Vec::new()
+    } else {
+        vec![steering_text]
+    };
+    let steering_section = wrap_xml_messages("steering_messages", &steering_texts);
+    let text = format!(
+        "{interrupted_section}\n\n{steering_section}\n\nThe active ACP prompt was cancelled so this steering could be delivered. Treat the interrupted user messages, if any, followed by the steering messages above as the latest user messages in chronological order."
+    );
+    let mut bundled = vec![json!({ "type": "text", "text": text })];
+    for blocks in interrupted {
+        bundled.extend(non_text_content_blocks(blocks));
+    }
+    bundled.extend(non_text_content_blocks(&steering));
+    bundled
+}
+
+fn empty_acp_prompt_diagnostic(
+    stop_reason: &str,
+    response: &Value,
+    stderr: Option<&str>,
+) -> String {
+    let usage = response.get("usage");
+    let input = usage
+        .and_then(|value| json_u64_field(value, "inputTokens"))
+        .unwrap_or(0);
+    let output = usage
+        .and_then(|value| json_u64_field(value, "outputTokens"))
+        .unwrap_or(0);
+    let total = usage
+        .and_then(|value| json_u64_field(value, "totalTokens"))
+        .unwrap_or(0);
+    let mut message = format!(
+        "OpenCode ACP completed with stopReason={stop_reason} but emitted no assistant content. Prompt usage was input={input}, output={output}, total={total}."
+    );
+    if let Some(stderr) = stderr.map(str::trim).filter(|text| !text.is_empty()) {
+        message.push_str(&format!(" OpenCode stderr reported: {stderr}."));
+    }
+    message.push_str(" The model returned no text to render.");
+    message
+}
+
 /// An ACP tool call's title, made readable. Agents send their own wire name
 /// (`read_file`, `search_replace`, `run_terminal_command`) on the opening
 /// update and only replace it with prose once the call resolves — which never
@@ -731,10 +922,14 @@ pub enum AcpEvent {
     /// The agent finished a prompt turn; ordered after that turn's deltas.
     /// `stop_reason` is the agent-reported reason (`end_turn`, `cancelled`,
     /// `refusal`, ...); `None` means the prompt request itself failed.
+    /// `had_output` is true when this prompt segment emitted assistant text,
+    /// reasoning, or a tool call — adapters that fail auth often return
+    /// `end_turn` with none of those, which must not look like a reply.
     TurnEnded {
         session_id: String,
         stop_reason: Option<String>,
         error: Option<String>,
+        had_output: bool,
     },
     /// The agent process died or the stream broke.
     Fatal { message: String },
@@ -839,6 +1034,9 @@ pub struct AcpRuntime {
     /// `session/prompt` is often the generic "Internal error"; this holds the
     /// real cause (for example an API 402) to surface instead.
     turn_failure_details: Mutex<HashMap<String, String>>,
+    /// OpenCode (and similar) can RPC-succeed `session/prompt` while the real
+    /// failure only appears on stderr. Captured while a prompt is in flight.
+    prompt_stderr_errors: Mutex<HashMap<String, String>>,
     initialize_result: Mutex<Option<Value>>,
     /// Whether the live process answered the vendor interjection probe
     /// (Grok's `x.ai/interject`). Steering itself needs no extension: every
@@ -849,6 +1047,11 @@ pub struct AcpRuntime {
     /// exactly while [`AcpRuntime::prompt`] runs its segment loop, so a steer
     /// landing without one is stale by definition.
     steer_queues: Mutex<HashMap<String, SteerQueue>>,
+    /// Sessions currently inside [`AcpRuntime::prompt`]. Out-of-turn chunks
+    /// (pi-acp's session-start banner) must not become the user's reply.
+    prompt_sessions: Mutex<HashSet<String>>,
+    /// Prompt sessions that emitted turn content during the current segment.
+    prompt_output_sessions: Mutex<HashSet<String>>,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
@@ -862,6 +1065,12 @@ struct SteerQueue {
     /// Prompt content blocks waiting to be delivered after the current
     /// prompt settles.
     queued: VecDeque<Vec<Value>>,
+    /// User prompts cancelled during this turn, in order. Some ACP providers
+    /// drop the cancelled prompt from their own history, so the next
+    /// `session/prompt` re-bundles these with the steering text.
+    interrupted: Vec<Vec<Value>>,
+    /// The in-flight segment's original content (not a re-bundled wrapper).
+    current: Vec<Value>,
     /// True after a steer sent `session/cancel` for the current prompt, so
     /// stacked steers do not fire redundant cancels.
     cancel_requested: bool,
@@ -1485,9 +1694,12 @@ impl AcpRuntime {
             metadata_discovered: AtomicBool::new(false),
             reported_update_kinds: Mutex::new(HashSet::new()),
             turn_failure_details: Mutex::new(HashMap::new()),
+            prompt_stderr_errors: Mutex::new(HashMap::new()),
             initialize_result: Mutex::new(None),
             supports_interject: AtomicBool::new(false),
             steer_queues: Mutex::new(HashMap::new()),
+            prompt_sessions: Mutex::new(HashSet::new()),
+            prompt_output_sessions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
             events,
         });
@@ -1996,6 +2208,11 @@ impl AcpRuntime {
         // notifications DURING the session/load request, so the
         // session→thread mapping must exist before the request goes out
         // or the event pump drops the entire replayed history.
+        //
+        // RepoPrompt suppresses that replay because it persists its own
+        // transcript. FalconDeck has no conversation DB: ingesting replay
+        // is how a restored thread gets its items back. The app layer
+        // skips load when items already exist so this does not duplicate.
         self.register_session(thread_id, native_session).await;
         // Bracket the replay on the ordered event channel. The read loop
         // handles every replayed notification before it resolves this
@@ -2262,6 +2479,62 @@ impl AcpRuntime {
             .cloned()
     }
 
+    async fn begin_prompt_segment(&self, session_id: &str) {
+        self.prompt_sessions
+            .lock()
+            .await
+            .insert(session_id.to_string());
+        self.prompt_output_sessions.lock().await.remove(session_id);
+        self.prompt_stderr_errors.lock().await.remove(session_id);
+    }
+
+    async fn wait_for_prompt_stderr(&self, session_id: &str) {
+        // The JSON-RPC response can beat the stderr pipe. Yield and poll so
+        // empty-turn diagnostics see the error line when it is already
+        // queued.
+        tokio::task::yield_now().await;
+        let deadline = Instant::now() + ACP_STDERR_DRAIN;
+        loop {
+            if self
+                .prompt_stderr_errors
+                .lock()
+                .await
+                .contains_key(session_id)
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn finish_prompt_segment(
+        &self,
+        session_id: &str,
+        stop_reason: Option<String>,
+        error: Option<String>,
+    ) {
+        let had_output = self.prompt_output_sessions.lock().await.remove(session_id);
+        self.prompt_sessions.lock().await.remove(session_id);
+        let _ = self.events.send(AcpEvent::TurnEnded {
+            session_id: session_id.to_string(),
+            stop_reason,
+            error,
+            had_output,
+        });
+    }
+
+    async fn note_prompt_output(&self, session_id: &str) {
+        if self.prompt_sessions.lock().await.contains(session_id) {
+            self.prompt_output_sessions
+                .lock()
+                .await
+                .insert(session_id.to_string());
+        }
+    }
+
     /// Runs one prompt turn; resolves when the agent reports a stop reason.
     ///
     /// A turn is a loop of `session/prompt` requests on the same session: a
@@ -2289,14 +2562,18 @@ impl AcpRuntime {
         } else {
             content
         };
-        self.steer_queues
-            .lock()
-            .await
-            .insert(session_id.to_string(), SteerQueue::default());
+        self.steer_queues.lock().await.insert(
+            session_id.to_string(),
+            SteerQueue {
+                current: content.clone(),
+                ..SteerQueue::default()
+            },
+        );
         loop {
             // A detail left over from an earlier prompt must not masquerade
             // as this one's cause.
             self.turn_failure_details.lock().await.remove(session_id);
+            self.begin_prompt_segment(session_id).await;
             let begun = self
                 .begin_request(
                     "session/prompt",
@@ -2361,11 +2638,8 @@ impl AcpRuntime {
                     // not restart the loop against a session in an unknown
                     // state.
                     self.steer_queues.lock().await.remove(session_id);
-                    let _ = self.events.send(AcpEvent::TurnEnded {
-                        session_id: session_id.to_string(),
-                        stop_reason: None,
-                        error: Some(error.to_string()),
-                    });
+                    self.finish_prompt_segment(session_id, None, Some(error.to_string()))
+                        .await;
                     return Err(error);
                 }
                 Ok(response) => response,
@@ -2375,6 +2649,31 @@ impl AcpRuntime {
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn")
                 .to_string();
+            let had_output = self
+                .prompt_output_sessions
+                .lock()
+                .await
+                .contains(session_id);
+            let empty_diagnostic =
+                if !had_output && is_successful_empty_prompt_stop_reason(&stop_reason) {
+                    self.wait_for_prompt_stderr(session_id).await;
+                    let stderr = self.prompt_stderr_errors.lock().await.remove(session_id);
+                    let is_opencode = self.config.id.eq_ignore_ascii_case("opencode");
+                    if stderr.is_some()
+                        || (is_opencode && prompt_usage_indicates_no_model_tokens(&response))
+                    {
+                        Some(empty_acp_prompt_diagnostic(
+                            &stop_reason,
+                            &response,
+                            stderr.as_deref(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    self.prompt_stderr_errors.lock().await.remove(session_id);
+                    None
+                };
             // Shift the queue regardless of the stop reason: a steer that
             // raced with normal completion is still delivered, as a follow-up
             // prompt in the same turn.
@@ -2389,13 +2688,27 @@ impl AcpRuntime {
                     }
                 })
             };
-            let _ = self.events.send(AcpEvent::TurnEnded {
-                session_id: session_id.to_string(),
-                stop_reason: Some(stop_reason.clone()),
-                error: None,
-            });
+            self.finish_prompt_segment(session_id, Some(stop_reason.clone()), empty_diagnostic)
+                .await;
             match next {
-                Some(next_content) => content = next_content,
+                Some(next_content) => {
+                    let mut queues = self.steer_queues.lock().await;
+                    if let Some(queue) = queues.get_mut(session_id) {
+                        if stop_reason == "cancelled" {
+                            if !queue.current.is_empty() {
+                                queue.interrupted.push(std::mem::take(&mut queue.current));
+                            }
+                            queue.current = next_content.clone();
+                            content = bundle_cancelled_acp_prompt(&queue.interrupted, next_content);
+                        } else {
+                            queue.interrupted.clear();
+                            queue.current = next_content.clone();
+                            content = next_content;
+                        }
+                    } else {
+                        content = next_content;
+                    }
+                }
                 None => {
                     self.steer_queues.lock().await.remove(session_id);
                     return Ok(stop_reason);
@@ -2410,7 +2723,9 @@ impl AcpRuntime {
     /// session, continuing the same logical turn. Works with any ACP agent —
     /// the protocol requires `session/cancel` to settle the active prompt.
     /// Unlike Grok's interject this discards the cancelled prompt's
-    /// in-flight work, which is why the vendor path stays preferred.
+    /// in-flight work, which is why the vendor path stays preferred. The
+    /// prompt loop re-bundles that cancelled user text with the steer: some
+    /// providers drop it from their own history after `session/cancel`.
     pub async fn steer_with_cancel(
         &self,
         session_id: &str,
@@ -2848,6 +3163,28 @@ impl AcpRuntime {
             while tail.len() > MAX_LINES {
                 tail.pop_front();
             }
+            drop(tail);
+            runtime.record_prompt_stderr_line(line).await;
+        }
+    }
+
+    async fn record_prompt_stderr_line(&self, line: &str) {
+        let Some(summary) = opencode_stderr_error_summary(line) else {
+            return;
+        };
+        let sessions = self
+            .prompt_sessions
+            .lock()
+            .await
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return;
+        }
+        let mut errors = self.prompt_stderr_errors.lock().await;
+        for session_id in sessions {
+            errors.insert(session_id, summary.clone());
         }
     }
 
@@ -3102,8 +3439,22 @@ impl AcpRuntime {
             }
         };
         if let Some(event) = event {
+            if Self::event_is_model_output(&event) {
+                self.note_prompt_output(session_id).await;
+            }
             let _ = self.events.send(event);
         }
+    }
+
+    fn event_is_model_output(event: &AcpEvent) -> bool {
+        matches!(
+            event,
+            AcpEvent::MessageDelta { .. }
+                | AcpEvent::ThoughtDelta { .. }
+                | AcpEvent::ToolCall { .. }
+                | AcpEvent::ToolCallUpdate { .. }
+                | AcpEvent::Plan { .. }
+        )
     }
 
     /// Records the failure text Grok reports through `_x.ai/session/update`
@@ -3482,6 +3833,29 @@ mod tests {
         (runtime, receiver)
     }
 
+    async fn fixture_runtime(
+        scenario: &str,
+    ) -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: format!("{scenario}-fixture"),
+            label: format!("{scenario} fixture"),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                scenario.to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize");
+        (runtime, receiver)
+    }
+
     async fn steer_fixture_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
@@ -3619,7 +3993,7 @@ mod tests {
             match next_acp_event(&mut events).await {
                 AcpEvent::TurnEnded { stop_reason, .. } => stop_reasons.push(stop_reason),
                 AcpEvent::MessageDelta { text, .. } => {
-                    saw_steer_delivery |= text.contains("SEEN:use the other endpoint");
+                    saw_steer_delivery |= text.contains("use the other endpoint");
                 }
                 _ => {}
             }
@@ -3631,6 +4005,115 @@ mod tests {
         assert!(
             saw_steer_delivery,
             "the queued steer should re-prompt on the same session"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_steer_re_sends_the_cancelled_prompt_with_the_steering_text() {
+        let (runtime, mut events) = steer_fixture_runtime().await;
+        let session_id = runtime
+            .ensure_session(
+                "thread-steer",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture session should start");
+        let prompt_runtime = Arc::clone(&runtime);
+        let prompt_session = session_id.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_runtime
+                .prompt(
+                    &prompt_session,
+                    vec![json!({ "type": "text", "text": "hold this prompt" })],
+                )
+                .await
+        });
+        wait_for_message_delta(&mut events, "SEEN:hold this prompt").await;
+
+        runtime
+            .steer_with_cancel(
+                &session_id,
+                vec![json!({ "type": "text", "text": "use the other endpoint" })],
+            )
+            .await
+            .expect("steer should be accepted while the prompt is in flight");
+
+        assert_eq!(
+            prompt.await.expect("prompt task should join").unwrap(),
+            "end_turn"
+        );
+        let mut saw_bundled_original = false;
+        let mut saw_bundled_steer = false;
+        let mut ended = 0usize;
+        while ended < 2 {
+            match next_acp_event(&mut events).await {
+                AcpEvent::TurnEnded { .. } => ended += 1,
+                AcpEvent::MessageDelta { text, .. } => {
+                    saw_bundled_original |= text.contains("hold this prompt")
+                        && text.contains("interrupted_user_messages");
+                    saw_bundled_steer |= text.contains("use the other endpoint")
+                        && text.contains("steering_messages");
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_bundled_original && saw_bundled_steer,
+            "the steered prompt must re-bundle the cancelled user text"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn empty_successful_prompt_with_stderr_error_is_diagnosed() {
+        let (runtime, mut events) = fixture_runtime("empty-stderr-error").await;
+        let session_id = runtime
+            .ensure_session(
+                "thread-empty-stderr",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture session should start");
+        let stop = runtime
+            .prompt(
+                &session_id,
+                vec![json!({ "type": "text", "text": "hello" })],
+            )
+            .await
+            .expect("empty prompt should still settle");
+        assert_eq!(stop, "end_turn");
+        let ended = timeout(Duration::from_secs(5), async {
+            loop {
+                if let AcpEvent::TurnEnded {
+                    had_output,
+                    stop_reason,
+                    error,
+                    ..
+                } = next_acp_event(&mut events).await
+                {
+                    return (had_output, stop_reason, error);
+                }
+            }
+        })
+        .await
+        .expect("turn-ended should arrive");
+        assert_eq!(ended.0, false);
+        assert_eq!(ended.1.as_deref(), Some("end_turn"));
+        let diagnostic = ended.2.expect("empty stderr failure must be diagnosed");
+        assert!(
+            diagnostic.contains("Authentication Failed"),
+            "diagnostic should carry the stderr cause: {diagnostic}"
         );
         runtime.shutdown().await;
     }
@@ -3694,7 +4177,7 @@ mod tests {
             .await
             .expect("steer should be accepted while the prompt is in flight");
         // The steer continued the turn; its own segment is now in flight.
-        wait_for_message_delta(&mut events, "SEEN:hold the steered segment").await;
+        wait_for_message_delta(&mut events, "hold the steered segment").await;
 
         runtime
             .cancel(&session_id)
@@ -3834,6 +4317,41 @@ mod tests {
         runtime.shutdown().await;
 
         assert_eq!(pending_count, 0);
+    }
+
+    #[test]
+    fn opencode_stderr_summary_extracts_the_api_call_error() {
+        let line = r#"timestamp=2026-06-27T15:45:21.351Z level=ERROR message="stream error" providerID=zai-coding-plan error.error="AI_APICallError: Authentication Failed""#;
+        assert_eq!(
+            opencode_stderr_error_summary(line).as_deref(),
+            Some("Authentication Failed")
+        );
+        assert!(opencode_stderr_error_summary("info: all good").is_none());
+        assert!(prompt_usage_indicates_no_model_tokens(&json!({
+            "usage": { "inputTokens": 0, "outputTokens": 0, "totalTokens": 0 }
+        })));
+        assert!(!prompt_usage_indicates_no_model_tokens(&json!({})));
+        assert!(is_successful_empty_prompt_stop_reason("end_turn"));
+        assert!(is_successful_empty_prompt_stop_reason("stop"));
+        assert!(!is_successful_empty_prompt_stop_reason("cancelled"));
+    }
+
+    #[test]
+    fn cancelled_steer_prompt_re_bundles_the_interrupted_user_text() {
+        let bundled = bundle_cancelled_acp_prompt(
+            &[vec![json!({ "type": "text", "text": "count to 80" })]],
+            vec![json!({ "type": "text", "text": "stop counting" })],
+        );
+        let text = bundled[0]["text"].as_str().expect("bundled text block");
+        assert!(text.contains("<interrupted_user_messages>"));
+        assert!(text.contains("count to 80"));
+        assert!(text.contains("<steering_messages>"));
+        assert!(text.contains("stop counting"));
+        let unchanged = bundle_cancelled_acp_prompt(
+            &[],
+            vec![json!({ "type": "text", "text": "just the steer" })],
+        );
+        assert_eq!(unchanged[0]["text"].as_str(), Some("just the steer"));
     }
 
     #[test]

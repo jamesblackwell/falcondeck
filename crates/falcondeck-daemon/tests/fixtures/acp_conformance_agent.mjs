@@ -126,6 +126,18 @@ input.on('line', (line) => {
 
   if (message.method === 'session/prompt') {
     promptCount += 1
+    if (scenario === 'empty-stderr-error') {
+      // JSON-RPC stdout first, then stderr: OpenCode's real failure mode is
+      // a successful stopReason with the cause only on the error pipe.
+      result(message.id, {
+        stopReason: 'end_turn',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      })
+      process.stderr.write(
+        'timestamp=2026-06-27T15:45:21.351Z level=ERROR message="stream error" providerID=zai-coding-plan error.error="AI_APICallError: Authentication Failed"\n',
+      )
+      return
+    }
     if (scenario === 'steer') {
       // Echoes each prompt so the test can observe delivery order. A prompt
       // containing "hold" stays open until session/cancel resolves it as
@@ -137,7 +149,14 @@ input.on('line', (line) => {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: `SEEN:${text}` },
       })
-      if (text.includes('hold')) {
+      // A steered prompt re-bundles the cancelled original. Only the
+      // steering section (or the raw text when there is no wrapper)
+      // decides whether this segment stays open for session/cancel.
+      const steering = text.match(
+        /<steering_messages>[\s\S]*?<\/steering_messages>/,
+      )
+      const holdScope = steering ? steering[0] : text
+      if (holdScope.includes('hold')) {
         cancelPromptId = message.id
         return
       }

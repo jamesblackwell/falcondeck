@@ -687,6 +687,14 @@ impl AppState {
                 let (item_id, full_text) = runtime
                     .append_user_text(&session_id, message_id.as_deref(), &text)
                     .await;
+                // Cancel+re-prompt steering re-bundles the interrupted
+                // user text. If the adapter echoes that wrapper, drop it
+                // — the client already appended the steering bubble.
+                if full_text.contains("<interrupted_user_messages>")
+                    || full_text.contains("<steering_messages>")
+                {
+                    return Ok(());
+                }
                 let is_submitted_message_echo = {
                     let workspaces = self.inner.workspaces.lock().await;
                     workspaces
@@ -1165,6 +1173,7 @@ impl AppState {
                 session_id,
                 stop_reason,
                 error,
+                had_output,
             } => {
                 if let Some(thread_id) = runtime.thread_for_session(&session_id).await {
                     let settlement = match stop_reason.as_deref() {
@@ -1191,6 +1200,34 @@ impl AppState {
                                 id: format!("acp-stop-{}", uuid::Uuid::new_v4().simple()),
                                 level: ServiceLevel::Warning,
                                 message: notice,
+                                created_at: Utc::now(),
+                            },
+                            true,
+                        )
+                        .await?;
+                    }
+                    // pi-acp maps a failed Pi RPC turn (401, missing model)
+                    // onto ACP `end_turn` with no assistant text. OpenCode can
+                    // do the same with a successful stopReason while the
+                    // cause lives only on stderr (`TurnEnded.error`).
+                    if !had_output && acp_empty_turn_stop_reason(stop_reason.as_deref()) {
+                        let message = match error
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|text| !text.is_empty())
+                        {
+                            Some(detail) => {
+                                format!("The agent finished without a reply. {detail}")
+                            }
+                            None => "The agent finished without a reply. Check that this harness is authenticated and the selected model can run.".to_string(),
+                        };
+                        self.push_conversation_item(
+                            workspace_id,
+                            &thread_id,
+                            ConversationItem::Service {
+                                id: format!("acp-empty-turn-{}", uuid::Uuid::new_v4().simple()),
+                                level: ServiceLevel::Warning,
+                                message,
                                 created_at: Utc::now(),
                             },
                             true,
@@ -1623,11 +1660,21 @@ fn default_acp_mode(available_modes: &[String]) -> Option<&str> {
         .or_else(|| available_modes.first().map(String::as_str))
 }
 
+fn acp_empty_turn_stop_reason(stop_reason: Option<&str>) -> bool {
+    matches!(
+        stop_reason
+            .map(|reason| reason.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("end_turn") | Some("stop") | Some("completed") | Some("complete")
+    )
+}
+
 /// A user-facing notice for stop reasons that cut the turn short. `end_turn`
 /// and `cancelled` are unremarkable (normal completion / user interrupt).
 fn acp_stop_reason_notice(stop_reason: Option<&str>) -> Option<String> {
     match stop_reason {
-        None | Some("end_turn") | Some("cancelled") => None,
+        None | Some("end_turn") | Some("cancelled") | Some("stop") | Some("completed")
+        | Some("complete") => None,
         Some("refusal") => Some("The agent declined to continue this turn.".to_string()),
         Some("max_tokens") => {
             Some("The turn stopped early: the model hit its output token limit.".to_string())
@@ -2222,7 +2269,7 @@ async fn acp_turn_content(
 mod tests {
     use chrono::Utc;
 
-    use super::{default_acp_mode, latest_user_message_contains_echo};
+    use super::{acp_empty_turn_stop_reason, default_acp_mode, latest_user_message_contains_echo};
     use falcondeck_core::{ContentLifecycle, ConversationItem};
 
     fn user_message(text: &str) -> ConversationItem {
@@ -2247,6 +2294,15 @@ mod tests {
             error: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn empty_turn_notice_covers_successful_stops_but_not_rpc_failure() {
+        assert!(acp_empty_turn_stop_reason(Some("end_turn")));
+        assert!(acp_empty_turn_stop_reason(Some("stop")));
+        assert!(acp_empty_turn_stop_reason(Some("completed")));
+        assert!(!acp_empty_turn_stop_reason(None));
+        assert!(!acp_empty_turn_stop_reason(Some("cancelled")));
     }
 
     #[test]
