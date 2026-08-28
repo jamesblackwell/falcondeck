@@ -17,6 +17,18 @@ export function triggerAgentCompletionHaptic() {
   runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light))
 }
 
+export function triggerMessageAcceptedHaptic() {
+  runWhenActive(() =>
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+  )
+}
+
+export function triggerMessageFailedHaptic() {
+  runWhenActive(() =>
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error),
+  )
+}
+
 export function triggerThreadArchiveHaptic() {
   runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium))
 }

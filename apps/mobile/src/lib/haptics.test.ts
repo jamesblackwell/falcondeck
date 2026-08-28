@@ -7,6 +7,8 @@ import {
   triggerComposerSelectionHaptic,
   triggerComposerStopHaptic,
   triggerComposerTapHaptic,
+  triggerMessageAcceptedHaptic,
+  triggerMessageFailedHaptic,
   triggerThreadArchiveFailedHaptic,
   triggerThreadArchiveHaptic,
   triggerThreadSelectionHaptic,
@@ -35,6 +37,26 @@ describe('mobile haptics', () => {
     triggerAgentCompletionHaptic()
 
     expect(impactAsync).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Light)
+  })
+
+  it('uses success notification feedback when a message is accepted', () => {
+    const notificationAsync = vi.spyOn(Haptics, 'notificationAsync')
+
+    triggerMessageAcceptedHaptic()
+
+    expect(notificationAsync).toHaveBeenCalledWith(
+      Haptics.NotificationFeedbackType.Success,
+    )
+  })
+
+  it('uses error notification feedback when a message send fails', () => {
+    const notificationAsync = vi.spyOn(Haptics, 'notificationAsync')
+
+    triggerMessageFailedHaptic()
+
+    expect(notificationAsync).toHaveBeenCalledWith(
+      Haptics.NotificationFeedbackType.Error,
+    )
   })
 
   it('uses a medium impact when a thread is archived', () => {
@@ -87,6 +109,8 @@ describe('mobile haptics', () => {
 
     triggerThreadSelectionHaptic()
     triggerAgentCompletionHaptic()
+    triggerMessageAcceptedHaptic()
+    triggerMessageFailedHaptic()
     triggerThreadArchiveHaptic()
     triggerThreadArchiveFailedHaptic()
     triggerComposerSelectionHaptic()

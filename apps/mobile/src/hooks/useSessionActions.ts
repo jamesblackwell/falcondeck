@@ -35,6 +35,10 @@ import type {
 
 import { isDemoSession } from "@/features/demo/demoRpc";
 import { isRelayTransportError } from "@/lib/connection-copy";
+import {
+  triggerMessageAcceptedHaptic,
+  triggerMessageFailedHaptic,
+} from "@/lib/haptics";
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
@@ -348,6 +352,7 @@ export function useSessionActions() {
         },
         { requestIdPrefix: "mobile-turn" },
       );
+      triggerMessageAcceptedHaptic();
       // The thread turned busy between our status check and the daemon's:
       // the send was queued, so the optimistic transcript copy comes out.
       if (sendResponse?.message === "queued") {
@@ -383,6 +388,7 @@ export function useSessionActions() {
           e instanceof Error ? e.message : "Failed to send message",
         );
       }
+      triggerMessageFailedHaptic();
     } finally {
       ui.clearPendingNewThreadItem(userItemId);
       ui.endSubmission(submittedKey);

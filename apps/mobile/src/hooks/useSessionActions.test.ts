@@ -9,6 +9,7 @@ import {
 } from "vitest";
 import React from "react";
 import TestRenderer, { act } from "react-test-renderer";
+import * as Haptics from "expo-haptics";
 
 import { useRelayStore } from "@/store/relay-store";
 import { useSessionStore } from "@/store/session-store";
@@ -476,6 +477,7 @@ describe("submitTurn guards", () => {
 
     const rpc = vi.fn().mockRejectedValue(new Error("nope"));
     const setError = vi.fn();
+    const notificationAsync = vi.spyOn(Haptics, "notificationAsync");
     useRelayStore.setState({
       _callRpc: rpc as RelayStoreState["_callRpc"],
       _setError: setError as RelayStoreState["_setError"],
@@ -531,6 +533,10 @@ describe("submitTurn guards", () => {
       },
     ]);
     expect(setError).toHaveBeenCalledWith("nope");
+    expect(notificationAsync).toHaveBeenCalledWith(
+      Haptics.NotificationFeedbackType.Error,
+    );
+    notificationAsync.mockRestore();
   });
 
   it("merges input added while a pending send fails", async () => {
@@ -685,6 +691,7 @@ describe("submitTurn guards", () => {
     useUIStore.getState().setDraft("Ship it");
 
     const pendingRpc = createDeferred<unknown>();
+    const notificationAsync = vi.spyOn(Haptics, "notificationAsync");
     useRelayStore.setState({
       _callRpc: vi
         .fn()
@@ -702,13 +709,18 @@ describe("submitTurn guards", () => {
       expect(useUIStore.getState().inFlightSubmissions["w1:t1"]?.text).toBe(
         "Ship it",
       );
+      expect(notificationAsync).not.toHaveBeenCalled();
 
       pendingRpc.resolve({ ok: true });
       await act(async () => submission);
 
       expect(useUIStore.getState().draft).toBe("");
       expect(useUIStore.getState().inFlightSubmissions["w1:t1"]).toBeUndefined();
+      expect(notificationAsync).toHaveBeenCalledWith(
+        Haptics.NotificationFeedbackType.Success,
+      );
     } finally {
+      notificationAsync.mockRestore();
       harness.unmount();
     }
   });
