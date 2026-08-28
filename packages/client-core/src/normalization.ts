@@ -354,6 +354,8 @@ const DEFAULT_CAPABILITIES: AgentCapabilitySummary = {
   supports_interrupt: false,
   supports_steering: false,
   supports_forking: false,
+  supports_compaction: false,
+  supports_compaction_instructions: false,
   sandbox_modes: [],
   permission_modes: [],
 };
@@ -402,6 +404,9 @@ function normalizeCapabilities(value: unknown): AgentCapabilitySummary {
     supports_interrupt: capabilities.supports_interrupt ?? false,
     supports_steering: capabilities.supports_steering ?? false,
     supports_forking: capabilities.supports_forking ?? false,
+    supports_compaction: capabilities.supports_compaction ?? false,
+    supports_compaction_instructions:
+      capabilities.supports_compaction_instructions ?? false,
     sandbox_modes: normalizeStringList(capabilities.sandbox_modes),
     permission_modes: normalizeStringList(capabilities.permission_modes),
   };
@@ -511,6 +516,10 @@ const LEGACY_CAPABILITIES: Record<string, AgentCapabilitySummary> = {
     supports_interrupt: true,
     supports_steering: false,
     supports_forking: false,
+    // Manual compaction also requires the new daemon API, so an older daemon
+    // that omitted this capability cannot safely expose the command.
+    supports_compaction: false,
+    supports_compaction_instructions: false,
     sandbox_modes: ["read-only", "workspace-write", "danger-full-access"],
     permission_modes: [
       "default",
@@ -530,6 +539,8 @@ const LEGACY_CAPABILITIES: Record<string, AgentCapabilitySummary> = {
     // to omit `capabilities` cannot inject into a running turn.
     supports_steering: false,
     supports_forking: false,
+    supports_compaction: false,
+    supports_compaction_instructions: false,
     sandbox_modes: [],
     permission_modes: [
       "default",

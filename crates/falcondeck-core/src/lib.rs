@@ -1936,6 +1936,18 @@ pub struct ForkThreadRequest {
     pub last_turn_id: String,
 }
 
+/// Request payload used to compact a provider-owned thread's model context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CompactThreadRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Provider thread whose active context should be compacted.
+    pub thread_id: String,
+    /// Optional provider-specific guidance about what the summary should retain.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
 /// Working directory a thread's turns run in.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -2962,6 +2974,12 @@ pub struct AgentCapabilitySummary {
     /// Whether the provider can create a history-preserving branch at a turn boundary.
     #[serde(default)]
     pub supports_forking: bool,
+    /// Whether the provider can manually compact an existing thread's context.
+    #[serde(default)]
+    pub supports_compaction: bool,
+    /// Whether manual compaction accepts provider-specific summary guidance.
+    #[serde(default)]
+    pub supports_compaction_instructions: bool,
     /// Sandbox modes the provider accepts; empty hides the sandbox picker.
     #[serde(default)]
     pub sandbox_modes: Vec<String>,
@@ -2981,6 +2999,8 @@ impl AgentCapabilitySummary {
             supports_interrupt: true,
             supports_steering: true,
             supports_forking: true,
+            supports_compaction: true,
+            supports_compaction_instructions: false,
             sandbox_modes: vec![
                 "read-only".to_string(),
                 "workspace-write".to_string(),
@@ -3011,6 +3031,8 @@ impl AgentCapabilitySummary {
             // life of a turn, so extra user messages reach the running agent.
             supports_steering: true,
             supports_forking: false,
+            supports_compaction: true,
+            supports_compaction_instructions: true,
             sandbox_modes: Vec::new(),
             permission_modes: vec![
                 "default".to_string(),
@@ -3038,6 +3060,8 @@ impl AgentCapabilitySummary {
             // per `{"event":"user"}` line, so extra messages reach the agent.
             supports_steering: true,
             supports_forking: false,
+            supports_compaction: false,
+            supports_compaction_instructions: false,
             sandbox_modes: vec!["default".to_string(), "sandbox".to_string()],
             permission_modes: vec![
                 "default".to_string(),
@@ -5186,6 +5210,20 @@ mod tests {
     #[test]
     fn codex_capabilities_include_steering() {
         assert!(AgentCapabilitySummary::codex().supports_steering);
+    }
+
+    #[test]
+    fn core_backends_advertise_their_compaction_contract() {
+        let codex = AgentCapabilitySummary::codex();
+        assert!(codex.supports_compaction);
+        assert!(!codex.supports_compaction_instructions);
+
+        let claude = AgentCapabilitySummary::claude();
+        assert!(claude.supports_compaction);
+        assert!(claude.supports_compaction_instructions);
+
+        assert!(!AgentCapabilitySummary::agy().supports_compaction);
+        assert!(!AgentCapabilitySummary::acp_minimal().supports_compaction);
     }
 
     #[test]

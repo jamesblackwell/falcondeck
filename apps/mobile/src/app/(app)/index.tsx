@@ -1548,6 +1548,11 @@ export default function HomeScreen() {
           isRunning={isThreadRunning}
           isStopping={isStopping}
           capabilities={capabilities}
+          compactCommandAvailable={
+            Boolean(selectedThread) &&
+            capabilities.supports_compaction &&
+            !isThreadRunning
+          }
           selectedPermissionMode={selectedPermissionMode}
           selectedSandboxMode={selectedSandboxMode}
           onSelectPermissionMode={handlePermissionModeChange}

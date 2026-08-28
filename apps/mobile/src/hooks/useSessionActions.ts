@@ -10,6 +10,7 @@ import {
   type HandoffThreadApi,
   normalizeThreadDetail,
   normalizeThreadHandle,
+  parseCompactThreadCommand,
   draftKeyFor,
   imageAttachmentSendBlockReason,
   composerSkillCatalog,
@@ -195,6 +196,51 @@ export function useSessionActions() {
       ui.selectedProvider ??
       workspace.default_provider ??
       "codex";
+    const compactCommand = override
+      ? null
+      : parseCompactThreadCommand(submittedDraft);
+    if (compactCommand) {
+      if (!activeThread) {
+        relay._setError("Start a conversation before compacting it.");
+        return;
+      }
+      if (submittedAttachments.length > 0) {
+        relay._setError("Remove attachments before compacting.");
+        return;
+      }
+      if (
+        activeThread.status === "running" ||
+        activeThread.status === "waiting_for_input"
+      ) {
+        relay._setError("Wait for the current turn to finish before compacting.");
+        return;
+      }
+      ui.setIsSubmitting(true, submittedKey);
+      try {
+        await relay._callRpc(
+          "thread.compact",
+          {
+            workspace_id: workspace.id,
+            thread_id: activeThread.id,
+            instructions: compactCommand.instructions,
+          },
+          { requestIdPrefix: "mobile-compact" },
+        );
+        ui.setComposerForConversation(submittedKey, "", []);
+        relay._setError(null);
+      } catch (error) {
+        if (!isRelayTransportError(error)) {
+          relay._setError(
+            error instanceof Error
+              ? error.message
+              : "Failed to compact context",
+          );
+        }
+      } finally {
+        ui.setIsSubmitting(false, submittedKey);
+      }
+      return;
+    }
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(workspace, provider),
       submittedAttachments.length,

@@ -2110,6 +2110,8 @@ function ConversationQa() {
               supports_interrupt: true,
               supports_steering: true,
               supports_forking: true,
+              supports_compaction: true,
+              supports_compaction_instructions: false,
               sandbox_modes: ["workspace-write"],
               permission_modes: ["on-request"],
             }}

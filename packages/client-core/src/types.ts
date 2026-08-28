@@ -118,6 +118,10 @@ export type AgentCapabilitySummary = {
   supports_steering: boolean;
   /** Whether the provider can branch history at a completed turn boundary. */
   supports_forking: boolean;
+  /** Whether the provider can manually compact an existing thread's context. */
+  supports_compaction: boolean;
+  /** Whether manual compaction accepts provider-specific summary guidance. */
+  supports_compaction_instructions: boolean;
   /** Sandbox modes the provider accepts; empty hides the sandbox picker. */
   sandbox_modes: string[];
   /** Permission modes the provider accepts; empty hides the picker. */

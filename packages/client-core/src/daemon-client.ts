@@ -138,6 +138,12 @@ export type ForkThreadPayload = {
   last_turn_id: string;
 };
 
+export type CompactThreadPayload = {
+  workspace_id: string;
+  thread_id: string;
+  instructions?: string | null;
+};
+
 export function createDaemonApiClient(baseUrl: string) {
   return {
     async snapshot(request: SnapshotRequest = {}) {
@@ -619,6 +625,18 @@ export function createDaemonApiClient(baseUrl: string) {
         await fetch(
           `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/interrupt`,
           { method: "POST" },
+        ),
+      );
+    },
+    async compactThread(payload: CompactThreadPayload) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/compact`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          },
         ),
       );
     },

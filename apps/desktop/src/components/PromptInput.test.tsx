@@ -14,6 +14,8 @@ const imageCapableAgent = {
   supports_interrupt: true,
   supports_steering: false,
   supports_forking: false,
+  supports_compaction: false,
+  supports_compaction_instructions: false,
   sandbox_modes: [],
   permission_modes: [],
 };
@@ -726,8 +728,30 @@ describe("PromptInput", () => {
     textarea.setSelectionRange(1, 1);
     fireEvent.click(textarea);
 
-    const emptyState = screen.getByText(/No skills match/);
+    const emptyState = screen.getByText(/No commands or skills match/);
     expect(emptyState.parentElement).toHaveClass("absolute", "bottom-full");
+  });
+
+  it("offers the native compact command and completes its alias", () => {
+    const onValueChange = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="/compa"
+        onValueChange={onValueChange}
+        compactCommandAvailable
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    textarea.setSelectionRange(6, 6);
+    fireEvent.click(textarea);
+
+    const command = screen.getByRole("button", { name: /compact/i });
+    expect(command).toHaveTextContent("harness");
+    fireEvent.mouseDown(command);
+    expect(onValueChange).toHaveBeenCalledWith("/compact ");
   });
 
   it("omits the goal entry from the plus menu when goals are unwired", () => {
@@ -781,6 +805,8 @@ describe("PromptInput", () => {
           supports_images: true,
           supports_skills: true,
           supports_interrupt: true,
+          supports_compaction: false,
+          supports_compaction_instructions: false,
           sandbox_modes: [],
           permission_modes: [],
         }}

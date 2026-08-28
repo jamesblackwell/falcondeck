@@ -7,8 +7,8 @@ use chrono::Utc;
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveRequestKind,
     InteractiveRequestOutcome, InteractiveRequestResolution, ServiceLevel, ThreadAgentParams,
-    ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary, UnifiedEvent,
-    merge_conversation_citations,
+    ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary, ToolLifecycle,
+    UnifiedEvent, merge_conversation_citations,
 };
 use serde_json::Value;
 use tokio::{
@@ -1324,6 +1324,18 @@ impl AppState {
                                     .push_conversation_item(&workspace_id, &thread_id, item, true)
                                     .await;
                             }
+                            let compaction_item = claude_context_compaction_item(&value);
+                            if let Some(item) = compaction_item.clone() {
+                                // A manual `/compact` result intentionally has
+                                // no assistant prose. Treat its structured
+                                // boundary as the turn output so the generic
+                                // empty-response guard does not turn a
+                                // successful compaction into an error.
+                                saw_agent_output = true;
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            }
                             if is_claude_text_block_start(&value) {
                                 assistant_block_break_pending = !assistant_text.is_empty();
                             }
@@ -1431,7 +1443,9 @@ impl AppState {
                                         )
                                         .await;
                                 }
-                            } else if let Some(message) = extract_claude_service_message(&value) {
+                            } else if compaction_item.is_none()
+                                && let Some(message) = extract_claude_service_message(&value)
+                            {
                                 // Awaited, not spawned: a service message on the
                                 // last line of a turn would otherwise race the
                                 // turn's own terminal thread update.
@@ -2675,6 +2689,21 @@ fn claude_init_session_id(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn claude_context_compaction_item(value: &Value) -> Option<ConversationItem> {
+    if value.get("type").and_then(Value::as_str) != Some("system")
+        || value.get("subtype").and_then(Value::as_str) != Some("compact_boundary")
+    {
+        return None;
+    }
+    let now = Utc::now();
+    Some(ConversationItem::ContextCompaction {
+        id: format!("claude-compaction-{}", Uuid::new_v4().simple()),
+        lifecycle: ToolLifecycle::Succeeded,
+        created_at: now,
+        completed_at: Some(now),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2982,6 +3011,35 @@ mod tests {
         ] {
             assert_eq!(claude_init_session_id(&value), None, "{value}");
         }
+    }
+
+    #[test]
+    fn compact_boundary_becomes_a_succeeded_compaction_item() {
+        let item = claude_context_compaction_item(&json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "compact_metadata": {
+                "trigger": "manual",
+                "pre_tokens": 42_000
+            }
+        }))
+        .expect("compact boundary should project");
+
+        assert!(matches!(
+            item,
+            ConversationItem::ContextCompaction {
+                lifecycle: ToolLifecycle::Succeeded,
+                completed_at: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            claude_context_compaction_item(&json!({
+                "type": "system",
+                "subtype": "init"
+            }))
+            .is_none()
+        );
     }
 
     #[test]

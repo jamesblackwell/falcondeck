@@ -133,6 +133,8 @@ function imageAgent(provider: string, supportsImages: boolean) {
       supports_interrupt: true,
       supports_steering: false,
       supports_forking: false,
+      supports_compaction: false,
+      supports_compaction_instructions: false,
       sandbox_modes: [],
       permission_modes: [],
     },
@@ -197,6 +199,47 @@ describe("submitTurn guards", () => {
     expect(ws!.id).toBe("w1");
     expect(session.selectedThreadId).toBe("t1");
     expect(ui.draft.trim()).toBe("Hello world");
+  });
+
+  it("routes /compact as a thread control without starting a model turn", async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("w1", "t1");
+    useUIStore.getState().setDraft("/compact preserve protocol decisions");
+    const rpc = vi.fn().mockResolvedValue({ ok: true });
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().submitTurn();
+      });
+    } finally {
+      harness.unmount();
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      "thread.compact",
+      {
+        workspace_id: "w1",
+        thread_id: "t1",
+        instructions: "preserve protocol decisions",
+      },
+      { requestIdPrefix: "mobile-compact" },
+    );
+    expect(rpc.mock.calls.some(([method]) => method === "turn.start")).toBe(
+      false,
+    );
+    expect(useUIStore.getState().draft).toBe("");
   });
 
   it("allows attachments without draft text", async () => {

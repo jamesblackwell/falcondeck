@@ -282,6 +282,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.mark_unread",
     "thread.goal.set",
     "thread.goal.clear",
+    "thread.compact",
     "turn.start",
     "turn.steer",
     "turn.interrupt",
@@ -1618,6 +1619,19 @@ impl AppState {
                         .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
+                "thread.compact" => {
+                    let request = falcondeck_core::CompactThreadRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        instructions: extract_string(&params, &["instructions"]),
+                    };
+                    self.compact_thread(request)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
                 "thread.mark_read" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let thread_id = required(&["threadId", "thread_id"])?;
@@ -2774,6 +2788,7 @@ mod tests {
     #[test]
     fn mutating_remote_rpc_methods_are_deduplicated() {
         assert!(!remote_rpc_is_read_only("turn.start"));
+        assert!(!remote_rpc_is_read_only("thread.compact"));
         assert!(!remote_rpc_is_read_only("control.execute"));
     }
 

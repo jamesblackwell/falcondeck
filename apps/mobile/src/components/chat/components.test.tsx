@@ -169,6 +169,8 @@ describe('ChatInput component', () => {
     supports_interrupt: true,
     supports_steering: false,
     supports_forking: false,
+    supports_compaction: false,
+    supports_compaction_instructions: false,
     sandbox_modes: [],
     permission_modes: [],
   }
@@ -698,6 +700,26 @@ describe('ChatInput component', () => {
     })
     expect(onChangeText).toHaveBeenCalledWith('')
     expect(onGoalCommand).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers the native compact command for a compactable thread', () => {
+    const onChangeText = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value="/compa"
+        {...chatInputDefaults}
+        onChangeText={onChangeText}
+        compactCommandAvailable
+      />,
+    )
+
+    expect(textOf(r)).toContain('Compact conversation history to free context')
+    act(() => {
+      r.root
+        .findByProps({ accessibilityLabel: 'Compact conversation context' })
+        .props.onPress()
+    })
+    expect(onChangeText).toHaveBeenCalledWith('/compact ')
   })
 
   it('sizes itself natively between the min and max heights', () => {

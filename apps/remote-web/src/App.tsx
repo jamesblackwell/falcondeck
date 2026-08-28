@@ -48,6 +48,7 @@ import {
   isDaemonRpcReady,
   identityPublicKeyToBase64,
   operationalConditionDismissalKey,
+  parseCompactThreadCommand,
   workspaceOperationalConditions,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
@@ -2934,6 +2935,41 @@ function RemoteApp() {
         submittedAttachments.length === 0)
     )
       return;
+    const compactCommand = override
+      ? null
+      : parseCompactThreadCommand(submittedDraft);
+    if (compactCommand) {
+      if (!selectedThreadId || !selectedThread) {
+        setError("Start a conversation before compacting it.");
+        return;
+      }
+      if (submittedAttachments.length > 0) {
+        setError("Remove attachments before compacting.");
+        return;
+      }
+      if (
+        selectedThread.status === "running" ||
+        selectedThread.status === "waiting_for_input"
+      ) {
+        setError("Wait for the current turn to finish before compacting.");
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        await callRpc("thread.compact", {
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          instructions: compactCommand.instructions,
+        });
+        setDraftForConversation(conversationKey, "");
+        setError(null);
+      } catch (error) {
+        reportError(error, "Failed to compact context");
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
     const submitProvider = selectedThread?.provider ?? selectedProvider;
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(selectedWorkspace, submitProvider),
@@ -5143,6 +5179,12 @@ function RemoteApp() {
                   onProviderChange={handleProviderChange}
                   providers={providerOptions}
                   capabilities={activeCapabilities}
+                  compactCommandAvailable={
+                    Boolean(selectedThread) &&
+                    activeCapabilities.supports_compaction &&
+                    selectedThread?.status !== "running" &&
+                    selectedThread?.status !== "waiting_for_input"
+                  }
                   providerLocked={Boolean(selectedThread)}
                   showProviderSelector={!selectedThread}
                   handoffProviders={handoffProviderOptions}

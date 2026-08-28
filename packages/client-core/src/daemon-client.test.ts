@@ -139,6 +139,33 @@ describe("createDaemonApiClient sendTurn", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ steer: true });
   });
 
+  it("sends compaction through the thread control endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createDaemonApiClient("http://daemon.test").compactThread({
+      workspace_id: "workspace",
+      thread_id: "thread",
+      instructions: "preserve API decisions",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "http://daemon.test/api/workspaces/workspace/threads/thread/compact",
+    );
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      workspace_id: "workspace",
+      thread_id: "thread",
+      instructions: "preserve API decisions",
+    });
+  });
+
   it("posts the complete queued message order", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

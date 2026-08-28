@@ -11,9 +11,24 @@ import {
   normalizeInteractiveRequest,
   normalizeThreadDetail,
   normalizeToolCallDisplay,
+  normalizeWorkspaceSummary,
 } from "./normalization";
 import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
+
+describe("workspace capability normalization", () => {
+  it("does not expose compaction when an older daemon omitted capabilities", () => {
+    const workspace = normalizeWorkspaceSummary({
+      agents: [{ provider: "codex" }, { provider: "claude" }],
+    });
+
+    expect(workspace.agents).toHaveLength(2);
+    for (const agent of workspace.agents) {
+      expect(agent.capabilities.supports_compaction).toBe(false);
+      expect(agent.capabilities.supports_compaction_instructions).toBe(false);
+    }
+  });
+});
 
 describe("extension snapshot normalization", () => {
   it("supplies safe defaults for older or malformed catalog fields", () => {

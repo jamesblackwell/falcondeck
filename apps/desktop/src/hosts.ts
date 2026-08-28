@@ -19,6 +19,7 @@ import {
   RemoteHostClient,
   DEFAULT_REMOTE_RELAY_URL,
   type ConversationItem,
+  type CompactThreadPayload,
   type CreateScheduledTaskPayload,
   type DaemonSnapshot,
   type EventEnvelope,
@@ -134,6 +135,7 @@ export type WorkspaceScopedApi = {
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
+  compactThread(payload: CompactThreadPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   hydrateProvider(workspaceId: string, provider: string): Promise<{ ok: boolean; message?: string | null }>
   listWorkspaceSkills(workspaceId: string, provider?: string | null): Promise<SkillSummary[]>
@@ -500,6 +502,7 @@ export class HostConnection {
       forkThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.fork', payload)),
       sendTurn: (payload) => this.rpc('turn.start', payload),
+      compactThread: (payload) => this.rpc('thread.compact', payload),
       interruptTurn: (workspaceId, threadId) =>
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
       hydrateProvider: (workspaceId, provider) =>

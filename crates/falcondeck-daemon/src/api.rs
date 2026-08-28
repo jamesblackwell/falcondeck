@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest,
+    ApprovalResponseRequest, ClientActivityRequest, CompactThreadRequest, ConnectWorkspaceRequest,
     CreateScheduledTaskRequest, ForkThreadRequest, GitCommitRequest, InteractiveResponseRequest,
     InvokeExtensionActionRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
     ShipThreadRequest, SnapshotRequest, StartRemotePairingRequest, StartReviewRequest,
@@ -199,6 +199,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/interrupt",
             post(interrupt_turn),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/compact",
+            post(compact_thread),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}",
@@ -764,6 +768,16 @@ async fn interrupt_turn(
     Path((workspace_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
     Ok(Json(state.interrupt_turn(workspace_id, thread_id).await?))
+}
+
+async fn compact_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<CompactThreadRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.compact_thread(request).await?))
 }
 
 async fn start_review(

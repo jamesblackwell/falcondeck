@@ -1,5 +1,6 @@
 import * as Popover from "@radix-ui/react-popover";
 import {
+  BookOpen,
   ChevronLeft,
   ImagePlus,
   Mic,
@@ -133,6 +134,8 @@ export type PromptInputProps = {
   providers?: ProviderOption[];
   /** Capabilities of the active provider; gates the mode pickers. */
   capabilities?: AgentCapabilitySummary;
+  /** Shows the native /compact command for an existing compactable thread. */
+  compactCommandAvailable?: boolean;
   providerLocked?: boolean;
   showProviderSelector?: boolean;
   /** Cross-provider destinations shown behind the model menu's handoff step. */
@@ -258,6 +261,7 @@ export const PromptInput = memo(function PromptInput({
   onProviderChange,
   providers = DEFAULT_PROVIDER_OPTIONS,
   capabilities = NO_AGENT_CAPABILITIES,
+  compactCommandAvailable = false,
   providerLocked = false,
   showProviderSelector = true,
   handoffProviders = EMPTY_HANDOFF_PROVIDER_OPTIONS,
@@ -382,8 +386,13 @@ export const PromptInput = memo(function PromptInput({
   const showGoalCommand =
     Boolean(goal) &&
     "goal".includes(slashQuery?.query.trim().toLowerCase() ?? "");
+  const showCompactCommand =
+    compactCommandAvailable &&
+    "compact".includes(slashQuery?.query.trim().toLowerCase() ?? "");
+  const nativeCommandCount =
+    (showGoalCommand ? 1 : 0) + (showCompactCommand ? 1 : 0);
   const slashSuggestionCount =
-    filteredSkills.length + (showGoalCommand ? 1 : 0);
+    filteredSkills.length + nativeCommandCount;
 
   useEffect(() => {
     setActiveSkillIndex(0);
@@ -503,15 +512,18 @@ export const PromptInput = memo(function PromptInput({
   );
 
   const activeSkill =
-    filteredSkills.length > 0 && (!showGoalCommand || activeSkillIndex > 0)
+    filteredSkills.length > 0 && activeSkillIndex >= nativeCommandCount
       ? (filteredSkills[
           Math.min(
-            activeSkillIndex - (showGoalCommand ? 1 : 0),
+            activeSkillIndex - nativeCommandCount,
             filteredSkills.length - 1,
           )
         ] ?? null)
       : null;
   const goalCommandActive = showGoalCommand && activeSkillIndex === 0;
+  const compactCommandActive =
+    showCompactCommand &&
+    activeSkillIndex === (showGoalCommand ? 1 : 0);
 
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex?: number | null) => {
@@ -574,6 +586,15 @@ export const PromptInput = memo(function PromptInput({
       ) {
         event.preventDefault();
         openGoalCommand();
+        return;
+      }
+      if (
+        !hasCommandModifier &&
+        (event.key === "Tab" || event.key === "Enter") &&
+        compactCommandActive
+      ) {
+        event.preventDefault();
+        insertSkillAlias("/compact");
         return;
       }
       if (
@@ -1069,9 +1090,39 @@ export const PromptInput = memo(function PromptInput({
                     </div>
                   </button>
                 ) : null}
+                {showCompactCommand ? (
+                  <button
+                    type="button"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertSkillAlias("/compact");
+                    }}
+                    className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
+                      compactCommandActive
+                        ? "bg-surface-3"
+                        : "hover:bg-surface-2"
+                    }`}
+                  >
+                    <BookOpen
+                      className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted"
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
+                        <span className="font-medium">/compact</span>
+                        <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
+                          harness
+                        </span>
+                      </div>
+                      <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
+                        Compact conversation history to free context
+                      </div>
+                    </div>
+                  </button>
+                ) : null}
                 {filteredSkills.map((skill, index) => {
                   const active =
-                    index + (showGoalCommand ? 1 : 0) === activeSkillIndex;
+                    index + nativeCommandCount === activeSkillIndex;
                   return (
                     <button
                       key={skill.id}
@@ -1101,7 +1152,7 @@ export const PromptInput = memo(function PromptInput({
               </div>
             ) : (
               <div className="px-3 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
-                No skills match{" "}
+                No commands or skills match{" "}
                 <span className="font-medium">/{slashQuery.query}</span>
               </div>
             )}

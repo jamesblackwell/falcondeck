@@ -21,6 +21,8 @@ export const NO_AGENT_CAPABILITIES: AgentCapabilitySummary = {
   supports_interrupt: false,
   supports_steering: false,
   supports_forking: false,
+  supports_compaction: false,
+  supports_compaction_instructions: false,
   sandbox_modes: [],
   permission_modes: [],
 };

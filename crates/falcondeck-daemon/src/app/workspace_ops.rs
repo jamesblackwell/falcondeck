@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    ConversationItem, ForkThreadRequest, ImageInput, InteractiveRequestOutcome,
-    InteractiveRequestResolution, SetThreadGoalRequest, ThreadDetail, ThreadDetailMode,
-    ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
+    CompactThreadRequest, ConversationItem, ForkThreadRequest, ImageInput,
+    InteractiveRequestOutcome, InteractiveRequestResolution, SetThreadGoalRequest, ThreadDetail,
+    ThreadDetailMode, ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
 };
 use uuid::Uuid;
 
@@ -3157,6 +3157,88 @@ pub(super) async fn interrupt_turn(
     Ok(CommandResponse {
         ok: true,
         message: Some("interrupt requested".to_string()),
+    })
+}
+
+pub(super) async fn compact_thread(
+    app: &AppState,
+    mut request: CompactThreadRequest,
+) -> Result<CommandResponse, DaemonError> {
+    request.instructions = request
+        .instructions
+        .take()
+        .map(|instructions| instructions.trim().to_string())
+        .filter(|instructions| !instructions.is_empty());
+    let thread = app
+        .thread_summary(&request.workspace_id, &request.thread_id)
+        .await?;
+    if matches!(
+        thread.status,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput
+    ) {
+        return Err(DaemonError::BadRequest(
+            "wait for the current turn to finish before compacting".to_string(),
+        ));
+    }
+    if thread.native_session_id.is_none() {
+        return Err(DaemonError::BadRequest(
+            "the thread has no provider session to compact".to_string(),
+        ));
+    }
+    let capabilities = app
+        .provider_capabilities(&request.workspace_id, &thread.provider)
+        .await;
+    if !capabilities.supports_compaction {
+        return Err(DaemonError::BadRequest(format!(
+            "the {} provider does not support manual context compaction",
+            thread.provider.as_str()
+        )));
+    }
+    if request.instructions.is_some() && !capabilities.supports_compaction_instructions {
+        return Err(DaemonError::BadRequest(format!(
+            "the {} provider does not accept compaction instructions",
+            thread.provider.as_str()
+        )));
+    }
+
+    let started = app
+        .upsert_thread(&request.workspace_id, &request.thread_id, |summary| {
+            summary.status = ThreadStatus::Running;
+            summary.last_error = None;
+            summary.updated_at = Utc::now();
+        })
+        .await?;
+    app.emit(
+        Some(request.workspace_id.clone()),
+        Some(request.thread_id.clone()),
+        UnifiedEvent::ThreadUpdated {
+            thread: started.clone(),
+        },
+    );
+
+    if let Err(error) = ProviderRuntime::for_provider(&thread.provider)
+        .compact(app, &request, &started)
+        .await
+    {
+        let message = error.to_string();
+        let failed = app
+            .upsert_thread(&request.workspace_id, &request.thread_id, |summary| {
+                summary.status = ThreadStatus::Error;
+                summary.last_error = Some(message.clone());
+                summary.updated_at = Utc::now();
+            })
+            .await?;
+        app.emit(
+            Some(request.workspace_id.clone()),
+            Some(request.thread_id.clone()),
+            UnifiedEvent::ThreadUpdated { thread: failed },
+        );
+        return Err(error);
+    }
+
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("compaction started".to_string()),
     })
 }
 

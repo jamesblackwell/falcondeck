@@ -10,17 +10,17 @@ use std::{
 use chrono::{Duration as ChronoDuration, Utc};
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
-    CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem,
-    DaemonCapabilities, DaemonInfo, DaemonSnapshot, EventEnvelope, ExtensionActionResponse,
-    ExtensionSnapshot, ExtensionSummary, FalconDeckPreferences, ForkThreadRequest, HealthResponse,
-    InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload,
-    InvokeExtensionActionRequest, OperationalCondition, PairingPublicKeyBundle,
-    RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice, SkillSummary,
-    SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget, ThreadAgentParams,
-    ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus,
-    ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest,
-    UpdateScheduledTaskRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-    WorkspaceSummary,
+    CommandResponse, CompactThreadRequest, ConnectWorkspaceRequest, ContentLifecycle,
+    ConversationItem, DaemonCapabilities, DaemonInfo, DaemonSnapshot, EventEnvelope,
+    ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary, FalconDeckPreferences,
+    ForkThreadRequest, HealthResponse, InteractiveRequest, InteractiveRequestKind,
+    InteractiveResponsePayload, InvokeExtensionActionRequest, OperationalCondition,
+    PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
+    SkillSummary, SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget,
+    ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
+    ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
+    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
     control::{AgentControlSettings, ControlGetRequest, ControlSearchRequest, ControlStateChanged},
     crypto::LocalBoxKeyPair,
 };
@@ -2668,6 +2668,13 @@ impl AppState {
         thread_id: String,
     ) -> Result<CommandResponse, DaemonError> {
         workspace_ops::interrupt_turn(self, workspace_id, thread_id).await
+    }
+
+    pub async fn compact_thread(
+        &self,
+        request: CompactThreadRequest,
+    ) -> Result<CommandResponse, DaemonError> {
+        workspace_ops::compact_thread(self, request).await
     }
 
     pub async fn respond_to_interactive_request(

@@ -14,8 +14,8 @@
 use std::{path::Path, sync::OnceLock};
 
 use falcondeck_core::{
-    AgentCapabilitySummary, AgentProvider, SendTurnRequest, SetThreadGoalRequest,
-    StartReviewRequest, ThreadSummary, TurnInputItem,
+    AgentCapabilitySummary, AgentProvider, CompactThreadRequest, SendTurnRequest,
+    SetThreadGoalRequest, StartReviewRequest, ThreadSummary, TurnInputItem,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -541,6 +541,71 @@ impl ProviderRuntime {
                 )
                 .await
             }
+        }
+    }
+
+    /// Starts provider-native manual context compaction without creating a
+    /// FalconDeck user message. Each backend chooses its real control surface:
+    /// Codex has a dedicated app-server method, while Claude exposes a
+    /// dispatchable headless slash command on its existing stream.
+    pub(super) async fn compact(
+        &self,
+        app: &AppState,
+        request: &CompactThreadRequest,
+        thread: &ThreadSummary,
+    ) -> Result<(), DaemonError> {
+        match self {
+            Self::Codex => {
+                let session = app
+                    .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
+                    .await?;
+                session
+                    .send_request(
+                        "thread/compact/start",
+                        json!({ "threadId": request.thread_id }),
+                    )
+                    .await?;
+                Ok(())
+            }
+            Self::Claude => {
+                let command = request
+                    .instructions
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|instructions| !instructions.is_empty())
+                    .map(|instructions| format!("/compact {instructions}"))
+                    .unwrap_or_else(|| "/compact".to_string());
+                let inputs = [TurnInputItem::Text {
+                    text: command,
+                    id: None,
+                }];
+                let selected_skills = Vec::<ResolvedSelectedSkill>::new();
+                self.send_turn(
+                    app,
+                    TurnSpec {
+                        workspace_id: &request.workspace_id,
+                        thread_id: &request.thread_id,
+                        thread,
+                        inputs: &inputs,
+                        selected_skills: &selected_skills,
+                        approval_policy: thread
+                            .agent
+                            .approval_policy
+                            .as_deref()
+                            .unwrap_or("default"),
+                        requested_model_id: thread.agent.model_id.as_deref(),
+                        requested_reasoning_effort: thread.agent.reasoning_effort.as_deref(),
+                        service_tier: thread.agent.service_tier.as_deref(),
+                        wait_for_startup: true,
+                        resume_interrupted: false,
+                    },
+                )
+                .await
+            }
+            Self::Agy | Self::Acp(_) => Err(DaemonError::BadRequest(format!(
+                "the {} provider does not support manual context compaction",
+                self.provider().as_str()
+            ))),
         }
     }
 

@@ -38,6 +38,7 @@ import {
   imageAttachmentSendBlockReason,
   insertTranscript,
   operationalConditionDismissalKey,
+  parseCompactThreadCommand,
   workspaceOperationalConditions,
   mergeThreadDetailPage,
   optimisticallySetThreadStage,
@@ -2796,6 +2797,10 @@ function AppInner() {
     }
     const submittedSelections = override ? [] : quotedSelections;
     const submittedUserDraft = override?.text ?? draft;
+    const submittedAttachments = override ? NO_ATTACHMENTS : attachments;
+    const compactCommand = override
+      ? null
+      : parseCompactThreadCommand(submittedUserDraft);
     const submittedDraft = composePromptWithQuotedSelections(
       submittedUserDraft,
       submittedSelections,
@@ -2809,7 +2814,45 @@ function AppInner() {
         (override ? 0 : attachments.length) === 0)
     )
       return;
-    const submittedAttachments = override ? NO_ATTACHMENTS : attachments;
+    if (compactCommand) {
+      if (!selectedThreadId || !selectedThread) {
+        setActionError("Start a conversation before compacting it.");
+        return;
+      }
+      if (submittedAttachments.length > 0 || submittedSelections.length > 0) {
+        setActionError("Remove attachments and quoted selections before compacting.");
+        return;
+      }
+      if (
+        selectedThread.status === "running" ||
+        selectedThread.status === "waiting_for_input"
+      ) {
+        setActionError("Wait for the current turn to finish before compacting.");
+        return;
+      }
+      setIsSending(true);
+      try {
+        await client.compactThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          instructions: compactCommand.instructions,
+        });
+        setDraftForConversation(conversationKey, "");
+        setActionError(null);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to compact context";
+        setActionError(message);
+        toast({
+          variant: "danger",
+          title: "Failed to compact context",
+          description: message,
+        });
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
     const submittedSkills = selectedSkillsFromText(
       submittedUserDraft,
       composerSkillCatalog(
@@ -6010,6 +6053,11 @@ function AppInner() {
                 onProviderChange: handleProviderChange,
                 providers: providerOptions,
                 capabilities: activeCapabilities,
+                compactCommandAvailable:
+                  Boolean(selectedThread) &&
+                  activeCapabilities.supports_compaction &&
+                  selectedThread?.status !== "running" &&
+                  selectedThread?.status !== "waiting_for_input",
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
                 handoffProviders: handoffProviderOptions,

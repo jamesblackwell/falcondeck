@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { View, TextInput, Pressable, useWindowDimensions } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Mic, Plus, Send, Square, Target } from 'lucide-react-native'
+import { BookOpen, Mic, Plus, Send, Square, Target } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
@@ -97,6 +97,8 @@ interface ChatInputProps {
   /** True while an interrupt request is in flight. */
   isStopping?: boolean
   capabilities?: AgentCapabilitySummary
+  /** Shows the native /compact command for an existing compactable thread. */
+  compactCommandAvailable?: boolean
   selectedPermissionMode?: string | null
   selectedSandboxMode?: string | null
   onSelectPermissionMode?: (mode: string | null) => void
@@ -156,6 +158,7 @@ export const ChatInput = memo(function ChatInput({
   isStopping = false,
   modelsLoading = false,
   capabilities = NO_AGENT_CAPABILITIES,
+  compactCommandAvailable = false,
   selectedPermissionMode = null,
   selectedSandboxMode = null,
   onSelectPermissionMode,
@@ -246,6 +249,9 @@ export const ChatInput = memo(function ChatInput({
     Boolean(onGoalCommand) &&
     capabilities.supports_goals &&
     'goal'.includes(slashQuery?.query.trim().toLowerCase() ?? '')
+  const showCompactCommand =
+    compactCommandAvailable &&
+    'compact'.includes(slashQuery?.query.trim().toLowerCase() ?? '')
 
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex: number) => {
@@ -531,13 +537,15 @@ export const ChatInput = memo(function ChatInput({
         />
         {slashQuery ? (
           <View style={styles.skillMenu}>
-            {filteredSkills.length > 0 || showGoalCommand ? (
+            {filteredSkills.length > 0 || showGoalCommand || showCompactCommand ? (
               <>
                 {showGoalCommand ? (
                   <Pressable
                     style={[
                       styles.skillItem,
-                      filteredSkills.length === 0 && styles.skillItemLast,
+                      filteredSkills.length === 0 &&
+                        !showCompactCommand &&
+                        styles.skillItemLast,
                     ]}
                     onPress={handleGoalCommand}
                     accessibilityRole="button"
@@ -553,6 +561,45 @@ export const ChatInput = memo(function ChatInput({
                       </Text>
                       <Text variant="caption" color="secondary" size="xs">
                         Set a goal to keep pursuing
+                      </Text>
+                    </View>
+                  </Pressable>
+                ) : null}
+                {showCompactCommand ? (
+                  <Pressable
+                    style={[
+                      styles.skillItem,
+                      filteredSkills.length === 0 && styles.skillItemLast,
+                    ]}
+                    onPress={() => handleInsertSkill('/compact')}
+                    accessibilityRole="button"
+                    accessibilityLabel="Compact conversation context"
+                  >
+                    <BookOpen
+                      size={theme.iconSize.sm}
+                      color={theme.colors.fg.muted}
+                    />
+                    <View style={styles.skillItemBody}>
+                      <View style={styles.skillHeading}>
+                        <View style={styles.skillAliasPill}>
+                          <Text
+                            variant="caption"
+                            size="2xs"
+                            color="secondary"
+                            weight="semibold"
+                          >
+                            /compact
+                          </Text>
+                        </View>
+                        <Text variant="caption" size="2xs" color="muted">
+                          harness
+                        </Text>
+                      </View>
+                      <Text color="primary" size="sm" weight="medium">
+                        Compact context
+                      </Text>
+                      <Text variant="caption" color="secondary" size="xs">
+                        Compact conversation history to free context
                       </Text>
                     </View>
                   </Pressable>
@@ -602,7 +649,7 @@ export const ChatInput = memo(function ChatInput({
             ) : (
               <View style={styles.skillEmpty}>
                 <Text variant="caption" color="muted">
-                  No skills match /{slashQuery.query}
+                  No commands or skills match /{slashQuery.query}
                 </Text>
               </View>
             )}
