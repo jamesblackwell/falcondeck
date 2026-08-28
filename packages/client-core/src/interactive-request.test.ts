@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   interactiveApprovalDecisions,
+  isMcpElicitationRequest,
   interactiveRequestEvidencePresentation,
   interactiveRequestReceiptPresentation,
   interactiveResolutionFromResponse,
+  MCP_ELICITATION_METHOD,
   orderedInteractiveRequestQueue,
 } from './conversation'
 import type { InteractiveRequest } from './types'
@@ -58,6 +60,17 @@ describe('interactive request queue', () => {
       'request-b',
       'request-z',
     ])
+  })
+})
+
+describe('mcp elicitation identity', () => {
+  it('recognizes the Codex elicitation method', () => {
+    expect(isMcpElicitationRequest({
+      method: MCP_ELICITATION_METHOD,
+    })).toBe(true)
+    expect(isMcpElicitationRequest({
+      method: 'item/commandExecution/requestApproval',
+    })).toBe(false)
   })
 })
 

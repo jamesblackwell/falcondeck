@@ -117,6 +117,9 @@ describe("MarkdownRenderer", () => {
       .filter((node) => node.props.selectable === true);
 
     expect(selectableText.length).toBeGreaterThanOrEqual(8);
+    expect(
+      selectableText.every((node) => node.props.uiTextView === true),
+    ).toBe(true);
     expect(textOf(renderer)).toContain("Selectable heading");
     expect(textOf(renderer)).toContain("Selectable paragraph with rich text.");
     expect(textOf(renderer)).toContain("FalconDecknative");
@@ -457,14 +460,19 @@ describe("MarkdownRenderer", () => {
     expect(textOf(renderer)).not.toContain("flowchart TD");
   });
 
-  it("keeps mermaid as source while streaming", () => {
+  it("renders a closed mermaid fence while streaming", async () => {
+    setMermaidAssetLoader(async () => "window.mermaid={}");
     const renderer = renderComponent(
       <MarkdownRenderer
         streaming
         text={"```mermaid\nflowchart TD\n  A-->B\n```"}
       />,
     );
-    expect(textOf(renderer)).toContain("flowchart TD");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(textOf(renderer)).toContain("Source");
+    expect(textOf(renderer)).not.toContain("flowchart TD");
   });
 
   it("opens only safe markdown links", async () => {
@@ -688,6 +696,69 @@ describe("MarkdownRenderer", () => {
     expect(textOf(renderer)).toContain("Fallback text");
     expect(textOf(renderer)).toContain("https://example.com/only.png");
   });
+});
+
+describe("streaming parse throttling", () => {
+  it(
+    "coalesces rapid stream deltas into a trailing parse and never leaves" +
+      " the settled message stale",
+    () => {
+      vi.useFakeTimers();
+      try {
+        const renderer = renderComponent(
+          <MarkdownRenderer text={"alpha paragraph"} streaming />,
+        );
+        expect(textOf(renderer)).toContain("alpha paragraph");
+
+        // Two more deltas land immediately inside the 120ms window.
+        act(() => {
+          renderer.update(
+            <MarkdownRenderer
+              text={"alpha paragraph\n\nbeta paragraph"}
+              streaming
+            />,
+          );
+        });
+        act(() => {
+          renderer.update(
+            <MarkdownRenderer
+              text={"alpha paragraph\n\nbeta paragraph\ngamma"}
+              streaming
+            />,
+          );
+        });
+        // Coalesced: intermediate content is not parsed mid-burst.
+        expect(textOf(renderer)).not.toContain("beta paragraph");
+        expect(textOf(renderer)).not.toContain("gamma");
+
+        // The always-scheduled trailing parse picks up the settled text.
+        act(() => {
+          vi.advanceTimersByTime(130);
+        });
+        expect(textOf(renderer)).toContain("beta paragraph");
+        expect(textOf(renderer)).toContain("gamma");
+
+        // Outside the throttle window, the next delta paints immediately —
+        // the streaming tail stays prompt after each tick.
+        act(() => {
+          vi.advanceTimersByTime(130);
+        });
+        act(() => {
+          renderer.update(
+            <MarkdownRenderer
+              text={
+                "alpha paragraph\n\nbeta paragraph\ngamma\ndelta paragraph"
+              }
+              streaming
+            />,
+          );
+        });
+        expect(textOf(renderer)).toContain("delta paragraph");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 describe("slash-command highlighting", () => {

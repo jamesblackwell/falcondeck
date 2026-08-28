@@ -42,7 +42,10 @@ describe('readMermaidPalette', () => {
 describe('renderMermaidSvg', () => {
   afterEach(() => {
     initialize.mockClear()
-    render.mockClear()
+    render.mockReset()
+    render.mockResolvedValue({
+      svg: '<svg data-testid="mermaid-svg"></svg>',
+    })
   })
 
   it('initializes mermaid then renders with a unique id', async () => {
@@ -54,5 +57,30 @@ describe('renderMermaidSvg', () => {
     const id = render.mock.calls[0]?.[0] as string
     expect(id).toMatch(/^fdm\d+$/)
     expect(id).not.toBe(first)
+  })
+
+  it('rejects an empty svg payload instead of painting a blank diagram', async () => {
+    render.mockImplementationOnce(async () => ({ svg: '' }))
+    await expect(renderMermaidSvg('flowchart TD\n  A-->B')).rejects.toMatchObject({
+      message: 'Could not render diagram',
+    })
+  })
+
+  it('renders one diagram at a time', async () => {
+    let inflight = 0
+    let peak = 0
+    render.mockImplementation(async () => {
+      inflight += 1
+      peak = Math.max(peak, inflight)
+      await Promise.resolve()
+      inflight -= 1
+      return { svg: '<svg data-testid="mermaid-svg"></svg>' }
+    })
+
+    await Promise.all([
+      renderMermaidSvg('flowchart TD\n  A-->B'),
+      renderMermaidSvg('flowchart TD\n  C-->D'),
+    ])
+    expect(peak).toBe(1)
   })
 })

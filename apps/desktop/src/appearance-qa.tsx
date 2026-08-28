@@ -26,7 +26,7 @@ if (overrides) {
   }
 }
 
-function SurfaceCard({ title, children }: { title: string; children: ReactNode }) {
+export function SurfaceCard({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-4">
       <p className="mb-3 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.24em] text-fg-muted">
@@ -37,7 +37,7 @@ function SurfaceCard({ title, children }: { title: string; children: ReactNode }
   );
 }
 
-function Preview() {
+export function Preview() {
   return (
     <div className="space-y-4">
       <SurfaceCard title="Sidebar">

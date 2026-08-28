@@ -35,6 +35,10 @@ PROJECT_RUSTDOC := $(shell if command -v rustup >/dev/null 2>&1; then rustup whi
 DAEMON_PORT ?= 4123
 OPENCODE_MODEL ?= default
 OPENCODE_TRANSPORT ?= auto
+LIVE ?=
+ALL_MODELS ?=
+RESTART ?=
+HARNESS_CONFORMANCE_JSON ?=
 RELAY_PORT ?= 8787
 UI_PORT ?= 1420
 REMOTE_WEB_PORT ?= 4174
@@ -442,6 +446,19 @@ daemon:
 
 qa-opencode:
 	OPENCODE_TRANSPORT=$(OPENCODE_TRANSPORT) OPENCODE_MODEL=$(OPENCODE_MODEL) ./scripts/qa-opencode.sh
+
+# Cost-free harness probes against whatever is installed locally. Missing
+# binaries are skipped. Token-spending checks stay behind LIVE=1 and use
+# current cheap-tier models (Luna / DeepSeek V4 Flash / Haiku 4 / Gemini 3.7
+# Flash-low). ALL_MODELS=1 also verifies every
+# curated Claude id. RESTART=1 adds the ACP process-restart live check.
+harness-conformance:
+	args="--skip-missing"; \
+	if [ "$(LIVE)" = "1" ]; then args="$$args --live"; fi; \
+	if [ "$(ALL_MODELS)" = "1" ]; then args="$$args --all-models"; fi; \
+	if [ "$(RESTART)" = "1" ]; then args="$$args --restart"; fi; \
+	if [ "$(HARNESS_CONFORMANCE_JSON)" = "1" ]; then args="$$args --json"; fi; \
+	$(CARGO) run -p falcondeck-daemon --example harness_conformance -- $$args
 
 relay:
 	FALCONDECK_RELAY_BIND=$(RELAY_BIND_HOST):$(RELAY_PORT) $(CARGO) run -p falcondeck-relay

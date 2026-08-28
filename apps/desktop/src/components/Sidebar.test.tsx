@@ -56,6 +56,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_error: null,
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     agent: {
       model_id: null,
@@ -207,6 +208,27 @@ describe("DesktopSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("opens search from the header and adds projects from the Projects heading", () => {
+    const onSearch = vi.fn();
+    const onAddProject = vi.fn();
+    renderSidebar({ onSearch, onAddProject, onNewThread: vi.fn() });
+
+    const search = screen.getByRole("button", { name: "Search" });
+    const addProject = screen.getByRole("button", { name: "Add project" });
+    const projects = screen.getByRole("region", { name: "Projects" });
+    expect(addProject).toHaveClass("text-fg-muted");
+    // Search sits in the header; adding a project lives with the projects.
+    expect(search.compareDocumentPosition(projects)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(projects).toContainElement(addProject);
+
+    fireEvent.click(search);
+    expect(onSearch).toHaveBeenCalledOnce();
+    fireEvent.click(addProject);
+    expect(onAddProject).toHaveBeenCalledOnce();
+  });
+
   it("keeps errors out of the titlebar row and lets them be dismissed", () => {
     const onDismissError = vi.fn();
     renderSidebar({
@@ -232,24 +254,120 @@ describe("DesktopSidebar", () => {
     );
   });
 
-  it("opens search from the header and adds projects from the Projects heading", () => {
-    const onSearch = vi.fn();
-    const onAddProject = vi.fn();
-    renderSidebar({ onSearch, onAddProject, onNewThread: vi.fn() });
+  it("keeps an empty Chats section visible with its own new-chat action", () => {
+    const onNewChat = vi.fn();
+    renderSidebar({ onNewChat });
 
-    const search = screen.getByRole("button", { name: "Search" });
-    const addProject = screen.getByRole("button", { name: "Add project" });
+    const chats = screen.getByRole("region", { name: "Chats" });
     const projects = screen.getByRole("region", { name: "Projects" });
-    // Search sits in the header; adding a project lives with the projects.
-    expect(search.compareDocumentPosition(projects)).toBe(
+    const startChat = within(chats).getByRole("button", {
+      name: "Start new chat",
+    });
+    expect(startChat).toHaveClass("text-fg-muted");
+
+    expect(projects.compareDocumentPosition(chats)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
-    expect(projects).toContainElement(addProject);
 
-    fireEvent.click(search);
-    expect(onSearch).toHaveBeenCalledOnce();
-    fireEvent.click(addProject);
-    expect(onAddProject).toHaveBeenCalledOnce();
+    fireEvent.click(startChat);
+    expect(onNewChat).toHaveBeenCalledOnce();
+  });
+
+  it("collapses the Chats section to hide individual chats", () => {
+    const onNewChat = vi.fn();
+    renderSidebar({
+      onNewChat,
+      groups: [
+        {
+          workspace: workspace({ id: "chat-w", kind: "casual" }),
+          threads: [
+            thread({
+              id: "chat-t",
+              workspace_id: "chat-w",
+              title: "Weekend plans",
+            }),
+          ],
+        },
+      ],
+    });
+
+    expect(screen.getByText("Weekend plans")).toBeInTheDocument();
+    const collapse = screen.getByRole("button", { name: "Collapse chats" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(collapse);
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+
+    const expand = screen.getByRole("button", { name: "Expand chats" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(expand);
+    expect(screen.getByText("Weekend plans")).toBeInTheDocument();
+  });
+
+  it("keeps the new-chat action available while chats are collapsed", () => {
+    const onNewChat = vi.fn();
+    renderSidebar({
+      onNewChat,
+      groups: [
+        {
+          workspace: workspace({ id: "chat-w", kind: "casual" }),
+          threads: [
+            thread({
+              id: "chat-t",
+              workspace_id: "chat-w",
+              title: "Weekend plans",
+            }),
+          ],
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse chats" }));
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+
+    const chats = screen.getByRole("region", { name: "Chats" });
+    fireEvent.click(
+      within(chats).getByRole("button", { name: "Start new chat" }),
+    );
+    expect(onNewChat).toHaveBeenCalledOnce();
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+  });
+
+  it("honors a host-owned chats collapsed flag and reports toggles back to it", () => {
+    const onChatsCollapsedChange = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "chat-w", kind: "casual" }),
+        threads: [
+          thread({
+            id: "chat-t",
+            workspace_id: "chat-w",
+            title: "Weekend plans",
+          }),
+        ],
+      },
+    ];
+    const { rerenderSidebar } = renderSidebar({
+      groups,
+      onNewChat: vi.fn(),
+      chatsCollapsed: true,
+      onChatsCollapsedChange,
+    });
+
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+    const expand = screen.getByRole("button", { name: "Expand chats" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expand);
+    expect(onChatsCollapsedChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+
+    rerenderSidebar({ chatsCollapsed: false, onChatsCollapsedChange });
+    expect(screen.getByRole("button", { name: "Collapse chats" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByText("Weekend plans")).toBeInTheDocument();
   });
 
   it("searches one project's threads from the project row", () => {
@@ -354,6 +472,7 @@ describe("DesktopSidebar", () => {
               id: "pinned-thread",
               title: "Pinned chat",
               is_pinned: true,
+              is_pinned_in_project: false,
             }),
             thread({ id: "regular-thread", title: "Project chat" }),
           ],
@@ -380,6 +499,51 @@ describe("DesktopSidebar", () => {
 
     fireEvent.click(within(pinnedSection).getByText("Pinned chat"));
     expect(onSelectThread).toHaveBeenCalledWith("workspace-1", "pinned-thread");
+  });
+
+  it("keeps pin-in-project chats at the top of their project instead of the global list", () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({
+              id: "regular-new",
+              title: "Newest project chat",
+              updated_at: "2026-03-16T12:00:00Z",
+            }),
+            thread({
+              id: "project-pinned",
+              title: "Pinned in project",
+              is_pinned_in_project: true,
+              updated_at: "2026-03-10T10:00:00Z",
+            }),
+            thread({
+              id: "regular-old",
+              title: "Older project chat",
+              updated_at: "2026-03-14T10:00:00Z",
+            }),
+          ],
+        },
+      ],
+      selectedThreadId: "regular-new",
+    });
+
+    expect(screen.queryByRole("region", { name: "Pinned" })).not.toBeInTheDocument();
+    const projectsSection = screen.getByRole("region", { name: "Projects" });
+    const projectPinned = within(projectsSection).getByText("Pinned in project");
+    const newest = within(projectsSection).getByText("Newest project chat");
+    const older = within(projectsSection).getByText("Older project chat");
+
+    expect(projectPinned.compareDocumentPosition(newest)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(newest.compareDocumentPosition(older)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(
+      within(projectsSection).getByRole("img", { name: "Pinned in project" }),
+    ).toBeInTheDocument();
   });
 
   it("sorts each project’s chats by name when asked", () => {
@@ -1121,15 +1285,95 @@ describe("DesktopSidebar", () => {
     });
   });
 
-  it("archives a thread from the right-click menu", async () => {
+  it("archives a thread from the right-click menu after confirmation", async () => {
     const { onArchiveThread } = renderSidebar();
 
     fireEvent.contextMenu(screen.getByText("Main thread"));
     fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
 
+    // The first click only arms the row's Confirm pill.
+    expect(onArchiveThread).not.toHaveBeenCalled();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Confirm archiving Main thread",
+      }),
+    );
+
     await waitFor(() => {
       expect(onArchiveThread).toHaveBeenCalledWith("workspace-1", "thread-1");
     });
+  });
+
+  it("asks for confirmation when the row's archive button is used", async () => {
+    const { onArchiveThread } = renderSidebar();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Archive thread Main thread",
+        hidden: true,
+      }),
+    );
+
+    expect(onArchiveThread).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("button", {
+        name: "Confirm archiving Main thread",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels the pending archive when clicking outside the row", async () => {
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Confirm archiving Main thread",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+
+    expect(
+      screen.queryByRole("button", { name: "Confirm archiving Main thread" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cancels the pending archive on Escape", async () => {
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Confirm archiving Main thread",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(
+      screen.queryByRole("button", { name: "Confirm archiving Main thread" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cancels the pending archive when the dimmed row is clicked", async () => {
+    renderSidebar();
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    expect(
+      await screen.findByRole("button", {
+        name: "Confirm archiving Main thread",
+      }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Main thread"));
+
+    expect(
+      screen.queryByRole("button", { name: "Confirm archiving Main thread" }),
+    ).not.toBeInTheDocument();
   });
 
   it("deletes a thread from the right-click menu after confirmation", async () => {
@@ -1662,5 +1906,24 @@ describe("DesktopSidebar", () => {
     expect(
       screen.queryByRole("menuitem", { name: "Remove project" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders Options menu trigger in footer and triggers actions", () => {
+    const onOpenSettings = vi.fn();
+    const onOpenUsage = vi.fn();
+
+    renderSidebar({
+      onOpenSettings,
+      onOpenUsage,
+    });
+
+    const optionsButton = screen.getByRole("button", { name: "Options" });
+    expect(optionsButton).toBeInTheDocument();
+
+    fireEvent.click(optionsButton);
+    expect(screen.getByRole("menu", { name: "Options menu" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /Usage/ }));
+    expect(onOpenUsage).toHaveBeenCalledOnce();
   });
 });

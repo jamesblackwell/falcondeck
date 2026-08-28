@@ -1,4 +1,5 @@
 import { assistantMessageCopyText } from "./agent-directive";
+import { projectHarnessUserItems } from "./harness-user-text";
 import {
   citationDisplayLabel,
   citationExcerptPreview,
@@ -538,7 +539,7 @@ export function conversationItemsToMarkdown(
   const preamble = [`# ${title}`, partial].filter(Boolean).join("\n\n");
   const fileSummary =
     mode === "handoff" ? handoffFileSummary(items, ctx) : null;
-  const transcript = items
+  const transcript = projectHarnessUserItems(items)
     .filter(
       (item) =>
         item.kind !== "reasoning" ||

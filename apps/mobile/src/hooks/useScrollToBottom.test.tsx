@@ -185,7 +185,12 @@ describe('useScrollToBottom', () => {
       hook.value.onScrollEndDrag(scrollEvent(490))
     })
 
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+    // Re-arm the flag only — do not animate shut the leftover gap.
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
   })
 
   it('does not resume following when a drag ends away from the bottom', () => {
@@ -208,7 +213,11 @@ describe('useScrollToBottom', () => {
       hook.value.onMomentumScrollEnd(scrollEvent(495))
     })
 
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
   })
 
   it('leaves following off when momentum settles mid-list', () => {
@@ -310,5 +319,64 @@ describe('useScrollToBottom', () => {
       hook.value.scrollToBottomIfFollowing(false)
     })
     expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not snap back after a small upward peek that layout corrections disguise as a downward move', () => {
+    const hook = renderHook()
+
+    // At the tail: y=500, content=1000, viewport=500 → distance 0.
+    act(() => {
+      hook.value.onTouchStart()
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+    })
+    // Reader moved up ~20px, but a row above finished measuring and MVCP
+    // raised the offset so raw y increased. Old code treated that as "not
+    // upward" and animated scrollToEnd because distance was still < 44.
+    act(() => {
+      hook.value.onScroll(scrollEvent(520, 1040, 500))
+      hook.value.onScrollEndDrag(scrollEvent(520, 1040, 500))
+    })
+
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('does not pin or snap while a finger is on the list', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onTouchStart()
+      hook.value.onContentSizeChange()
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+
+    act(() => {
+      hook.value.onTouchEnd()
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
+  })
+
+  it('keeps following off after an upward peek even when momentum later looks near the tail', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScroll(scrollEvent(470))
+      hook.value.onScrollEndDrag(scrollEvent(490, 1000, 500))
+      hook.value.onMomentumScrollEnd(scrollEvent(490, 1000, 500))
+    })
+
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 })

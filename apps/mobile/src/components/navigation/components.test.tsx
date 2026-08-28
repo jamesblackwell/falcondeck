@@ -126,17 +126,44 @@ describe("SidebarView component", () => {
     settings.props.onPress();
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
-  it("opens automations from the persistent footer", () => {
+  it("opens automations from first-class navigation above projects", () => {
     const onOpenAutomations = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [thread({ id: "t1", workspace_id: "w1" })],
+      },
+    ];
     const r = renderComponent(
-      <SidebarView {...base} onOpenAutomations={onOpenAutomations} />,
+      <SidebarView
+        {...base}
+        groups={groups}
+        onOpenAutomations={onOpenAutomations}
+        onOpenSettings={vi.fn()}
+      />,
     );
     const automations = r.root.find(
       (node) => node.props.accessibilityLabel === "Automations",
     );
-    expect(textOf(r)).toContain("Automations");
+    const text = textOf(r);
+    expect(text.indexOf("Automations")).toBeGreaterThan(-1);
+    expect(text.indexOf("Automations")).toBeLessThan(text.indexOf("PROJECTS"));
+    expect(text.indexOf("PROJECTS")).toBeLessThan(text.indexOf("Settings"));
     automations.props.onPress();
     expect(onOpenAutomations).toHaveBeenCalledTimes(1);
+  });
+  it("marks Automations as the current page when that view is open", () => {
+    const r = renderComponent(
+      <SidebarView
+        {...base}
+        onOpenAutomations={vi.fn()}
+        automationsOpen
+      />,
+    );
+    expect(
+      r.root.find((node) => node.props.accessibilityLabel === "Automations")
+        .props.accessibilityState,
+    ).toEqual({ selected: true });
   });
   it("starts a thread from a row above the project list", () => {
     const onNewThread = vi.fn();
@@ -202,6 +229,35 @@ describe("SidebarView component", () => {
     expect(textOf(r)).toContain("proj");
     expect(textOf(r)).toContain("Test thread");
   });
+  it("collapses the Chats section to hide individual chats", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "chat-w", kind: "casual" }),
+        threads: [
+          thread({
+            id: "chat-t",
+            workspace_id: "chat-w",
+            title: "Weekend plans",
+          }),
+        ],
+      },
+    ];
+    const r = renderComponent(
+      <SidebarView {...base} groups={groups} onNewChat={vi.fn()} />,
+    );
+    expect(textOf(r)).toContain("Weekend plans");
+    const collapse = r.root.findByProps({
+      accessibilityLabel: "Collapse chats",
+    });
+    expect(collapse.props.accessibilityState).toEqual({ expanded: true });
+    act(() => {
+      collapse.props.onPress();
+    });
+    expect(
+      r.root.findByProps({ accessibilityLabel: "Expand chats" }).props
+        .accessibilityState,
+    ).toEqual({ expanded: false });
+  });
   it("sorts project chats by last updated, priority, or name", () => {
     const groups: ProjectGroup[] = [
       {
@@ -262,7 +318,7 @@ describe("SidebarView component", () => {
       renderComponent(<SidebarView {...base} groups={groups} />).toJSON(),
     ).toBeTruthy();
   });
-  it("shows a skeleton silently during the first-sync grace period", () => {
+  it("stays quiet during the first-sync grace period instead of claiming there are no projects", () => {
     useRelayStore.setState({
       connectionStatus: "encrypted",
       isEncrypted: true,
@@ -282,6 +338,33 @@ describe("SidebarView component", () => {
     expect(text).not.toContain("Loading your projects");
     expect(text).not.toContain("No projects");
   });
+  it("keeps cached projects visible while a background sync is in flight", () => {
+    useRelayStore.setState({
+      connectionStatus: "encrypted",
+      isEncrypted: true,
+      isSyncing: true,
+      hasSyncedOnce: false,
+      machinePresence: {
+        session_id: "s1",
+        daemon_connected: true,
+        daemon_rpc_ready: true,
+        last_seen_at: null,
+      },
+    });
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/alpha" }),
+        threads: [thread({ id: "t1", workspace_id: "w1", title: "Keep me" })],
+      },
+    ];
+
+    const text = textOf(renderComponent(<SidebarView {...base} groups={groups} />));
+
+    expect(text).toContain("alpha");
+    expect(text).toContain("Keep me");
+    expect(text).not.toContain("No projects");
+    expect(text).not.toContain("Syncing your projects…");
+  });
   it("filters threads with a synchronized custom stage", () => {
     const groups: ProjectGroup[] = [
       {
@@ -292,6 +375,7 @@ describe("SidebarView component", () => {
             workspace_id: "w1",
             title: "Blocked thread",
             is_pinned: true,
+            is_pinned_in_project: false,
           }),
           thread({
             id: "done-thread",

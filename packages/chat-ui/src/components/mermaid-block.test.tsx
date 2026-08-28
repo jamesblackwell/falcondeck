@@ -71,4 +71,12 @@ describe('MermaidBlock', () => {
     expect(mermaidRender).not.toHaveBeenCalled()
     expect(screen.queryByRole('img', { name: 'Mermaid diagram' })).toBeNull()
   })
+
+  it('hides the render error while the enclosing message is still pending', async () => {
+    mermaidRender.mockRejectedValueOnce(new Error('Parse error'))
+    render(<MermaidBlock code={'flowchart TD\n  A-->'} pending />)
+
+    expect(await screen.findByText(/A-->/)).toBeInTheDocument()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
 })

@@ -3,6 +3,7 @@ use crate::codex::extract_datetime_or_timestamp;
 use falcondeck_core::RealtimeConversationItem;
 use falcondeck_core::{
     RealtimeAudioChunk, ThreadTokenUsage, TokenUsageBreakdown, ToolCallDetail, ToolLifecycle,
+    WorkspaceStatus,
 };
 
 /// Recognizes a provider diagnostic that is really "one configured MCP server
@@ -525,14 +526,14 @@ pub(super) async fn ingest_notification(
                 app.with_thread_mut(workspace_id, &thread_id, |thread| {
                     // The provider refines objective/usage but has no notion
                     // of when the goal started; that stamp is ours to keep.
-                    if let Some(goal) = goal.as_mut() {
-                        if goal.started_at.is_none() {
-                            goal.started_at = thread
-                                .goal
-                                .as_ref()
-                                .and_then(|existing| existing.started_at)
-                                .or_else(|| Some(Utc::now()));
-                        }
+                    if let Some(goal) = goal.as_mut()
+                        && goal.started_at.is_none()
+                    {
+                        goal.started_at = thread
+                            .goal
+                            .as_ref()
+                            .and_then(|existing| existing.started_at)
+                            .or_else(|| Some(Utc::now()));
                     }
                     thread.goal = goal.clone();
                 })
@@ -1832,6 +1833,9 @@ pub(super) async fn ingest_notification(
                     &workspace.summary.status,
                     &workspace.summary.account.status,
                 );
+                if workspace.summary.status == WorkspaceStatus::Ready {
+                    workspace.summary.last_error = None;
+                }
                 workspace.summary.updated_at = Utc::now();
             }
         }
@@ -2489,6 +2493,17 @@ fn claude_hook_decision(decision: &str, reason: &str) -> Value {
     })
 }
 
+fn claude_hook_allow_with_input(reason: &str, updated_input: Value) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "permissionDecisionReason": reason,
+            "updatedInput": updated_input
+        }
+    })
+}
+
 /// Human-readable approval detail for a Claude tool input. Clients JSON.parse
 /// detail strings that start with `{`, so truncating raw JSON broke the parse
 /// for any input over the preview limit and rendered the mangled blob
@@ -2653,6 +2668,16 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         return no_opinion;
     };
 
+    // These tools *are* the prompt. Auto-allow (bypass / auto / dontAsk /
+    // always-allow lists) would hide AskUserQuestion and approve a plan the
+    // user never saw. Handle them before every permission-mode shortcut.
+    if tool_name == crate::claude::ASK_USER_QUESTION_TOOL {
+        return handle_claude_ask_user_question(app, workspace_id, thread_id, tool_input).await;
+    }
+    if tool_name == crate::claude::EXIT_PLAN_MODE_TOOL {
+        return handle_claude_exit_plan_mode(app, workspace_id, thread_id, tool_input).await;
+    }
+
     let allow = claude_hook_decision("allow", "Approved in FalconDeck");
 
     // The thread's CURRENT permission mode decides, not the mode the turn was
@@ -2741,46 +2766,210 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         created_at: Utc::now(),
     };
 
+    let reply = match wait_for_claude_hook_reply(
+        app,
+        &workspace_id,
+        &thread_id,
+        request,
+        Value::Null,
+        "approval",
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(deny) => return deny,
+    };
+
+    match reply {
+        crate::claude::ClaudeHookReply::Approval(ApprovalDecision::Allow) => allow,
+        crate::claude::ClaudeHookReply::Approval(ApprovalDecision::AlwaysAllow) => {
+            app.inner
+                .claude_always_allowed_tools
+                .lock()
+                .await
+                .entry((workspace_id, thread_id))
+                .or_default()
+                .insert(tool_name);
+            allow
+        }
+        crate::claude::ClaudeHookReply::Approval(ApprovalDecision::Deny) => {
+            claude_hook_decision("deny", "Denied in FalconDeck")
+        }
+        crate::claude::ClaudeHookReply::QuestionAnswers(_)
+        | crate::claude::ClaudeHookReply::Plan { .. } => {
+            claude_hook_decision("deny", "FalconDeck approval response mismatch")
+        }
+    }
+}
+
+async fn handle_claude_ask_user_question(
+    app: &AppState,
+    workspace_id: String,
+    thread_id: String,
+    tool_input: Value,
+) -> Value {
+    let Some(parsed) = crate::claude::parse_ask_user_question(&tool_input) else {
+        return claude_hook_decision("deny", "Invalid AskUserQuestion input");
+    };
+    let request_id = format!("claude-{}", Uuid::new_v4());
+    let request = InteractiveRequest {
+        request_id,
+        workspace_id: workspace_id.clone(),
+        thread_id: Some(thread_id.clone()),
+        method: "claude/hooks/ask-user-question".to_string(),
+        kind: InteractiveRequestKind::Question,
+        approval_decisions: Some(Vec::new()),
+        title: "Claude has a question".to_string(),
+        detail: Some(format!(
+            "{} question{} from Claude.",
+            parsed.questions.len(),
+            if parsed.questions.len() == 1 { "" } else { "s" }
+        )),
+        command: None,
+        path: None,
+        turn_id: None,
+        item_id: None,
+        questions: parsed.questions.clone(),
+        created_at: Utc::now(),
+    };
+    let params = json!({
+        "original_questions": parsed.original_questions,
+        "questions": parsed.questions,
+    });
+    let reply = match wait_for_claude_hook_reply(
+        app,
+        &workspace_id,
+        &thread_id,
+        request,
+        params,
+        "question",
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(deny) => return deny,
+    };
+    match reply {
+        crate::claude::ClaudeHookReply::QuestionAnswers(answers) => claude_hook_allow_with_input(
+            "Answered in FalconDeck",
+            crate::claude::ask_user_question_updated_input(
+                &parsed.original_questions,
+                &parsed.questions,
+                &answers,
+            ),
+        ),
+        _ => claude_hook_decision("deny", "FalconDeck question response mismatch"),
+    }
+}
+
+async fn handle_claude_exit_plan_mode(
+    app: &AppState,
+    workspace_id: String,
+    thread_id: String,
+    tool_input: Value,
+) -> Value {
+    let Some(plan) = crate::claude::parse_exit_plan_mode(&tool_input) else {
+        return claude_hook_decision("deny", "Invalid ExitPlanMode input");
+    };
+    let request_id = format!("claude-{}", Uuid::new_v4());
+    let request = InteractiveRequest {
+        request_id,
+        workspace_id: workspace_id.clone(),
+        thread_id: Some(thread_id.clone()),
+        method: "claude/hooks/exit-plan-mode".to_string(),
+        kind: InteractiveRequestKind::PlanApproval,
+        approval_decisions: Some(Vec::new()),
+        title: "Review Claude's plan".to_string(),
+        detail: Some(plan),
+        command: None,
+        path: crate::codex::extract_string(&tool_input, &["planFilePath", "plan_file_path"]),
+        turn_id: None,
+        item_id: None,
+        questions: Vec::new(),
+        created_at: Utc::now(),
+    };
+    let reply = match wait_for_claude_hook_reply(
+        app,
+        &workspace_id,
+        &thread_id,
+        request,
+        tool_input,
+        "approval",
+    )
+    .await
+    {
+        Ok(reply) => reply,
+        Err(deny) => return deny,
+    };
+    match reply {
+        crate::claude::ClaudeHookReply::Plan {
+            outcome: falcondeck_core::PlanApprovalOutcome::Approved,
+            ..
+        } => claude_hook_decision("allow", "Plan approved in FalconDeck"),
+        crate::claude::ClaudeHookReply::Plan {
+            outcome: falcondeck_core::PlanApprovalOutcome::Cancelled,
+            feedback,
+        } => claude_hook_decision(
+            "deny",
+            &crate::claude::exit_plan_mode_rejection_message(feedback.as_deref()),
+        ),
+        crate::claude::ClaudeHookReply::Plan {
+            outcome: falcondeck_core::PlanApprovalOutcome::Abandoned,
+            ..
+        } => claude_hook_decision("deny", &crate::claude::exit_plan_mode_abandon_message()),
+        _ => claude_hook_decision("deny", "FalconDeck plan response mismatch"),
+    }
+}
+
+async fn wait_for_claude_hook_reply(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    request: InteractiveRequest,
+    params: Value,
+    attention_kind: &str,
+) -> Result<crate::claude::ClaudeHookReply, Value> {
+    let request_id = request.request_id.clone();
     let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
     app.inner
         .claude_approvals
         .lock()
         .await
-        .insert((workspace_id.clone(), request_id.clone()), decision_tx);
+        .insert((workspace_id.to_string(), request_id.clone()), decision_tx);
     app.inner.interactive_requests.lock().await.insert(
-        (workspace_id.clone(), request_id.clone()),
+        (workspace_id.to_string(), request_id.clone()),
         PendingServerRequest {
             raw_id: Value::Null,
             request: request.clone(),
-            params: Value::Null,
+            params,
         },
     );
     let mut guard = ClaudeApprovalGuard {
         app: app.clone(),
-        workspace_id: workspace_id.clone(),
-        thread_id: thread_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        thread_id: thread_id.to_string(),
         request_id: request_id.clone(),
         completed: false,
     };
 
     let _ = app
-        .with_thread_mut(&workspace_id, &thread_id, |thread| {
+        .with_thread_mut(workspace_id, thread_id, |thread| {
             thread.status = ThreadStatus::WaitingForInput;
         })
         .await;
     app.emit(
-        Some(workspace_id.clone()),
-        Some(thread_id.clone()),
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
         UnifiedEvent::InteractiveRequest {
             request: request.clone(),
         },
     );
-    app.notify_remote_attention("approval", &workspace_id, Some(thread_id.clone()))
+    app.notify_remote_attention(attention_kind, workspace_id, Some(thread_id.to_string()))
         .await;
     let _ = app
         .push_conversation_item(
-            &workspace_id,
-            &thread_id,
+            workspace_id,
+            thread_id,
             ConversationItem::InteractiveRequest {
                 id: request_id.clone(),
                 request: Box::new(request),
@@ -2792,52 +2981,43 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         )
         .await;
 
-    let decision = match timeout(CLAUDE_APPROVAL_TIMEOUT, decision_rx).await {
-        Ok(Ok(decision)) => {
+    match timeout(CLAUDE_APPROVAL_TIMEOUT, decision_rx).await {
+        Ok(Ok(reply)) => {
             // The responder in `respond_to_interactive_request` already
             // removed both map entries and resolved the conversation item.
             guard.disarm();
-            decision
+            Ok(reply)
         }
         Err(_) => {
             guard.disarm();
             cleanup_abandoned_claude_approval(
                 app,
-                &workspace_id,
-                &thread_id,
+                workspace_id,
+                thread_id,
                 &request_id,
                 falcondeck_core::InteractiveRequestOutcome::Expired,
             )
             .await;
-            return claude_hook_decision("deny", "FalconDeck approval timed out");
+            Err(claude_hook_decision(
+                "deny",
+                "FalconDeck approval timed out",
+            ))
         }
         Ok(Err(_)) => {
             guard.disarm();
             cleanup_abandoned_claude_approval(
                 app,
-                &workspace_id,
-                &thread_id,
+                workspace_id,
+                thread_id,
                 &request_id,
                 falcondeck_core::InteractiveRequestOutcome::Cancelled,
             )
             .await;
-            return claude_hook_decision("deny", "FalconDeck approval was cancelled");
+            Err(claude_hook_decision(
+                "deny",
+                "FalconDeck approval was cancelled",
+            ))
         }
-    };
-
-    match decision {
-        ApprovalDecision::Allow => allow,
-        ApprovalDecision::AlwaysAllow => {
-            app.inner
-                .claude_always_allowed_tools
-                .lock()
-                .await
-                .entry((workspace_id, thread_id))
-                .or_default()
-                .insert(tool_name);
-            allow
-        }
-        ApprovalDecision::Deny => claude_hook_decision("deny", "Denied in FalconDeck"),
     }
 }
 
@@ -2882,7 +3062,14 @@ pub(super) async fn ingest_server_request(
 ) -> Result<(), DaemonError> {
     if crate::codex::server_request_expects_result(method) {
         let request_id = normalize_request_id(&raw_id);
-        let request = if method.ends_with("requestApproval") {
+        let request = if is_mcp_elicitation_method(method) {
+            mcp_elicitation_interactive_request(
+                request_id.clone(),
+                workspace_id.to_string(),
+                method.to_string(),
+                &params,
+            )
+        } else if method.ends_with("requestApproval") {
             InteractiveRequest {
                 request_id: request_id.clone(),
                 workspace_id: workspace_id.to_string(),

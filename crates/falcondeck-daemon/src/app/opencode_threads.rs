@@ -106,7 +106,24 @@ impl AppState {
             .get(workspace_id)
             .map(|workspace| workspace.summary.path.clone())
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        let runtime = OpenCodeRuntime::spawn(&config.command, &workspace_path, &config.env).await?;
+        let mut env = config.env.clone();
+        let servers = crate::connectors::with_builtin_servers(
+            crate::connectors::load_mcp_servers(&workspace_path, "opencode"),
+            &self
+                .builtin_connectors(
+                    &falcondeck_core::AgentProvider::OPENCODE,
+                    &workspace_path,
+                    None,
+                )
+                .await,
+        );
+        if !servers.is_empty() {
+            env.insert(
+                "OPENCODE_CONFIG_CONTENT".to_string(),
+                crate::connectors::opencode_config_content(&servers),
+            );
+        }
+        let runtime = OpenCodeRuntime::spawn(&config.command, &workspace_path, &env).await?;
         {
             let mut workspaces = self.inner.workspaces.lock().await;
             if let Some(workspace) = workspaces.get_mut(workspace_id) {
@@ -306,6 +323,19 @@ impl AppState {
                     if marked.is_ok()
                         && let Ok(thread) = app.thread_summary(&workspace_id, &thread_id).await
                     {
+                        if super::is_shutdown_interrupted(
+                            &thread.status,
+                            thread.last_error.as_deref(),
+                        ) {
+                            app.settle_turn_items_with_error(
+                                &workspace_id,
+                                &thread_id,
+                                Utc::now(),
+                                ToolSettlement::Interrupted,
+                                Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR),
+                            )
+                            .await;
+                        }
                         app.emit(
                             Some(workspace_id.clone()),
                             Some(thread_id.clone()),
@@ -576,7 +606,12 @@ pub(super) async fn start_opencode_turn(
                 // transcript: leaving it unsynced would make the next detail
                 // read rehydrate from OpenCode storage and resurface the
                 // cancellation as a red provider error.
-                (ThreadStatus::Idle, None, ToolSettlement::Interrupted, projected)
+                (
+                    ThreadStatus::Idle,
+                    None,
+                    ToolSettlement::Interrupted,
+                    projected,
+                )
             }
             Err(error) => (
                 ThreadStatus::Error,

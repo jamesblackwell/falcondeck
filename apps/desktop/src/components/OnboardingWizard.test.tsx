@@ -236,27 +236,28 @@ describe('OnboardingWizard', () => {
   })
 
   it('refreshes the displayed harness version after an upgrade completes', async () => {
-    const gemini = {
+    const pi = {
       host: 'local',
       harnesses: [
         {
-          id: 'gemini',
-          label: 'Gemini CLI',
+          id: 'pi',
+          label: 'Pi',
           kind: 'detected',
-          bin: 'gemini',
+          bin: 'pi-acp',
           installed: true,
           version: '0.22.5',
           latest_version: '0.55.1',
           update_available: true,
-          upgrade_command: 'npm install -g @google/gemini-cli',
+          upgrade_command:
+            'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
         },
       ],
     }
-    const updatedGemini = {
-      ...gemini,
+    const updatedPi = {
+      ...pi,
       harnesses: [
         {
-          ...gemini.harnesses[0],
+          ...pi.harnesses[0],
           version: '0.55.1',
           update_available: false,
         },
@@ -264,20 +265,20 @@ describe('OnboardingWizard', () => {
     }
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(jsonResponse(gemini))
-      .mockResolvedValueOnce(jsonResponse({ job_id: 'job-gemini' }))
+      .mockResolvedValueOnce(jsonResponse(pi))
+      .mockResolvedValueOnce(jsonResponse({ job_id: 'job-pi' }))
       .mockResolvedValueOnce(
         jsonResponse({
-          job_id: 'job-gemini',
-          harness_id: 'gemini',
-          label: 'Gemini CLI',
+          job_id: 'job-pi',
+          harness_id: 'pi',
+          label: 'Pi',
           host: 'local',
           status: 'completed',
           log: ['installed'],
           error: null,
         }),
       )
-      .mockResolvedValueOnce(jsonResponse(updatedGemini))
+      .mockResolvedValueOnce(jsonResponse(updatedPi))
     vi.stubGlobal('fetch', fetchMock)
     const onToast = vi.fn()
     renderWizard({ onToast })
@@ -292,7 +293,7 @@ describe('OnboardingWizard', () => {
     expect(screen.queryByText('Update available')).toBeNull()
     expect(onToast).toHaveBeenCalledWith({
       variant: 'success',
-      title: 'Gemini CLI updated',
+      title: 'Pi updated',
     })
   })
 

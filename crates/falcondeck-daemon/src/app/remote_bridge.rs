@@ -231,6 +231,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "speech.models"
             | "workspace.files"
             | "workspace.file.read"
+            | "workspace.skills"
             | "git.status"
             | "git.diff"
             | "connectors.read"
@@ -288,9 +289,11 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.steer",
     "thread.queue.edit",
     "thread.queue.reorder",
+    "chat.create",
     "workspace.connect",
     "workspace.remove",
     "provider.hydrate",
+    "workspace.skills",
     "workspace.files",
     "workspace.file.read",
     "workspace.file.write",
@@ -1023,10 +1026,10 @@ impl AppState {
                     .map_err(|error| format!("failed to serialize control read: {error}"))
                 }
                 "control.execute" => {
-                    let request =
-                        serde_json::from_value::<ControlExecuteRequest>(params.clone()).map_err(
-                            |error| format!("invalid control operation payload: {error}"),
-                        )?;
+                    let request = serde_json::from_value::<ControlExecuteRequest>(params.clone())
+                        .map_err(|error| {
+                        format!("invalid control operation payload: {error}")
+                    })?;
                     let context = ControlRequestContext {
                         origin: ControlOrigin::RemoteRpc,
                         ..ControlRequestContext::default()
@@ -1412,6 +1415,10 @@ impl AppState {
                             &["serviceTier", "service_tier"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
+                        pinned_in_project: params
+                            .get("pinnedInProject")
+                            .or_else(|| params.get("pinned_in_project"))
+                            .and_then(Value::as_bool),
                         acknowledge_interruption: params
                             .get("acknowledgeInterruption")
                             .or_else(|| params.get("acknowledge_interruption"))
@@ -1447,8 +1454,20 @@ impl AppState {
                 "workspace.connect" => {
                     let request = falcondeck_core::ConnectWorkspaceRequest {
                         path: required(&["path"])?,
+                        kind: falcondeck_core::WorkspaceKind::Project,
                     };
                     self.connect_workspace(request)
+                        .await
+                        .and_then(|workspace| {
+                            serde_json::to_value(workspace).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "chat.create" => {
+                    if params.get("create").and_then(Value::as_bool) != Some(true) {
+                        return Err("invalid remote rpc payload: create must be true".to_string());
+                    }
+                    self.create_chat()
                         .await
                         .and_then(|workspace| {
                             serde_json::to_value(workspace).map_err(DaemonError::from)
@@ -1472,6 +1491,20 @@ impl AppState {
                         &falcondeck_core::AgentProvider::new(provider),
                     );
                     Ok(serde_json::json!({ "ok": true }))
+                }
+                "workspace.skills" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let provider = extract_string(&params, &["provider"])
+                        .map(falcondeck_core::AgentProvider::new);
+                    self.list_workspace_skills(&workspace_id, provider.as_ref())
+                        .await
+                        .and_then(|skills| {
+                            serde_json::to_value(falcondeck_core::WorkspaceSkillsResponse {
+                                skills,
+                            })
+                            .map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
                 }
                 "workspace.files" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
@@ -1650,6 +1683,11 @@ impl AppState {
                                 .and_then(Value::as_bool)
                                 .unwrap_or(false),
                         user_item_id: extract_string(&params, &["userItemId", "user_item_id"]),
+                        resume_interrupted: params
+                            .get("resumeInterrupted")
+                            .or_else(|| params.get("resume_interrupted"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     };
                     self.send_turn(request)
                         .await
@@ -1901,6 +1939,10 @@ impl AppState {
                             &["serviceTier", "service_tier"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
+                        pinned_in_project: params
+                            .get("pinnedInProject")
+                            .or_else(|| params.get("pinned_in_project"))
+                            .and_then(Value::as_bool),
                         acknowledge_interruption: params
                             .get("acknowledgeInterruption")
                             .or_else(|| params.get("acknowledge_interruption"))
@@ -2008,6 +2050,11 @@ impl AppState {
                         // after the turn it would have steered ended.
                         steer: false,
                         user_item_id: extract_string(&params, &["userItemId", "user_item_id"]),
+                        resume_interrupted: params
+                            .get("resumeInterrupted")
+                            .or_else(|| params.get("resume_interrupted"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     };
                     self.send_turn(request).await.and_then(|response| {
                         serde_json::to_value(response).map_err(DaemonError::from)

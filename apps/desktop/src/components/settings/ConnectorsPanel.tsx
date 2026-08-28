@@ -5,7 +5,9 @@ import {
   Badge,
   Button,
   Card,
+
   SettingsPage,
+
   SettingsPageHeader,
   CardContent,
   CardDescription,
@@ -34,9 +36,16 @@ type ConnectorsOverview = {
   merged: Array<ConnectorEntry & { name: string; scope: 'global' | 'workspace' }>
 }
 
+export type ConnectorWorkspace = {
+  id: string
+  path: string
+  /** Omitted by older daemons, where every workspace was a project. */
+  kind?: 'project' | 'casual'
+}
+
 export type ConnectorsPanelProps = {
   baseUrl: string | null
-  workspaces: Array<{ id: string; path: string }>
+  workspaces: ConnectorWorkspace[]
   onToast: (toast: {
     variant: 'success' | 'danger' | 'warning' | 'default'
     title: string
@@ -46,6 +55,11 @@ export type ConnectorsPanelProps = {
 
 function workspaceLabel(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path
+}
+
+/** Casual chat folders inherit global servers; they are not a config surface. */
+function isConnectorScopeWorkspace(workspace: ConnectorWorkspace) {
+  return workspace.kind !== 'casual'
 }
 
 function entrySummary(entry: ConnectorEntry) {
@@ -103,6 +117,18 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
   const isWorkspaceScope = scope !== 'global'
   const ready = overview !== null && overview.forScope === scope && !loadError
 
+  const projectWorkspaces = useMemo(
+    () =>
+      workspaces
+        .filter(isConnectorScopeWorkspace)
+        .sort((a, b) =>
+          workspaceLabel(a.path).localeCompare(workspaceLabel(b.path), undefined, {
+            sensitivity: 'base',
+          }),
+        ),
+    [workspaces],
+  )
+
   const load = useCallback(async () => {
     if (!baseUrl) return
     const generation = ++loadGeneration.current
@@ -130,6 +156,13 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
     setLoadError(null)
     void load()
   }, [load])
+
+  useEffect(() => {
+    if (scope === 'global') return
+    if (!projectWorkspaces.some((workspace) => workspace.id === scope)) {
+      setScope('global')
+    }
+  }, [projectWorkspaces, scope])
 
   const writeScope = useCallback(
     async (
@@ -224,17 +257,23 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <ScopeChip active={!isWorkspaceScope} label="Global" onClick={() => setScope('global')} />
-            {workspaces.map((workspace) => (
+          {projectWorkspaces.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2">
               <ScopeChip
-                key={workspace.id}
-                active={scope === workspace.id}
-                label={workspaceLabel(workspace.path)}
-                onClick={() => setScope(workspace.id)}
+                active={!isWorkspaceScope}
+                label="Global"
+                onClick={() => setScope('global')}
               />
-            ))}
-          </div>
+              {projectWorkspaces.map((workspace) => (
+                <ScopeChip
+                  key={workspace.id}
+                  active={scope === workspace.id}
+                  label={workspaceLabel(workspace.path)}
+                  onClick={() => setScope(workspace.id)}
+                />
+              ))}
+            </div>
+          ) : null}
 
           {isImporting ? (
             <ImportJsonForm

@@ -123,24 +123,74 @@ const EMPTY_HISTORY: ThreadHistoryState = {
   isPartial: false,
 };
 
-function filterActiveSnapshot(snapshot: DaemonSnapshot | null): DaemonSnapshot | null {
+function shallowEqualFields<T extends Record<string, unknown>>(a: T, b: T): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => key in b && a[key] === b[key]);
+}
+
+/**
+ * Returns `prev` itself when a freshly built list holds identical element
+ * references in identical order — sparing downstream shallow compares
+ * (`useGroups`, drawer subscriptions) from treating every snapshot event as
+ * a change.
+ */
+function reuseIfIdentical<T>(built: T[], prev: T[] | undefined): T[] {
+  if (
+    prev &&
+    prev.length === built.length &&
+    prev.every((item, index) => item === built[index])
+  ) {
+    return prev;
+  }
+  return built;
+}
+
+function filterActiveSnapshot(
+  snapshot: DaemonSnapshot | null,
+  /**
+   * Previous filtered snapshot, when one exists. Unchanged workspaces are
+   * reused by reference so per-event spread copies do not defeat shallow
+   * equality downstream.
+   */
+  prevSnapshot?: DaemonSnapshot | null,
+): DaemonSnapshot | null {
   if (!snapshot) return null;
 
   const threads = snapshot.threads.filter((thread) => !thread.is_archived);
   const visibleThreadIds = new Set(threads.map((thread) => thread.id));
+  const prevWorkspacesById = prevSnapshot
+    ? new Map(prevSnapshot.workspaces.map((workspace) => [workspace.id, workspace]))
+    : null;
 
-  return {
-    ...snapshot,
-    workspaces: snapshot.workspaces.map((workspace) => ({
+  // Rebuild each workspace's visible-thread pointer, then keep the PREVIOUS
+  // object whenever every field matches — object identity, not just shape,
+  // is what consumers compare.
+  let rebuiltWorkspaces = snapshot.workspaces.map((workspace) => {
+    const candidate = {
       ...workspace,
       current_thread_id:
         workspace.current_thread_id && visibleThreadIds.has(workspace.current_thread_id)
           ? workspace.current_thread_id
           : null,
-    })),
-    threads,
-    interactive_requests: snapshot.interactive_requests.filter(
-      (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
+    };
+    const previous = prevWorkspacesById?.get(workspace.id);
+    if (previous && shallowEqualFields(candidate as Record<string, unknown>, previous as Record<string, unknown>)) {
+      return previous;
+    }
+    return candidate;
+  });
+  rebuiltWorkspaces = reuseIfIdentical(rebuiltWorkspaces, prevSnapshot?.workspaces);
+
+  return {
+    ...snapshot,
+    workspaces: rebuiltWorkspaces,
+    threads: reuseIfIdentical(threads, prevSnapshot?.threads),
+    interactive_requests: reuseIfIdentical(
+      snapshot.interactive_requests.filter(
+        (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
+      ),
+      prevSnapshot?.interactive_requests,
     ),
   };
 }
@@ -175,12 +225,17 @@ function captureThreadArchiveUndo(
 
 function dropArchivedThread(state: SessionState, threadId: string): SessionState | null {
   if (!state.snapshot?.threads.some((thread) => thread.id === threadId)) return null;
-  const nextSnapshot = filterActiveSnapshot({
-    ...state.snapshot,
-    threads: state.snapshot.threads.map((thread) =>
-      thread.id === threadId ? { ...thread, is_archived: true } : thread,
-    ),
-  })!;
+  // prevSnapshot is the already-filtered stored snapshot, so workspaces and
+  // threads untouched by the archive keep their object identity.
+  const nextSnapshot = filterActiveSnapshot(
+    {
+      ...state.snapshot,
+      threads: state.snapshot.threads.map((thread) =>
+        thread.id === threadId ? { ...thread, is_archived: true } : thread,
+      ),
+    },
+    state.snapshot,
+  )!;
 
   const visibleThreadIds = new Set(nextSnapshot.threads.map((thread) => thread.id));
   const nextThreadItems = pruneThreadRecord(state.threadItems, visibleThreadIds);
@@ -313,7 +368,7 @@ function reconcileThreadDetail(
 }
 
 function buildCacheFromState(state: SessionState): MobileSessionCache | null {
-  const snapshot = filterActiveSnapshot(state.snapshot);
+  const snapshot = filterActiveSnapshot(state.snapshot, state.snapshot);
   if (!snapshot) return null;
 
   const visibleThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
@@ -385,10 +440,9 @@ export function __resetSessionCachePersistThrottleForTests(): void {
 
 function writeStateCache(state: SessionState) {
   const cache = buildCacheFromState(state);
-  // A null cache just means there is no snapshot to derive one from (e.g.
-  // right after a truncation reset). Deleting the persisted cache here would
-  // defeat reset({ preserveCache: true }); explicit clearing goes through
-  // clearMobileSessionCache instead.
+  // A null cache just means there is no snapshot to derive one from.
+  // Deleting the persisted cache here would defeat reset({ preserveCache: true });
+  // explicit clearing goes through clearMobileSessionCache instead.
   if (!cache) return;
   lastCachePersistAt = Date.now();
   persistMobileSessionCache(cache);
@@ -437,7 +491,10 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
       candidateSnapshot = normalizeDaemonSnapshot(event.event.snapshot);
     }
     if (candidateSnapshot) {
-      nextSnapshot = filterActiveSnapshot(candidateSnapshot);
+      // Prev is the filtered snapshot accumulated so far in this batch, so
+      // per-event workspace spreads stay referentially stable while nothing
+      // actually changed.
+      nextSnapshot = filterActiveSnapshot(candidateSnapshot, nextSnapshot);
     }
 
     const daemonEvent = event.event;
@@ -522,7 +579,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   hydrateCache: (cache) => {
-    const snapshot = filterActiveSnapshot(normalizeDaemonSnapshot(cache.snapshot));
+    const snapshot = filterActiveSnapshot(normalizeDaemonSnapshot(cache.snapshot), get().snapshot);
     const visibleThreadIds = new Set(snapshot?.threads.map((thread) => thread.id) ?? []);
     const cachedThreadHistories = Object.entries(cache.threadHistories ?? {}).filter(([threadId]) =>
       visibleThreadIds.has(threadId),
@@ -781,8 +838,20 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   reset: (options) => {
     const previous = get();
+    const preserveCache = options?.preserveCache === true;
     set({
       ...initialState,
+      // Truncation recovery still has to fetch an authoritative snapshot, but
+      // the last-known project list (and open transcript) should stay on
+      // screen while it does. Wiping them here is what made the sidebar flash
+      // a skeleton over cached threads on every reconnect that pruned replay.
+      snapshot: preserveCache ? previous.snapshot : initialState.snapshot,
+      threadItems: preserveCache ? previous.threadItems : initialState.threadItems,
+      threadHistory: preserveCache ? previous.threadHistory : initialState.threadHistory,
+      threadDetail: preserveCache ? previous.threadDetail : initialState.threadDetail,
+      threadDetailErrors: preserveCache
+        ? previous.threadDetailErrors
+        : initialState.threadDetailErrors,
       selectedWorkspaceId: options?.preserveSelection
         ? previous.selectedWorkspaceId
         : initialState.selectedWorkspaceId,
@@ -798,7 +867,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }
     // A relay history truncation only needs derived state rebuilt; wiping the
     // offline cache would blank the UI until the next snapshot arrives.
-    if (!options?.preserveCache) {
+    if (!preserveCache) {
       clearMobileSessionCache();
     }
   },

@@ -1,6 +1,12 @@
-import { memo } from 'react'
-import { Text as RNText, type TextProps as RNTextProps } from 'react-native'
+import { memo, type ComponentType } from 'react'
+import { type TextProps as RNTextProps } from 'react-native'
+import { UITextView } from '@bsky.app/react-native-uitextview'
 import { StyleSheet } from 'react-native-unistyles'
+
+// The library types against a hoisted React Native copy whose TextStyle
+// disagrees with the app's 0.81.5 types. Keep the runtime component and type
+// it against this package's Text props.
+const NativeText = UITextView as ComponentType<RNTextProps & { uiTextView?: boolean }>
 
 type TextVariant =
   | 'body'
@@ -26,10 +32,15 @@ export const Text = memo(function Text({
   color,
   weight,
   style,
+  selectable,
   ...props
 }: TextProps) {
+  // RN <Text selectable> uses UILabel on iOS, which can only copy the whole
+  // block. UITextView is required for drag-handle range selection. Every Text
+  // still goes through this wrapper so nested styled spans flatten into the
+  // parent UITextView; Android and non-selectable labels stay on RN Text.
   return (
-    <RNText
+    <NativeText
       style={[
         styles.base,
         styles[variant],
@@ -39,6 +50,8 @@ export const Text = memo(function Text({
         style,
       ]}
       {...props}
+      selectable={selectable}
+      uiTextView={selectable === true}
     />
   )
 })

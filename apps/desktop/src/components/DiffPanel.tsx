@@ -84,6 +84,7 @@ export const DiffPanel = memo(function DiffPanel({
   const selectedFile =
     selection && selection.workspaceId === workspaceId ? selection.filePath : null
   const selectedView = selection?.view ?? 'changes'
+  const gitEnabled = info?.workspaceKind !== 'casual'
 
   useEffect(() => {
     const previous = previewContextRef.current
@@ -101,7 +102,7 @@ export const DiffPanel = memo(function DiffPanel({
     isLoading,
     error,
     refresh: refreshStatus,
-  } = useGitStatus(api, workspaceId, refreshTrigger, threadId)
+  } = useGitStatus(gitEnabled ? api : null, workspaceId, refreshTrigger, threadId)
   const statusByPath = useMemo(
     () => new Map((status?.entries ?? []).map((entry) => [entry.path, entry])),
     [status?.entries],
@@ -110,7 +111,7 @@ export const DiffPanel = memo(function DiffPanel({
     ? statusByPath.get(selectedFile)?.status ?? 'modified'
     : null
   const { diff, content, isLoading: isDiffLoading, error: diffError } = useGitDiff(
-    selectedView === 'changes' ? api : null,
+    selectedView === 'changes' && gitEnabled ? api : null,
     workspaceId,
     selectedFile,
     selectedStatus,
@@ -265,6 +266,7 @@ export const DiffPanel = memo(function DiffPanel({
         onSelectChangedFile={selectChangedFile}
         onSelectWorkspaceFile={selectWorkspaceFile}
         info={info}
+        showChanges={gitEnabled}
       />
     </div>
   )

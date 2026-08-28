@@ -3,6 +3,7 @@ import {
   useCallback,
   useMemo,
   useState,
+  type ComponentType,
   type ReactNode,
 } from "react";
 import { Pressable, View } from "react-native";
@@ -48,9 +49,12 @@ import {
   Button,
   EmptyState,
   OptionSheet,
-  Skeleton,
   SyncBanner,
 } from "@/components/ui";
+import {
+  readStoredChatsCollapsed,
+  writeStoredChatsCollapsed,
+} from "@/storage/chats-collapsed";
 import {
   readStoredThreadSort,
   writeStoredThreadSort,
@@ -73,8 +77,11 @@ interface SidebarViewProps {
   selectedThreadId: string | null;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread: (workspaceId: string) => void;
+  onNewChat?: () => Promise<void> | void;
   onOpenSettings?: () => void;
+  settingsOpen?: boolean;
   onOpenAutomations?: () => void;
+  automationsOpen?: boolean;
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void;
   threadTagsById?: Record<string, ThreadTag[]>;
@@ -141,14 +148,60 @@ const CollapsibleRow = memo(function CollapsibleRow({
   );
 });
 
+type SidebarNavIcon = ComponentType<{ size?: number; color?: string }>;
+
+const SidebarNavRow = memo(function SidebarNavRow({
+  icon: Icon,
+  label,
+  selected = false,
+  onPress,
+  accessibilityHint,
+}: {
+  icon: SidebarNavIcon;
+  label: string;
+  selected?: boolean;
+  onPress: () => void;
+  accessibilityHint?: string;
+}) {
+  const { theme } = useUnistyles();
+  const color = selected ? theme.colors.fg.primary : theme.colors.fg.secondary;
+
+  return (
+    <Pressable
+      style={({ pressed }) => [
+        styles.navRow,
+        selected ? styles.navRowSelected : undefined,
+        pressed ? styles.navRowPressed : undefined,
+      ]}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={accessibilityHint}
+      accessibilityState={{ selected }}
+    >
+      <Icon size={theme.iconSize.sm} color={color} />
+      <Text
+        variant="label"
+        color={selected ? "primary" : "secondary"}
+        weight="medium"
+      >
+        {label}
+      </Text>
+    </Pressable>
+  );
+});
+
 export const SidebarView = memo(function SidebarView({
   groups,
   selectedWorkspaceId = null,
   selectedThreadId,
   onSelectThread,
   onNewThread,
+  onNewChat,
   onOpenSettings,
+  settingsOpen = false,
   onOpenAutomations,
+  automationsOpen = false,
   onClose,
   threadTagsById,
   threadTagOptions = [],
@@ -158,13 +211,14 @@ export const SidebarView = memo(function SidebarView({
 }: SidebarViewProps) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
-  // The sidebar is where "New thread" lives, so it is where the boot-time wait
-  // has to be visible: without this the button looks broken for ~10s.
+  // Cached projects stay on screen while a reconnect snapshot is in flight.
+  // The banner is the only extra voice if that wait actually drags.
   const syncStatus = useSessionSyncStatus();
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
     () => new Set(),
   );
+  const [chatsCollapsed, setChatsCollapsed] = useState(readStoredChatsCollapsed);
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<
     Map<string, number>
   >(() => new Map());
@@ -269,6 +323,8 @@ export const SidebarView = memo(function SidebarView({
         visibleThreadCounts,
         selectedThreadId,
         sortMode,
+        Boolean(onNewChat),
+        chatsCollapsed,
       ),
     [
       displayGroups,
@@ -276,6 +332,8 @@ export const SidebarView = memo(function SidebarView({
       visibleThreadCounts,
       selectedThreadId,
       sortMode,
+      onNewChat,
+      chatsCollapsed,
     ],
   );
 
@@ -302,13 +360,17 @@ export const SidebarView = memo(function SidebarView({
   }, []);
 
   // The drawer runs to the bottom of the screen, so the last thread would sit
-  // under the home indicator without this.
+  // under the home indicator without this. Top nav already supplies the gap
+  // above Projects, matching the Mac sidebar's nav-then-list spacing.
+  const hasTopNav = Boolean(
+    onNewChat || newThreadWorkspaceId || onOpenAutomations,
+  );
   const listContentStyle = useMemo(
     () => ({
-      paddingTop: theme.spacing[3],
+      paddingTop: hasTopNav ? 0 : theme.spacing[3],
       paddingBottom: theme.spacing[3] + insets.bottom,
     }),
-    [insets.bottom, theme.spacing],
+    [hasTopNav, insets.bottom, theme.spacing],
   );
 
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
@@ -319,6 +381,14 @@ export const SidebarView = memo(function SidebarView({
       } else {
         next.add(workspaceId);
       }
+      return next;
+    });
+  }, []);
+
+  const toggleChatsCollapsed = useCallback(() => {
+    setChatsCollapsed((current) => {
+      const next = !current;
+      writeStoredChatsCollapsed(next);
       return next;
     });
   }, []);
@@ -353,16 +423,63 @@ export const SidebarView = memo(function SidebarView({
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
       if (item.type === "section") {
+        const chatsCollapsible = item.title === "Chats" && item.isOpen != null;
         return (
           <View style={styles.sectionHeading}>
             {/* Explicitly 400: the bundled Geist has only Regular and Bold, so
                 RN resolves any in-between weight to the nearest real face.
                 Naming the weight we actually have keeps this row off that
                 rounding edge — see docs/MARKDOWN_STYLE.md. */}
-            <Text variant="caption" color="muted" weight="normal">
-              {item.title.toUpperCase()}
-            </Text>
-            {item.title === "Projects" ? (
+            {chatsCollapsible ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.sectionHeadingToggle,
+                  pressed ? styles.filterButtonPressed : undefined,
+                ]}
+                onPress={toggleChatsCollapsed}
+                accessibilityRole="button"
+                accessibilityLabel={
+                  item.isOpen ? "Collapse chats" : "Expand chats"
+                }
+                accessibilityHint={
+                  item.isOpen
+                    ? "Hides individual chats"
+                    : "Shows individual chats"
+                }
+                accessibilityState={{ expanded: item.isOpen }}
+              >
+                <Text variant="caption" color="muted" weight="normal">
+                  {item.title.toUpperCase()}
+                </Text>
+                <ChevronDown
+                  size={12}
+                  color={theme.colors.fg.muted}
+                  style={
+                    item.isOpen ? undefined : styles.sectionChevronCollapsed
+                  }
+                />
+              </Pressable>
+            ) : (
+              <Text variant="caption" color="muted" weight="normal">
+                {item.title.toUpperCase()}
+              </Text>
+            )}
+            {item.title === "Chats" && onNewChat ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.filterButton,
+                  pressed ? styles.filterButtonPressed : undefined,
+                ]}
+                onPress={() => void onNewChat()}
+                accessibilityRole="button"
+                accessibilityLabel="Start new chat"
+              >
+                <Plus
+                  size={theme.iconSize.xs}
+                  color={theme.colors.fg.muted}
+                />
+              </Pressable>
+            ) : item.title === "Projects" ? (
               <View style={styles.sectionActions}>
                 <Pressable
                   style={({ pressed }) => [
@@ -537,6 +654,7 @@ export const SidebarView = memo(function SidebarView({
     },
     [
       onNewThread,
+      onNewChat,
       onSelectThread,
       openThreadOptions,
       selectedThreadId,
@@ -544,6 +662,7 @@ export const SidebarView = memo(function SidebarView({
       theme.colors.fg.muted,
       theme.iconSize.xs,
       toggleWorkspaceCollapse,
+      toggleChatsCollapsed,
       handleOverflowPress,
       threadTagsById,
       workspaceColors,
@@ -578,35 +697,54 @@ export const SidebarView = memo(function SidebarView({
 
       <SyncBanner status={syncStatus} />
 
-      {newThreadWorkspaceId ? (
-        <Pressable
-          style={({ pressed }) => [
-            styles.newThreadRow,
-            pressed ? styles.newThreadRowPressed : undefined,
-          ]}
-          onPress={() => onNewThread(newThreadWorkspaceId)}
-          accessibilityRole="button"
-          accessibilityLabel="New thread"
-          accessibilityHint="Starts a conversation in the open project"
-        >
-          <View style={styles.newThreadIcon}>
-            <Plus size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-          </View>
-          <Text variant="label" color="primary" weight="semibold">
-            New thread
-          </Text>
-        </Pressable>
+      {onNewChat || newThreadWorkspaceId || onOpenAutomations ? (
+        <View style={styles.topNav}>
+          {onNewChat || newThreadWorkspaceId ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.newThreadRow,
+                pressed ? styles.newThreadRowPressed : undefined,
+              ]}
+              onPress={() => {
+                if (onNewChat) void onNewChat();
+                else if (newThreadWorkspaceId) onNewThread(newThreadWorkspaceId);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={onNewChat ? "New chat" : "New thread"}
+              accessibilityHint={
+                onNewChat
+                  ? "Starts a conversation outside a project"
+                  : "Starts a conversation in the open project"
+              }
+            >
+              <View style={styles.newThreadIcon}>
+                <Plus size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
+              </View>
+              <Text variant="label" color="primary" weight="semibold">
+                {onNewChat ? "New chat" : "New thread"}
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {onOpenAutomations ? (
+            <SidebarNavRow
+              icon={CalendarClock}
+              label="Automations"
+              selected={automationsOpen}
+              onPress={onOpenAutomations}
+              accessibilityHint="Opens scheduled agent automations"
+            />
+          ) : null}
+        </View>
       ) : null}
 
       <View style={styles.list}>
         {rows.length === 0 ? (
-          // The banner above is the only voice for a wait in progress, so the
-          // list shows the shape of what is coming rather than repeating its
-          // words. 'offline' is a dead end rather than a wait, so it keeps the
+          // Cached rows render above. With nothing on disk yet, stay quiet
+          // while a sync is in flight — the banner names a wait that lasts.
+          // 'offline' is a dead end rather than a wait, so it keeps the
           // regular empty state.
-          syncStatus.isBusy && syncStatus.stage !== "offline" ? (
-            <SidebarSkeleton />
-          ) : activeExtensionFilterCount > 0 ? (
+          activeExtensionFilterCount > 0 ? (
             <View style={styles.filteredEmptyState}>
               <EmptyState
                 title="No matching threads"
@@ -618,7 +756,7 @@ export const SidebarView = memo(function SidebarView({
                 onPress={() => setFiltersOpen(true)}
               />
             </View>
-          ) : (
+          ) : syncStatus.isBusy && syncStatus.stage !== "offline" ? null : (
             <EmptyState
               title="No projects"
               description="Connect from your desktop to get started"
@@ -636,53 +774,20 @@ export const SidebarView = memo(function SidebarView({
         )}
       </View>
 
-      {onOpenSettings || onOpenAutomations ? (
+      {onOpenSettings ? (
         <View
           style={[
             styles.footer,
             { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) },
           ]}
         >
-          {onOpenAutomations ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.settingsRow,
-                pressed ? styles.settingsRowPressed : undefined,
-              ]}
-              onPress={onOpenAutomations}
-              accessibilityRole="button"
-              accessibilityLabel="Automations"
-              accessibilityHint="Opens scheduled agent automations"
-            >
-              <CalendarClock
-                size={theme.iconSize.sm}
-                color={theme.colors.fg.secondary}
-              />
-              <Text variant="label" color="secondary" weight="medium">
-                Automations
-              </Text>
-            </Pressable>
-          ) : null}
-          {onOpenSettings ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.settingsRow,
-                pressed ? styles.settingsRowPressed : undefined,
-              ]}
-              onPress={onOpenSettings}
-              accessibilityRole="button"
-              accessibilityLabel="Settings"
-              accessibilityHint="Opens mobile settings"
-            >
-              <Settings
-                size={theme.iconSize.sm}
-                color={theme.colors.fg.secondary}
-              />
-              <Text variant="label" color="secondary" weight="medium">
-                Settings
-              </Text>
-            </Pressable>
-          ) : null}
+          <SidebarNavRow
+            icon={Settings}
+            label="Settings"
+            selected={settingsOpen}
+            onPress={onOpenSettings}
+            accessibilityHint="Opens mobile settings"
+          />
         </View>
       ) : null}
 
@@ -717,28 +822,6 @@ export const SidebarView = memo(function SidebarView({
   );
 });
 
-/** Placeholder rows for the first sync: two projects, three threads each. */
-const SidebarSkeleton = memo(function SidebarSkeleton() {
-  return (
-    <View
-      style={styles.skeleton}
-      accessible={false}
-      importantForAccessibility="no-hide-descendants"
-    >
-      {[0, 1].map((group) => (
-        <View key={group} style={styles.skeletonGroup}>
-          <Skeleton width="45%" height={14} />
-          {[0, 1, 2].map((row) => (
-            <View key={row} style={styles.skeletonRow}>
-              <Skeleton width={`${72 - row * 12}%`} height={12} />
-            </View>
-          ))}
-        </View>
-      ))}
-    </View>
-  );
-});
-
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
@@ -752,17 +835,6 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing[2],
-  },
-  skeleton: {
-    paddingHorizontal: theme.spacing[3],
-    paddingTop: theme.spacing[4],
-    gap: theme.spacing[5],
-  },
-  skeletonGroup: {
-    gap: theme.spacing[3],
-  },
-  skeletonRow: {
-    paddingLeft: theme.spacing[3],
   },
   header: {
     flexDirection: "row",
@@ -782,21 +854,26 @@ const styles = StyleSheet.create((theme) => ({
   },
   closeButtonPressed: { backgroundColor: theme.colors.surface[2] },
   footer: {
-    paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[2],
     borderTopWidth: 1,
     borderTopColor: theme.colors.border.subtle,
     backgroundColor: theme.colors.surface[1],
   },
-  settingsRow: {
+  topNav: {
+    paddingBottom: theme.spacing[4],
+  },
+  navRow: {
     minHeight: theme.minTouchTarget,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[3],
+    gap: theme.spacing[2],
+    marginHorizontal: theme.spacing[3],
     paddingHorizontal: theme.spacing[3],
-    borderRadius: theme.radius.lg,
+    borderRadius: theme.radius.md,
+    borderCurve: "continuous",
   },
-  settingsRowPressed: { backgroundColor: theme.colors.surface[2] },
+  navRowSelected: { backgroundColor: theme.colors.surface[3] },
+  navRowPressed: { backgroundColor: theme.colors.surface[3] },
   newThreadRow: {
     minHeight: theme.minTouchTarget,
     flexDirection: "row",
@@ -806,10 +883,10 @@ const styles = StyleSheet.create((theme) => ({
     marginTop: theme.spacing[1],
     paddingLeft: theme.spacing[1.5],
     paddingRight: theme.spacing[3],
-    borderRadius: theme.radius.lg,
+    borderRadius: theme.radius.md,
     borderCurve: "continuous",
   },
-  newThreadRowPressed: { backgroundColor: theme.colors.surface[2] },
+  newThreadRowPressed: { backgroundColor: theme.colors.surface[3] },
   newThreadIcon: {
     width: 32,
     height: 32,
@@ -833,6 +910,16 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[3],
     paddingBottom: theme.spacing[1],
+  },
+  sectionHeadingToggle: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    minHeight: theme.minTouchTarget,
+  },
+  sectionChevronCollapsed: {
+    transform: [{ rotate: "-90deg" }],
   },
   sectionActions: {
     flexDirection: "row",

@@ -1,16 +1,19 @@
 import { memo, useCallback, useMemo, useState } from "react";
-import { View } from "react-native";
+import { Pressable, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { AlertTriangle } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 
 import {
   interactiveRequestEvidencePresentation,
+  isMcpElicitationRequest,
+  safeExternalUrl,
   type ApprovalRequest,
 } from "@falcondeck/client-core";
 
 import { Text, Button } from "@/components/ui";
 import { CodeBlock } from "./CodeBlock";
+import { useExternalUrl } from "./useExternalUrl";
 
 interface ApprovalBannerProps {
   approval: ApprovalRequest;
@@ -38,6 +41,11 @@ export const ApprovalBanner = memo(function ApprovalBanner({
   const [isResponding, setIsResponding] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const detail = useMemo(() => approvalDetail(approval), [approval]);
+  const elicitation = isMcpElicitationRequest(approval);
+  const signInUrl = safeExternalUrl(approval.path);
+  const { open: openSignInUrl, failed: signInOpenFailed } = useExternalUrl(
+    signInUrl ?? "",
+  );
 
   /* v8 ignore start — Pressable callbacks with haptics, tested via E2E */
   const handleAllow = useCallback(async () => {
@@ -45,6 +53,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
     setIsResponding(true);
     setSubmitError(null);
     try {
+      if (signInUrl) void openSignInUrl();
       await onAllow(approval.request_id);
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
@@ -55,7 +64,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
     } finally {
       setIsResponding(false);
     }
-  }, [approval.request_id, isResponding, onAllow]);
+  }, [approval.request_id, isResponding, onAllow, openSignInUrl, signInUrl]);
 
   const handleDeny = useCallback(async () => {
     if (isResponding || !onDeny) return;
@@ -100,7 +109,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
         </View>
         <View style={styles.heading}>
           <Text variant="caption" color="warning" weight="semibold">
-            Permission required
+            {elicitation ? "Sign in required" : "Permission required"}
           </Text>
           <Text selectable variant="label" color="primary">
             {approval.title}
@@ -124,9 +133,29 @@ export const ApprovalBanner = memo(function ApprovalBanner({
           {detail}
         </Text>
       ) : null}
-      {approval.path && !approval.command?.includes(approval.path) ? (
+      {signInUrl ? (
+        <Pressable
+          accessibilityRole="link"
+          accessibilityLabel={signInUrl}
+          onPress={() => void openSignInUrl()}
+        >
+          <Text selectable variant="caption" color="accent">
+            {signInUrl}
+          </Text>
+        </Pressable>
+      ) : approval.path && !approval.command?.includes(approval.path) ? (
         <Text selectable variant="caption" color="muted">
           {approval.path}
+        </Text>
+      ) : null}
+      {elicitation && signInUrl ? (
+        <Text variant="caption" color="secondary">
+          Open the link to finish sign-in, then continue.
+        </Text>
+      ) : null}
+      {signInOpenFailed ? (
+        <Text accessibilityRole="alert" variant="caption" color="danger">
+          Could not open the sign-in page. Try the link above.
         </Text>
       ) : null}
       <View style={styles.actions}>
@@ -134,7 +163,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
           <Button
             variant="ghost"
             size="sm"
-            label="Deny"
+            label={elicitation ? "Cancel" : "Deny"}
             disabled={isResponding}
             onPress={handleDeny}
           />
@@ -152,7 +181,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
           <Button
             variant="default"
             size="sm"
-            label="Allow"
+            label={elicitation ? "Continue" : "Allow"}
             loading={isResponding}
             onPress={handleAllow}
           />

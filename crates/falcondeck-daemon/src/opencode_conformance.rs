@@ -46,7 +46,7 @@ pub struct Report {
 }
 
 impl Report {
-    fn new(command: Vec<String>, live: bool) -> Self {
+    pub(crate) fn new(command: Vec<String>, live: bool) -> Self {
         Self {
             command,
             live,
@@ -54,7 +54,7 @@ impl Report {
         }
     }
 
-    fn push(&mut self, name: &str, status: CheckStatus, detail: impl Into<String>) {
+    pub(crate) fn push(&mut self, name: &str, status: CheckStatus, detail: impl Into<String>) {
         self.checks.push(Check {
             name: name.to_string(),
             status,
@@ -115,6 +115,8 @@ pub struct ProbeOptions {
     pub cwd: Option<String>,
     pub live: bool,
     pub json: bool,
+    /// Treat a missing OpenCode binary as skipped rather than failed.
+    pub skip_missing: bool,
 }
 
 impl ProbeOptions {
@@ -124,6 +126,7 @@ impl ProbeOptions {
             cwd: None,
             live: false,
             json: false,
+            skip_missing: false,
         };
         let mut rest = false;
         let mut args = args.into_iter();
@@ -131,6 +134,7 @@ impl ProbeOptions {
             match arg.as_str() {
                 "--live" if !rest => options.live = true,
                 "--json" if !rest => options.json = true,
+                "--skip-missing" if !rest => options.skip_missing = true,
                 "--cwd" if !rest => options.cwd = args.next(),
                 "--" if !rest => rest = true,
                 _ => options.command.push(arg),
@@ -153,6 +157,21 @@ impl ProbeOptions {
 
 pub async fn run_probe(options: &ProbeOptions) -> Report {
     let mut report = Report::new(options.command.clone(), options.live);
+    if options.skip_missing {
+        let exe = options
+            .command
+            .first()
+            .map(String::as_str)
+            .unwrap_or("opencode");
+        if !crate::agent_binary::agent_binary_available_cached(exe, exe) {
+            report.push(
+                "server starts and reports its port",
+                CheckStatus::Skipped,
+                format!("`{exe}` is not installed"),
+            );
+            return report;
+        }
+    }
     let Some(cwd) = options.resolved_cwd() else {
         report.push(
             "probe directory",
@@ -261,7 +280,27 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
     probe_session_routes(&runtime, &cwd, &mut report).await;
     probe_silent_model_failure(&runtime, &cwd, &mut report).await;
     if options.live {
-        probe_live_turn(&runtime, &cwd, &mut report).await;
+        let live_model = match runtime.runner_models().await {
+            Ok(models) if !models.is_empty() => {
+                let runnable = models
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|id| {
+                        crate::opencode::native_model_block_reason(Some(id), &models).is_none()
+                    })
+                    .collect::<Vec<_>>();
+                crate::acp_conformance::pick_preferred_live_model(runnable).map(str::to_string)
+            }
+            _ => None,
+        };
+        match live_model.as_deref() {
+            Some(model) => probe_live_turn(&runtime, &cwd, Some(model), &mut report).await,
+            None => report.push(
+                "live turn reaches an assistant reply",
+                CheckStatus::Skipped,
+                "no current-tier model is natively executable on this runner",
+            ),
+        }
     } else {
         report.push(
             "live turn reaches an assistant reply",
@@ -405,11 +444,15 @@ async fn probe_silent_model_failure(runtime: &OpenCodeRuntime, cwd: &str, report
     }
 }
 
-/// One real turn against whatever model OpenCode is configured to default to.
-async fn probe_live_turn(runtime: &OpenCodeRuntime, cwd: &str, report: &mut Report) {
-    // No model override: this must exercise the user's configured default,
-    // since model resolution is exactly what varies per install.
-    let session_id = match runtime.create_session(cwd, None, Some("build")).await {
+/// One real turn against a cheap runner-resolvable model when the registry
+/// publishes one, otherwise the user's configured default.
+async fn probe_live_turn(
+    runtime: &OpenCodeRuntime,
+    cwd: &str,
+    model: Option<&str>,
+    report: &mut Report,
+) {
+    let session_id = match runtime.create_session(cwd, model, Some("build")).await {
         Ok(session_id) => session_id,
         Err(error) => {
             report.push(
@@ -476,7 +519,10 @@ async fn probe_live_turn(runtime: &OpenCodeRuntime, cwd: &str, report: &mut Repo
             report.push(
                 "live turn reaches an assistant reply",
                 status,
-                format!("{assistant} assistant record(s)"),
+                match model {
+                    Some(model) => format!("{assistant} assistant record(s) via {model}"),
+                    None => format!("{assistant} assistant record(s) via configured default"),
+                },
             );
         }
     }
@@ -508,6 +554,7 @@ mod tests {
         let options = ProbeOptions::parse(Vec::new());
         assert_eq!(options.command, ["opencode"]);
         assert!(!options.live);
+        assert!(!options.skip_missing);
     }
 
     #[test]

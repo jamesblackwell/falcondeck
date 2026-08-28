@@ -12,13 +12,14 @@ use falcondeck_core::{
 };
 use serde_json::Value;
 use tokio::{
-    io::AsyncBufReadExt,
+    io::{AsyncBufReadExt, AsyncReadExt},
     time::{Duration, timeout},
 };
 use uuid::Uuid;
 
 use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
+    SHUTDOWN_INTERRUPTED_TURN_ERROR,
     agent_helpers::{
         SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta, claude_parent_tool_use_id,
         claude_stream_message_id, claude_tool_result_image_items, extract_claude_error,
@@ -30,14 +31,19 @@ use super::{
         TURN_RECEIPT_ID_PREFIX, ToolSettlement, build_ai_thread_title_prompt,
         build_refresh_ai_thread_title_prompt, is_placeholder_thread_title,
         is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
-        settle_content_items, settle_tool_call_items, should_generate_ai_thread_title,
-        terminal_assistant_receipt_with_error, tool_display_metadata,
-        with_renderable_attachment_previews,
+        settle_content_items, settle_items_as_shutdown_interrupted, settle_tool_call_items,
+        should_generate_ai_thread_title, terminal_assistant_receipt_with_error,
+        tool_display_metadata, with_renderable_attachment_previews,
     },
+    is_shutdown_interrupted,
 };
 use crate::{
     agy::{self, AgyRuntime, AgyStreamEvent},
-    claude::ClaudeRuntime,
+    claude::{
+        self, ClaudeRuntime, ClaudeStreamLine, encode_control_response_error,
+        is_resume_startup_failure, live_context_usage, parse_claude_stream_lines,
+        result_is_cancelled, result_model_context_window, synthetic_permission_requests,
+    },
     codex::CodexSessionLease,
     error::DaemonError,
 };
@@ -97,7 +103,9 @@ impl AppState {
                     .collect::<Vec<_>>()
             };
             for sender in senders {
-                let _ = sender.send(ApprovalDecision::Deny);
+                let _ = sender.send(crate::claude::ClaudeHookReply::Approval(
+                    ApprovalDecision::Deny,
+                ));
             }
         }
         let (updated, terminal_receipt) = {
@@ -333,14 +341,14 @@ impl AppState {
             // The provider refresh carries no start time; the daemon's stamp
             // (persisted across restarts) must survive it, or every client's
             // elapsed clock resets on the first `thread.detail`.
-            if let Some(goal) = goal.as_mut() {
-                if goal.started_at.is_none() {
-                    goal.started_at = thread
-                        .goal
-                        .as_ref()
-                        .and_then(|existing| existing.started_at)
-                        .or_else(|| Some(Utc::now()));
-                }
+            if let Some(goal) = goal.as_mut()
+                && goal.started_at.is_none()
+            {
+                goal.started_at = thread
+                    .goal
+                    .as_ref()
+                    .and_then(|existing| existing.started_at)
+                    .or_else(|| Some(Utc::now()));
             }
             if thread.goal != goal {
                 thread.goal = goal;
@@ -446,12 +454,14 @@ impl AppState {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,
                 })
             });
         let before = thread.summary.updated_at;
+        let previous_status = thread.summary.status.clone();
         updater(&mut thread.summary);
         if thread.summary.updated_at == before {
             thread.summary.updated_at = now;
@@ -463,7 +473,13 @@ impl AppState {
         if thread.summary.updated_at > workspace.summary.updated_at {
             workspace.summary.updated_at = thread.summary.updated_at;
         }
-        Ok(thread.summary.clone())
+        let status_changed = previous_status != thread.summary.status;
+        let summary = thread.summary.clone();
+        drop(workspaces);
+        if status_changed && let Err(error) = self.persist_local_state().await {
+            tracing::warn!(%error, "failed to persist thread status change");
+        }
+        Ok(summary)
     }
 
     pub(crate) async fn with_thread_mut<F>(
@@ -742,6 +758,113 @@ impl AppState {
         Ok(falcondeck_core::SuggestThreadTitleResponse { title })
     }
 
+    async fn finalize_claude_turn_at_result(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        turn_generation: u64,
+        mut turn_error: Option<String>,
+        saw_agent_output: bool,
+        result_reported_success: bool,
+    ) -> bool {
+        if result_reported_success && !saw_agent_output && turn_error.is_none() {
+            turn_error =
+                Some("Claude turn completed without emitting any assistant output".to_string());
+        }
+        if turn_error.is_some() {
+            return false;
+        }
+        let Ok(runtime) = self.claude_runtime_for(workspace_id).await else {
+            return false;
+        };
+        if !runtime.park_turn(thread_id, turn_generation).await {
+            return false;
+        }
+        let settled_at = Utc::now();
+        self.settle_turn_items_with_error(
+            workspace_id,
+            thread_id,
+            settled_at,
+            ToolSettlement::Completed,
+            None,
+        )
+        .await;
+        let _ = self
+            .with_thread_mut(workspace_id, thread_id, |thread| {
+                thread.status = ThreadStatus::Idle;
+                thread.last_error = None;
+                thread.updated_at = settled_at;
+            })
+            .await;
+        if let Ok(thread) = self.thread_summary(workspace_id, thread_id).await {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+        self.dispatch_next_queued_turn(workspace_id, thread_id);
+        self.notify_remote_attention("turn-complete", workspace_id, Some(thread_id.to_string()))
+            .await;
+        if saw_agent_output {
+            self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id.to_string())
+                .await;
+        }
+        true
+    }
+
+    async fn reply_to_claude_control_request(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        request_id: &str,
+        subtype: &str,
+    ) {
+        // An ignored control_request stalls the CLI. Unknown subtypes — and
+        // `can_use_tool`, which we handle via PreToolUse hooks instead — get
+        // an error envelope rather than silence.
+        let error = format!("Unsupported control request subtype: {subtype}");
+        let line = encode_control_response_error(request_id, &error);
+        if let Ok(runtime) = self.claude_runtime_for(workspace_id).await
+            && let Err(error) = runtime.write_protocol_line(thread_id, &line).await
+        {
+            tracing::warn!(
+                %workspace_id,
+                %thread_id,
+                subtype,
+                "failed to reply to Claude control_request: {error}"
+            );
+        }
+    }
+
+    fn record_claude_live_usage(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        usage: claude::ClaudeLiveContextUsage,
+        model_context_window: Option<u64>,
+    ) {
+        let usage = usage.to_thread_usage(model_context_window);
+        self.inner
+            .thread_token_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(thread_id.to_string(), usage.clone());
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadTokenUsageUpdated { usage },
+        );
+    }
+
+    async fn drop_claude_native_session(&self, workspace_id: &str, thread_id: &str) {
+        let _ = self
+            .with_thread_mut(workspace_id, thread_id, |thread| {
+                thread.native_session_id = None;
+            })
+            .await;
+    }
+
     pub(super) async fn monitor_claude_turn(
         &self,
         workspace_id: String,
@@ -820,31 +943,51 @@ impl AppState {
         // listening, which doubles as the post-`result` drain.
         let mut saw_result = false;
         let mut result_reported_success = false;
+        let mut parked_between_turns = false;
+        let mut saw_cancelled_result = false;
+        let mut last_live_usage: Option<claude::ClaudeLiveContextUsage> = None;
+        let mut model_context_window: Option<u64> = None;
         if let Some(stdout) = stdout {
             let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             tokio::spawn(async move {
-                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                let mut stdout = stdout;
+                let mut framer = claude::ClaudeNdjsonFramer::new();
+                let mut buf = vec![0u8; 8192];
                 loop {
-                    match lines.next_line().await {
+                    match stdout.read(&mut buf).await {
                         // A dropped receiver means the monitor is done with
                         // events; keep reading so a late write cannot fill the
                         // buffer or SIGPIPE the CLI mid-shutdown.
-                        Ok(Some(line)) => {
-                            let _ = line_tx.send(line);
+                        Ok(0) => {
+                            if let Some(line) = framer.flush() {
+                                let _ = line_tx.send(line);
+                            }
+                            break;
                         }
-                        Ok(None) => break,
-                        // A read error (e.g. invalid UTF-8) must not stop the
-                        // drain: the pipe still needs emptying or the CLI
-                        // wedges, and later lines may parse fine.
+                        Ok(n) => {
+                            for line in framer.push(&buf[..n]) {
+                                let _ = line_tx.send(line);
+                            }
+                        }
                         Err(error) => {
-                            tracing::warn!("failed to read claude stdout line: {error}");
+                            tracing::warn!("failed to read claude stdout: {error}");
+                            if let Some(line) = framer.flush() {
+                                let _ = line_tx.send(line);
+                            }
+                            break;
                         }
                     }
                 }
             });
-            loop {
+            'stdout: loop {
                 let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
                     Ok(Some(line)) => line,
+                    Ok(None) if parked_between_turns => {
+                        if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
+                            let _ = runtime.finish_turn(&thread_id, turn_generation).await;
+                        }
+                        return;
+                    }
                     Ok(None) => break,
                     Err(_) => {
                         // Total stream silence — not even thinking heartbeats.
@@ -853,7 +996,8 @@ impl AppState {
                         // as "stopped working", so say which it is, once per
                         // silent stretch. An approval wait is expected silence
                         // and already renders its own pinned notice.
-                        if !stall_warned
+                        if !parked_between_turns
+                            && !stall_warned
                             && last_line_at.elapsed() >= CLAUDE_STALL_WARN_AFTER
                             && !self
                                 .thread_waiting_for_input(&workspace_id, &thread_id)
@@ -907,329 +1051,437 @@ impl AppState {
                 };
                 last_line_at = tokio::time::Instant::now();
                 stall_warned = false;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
+                if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Value>(trimmed) {
-                    Ok(value) => {
-                        if let Some(tasks) = claude_background_tasks(&value) {
-                            background_tasks = tasks;
-                        }
-                        if let Some(task) = claude_task_started(&value) {
-                            if task.holds_turn_open {
-                                background_tasks.insert(task.task_id.clone());
-                            }
-                            // Recorded for every task, blocking or not: a
-                            // backgrounded command still needs its spawning
-                            // tool card settled when it eventually reports.
-                            background_task_tools.insert(task.task_id, task.tool_use_id);
-                        }
-                        if let Some(task) = claude_task_finished(&value) {
-                            background_tasks.remove(&task.task_id);
-                            let tool_id = task
-                                .tool_use_id
-                                .or_else(|| background_task_tools.remove(&task.task_id));
-                            if let Some(tool_id) = tool_id {
-                                running_tool_titles.remove(&tool_id);
-                                let (title, tool_kind) =
-                                    tool_identity.get(&tool_id).cloned().unwrap_or_else(|| {
-                                        ("Sub-agent".to_string(), "Agent".to_string())
-                                    });
-                                let item = ConversationItem::ToolCall {
-                                    id: tool_id,
-                                    title: title.clone(),
-                                    tool_kind: tool_kind.clone(),
-                                    status: task.status.clone(),
-                                    output: task.summary.clone(),
-                                    exit_code: None,
-                                    display: Box::new(tool_display_metadata(
-                                        &title,
-                                        &tool_kind,
-                                        &task.status,
-                                        None,
-                                        task.summary.as_deref(),
-                                    )),
-                                    detail: None,
-                                    created_at: Utc::now(),
-                                    completed_at: Some(Utc::now()),
-                                };
-                                let _ = self
-                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                    .await;
-                            }
-                            // The task_notification has its own handler; nothing
-                            // downstream applies. Without this continue, the bare
-                            // `status` ("stopped", "killed", "interrupted") would
-                            // slip through `extract_claude_service_message` and
-                            // re-surface as an "stopped" diagnostic notice on every
-                            // interrupted background task.
+                let mut records = parse_claude_stream_lines(&line);
+                let extras: Vec<_> = records
+                    .iter()
+                    .flat_map(|record| match record {
+                        ClaudeStreamLine::ControlResponse {
+                            pending_permission_requests,
+                            ..
+                        } => synthetic_permission_requests(pending_permission_requests),
+                        _ => Vec::new(),
+                    })
+                    .collect();
+                records.extend(extras);
+                for record in records {
+                    match record {
+                        ClaudeStreamLine::KeepAlive => continue,
+                        ClaudeStreamLine::ControlCancelRequest { .. } => continue,
+                        ClaudeStreamLine::ControlResponse { .. } => continue,
+                        ClaudeStreamLine::ControlRequest {
+                            request_id,
+                            subtype,
+                            ..
+                        } => {
+                            self.reply_to_claude_control_request(
+                                &workspace_id,
+                                &thread_id,
+                                &request_id,
+                                &subtype,
+                            )
+                            .await;
                             continue;
                         }
-                        // Sub-agent traffic is tagged with the id of the tool
-                        // call that spawned it. It must stay out of the main
-                        // transcript paths — its prose would merge into the
-                        // assistant's reply and its tool calls would render as
-                        // main-loop work. Instead, fold each tool start into a
-                        // step log on the spawning tool call's card; the
-                        // parent's own tool_result later replaces the log with
-                        // the sub-agent's report.
-                        if let Some(parent_id) = claude_parent_tool_use_id(&value) {
-                            let parent_id = parent_id.to_string();
-                            let step = extract_claude_tool_event(&value)
-                                .filter(|event| event.status == "running")
-                                .and_then(|event| event.title);
-                            if let Some(step) = step {
-                                let entry = subagent_steps.entry(parent_id.clone()).or_default();
-                                entry.0.push(step);
-                                if entry.0.len() > SUBAGENT_ACTIVITY_KEPT_STEPS {
-                                    entry.0.remove(0);
-                                    entry.1 += 1;
-                                }
-                                let output = format_subagent_activity(&entry.0, entry.1);
-                                saw_agent_output = true;
-                                let (title, tool_kind) =
-                                    tool_identity.get(&parent_id).cloned().unwrap_or_else(|| {
-                                        ("Sub-agent".to_string(), "Task".to_string())
-                                    });
-                                let item = ConversationItem::ToolCall {
-                                    id: parent_id,
-                                    title: title.clone(),
-                                    tool_kind: tool_kind.clone(),
-                                    status: "running".to_string(),
-                                    output: Some(output.clone()),
-                                    exit_code: None,
-                                    display: Box::new(tool_display_metadata(
-                                        &title,
-                                        &tool_kind,
-                                        "running",
-                                        None,
-                                        Some(&output),
-                                    )),
-                                    detail: None,
-                                    created_at: Utc::now(),
-                                    completed_at: None,
-                                };
-                                let _ = self
-                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                    .await;
-                            }
-                            continue;
-                        }
-                        // The CLI is authoritative about which session it is
-                        // writing to. A mismatch with the daemon's assumed id
-                        // would make PreToolUse hook lookups (keyed by session
-                        // id) silently miss this thread.
-                        if let Some(init_session_id) = claude_init_session_id(&value) {
-                            let mut assumed: Option<Option<String>> = None;
-                            let _ = self
-                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                                    if thread.native_session_id.as_deref()
-                                        != Some(init_session_id.as_str())
-                                    {
-                                        assumed = Some(thread.native_session_id.clone());
-                                        thread.native_session_id = Some(init_session_id.clone());
-                                    }
-                                })
-                                .await;
-                            if let Some(assumed) = assumed {
-                                tracing::warn!(
-                                    "claude session id mismatch: daemon assumed {assumed:?}, CLI reported {init_session_id}"
+                        ClaudeStreamLine::Payload(value) => {
+                            if let Some(usage) = live_context_usage(&value) {
+                                last_live_usage = Some(usage);
+                                self.record_claude_live_usage(
+                                    &workspace_id,
+                                    &thread_id,
+                                    usage,
+                                    model_context_window,
                                 );
                             }
-                        }
-                        // Message boundary: start a fresh assistant item (and
-                        // thinking item) for each API message.
-                        if let Some(message_id) = claude_stream_message_id(&value) {
-                            if assistant_message_key.as_deref() != Some(message_id.as_str()) {
-                                assistant_message_key = Some(message_id.clone());
-                                assistant_id = message_id;
+                            if let Some(window) = result_model_context_window(&value) {
+                                model_context_window = Some(window);
+                                if let Some(usage) = last_live_usage {
+                                    self.record_claude_live_usage(
+                                        &workspace_id,
+                                        &thread_id,
+                                        usage,
+                                        model_context_window,
+                                    );
+                                }
+                            }
+                            if let Some(tasks) = claude_background_tasks(&value) {
+                                background_tasks = tasks;
+                            }
+                            if let Some(task) = claude_task_started(&value) {
+                                if task.holds_turn_open {
+                                    background_tasks.insert(task.task_id.clone());
+                                }
+                                // Recorded for every task, blocking or not: a
+                                // backgrounded command still needs its spawning
+                                // tool card settled when it eventually reports.
+                                background_task_tools.insert(task.task_id, task.tool_use_id);
+                            }
+                            if let Some(task) = claude_task_finished(&value) {
+                                background_tasks.remove(&task.task_id);
+                                let tool_id = task
+                                    .tool_use_id
+                                    .or_else(|| background_task_tools.remove(&task.task_id));
+                                if let Some(tool_id) = tool_id {
+                                    running_tool_titles.remove(&tool_id);
+                                    let (title, tool_kind) =
+                                        tool_identity.get(&tool_id).cloned().unwrap_or_else(|| {
+                                            ("Sub-agent".to_string(), "Agent".to_string())
+                                        });
+                                    let item = ConversationItem::ToolCall {
+                                        id: tool_id,
+                                        title: title.clone(),
+                                        tool_kind: tool_kind.clone(),
+                                        status: task.status.clone(),
+                                        output: task.summary.clone(),
+                                        exit_code: None,
+                                        display: Box::new(tool_display_metadata(
+                                            &title,
+                                            &tool_kind,
+                                            &task.status,
+                                            None,
+                                            task.summary.as_deref(),
+                                        )),
+                                        detail: None,
+                                        created_at: Utc::now(),
+                                        completed_at: Some(Utc::now()),
+                                    };
+                                    let _ = self
+                                        .push_conversation_item(
+                                            &workspace_id,
+                                            &thread_id,
+                                            item,
+                                            true,
+                                        )
+                                        .await;
+                                }
+                                // The task_notification has its own handler; nothing
+                                // downstream applies. Without this continue, the bare
+                                // `status` ("stopped", "killed", "interrupted") would
+                                // slip through `extract_claude_service_message` and
+                                // re-surface as an "stopped" diagnostic notice on every
+                                // interrupted background task.
+                                continue;
+                            }
+                            // Sub-agent traffic is tagged with the id of the tool
+                            // call that spawned it. It must stay out of the main
+                            // transcript paths — its prose would merge into the
+                            // assistant's reply and its tool calls would render as
+                            // main-loop work. Instead, fold each tool start into a
+                            // step log on the spawning tool call's card; the
+                            // parent's own tool_result later replaces the log with
+                            // the sub-agent's report.
+                            if let Some(parent_id) = claude_parent_tool_use_id(&value) {
+                                let parent_id = parent_id.to_string();
+                                let step = extract_claude_tool_event(&value)
+                                    .filter(|event| event.status == "running")
+                                    .and_then(|event| event.title);
+                                if let Some(step) = step {
+                                    let entry =
+                                        subagent_steps.entry(parent_id.clone()).or_default();
+                                    entry.0.push(step);
+                                    if entry.0.len() > SUBAGENT_ACTIVITY_KEPT_STEPS {
+                                        entry.0.remove(0);
+                                        entry.1 += 1;
+                                    }
+                                    let output = format_subagent_activity(&entry.0, entry.1);
+                                    saw_agent_output = true;
+                                    let (title, tool_kind) =
+                                        tool_identity.get(&parent_id).cloned().unwrap_or_else(
+                                            || ("Sub-agent".to_string(), "Task".to_string()),
+                                        );
+                                    let item = ConversationItem::ToolCall {
+                                        id: parent_id,
+                                        title: title.clone(),
+                                        tool_kind: tool_kind.clone(),
+                                        status: "running".to_string(),
+                                        output: Some(output.clone()),
+                                        exit_code: None,
+                                        display: Box::new(tool_display_metadata(
+                                            &title,
+                                            &tool_kind,
+                                            "running",
+                                            None,
+                                            Some(&output),
+                                        )),
+                                        detail: None,
+                                        created_at: Utc::now(),
+                                        completed_at: None,
+                                    };
+                                    let _ = self
+                                        .push_conversation_item(
+                                            &workspace_id,
+                                            &thread_id,
+                                            item,
+                                            true,
+                                        )
+                                        .await;
+                                }
+                                continue;
+                            }
+                            // The CLI is authoritative about which session it is
+                            // writing to. A mismatch with the daemon's assumed id
+                            // would make PreToolUse hook lookups (keyed by session
+                            // id) silently miss this thread.
+                            if let Some(init_session_id) = claude_init_session_id(&value) {
+                                let mut assumed: Option<Option<String>> = None;
+                                let _ = self
+                                    .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                                        if thread.native_session_id.as_deref()
+                                            != Some(init_session_id.as_str())
+                                        {
+                                            assumed = Some(thread.native_session_id.clone());
+                                            thread.native_session_id =
+                                                Some(init_session_id.clone());
+                                        }
+                                    })
+                                    .await;
+                                if let Some(assumed) = assumed {
+                                    tracing::warn!(
+                                        "claude session id mismatch: daemon assumed {assumed:?}, CLI reported {init_session_id}"
+                                    );
+                                }
+                            }
+                            // Message boundary: start a fresh assistant item (and
+                            // thinking item) for each API message.
+                            if let Some(message_id) = claude_stream_message_id(&value) {
+                                if assistant_message_key.as_deref() != Some(message_id.as_str()) {
+                                    assistant_message_key = Some(message_id.clone());
+                                    assistant_id = message_id;
+                                    assistant_text.clear();
+                                    assistant_citations.clear();
+                                    reasoning_text.clear();
+                                    assistant_block_break_pending = false;
+                                }
+                            } else if is_claude_message_start(&value) {
+                                assistant_message_key = None;
+                                assistant_id =
+                                    format!("claude-assistant-{}", Uuid::new_v4().simple());
                                 assistant_text.clear();
                                 assistant_citations.clear();
                                 reasoning_text.clear();
                                 assistant_block_break_pending = false;
                             }
-                        } else if is_claude_message_start(&value) {
-                            assistant_message_key = None;
-                            assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
-                            assistant_text.clear();
-                            assistant_citations.clear();
-                            reasoning_text.clear();
-                            assistant_block_break_pending = false;
-                        }
-                        // Not part of the text else-if chain: a complete
-                        // assistant echo can carry thinking and text blocks in
-                        // one line, and thinking-only lines match nothing below.
-                        if let Some(chunk) = extract_claude_thinking_chunk(&value)
-                            && !chunk.text.is_empty()
-                        {
-                            reasoning_text = if chunk.is_delta {
-                                append_claude_text_delta(&reasoning_text, &chunk.text)
-                            } else {
-                                merge_claude_assistant_text(&reasoning_text, &chunk.text)
-                            };
-                            saw_agent_output = true;
-                            let item = ConversationItem::Reasoning {
-                                id: format!("{assistant_id}-reasoning"),
-                                summary: None,
-                                content: reasoning_text.clone(),
-                                lifecycle: ContentLifecycle::Streaming,
-                                duration_ms: None,
-                                created_at: Utc::now(),
-                            };
-                            let _ = self
-                                .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                .await;
-                        }
-                        if is_claude_text_block_start(&value) {
-                            assistant_block_break_pending = !assistant_text.is_empty();
-                        }
-                        if let Some(chunk) = extract_claude_text_chunk(&value) {
-                            assistant_text = if chunk.text.is_empty() {
-                                assistant_text
-                            } else if chunk.is_delta {
-                                if std::mem::take(&mut assistant_block_break_pending) {
-                                    format!(
-                                        "{}\n\n{}",
-                                        assistant_text.trim_end(),
-                                        chunk.text.trim_start()
-                                    )
-                                } else {
-                                    append_claude_text_delta(&assistant_text, &chunk.text)
-                                }
-                            } else {
-                                assistant_block_break_pending = false;
-                                merge_claude_assistant_text(&assistant_text, &chunk.text)
-                            };
-                            merge_conversation_citations(
-                                &mut assistant_citations,
-                                chunk.citations,
-                                &assistant_id,
-                            );
-                            saw_agent_output = true;
-                            let item = ConversationItem::AssistantMessage {
-                                id: assistant_id.clone(),
-                                text: assistant_text.clone(),
-                                phase: None,
-                                memory_citation: None,
-                                citations: assistant_citations.clone(),
-                                lifecycle: ContentLifecycle::Streaming,
-                                error: None,
-                                created_at: Utc::now(),
-                            };
-                            let _ = self
-                                .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                .await;
-                        } else if let Some(tool_event) = extract_claude_tool_event(&value) {
-                            saw_agent_output = true;
-                            let known_identity = tool_identity.get(&tool_event.id).cloned();
-                            let title = tool_event
-                                .title
-                                .or_else(|| known_identity.as_ref().map(|(title, _)| title.clone()))
-                                .unwrap_or_else(|| "Claude tool".to_string());
-                            let tool_kind = tool_event
-                                .tool_kind
-                                .or_else(|| {
-                                    known_identity
-                                        .as_ref()
-                                        .map(|(_, tool_kind)| tool_kind.clone())
-                                })
-                                .unwrap_or_else(|| title.clone());
-                            if tool_event.status == "running" {
-                                tool_identity.insert(
-                                    tool_event.id.clone(),
-                                    (title.clone(), tool_kind.clone()),
-                                );
-                                running_tool_titles.insert(tool_event.id.clone(), title.clone());
-                            } else {
-                                running_tool_titles.remove(&tool_event.id);
-                            }
-                            let completed_at = if tool_event.status == "running" {
-                                None
-                            } else {
-                                Some(Utc::now())
-                            };
-                            let tool_id = tool_event.id.clone();
-                            let item = ConversationItem::ToolCall {
-                                id: tool_event.id,
-                                title: title.clone(),
-                                tool_kind: tool_kind.clone(),
-                                status: tool_event.status.clone(),
-                                output: tool_event.output.clone(),
-                                exit_code: None,
-                                display: Box::new(tool_display_metadata(
-                                    &title,
-                                    &tool_kind,
-                                    &tool_event.status,
-                                    None,
-                                    tool_event.output.as_deref(),
-                                )),
-                                detail: None,
-                                created_at: Utc::now(),
-                                completed_at,
-                            };
-                            let _ = self
-                                .push_conversation_item(&workspace_id, &thread_id, item, true)
-                                .await;
-                            for item in
-                                claude_tool_result_image_items(&tool_id, &title, &tool_event.images)
+                            // Not part of the text else-if chain: a complete
+                            // assistant echo can carry thinking and text blocks in
+                            // one line, and thinking-only lines match nothing below.
+                            if let Some(chunk) = extract_claude_thinking_chunk(&value)
+                                && !chunk.text.is_empty()
                             {
+                                reasoning_text = if chunk.is_delta {
+                                    append_claude_text_delta(&reasoning_text, &chunk.text)
+                                } else {
+                                    merge_claude_assistant_text(&reasoning_text, &chunk.text)
+                                };
+                                saw_agent_output = true;
+                                let item = ConversationItem::Reasoning {
+                                    id: format!("{assistant_id}-reasoning"),
+                                    summary: None,
+                                    content: reasoning_text.clone(),
+                                    lifecycle: ContentLifecycle::Streaming,
+                                    duration_ms: None,
+                                    created_at: Utc::now(),
+                                };
                                 let _ = self
                                     .push_conversation_item(&workspace_id, &thread_id, item, true)
                                     .await;
                             }
-                        } else if let Some(message) = extract_claude_service_message(&value) {
-                            // Awaited, not spawned: a service message on the
-                            // last line of a turn would otherwise race the
-                            // turn's own terminal thread update.
-                            self.push_conversation_diagnostic(
-                                &workspace_id,
-                                &thread_id,
-                                ServiceLevel::Info,
-                                message,
-                                Some("claude".to_string()),
-                            )
-                            .await;
-                        }
-                        if let Some(error) = extract_claude_error(&value) {
-                            turn_error = Some(error);
-                        }
-                        if let Some(is_error) = claude_result_is_error(&value) {
-                            saw_result = true;
-                            result_reported_success = !is_error;
-                            // Claude emits an interim result when the parent
-                            // yields while async agents keep working. Closing
-                            // stdin at that point kills those agents. Their
-                            // terminal notification triggers another parent
-                            // response/result, which is the real boundary.
-                            if is_error || background_tasks.is_empty() {
+                            if is_claude_text_block_start(&value) {
+                                assistant_block_break_pending = !assistant_text.is_empty();
+                            }
+                            if let Some(chunk) = extract_claude_text_chunk(&value) {
+                                assistant_text = if chunk.text.is_empty() {
+                                    assistant_text
+                                } else if chunk.is_delta {
+                                    if std::mem::take(&mut assistant_block_break_pending) {
+                                        format!(
+                                            "{}\n\n{}",
+                                            assistant_text.trim_end(),
+                                            chunk.text.trim_start()
+                                        )
+                                    } else {
+                                        append_claude_text_delta(&assistant_text, &chunk.text)
+                                    }
+                                } else {
+                                    assistant_block_break_pending = false;
+                                    merge_claude_assistant_text(&assistant_text, &chunk.text)
+                                };
+                                merge_conversation_citations(
+                                    &mut assistant_citations,
+                                    chunk.citations,
+                                    &assistant_id,
+                                );
+                                saw_agent_output = true;
+                                let item = ConversationItem::AssistantMessage {
+                                    id: assistant_id.clone(),
+                                    text: assistant_text.clone(),
+                                    phase: None,
+                                    memory_citation: None,
+                                    citations: assistant_citations.clone(),
+                                    lifecycle: ContentLifecycle::Streaming,
+                                    error: None,
+                                    created_at: Utc::now(),
+                                };
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            } else if let Some(tool_event) = extract_claude_tool_event(&value) {
+                                saw_agent_output = true;
+                                let known_identity = tool_identity.get(&tool_event.id).cloned();
+                                let title = tool_event
+                                    .title
+                                    .or_else(|| {
+                                        known_identity.as_ref().map(|(title, _)| title.clone())
+                                    })
+                                    .unwrap_or_else(|| "Claude tool".to_string());
+                                let tool_kind = tool_event
+                                    .tool_kind
+                                    .or_else(|| {
+                                        known_identity
+                                            .as_ref()
+                                            .map(|(_, tool_kind)| tool_kind.clone())
+                                    })
+                                    .unwrap_or_else(|| title.clone());
+                                if tool_event.status == "running" {
+                                    tool_identity.insert(
+                                        tool_event.id.clone(),
+                                        (title.clone(), tool_kind.clone()),
+                                    );
+                                    running_tool_titles
+                                        .insert(tool_event.id.clone(), title.clone());
+                                } else {
+                                    running_tool_titles.remove(&tool_event.id);
+                                }
+                                let completed_at = if tool_event.status == "running" {
+                                    None
+                                } else {
+                                    Some(Utc::now())
+                                };
+                                let tool_id = tool_event.id.clone();
+                                let item = ConversationItem::ToolCall {
+                                    id: tool_event.id,
+                                    title: title.clone(),
+                                    tool_kind: tool_kind.clone(),
+                                    status: tool_event.status.clone(),
+                                    output: tool_event.output.clone(),
+                                    exit_code: None,
+                                    display: Box::new(tool_display_metadata(
+                                        &title,
+                                        &tool_kind,
+                                        &tool_event.status,
+                                        None,
+                                        tool_event.output.as_deref(),
+                                    )),
+                                    detail: None,
+                                    created_at: Utc::now(),
+                                    completed_at,
+                                };
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                                for item in claude_tool_result_image_items(
+                                    &tool_id,
+                                    &title,
+                                    &tool_event.images,
+                                ) {
+                                    let _ = self
+                                        .push_conversation_item(
+                                            &workspace_id,
+                                            &thread_id,
+                                            item,
+                                            true,
+                                        )
+                                        .await;
+                                }
+                            } else if let Some(message) = extract_claude_service_message(&value) {
+                                // Awaited, not spawned: a service message on the
+                                // last line of a turn would otherwise race the
+                                // turn's own terminal thread update.
+                                self.push_conversation_diagnostic(
+                                    &workspace_id,
+                                    &thread_id,
+                                    ServiceLevel::Info,
+                                    message,
+                                    Some("claude".to_string()),
+                                )
+                                .await;
+                            }
+                            if result_is_cancelled(&value) {
+                                saw_cancelled_result = true;
+                            } else if let Some(error) = extract_claude_error(&value) {
+                                turn_error = Some(error);
+                            }
+                            if let Some(is_error) = claude_result_is_error(&value) {
+                                saw_result = true;
+                                result_reported_success = !is_error && !saw_cancelled_result;
+                                // Claude emits an interim result when the parent
+                                // yields while async agents keep working. Closing
+                                // stdin at that point kills those agents. Their
+                                // terminal notification triggers another parent
+                                // response/result, which is the real boundary.
+                                // A cancelled result must not park: the CLI is
+                                // done, even if `is_error` was omitted.
+                                if is_error || saw_cancelled_result || background_tasks.is_empty() {
+                                    tracing::info!(
+                                        %workspace_id,
+                                        %thread_id,
+                                        is_error,
+                                        cancelled = saw_cancelled_result,
+                                        "claude turn finished at result"
+                                    );
+                                    if !is_error
+                                        && !saw_cancelled_result
+                                        && self
+                                            .finalize_claude_turn_at_result(
+                                                &workspace_id,
+                                                &thread_id,
+                                                turn_generation,
+                                                turn_error.clone(),
+                                                saw_agent_output,
+                                                result_reported_success,
+                                            )
+                                            .await
+                                    {
+                                        parked_between_turns = true;
+                                        assistant_id =
+                                            format!("claude-assistant-{}", Uuid::new_v4().simple());
+                                        assistant_message_key = None;
+                                        assistant_text.clear();
+                                        assistant_citations.clear();
+                                        reasoning_text.clear();
+                                        assistant_block_break_pending = false;
+                                        tool_identity.clear();
+                                        subagent_steps.clear();
+                                        background_tasks.clear();
+                                        background_task_tools.clear();
+                                        running_tool_titles.clear();
+                                        last_line_at = tokio::time::Instant::now();
+                                        stall_warned = false;
+                                        turn_error = None;
+                                        saw_agent_output = false;
+                                        saw_result = false;
+                                        result_reported_success = false;
+                                        saw_cancelled_result = false;
+                                        last_live_usage = None;
+                                        continue 'stdout;
+                                    }
+                                    break 'stdout;
+                                }
+                                // The single most confusing state this monitor can
+                                // be in: the turn is over but the thread still
+                                // reads as running. Say so, with the tasks that
+                                // are keeping it open.
                                 tracing::info!(
                                     %workspace_id,
                                     %thread_id,
-                                    is_error,
-                                    "claude turn finished at result"
+                                    held_by = background_tasks.len(),
+                                    tasks = ?background_tasks,
+                                    "claude result received but holding turn open for background agents"
                                 );
-                                break;
                             }
-                            // The single most confusing state this monitor can
-                            // be in: the turn is over but the thread still
-                            // reads as running. Say so, with the tasks that
-                            // are keeping it open.
-                            tracing::info!(
-                                %workspace_id,
-                                %thread_id,
-                                held_by = background_tasks.len(),
-                                tasks = ?background_tasks,
-                                "claude result received but holding turn open for background agents"
-                            );
                         }
                     }
-                    Err(error) => tracing::debug!(
-                        %workspace_id,
-                        %thread_id,
-                        %error,
-                        "ignored unparseable Claude stream line"
-                    ),
                 }
             }
         }
@@ -1255,9 +1507,10 @@ impl AppState {
                     // A newer turn owns this thread now; leave its state alone.
                     return;
                 }
-                Ok(finish) if finish.interrupted => {
+                Ok(finish) if finish.interrupted || saw_cancelled_result => {
                     // A user-requested stop is a clean outcome, not an error —
-                    // the CLI exits non-zero after SIGTERM/SIGKILL.
+                    // the CLI exits non-zero after SIGTERM/SIGKILL. A post-interrupt
+                    // `error_during_execution` result is the same: cancelled, not failed.
                     was_interrupted = true;
                     turn_error = None;
                 }
@@ -1293,9 +1546,31 @@ impl AppState {
             && !saw_agent_output
             && turn_error.is_none()
             && !was_interrupted
+            && !saw_cancelled_result
         {
             turn_error =
                 Some("Claude turn completed without emitting any assistant output".to_string());
+        }
+        if saw_cancelled_result {
+            was_interrupted = true;
+            turn_error = None;
+        }
+        let resume_failed = turn_error.as_deref().is_some_and(is_resume_startup_failure)
+            || stderr_tail
+                .iter()
+                .any(|line| is_resume_startup_failure(line));
+        if resume_failed {
+            self.drop_claude_native_session(&workspace_id, &thread_id)
+                .await;
+            self.push_conversation_diagnostic(
+                &workspace_id,
+                &thread_id,
+                ServiceLevel::Warning,
+                "Could not resume the previous Claude session. The next message will start a new one."
+                    .to_string(),
+                Some("claude-resume".to_string()),
+            )
+            .await;
         }
         if was_interrupted {
             // Awaited so its thread update cannot land after the Idle one
@@ -1793,10 +2068,7 @@ impl AppState {
             ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                 thread.tool_items.get(id).copied()
             }
-            _ => thread
-                .items
-                .iter()
-                .position(|entry| conversation_item_identity(entry) == id),
+            _ => thread.other_items.get(id).copied(),
         };
 
         if update_existing && let Some(index) = existing_index {
@@ -1846,7 +2118,10 @@ impl AppState {
             ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                 thread.tool_items.insert(id.to_string(), index);
             }
-            _ => {}
+            _ => {
+                // First-wins to mirror the previous position()-based scan.
+                thread.other_items.entry(id.to_string()).or_insert(index);
+            }
         }
         thread.items.push(item.clone());
         let track_attention = track_attention && marks_agent_activity(&item);
@@ -1901,10 +2176,23 @@ impl AppState {
             .threads
             .get_mut(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        let Some(index) = thread.items.iter().position(|item| match item {
-            ConversationItem::InteractiveRequest { id, .. } => id == request_id,
-            _ => false,
-        }) else {
+        let Some(index) = thread
+            .other_items
+            .get(request_id)
+            .copied()
+            .filter(|index| {
+                matches!(
+                    thread.items.get(*index),
+                    Some(ConversationItem::InteractiveRequest { id, .. }) if id == request_id
+                )
+            })
+            .or_else(|| {
+                thread.items.iter().position(|item| match item {
+                    ConversationItem::InteractiveRequest { id, .. } => id == request_id,
+                    _ => false,
+                })
+            })
+        else {
             return Ok(());
         };
         if let ConversationItem::InteractiveRequest {
@@ -1940,6 +2228,7 @@ impl ManagedThread {
             reasoning_items: HashMap::new(),
             plan_items: HashMap::new(),
             tool_items: HashMap::new(),
+            other_items: HashMap::new(),
             manual_title: false,
             ai_title_generated,
             ai_title_in_flight: false,
@@ -1952,6 +2241,7 @@ impl ManagedThread {
             queued_requests: Vec::new(),
             dispatching_request: None,
             pending_opencode_steer: None,
+            claude_post_plan_permission_mode: None,
         }
     }
 
@@ -1968,6 +2258,7 @@ impl ManagedThread {
         self.reasoning_items.clear();
         self.plan_items.clear();
         self.tool_items.clear();
+        self.other_items.clear();
         for (index, item) in items.into_iter().enumerate() {
             let id = conversation_item_identity(&item).to_string();
             match &item {
@@ -1983,7 +2274,11 @@ impl ManagedThread {
                 ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                     self.tool_items.insert(id, index);
                 }
-                _ => {}
+                _ => {
+                    // First-wins to mirror the position()-based scan this
+                    // map replaces.
+                    self.other_items.entry(id).or_insert(index);
+                }
             }
             self.items.push(item);
         }
@@ -2007,7 +2302,19 @@ fn apply_resumed_codex_thread_hydration(
         thread.summary.last_tool = hydrated.summary.last_tool;
     }
     thread.summary.updated_at = thread.summary.updated_at.max(hydrated.summary.updated_at);
-    let merged_items = merge_resumed_codex_items(&thread.items, hydrated.items);
+    let mut merged_items = merge_resumed_codex_items(&thread.items, hydrated.items);
+    if is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref()) {
+        settle_items_as_shutdown_interrupted(
+            &mut merged_items,
+            thread
+                .summary
+                .latest_turn_id
+                .as_deref()
+                .or(Some(thread.summary.id.as_str())),
+            Utc::now(),
+            SHUTDOWN_INTERRUPTED_TURN_ERROR,
+        );
+    }
     thread.replace_items(merged_items);
     thread.requires_resume = false;
 }
@@ -2051,7 +2358,7 @@ fn user_message_turn_key(item: &ConversationItem) -> Option<(String, String)> {
     else {
         return None;
     };
-    Some((turn_id.clone(), text.clone()))
+    Some((turn_id.clone(), text.trim().to_string()))
 }
 
 impl ManagedWorkspace {
@@ -2296,6 +2603,7 @@ mod tests {
             attention: ThreadAttention::default(),
             is_archived: false,
             is_pinned: false,
+            is_pinned_in_project: false,
             goal: None,
             queued_turns: Vec::new(),
             variant: Some(falcondeck_core::ThreadVariant {
@@ -2439,8 +2747,9 @@ mod tests {
             "/tmp/project-copy",
         );
         let mut current = hydrated.items.clone();
-        if let ConversationItem::UserMessage { id, .. } = &mut current[0] {
+        if let ConversationItem::UserMessage { id, text, .. } = &mut current[0] {
             *id = "local-user".to_string();
+            text.push(' ');
         }
         thread.replace_items(current);
 
@@ -2525,6 +2834,10 @@ mod tests {
             json!({ "type": "user" }),
             // A nested result field must not be mistaken for the event.
             json!({ "type": "system", "result": "success" }),
+            // Stream-event message_stop is not a turn boundary; multiple
+            // arrive per turn and would desynchronize completion.
+            json!({ "type": "stream_event", "event": { "type": "message_stop" } }),
+            json!({ "type": "stream_event", "event": { "type": "message_delta", "delta": { "stop_reason": "end_turn" } } }),
         ] {
             assert_eq!(claude_result_is_error(&value), None, "{value}");
         }

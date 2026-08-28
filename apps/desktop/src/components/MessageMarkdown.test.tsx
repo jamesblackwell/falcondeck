@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -12,7 +12,9 @@ vi.mock("mermaid", () => ({
 }));
 
 import {
+  LocalPathProvider,
   MessageMarkdown,
+  WebLinkProvider,
   normalizeMarkdownForStreaming,
   renderMarkdown,
   splitStreamingMarkdownBlocks,
@@ -274,7 +276,7 @@ describe("streaming code highlighting", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps mermaid as source while the message is still streaming", () => {
+  it("renders a closed mermaid fence while the message is still streaming", async () => {
     render(
       <MessageMarkdown
         text={"```mermaid\nflowchart TD\n  A-->B\n```"}
@@ -283,8 +285,9 @@ describe("streaming code highlighting", () => {
       />,
     );
 
-    expect(screen.queryByRole("img", { name: "Mermaid diagram" })).toBeNull();
-    expect(screen.getByText(/flowchart TD/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("img", { name: "Mermaid diagram" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps a newly streamed fenced block empty until its first code token arrives", () => {
@@ -493,5 +496,134 @@ describe("slash-command highlighting", () => {
 
     expect(view.container.querySelector(".text-accent")).toBeNull();
     expect(view.container).toHaveTextContent("Run /db-query");
+  });
+});
+
+describe("local file paths", () => {
+  const directory =
+    "/Users/James/www/sites/lucidpic/storage/app/training-artifacts/dani-wan-t2v-poc-20260822/tailscale/v2/";
+
+  it("leaves absolute paths inert when the host cannot open them", () => {
+    render(
+      <MessageMarkdown text={`Saved at \`${directory}\``} defer={false} />,
+    );
+
+    expect(screen.queryByRole("link", { name: `Open ${directory}` })).toBeNull();
+    expect(screen.getByText(directory).tagName).toBe("CODE");
+  });
+
+  it("opens an inline-code path on click", () => {
+    const onLocalPath = vi.fn();
+    render(
+      <LocalPathProvider onLocalPath={onLocalPath}>
+        <MessageMarkdown text={`Saved at \`${directory}\``} defer={false} />
+      </LocalPathProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: `Open ${directory}` }));
+    expect(onLocalPath).toHaveBeenCalledWith("open", directory);
+  });
+
+  it("offers Finder actions from the path context menu", () => {
+    const onLocalPath = vi.fn();
+    render(
+      <LocalPathProvider onLocalPath={onLocalPath}>
+        <MessageMarkdown
+          text={`Clips are in ${directory}kitchen.mp4`}
+          defer={false}
+        />
+      </LocalPathProvider>,
+    );
+
+    fireEvent.contextMenu(
+      screen.getByRole("link", { name: `Open ${directory}kitchen.mp4` }),
+    );
+    fireEvent.click(
+      screen.getByRole("menuitem", {
+        name: /Reveal in Finder|Show in Explorer|Show in folder/,
+      }),
+    );
+    expect(onLocalPath).toHaveBeenCalledWith("reveal", `${directory}kitchen.mp4`);
+  });
+
+  it("copies the filesystem path from the context menu", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(
+      <LocalPathProvider onLocalPath={vi.fn()}>
+        <MessageMarkdown text={`\`${directory}\``} defer={false} />
+      </LocalPathProvider>,
+    );
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: `Open ${directory}` }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy Path" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(directory));
+  });
+
+  it("does not turn web routes into path links", () => {
+    const onLocalPath = vi.fn();
+    render(
+      <LocalPathProvider onLocalPath={onLocalPath}>
+        <MessageMarkdown text="See `/api/provider` and src/App.tsx" defer={false} />
+      </LocalPathProvider>,
+    );
+
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("/api/provider").tagName).toBe("CODE");
+  });
+
+  it("opens markdown file:// links locally", () => {
+    const onLocalPath = vi.fn();
+    render(
+      <LocalPathProvider onLocalPath={onLocalPath}>
+        <MessageMarkdown
+          text="Open [the clip](file:///Users/James/clip.mp4)"
+          defer={false}
+        />
+      </LocalPathProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("link", { name: "Open /Users/James/clip.mp4" }));
+    expect(onLocalPath).toHaveBeenCalledWith("open", "/Users/James/clip.mp4");
+  });
+});
+
+describe("external link context menu", () => {
+  it("offers open and copy actions for markdown links", async () => {
+    const onOpenLink = vi.fn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(
+      <WebLinkProvider onOpenLink={onOpenLink}>
+        <MessageMarkdown
+          text="See [the guide](https://example.com/guide) for details"
+          defer={false}
+        />
+      </WebLinkProvider>,
+    );
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: "the guide" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open Link" }));
+    expect(onOpenLink).toHaveBeenCalledWith("https://example.com/guide");
+
+    fireEvent.contextMenu(screen.getByRole("link", { name: "the guide" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy Link" }));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("https://example.com/guide"),
+    );
+  });
+
+  it("keeps markdown links plain without a link host", () => {
+    render(
+      <MessageMarkdown
+        text="See [the guide](https://example.com/guide) for details"
+        defer={false}
+      />,
+    );
+
+    const anchor = screen.getByRole("link", { name: "the guide" });
+    expect(anchor.getAttribute("target")).toBe("_blank");
+    fireEvent.contextMenu(anchor);
+    expect(screen.queryByRole("menu")).toBeNull();
   });
 });

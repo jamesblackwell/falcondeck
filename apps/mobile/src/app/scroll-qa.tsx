@@ -85,6 +85,8 @@ export default function ScrollQaScreen() {
     onScrollBeginDrag: onScrollBeginDragFollow,
     onScrollEndDrag: onScrollEndDragFollow,
     onMomentumScrollEnd,
+    onTouchStart,
+    onTouchEnd,
     scrollToBottom,
   } = useScrollToBottom<QaBlock>();
 
@@ -211,6 +213,10 @@ export default function ScrollQaScreen() {
           onScrollEndDrag={onScrollEndDrag}
           onContentSizeChange={onContentSizeChange}
           onMomentumScrollEnd={onMomentumScrollEnd}
+          onTouchStart={onTouchStart}
+          onTouchEnd={onTouchEnd}
+          onTouchCancel={onTouchEnd}
+          onResponderRelease={onTouchEnd}
           onViewableItemsChanged={onViewableItemsChanged}
           scrollEventThrottle={16}
           contentContainerStyle={styles.listContent}

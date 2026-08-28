@@ -47,9 +47,14 @@ pub(super) const THREADS_READ_PERMISSION: &str = "threads:read";
 /// Lets an extension publish manifest-declared tools to agent harnesses.
 pub(super) const AGENT_TOOLS_PERMISSION: &str = "agent-tools:register";
 const SUPPORTED_PERMISSIONS: &[&str] = &[THREADS_READ_PERMISSION, AGENT_TOOLS_PERMISSION];
-/// Joins an extension id and tool id into one MCP tool name. Neither id can
-/// contain a double underscore, so the split back is unambiguous.
-const TOOL_NAME_SEPARATOR: &str = "__";
+/// Clients qualify MCP tools as `{server}__{name}`. A `__` inside `name`
+/// makes that qualifier ambiguous, and Grok skips the tool. After sanitizing
+/// `.`/`-` to `_`, neither half contains `-`, so a hyphen is unambiguous.
+const TOOL_NAME_SEPARATOR: &str = "-";
+/// Grok rejects qualified names longer than 64 characters
+/// (`^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$` on `falcondeck-extensions__{name}`).
+/// `falcondeck-extensions__` is 23 characters, leaving 41 for the tool name.
+const MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS: usize = 41;
 const EXTENSION_PANEL_ICONS: &[&str] = &[
     "activity",
     "blocks",
@@ -1277,14 +1282,44 @@ fn validate_agent_tools<'a>(
     Ok(())
 }
 
-/// Builds the MCP tool name for one declared tool. Neither id may contain the
-/// separator, so [`split_agent_tool_name`] recovers both halves exactly.
+/// Builds the MCP tool name for one declared tool.
+///
+/// Prefer `{sanitized_extension}-{sanitized_tool}` so two ids that flatten to
+/// the same underscore string stay distinct. If that form would exceed
+/// [`MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS`] — as the follow-up suggestions
+/// tool does — compact to `{publisher}_{tool}` so Grok can still qualify it
+/// as `falcondeck-extensions__{name}` in 64 characters. That is why
+/// `falcondeck.follow-up-suggestions` / `suggest-follow-ups` publishes as
+/// `falcondeck_suggest_follow_ups` rather than the 52-character hyphenated
+/// form, which Grok skips.
 pub(super) fn agent_tool_name(extension_id: &str, tool_id: &str) -> String {
-    format!(
-        "{}{TOOL_NAME_SEPARATOR}{}",
-        extension_id.replace(['.', '-'], "_"),
-        tool_id.replace('-', "_")
-    )
+    let ext = sanitize_agent_tool_name_part(extension_id);
+    let tool = sanitize_agent_tool_name_part(tool_id);
+    let specific = format!("{ext}{TOOL_NAME_SEPARATOR}{tool}");
+    if specific.len() <= MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS {
+        return specific;
+    }
+    let publisher = extension_id
+        .split('.')
+        .next()
+        .unwrap_or(extension_id)
+        .replace('-', "_");
+    let compact = format!("{publisher}_{tool}");
+    if compact.len() <= MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS {
+        return compact;
+    }
+    let mut clipped: String = compact
+        .chars()
+        .take(MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS)
+        .collect();
+    while clipped.ends_with('_') || clipped.ends_with('-') {
+        clipped.pop();
+    }
+    clipped
+}
+
+fn sanitize_agent_tool_name_part(value: &str) -> String {
+    value.replace(['.', '-'], "_")
 }
 
 fn validate_unique_actions<'a>(
@@ -1722,9 +1757,37 @@ mod tests {
         // Neither id may contain the separator, so these two cannot collide
         // even though their halves concatenate to the same characters.
         assert_ne!(agent_tool_name("a.b", "c-d"), agent_tool_name("a.b-c", "d"),);
+        assert_eq!(agent_tool_name("a.b", "c-d"), "a_b-c_d");
+        assert_eq!(agent_tool_name("a.b-c", "d"), "a_b_c-d");
+    }
+
+    #[test]
+    fn agent_tool_names_stay_safe_for_server_tool_qualifiers() {
+        // Grok qualifies tools as `{server}__{name}` and skips anything whose
+        // qualified form is longer than 64 characters or contains more than
+        // one `__`. The long hyphenated form for follow-ups is 52 characters
+        // and would become a 75-character qualifier, so it must compact.
+        let name = agent_tool_name("falcondeck.follow-up-suggestions", "suggest-follow-ups");
+        assert_eq!(name, "falcondeck_suggest_follow_ups");
+        assert!(!name.contains("__"), "{name} must not contain '__'");
+        assert!(
+            name.len() <= MAX_PUBLISHED_AGENT_TOOL_NAME_CHARS,
+            "{name} is {} characters",
+            name.len()
+        );
+        let qualified = format!(
+            "{}__{name}",
+            crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME
+        );
+        assert!(
+            qualified.len() <= 64,
+            "{qualified} is {} characters",
+            qualified.len()
+        );
         assert_eq!(
-            agent_tool_name("falcondeck.follow-up-suggestions", "suggest-follow-ups"),
-            "falcondeck_follow_up_suggestions__suggest_follow_ups"
+            qualified.split("__").count(),
+            2,
+            "{qualified} must split into server and tool"
         );
     }
 
@@ -2032,7 +2095,9 @@ mod tests {
     #[test]
     fn scratch_pad_state_carries_over_to_notes() {
         let mut state = PersistedExtensionState::default();
-        state.enabled.insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
+        state
+            .enabled
+            .insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
         state.storage.insert(
             LEGACY_SCRATCH_PAD_ID.to_string(),
             BTreeMap::from([("pad".to_string(), serde_json::json!("# Keep me"))]),
@@ -2062,7 +2127,9 @@ mod tests {
     #[test]
     fn migration_keeps_notes_state_when_both_ids_are_present() {
         let mut state = PersistedExtensionState::default();
-        state.enabled.insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
+        state
+            .enabled
+            .insert(LEGACY_SCRATCH_PAD_ID.to_string(), false);
         state.enabled.insert(NOTES_ID.to_string(), true);
         state.storage.insert(
             LEGACY_SCRATCH_PAD_ID.to_string(),
@@ -2081,7 +2148,7 @@ mod tests {
     }
 
     const FOLLOW_UPS: &str = "falcondeck.follow-up-suggestions";
-    const FOLLOW_UPS_TOOL: &str = "falcondeck_follow_up_suggestions__suggest_follow_ups";
+    const FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
 
     #[tokio::test]
     async fn bundled_follow_ups_is_enabled_and_granted_on_a_fresh_install() {

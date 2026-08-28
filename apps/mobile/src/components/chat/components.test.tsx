@@ -354,24 +354,129 @@ describe('ChatInput component', () => {
     expect(r.toJSON()).toBeTruthy()
   })
 
-  it('moves thread setup controls into the plus menu', () => {
+  it('keeps agent picking on the model chip, not in the plus menu', () => {
     const r = renderComponent(
       <ChatInput
         value=""
         {...chatInputDefaults}
         showProviderSelector
-        providers={[{ provider: 'codex', label: 'Codex' }]}
+        providers={[
+          { provider: 'codex', label: 'Codex' },
+          { provider: 'claude', label: 'Claude' },
+        ]}
+        models={[
+          {
+            id: 'gpt-5',
+            label: 'GPT-5',
+            is_default: true,
+            default_reasoning_effort: 'medium',
+            supported_reasoning_efforts: [],
+          },
+        ]}
+        selectedModel="gpt-5"
       />,
     )
 
-    const addButton = r.root
-      .findAllByType('Pressable' as any)
-      .find((button) => button.props.accessibilityLabel === 'Add to prompt')
-    act(() => addButton?.props.onPress())
+    expect(
+      r.root.findByProps({
+        accessibilityLabel: 'Agent and model: Codex · gpt-5',
+      }),
+    ).toBeDefined()
+
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Add to prompt' }).props.onPress()
+    })
 
     expect(textOf(r)).toContain('Photos')
     expect(textOf(r)).toContain('Paste image')
-    expect(textOf(r)).toContain('Agent')
+    expect(
+      r.root.findAllByProps({ accessibilityLabel: 'Agent' }),
+    ).toHaveLength(0)
+  })
+
+  it('offers a handoff destination from the model chip on an existing thread', () => {
+    const onHandoffProviderSelect = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value=""
+        {...chatInputDefaults}
+        showProviderSelector={false}
+        providers={[
+          { provider: 'codex', label: 'Codex' },
+          { provider: 'claude', label: 'Claude' },
+        ]}
+        models={[
+          {
+            id: 'gpt-5',
+            label: 'GPT-5',
+            is_default: true,
+            default_reasoning_effort: 'medium',
+            supported_reasoning_efforts: [],
+          },
+        ]}
+        selectedModel="gpt-5"
+        handoffProviders={[{ provider: 'claude', label: 'Claude' }]}
+        onHandoffProviderSelect={onHandoffProviderSelect}
+      />,
+    )
+
+    act(() => {
+      r.root
+        .findByProps({
+          accessibilityLabel: 'Agent and model: Codex · gpt-5',
+        })
+        .props.onPress()
+    })
+    act(() => {
+      r.root
+        .findByProps({
+          accessibilityLabel: 'Continue in another harness…',
+        })
+        .props.onPress()
+    })
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Claude' }).props.onPress()
+    })
+    expect(onHandoffProviderSelect).toHaveBeenCalledWith('claude')
+  })
+
+  it('keeps the agent chip available for handoff while models are loading', () => {
+    const onHandoffProviderSelect = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value=""
+        {...chatInputDefaults}
+        showProviderSelector={false}
+        providers={[
+          { provider: 'codex', label: 'Codex' },
+          { provider: 'claude', label: 'Claude' },
+        ]}
+        models={[]}
+        modelsLoading
+        selectedModel={null}
+        handoffProviders={[{ provider: 'claude', label: 'Claude' }]}
+        onHandoffProviderSelect={onHandoffProviderSelect}
+      />,
+    )
+
+    act(() => {
+      r.root
+        .findByProps({
+          accessibilityLabel: 'Agent and model: Codex · Loading…',
+        })
+        .props.onPress()
+    })
+    act(() => {
+      r.root
+        .findByProps({
+          accessibilityLabel: 'Continue in another harness…',
+        })
+        .props.onPress()
+    })
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Claude' }).props.onPress()
+    })
+    expect(onHandoffProviderSelect).toHaveBeenCalledWith('claude')
   })
 
   it('removes image actions when the selected agent does not support them', () => {
@@ -517,6 +622,38 @@ describe('ChatInput component', () => {
     expect(sendButton?.props.accessibilityHint).toBe('Reconnect to send')
     act(() => sendButton?.props.onPress())
     expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('hides skills the current provider cannot use', () => {
+    const r = renderComponent(
+      <ChatInput
+        value="/"
+        {...chatInputDefaults}
+        selectedProvider="grok"
+        skills={[
+          {
+            id: 'skill-1',
+            label: 'Lint',
+            alias: '/lint',
+            availability: 'both',
+            providers: ['codex', 'claude'],
+            source_kind: 'project_file',
+            description: 'Run lint fixes',
+          },
+          {
+            id: 'skill-2',
+            label: 'Grok Review',
+            alias: '/grok-review',
+            availability: 'both',
+            providers: ['grok'],
+            source_kind: 'project_file',
+          },
+        ]}
+      />,
+    )
+
+    expect(textOf(r)).toContain('/grok-review')
+    expect(textOf(r)).not.toContain('/lint')
   })
 
   it('shows slash skill suggestions', () => {

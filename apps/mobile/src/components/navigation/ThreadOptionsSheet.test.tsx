@@ -35,8 +35,30 @@ describe('ThreadOptionsSheet', () => {
 
     expect(textOf(renderer)).toContain('Thread options')
     expect(textOf(renderer)).toContain('Pin')
+    expect(textOf(renderer)).toContain('Pin in project')
     expect(textOf(renderer)).toContain('Rename')
     expect(textOf(renderer)).toContain('Archive')
+  })
+
+  it('hides pin in project for casual chats', () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: 'workspace-1', kind: 'casual' })],
+          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+        }),
+      ),
+    )
+    const renderer = renderComponent(
+      <ThreadOptionsSheet
+        workspaceId="workspace-1"
+        thread={thread({ id: 'thread-1', workspace_id: 'workspace-1' })}
+        onClose={vi.fn()}
+      />,
+    )
+
+    expect(textOf(renderer)).toContain('Pin')
+    expect(textOf(renderer)).not.toContain('Pin in project')
   })
 
   it('opens the rename form without dismissing the sheet', () => {

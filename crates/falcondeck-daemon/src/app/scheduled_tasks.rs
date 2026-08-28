@@ -857,6 +857,7 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
             sandbox_mode: task.sandbox_mode,
             steer: false,
             user_item_id: None,
+            resume_interrupted: false,
         },
     )
     .await;
@@ -904,7 +905,7 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
                 if envelope.workspace_id.as_deref() == Some(&task.summary.workspace_id)
                     && envelope.thread_id.as_deref() == Some(&handle.thread.id) =>
             {
-                match envelope.event {
+                match envelope.event.clone() {
                     UnifiedEvent::InteractiveRequest { .. } => {
                         let _ = update_run(&app, &task_id, &run_id, |run| {
                             run.status = ScheduledTaskRunStatus::AwaitingInput

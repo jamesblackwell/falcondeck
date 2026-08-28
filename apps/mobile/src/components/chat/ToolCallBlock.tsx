@@ -17,9 +17,12 @@ import {
   Circle,
   CircleX,
   Clock3,
+  GitCommitHorizontal,
   Pause,
   PauseCircle,
   Play,
+  Split,
+  Upload,
 } from "lucide-react-native";
 
 import {
@@ -33,6 +36,7 @@ import {
   parseMcpResult,
   summarizeMcpArtifacts,
   summarizeParsedMcpArtifacts,
+  notableToolAction,
   toolCallLabel,
   toolLifecycle,
   toolLifecycleLabel,
@@ -170,9 +174,24 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
   const label = useMemo(
     () => toolCallLabel(item),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- title, detail and the head of the output are all toolCallLabel reads.
-    [item.title, item.output, item.detail],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- title, detail, kind and the head of the output are all toolCallLabel reads.
+    [item.title, item.output, item.detail, item.tool_kind],
   );
+  const notable = notableToolAction(item);
+  const notableColor =
+    notable?.kind === "push"
+      ? theme.colors.info.default
+      : notable
+        ? theme.colors.accent.default
+        : null;
+  const NotableIcon =
+    notable?.kind === "commit"
+      ? GitCommitHorizontal
+      : notable?.kind === "push"
+        ? Upload
+        : notable?.kind === "breakout"
+          ? Split
+          : null;
 
   if (variant === "row") {
     return (
@@ -183,11 +202,14 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         accessibilityLabel={`${label}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
       >
         {statusIcon}
+        {NotableIcon && notableColor ? (
+          <NotableIcon accessible={false} size={14} color={notableColor} />
+        ) : null}
         <Text
           variant="mono"
           color="tertiary"
           size="xs"
-          style={styles.title}
+          style={[styles.title, notableColor ? { color: notableColor } : null]}
           numberOfLines={1}
         >
           {label}
@@ -197,7 +219,21 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   }
 
   return (
-    <View style={[styles.container, nested ? styles.containerNested : null]}>
+    <View
+      style={[
+        styles.container,
+        nested ? styles.containerNested : null,
+        notableColor
+          ? {
+              borderColor: notableColor,
+              backgroundColor:
+                notable?.kind === "push"
+                  ? theme.colors.info.muted
+                  : theme.colors.accent.muted,
+            }
+          : null,
+      ]}
+    >
       <Pressable
         style={styles.header}
         onPress={hasContent && !awaitingApproval ? toggle : undefined}
@@ -224,11 +260,14 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         }
       >
         {statusIcon}
+        {NotableIcon && notableColor ? (
+          <NotableIcon accessible={false} size={14} color={notableColor} />
+        ) : null}
         <Text
           variant="mono"
           color="tertiary"
           size="xs"
-          style={styles.title}
+          style={[styles.title, notableColor ? { color: notableColor } : null]}
           numberOfLines={1}
         >
           {label}

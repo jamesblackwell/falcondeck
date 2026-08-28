@@ -280,7 +280,7 @@ DEFAULT_MODEL_BY_ENGINE = {
     "amp": "openai/gpt-5.6-sol",
     "codex": "gpt-5.6-sol",
     "claude": "claude-fable-5",
-    "opencode": "zai-coding-plan/glm-5.3",
+    "opencode": "openrouter/z-ai/glm-5.3-flash",
 }
 DEFAULT_CODEX_ACCESS_FALLBACK_MODEL = "gpt-5.6-terra"
 AMP_THINKING_VALUES = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
@@ -576,7 +576,6 @@ def safe_engine_env(
     extra: dict[str, str] | None = None,
     *,
     engine: str | None = None,
-    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     common_allowed_exact = {
         "ALL_PROXY",
@@ -827,8 +826,8 @@ def safe_engine_env(
         ):
             if key in os.environ:
                 env[key] = os.environ[key]
-    if extra_env:
-        env.update(extra_env)
+    if extra:
+        env.update(extra)
     return env
 
 
@@ -4946,7 +4945,7 @@ def run_opencode(args: argparse.Namespace, repo: Path, prompt: str) -> str:
                 repo,
                 [Path(cmd[0]).parent],
                 engine="opencode",
-                extra_env=engine_env,
+                extra=engine_env,
             ),
         )
     if result.returncode != 0:

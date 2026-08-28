@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
 import { Directory, File, Paths } from 'expo-file-system'
 import {
-  RecordingPresets,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioRecorder,
@@ -25,6 +24,7 @@ import {
   updateSpeechSettings,
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
+import { CLOUD_VOICE_RECORDING } from '@/features/speech/cloudVoiceRecording'
 import {
   getDesktopSpeechStatus,
   transcriptionProgressLabel,
@@ -130,7 +130,7 @@ export function InlineVoiceRecorder({
   const localErrorRef = useRef(false)
   const startedRef = useRef(false)
   const recorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
+    ...CLOUD_VOICE_RECORDING,
     isMeteringEnabled: true,
   })
   const recorderState = useAudioRecorderState(recorder, 150)

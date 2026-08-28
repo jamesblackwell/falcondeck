@@ -8,7 +8,6 @@ import {
   Blocks,
   Bot,
   CalendarClock,
-  Gauge,
   Keyboard,
   Mic,
   Palette,
@@ -92,12 +91,6 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Harnesses",
     description: "CLI installs, versions, and upgrades",
     icon: Terminal,
-  },
-  {
-    id: "usage",
-    label: "Usage",
-    description: "Subscription limits for Codex and Claude",
-    icon: Gauge,
   },
   {
     id: "connectors",

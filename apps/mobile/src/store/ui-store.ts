@@ -37,6 +37,53 @@ function writeStoredDrafts(drafts: ComposerDrafts) {
   }
 }
 
+/**
+ * Draft persistence runs behind a burst-aware writer: keystrokes fire far
+ * faster than MMKV needs to, so a burst commits its first change immediately
+ * (a crash right after typing starts cannot lose the whole message) and
+ * coalesces everything after it into one trailing write ~300ms after the
+ * last change. A process killed mid-burst loses only the unflushed tail —
+ * MMKV keeps the last committed value.
+ */
+const DRAFT_PERSIST_DEBOUNCE_MS = 300;
+let draftPersistTimer: ReturnType<typeof setTimeout> | null = null;
+// Newest drafts of the in-flight burst, awaiting its trailing write.
+let pendingStoredDrafts: ComposerDrafts | null = null;
+
+/** Commits any draft burst still waiting on its trailing write right away. */
+export function flushStoredDrafts() {
+  if (draftPersistTimer !== null) {
+    clearTimeout(draftPersistTimer);
+    draftPersistTimer = null;
+  }
+  const pending = pendingStoredDrafts;
+  pendingStoredDrafts = null;
+  if (pending !== null) writeStoredDrafts(pending);
+}
+
+function scheduleStoredDraftsWrite(drafts: ComposerDrafts) {
+  // Each call supersedes the queued value — only the newest matters.
+  pendingStoredDrafts = drafts;
+  if (draftPersistTimer === null) {
+    // Leading edge of a burst: write immediately instead of waiting out the
+    // trailing delay, then arm the trailing write for everything that follows.
+    writeStoredDrafts(drafts);
+    pendingStoredDrafts = null;
+  }
+  if (draftPersistTimer !== null) clearTimeout(draftPersistTimer);
+  draftPersistTimer = setTimeout(flushStoredDrafts, DRAFT_PERSIST_DEBOUNCE_MS);
+}
+
+/** Synchronous counterpart: cancels any queued burst write, then commits. */
+function writeStoredDraftsNow(drafts: ComposerDrafts) {
+  if (draftPersistTimer !== null) {
+    clearTimeout(draftPersistTimer);
+    draftPersistTimer = null;
+    pendingStoredDrafts = null;
+  }
+  writeStoredDrafts(drafts);
+}
+
 function writeStoredInFlight(inFlight: ComposerDrafts) {
   try {
     storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(inFlight))
@@ -146,7 +193,7 @@ const initialDrafts = Object.entries(storedInFlight).reduce(
   parseComposerDrafts(storage.getString(DRAFTS_STORAGE_KEY) ?? null),
 );
 if (Object.keys(storedInFlight).length > 0) {
-  writeStoredDrafts(initialDrafts);
+  writeStoredDraftsNow(initialDrafts);
   writeStoredInFlight({});
 }
 const initialConversationKey = draftKeyFor(null, null);
@@ -184,7 +231,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setDraft: (draft) =>
     set((state) => {
       const drafts = upsertComposerDraft(state.drafts, state.conversationKey, draft);
-      if (drafts !== state.drafts) writeStoredDrafts(drafts);
+      // Per-keystroke MMKV writes dominate composer input cost; the burst
+      // writer commits immediately once, then coalesces into a trailing write.
+      if (drafts !== state.drafts) scheduleStoredDraftsWrite(drafts);
       return { drafts, draft };
     }),
   setAttachments: (attachments) =>
@@ -206,7 +255,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
       } else {
         attachmentsByConversation[conversationKey] = attachments;
       }
-      if (drafts !== state.drafts) writeStoredDrafts(drafts);
+      // Not keystroke-driven: commit synchronously so a queued burst write
+      // cannot later clobber this newer snapshot with a stale value.
+      if (drafts !== state.drafts) writeStoredDraftsNow(drafts);
       return {
         drafts,
         attachmentsByConversation,
@@ -232,7 +283,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
         [conversationKey]: attachments,
       };
       if (attachments.length === 0) delete attachmentsByConversation[conversationKey];
-      if (drafts !== state.drafts) writeStoredDrafts(drafts);
+      // Failure recovery must land synchronously, superseding any queued
+      // burst write from earlier keystrokes.
+      if (drafts !== state.drafts) writeStoredDraftsNow(drafts);
       return {
         drafts,
         attachmentsByConversation,
@@ -268,6 +321,9 @@ export const useUIStore = create<UIStore>((set, get) => ({
       return { persistedComposerSelections };
     }),
   beginSubmission: (conversationKey, submittedDraft) => {
+    // Settle any in-flight draft burst first so the persisted drafts key and
+    // the in-flight record are written in logical order for crash recovery.
+    flushStoredDrafts();
     set((state) => {
       const inFlightSubmissions = upsertComposerDraft(
         state.inFlightSubmissions,

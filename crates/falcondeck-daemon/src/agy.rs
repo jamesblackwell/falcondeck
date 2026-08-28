@@ -48,10 +48,14 @@ const SHUTDOWN_POLL_INTERVAL: tokio::time::Duration = tokio::time::Duration::fro
 /// Headless default is five minutes, which is too short for a coding turn.
 const PRINT_TIMEOUT: &str = "24h";
 
-/// Flags FalconDeck relies on. The regression test keeps the declared surface
-/// aligned with turn spawning until the live conformance probe covers AGY.
-#[cfg(test)]
-const REQUIRED_CLI_FLAGS: &[&str] = &[
+/// Command-line flags a turn or catalog probe depends on.
+///
+/// Keep this in step with `spawn_turn`, `list_models`, and the auth/skills
+/// print-mode calls. A CLI that drops `--effort` or `--conversation` does not
+/// necessarily fail: the flag is ignored and resume or reasoning silently
+/// stops applying. `harness_conformance` checks the installed binary still
+/// advertises every one.
+pub const REQUIRED_CLI_FLAGS: &[&str] = &[
     "--print",
     "--input-format",
     "--output-format",
@@ -1101,6 +1105,7 @@ pub fn parse_hydrated_threads(
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: Vec::new(),
                 variant: None,
@@ -1198,6 +1203,8 @@ pub fn parse_stream_line(line: &str) -> Option<AgyStreamEvent> {
                     }),
                 text_delta: step
                     .get("text_delta")
+                    .or_else(|| step.get("text"))
+                    .or_else(|| step.get("delta"))
                     .and_then(Value::as_str)
                     .filter(|text| !text.is_empty())
                     .map(str::to_string),
@@ -1232,9 +1239,15 @@ pub fn parse_stream_line(line: &str) -> Option<AgyStreamEvent> {
                 success: status.eq_ignore_ascii_case("success"),
                 response: result
                     .get("response")
-                    .and_then(Value::as_str)
-                    .filter(|text| !text.is_empty())
-                    .map(str::to_string),
+                    .and_then(|value| {
+                        value.as_str().map(str::to_string).or_else(|| {
+                            value
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                    })
+                    .filter(|text| !text.is_empty()),
                 error: result
                     .get("error")
                     .and_then(Value::as_str)
@@ -1344,6 +1357,17 @@ mod tests {
             } => {
                 assert_eq!(step_type, "agent_response");
                 assert_eq!(text_delta.as_deref(), Some("pong\n"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        let completed = parse_stream_line(
+            r#"{"event":"step_update","step_update":{"conversation_id":"abc","step_index":3,"state":"DONE","step_type":"agent_response","text":"done\n"}}"#,
+        )
+        .unwrap();
+        match completed {
+            AgyStreamEvent::Step { text_delta, .. } => {
+                assert_eq!(text_delta.as_deref(), Some("done\n"));
             }
             other => panic!("unexpected {other:?}"),
         }

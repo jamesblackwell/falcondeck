@@ -600,4 +600,37 @@ describe("conversation Markdown export", () => {
     expect(markdown).toContain("## Tool — ls");
     expect(markdown).not.toContain("cd /Users/James/www/sites/lucidpic");
   });
+
+  it("projects harness-injected user envelopes before export", () => {
+    const markdown = conversationItemsToMarkdown([
+      {
+        kind: "user_message",
+        id: "user-1",
+        text: "<user_query>ship it</user_query>",
+        attachments: [],
+        created_at,
+      },
+      {
+        kind: "user_message",
+        id: "user-2",
+        text: '<system-reminder>Background task "x" completed (exit code: 1).\nCommand: python3 -m http.server 8765 --bind 127.0.0.1 | Duration: 0.4s</system-reminder>',
+        attachments: [],
+        created_at,
+      },
+      {
+        kind: "user_message",
+        id: "user-3",
+        text: "<system-reminder>The following skills are available for use:</system-reminder>",
+        attachments: [],
+        created_at,
+      },
+    ]);
+    expect(markdown).toContain("ship it");
+    expect(markdown).toContain(
+      "Background command failed (exit 1) · python3 -m http.server 8765 --bind 127.0.0.1 · 0.4s",
+    );
+    expect(markdown).not.toContain("<user_query>");
+    expect(markdown).not.toContain("system-reminder");
+    expect(markdown).not.toContain("skills are available");
+  });
 });

@@ -57,6 +57,7 @@ fn skill_scan_roots(root: &Path, source_kind: SkillSourceKind) -> Vec<SkillScanR
                 AgentProvider::CLAUDE,
                 AgentProvider::AGY,
                 AgentProvider::OPENCODE,
+                AgentProvider::GROK,
             ],
             layout: SkillDirLayout::AgentsSkills,
         },
@@ -70,6 +71,12 @@ fn skill_scan_roots(root: &Path, source_kind: SkillSourceKind) -> Vec<SkillScanR
             dir: root.join(".opencode/skills"),
             source_kind: source_kind.clone(),
             providers: vec![AgentProvider::OPENCODE],
+            layout: SkillDirLayout::AgentsSkills,
+        },
+        SkillScanRoot {
+            dir: root.join(".grok/skills"),
+            source_kind: source_kind.clone(),
+            providers: vec![AgentProvider::GROK],
             layout: SkillDirLayout::AgentsSkills,
         },
         SkillScanRoot {
@@ -216,6 +223,56 @@ pub fn skills_for_provider(skills: &[SkillSummary], provider: AgentProvider) -> 
         .collect()
 }
 
+/// Fresh file-backed scan plus cached provider-native entries. Used by the
+/// slash-menu list and by turn start so a skill added on disk is visible
+/// without reconnecting. Does not call Codex `skills/list`.
+pub fn live_workspace_skills(
+    workspace_path: &str,
+    cached_skills: &[SkillSummary],
+) -> Vec<SkillSummary> {
+    let file_backed = discover_file_backed_skills(workspace_path);
+    let native = cached_skills
+        .iter()
+        .filter(|skill| skill.source_kind == SkillSourceKind::ProviderNative)
+        .cloned();
+    merge_skills(file_backed.into_iter().chain(native).collect())
+}
+
+/// Slash-command tokens in user text (`/lint` after whitespace or start).
+/// Mirrors the client mention regex so send-time resolution sees the same
+/// aliases the composer highlighted.
+pub fn slash_command_aliases_in_text(text: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'/' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric()
+                    || bytes[index] == b'_'
+                    || bytes[index] == b'-')
+            {
+                index += 1;
+            }
+            if index > start + 1 {
+                let next = bytes.get(index).copied();
+                let attached = next.is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'/'
+                });
+                if !attached && let Ok(raw) = std::str::from_utf8(&bytes[start..index]) {
+                    aliases.push(canonical_skill_alias(raw));
+                    continue;
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    aliases
+}
+
 fn scan_agents_skill_dir(
     dir: &Path,
     source_kind: SkillSourceKind,
@@ -333,11 +390,11 @@ fn parse_markdown_skill(
                 command_name: None,
                 prompt_reference_path: source_path.clone(),
             }),
-        opencode: providers
-            .contains(&AgentProvider::OPENCODE)
-            .then(|| OpenCodeSkillTranslation {
+        opencode: providers.contains(&AgentProvider::OPENCODE).then_some(
+            OpenCodeSkillTranslation {
                 native_name: path_name,
-            }),
+            },
+        ),
     };
 
     Some(SkillSummary {
@@ -660,6 +717,7 @@ description: >
         assert!(skill.supports_provider(&AgentProvider::CLAUDE));
         assert!(skill.supports_provider(&AgentProvider::AGY));
         assert!(skill.supports_provider(&AgentProvider::OPENCODE));
+        assert!(skill.supports_provider(&AgentProvider::GROK));
         // The `$name` mention OpenCode expands is path-derived, not the
         // frontmatter name.
         assert_eq!(
@@ -687,5 +745,83 @@ description: >
         assert!(skill.supports_provider(&AgentProvider::OPENCODE));
         assert!(!skill.supports_provider(&AgentProvider::CODEX));
         assert!(!skill.supports_provider(&AgentProvider::CLAUDE));
+    }
+
+    #[test]
+    fn grok_native_skill_root_is_scanned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write_skill(&root.join(".grok/skills"), "grok-review", None);
+
+        let skills = skills_under(root, root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.alias == "/grok-review")
+            .expect("skill discovered");
+
+        assert!(skill.supports_provider(&AgentProvider::GROK));
+        assert!(!skill.supports_provider(&AgentProvider::CODEX));
+        assert!(!skill.supports_provider(&AgentProvider::CLAUDE));
+    }
+
+    #[test]
+    fn live_catalog_drops_deleted_file_backed_skills_and_keeps_native() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write_skill(&root.join(".agents/skills"), "keep-me", None);
+        write_skill(&root.join(".agents/skills"), "drop-me", None);
+
+        let discovered = skills_under(root, root);
+        let drop_me = discovered
+            .iter()
+            .find(|skill| skill.alias == "/drop-me")
+            .cloned()
+            .expect("drop-me discovered");
+        fs::remove_dir_all(root.join(".agents/skills/drop-me")).expect("remove skill");
+
+        let native = SkillSummary {
+            id: "skill:native-web".to_string(),
+            label: "Native Web".to_string(),
+            alias: "/native-web".to_string(),
+            availability: SkillAvailability::Codex,
+            providers: vec![AgentProvider::CODEX],
+            source_kind: SkillSourceKind::ProviderNative,
+            source_path: None,
+            description: Some("Codex native".to_string()),
+            provider_translations: SkillProviderTranslations::default(),
+        };
+        let mut cached = discovered;
+        cached.push(native.clone());
+        cached.push(drop_me);
+
+        let live = live_workspace_skills(&root.to_string_lossy(), &cached)
+            .into_iter()
+            .filter(|skill| {
+                skill.source_kind == SkillSourceKind::ProviderNative
+                    || skill
+                        .source_path
+                        .as_deref()
+                        .is_some_and(|path| Path::new(path).starts_with(root))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(live.iter().any(|skill| skill.alias == "/keep-me"));
+        assert!(!live.iter().any(|skill| skill.alias == "/drop-me"));
+        assert!(live.iter().any(|skill| skill.alias == "/native-web"
+            && skill.source_kind == SkillSourceKind::ProviderNative));
+    }
+
+    #[test]
+    fn slash_command_aliases_match_composer_mentions() {
+        assert_eq!(
+            slash_command_aliases_in_text("please run /deslop now"),
+            vec!["/deslop".to_string()]
+        );
+        assert_eq!(
+            slash_command_aliases_in_text("/code-review"),
+            vec!["/code-review".to_string()]
+        );
+        assert!(slash_command_aliases_in_text("check /api/provider").is_empty());
+        assert!(slash_command_aliases_in_text("see https://falcondeck.com/docs").is_empty());
     }
 }

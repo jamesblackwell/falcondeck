@@ -47,7 +47,9 @@ describe('assistant content lifecycle presentation', () => {
 
   it('keeps partial text copyable and exposes interruption', () => {
     render(<MessageCard item={assistant('interrupted')} />)
-    expect(screen.getByRole('status')).toHaveTextContent('Response interrupted')
+    const status = screen.getByRole('status', { name: 'Response interrupted' })
+    expect(status).toHaveTextContent('Interrupted')
+    expect(status).not.toHaveClass('text-warning')
     expect(
       screen.getByRole('button', { name: 'Copy response' }),
     ).toBeInTheDocument()
@@ -55,7 +57,9 @@ describe('assistant content lifecycle presentation', () => {
 
   it('keeps an interrupted response visible when no text arrived', () => {
     render(<MessageCard item={assistant('interrupted', '')} />)
-    expect(screen.getByRole('status')).toHaveTextContent('Response interrupted')
+    expect(
+      screen.getByRole('status', { name: 'Response interrupted' }),
+    ).toHaveTextContent('Interrupted')
     expect(
       screen.queryByRole('button', { name: 'Copy response' }),
     ).not.toBeInTheDocument()

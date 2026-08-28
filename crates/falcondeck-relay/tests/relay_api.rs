@@ -934,7 +934,7 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
 
     let seq_before_disconnect = server
         .state
-        .session_updates(&claim.session_id, &claim.client_token, 0)
+        .session_updates(&claim.session_id, &claim.client_token, 0, None)
         .await
         .unwrap()
         .next_seq;
@@ -943,7 +943,7 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
         loop {
             let next_seq = server
                 .state
-                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .session_updates(&claim.session_id, &claim.client_token, 0, None)
                 .await
                 .unwrap()
                 .next_seq;
@@ -1236,7 +1236,7 @@ async fn rpc_called_during_the_daemon_reconnect_grace_window_is_parked() {
     // (the phone was just told "connected") parks instead of failing.
     let seq_before_disconnect = server
         .state
-        .session_updates(&claim.session_id, &claim.client_token, 0)
+        .session_updates(&claim.session_id, &claim.client_token, 0, None)
         .await
         .unwrap()
         .next_seq;
@@ -1245,7 +1245,7 @@ async fn rpc_called_during_the_daemon_reconnect_grace_window_is_parked() {
         loop {
             let next_seq = server
                 .state
-                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .session_updates(&claim.session_id, &claim.client_token, 0, None)
                 .await
                 .unwrap()
                 .next_seq;
@@ -1894,7 +1894,7 @@ async fn dispatched_status_precedes_fast_daemon_action_updates() {
         loop {
             let history = server
                 .state
-                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .session_updates(&claim.session_id, &claim.client_token, 0, None)
                 .await
                 .unwrap();
             let statuses = history

@@ -5,7 +5,6 @@ import {
   Clock3,
   PanelsTopLeft,
   Puzzle,
-  Settings,
 } from "lucide-react";
 
 import {
@@ -17,10 +16,15 @@ import type { ExtensionPanelDefinition } from "@falcondeck/client-core";
 import { cn, Tooltip } from "@falcondeck/ui";
 
 import { shortcutHintTokens, useShortcutSettings } from "../shortcuts";
+import { SidebarOptionsMenu } from "./SidebarOptionsMenu";
 
 export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
+  onOpenUsage?: () => void;
+  onOpenKeyboardShortcuts?: () => void;
+  onOpenSpeechSettings?: () => void;
+  onCheckForUpdates?: () => void;
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
@@ -42,6 +46,10 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
 export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenSettings,
   settingsOpen = false,
+  onOpenUsage,
+  onOpenKeyboardShortcuts,
+  onOpenSpeechSettings,
+  onCheckForUpdates,
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
@@ -215,26 +223,15 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         ) : null
       }
       footer={
-        onOpenSettings ? (
-          <Tooltip
-            label="Settings"
-            shortcut={shortcutHintTokens("openSettings", shortcutSettings)}
-          >
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className={cn(
-                "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                settingsOpen
-                  ? "bg-surface-3 text-fg-primary"
-                  : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-              )}
-              aria-current={settingsOpen ? "page" : undefined}
-            >
-              <Settings aria-hidden="true" className="h-4 w-4 shrink-0" />
-              <span>Settings</span>
-            </button>
-          </Tooltip>
+        onOpenSettings || onOpenUsage || onOpenKeyboardShortcuts || onCheckForUpdates ? (
+          <SidebarOptionsMenu
+            onOpenSettings={onOpenSettings}
+            settingsOpen={settingsOpen}
+            onOpenUsage={onOpenUsage}
+            onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
+            onOpenSpeechSettings={onOpenSpeechSettings}
+            onCheckForUpdates={onCheckForUpdates}
+          />
         ) : null
       }
     />

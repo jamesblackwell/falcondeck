@@ -747,9 +747,35 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         inFlight = false
       })
     }
+    // The webview keeps timers running while minimised or hidden, and nothing
+    // reads this poll's result until the window is visible again, so pause the
+    // 2s loop while hidden. Becoming visible restarts it immediately (plus one
+    // catch-up refresh rather than waiting a full interval).
+    let interval: number | null = null
+    const stopPolling = () => {
+      if (interval === null) return
+      window.clearInterval(interval)
+      interval = null
+    }
+    const startPolling = () => {
+      if (interval !== null) return
+      interval = window.setInterval(refresh, 2_000)
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        stopPolling()
+        return
+      }
+      startPolling()
+      refresh()
+    }
     refresh()
-    const interval = window.setInterval(refresh, 2000)
-    return () => window.clearInterval(interval)
+    if (document.visibilityState !== 'hidden') startPolling()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      stopPolling()
+    }
   }, [api])
 
   // Refresh git on workspace change

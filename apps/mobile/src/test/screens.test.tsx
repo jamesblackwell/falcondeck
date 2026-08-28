@@ -223,6 +223,30 @@ describe('mobile app screens', () => {
     ).toEqual({ disabled: false, expanded: true })
   })
 
+  it('keeps the demo workspace separate from the pairing controls', () => {
+    const renderer = renderComponent(<PairScreen />)
+    const text = textOf(renderer)
+
+    expect(text).toContain('Scan QR code')
+    expect(text).toContain('or enter the code')
+    expect(text).toContain('Just looking around?')
+    expect(text).toContain('Explore demo workspace')
+  })
+
+  it('enters the demo workspace without pairing', () => {
+    const renderer = renderComponent(<PairScreen />)
+    const demoButton = renderer.root.find(
+      (node) => node.props.label === 'Explore demo workspace',
+    )
+
+    act(() => {
+      demoButton.props.onPress()
+    })
+
+    expect(useRelayStore.getState().sessionId).toBe('demo-session')
+    expect(routerMock.replace).toHaveBeenCalledWith('/(app)')
+  })
+
   it('navigates to the app once the session is encrypted', () => {
     useRelayStore.setState({
       relayUrl: 'https://relay.test',

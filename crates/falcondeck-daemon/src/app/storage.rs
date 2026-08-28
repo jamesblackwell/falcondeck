@@ -104,9 +104,10 @@ where
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
+                project_pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
-            PersistedWorkspaceEntry::State(workspace) => workspace,
+            PersistedWorkspaceEntry::State(workspace) => *workspace,
         })
         .collect())
 }
@@ -916,6 +917,7 @@ mod tests {
                     last_error: None,
                     archived_thread_ids: Vec::new(),
                     pinned_thread_ids: Vec::new(),
+                    project_pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
                 PersistedWorkspaceState {
@@ -927,6 +929,7 @@ mod tests {
                     last_error: None,
                     archived_thread_ids: Vec::new(),
                     pinned_thread_ids: Vec::new(),
+                    project_pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
             ]
@@ -972,7 +975,7 @@ mod tests {
                 .map(String::as_str),
             Some("cat-3")
         );
-        assert!(preferences.workspace_colors.get("workspace-a").is_none());
+        assert!(!preferences.workspace_colors.contains_key("workspace-a"));
         assert_eq!(
             preferences.conversation.tool_details_mode,
             ToolDetailsMode::Compact

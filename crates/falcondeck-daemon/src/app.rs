@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -34,6 +34,38 @@ use tokio::{
 use tracing::debug;
 use uuid::Uuid;
 
+fn workspace_kind_for_path(path: &str) -> falcondeck_core::WorkspaceKind {
+    let path = Path::new(path);
+    let is_managed_chat = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("chat-"))
+        && path
+            .parent()
+            .and_then(|date| date.file_name())
+            .and_then(|name| name.to_str())
+            .is_some_and(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok())
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("FalconDeck")
+        && path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            == Some("Documents");
+
+    if is_managed_chat {
+        falcondeck_core::WorkspaceKind::Casual
+    } else {
+        falcondeck_core::WorkspaceKind::Project
+    }
+}
+
 use crate::{
     agy::{AgyProviderMetadata, AgyRuntime},
     claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
@@ -43,7 +75,8 @@ use crate::{
     },
     error::DaemonError,
     skills::{
-        discover_file_backed_skills, merge_skills, parse_codex_provider_skills, skills_for_provider,
+        discover_file_backed_skills, live_workspace_skills, merge_skills,
+        parse_codex_provider_skills, skills_for_provider,
     },
 };
 
@@ -54,6 +87,7 @@ mod extension_events;
 mod extension_host;
 mod extensions;
 pub(crate) mod harness_manager;
+mod harness_user_text;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
@@ -80,7 +114,38 @@ use storage::*;
 use threads::{interactive_request_counts, refresh_thread_attention};
 
 const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
-const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str = "FalconDeck was closed while this turn was running";
+pub(crate) const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str =
+    "FalconDeck was closed while this turn was running";
+
+pub(crate) fn is_shutdown_interrupted(status: &ThreadStatus, last_error: Option<&str>) -> bool {
+    matches!(status, ThreadStatus::Error) && last_error == Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+}
+
+pub(crate) fn persisted_turn_was_cut_off(
+    status: Option<&ThreadStatus>,
+    last_error: Option<&str>,
+) -> bool {
+    matches!(
+        status,
+        Some(ThreadStatus::Running | ThreadStatus::WaitingForInput)
+    ) || is_shutdown_interrupted(status.unwrap_or(&ThreadStatus::Idle), last_error)
+}
+
+fn remap_cut_off_thread_status(status: ThreadStatus) -> ThreadStatus {
+    match status {
+        ThreadStatus::Running | ThreadStatus::WaitingForInput => ThreadStatus::Error,
+        other => other,
+    }
+}
+
+fn shutdown_error_for_cut_off_status(status: Option<&ThreadStatus>) -> Option<String> {
+    matches!(
+        status,
+        Some(ThreadStatus::Running | ThreadStatus::WaitingForInput)
+    )
+    .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
+}
+
 const MAX_EXTENSION_THREAD_SUMMARIES: usize = 1_000;
 const MAX_EXTENSION_THREAD_TITLE_CHARS: usize = 256;
 const MAX_EXTENSION_THREAD_SUMMARY_BYTES: usize = 2 * 1024 * 1024;
@@ -102,6 +167,38 @@ type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
 type CodexRuntimeGates = HashMap<String, Arc<Mutex<()>>>;
 type WorkspaceConnectGates = HashMap<String, Arc<Mutex<()>>>;
 
+/// A broadcast envelope paired with its lazily-computed JSON form so each
+/// event is serialized once no matter how many local WebSocket clients (or
+/// remote bridge forwards) consume it. Deref keeps receiver code reading
+/// envelope fields directly.
+pub struct CachedEnvelope {
+    pub envelope: EventEnvelope,
+    serialized: OnceLock<String>,
+}
+
+impl CachedEnvelope {
+    pub fn new(envelope: EventEnvelope) -> Self {
+        Self {
+            envelope,
+            serialized: OnceLock::new(),
+        }
+    }
+
+    pub fn serialized(&self) -> &str {
+        self.serialized.get_or_init(|| {
+            serde_json::to_string(&self.envelope).unwrap_or_else(|_| "{}".to_string())
+        })
+    }
+}
+
+impl std::ops::Deref for CachedEnvelope {
+    type Target = EventEnvelope;
+
+    fn deref(&self) -> &EventEnvelope {
+        &self.envelope
+    }
+}
+
 struct InnerState {
     daemon: DaemonInfo,
     /// Agent binary name or path per provider id. Providers absent from the map
@@ -111,7 +208,7 @@ struct InnerState {
     preferences_path: PathBuf,
     scheduled_tasks_path: PathBuf,
     sequence: AtomicU64,
-    broadcaster: broadcast::Sender<EventEnvelope>,
+    broadcaster: broadcast::Sender<Arc<CachedEnvelope>>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
     /// Per-workspace/provider gates prevent background metadata hydration and
     /// a first user turn from spawning competing ACP processes.
@@ -143,9 +240,10 @@ struct InnerState {
     thread_search_scan: Mutex<()>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
     realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
-    /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
+    /// Pending Claude PreToolUse hook replies keyed by (workspace_id, request_id);
     /// the hook handler blocks on the receiver until the UI responds.
-    claude_approvals: Mutex<HashMap<(String, String), oneshot::Sender<ApprovalDecision>>>,
+    claude_approvals:
+        Mutex<HashMap<(String, String), oneshot::Sender<crate::claude::ClaudeHookReply>>>,
     /// Tools the user always-allowed for a thread, keyed by
     /// (workspace_id, thread_id).
     claude_always_allowed_tools: Mutex<HashMap<(String, String), HashSet<String>>>,
@@ -236,6 +334,10 @@ struct ManagedThread {
     reasoning_items: HashMap<String, usize>,
     plan_items: HashMap<String, usize>,
     tool_items: HashMap<String, usize>,
+    /// Identity→index for every other item kind (user messages, diffs,
+    /// service notices, interactive requests, …) so per-update scans stay
+    /// O(1) over long transcripts.
+    other_items: HashMap<String, usize>,
     manual_title: bool,
     ai_title_generated: bool,
     ai_title_in_flight: bool,
@@ -279,6 +381,10 @@ struct ManagedThread {
     /// payload with a conflict, so the key is only reusable for identical
     /// input; it is cleared once an admission is confirmed.
     pending_opencode_steer: Option<(String, serde_json::Value)>,
+    /// Permission mode to restore after the user approves an ExitPlanMode
+    /// request. Captured when the thread enters plan mode; `acceptEdits` if
+    /// the thread started in plan.
+    claude_post_plan_permission_mode: Option<String>,
 }
 
 #[derive(Clone)]
@@ -373,6 +479,7 @@ impl AppState {
             .map(|config| {
                 let mut capabilities = AgentCapabilitySummary::acp_minimal();
                 let mut models = Vec::new();
+                let mut collaboration_modes = Vec::new();
                 // Mirror post-handshake Grok override so paste is available
                 // before the first connect refreshes the agent entry.
                 capabilities.supports_images =
@@ -383,6 +490,13 @@ impl AppState {
                     // composer would otherwise sit on a greyed picker.
                     capabilities = crate::acp::grok_placeholder_capabilities();
                     models = crate::acp::grok_placeholder_models();
+                }
+                if config.id.eq_ignore_ascii_case("cursor") {
+                    // Cursor ACP never publishes a permission catalog, and
+                    // session modes arrive only after discovery. Seed both
+                    // pickers so a new-thread composer is usable immediately.
+                    capabilities = crate::acp::cursor_placeholder_capabilities();
+                    collaboration_modes = crate::acp::cursor_placeholder_collaboration_modes();
                 }
                 if config.id.eq_ignore_ascii_case("opencode")
                     && crate::app::opencode_threads::requested_native_transport(config)
@@ -398,7 +512,7 @@ impl AppState {
                         label: format!("{} not started", config.label),
                     },
                     models,
-                    collaboration_modes: Vec::new(),
+                    collaboration_modes,
                     skills: Vec::new(),
                     capabilities,
                 }
@@ -487,6 +601,8 @@ struct PersistedWorkspaceState {
     #[serde(default)]
     pinned_thread_ids: Vec<String>,
     #[serde(default)]
+    project_pinned_thread_ids: Vec<String>,
+    #[serde(default)]
     thread_states: Vec<PersistedThreadState>,
 }
 
@@ -542,7 +658,7 @@ struct PersistedThreadState {
 #[serde(untagged)]
 enum PersistedWorkspaceEntry {
     LegacyPath(String),
-    State(PersistedWorkspaceState),
+    State(Box<PersistedWorkspaceState>),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -623,7 +739,10 @@ impl AppState {
         state_path: PathBuf,
         deno_bin: String,
     ) -> Self {
-        let (broadcaster, _) = broadcast::channel(2048);
+        // 512 envelopes cover any realistic burst between client paints while
+        // bounding retained memory: each slot can hold a full snapshot event
+        // with plan/diff artifacts.
+        let (broadcaster, _) = broadcast::channel::<Arc<CachedEnvelope>>(512);
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
         let control_store = crate::control::store::control_store_path(&state_path);
@@ -703,8 +822,19 @@ impl AppState {
         }
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<CachedEnvelope>> {
         self.inner.broadcaster.subscribe()
+    }
+
+    /// Direct workspace path lookup for callers that need one field and must
+    /// not pay for building (and locking through) a full daemon snapshot.
+    pub async fn workspace_path(&self, workspace_id: &str) -> Option<String> {
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .map(|workspace| workspace.summary.path.clone())
     }
 
     pub fn set_local_base_url(&self, url: String) {
@@ -723,16 +853,6 @@ impl AppState {
     /// Live terminal sessions owned by this daemon.
     pub fn terminals(&self) -> &Arc<crate::terminal::TerminalManager> {
         &self.inner.terminals
-    }
-
-    /// Resolves a workspace's on-disk path for terminal sessions.
-    pub async fn terminal_workspace_path(&self, workspace_id: &str) -> Option<String> {
-        self.inner
-            .workspaces
-            .lock()
-            .await
-            .get(workspace_id)
-            .map(|workspace| workspace.summary.path.clone())
     }
 
     /// Loads the agent control store. A degraded store (malformed or
@@ -924,6 +1044,7 @@ impl AppState {
         self.connect_workspace_internal(
             ConnectWorkspaceRequest {
                 path: workspace_path.to_string(),
+                kind: falcondeck_core::WorkspaceKind::Project,
             },
             None,
         )
@@ -1062,31 +1183,7 @@ impl AppState {
             let app = self.clone();
             tokio::spawn(async move {
                 for workspace in workspaces_to_restore {
-                    let result = timeout(
-                        WORKSPACE_RESTORE_TIMEOUT,
-                        app.connect_workspace_internal(
-                            ConnectWorkspaceRequest {
-                                path: workspace.path.clone(),
-                            },
-                            Some(&workspace),
-                        ),
-                    )
-                    .await;
-
-                    if let Err(error) = match result {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(error)) => Err(error.to_string()),
-                        Err(_) => Err("workspace restore timed out".to_string()),
-                    } {
-                        tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
-                        let _ = app
-                            .update_workspace_placeholder_status(
-                                &workspace.path,
-                                WorkspaceStatus::Disconnected,
-                                Some(error),
-                            )
-                            .await;
-                    }
+                    app.restore_one_persisted_workspace(workspace).await;
                 }
                 // A restored task may be immediately due. Wait until every
                 // persisted workspace has either reconnected or settled into
@@ -1097,6 +1194,70 @@ impl AppState {
             scheduled_tasks::start_scheduler(self);
         }
         Ok(())
+    }
+
+    /// Reconnects one persisted project after a daemon restart.
+    ///
+    /// The short timeout keeps a hung Codex listing from blocking every other
+    /// project and the scheduler. Timing out must not flip the placeholder to
+    /// Disconnected: that locked the composer behind "add a project" even when
+    /// a lazy ACP provider (Grok) was already usable. Retry the connect in the
+    /// background instead, and leave the project Connecting until it succeeds
+    /// or fails for a real reason.
+    async fn restore_one_persisted_workspace(&self, workspace: PersistedWorkspaceState) {
+        let path = workspace.path.clone();
+        let result = timeout(
+            WORKSPACE_RESTORE_TIMEOUT,
+            self.connect_workspace_internal(
+                ConnectWorkspaceRequest {
+                    path: path.clone(),
+                    kind: workspace_kind_for_path(&path),
+                },
+                Some(&workspace),
+            ),
+        )
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!("failed to restore workspace {path}: {error}");
+                let _ = self
+                    .update_workspace_placeholder_status(
+                        &path,
+                        WorkspaceStatus::Disconnected,
+                        Some(error.to_string()),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "workspace restore timed out for {path}; retrying in the background"
+                );
+                let app = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = app
+                        .connect_workspace_internal(
+                            ConnectWorkspaceRequest {
+                                path: path.clone(),
+                                kind: workspace_kind_for_path(&path),
+                            },
+                            Some(&workspace),
+                        )
+                        .await
+                    {
+                        tracing::warn!("failed to restore workspace {path}: {error}");
+                        let _ = app
+                            .update_workspace_placeholder_status(
+                                &path,
+                                WorkspaceStatus::Disconnected,
+                                Some(error.to_string()),
+                            )
+                            .await;
+                    }
+                });
+            }
+        }
     }
 
     pub(crate) async fn restore_scheduled_tasks(&self) -> Result<(), DaemonError> {
@@ -1143,14 +1304,12 @@ impl AppState {
         });
         let mut threads = HashMap::new();
         for state in &persisted_workspace.thread_states {
-            let status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
-                ThreadStatus::Running => ThreadStatus::Error,
-                other => other,
-            };
-            let thread_last_error = state.last_error.clone().or_else(|| {
-                matches!(state.status, Some(ThreadStatus::Running))
-                    .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
-            });
+            let status =
+                remap_cut_off_thread_status(state.status.clone().unwrap_or(ThreadStatus::Idle));
+            let thread_last_error = state
+                .last_error
+                .clone()
+                .or_else(|| shutdown_error_for_cut_off_status(state.status.as_ref()));
             let summary = ThreadSummary {
                 id: state.thread_id.clone(),
                 workspace_id: workspace_id.clone(),
@@ -1186,11 +1345,22 @@ impl AppState {
                 is_pinned: persisted_workspace
                     .pinned_thread_ids
                     .contains(&state.thread_id),
+                is_pinned_in_project: persisted_workspace
+                    .project_pinned_thread_ids
+                    .contains(&state.thread_id)
+                    && !persisted_workspace
+                        .pinned_thread_ids
+                        .contains(&state.thread_id),
                 goal: state.goal.clone(),
-                queued_turns: Vec::new(),
+                queued_turns: state
+                    .queued_requests
+                    .iter()
+                    .map(|queued| queued.summary.clone())
+                    .collect(),
                 variant: state.variant.clone(),
             };
             let mut thread = ManagedThread::new(summary);
+            thread.queued_requests = state.queued_requests.clone();
             thread.manual_title = state.manual_title;
             thread.ai_title_generated = state.ai_title_generated
                 || (!is_placeholder_thread_title(&thread.summary.title)
@@ -1203,6 +1373,7 @@ impl AppState {
         let summary = WorkspaceSummary {
             id: workspace_id.clone(),
             path: path_string.clone(),
+            kind: workspace_kind_for_path(&path_string),
             status,
             agents: {
                 let mut agents = vec![
@@ -1304,7 +1475,10 @@ impl AppState {
             workspace.summary.last_error = last_error.clone();
             for thread in workspace.threads.values_mut() {
                 if status == WorkspaceStatus::Disconnected
-                    && thread.summary.status == ThreadStatus::Running
+                    && matches!(
+                        thread.summary.status,
+                        ThreadStatus::Running | ThreadStatus::WaitingForInput
+                    )
                 {
                     thread.summary.status = ThreadStatus::Error;
                     thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
@@ -1428,6 +1602,7 @@ impl AppState {
                         workspace.claude_runtime.clone(),
                         workspace.agy_runtime.clone(),
                         workspace.opencode_runtime.clone(),
+                        workspace.acp_runtimes.values().cloned().collect::<Vec<_>>(),
                         workspace
                             .threads
                             .values()
@@ -1453,6 +1628,7 @@ impl AppState {
             claude_runtime,
             agy_runtime,
             opencode_runtime,
+            acp_runtimes,
             threads,
         ) in snapshots
         {
@@ -1468,17 +1644,29 @@ impl AppState {
             if let Some(runtime) = opencode_runtime {
                 runtime.shutdown().await;
             }
+            for runtime in acp_runtimes {
+                runtime.shutdown().await;
+            }
             for (thread_id, was_running) in threads {
                 if !was_running {
                     continue;
                 }
+                let settled_at = Utc::now();
                 let _ = self
                     .with_thread_mut(&workspace_id, &thread_id, |thread| {
                         thread.status = ThreadStatus::Error;
                         thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
-                        thread.updated_at = Utc::now();
+                        thread.updated_at = settled_at;
                     })
                     .await;
+                self.settle_turn_items_with_error(
+                    &workspace_id,
+                    &thread_id,
+                    settled_at,
+                    ToolSettlement::Interrupted,
+                    Some(SHUTDOWN_INTERRUPTED_TURN_ERROR),
+                )
+                .await;
             }
         }
 
@@ -1535,11 +1723,11 @@ impl AppState {
             };
 
             let path = thread_search::index_path(&state.inner.state_path);
-            if let Ok(serialized) = serde_json::to_string(&index) {
-                if let Err(error) = tokio::fs::write(&path, serialized).await {
-                    // A missing cache only costs one rescan next launch.
-                    tracing::debug!("could not persist thread search index: {error}");
-                }
+            if let Ok(serialized) = serde_json::to_string(&index)
+                && let Err(error) = tokio::fs::write(&path, serialized).await
+            {
+                // A missing cache only costs one rescan next launch.
+                tracing::debug!("could not persist thread search index: {error}");
             }
             *state
                 .inner
@@ -2117,6 +2305,7 @@ impl AppState {
                 collaboration_mode_id: None,
                 service_tier: None,
                 pinned: None,
+                pinned_in_project: None,
                 acknowledge_interruption: None,
                 permission_mode: None,
                 approval_policy: None,
@@ -2326,6 +2515,22 @@ impl AppState {
         workspace_ops::connect_workspace(self, request).await
     }
 
+    pub async fn create_chat(&self) -> Result<WorkspaceSummary, DaemonError> {
+        workspace_ops::create_chat(self).await
+    }
+
+    pub(super) async fn casual_chat_documents_root(&self, workspace_id: &str) -> Option<String> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces.get(workspace_id)?;
+        if workspace.summary.kind != falcondeck_core::WorkspaceKind::Casual {
+            return None;
+        }
+        Path::new(&workspace.summary.path)
+            .parent()?
+            .parent()
+            .map(|path| path.to_string_lossy().to_string())
+    }
+
     pub async fn remove_workspace(
         &self,
         workspace_id: &str,
@@ -2476,6 +2681,14 @@ impl AppState {
         workspace_ops::collaboration_modes(self, workspace_id).await
     }
 
+    pub async fn list_workspace_skills(
+        &self,
+        workspace_id: &str,
+        provider: Option<&AgentProvider>,
+    ) -> Result<Vec<SkillSummary>, DaemonError> {
+        workspace_ops::list_workspace_skills(self, workspace_id, provider).await
+    }
+
     pub async fn thread_detail(
         &self,
         workspace_id: &str,
@@ -2578,6 +2791,12 @@ impl AppState {
                 .filter(|thread| thread.summary.is_pinned)
                 .map(|thread| thread.summary.id.clone())
                 .collect();
+            let project_pinned_thread_ids = workspace
+                .threads
+                .values()
+                .filter(|thread| thread.summary.is_pinned_in_project && !thread.summary.is_pinned)
+                .map(|thread| thread.summary.id.clone())
+                .collect();
             let mut thread_states = workspace
                 .threads
                 .values()
@@ -2594,7 +2813,10 @@ impl AppState {
                     ai_title_generated: thread.ai_title_generated,
                     status: Some(
                         if workspace.summary.status == WorkspaceStatus::Disconnected
-                            && thread.summary.status == ThreadStatus::Running
+                            && matches!(
+                                thread.summary.status,
+                                ThreadStatus::Running | ThreadStatus::WaitingForInput
+                            )
                         {
                             ThreadStatus::Error
                         } else {
@@ -2602,8 +2824,10 @@ impl AppState {
                         },
                     ),
                     last_error: if workspace.summary.status == WorkspaceStatus::Disconnected
-                        && thread.summary.status == ThreadStatus::Running
-                    {
+                        && matches!(
+                            thread.summary.status,
+                            ThreadStatus::Running | ThreadStatus::WaitingForInput
+                        ) {
                         Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
                     } else {
                         thread.summary.last_error.clone()
@@ -2633,6 +2857,7 @@ impl AppState {
                     last_error: workspace.summary.last_error.clone(),
                     archived_thread_ids,
                     pinned_thread_ids,
+                    project_pinned_thread_ids,
                     thread_states,
                 },
             );
@@ -2920,7 +3145,10 @@ impl AppState {
             thread_id,
             event,
         };
-        let _ = self.inner.broadcaster.send(envelope);
+        let _ = self
+            .inner
+            .broadcaster
+            .send(Arc::new(CachedEnvelope::new(envelope)));
         if let Some(event) = extension_event {
             self.enqueue_extension_event(event);
         }
@@ -3249,6 +3477,17 @@ fn workspace_status_after_account_update(
 ) -> WorkspaceStatus {
     match account_status {
         falcondeck_core::AccountStatus::NeedsAuth => WorkspaceStatus::NeedsAuth,
+        falcondeck_core::AccountStatus::Ready
+            if matches!(
+                current_status,
+                WorkspaceStatus::Connecting
+                    | WorkspaceStatus::Disconnected
+                    | WorkspaceStatus::NeedsAuth
+                    | WorkspaceStatus::Error
+            ) =>
+        {
+            WorkspaceStatus::Ready
+        }
         _ if matches!(current_status, WorkspaceStatus::NeedsAuth) => WorkspaceStatus::Ready,
         _ => current_status.clone(),
     }

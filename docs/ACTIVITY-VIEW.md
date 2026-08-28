@@ -39,7 +39,8 @@ prefetch), the multiplex grid, Zen mode, any daemon or wire-format changes.
   (`idle | running | waiting_for_input | error`), `attention: ThreadAttention`
   (level, `unread`, `pending_approval_count`, `pending_question_count`, read
   cursor), `last_message_preview`, `last_tool`, `last_error`, `latest_plan`,
-  `queued_turns`, `updated_at`, `is_archived`, `is_pinned`, `provider`.
+  `queued_turns`, `updated_at`, `is_archived`, `is_pinned`,
+  `is_pinned_in_project`, `provider`.
 - `DaemonSnapshot.interactive_requests: InteractiveRequest[]` — **full payloads**
   for all pending approvals/questions across all threads (`types.ts:475`):
   `kind`, `title`, `detail`, `command`, `path`, `approval_decisions`,

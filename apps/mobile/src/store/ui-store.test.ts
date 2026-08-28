@@ -3,11 +3,15 @@ import { draftKeyFor } from '@falcondeck/client-core'
 
 import { storage } from '@/storage/mmkv'
 
-import { useUIStore } from './ui-store'
+import { flushStoredDrafts, useUIStore } from './ui-store'
+
+const DRAFTS_STORAGE_KEY = 'falcondeck.mobile.composer-drafts.v1'
 
 describe('ui-store', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    // Drop any draft burst left pending by an earlier test.
+    flushStoredDrafts()
     // Reset to initial state
     useUIStore.setState({
       conversationKey: draftKeyFor(null, null),
@@ -231,6 +235,56 @@ describe('ui-store', () => {
     })
     setDraft('still works in memory')
     expect(useUIStore.getState().draft).toBe('still works in memory')
+    // Drop the burst state; pending writes are gone now.
+    flushStoredDrafts()
+  })
+
+  it('commits the first keystroke of a burst immediately and coalesces the rest into one trailing write', () => {
+    vi.useFakeTimers()
+    try {
+      const { setDraft, setConversation } = useUIStore.getState()
+      setConversation('w1', 't1')
+
+      setDraft('first')
+      // Leading edge of the burst: persisted straight away.
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('first')
+
+      setDraft('second')
+      setDraft('third')
+      // Still within the trailing window: only the newest value is queued,
+      // and nothing further has been written.
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('second')
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('third')
+
+      vi.advanceTimersByTime(299)
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('third')
+
+      vi.advanceTimersByTime(1)
+      // Trailing final flush carries the settled value.
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('third')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('flushes a queued draft burst on demand via flushStoredDrafts', () => {
+    vi.useFakeTimers()
+    try {
+      const { setDraft, setConversation } = useUIStore.getState()
+      setConversation('w1', 't1')
+      setDraft('leading')
+      setDraft('queued tail')
+
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('queued tail')
+      flushStoredDrafts()
+      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('queued tail')
+
+      // Nothing remains scheduled — flushing again is a no-op.
+      vi.advanceTimersByTime(5_000)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('remembers picker selections per workspace and provider', () => {

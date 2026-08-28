@@ -37,6 +37,8 @@ export type FileListViewProps = {
   isReviewPending?: boolean
   /** Context for the overview tab; omitted only by callers without a workspace. */
   info?: ReviewInfoContext | null
+  /** Git-only review UI is irrelevant for casual chat document folders. */
+  showChanges?: boolean
 }
 
 const ROW_HEIGHT = 32
@@ -87,6 +89,7 @@ export const FileListView = memo(function FileListView({
   onStartReview = null,
   isReviewPending = false,
   info = null,
+  showChanges = true,
 }: FileListViewProps) {
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
@@ -111,10 +114,27 @@ export const FileListView = memo(function FileListView({
     return matches
   }, [deferredQuery, files])
   const rows = useVirtualRows(filteredEntries.length, ROW_HEIGHT)
-  const tabs = (info ? ['info', 'changes', 'files'] : ['changes', 'files']) as ReviewPanelTab[]
+  const tabs = (
+    info
+      ? showChanges
+        ? ['info', 'changes', 'files']
+        : ['info', 'files']
+      : showChanges
+        ? ['changes', 'files']
+        : ['files']
+  ) as ReviewPanelTab[]
   // The overview is the default tab, but a workspace-less panel has no overview
   // to show, so those callers fall back to the changes list.
-  const visibleTab = activeTab === 'info' && !info ? 'changes' : activeTab
+  const visibleTab =
+    activeTab === 'info' && !info
+      ? showChanges
+        ? 'changes'
+        : 'files'
+      : activeTab === 'changes' && !showChanges
+        ? info
+          ? 'info'
+          : 'files'
+        : activeTab
   // The overview reads the same git status the changes tab does, so it shares
   // that tab's loading and error state rather than owning one of its own.
   const activeError = visibleTab === 'files' ? filesError : error
@@ -175,21 +195,23 @@ export const FileListView = memo(function FileListView({
             )}
           </button>
         ) : null}
-        <button
-          type="button"
-          onClick={visibleTab === 'files' ? onRefreshFiles : onRefresh}
-          disabled={activeLoading}
-          title={`Refresh ${visibleTab}`}
-          aria-label={`Refresh ${visibleTab}`}
-          aria-busy={activeLoading}
-          className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
-        >
-          {activeLoading ? (
-            <ActivityDiamond tone="current" />
-          ) : (
-            <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
-          )}
-        </button>
+        {visibleTab !== 'info' || showChanges ? (
+          <button
+            type="button"
+            onClick={visibleTab === 'files' ? onRefreshFiles : onRefresh}
+            disabled={activeLoading}
+            title={`Refresh ${visibleTab}`}
+            aria-label={`Refresh ${visibleTab}`}
+            aria-busy={activeLoading}
+            className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+          >
+            {activeLoading ? (
+              <ActivityDiamond tone="current" />
+            ) : (
+              <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+          </button>
+        ) : null}
       </div>
 
       {visibleTab === 'info' ? null : (

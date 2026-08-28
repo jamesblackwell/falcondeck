@@ -8,6 +8,19 @@ export function isMermaidLanguage(
   return MERMAID_LANGUAGES.has(language.trim().toLowerCase());
 }
 
+/** Reads a `language-*` fence tag out of a react-markdown/hast className. */
+export function fenceLanguageFromClassName(
+  className: unknown,
+): string | null {
+  const value = Array.isArray(className)
+    ? className.filter((item): item is string => typeof item === "string").join(" ")
+    : typeof className === "string"
+      ? className
+      : "";
+  const match = /(?:^|\s)language-(\w+)/.exec(value);
+  return match?.[1] ?? null;
+}
+
 export type MermaidPalette = {
   darkMode: boolean;
   fontFamily: string;
@@ -98,6 +111,8 @@ export type MermaidRenderOptions = {
   startOnLoad: false;
   securityLevel: "strict";
   theme: "base";
+  look: "classic";
+  htmlLabels: false;
   logLevel: "fatal";
   suppressErrorRendering: true;
   fontFamily?: string;
@@ -114,6 +129,8 @@ export function mermaidRenderOptions(
     startOnLoad: false,
     securityLevel: "strict",
     theme: "base",
+    look: "classic",
+    htmlLabels: false,
     logLevel: "fatal",
     suppressErrorRendering: true,
     fontFamily: palette.fontFamily || undefined,

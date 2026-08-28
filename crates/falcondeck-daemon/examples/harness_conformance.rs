@@ -1,4 +1,7 @@
-//! Command-line entry point for FalconDeck's Claude and Codex conformance probes.
+//! Command-line entry point for FalconDeck's harness conformance suite.
+//!
+//! Cost-free by default (catalogs, CLI flags, ACP handshake). Missing
+//! binaries are skipped. Pass `--live` to spend tokens on current cheap-tier models.
 
 #[tokio::main]
 async fn main() {

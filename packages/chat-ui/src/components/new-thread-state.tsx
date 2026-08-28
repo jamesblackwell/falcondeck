@@ -23,6 +23,7 @@ export const NewThreadState = memo(function NewThreadState({
   selectedWorkspace,
 }: NewThreadStateProps) {
   const label = selectedWorkspace?.path.split('/').pop()
+  const isCasualChat = selectedWorkspace?.kind === 'casual'
   const [starterMessage] = useState(
     () => STARTER_MESSAGES[Math.floor(Math.random() * STARTER_MESSAGES.length)]!,
   )
@@ -30,7 +31,9 @@ export const NewThreadState = memo(function NewThreadState({
   return (
     <div className="flex min-h-full w-full flex-1 flex-col items-center justify-center gap-3">
       <p className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
-        {label ? (
+        {isCasualChat ? (
+          'What would you like to talk about?'
+        ) : label ? (
           <>
             {starterMessage.lead}{' '}
             <span className="underline decoration-border-emphasis decoration-2 underline-offset-4">

@@ -108,15 +108,6 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         builtin: false,
     },
     KnownHarness {
-        id: "gemini",
-        label: "Gemini CLI",
-        bin: "gemini",
-        npm_package: Some("@google/gemini-cli"),
-        upgrade_command: Some("npm install -g @google/gemini-cli"),
-        auth_probe: None,
-        builtin: false,
-    },
-    KnownHarness {
         id: "pi",
         label: "Pi",
         bin: "pi-acp",
@@ -142,10 +133,19 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         label: "Cursor",
         bin: "cursor-agent",
         // Distributed through Cursor's install script, not npm, so there is
-        // no registry latest to check; `cursor-agent --version` also prints a
-        // bare commit hash, which parse_version leaves as no version.
+        // no registry latest to check. Current builds print `YYYY.MM.DD-hash`;
+        // the original beta printed a bare commit hash, which parse_version
+        // leaves as no version.
         npm_package: None,
-        upgrade_command: Some("curl -fsSL https://cursor.com/install | bash"),
+        // The official installer always recreates `~/.local/bin/agent` as a
+        // Cursor symlink. Grok also installs as `agent`, so restore any
+        // pre-existing non-Cursor link after the install finishes.
+        upgrade_command: Some(concat!(
+            r#"if [ -L "$HOME/.local/bin/agent" ]; then _fd_agent_link=$(readlink "$HOME/.local/bin/agent"); fi; "#,
+            r#"curl -fsSL https://cursor.com/install | bash; "#,
+            r#"if [ -n "${_fd_agent_link:-}" ] && ! printf '%s' "$_fd_agent_link" | grep -q cursor-agent; then "#,
+            r#"ln -sfn "$_fd_agent_link" "$HOME/.local/bin/agent"; fi"#,
+        )),
         auth_probe: Some(&["status"]),
         builtin: false,
     },
@@ -873,10 +873,28 @@ mod tests {
             Some("1.0.5".to_string())
         );
         assert_eq!(
+            parse_version("2026.08.11-e8db854"),
+            Some("2026.08.11-e8db854".to_string())
+        );
+        assert_eq!(
+            parse_version("32c684dc5c8a0e364043db77d4e5b9a5dc1e2d3b"),
+            None
+        );
+        assert_eq!(
             classify_install_source("/Users/x/.codex/packages/standalone/releases/0.147.0/codex"),
             "local"
         );
         assert_eq!(classify_install_source("/usr/bin/tool"), "unknown");
+    }
+
+    #[test]
+    fn curated_list_does_not_include_deprecated_gemini_cli() {
+        assert!(
+            KNOWN_HARNESSES
+                .iter()
+                .all(|harness| harness.id != "gemini" && harness.bin != "gemini"),
+            "Gemini CLI is deprecated; Antigravity (agy) replaced it"
+        );
     }
 
     #[test]
@@ -888,6 +906,22 @@ mod tests {
         // Auth probes only for harnesses that define them.
         assert!(script.contains("FD_AUTH:codex:"));
         assert!(script.contains("FD_AUTH:claude:"));
+        assert!(script.contains("FD_AUTH:cursor-agent:"));
+    }
+
+    #[test]
+    fn cursor_upgrade_restores_a_non_cursor_agent_symlink() {
+        let cursor = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "cursor")
+            .expect("cursor is a curated harness");
+        let command = cursor
+            .upgrade_command
+            .expect("cursor has an upgrade command");
+        assert!(command.contains("cursor.com/install"));
+        assert!(command.contains("ln -sfn"));
+        assert!(command.contains("cursor-agent"));
+        assert!(command.contains(r#"readlink "$HOME/.local/bin/agent""#));
     }
 
     #[test]

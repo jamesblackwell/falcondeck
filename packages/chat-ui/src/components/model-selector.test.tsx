@@ -4,7 +4,11 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ModelSummary } from "@falcondeck/client-core";
 
 import { STARRED_MODELS_STORAGE_KEY } from "../lib/starred-models";
-import { ModelMenu, PermissionModeSelector } from "./model-selector";
+import {
+  ModelMenu,
+  PermissionModeSelector,
+  SandboxSelector,
+} from "./model-selector";
 
 function model(id: string, label: string): ModelSummary {
   return {
@@ -85,6 +89,30 @@ describe("ModelMenu", () => {
     });
     expect(screen.getByText("Model")).toBeInTheDocument();
     expect(keycapTexts()).toEqual([]);
+  });
+
+  it("does not repeat an effort already encoded in the model label", () => {
+    const fixedEffortModel = model(
+      "gemini-3.7-flash-medium",
+      "Gemini 3.7 Flash (Medium)",
+    );
+    render(
+      <ModelMenu
+        models={[fixedEffortModel]}
+        selectedModel={fixedEffortModel}
+        onModelChange={() => {}}
+        reasoningOptions={["medium"]}
+        selectedEffort="medium"
+        onEffortChange={() => {}}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Model" })).toHaveTextContent(
+      "gemini 3.7 flash (medium)",
+    );
+    expect(screen.getByRole("button", { name: "Model" })).not.toHaveTextContent(
+      "(medium)Medium",
+    );
   });
 
   it("pins a starred model to the top without changing the selection", async () => {
@@ -168,8 +196,13 @@ describe("PermissionModeSelector", () => {
       />,
     );
 
+    const trigger = screen.getByRole("combobox", { name: "Permission mode" });
+    expect(trigger).toHaveTextContent("Bypass");
+    expect(trigger).not.toHaveTextContent("Bypass permissions");
+    expect(trigger).toHaveClass("whitespace-nowrap");
+
     fireEvent.pointerDown(
-      screen.getByRole("combobox", { name: "Permission mode" }),
+      trigger,
       { button: 0, ctrlKey: false, pointerType: "mouse" },
     );
 
@@ -181,5 +214,22 @@ describe("PermissionModeSelector", () => {
     // The header stays aria-hidden so the listbox semantics remain on options.
     expect(screen.getByText("Permissions")).toBeInTheDocument();
     expect(keycapTexts()).toEqual(["⌃", "⇧", "P"]);
+  });
+});
+
+describe("SandboxSelector", () => {
+  it("uses a compact default label in the toolbar", () => {
+    render(
+      <SandboxSelector
+        value={null}
+        modes={["default", "sandbox"]}
+        onValueChange={() => {}}
+      />,
+    );
+
+    const trigger = screen.getByRole("combobox", { name: "Sandbox mode" });
+    expect(trigger).toHaveTextContent("Default");
+    expect(trigger).not.toHaveTextContent("Default sandbox");
+    expect(trigger).toHaveClass("whitespace-nowrap");
   });
 });

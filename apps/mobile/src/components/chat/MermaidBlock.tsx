@@ -17,8 +17,11 @@ const INITIAL_DIAGRAM_HEIGHT = 120
 
 export const MermaidBlock = memo(function MermaidBlock({
   code,
+  pending = false,
 }: {
   code: string
+  /** Quiet parse failures while the enclosing fence may still be growing. */
+  pending?: boolean
 }) {
   const { theme } = useUnistyles()
   const [html, setHtml] = useState<string | null>(null)
@@ -96,7 +99,7 @@ export const MermaidBlock = memo(function MermaidBlock({
         <Text variant="caption" color="muted" size="2xs">
           mermaid
         </Text>
-        {error ? (
+        {error && !pending ? (
           <Text
             accessible
             accessibilityLiveRegion="polite"

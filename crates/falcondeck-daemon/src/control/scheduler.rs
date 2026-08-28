@@ -291,6 +291,7 @@ async fn execute_run(app: &AppState, run_id: &str) {
             sandbox_mode: automation.target.sandbox_mode.clone(),
             steer: false,
             user_item_id: None,
+            resume_interrupted: false,
         })
         .await;
     if let Err(error) = response {
@@ -330,7 +331,7 @@ async fn execute_run(app: &AppState, run_id: &str) {
                 if envelope.workspace_id.as_deref() == Some(workspace.id.as_str())
                     && envelope.thread_id.as_deref() == Some(thread_id.as_str()) =>
             {
-                match envelope.event {
+                match envelope.event.clone() {
                     UnifiedEvent::TurnStart { turn_id } => {
                         // The first turn start after dispatch is the
                         // automation's own turn: turns are serialized per

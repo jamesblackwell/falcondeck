@@ -23,6 +23,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_error: "FalconDeck was closed while this turn was running",
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     queued_turns: [],
     variant: null,
@@ -62,7 +63,7 @@ describe("ResumeStoppedThreadsDialog", () => {
     );
 
     expect(
-      screen.getByText("2 sessions were stopped when the app quit"),
+      screen.getByText("2 sessions were stopped when FalconDeck closed"),
     ).toBeInTheDocument();
     expect(screen.getByText("Pricing and unlimited")).toBeInTheDocument();
     expect(screen.getByText("Relay reconnect")).toBeInTheDocument();
@@ -84,7 +85,7 @@ describe("ResumeStoppedThreadsDialog", () => {
     );
 
     expect(
-      screen.getByText("1 session was stopped when the app quit"),
+      screen.getByText("1 session was stopped when FalconDeck closed"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument();
   });

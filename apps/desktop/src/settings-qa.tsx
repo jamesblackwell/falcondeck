@@ -49,7 +49,7 @@ const UPDATER = {
   lastTrigger: null,
 };
 
-function Fixture() {
+export function Fixture() {
   const [section, setSection] = useState<SettingsSectionId>(
     (params.get("section") as SettingsSectionId | null) ?? "speech",
   );

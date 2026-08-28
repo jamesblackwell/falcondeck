@@ -13,9 +13,19 @@ import type {
   ToolLifecycle,
   TurnInputItem,
 } from "./types";
+import { projectHarnessUserItems } from "./harness-user-text";
 import { normalizeEventEnvelope, normalizePreferences } from "./normalization";
 import { summarizeMcpArtifacts } from "./provider-output";
 import { describeToolCall } from "./tool-label";
+
+/** Codex app-server method for MCP URL-mode OAuth and in-band form prompts. */
+export const MCP_ELICITATION_METHOD = "mcpServer/elicitation/request";
+
+export function isMcpElicitationRequest(
+  request: Pick<InteractiveRequest, "method">,
+): boolean {
+  return request.method === MCP_ELICITATION_METHOD;
+}
 
 /** Creates the receipt-safe outcome for a response without retaining answers. */
 export function interactiveResolutionFromResponse(
@@ -574,24 +584,59 @@ export function mergeThreadDetailPage(
       hasOlder = overlapIndex > 0 ? current.has_older : page.has_older;
     }
 
-    // An optimistic user message is client-local until the daemon echoes it;
-    // a refresh fetched before that echo doesn't contain it and must not
-    // swallow it. Duplicate-by-content echoes are folded by the upsert path.
-    // The age cutoff stops a pending item whose removal was lost (crash
-    // between failure and cleanup) from haunting the transcript forever.
-    const pageKeys = new Set(items.map(conversationItemKey));
-    const pendingTail = current.items.filter(
-      (item) =>
-        item.kind === "user_message" &&
-        item.pending === true &&
-        Date.now() - Date.parse(item.created_at) < PENDING_USER_ITEM_TTL_MS &&
-        !pageKeys.has(conversationItemKey(item)) &&
-        !items.some(
-          (kept) => kept.kind === "user_message" && kept.text === item.text,
-        ),
-    );
-    if (pendingTail.length > 0) {
-      items = [...items, ...pendingTail];
+    // A just-sent user message can fall out of the daemon tail once a
+    // verbose turn emits more items than the page size. Pending copies are
+    // one case; an already-echoed prompt with images is the same race.
+    // Duplicate-by-content echoes are folded; the age cutoff stops a lost
+    // removal from haunting the transcript forever.
+    const preservedUsers = current.items.filter((item) => {
+      if (item.kind !== "user_message") return false;
+      const age = Date.now() - Date.parse(item.created_at);
+      if (!Number.isFinite(age) || age >= PENDING_USER_ITEM_TTL_MS) {
+        return false;
+      }
+      const existing = items.find(
+        (kept) =>
+          kept.kind === "user_message" &&
+          (kept.id === item.id || kept.text.trim() === item.text.trim()),
+      );
+      if (!existing) return true;
+      return (
+        existing.kind === "user_message" &&
+        item.attachments.length > existing.attachments.length
+      );
+    });
+    if (preservedUsers.length > 0) {
+      const next = items.slice();
+      for (const item of preservedUsers) {
+        if (item.kind !== "user_message") continue;
+        const existingIndex = next.findIndex(
+          (kept) =>
+            kept.kind === "user_message" &&
+            (kept.id === item.id || kept.text.trim() === item.text.trim()),
+        );
+        if (existingIndex !== -1) {
+          const existing = next[existingIndex];
+          if (
+            existing?.kind === "user_message" &&
+            item.attachments.length > existing.attachments.length
+          ) {
+            next[existingIndex] = {
+              ...item,
+              id: existing.id,
+              created_at: existing.created_at,
+              pending: existing.pending,
+            };
+          }
+          continue;
+        }
+        const insertAt = next.findIndex(
+          (kept) => kept.created_at >= item.created_at,
+        );
+        if (insertAt === -1) next.push(item);
+        else next.splice(insertAt, 0, item);
+      }
+      items = next;
     }
   }
 
@@ -1748,7 +1793,7 @@ export function deriveConversationPresentation(
   options: ConversationPresentationOptions = {},
 ): ConversationPresentation {
   const items = settleFinishedReasoning(
-    itemsInput,
+    projectHarnessUserItems(itemsInput),
     options.is_streaming === true,
   );
   const preferences = normalizePreferences(preferencesInput);

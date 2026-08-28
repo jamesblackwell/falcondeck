@@ -146,6 +146,11 @@ OTA only works if the native binary hasn't changed. If you added native modules,
 
 ## Native Module Gotchas
 
+### @bsky.app/react-native-uitextview
+
+- `components/ui/Text` opts `selectable` copy into this native view on iOS so a long-press can highlight a range instead of copying a whole message block.
+- Android keeps RN `Text`, which already supports partial selection. Requires a native rebuild (`npx expo prebuild --platform ios` or EAS); OTA is not enough.
+
 ### react-native-unistyles v3
 
 - Requires the Babel plugin: `["react-native-unistyles/plugin", { root: __dirname }]`

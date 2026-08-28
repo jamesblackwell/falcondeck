@@ -1,7 +1,7 @@
 //! Generic Agent Client Protocol (ACP) adapter.
 //!
 //! ACP is JSON-RPC 2.0 over stdio, spoken by Grok Build (`grok agent stdio`),
-//! OpenCode (`opencode acp`), Gemini CLI, and others. FalconDeck acts as the
+//! OpenCode (`opencode acp`), Pi, Cursor, and others. FalconDeck acts as the
 //! ACP *client*: it spawns the configured agent command once per workspace,
 //! negotiates capabilities via `initialize`, opens one ACP session per thread,
 //! and streams `session/update` notifications into the daemon's unified
@@ -26,8 +26,9 @@ use tokio::time::{Duration, Instant, timeout};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, ModelSummary,
-    PlanApprovalOutcome, PlanStep, ReasoningEffortSummary, ThreadPlan,
+    AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, InteractiveQuestion,
+    InteractiveQuestionOption, ModelSummary, PlanApprovalOutcome, PlanStep, ReasoningEffortSummary,
+    ThreadPlan,
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
@@ -51,8 +52,8 @@ const ACP_SESSION_START_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Total encoded-image budget per turn, mirroring the Claude path: without it
 /// many individually-legal images could produce a single stdin line in the
-/// hundreds of megabytes.
-pub const MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES: usize = 10_000_000;
+/// hundreds of megabytes. 15 MB decoded expands to 20 MB encoded.
+pub const MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES: usize = 20_000_000;
 
 /// Whether FalconDeck should treat an ACP provider as image-capable.
 ///
@@ -81,6 +82,52 @@ pub fn grok_placeholder_capabilities() -> falcondeck_core::AgentCapabilitySummar
         supports_images: true,
         permission_modes: grok_placeholder_permission_modes(),
         ..falcondeck_core::AgentCapabilitySummary::acp_minimal()
+    }
+}
+
+/// Cursor ACP does not advertise a permission catalog. FalconDeck still
+/// enforces these: `always-approve` auto-answers `session/request_permission`
+/// and is the composer default; `default` surfaces those requests instead.
+/// Agent/plan/ask stay session modes.
+pub fn cursor_placeholder_permission_modes() -> Vec<String> {
+    vec!["always-approve".to_string(), "default".to_string()]
+}
+
+/// Capabilities a new-thread Cursor composer can use before `cursor-agent acp`
+/// has finished starting. Live handshake still replaces models and modes.
+pub fn cursor_placeholder_capabilities() -> falcondeck_core::AgentCapabilitySummary {
+    falcondeck_core::AgentCapabilitySummary {
+        supports_images: true,
+        permission_modes: cursor_placeholder_permission_modes(),
+        ..falcondeck_core::AgentCapabilitySummary::acp_minimal()
+    }
+}
+
+/// Cursor's advertised ACP session modes. Seeded so the Mode picker is not
+/// empty while the discovery session is still starting.
+pub fn cursor_placeholder_collaboration_modes() -> Vec<CollaborationModeSummary> {
+    [("agent", "Agent"), ("plan", "Plan"), ("ask", "Ask")]
+        .into_iter()
+        .map(|(id, label)| CollaborationModeSummary {
+            id: id.to_string(),
+            label: label.to_string(),
+            mode: Some(id.to_string()),
+            model_id: None,
+            reasoning_effort: None,
+            is_native: true,
+        })
+        .collect()
+}
+
+/// Pre-handshake permission list for adapters that do not publish one on
+/// `session/new`. Empty means the composer hides the picker.
+pub fn placeholder_permission_modes_for(provider: &str) -> Vec<String> {
+    if provider.eq_ignore_ascii_case("grok") {
+        grok_placeholder_permission_modes()
+    } else if provider.eq_ignore_ascii_case("cursor") {
+        cursor_placeholder_permission_modes()
+    } else {
+        Vec::new()
     }
 }
 
@@ -142,6 +189,208 @@ fn acp_may_support_interject(provider: &str) -> bool {
 
 fn is_grok_plan_approval_method(method: &str) -> bool {
     matches!(method, "_x.ai/exit_plan_mode" | "x.ai/exit_plan_mode")
+}
+
+/// ACP reverse-RPC methods that FalconDeck presents as plan review banners.
+pub fn is_acp_plan_approval_method(method: &str) -> bool {
+    is_grok_plan_approval_method(method) || method == "cursor/create_plan"
+}
+
+/// Auth methods FalconDeck can complete without opening a browser.
+/// Cursor advertises `cursor_login`, which reuses credentials from `agent login`.
+pub(crate) fn silent_acp_auth_method(init: &Value) -> Option<String> {
+    init.get("authMethods")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|method| method.get("id").and_then(Value::as_str))
+        .find(|id| matches!(*id, "cursor_login"))
+        .map(ToOwned::to_owned)
+}
+
+fn is_cursor_notification_method(method: &str) -> bool {
+    matches!(
+        method,
+        "cursor/update_todos" | "cursor/task" | "cursor/generate_image"
+    )
+}
+
+#[derive(Clone, Copy)]
+enum PlanApprovalKind {
+    Grok,
+    Cursor,
+}
+
+fn plan_approval_rpc_result(
+    kind: PlanApprovalKind,
+    outcome: PlanApprovalOutcome,
+    feedback: Option<&str>,
+) -> Value {
+    let feedback = feedback
+        .map(str::trim)
+        .filter(|feedback| !feedback.is_empty());
+    match kind {
+        PlanApprovalKind::Grok => match outcome {
+            PlanApprovalOutcome::Approved => json!({ "outcome": "approved" }),
+            PlanApprovalOutcome::Cancelled => match feedback {
+                Some(feedback) => json!({ "outcome": "cancelled", "feedback": feedback }),
+                None => json!({ "outcome": "cancelled" }),
+            },
+            PlanApprovalOutcome::Abandoned => json!({ "outcome": "abandoned" }),
+        },
+        PlanApprovalKind::Cursor => match outcome {
+            PlanApprovalOutcome::Approved => json!({ "outcome": { "outcome": "accepted" } }),
+            PlanApprovalOutcome::Cancelled => match feedback {
+                Some(reason) => json!({ "outcome": { "outcome": "rejected", "reason": reason } }),
+                None => json!({ "outcome": { "outcome": "rejected" } }),
+            },
+            PlanApprovalOutcome::Abandoned => json!({ "outcome": { "outcome": "cancelled" } }),
+        },
+    }
+}
+
+fn cursor_notification_result(method: &str, params: &Value) -> Value {
+    match method {
+        "cursor/update_todos" => json!({
+            "outcome": {
+                "outcome": "accepted",
+                "todos": params.get("todos").cloned().unwrap_or(json!([]))
+            }
+        }),
+        "cursor/task" => json!({ "outcome": { "outcome": "completed" } }),
+        "cursor/generate_image" => json!({
+            "outcome": {
+                "outcome": "generated",
+                "filePath": params.get("filePath").and_then(Value::as_str).unwrap_or("")
+            }
+        }),
+        _ => json!({}),
+    }
+}
+
+fn cursor_plan_content(params: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        parts.push(format!("# {name}"));
+    }
+    if let Some(overview) = params
+        .get("overview")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|overview| !overview.is_empty())
+    {
+        parts.push(overview.to_string());
+    }
+    if let Some(plan) = params
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+    {
+        parts.push(plan.to_string());
+    }
+    if let Some(todos) = params.get("todos").and_then(Value::as_array) {
+        let lines = todos
+            .iter()
+            .filter_map(|todo| {
+                let content = todo.get("content").and_then(Value::as_str)?.trim();
+                if content.is_empty() {
+                    return None;
+                }
+                let status = todo
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pending");
+                let mark = if status == "completed" { "x" } else { " " };
+                Some(format!("- [{mark}] {content}"))
+            })
+            .collect::<Vec<_>>();
+        if !lines.is_empty() {
+            parts.push(lines.join("\n"));
+        }
+    }
+    let text = parts.join("\n\n");
+    if text.trim().is_empty() {
+        "The provider did not include plan content.".to_string()
+    } else {
+        text
+    }
+}
+
+type ParsedCursorQuestions = (
+    Vec<InteractiveQuestion>,
+    HashMap<String, Vec<(String, String)>>,
+);
+
+fn parse_cursor_questions(params: &Value) -> ParsedCursorQuestions {
+    let mut questions = Vec::new();
+    let mut options_by_question = HashMap::new();
+    let Some(entries) = params.get("questions").and_then(Value::as_array) else {
+        return (questions, options_by_question);
+    };
+    for (index, entry) in entries.iter().enumerate() {
+        let question_id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("q{index}"));
+        let prompt = entry
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())
+            .unwrap_or("Cursor needs more information");
+        let mut option_pairs = Vec::new();
+        let ui_options = entry
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        let option_id = option.get("id").and_then(Value::as_str)?.trim();
+                        if option_id.is_empty() {
+                            return None;
+                        }
+                        let label = option
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())
+                            .unwrap_or(option_id);
+                        option_pairs.push((option_id.to_string(), label.to_string()));
+                        Some(InteractiveQuestionOption {
+                            label: label.to_string(),
+                            description: String::new(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|options| !options.is_empty());
+        options_by_question.insert(question_id.clone(), option_pairs);
+        questions.push(InteractiveQuestion {
+            id: question_id,
+            header: params
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Question")
+                .to_string(),
+            question: prompt.to_string(),
+            is_other: false,
+            is_secret: false,
+            options: ui_options,
+        });
+    }
+    (questions, options_by_question)
 }
 
 fn acp_interject_probe_supported(outcome: &Result<Value, DaemonError>) -> bool {
@@ -912,12 +1161,20 @@ pub enum AcpEvent {
         detail: Option<String>,
         options: Vec<AcpPermissionOption>,
     },
-    /// Grok asks the user to approve, revise, or abandon an implementation plan.
+    /// Grok or Cursor asks the user to approve, revise, or abandon an implementation plan.
     PlanApprovalRequest {
         session_id: String,
         request_id: String,
+        method: String,
         tool_call_id: Option<String>,
         plan_content: String,
+    },
+    /// Cursor asks one or more clarifying questions before continuing.
+    QuestionRequest {
+        session_id: String,
+        request_id: String,
+        title: String,
+        questions: Vec<InteractiveQuestion>,
     },
     /// The agent finished a prompt turn; ordered after that turn's deltas.
     /// `stop_reason` is the agent-reported reason (`end_turn`, `cancelled`,
@@ -944,6 +1201,13 @@ struct PendingPermission {
 struct PendingPlanApproval {
     raw_id: Value,
     session_id: String,
+    kind: PlanApprovalKind,
+}
+
+struct PendingQuestion {
+    raw_id: Value,
+    session_id: String,
+    options_by_question: HashMap<String, Vec<(String, String)>>,
 }
 
 /// Remembered identity and last-known output for an announced tool call.
@@ -988,6 +1252,7 @@ pub struct AcpRuntime {
     session_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     permission_requests: Mutex<HashMap<String, PendingPermission>>,
     plan_approval_requests: Mutex<HashMap<String, PendingPlanApproval>>,
+    question_requests: Mutex<HashMap<String, PendingQuestion>>,
     /// Per-session accumulating assistant item for the current turn.
     current_items: Mutex<HashMap<String, (String, String)>>,
     /// Per-session accumulating reasoning item for the current turn.
@@ -1014,8 +1279,8 @@ pub struct AcpRuntime {
     /// Model catalog learned from session/new. ACP initialize commonly has no
     /// model list, so this is intentionally separate from initialize_result.
     discovered_models: Mutex<Vec<ModelSummary>>,
-    /// Whether the cursor CLI model probe already ran for this process. Cursor
-    /// does not advertise models over ACP, so the catalog falls back to
+    /// Whether the cursor CLI model probe already ran for this process. Older
+    /// Cursor builds omit the ACP catalog, so the fallback is
     /// `cursor-agent --list-models`; the flag keeps that to one run.
     cli_models_probed: AtomicBool,
     /// Permission-like modes learned from ACP config options. Grok also has a
@@ -1052,6 +1317,9 @@ pub struct AcpRuntime {
     prompt_sessions: Mutex<HashSet<String>>,
     /// Prompt sessions that emitted turn content during the current segment.
     prompt_output_sessions: Mutex<HashSet<String>>,
+    /// Sessions whose `session/load` replay is in flight. Replay history is
+    /// not a prompt but must still project as conversation items.
+    replay_sessions: Mutex<HashSet<String>>,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
@@ -1112,6 +1380,12 @@ pub(crate) struct ParsedSessionMetadata {
     pub(crate) permission_modes: Vec<String>,
     pub(crate) collaboration_modes: Vec<CollaborationModeSummary>,
     configuration: AcpSessionConfiguration,
+}
+
+impl ParsedSessionMetadata {
+    pub(crate) fn model_config_id(&self) -> Option<&str> {
+        self.configuration.model_config_id.as_deref()
+    }
 }
 
 fn string_field(value: &Value, names: &[&str]) -> Option<String> {
@@ -1456,6 +1730,12 @@ pub(crate) fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
     parsed.reasoning_efforts = dedupe_reasoning_efforts(parsed.reasoning_efforts);
     parsed.permission_modes.sort();
     parsed.permission_modes.dedup();
+    {
+        let mut seen = HashSet::new();
+        parsed
+            .collaboration_modes
+            .retain(|mode| seen.insert(mode.id.clone()));
+    }
     let reasoning = parsed.reasoning_efforts.clone();
     let default_reasoning_effort = parsed.default_reasoning_effort.clone();
     parsed.models = dedupe_models(parsed.models.into_iter().map(|mut model| {
@@ -1502,12 +1782,10 @@ fn is_reasoning_mode_block(modes: &Value) -> bool {
     looks_like_reasoning(&options)
 }
 
-/// Runs `cursor-agent --list-models` for the cursor provider, which publishes
-/// its model catalog through the CLI instead of ACP. The probe mirrors the
-/// spawn environment of the agent process itself (login-shell PATH plus the
-/// provider's env overrides) so the binary that answers is the one
-/// FalconDeck launches. Failures are non-fatal: the model picker simply
-/// stays empty until ACP advertises models.
+/// Runs `cursor-agent --list-models` for the cursor provider. Current Cursor
+/// publishes models over ACP; this probe is the fallback when that catalog is
+/// empty. The spawn environment matches the agent process so the binary that
+/// answers is the one FalconDeck launches. Failures are non-fatal.
 async fn probe_cursor_cli_models(config: &AcpProviderConfig) -> Vec<ModelSummary> {
     let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
     let mut command = Command::new(&executable);
@@ -1640,6 +1918,9 @@ impl AcpRuntime {
         let mut command = Command::new(&executable);
         apply_provider_environment(&mut command, &executable, &config.env).await;
         strip_terminal_advertising_env(&mut command);
+        for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
+            command.env(*key, *value);
+        }
         command
             .args(&config.command[1..])
             .current_dir(workspace_path)
@@ -1677,6 +1958,7 @@ impl AcpRuntime {
             session_gates: Mutex::new(HashMap::new()),
             permission_requests: Mutex::new(HashMap::new()),
             plan_approval_requests: Mutex::new(HashMap::new()),
+            question_requests: Mutex::new(HashMap::new()),
             current_items: Mutex::new(HashMap::new()),
             current_thought_items: Mutex::new(HashMap::new()),
             current_user_items: Mutex::new(HashMap::new()),
@@ -1700,6 +1982,7 @@ impl AcpRuntime {
             steer_queues: Mutex::new(HashMap::new()),
             prompt_sessions: Mutex::new(HashSet::new()),
             prompt_output_sessions: Mutex::new(HashSet::new()),
+            replay_sessions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
             events,
         });
@@ -1749,9 +2032,29 @@ impl AcpRuntime {
             )));
         }
         let init_models = parse_initialize_models(&init);
-        *runtime.initialize_result.lock().await = Some(init);
+        *runtime.initialize_result.lock().await = Some(init.clone());
         if !init_models.is_empty() {
             *runtime.discovered_models.lock().await = init_models;
+        }
+        if let Some(method_id) = silent_acp_auth_method(&init)
+            && let Err(error) = runtime
+                .request_with_timeout(
+                    "authenticate",
+                    json!({ "methodId": method_id }),
+                    ACP_SETUP_TIMEOUT,
+                )
+                .await
+        {
+            // Cursor's `cursor_login` reuses CLI credentials; a failure here
+            // is usually "already signed in" or a stale token. session/new
+            // is the real gate — failing connect on this would hide adapters
+            // that work without an explicit authenticate call.
+            tracing::info!(
+                provider = %runtime.config.id,
+                method = %method_id,
+                %error,
+                "ACP authenticate failed; continuing with existing credentials"
+            );
         }
         if acp_may_support_interject(runtime.provider.as_str()) {
             let outcome = runtime
@@ -1807,10 +2110,8 @@ impl AcpRuntime {
             .unwrap_or(false);
         let supports_images = acp_supports_images(self.provider.as_str(), advertised_images);
         let discovered_permission_modes = self.discovered_permission_modes.lock().await.clone();
-        let permission_modes = if discovered_permission_modes.is_empty()
-            && self.provider.as_str().eq_ignore_ascii_case("grok")
-        {
-            grok_placeholder_permission_modes()
+        let permission_modes = if discovered_permission_modes.is_empty() {
+            placeholder_permission_modes_for(self.provider.as_str())
         } else {
             discovered_permission_modes
         };
@@ -1843,9 +2144,9 @@ impl AcpRuntime {
             return models;
         }
         drop(init);
-        // Cursor publishes no model catalog over ACP. Probe its CLI directly
-        // until a probe succeeds; raw variant ids are exposed verbatim because
-        // session model selection sends the id back exactly as chosen.
+        // Older Cursor builds published no model catalog over ACP. Probe the
+        // CLI until a probe succeeds. Current builds advertise parameterized
+        // ACP ids on session/new, which win above and never reach this path.
         if self.config.id.eq_ignore_ascii_case("cursor")
             && !self.cli_models_probed.load(Ordering::Acquire)
         {
@@ -2094,6 +2395,7 @@ impl AcpRuntime {
     /// `session/update` notifications, which repopulates the (empty after
     /// restart) in-memory thread history. If the persisted session is truly
     /// unavailable, the serialized caller falls back to a fresh session.
+    #[allow(clippy::too_many_arguments)]
     pub async fn ensure_session(
         &self,
         thread_id: &str,
@@ -2222,6 +2524,10 @@ impl AcpRuntime {
         let _ = self.events.send(AcpEvent::ReplayStarted {
             session_id: native_session.to_string(),
         });
+        self.replay_sessions
+            .lock()
+            .await
+            .insert(native_session.to_string());
         let loaded = self
             .request_with_timeout(
                 "session/load",
@@ -2233,6 +2539,7 @@ impl AcpRuntime {
                 ACP_SESSION_START_TIMEOUT,
             )
             .await;
+        self.replay_sessions.lock().await.remove(native_session);
         let _ = self.events.send(AcpEvent::ReplayFinished {
             session_id: native_session.to_string(),
         });
@@ -2526,6 +2833,11 @@ impl AcpRuntime {
         });
     }
 
+    async fn session_accepts_turn_content(&self, session_id: &str) -> bool {
+        self.prompt_sessions.lock().await.contains(session_id)
+            || self.replay_sessions.lock().await.contains(session_id)
+    }
+
     async fn note_prompt_output(&self, session_id: &str) {
         if self.prompt_sessions.lock().await.contains(session_id) {
             self.prompt_output_sessions
@@ -2618,6 +2930,7 @@ impl AcpRuntime {
             // retaining dead state.
             self.cancel_pending_permissions(session_id).await;
             self.cancel_pending_plan_approvals(session_id).await;
+            self.cancel_pending_questions(session_id).await;
             // The read loop delivers messages in order, so a vendor failure
             // notice written before the error response is already recorded.
             let result = match result {
@@ -2948,6 +3261,7 @@ impl AcpRuntime {
             .await?;
         self.cancel_pending_permissions(session_id).await;
         self.cancel_pending_plan_approvals(session_id).await;
+        self.cancel_pending_questions(session_id).await;
         Ok(())
     }
 
@@ -2994,7 +3308,35 @@ impl AcpRuntime {
                 .write_message(&json!({
                     "jsonrpc": "2.0",
                     "id": pending.raw_id,
-                    "result": { "outcome": "abandoned" }
+                    "result": plan_approval_rpc_result(
+                        pending.kind,
+                        PlanApprovalOutcome::Abandoned,
+                        None
+                    )
+                }))
+                .await;
+        }
+    }
+
+    /// Resolves every pending Cursor question for a session as cancelled.
+    pub async fn cancel_pending_questions(&self, session_id: &str) {
+        let drained = {
+            let mut requests = self.question_requests.lock().await;
+            let ids = requests
+                .iter()
+                .filter(|(_, pending)| pending.session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| requests.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for pending in drained {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": pending.raw_id,
+                    "result": { "outcome": { "outcome": "cancelled" } }
                 }))
                 .await;
         }
@@ -3046,24 +3388,71 @@ impl AcpRuntime {
             .await
             .remove(request_id)
             .ok_or_else(|| DaemonError::NotFound("ACP plan approval not found".to_string()))?;
-        let result = match outcome {
-            PlanApprovalOutcome::Approved => json!({ "outcome": "approved" }),
-            PlanApprovalOutcome::Cancelled => {
-                let feedback = feedback
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|feedback| !feedback.is_empty());
-                match feedback {
-                    Some(feedback) => json!({ "outcome": "cancelled", "feedback": feedback }),
-                    None => json!({ "outcome": "cancelled" }),
-                }
-            }
-            PlanApprovalOutcome::Abandoned => json!({ "outcome": "abandoned" }),
-        };
         self.write_message(&json!({
             "jsonrpc": "2.0",
             "id": pending.raw_id,
-            "result": result
+            "result": plan_approval_rpc_result(pending.kind, outcome, feedback.as_deref())
+        }))
+        .await
+    }
+
+    /// Answers a pending `cursor/ask_question` reverse request.
+    pub async fn respond_question(
+        &self,
+        request_id: &str,
+        answers: &HashMap<String, Vec<String>>,
+    ) -> Result<(), DaemonError> {
+        let pending = self
+            .question_requests
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| DaemonError::NotFound("ACP question request not found".to_string()))?;
+        let mapped = pending
+            .options_by_question
+            .iter()
+            .map(|(question_id, options)| {
+                let selected = answers.get(question_id).into_iter().flatten();
+                let selected_option_ids = selected
+                    .filter_map(|choice| {
+                        options
+                            .iter()
+                            .find(|(_, label)| label == choice)
+                            .or_else(|| options.iter().find(|(id, _)| id == choice))
+                            .map(|(id, _)| id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "questionId": question_id,
+                    "selectedOptionIds": selected_option_ids
+                })
+            })
+            .collect::<Vec<_>>();
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": pending.raw_id,
+            "result": {
+                "outcome": {
+                    "outcome": "answered",
+                    "answers": mapped
+                }
+            }
+        }))
+        .await
+    }
+
+    /// Cancels a pending `cursor/ask_question` when its thread is gone.
+    pub async fn cancel_question(&self, request_id: &str) -> Result<(), DaemonError> {
+        let pending = self
+            .question_requests
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| DaemonError::NotFound("ACP question request not found".to_string()))?;
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": pending.raw_id,
+            "result": { "outcome": { "outcome": "cancelled" } }
         }))
         .await
     }
@@ -3254,7 +3643,29 @@ impl AcpRuntime {
             // unprefixed spelling for compatibility with earlier builds.
             method if is_grok_plan_approval_method(method) => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
-                self.handle_plan_approval_request(raw_id, &params).await;
+                self.handle_plan_approval_request(raw_id, &params, PlanApprovalKind::Grok)
+                    .await;
+            }
+            "cursor/create_plan" => {
+                let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                self.handle_plan_approval_request(raw_id, &params, PlanApprovalKind::Cursor)
+                    .await;
+            }
+            "cursor/ask_question" => {
+                let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                self.handle_cursor_question_request(raw_id, &params).await;
+            }
+            method if is_cursor_notification_method(method) => {
+                if has_id {
+                    let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                    let _ = self
+                        .write_message(&json!({
+                            "jsonrpc": "2.0",
+                            "id": raw_id,
+                            "result": cursor_notification_result(method, &params)
+                        }))
+                        .await;
+                }
             }
             // Filesystem and terminal capabilities are declined during
             // initialize; refuse politely if an agent tries anyway.
@@ -3439,11 +3850,32 @@ impl AcpRuntime {
             }
         };
         if let Some(event) = event {
+            if Self::event_is_turn_content(&event)
+                && !self.session_accepts_turn_content(session_id).await
+            {
+                // pi-acp (and similar) emit a session-start banner after
+                // session/new, before any prompt. Projecting that as the
+                // turn's assistant reply hides auth failures as a "successful"
+                // message.
+                return;
+            }
             if Self::event_is_model_output(&event) {
                 self.note_prompt_output(session_id).await;
             }
             let _ = self.events.send(event);
         }
+    }
+
+    fn event_is_turn_content(event: &AcpEvent) -> bool {
+        matches!(
+            event,
+            AcpEvent::MessageDelta { .. }
+                | AcpEvent::ThoughtDelta { .. }
+                | AcpEvent::UserMessageDelta { .. }
+                | AcpEvent::ToolCall { .. }
+                | AcpEvent::ToolCallUpdate { .. }
+                | AcpEvent::Plan { .. }
+        )
     }
 
     fn event_is_model_output(event: &AcpEvent) -> bool {
@@ -3583,28 +4015,26 @@ impl AcpRuntime {
         });
     }
 
-    async fn handle_plan_approval_request(&self, raw_id: Value, params: &Value) {
-        let session_id = params
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        if self
-            .threads_by_session
-            .lock()
-            .await
-            .get(&session_id)
-            .is_none()
-        {
+    async fn handle_plan_approval_request(
+        &self,
+        raw_id: Value,
+        params: &Value,
+        kind: PlanApprovalKind,
+    ) {
+        let Some(session_id) = self.owning_session_id(params).await else {
             let _ = self
                 .write_message(&json!({
                     "jsonrpc": "2.0",
                     "id": raw_id,
-                    "result": { "outcome": "abandoned" }
+                    "result": plan_approval_rpc_result(
+                        kind,
+                        PlanApprovalOutcome::Abandoned,
+                        None
+                    )
                 }))
                 .await;
             return;
-        }
+        };
 
         let request_id = format!("acp-plan-{}", uuid::Uuid::new_v4().simple());
         self.plan_approval_requests.lock().await.insert(
@@ -3612,21 +4042,105 @@ impl AcpRuntime {
             PendingPlanApproval {
                 raw_id,
                 session_id: session_id.clone(),
+                kind,
             },
         );
-        let _ = self.events.send(AcpEvent::PlanApprovalRequest {
-            session_id,
-            request_id,
-            tool_call_id: params
-                .get("toolCallId")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
-            plan_content: params
+        let plan_content = match kind {
+            PlanApprovalKind::Cursor => cursor_plan_content(params),
+            PlanApprovalKind::Grok => params
                 .get("planContent")
                 .and_then(Value::as_str)
                 .unwrap_or("The provider did not include plan content.")
                 .to_string(),
+        };
+        let method = match kind {
+            PlanApprovalKind::Cursor => "cursor/create_plan",
+            PlanApprovalKind::Grok => "x.ai/exit_plan_mode",
+        };
+        let _ = self.events.send(AcpEvent::PlanApprovalRequest {
+            session_id,
+            request_id,
+            method: method.to_string(),
+            tool_call_id: params
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            plan_content,
         });
+    }
+
+    async fn handle_cursor_question_request(&self, raw_id: Value, params: &Value) {
+        let Some(session_id) = self.owning_session_id(params).await else {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": raw_id,
+                    "result": { "outcome": { "outcome": "cancelled" } }
+                }))
+                .await;
+            return;
+        };
+        let (questions, options_by_question) = parse_cursor_questions(params);
+        if questions.is_empty() {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": raw_id,
+                    "result": { "outcome": { "outcome": "skipped", "reason": "no questions" } }
+                }))
+                .await;
+            return;
+        }
+        let request_id = format!("acp-question-{}", uuid::Uuid::new_v4().simple());
+        self.question_requests.lock().await.insert(
+            request_id.clone(),
+            PendingQuestion {
+                raw_id,
+                session_id: session_id.clone(),
+                options_by_question,
+            },
+        );
+        let title = params
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Cursor question")
+            .to_string();
+        let _ = self.events.send(AcpEvent::QuestionRequest {
+            session_id,
+            request_id,
+            title,
+            questions,
+        });
+    }
+
+    /// Session id on the reverse request, or the unique in-flight prompt
+    /// session when Cursor omits `sessionId`.
+    async fn owning_session_id(&self, params: &Value) -> Option<String> {
+        if let Some(session_id) = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+        {
+            return self
+                .threads_by_session
+                .lock()
+                .await
+                .contains_key(session_id)
+                .then(|| session_id.to_string());
+        }
+        let unique_prompt = {
+            let prompt_sessions = self.prompt_sessions.lock().await;
+            (prompt_sessions.len() == 1).then(|| prompt_sessions.iter().next().cloned())?
+        };
+        let session_id = unique_prompt?;
+        self.threads_by_session
+            .lock()
+            .await
+            .contains_key(&session_id)
+            .then_some(session_id)
     }
 }
 
@@ -3833,29 +4347,6 @@ mod tests {
         (runtime, receiver)
     }
 
-    async fn fixture_runtime(
-        scenario: &str,
-    ) -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
-        let config = AcpProviderConfig {
-            id: format!("{scenario}-fixture"),
-            label: format!("{scenario} fixture"),
-            command: vec![
-                "node".to_string(),
-                fixture.to_string_lossy().into_owned(),
-                scenario.to_string(),
-            ],
-            env: HashMap::new(),
-            transport: ProviderTransport::default(),
-        };
-        let (events, receiver) = mpsc::unbounded_channel();
-        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
-            .await
-            .expect("fixture should initialize");
-        (runtime, receiver)
-    }
-
     async fn steer_fixture_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
@@ -3892,6 +4383,88 @@ mod tests {
                 return;
             }
         }
+    }
+
+    async fn fixture_runtime(
+        scenario: &str,
+    ) -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: format!("{scenario}-fixture"),
+            label: format!("{scenario} fixture"),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                scenario.to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize");
+        (runtime, receiver)
+    }
+
+    #[tokio::test]
+    async fn session_start_banner_is_not_projected_as_turn_text() {
+        let (runtime, mut events) = fixture_runtime("startup-banner").await;
+        let session_id = runtime
+            .ensure_session(
+                "thread-startup",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture session should start");
+
+        let saw_banner = timeout(Duration::from_millis(250), async {
+            loop {
+                if let AcpEvent::MessageDelta { text, .. } = next_acp_event(&mut events).await
+                    && text.contains("STARTUP_BANNER")
+                {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            !saw_banner,
+            "session/new startup text must not become the turn reply"
+        );
+
+        let stop = runtime
+            .prompt(
+                &session_id,
+                vec![json!({ "type": "text", "text": "hello" })],
+            )
+            .await
+            .expect("empty prompt should still settle");
+        assert_eq!(stop, "end_turn");
+
+        let ended = timeout(Duration::from_secs(5), async {
+            loop {
+                if let AcpEvent::TurnEnded {
+                    had_output,
+                    stop_reason,
+                    ..
+                } = next_acp_event(&mut events).await
+                {
+                    return (had_output, stop_reason);
+                }
+            }
+        })
+        .await
+        .expect("turn-ended should arrive");
+        assert_eq!(ended, (false, Some("end_turn".to_string())));
+        runtime.shutdown().await;
     }
 
     /// The pump decides replay-vs-live per item from these markers, so their
@@ -4108,7 +4681,7 @@ mod tests {
         })
         .await
         .expect("turn-ended should arrive");
-        assert_eq!(ended.0, false);
+        assert!(!ended.0);
         assert_eq!(ended.1.as_deref(), Some("end_turn"));
         let diagnostic = ended.2.expect("empty stderr failure must be diagnosed");
         assert!(
@@ -4226,6 +4799,95 @@ mod tests {
         assert!(is_grok_plan_approval_method("_x.ai/exit_plan_mode"));
         assert!(is_grok_plan_approval_method("x.ai/exit_plan_mode"));
         assert!(!is_grok_plan_approval_method("_x.ai/enter_plan_mode"));
+        assert!(is_acp_plan_approval_method("cursor/create_plan"));
+        assert!(is_acp_plan_approval_method("x.ai/exit_plan_mode"));
+        assert!(!is_acp_plan_approval_method("cursor/ask_question"));
+    }
+
+    #[test]
+    fn silent_auth_method_picks_cursor_login() {
+        assert_eq!(
+            silent_acp_auth_method(&json!({
+                "authMethods": [
+                    { "id": "browser" },
+                    { "id": "cursor_login", "name": "Cursor Login" }
+                ]
+            }))
+            .as_deref(),
+            Some("cursor_login")
+        );
+        assert_eq!(silent_acp_auth_method(&json!({ "authMethods": [] })), None);
+    }
+
+    #[test]
+    fn cursor_plan_content_joins_name_overview_plan_and_todos() {
+        let text = cursor_plan_content(&json!({
+            "name": "Refactor tabs",
+            "overview": "Tighten layout.",
+            "plan": "1. Inspect.\n2. Update.",
+            "todos": [
+                { "id": "1", "content": "Inspect current logic", "status": "completed" },
+                { "id": "2", "content": "Update calculations", "status": "pending" }
+            ]
+        }));
+        assert!(text.contains("# Refactor tabs"));
+        assert!(text.contains("Tighten layout."));
+        assert!(text.contains("1. Inspect."));
+        assert!(text.contains("- [x] Inspect current logic"));
+        assert!(text.contains("- [ ] Update calculations"));
+    }
+
+    #[test]
+    fn cursor_questions_keep_option_ids_and_labels() {
+        let (questions, options) = parse_cursor_questions(&json!({
+            "title": "Need input",
+            "questions": [{
+                "id": "q1",
+                "prompt": "Which mode?",
+                "options": [
+                    { "id": "agent", "label": "Agent" },
+                    { "id": "plan", "label": "Plan" }
+                ]
+            }]
+        }));
+        assert_eq!(questions[0].id, "q1");
+        assert_eq!(questions[0].header, "Need input");
+        assert_eq!(questions[0].question, "Which mode?");
+        assert_eq!(questions[0].options.as_ref().unwrap()[0].label, "Agent");
+        assert_eq!(
+            options.get("q1").map(Vec::as_slice),
+            Some(
+                [
+                    ("agent".to_string(), "Agent".to_string()),
+                    ("plan".to_string(), "Plan".to_string())
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_plan_approval_rpc_result_uses_nested_outcome() {
+        assert_eq!(
+            plan_approval_rpc_result(
+                PlanApprovalKind::Cursor,
+                PlanApprovalOutcome::Approved,
+                None
+            ),
+            json!({ "outcome": { "outcome": "accepted" } })
+        );
+        assert_eq!(
+            plan_approval_rpc_result(
+                PlanApprovalKind::Cursor,
+                PlanApprovalOutcome::Cancelled,
+                Some("change the approach")
+            ),
+            json!({ "outcome": { "outcome": "rejected", "reason": "change the approach" } })
+        );
+        assert_eq!(
+            plan_approval_rpc_result(PlanApprovalKind::Grok, PlanApprovalOutcome::Approved, None),
+            json!({ "outcome": "approved" })
+        );
     }
 
     #[tokio::test]
@@ -4261,6 +4923,7 @@ mod tests {
         let AcpEvent::PlanApprovalRequest {
             session_id: event_session_id,
             request_id,
+            method,
             tool_call_id,
             plan_content,
         } = event
@@ -4268,6 +4931,7 @@ mod tests {
             panic!("expected a plan approval request");
         };
         assert_eq!(event_session_id, session_id);
+        assert_eq!(method, "x.ai/exit_plan_mode");
         assert_eq!(tool_call_id.as_deref(), Some("fixture-plan-1"));
         assert!(plan_content.contains("Add the regression test"));
 
@@ -4459,6 +5123,59 @@ mod tests {
         assert_eq!(
             parsed.configuration.collaboration_config_id.as_deref(),
             Some("mode")
+        );
+    }
+
+    #[test]
+    fn cursor_modes_from_both_surfaces_are_deduped() {
+        let parsed = parse_session_metadata(&json!({
+            "modes": {
+                "currentModeId": "agent",
+                "availableModes": [
+                    { "id": "agent", "name": "Agent" },
+                    { "id": "plan", "name": "Plan" },
+                    { "id": "ask", "name": "Ask" }
+                ]
+            },
+            "configOptions": [{
+                "id": "mode",
+                "category": "mode",
+                "currentValue": "agent",
+                "options": [
+                    { "value": "agent", "name": "Agent" },
+                    { "value": "plan", "name": "Plan" },
+                    { "value": "ask", "name": "Ask" }
+                ]
+            }]
+        }));
+        assert_eq!(
+            parsed
+                .collaboration_modes
+                .iter()
+                .map(|mode| mode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent", "plan", "ask"]
+        );
+    }
+
+    #[test]
+    fn cursor_placeholder_catalog_includes_permission_modes() {
+        let capabilities = cursor_placeholder_capabilities();
+        assert!(capabilities.supports_images);
+        assert_eq!(
+            capabilities.permission_modes,
+            cursor_placeholder_permission_modes()
+        );
+        assert_eq!(
+            placeholder_permission_modes_for("cursor"),
+            cursor_placeholder_permission_modes()
+        );
+        assert_eq!(
+            cursor_placeholder_collaboration_modes()
+                .iter()
+                .map(|mode| mode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent", "plan", "ask"]
         );
     }
 

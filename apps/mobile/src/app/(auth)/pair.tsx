@@ -3,11 +3,12 @@ import {
   KeyboardAvoidingView,
   Platform,
   Pressable,
+  ScrollView,
   View,
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Lock, ChevronDown, ChevronUp } from 'lucide-react-native'
+import { Lock, ChevronDown, ChevronUp, QrCode } from 'lucide-react-native'
 import { useRouter } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
@@ -167,77 +168,88 @@ export default function PairScreen() {
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={styles.container}>
-        <View style={styles.content}>
+      <View
+        style={[
+          styles.container,
+          { paddingTop: insets.top, paddingBottom: insets.bottom },
+        ]}
+      >
+        <ScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
           <View style={styles.hero}>
             <Text
               variant="heading"
+              size="2xl"
               numberOfLines={1}
               adjustsFontSizeToFit
               minimumFontScale={0.5}
             >
               FalconDeck
             </Text>
-            <Text variant="body" color="tertiary" style={styles.subtitle}>
+            <Text variant="supporting" color="tertiary" style={styles.subtitle}>
               Connect to your desktop agent
             </Text>
           </View>
 
-          <View style={styles.form}>
-            {isSecuringSession ? (
-              <View style={styles.connectingState}>
-                <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
-                <Text variant="label" color="primary" weight="semibold" style={styles.connectingTitle}>
-                  {connectionLabel(connectionStatus, desktopOnline)}
+          {isSecuringSession ? (
+            <View style={styles.connectingState}>
+              <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
+              <Text variant="label" color="primary" weight="semibold" style={styles.centeredText}>
+                {connectionLabel(connectionStatus, desktopOnline)}
+              </Text>
+              <Text variant="caption" color="muted" style={styles.centeredText}>
+                {desktopOnline
+                  ? CONNECTION_COPY.securingDetail
+                  : CONNECTION_COPY.waitingForDesktopDetail}
+              </Text>
+              {error ? (
+                <Text variant="caption" color="danger" style={styles.centeredText}>
+                  {error}
                 </Text>
-                <Text variant="caption" color="muted" style={styles.connectingBody}>
-                  {desktopOnline
-                    ? CONNECTION_COPY.securingDetail
-                    : CONNECTION_COPY.waitingForDesktopDetail}
+              ) : null}
+              {securingTooLong && !error ? (
+                <Text variant="caption" color="danger" style={styles.centeredText}>
+                  This is taking longer than expected. Check that FalconDeck
+                  is running on your computer, or start over to pair again.
                 </Text>
-                {error ? (
-                  <Text variant="caption" color="danger" style={styles.error}>
-                    {error}
-                  </Text>
-                ) : null}
-                {securingTooLong && !error ? (
-                  <Text variant="caption" color="danger" style={styles.error}>
-                    This is taking longer than expected. Check that FalconDeck
-                    is running on your computer, or start over to pair again.
-                  </Text>
-                ) : null}
-                <Button
-                  variant="danger"
-                  label="Start Over"
-                  onPress={handleStartOver}
-                />
-              </View>
-            ) : (
-              <>
+              ) : null}
+              <Button
+                variant="danger"
+                label="Start Over"
+                onPress={handleStartOver}
+              />
+            </View>
+          ) : (
+            <>
+              <View style={styles.pairPanel}>
                 <Button
                   variant="default"
                   size="lg"
-                  label="Scan QR Code"
+                  label="Scan QR code"
+                  icon={<QrCode size={theme.iconSize.md} color={theme.colors.surface[0]} />}
                   onPress={handleScanPress}
                   disabled={isClaiming}
                 />
 
                 <View style={styles.divider}>
                   <View style={styles.dividerLine} />
-                  <Text variant="caption" color="muted" size="2xs">
-                    OR PASTE SECURE CODE
-                  </Text>
+                  <Text variant="microlabel">or enter the code</Text>
                   <View style={styles.dividerLine} />
                 </View>
 
                 <Input
                   value={pairingCode}
                   onChangeText={setPairingCode}
-                  placeholder="Secure pairing code"
+                  placeholder="Pairing code"
                   accessibilityLabel="Secure pairing code"
                   accessibilityHint="Paste the complete secure code shown by FalconDeck on your desktop"
                   autoCapitalize="none"
                   autoCorrect={false}
+                  returnKeyType="go"
+                  onSubmitEditing={handleConnect}
                   style={styles.codeInput}
                 />
 
@@ -249,32 +261,38 @@ export default function PairScreen() {
                   onPress={handleConnect}
                 />
 
-                <Button
-                  variant="outline"
-                  label="Explore demo workspace"
-                  onPress={handleExploreDemo}
-                  disabled={isClaiming}
-                />
-
-                <Text variant="caption" color="muted" style={styles.demoHint}>
-                  No desktop available? Browse a sample workspace without pairing or signing in.
-                </Text>
-
                 {error ? (
                   <Text
                     variant="caption"
                     color="danger"
-                    style={styles.error}
+                    style={styles.centeredText}
                     accessibilityRole="alert"
                     accessibilityLiveRegion="assertive"
                   >
                     {error}
                   </Text>
                 ) : null}
-              </>
-            )}
-          </View>
-        </View>
+              </View>
+
+              <View style={styles.demoPanel}>
+                <Text variant="label" color="secondary" weight="semibold">
+                  Just looking around?
+                </Text>
+                <Text variant="caption" color="muted" style={styles.demoHint}>
+                  Open a sample workspace with example conversations. No pairing,
+                  no sign-in, and nothing touches your computer.
+                </Text>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  label="Explore demo workspace"
+                  onPress={handleExploreDemo}
+                  disabled={isClaiming}
+                />
+              </View>
+            </>
+          )}
+        </ScrollView>
 
         <View style={styles.bottom}>
           {!isSecuringSession && showAdvanced ? (
@@ -340,34 +358,48 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[6],
   },
   content: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    gap: theme.spacing[8],
+    paddingVertical: theme.spacing[8],
   },
   hero: {
     alignItems: 'center',
     gap: theme.spacing[1],
-    marginBottom: theme.spacing[10],
   },
   subtitle: {
     textAlign: 'center',
   },
-  form: {
+  /** Everything the primary path needs: scan, or type the code and connect. */
+  pairPanel: {
     width: '100%',
     maxWidth: 320,
     gap: theme.spacing[3],
   },
+  /** The demo is a side door, so it sits apart from the pairing controls
+      rather than as a fourth button in the same stack. */
+  demoPanel: {
+    width: '100%',
+    maxWidth: 320,
+    alignItems: 'center',
+    gap: theme.spacing[2],
+    padding: theme.spacing[4],
+    borderRadius: theme.radius.xl,
+    borderCurve: 'continuous',
+    borderWidth: 1,
+    borderColor: theme.colors.border.subtle,
+    backgroundColor: theme.colors.surface[1],
+  },
   connectingState: {
+    width: '100%',
+    maxWidth: 320,
     alignItems: 'center',
     gap: theme.spacing[3],
     paddingVertical: theme.spacing[4],
   },
-  connectingTitle: {
+  centeredText: {
     textAlign: 'center',
-  },
-  connectingBody: {
-    textAlign: 'center',
-    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
   codeInput: {
     textAlign: 'center',
@@ -385,17 +417,13 @@ const styles = StyleSheet.create((theme) => ({
     height: 1,
     backgroundColor: theme.colors.border.subtle,
   },
-  error: {
-    textAlign: 'center',
-  },
   demoHint: {
     textAlign: 'center',
-    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
   bottom: {
     alignItems: 'center',
     gap: theme.spacing[2],
-    paddingBottom: theme.spacing[2],
+    paddingTop: theme.spacing[2],
   },
   advancedPanel: {
     width: '100%',

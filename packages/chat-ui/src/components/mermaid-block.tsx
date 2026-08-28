@@ -6,8 +6,11 @@ import { renderMermaidSvg } from '../lib/mermaid'
 
 export const MermaidBlock = memo(function MermaidBlock({
   code,
+  pending = false,
 }: {
   code: string
+  /** Quiet parse failures while the enclosing fence may still be growing. */
+  pending?: boolean
 }) {
   const [svg, setSvg] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -15,7 +18,6 @@ export const MermaidBlock = memo(function MermaidBlock({
 
   useEffect(() => {
     let cancelled = false
-    let generation = 0
 
     const run = () => {
       const trimmed = code.trim()
@@ -25,15 +27,14 @@ export const MermaidBlock = memo(function MermaidBlock({
         return
       }
 
-      const current = ++generation
       void renderMermaidSvg(trimmed)
         .then((next) => {
-          if (cancelled || current !== generation) return
+          if (cancelled) return
           setSvg(next)
           setError(null)
         })
         .catch((reason: unknown) => {
-          if (cancelled || current !== generation) return
+          if (cancelled) return
           setSvg(null)
           setError(
             reason instanceof Error ? reason.message : 'Could not render diagram',
@@ -56,7 +57,7 @@ export const MermaidBlock = memo(function MermaidBlock({
       <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
         <span className="min-w-0 truncate">mermaid</span>
         <div className="flex shrink-0 items-center gap-2">
-          {error ? (
+          {error && !pending ? (
             <span role="status" className="truncate">
               Could not render
             </span>

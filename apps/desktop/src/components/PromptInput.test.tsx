@@ -643,6 +643,80 @@ describe("PromptInput", () => {
     ).toBeInTheDocument();
   });
 
+  it("hides skills the current provider cannot use", () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        selectedProvider="grok"
+        value="/"
+        skills={[
+          {
+            id: "skill:lint",
+            label: "Lint",
+            alias: "/lint",
+            availability: "both",
+            providers: ["codex", "claude"],
+            source_kind: "project_file",
+            description: "Run lint fixes",
+          },
+          {
+            id: "skill:grok-review",
+            label: "Grok Review",
+            alias: "/grok-review",
+            availability: "both",
+            providers: ["grok"],
+            source_kind: "project_file",
+            description: "Review with Grok",
+          },
+        ]}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    textarea.setSelectionRange(1, 1);
+    fireEvent.click(textarea);
+
+    expect(screen.getByText("/grok-review")).toBeInTheDocument();
+    expect(screen.queryByText("/lint")).not.toBeInTheDocument();
+    expect(screen.queryByText(/only unavailable/)).not.toBeInTheDocument();
+  });
+
+  it("refetches skills when the slash menu opens and filters locally while typing", async () => {
+    const loadSkills = vi.fn(async () => [
+      {
+        id: "skill:lint",
+        label: "Lint",
+        alias: "/lint",
+        availability: "both" as const,
+        providers: ["codex"],
+        source_kind: "project_file" as const,
+        description: "Run lint fixes",
+      },
+    ]);
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="/"
+        loadSkills={loadSkills}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    textarea.setSelectionRange(1, 1);
+    fireEvent.click(textarea);
+
+    await waitFor(() => expect(loadSkills).toHaveBeenCalledTimes(1));
+    expect(loadSkills).toHaveBeenCalledWith("codex");
+    await waitFor(() => expect(screen.getByText("/lint")).toBeInTheDocument());
+
+    fireEvent.change(textarea, { target: { value: "/li" } });
+    textarea.setSelectionRange(3, 3);
+    fireEvent.click(textarea);
+    expect(loadSkills).toHaveBeenCalledTimes(1);
+  });
+
   it("anchors slash suggestions above the composer without expanding it", () => {
     render(<PromptInput {...promptInputProps} value="/" />);
 
@@ -1018,6 +1092,52 @@ describe("PromptInput", () => {
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Claude" }));
     expect(onHandoffProviderSelect).toHaveBeenCalledWith("claude");
+  });
+
+  it("keeps the model menu openable for handoff when the catalog is empty", () => {
+    const onHandoffProviderSelect = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        models={[]}
+        selectedModelId={null}
+        handoffProviders={[{ provider: "claude", label: "Claude" }]}
+        onHandoffProviderSelect={onHandoffProviderSelect}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Model" });
+    expect(trigger).toBeEnabled();
+    fireEvent.click(trigger);
+    expect(
+      screen.getByRole("menuitem", { name: /Continue in another harness/ }),
+    ).toBeEnabled();
+  });
+
+  it("only greys out handoff while a destination is being created", () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        models={[
+          {
+            id: "gpt-5.4",
+            label: "gpt-5.4",
+            is_default: true,
+            default_reasoning_effort: "medium",
+            supported_reasoning_efforts: [],
+          },
+        ]}
+        selectedModelId="gpt-5.4"
+        handoffProviders={[{ provider: "claude", label: "Claude" }]}
+        onHandoffProviderSelect={vi.fn()}
+        handoffDisabledReason="Creating the linked handoff thread…"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    expect(
+      screen.getByRole("menuitem", { name: /Continue in another harness/ }),
+    ).toBeDisabled();
   });
 
   it("filters a long model menu by label or provider identifier", () => {

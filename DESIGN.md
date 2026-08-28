@@ -215,7 +215,7 @@ Secondary actions on a list item live in a context menu, never in a row of alway
 Rules:
 
 - Keep the action list and its order identical across platforms.
-- Order is: pin/unpin, rename, mark as read, then a separator, then copy actions, then a separator, then destructive actions last.
+- Order is: pin/unpin, pin in project, rename, mark as read, then a separator, then copy actions, then a separator, then destructive actions last.
 - Destructive items use `danger` foreground with a muted danger hover fill.
 - If a menu is positioned manually, the width constant used for viewport clamping must match the rendered width, or the menu will overflow the screen edge.
 - One action may also appear inline on hover as a shortcut (thread archive), but the context menu remains the complete list.

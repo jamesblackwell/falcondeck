@@ -231,6 +231,64 @@ export function applyDaemonEventsToThreadItems(
   return next
 }
 
+/** How many per-thread conversation caches survive between snapshot passes.
+ * One slot belongs to the selected thread regardless of recency. */
+export const MAX_RETAINED_THREAD_ITEM_THREADS = 32
+
+/**
+ * Bounds the per-thread conversation-item cache.
+ *
+ * Streaming deltas append to this cache for every thread they mention, but
+ * only the selected thread ever reads it: the transcript shown for a thread is
+ * rebuilt authoritatively by the thread.detail RPC on selection, and seq/order
+ * tracking for replay lives entirely in relay cursor state, never here.
+ * Dropping a background thread's cache therefore costs nothing correctness-wise;
+ * selecting it later simply rehydrates through the existing RPC path. Without
+ * this bound a long-lived session accumulates one growing item array per
+ * thread the daemon ever streamed.
+ *
+ * Returns the same object untouched when nothing needs dropping, so callers
+ * can use this directly inside a setState updater.
+ */
+export function boundRetainedThreadItems(
+  current: Record<string, ConversationItem[]>,
+  threads: readonly { id: string; updated_at: string }[],
+  keepThreadId: string | null,
+  maxThreads: number = MAX_RETAINED_THREAD_ITEM_THREADS,
+): Record<string, ConversationItem[]> {
+  const liveIds = new Set(threads.map((thread) => thread.id))
+  const retained: Array<[string, ConversationItem[]]> = []
+  for (const [threadId, items] of Object.entries(current)) {
+    if (!liveIds.has(threadId)) continue
+    retained.push([threadId, items])
+  }
+
+  if (retained.length <= maxThreads) {
+    return retained.length === Object.keys(current).length
+      ? current
+      : Object.fromEntries(retained)
+  }
+
+  // Evict by snapshot recency: threads the daemon touched last are the ones
+  // most likely to be revisited soonest.
+  const updatedAtById = new Map(
+    threads.map((thread) => [thread.id, thread.updated_at]),
+  )
+  const keptSelected =
+    keepThreadId !== null
+      ? retained.filter(([id]) => id === keepThreadId)
+      : []
+  const evictable = retained.filter(([id]) => id !== keepThreadId)
+  const keptCount = Math.max(0, maxThreads - keptSelected.length)
+  evictable.sort((left, right) => {
+    const leftAt = updatedAtById.get(left[0]) ?? ''
+    const rightAt = updatedAtById.get(right[0]) ?? ''
+    return rightAt.localeCompare(leftAt) || left[0].localeCompare(right[0])
+  })
+
+  return Object.fromEntries([...keptSelected, ...evictable.slice(0, keptCount)])
+}
+
 export function applyDaemonEventsToThreadDetail(
   current: ThreadDetail | null,
   events: EventEnvelope[],
@@ -310,7 +368,9 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
         dataKey: typeof parsed.dataKey === 'string' ? parsed.dataKey : null,
       })
       window.sessionStorage.setItem(SESSION_SECRETS_STORAGE_KEY, secretsRaw)
-      const { clientSecretKey: _clientSecretKey, dataKey: _dataKey, ...metadata } = parsed
+      const metadata: Partial<PersistedRemoteSession> = { ...parsed }
+      delete metadata.clientSecretKey
+      delete metadata.dataKey
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(metadata))
     }
     if (!secretsRaw) {
@@ -442,6 +502,67 @@ export function persistRemoteSnapshot(
     )
   } catch {
     // Ignore local persistence failures and keep the live session running.
+  }
+}
+
+/** Minimum spacing between warm-start snapshot writes while updates keep
+ * arriving. Each write JSON.stringifies the entire snapshot synchronously, so
+ * without spacing it stays part of the streaming hot path. */
+export const SNAPSHOT_CACHE_MIN_INTERVAL_MS = 5_000
+
+export type SnapshotCacheScheduler = {
+  /** Books the next trailing write at least one interval after the last. */
+  schedule: () => void
+  /** Lands any pending image now (hide/pagehide) and resets the interval. */
+  flush: () => void
+  /** Drops the pending image without writing (session reset/invalidation). */
+  cancel: () => void
+}
+
+export function createSnapshotCacheScheduler(
+  write: () => void,
+  minIntervalMs: number = SNAPSHOT_CACHE_MIN_INTERVAL_MS,
+): SnapshotCacheScheduler {
+  let timer: number | null = null
+  let pending = false
+  // Zero reads as "never written", so the first cache seed is not delayed.
+  let lastWriteAt = 0
+
+  const writeNow = () => {
+    timer = null
+    if (!pending) return
+    pending = false
+    // Stamp before writing: a throwing write must not shorten the next wait
+    // into a tight loop against failing storage.
+    lastWriteAt = Date.now()
+    write()
+  }
+
+  return {
+    // While a write is already booked, callers only refresh the pending
+    // image; the single trailing timer always fires with what is newest.
+    schedule() {
+      pending = true
+      if (timer !== null) return
+      const delay = Math.max(0, minIntervalMs - (Date.now() - lastWriteAt))
+      timer = window.setTimeout(writeNow, delay)
+    },
+    // Timers stop running in backgrounded or closing tabs, so the hidden /
+    // pagehide paths flush synchronously instead of waiting for the timer.
+    flush() {
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      writeNow()
+    },
+    cancel() {
+      if (timer !== null) {
+        window.clearTimeout(timer)
+        timer = null
+      }
+      pending = false
+    },
   }
 }
 

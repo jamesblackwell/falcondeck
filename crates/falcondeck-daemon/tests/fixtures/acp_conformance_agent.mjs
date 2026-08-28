@@ -121,11 +121,21 @@ input.on('line', (line) => {
         availableModes: [{ id: 'safe', name: 'Safe' }],
       },
     })
+    if (scenario === 'startup-banner') {
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'STARTUP_BANNER' },
+      })
+    }
     return
   }
 
   if (message.method === 'session/prompt') {
     promptCount += 1
+    if (scenario === 'startup-banner' || scenario === 'empty-turn') {
+      result(message.id, { stopReason: 'end_turn' })
+      return
+    }
     if (scenario === 'empty-stderr-error') {
       // JSON-RPC stdout first, then stderr: OpenCode's real failure mode is
       // a successful stopReason with the cause only on the error pipe.

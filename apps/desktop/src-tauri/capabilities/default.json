@@ -9,6 +9,7 @@
     "core:window:allow-set-theme",
     "core:window:allow-set-always-on-top",
     "dialog:allow-open",
+    "dialog:allow-save",
     "notification:default",
     "updater:default"
   ]

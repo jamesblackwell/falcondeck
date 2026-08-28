@@ -33,7 +33,11 @@ const SPEECH_STORAGE: &str = "daemon_secret_store";
 // Stay under the phone's 8-second speech.status deadline so a parked
 // one-shot Keychain migration surfaces the daemon error, not a relay timeout.
 const SPEECH_SECRET_TIMEOUT: Duration = Duration::from_secs(5);
-const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
+// Ceiling for a single transcription attempt on a short dictation. Long
+// recordings scale this up; see `transcription_timeout`.
+const BASE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
+// Even a 30-minute dictation should not hold a request open longer than this.
+const MAX_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(480);
 // Remote clients have a roughly 30-second relay RPC budget. Keep this below
 // it so cancellation reaches OpenRouter before the client gives up.
 const SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(25);
@@ -42,10 +46,15 @@ const READ_ALOUD_VOICE: &str = "Eve";
 // Grok Voice accepts up to 15,000 characters. Keeping the relay payload below
 // its encrypted WebSocket limit also makes cancellation feel immediate.
 const MAX_READ_ALOUD_CHARS: usize = 8_000;
-// Wall-clock budget for the whole fallback chain. Without it, several slow
-// models can each consume the full request timeout and hold the client for
-// minutes before the error surfaces.
-const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(20);
+// Wall-clock budget for the whole fallback chain on a short dictation.
+// Without it, several slow models can each consume the full request timeout
+// and hold the client for minutes before the error surfaces. Long recordings
+// scale this up; see `fallback_budget`.
+const BASE_FALLBACK_BUDGET: Duration = Duration::from_secs(30);
+const MAX_FALLBACK_BUDGET: Duration = Duration::from_secs(900);
+// An attempt that cannot get at least this much of the budget is not worth
+// starting; return the last real error instead.
+const MIN_ATTEMPT_TIME: Duration = Duration::from_secs(5);
 // How long a connection attempt to OpenRouter may take before the fallback
 // chain moves on. Distinct from the per-request timeout: a stalled network
 // should fail in seconds, while a legitimately long transcription may not.
@@ -60,6 +69,23 @@ const FALLBACK_MODELS: [&str; 4] = [
     "openai/whisper-large-v3-turbo",
     "nvidia/parakeet-tdt-0.6b-v3",
 ];
+
+// OpenAI's transcription family rejects audio longer than 1500 s outright, so
+// a long dictation has to reach a long-form model before the chain runs out.
+// Everything else here streams arbitrary lengths.
+const MODEL_AUDIO_LIMIT: Duration = Duration::from_secs(1500);
+const DURATION_CAPPED_MODELS: [&str; 4] = [
+    "openai/gpt-4o-mini-transcribe",
+    "openai/gpt-4o-transcribe",
+    "openai/gpt-transcribe",
+    "openai/whisper-1",
+];
+// Recording length is what actually drives transcription time, but not every
+// client knows it. These are deliberately generous bytes-per-second floors so
+// a missing duration over-estimates (a longer ceiling) rather than cutting a
+// legitimate transcription short.
+const COMPRESSED_BYTES_PER_SECOND: f64 = 4_000.0;
+const UNCOMPRESSED_BYTES_PER_SECOND: f64 = 32_000.0;
 
 /// One client for every OpenRouter call. Reusing the pool skips the DNS +
 /// TCP + TLS handshake on each dictation after the first; timeouts are set
@@ -89,6 +115,14 @@ pub struct SpeechTranscriptionRequest {
     pub model: String,
     #[serde(default)]
     pub language: Option<String>,
+    /// Tried right after the preferred model. Clients set this to a different
+    /// vendor so one provider outage cannot take out both attempts.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+    /// Recording length, when the client measured it. Drives the request
+    /// timeout and the ordering of duration-capped models.
+    #[serde(default)]
+    pub duration_seconds: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,7 +258,14 @@ impl AppState {
                 "OpenRouter is not configured on the connected desktop".to_string(),
             )
         })?;
-        let models = fallback_models(&request.model);
+        let audio_duration =
+            estimated_audio_duration(request.duration_seconds, audio.len(), &request.format);
+        let models = fallback_models(
+            &request.model,
+            request.fallback_model.as_deref(),
+            audio_duration,
+        );
+        let request_timeout = transcription_timeout(audio_duration);
         // The extension tells OpenRouter the container format.
         let file_name = format!("audio.{}", request.format);
         let language = request
@@ -234,12 +275,18 @@ impl AppState {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let mut last_error = "Transcription failed".to_string();
-        let fallback_deadline = Instant::now() + FALLBACK_TIME_BUDGET;
+        let fallback_deadline = Instant::now() + fallback_budget(audio_duration);
 
         for model in models {
-            if Instant::now() > fallback_deadline {
+            // Cap each attempt to what is left of the budget: a hung provider
+            // must not eat the whole window and starve the fallback models.
+            // The typical transcription finishes in one or two seconds, so a
+            // capped attempt still has an order of magnitude of headroom.
+            let remaining = fallback_deadline.saturating_duration_since(Instant::now());
+            if remaining < MIN_ATTEMPT_TIME {
                 break;
             }
+            let attempt_timeout = request_timeout.min(remaining);
             let mut form = reqwest::multipart::Form::new()
                 .part(
                     "file",
@@ -254,7 +301,7 @@ impl AppState {
                 .post(OPENROUTER_TRANSCRIPTIONS_URL)
                 .bearer_auth(&api_key)
                 .header("X-Title", "FalconDeck")
-                .timeout(TRANSCRIPTION_TIMEOUT)
+                .timeout(attempt_timeout)
                 .multipart(form)
                 .send()
                 .await
@@ -433,8 +480,25 @@ fn with_nitro(model: &str) -> Option<String> {
     (!model.is_empty() && !model.contains(':')).then(|| format!("{model}:nitro"))
 }
 
-fn fallback_models(preferred: &str) -> Vec<String> {
+/// The base model id without OpenRouter's variant suffix.
+fn base_model(model: &str) -> &str {
+    model.split(':').next().unwrap_or(model)
+}
+
+/// Whether the model refuses audio longer than [`MODEL_AUDIO_LIMIT`].
+fn rejects_long_audio(model: &str) -> bool {
+    DURATION_CAPPED_MODELS.contains(&base_model(model))
+}
+
+fn fallback_models(
+    preferred: &str,
+    user_fallback: Option<&str>,
+    audio_duration: Duration,
+) -> Vec<String> {
     let preferred = preferred.trim();
+    let user_fallback = user_fallback
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let mut models: Vec<String> = Vec::new();
     {
         let mut add = |model: String| {
@@ -448,12 +512,70 @@ fn fallback_models(preferred: &str) -> Vec<String> {
         // The plain preferred model is the safety net for a rejected variant;
         // the fallbacks run nitro-only to keep the chain short.
         add(preferred.to_string());
+        // The user's own second choice outranks our built-in chain, and gets
+        // the same nitro-then-plain treatment as the preferred model: it was
+        // chosen deliberately, so a rejected routing variant should not skip
+        // it entirely.
+        if let Some(fallback) = user_fallback {
+            if let Some(nitro) = with_nitro(fallback) {
+                add(nitro);
+            }
+            add(fallback.to_string());
+        }
         for fallback in FALLBACK_MODELS {
             add(with_nitro(fallback).unwrap_or_else(|| fallback.to_string()));
         }
     }
-    models.truncate(6);
+    // A recording past the OpenAI duration cap would burn the front of the
+    // chain on guaranteed rejections, so those models move to the back
+    // instead of being dropped: the estimate can be wrong, and a rejected
+    // request is not billed.
+    if audio_duration > MODEL_AUDIO_LIMIT {
+        let mut long_form: Vec<String> = Vec::new();
+        let mut capped: Vec<String> = Vec::new();
+        for model in models {
+            if rejects_long_audio(&model) {
+                capped.push(model);
+            } else {
+                long_form.push(model);
+            }
+        }
+        long_form.extend(capped);
+        models = long_form;
+    }
+    models.truncate(8);
     models
+}
+
+/// How long the recording runs for, from the client's measurement when it has
+/// one and from a conservative bitrate floor otherwise.
+fn estimated_audio_duration(
+    duration_seconds: Option<f64>,
+    audio_bytes: usize,
+    format: &str,
+) -> Duration {
+    if let Some(seconds) = duration_seconds.filter(|value| value.is_finite() && *value > 0.0) {
+        return Duration::from_secs_f64(seconds.min(24.0 * 60.0 * 60.0));
+    }
+    let bytes_per_second = match format {
+        "wav" | "flac" => UNCOMPRESSED_BYTES_PER_SECOND,
+        _ => COMPRESSED_BYTES_PER_SECOND,
+    };
+    Duration::from_secs_f64(audio_bytes as f64 / bytes_per_second)
+}
+
+/// Ceiling for one transcription attempt. Providers batch-transcribe well
+/// above real time, but a 30-minute dictation legitimately takes minutes, so
+/// the ceiling grows with the recording instead of failing it at a flat 70 s.
+fn transcription_timeout(audio_duration: Duration) -> Duration {
+    (BASE_TRANSCRIPTION_TIMEOUT + audio_duration / 2).min(MAX_TRANSCRIPTION_TIMEOUT)
+}
+
+/// Wall clock for the whole fallback chain. A short dictation fails fast so
+/// the writer can simply say it again; a long one is expensive to re-record,
+/// so the chain gets room for another model to run.
+fn fallback_budget(audio_duration: Duration) -> Duration {
+    (BASE_FALLBACK_BUDGET + audio_duration).min(MAX_FALLBACK_BUDGET)
 }
 
 fn should_try_fallback(status: u16) -> bool {
@@ -629,6 +751,9 @@ fn delete_openrouter_key() -> Result<(), DaemonError> {
 mod tests {
     use super::*;
 
+    /// A typical dictation: a few seconds of speech.
+    const SHORT_AUDIO: Duration = Duration::from_secs(10);
+
     /// Serializes the tests that mutate the process-global test credential.
     async fn credential_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
         static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -640,7 +765,7 @@ mod tests {
 
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
-        let models = fallback_models("openai/gpt-4o-mini-transcribe");
+        let models = fallback_models("openai/gpt-4o-mini-transcribe", None, SHORT_AUDIO);
         assert_eq!(
             models,
             [
@@ -654,8 +779,124 @@ mod tests {
     }
 
     #[test]
+    fn user_fallback_runs_before_the_built_in_chain() {
+        let models = fallback_models(
+            "openai/gpt-4o-mini-transcribe",
+            Some("mistralai/voxtral-mini-transcribe"),
+            SHORT_AUDIO,
+        );
+        assert_eq!(models[2], "mistralai/voxtral-mini-transcribe:nitro");
+        // The plain id backs up a rejected :nitro variant, exactly like the
+        // preferred model's safety net.
+        assert_eq!(models[3], "mistralai/voxtral-mini-transcribe");
+        assert_eq!(models[4], "deepgram/nova-3:nitro");
+    }
+
+    #[test]
+    fn every_model_fits_even_with_a_user_fallback() {
+        let models = fallback_models(
+            "google/chirp-3",
+            Some("qwen/qwen3-asr-flash-2026-02-10"),
+            SHORT_AUDIO,
+        );
+        // 2 preferred + 2 user fallback + 4 built-ins: nothing is truncated.
+        assert_eq!(models.len(), 8);
+        assert!(models.contains(&"nvidia/parakeet-tdt-0.6b-v3:nitro".to_string()));
+    }
+
+    #[test]
+    fn a_slow_attempt_cannot_starve_the_fallback_chain() {
+        // The whole point of the per-attempt cap: even the first attempt is
+        // bounded by the budget, so a hung provider leaves room for another
+        // model inside the same request.
+        let budget = fallback_budget(SHORT_AUDIO);
+        let attempt = transcription_timeout(SHORT_AUDIO).min(budget);
+        assert!(attempt <= budget);
+        assert!(MIN_ATTEMPT_TIME < budget);
+    }
+
+    #[test]
+    fn user_fallback_matching_the_preferred_model_is_not_repeated() {
+        let models = fallback_models("deepgram/nova-3", Some("deepgram/nova-3"), SHORT_AUDIO);
+        assert_eq!(models[0], "deepgram/nova-3:nitro");
+        assert_eq!(models[1], "deepgram/nova-3");
+        assert_eq!(models[2], "openai/gpt-4o-mini-transcribe:nitro");
+    }
+
+    #[test]
+    fn long_recordings_try_long_form_models_first() {
+        let models = fallback_models(
+            "openai/gpt-4o-mini-transcribe",
+            Some("mistralai/voxtral-mini-transcribe"),
+            Duration::from_secs(30 * 60),
+        );
+        // Every OpenAI model rejects audio past 1500 s, so they sink to the
+        // back of the chain rather than eating the first two attempts.
+        assert_eq!(models[0], "mistralai/voxtral-mini-transcribe:nitro");
+        assert!(!rejects_long_audio(&models[0]));
+        assert!(rejects_long_audio(models.last().unwrap()));
+        // Nothing is dropped: the duration estimate can be wrong.
+        assert!(models.contains(&"openai/gpt-4o-mini-transcribe:nitro".to_string()));
+    }
+
+    #[test]
+    fn duration_capped_models_are_matched_through_the_nitro_suffix() {
+        assert!(rejects_long_audio("openai/gpt-4o-mini-transcribe:nitro"));
+        assert!(!rejects_long_audio("deepgram/nova-3:nitro"));
+    }
+
+    #[test]
+    fn transcription_timeout_grows_with_the_recording() {
+        assert_eq!(transcription_timeout(SHORT_AUDIO), Duration::from_secs(75));
+        // A 30-minute dictation gets minutes, not the short-clip ceiling.
+        assert_eq!(
+            transcription_timeout(Duration::from_secs(30 * 60)),
+            MAX_TRANSCRIPTION_TIMEOUT
+        );
+        assert!(transcription_timeout(Duration::from_secs(5 * 60)) > BASE_TRANSCRIPTION_TIMEOUT);
+    }
+
+    #[test]
+    fn fallback_budget_lets_a_long_recording_reach_a_second_model() {
+        assert_eq!(fallback_budget(SHORT_AUDIO), Duration::from_secs(40));
+        let long = Duration::from_secs(30 * 60);
+        assert!(fallback_budget(long) > transcription_timeout(long));
+        assert_eq!(
+            fallback_budget(Duration::from_secs(60 * 60)),
+            MAX_FALLBACK_BUDGET
+        );
+    }
+
+    #[test]
+    fn audio_duration_prefers_the_measured_length() {
+        assert_eq!(
+            estimated_audio_duration(Some(42.5), 1_000, "m4a"),
+            Duration::from_secs_f64(42.5)
+        );
+        // 32 kbps AAC is 4 kB per second of speech.
+        assert_eq!(
+            estimated_audio_duration(None, 400_000, "m4a"),
+            Duration::from_secs(100)
+        );
+        // Uncompressed audio carries far more bytes per second.
+        assert_eq!(
+            estimated_audio_duration(None, 320_000, "wav"),
+            Duration::from_secs(10)
+        );
+        // Nonsense measurements fall back to the size estimate.
+        assert_eq!(
+            estimated_audio_duration(Some(-1.0), 400_000, "m4a"),
+            Duration::from_secs(100)
+        );
+        assert_eq!(
+            estimated_audio_duration(Some(f64::NAN), 400_000, "m4a"),
+            Duration::from_secs(100)
+        );
+    }
+
+    #[test]
     fn fallback_models_apply_nitro_to_every_entry() {
-        let models = fallback_models("mistralai/voxtral-mini-transcribe");
+        let models = fallback_models("mistralai/voxtral-mini-transcribe", None, SHORT_AUDIO);
         assert_eq!(models[0], "mistralai/voxtral-mini-transcribe:nitro");
         assert_eq!(models[1], "mistralai/voxtral-mini-transcribe");
         // Every fallback rides the throughput-first variant too.
@@ -665,7 +906,7 @@ mod tests {
 
     #[test]
     fn fallback_models_never_stack_variant_suffixes() {
-        let models = fallback_models("openai/whisper-large-v3-turbo:free");
+        let models = fallback_models("openai/whisper-large-v3-turbo:free", None, SHORT_AUDIO);
         assert_eq!(models[0], "openai/whisper-large-v3-turbo:free");
         assert!(models.iter().all(|model| !model.contains(":free:")));
     }
@@ -683,8 +924,8 @@ mod tests {
     }
 
     #[test]
-    fn fallback_budget_stays_shorter_than_one_request_timeout() {
-        assert!(FALLBACK_TIME_BUDGET < TRANSCRIPTION_TIMEOUT);
+    fn short_dictations_give_up_before_one_request_times_out() {
+        assert!(fallback_budget(SHORT_AUDIO) < transcription_timeout(SHORT_AUDIO));
     }
 
     #[test]

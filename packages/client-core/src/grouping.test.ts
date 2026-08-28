@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ThreadSummary, WorkspaceSummary } from './types'
-import { buildProjectGroups, compareThreads, sortProjectGroupThreads } from './grouping'
+import {
+  buildProjectGroups,
+  compareThreads,
+  partitionSidebarThreads,
+  sortProjectGroupThreads,
+} from './grouping'
 
 function workspace(id: string, path: string) {
   return { id, path } as WorkspaceSummary
@@ -43,6 +48,107 @@ describe('buildProjectGroups', () => {
     )
 
     expect(groups.map((group) => group.workspace.id)).toEqual(['saved-a', 'saved-b', 'new'])
+  })
+})
+
+describe('buildProjectGroups reuse', () => {
+  const fullSummary = (overrides: Partial<ThreadSummary>): ThreadSummary =>
+    summary({ id: 'thread', ...overrides })
+
+  it('returns the previous groups untouched when fresh snapshot content is equal', () => {
+    const previous = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [fullSummary({})],
+    )
+    // Snapshots rebuild every summary object, so feed equivalent-but-fresh
+    // inputs plus the previous build.
+    const next = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [{ ...fullSummary({}) }],
+      [],
+      previous,
+    )
+
+    expect(next).toBe(previous)
+  })
+
+  it('keeps unchanged identities and swaps only the changed thread', () => {
+    const stable = fullSummary({})
+    const changed = fullSummary({})
+    const previous = buildProjectGroups([workspace('workspace', '/projects/alpha')], [stable, changed])
+
+    const next = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [stable, { ...changed, title: 'Renamed' }],
+      [],
+      previous,
+    )
+
+    expect(next).not.toBe(previous)
+    expect(next[0]?.threads[0]).toBe(stable)
+    expect(next[0]?.threads[1]).not.toBe(changed)
+    expect(next[0]?.threads[1]?.title).toBe('Renamed')
+  })
+
+  it('keeps row identities when recency order moves a thread', () => {
+    const older = fullSummary({ id: 'older', updated_at: '2026-08-12T09:00:00Z' })
+    const newer = fullSummary({ id: 'newer', updated_at: '2026-08-12T11:00:00Z' })
+    const previous = buildProjectGroups([workspace('workspace', '/projects/alpha')], [older, newer])
+
+    const bumped = { ...older, updated_at: '2026-08-12T12:00:00Z' }
+    const next = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [bumped, newer],
+      [],
+      previous,
+    )
+
+    // Order moved, so the list and its container are new, but both rows keep
+    // identity and the workspace stays put.
+    expect(next).not.toBe(previous)
+    expect(next[0]).not.toBe(previous[0])
+    expect(next[0]?.threads.map(({ id }) => id)).toEqual(['older', 'newer'])
+    expect(next[0]?.threads[0]).toBe(bumped)
+    expect(next[0]?.threads[1]).toBe(newer)
+    expect(next[0]?.workspace).toBe(previous[0]?.workspace)
+  })
+
+  it('still rebuilds everything without a previous build', () => {
+    const inputs = () => [workspace('workspace', '/projects/alpha')]
+    const first = buildProjectGroups(inputs(), [fullSummary({})])
+    const second = buildProjectGroups([...inputs()], [{ ...fullSummary({}) }])
+
+    expect(second).not.toBe(first)
+    expect(second[0]).not.toBe(first[0])
+  })
+
+  it('detects nested attention changes on an otherwise identical summary', () => {
+    const before = fullSummary({
+      attention: {
+        level: 'none',
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 1,
+        last_read_seq: 1,
+      },
+    })
+    const previous = buildProjectGroups([workspace('workspace', '/projects/alpha')], [before])
+
+    const after = {
+      ...before,
+      attention: { ...before.attention, last_read_seq: 2, unread: false },
+    }
+    const next = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [after],
+      [],
+      previous,
+    )
+
+    expect(next[0]?.threads[0]).toBe(after)
+    expect(next[0]?.threads[0]).not.toBe(before)
   })
 })
 
@@ -160,7 +266,7 @@ describe('sortProjectGroupThreads', () => {
     })
     const groups = [
       {
-        workspace: workspace('ws', '/projects/alpha'),
+        workspace: workspace('workspace', '/projects/alpha'),
         threads: [older, newer],
       },
     ]
@@ -171,5 +277,49 @@ describe('sortProjectGroupThreads', () => {
     expect(
       sortProjectGroupThreads(groups, 'alphabetical')[0]?.threads.map(({ id }) => id),
     ).toEqual(['older', 'newer'])
+  })
+
+  it('keeps project pins above ordinary chats and global pins above both', () => {
+    const older = summary({
+      id: 'older',
+      title: 'Alpha',
+      updated_at: '2026-08-12T09:00:00Z',
+    })
+    const projectPinned = summary({
+      id: 'project-pinned',
+      title: 'Zebra',
+      is_pinned_in_project: true,
+      updated_at: '2026-08-12T08:00:00Z',
+    })
+    const globallyPinned = summary({
+      id: 'globally-pinned',
+      title: 'Beta',
+      is_pinned: true,
+      updated_at: '2026-08-12T07:00:00Z',
+    })
+    const groups = [
+      {
+        workspace: workspace('workspace', '/projects/alpha'),
+        threads: [older, projectPinned, globallyPinned],
+      },
+    ]
+
+    expect(
+      sortProjectGroupThreads(groups, 'last_updated')[0]?.threads.map(({ id }) => id),
+    ).toEqual(['globally-pinned', 'project-pinned', 'older'])
+  })
+})
+
+describe('partitionSidebarThreads', () => {
+  it('treats a global pin as leaving the project list', () => {
+    const globallyPinned = summary({ id: 'global', is_pinned: true, is_pinned_in_project: true })
+    const projectPinned = summary({ id: 'project', is_pinned_in_project: true })
+    const ordinary = summary({ id: 'ordinary' })
+
+    expect(partitionSidebarThreads([globallyPinned, projectPinned, ordinary])).toEqual({
+      globallyPinned: [globallyPinned],
+      pinnedInProject: [projectPinned],
+      unpinned: [ordinary],
+    })
   })
 })

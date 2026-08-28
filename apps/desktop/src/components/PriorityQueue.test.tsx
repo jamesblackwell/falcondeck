@@ -39,6 +39,7 @@ function thread(id: string, overrides: Partial<ThreadSummary> = {}): ThreadSumma
     },
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     ...overrides,
   } as ThreadSummary
 }
@@ -93,11 +94,13 @@ describe('Priority chat queue', () => {
   it('keeps pinned Priority rows stable while timestamps churn', () => {
     const alpha = thread('Pinned Alpha', {
       is_pinned: true,
+      is_pinned_in_project: false,
       status: 'running',
       updated_at: '2026-08-13T11:00:00Z',
     })
     const beta = thread('Pinned Beta', {
       is_pinned: true,
+      is_pinned_in_project: false,
       status: 'running',
       updated_at: '2026-08-13T10:00:00Z',
     })

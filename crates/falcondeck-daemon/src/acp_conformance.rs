@@ -69,6 +69,8 @@ pub struct ProbeOptions {
     pub live: bool,
     /// Whether to restart the adapter and reload the live session.
     pub restart: bool,
+    /// Treat a missing adapter binary as skipped rather than failed.
+    pub skip_missing: bool,
     /// Maximum time allowed for each ACP request.
     pub timeout: Duration,
 }
@@ -83,7 +85,28 @@ impl ProbeOptions {
             json: false,
             live: false,
             restart: false,
+            skip_missing: false,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        }
+    }
+
+    /// Shared options for a matrix run from the harness suite.
+    pub fn for_suite(
+        cwd: PathBuf,
+        live: bool,
+        restart: bool,
+        skip_missing: bool,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            command: Vec::new(),
+            env: HashMap::new(),
+            cwd,
+            json: false,
+            live,
+            restart,
+            skip_missing,
+            timeout,
         }
     }
 
@@ -111,6 +134,7 @@ impl ProbeOptions {
         let mut json = false;
         let mut live = false;
         let mut restart = false;
+        let mut skip_missing = false;
         let mut timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
 
         while let Some(arg) = args.next() {
@@ -119,6 +143,7 @@ impl ProbeOptions {
                 "--json" => json = true,
                 "--live" => live = true,
                 "--restart" => restart = true,
+                "--skip-missing" => skip_missing = true,
                 "--cwd" => {
                     let value = args.next().ok_or_else(|| {
                         ProbeError::Usage("--cwd requires a directory".to_string())
@@ -153,6 +178,7 @@ impl ProbeOptions {
                         json,
                         live,
                         restart,
+                        skip_missing,
                         timeout: Duration::from_secs(timeout_seconds),
                     });
                 }
@@ -162,7 +188,7 @@ impl ProbeOptions {
         let command = args.collect::<Vec<_>>();
         if command.is_empty() {
             return Err(ProbeError::Usage(
-                "acp_conformance [--json] [--live] [--restart] [--all] [--cwd PATH] [--timeout-seconds N] -- COMMAND [ARGS...]"
+                "acp_conformance [--json] [--live] [--restart] [--skip-missing] [--all] [--cwd PATH] [--timeout-seconds N] -- COMMAND [ARGS...]"
                     .to_string(),
             ));
         }
@@ -173,6 +199,7 @@ impl ProbeOptions {
             json,
             live,
             restart,
+            skip_missing,
             timeout: Duration::from_secs(timeout_seconds),
         })
     }
@@ -200,6 +227,102 @@ impl CheckStatus {
             Self::Skipped => "–",
         }
     }
+}
+
+/// Picks a current cheap-tier model for a live probe.
+///
+/// Prefer today's fast tiers (GPT-5.6 Luna, DeepSeek V4 Flash, Grok 4.6,
+/// Gemini 3.7 Flash, Claude Haiku 4) over retired names that still sort
+/// "cheap" — `claude-3-haiku`, `gpt-5.4-mini`, Nemotron nano, and the like.
+/// Those ids fail or stall on current harnesses. Unknown catalogs fall
+/// through to the first non-retired id.
+pub(crate) fn pick_cheap_model<'a>(ids: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    pick_live_model(ids, true)
+}
+
+/// Like [`pick_cheap_model`], but never falls back to an unranked id such as
+/// `opencode/grok-code`. Native OpenCode live turns should skip rather than
+/// run a default the runner cannot execute.
+pub(crate) fn pick_preferred_live_model<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    pick_live_model(ids, false)
+}
+
+fn pick_live_model<'a>(ids: impl IntoIterator<Item = &'a str>, fallback: bool) -> Option<&'a str> {
+    let ids = ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect::<Vec<_>>();
+    let preferred = ids
+        .iter()
+        .copied()
+        .filter_map(|id| {
+            preferred_live_model_rank(id).map(|rank| {
+                let routed = if normalized_model_id(id).contains("openrouter/") {
+                    0
+                } else {
+                    1
+                };
+                (rank, routed, id.len(), id)
+            })
+        })
+        .min()
+        .map(|(_, _, _, id)| id);
+    if preferred.is_some() || !fallback {
+        return preferred;
+    }
+    ids.iter().copied().find(|id| !is_retired_live_model(id))
+}
+
+fn normalized_model_id(id: &str) -> String {
+    id.to_ascii_lowercase().replace('_', "-")
+}
+
+fn is_retired_live_model(id: &str) -> bool {
+    let id = normalized_model_id(id);
+    id.contains("claude-3")
+        || id.contains("gpt-3.")
+        || id.contains("gpt-4")
+        || id.contains("gpt-5-mini")
+        || id.contains("gpt-5.4")
+        || id.contains("nemotron")
+        || id.contains("nano")
+        || id.contains("-free")
+        || id.contains(":free")
+        || id.ends_with("/free")
+}
+
+/// Lower is better. `None` means "not a preferred cheap-tier id".
+fn preferred_live_model_rank(id: &str) -> Option<usize> {
+    let id = normalized_model_id(id);
+    if is_retired_live_model(&id) {
+        return None;
+    }
+    // Most preferred first. Luna and DeepSeek V4 Flash are the current
+    // high-volume cheap tiers on OpenRouter; Grok only has 4.6.
+    const PREFERRED: &[&str] = &[
+        "gpt-5.6-luna",
+        "5.6-luna",
+        "deepseek-v4-flash-0731",
+        "deepseek-v4-flash",
+        "grok-4.6",
+        "gemini-3.7-flash-low",
+        "gemini-3.7-flash",
+        "claude-haiku-4",
+        "haiku-4.5",
+        "haiku-4",
+    ];
+    if let Some(rank) = PREFERRED.iter().position(|needle| id.contains(needle)) {
+        return Some(rank);
+    }
+    if id == "haiku" || id.ends_with("/haiku") {
+        return Some(PREFERRED.len());
+    }
+    if id.contains("flash-low") {
+        return Some(PREFERRED.len() + 1);
+    }
+    None
 }
 
 #[derive(Debug, Serialize)]
@@ -583,6 +706,17 @@ impl Drop for ProbeFixture {
 /// unhealthy adapters.
 pub async fn run_probe(options: &ProbeOptions) -> Report {
     let mut report = Report::new(options.command.clone());
+    if options.skip_missing
+        && let Some(exe) = options.command.first()
+        && !crate::agent_binary::agent_binary_available_cached(exe, exe)
+    {
+        report.push(
+            "Process launch",
+            CheckStatus::Skipped,
+            format!("`{exe}` is not installed"),
+        );
+        return report;
+    }
     let mut adapter = match AdapterProcess::spawn(options).await {
         Ok(adapter) => adapter,
         Err(error) => {
@@ -679,15 +813,33 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
         .get("authMethods")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    report.push(
-        "Authentication",
-        CheckStatus::Warning,
-        if auth_methods == 0 {
-            "no ACP auth methods advertised".to_string()
-        } else {
-            format!("{auth_methods} method(s) advertised; login flow not exercised")
-        },
-    );
+    if let Some(method_id) = crate::acp::silent_acp_auth_method(&initialized) {
+        match adapter
+            .request("authenticate", json!({ "methodId": method_id }))
+            .await
+        {
+            Ok(_) => report.push(
+                "Authentication",
+                CheckStatus::Pass,
+                format!("authenticated via {method_id}"),
+            ),
+            Err(error) => report.push(
+                "Authentication",
+                CheckStatus::Warning,
+                format!("{method_id} failed ({error}); continuing"),
+            ),
+        }
+    } else {
+        report.push(
+            "Authentication",
+            CheckStatus::Warning,
+            if auth_methods == 0 {
+                "no ACP auth methods advertised".to_string()
+            } else {
+                format!("{auth_methods} method(s) advertised; login flow not exercised")
+            },
+        );
+    }
 
     // `session/new` spends nothing — it is the same discovery call FalconDeck
     // makes at workspace attach — so session creation and catalog discovery
@@ -753,6 +905,45 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
         );
     } else {
         report.push("Catalog discovery", CheckStatus::Pass, catalog);
+    }
+
+    let cheap_model =
+        pick_cheap_model(parsed.models.iter().map(|model| model.id.as_str())).map(str::to_string);
+    if options.live {
+        match (cheap_model.as_deref(), parsed.model_config_id()) {
+            (Some(model), Some(config_id)) => {
+                match adapter
+                    .request(
+                        "session/set_config_option",
+                        json!({
+                            "sessionId": session_id,
+                            "configId": config_id,
+                            "value": model,
+                        }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        report.push("Live model", CheckStatus::Pass, format!("selected {model}"))
+                    }
+                    Err(error) => report.push(
+                        "Live model",
+                        CheckStatus::Warning,
+                        format!("could not select {model} ({error}); using adapter default"),
+                    ),
+                }
+            }
+            (Some(model), None) => report.push(
+                "Live model",
+                CheckStatus::Pass,
+                format!("{model} advertised; adapter has no model config option"),
+            ),
+            (None, _) => report.push(
+                "Live model",
+                CheckStatus::Warning,
+                "catalog has no model ids; using adapter default",
+            ),
+        }
     }
 
     if !options.live {
@@ -1010,22 +1201,29 @@ async fn restart_and_load(options: &ProbeOptions, session_id: &str) -> (Check, V
         )
         .await;
     let outcome = match initialized {
-        Ok(_) => adapter
-            .request(
-                "session/load",
-                json!({ "sessionId": session_id, "cwd": options.cwd, "mcpServers": [] }),
-            )
-            .await
-            .map(|_| {
-                Check::new(
-                    "Process restart",
-                    CheckStatus::Pass,
-                    format!(
-                        "new process loaded session; replayed {} update(s)",
-                        adapter.updates.len()
-                    ),
+        Ok(init) => {
+            if let Some(method_id) = crate::acp::silent_acp_auth_method(&init) {
+                let _ = adapter
+                    .request("authenticate", json!({ "methodId": method_id }))
+                    .await;
+            }
+            adapter
+                .request(
+                    "session/load",
+                    json!({ "sessionId": session_id, "cwd": options.cwd, "mcpServers": [] }),
                 )
-            }),
+                .await
+                .map(|_| {
+                    Check::new(
+                        "Process restart",
+                        CheckStatus::Pass,
+                        format!(
+                            "new process loaded session; replayed {} update(s)",
+                            adapter.updates.len()
+                        ),
+                    )
+                })
+        }
         Err(error) => Err(error),
     };
     let check = outcome.unwrap_or_else(|error| {
@@ -1086,7 +1284,7 @@ fn default_state_dir() -> PathBuf {
 }
 
 /// Runs the probe once per configured provider and renders one table.
-async fn run_matrix(options: &ProbeOptions) -> Vec<Report> {
+pub async fn run_matrix(options: &ProbeOptions) -> Vec<Report> {
     let providers = configured_provider_commands(&default_state_dir());
     let mut reports = Vec::new();
     for (id, command, env) in providers {
@@ -1101,6 +1299,7 @@ async fn run_matrix(options: &ProbeOptions) -> Vec<Report> {
             json: options.json,
             live: options.live,
             restart: options.restart,
+            skip_missing: options.skip_missing,
             timeout: options.timeout,
         };
         reports.push(run_probe(&options).await);
@@ -1129,6 +1328,10 @@ pub async fn run_cli(args: impl IntoIterator<Item = String>) -> i32 {
         };
         let reports = run_matrix(&options).await;
         if reports.is_empty() {
+            if options.skip_missing {
+                eprintln!("no ACP providers configured in providers.json; skipped");
+                return 0;
+            }
             eprintln!("no ACP providers configured in providers.json");
             return 2;
         }
@@ -1267,6 +1470,55 @@ mod tests {
             BTreeSet::from(["available_commands_update".to_string()])
         );
         assert_eq!(unknown, BTreeSet::from(["provider_extension".to_string()]));
+    }
+
+    #[test]
+    fn live_model_prefers_current_cheap_tiers_over_retired_ids() {
+        assert_eq!(
+            pick_cheap_model(["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.4-mini"]),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(
+            pick_cheap_model([
+                "openrouter/anthropic/claude-3-haiku",
+                "openai/gpt-5.6-luna",
+                "openrouter/openai/gpt-5.6-luna",
+                "openrouter/deepseek/deepseek-v4-flash",
+            ]),
+            Some("openrouter/openai/gpt-5.6-luna")
+        );
+        assert_eq!(
+            pick_cheap_model([
+                "opencode/deepseek-v4-flash-free",
+                "opencode/deepseek-v4-flash",
+            ]),
+            Some("opencode/deepseek-v4-flash")
+        );
+        assert_eq!(
+            pick_cheap_model([
+                "openrouter/deepseek/deepseek-v4-flash",
+                "openrouter/deepseek/deepseek-v4-flash-0731",
+            ]),
+            Some("openrouter/deepseek/deepseek-v4-flash-0731")
+        );
+        assert_eq!(pick_cheap_model(["grok-4.5", "grok-4.6"]), Some("grok-4.6"));
+        assert_eq!(
+            pick_cheap_model(["claude-opus-4", "claude-haiku-4", "claude-sonnet-4"]),
+            Some("claude-haiku-4")
+        );
+        assert_eq!(
+            pick_cheap_model([
+                "gemini-3.7-flash-high",
+                "gemini-3.7-flash-low",
+                "claude-sonnet-4-6",
+            ]),
+            Some("gemini-3.7-flash-low")
+        );
+        assert_eq!(
+            pick_cheap_model(["gpt-5", "gpt-5-mini", "gpt-5.1-codex"]),
+            Some("gpt-5")
+        );
+        assert_eq!(pick_cheap_model(["opus", "sonnet"]), Some("opus"));
     }
 
     #[test]

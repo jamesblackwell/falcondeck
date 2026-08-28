@@ -49,6 +49,17 @@ describe('Text', () => {
       expect.arrayContaining([expect.objectContaining({ fontSize: 19, lineHeight: 28.5 })]),
     )
   })
+  it('opts selectable copy into native range selection', () => {
+    const selectable = renderComponent(<Text selectable>Copy this phrase</Text>)
+      .root.findByType('Text' as never)
+    expect(selectable.props.selectable).toBe(true)
+    expect(selectable.props.uiTextView).toBe(true)
+
+    const label = renderComponent(<Text>Not selectable</Text>)
+      .root.findByType('Text' as never)
+    expect(label.props.selectable).toBeUndefined()
+    expect(label.props.uiTextView).toBe(false)
+  })
   it('applies semantic emphasis unless the caller overrides it', () => {
     const meta = renderComponent(<Text variant="meta">Metadata</Text>)
     const metaNode = meta.root.findByType('Text' as never)

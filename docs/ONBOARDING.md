@@ -45,7 +45,7 @@ a UI that sequences existing daemon capabilities.
 
 | Capability | Where | Notes |
 | --- | --- | --- |
-| Harness inventory | `crates/falcondeck-daemon/src/app/harness_manager.rs` | Curated `KNOWN_HARNESSES` (codex, claude, opencode, gemini, pi) + `providers.json` ACP overlay; 60s cache |
+| Harness inventory | `crates/falcondeck-daemon/src/app/harness_manager.rs` | Curated `KNOWN_HARNESSES` (codex, claude, agy, opencode, pi, grok, cursor) + `providers.json` ACP overlay; 60s cache |
 | Probe endpoints | `GET /api/harnesses`, `POST /api/harnesses/refresh` (`include_latest` hits npm registry) | Also relay RPCs `harnesses.read/refresh/upgrade/job` |
 | Install/upgrade | `POST /api/harnesses/upgrade` → job, poll `GET /api/harnesses/jobs/{id}` | Commands come only from the curated registry (OpenCode = `curl -fsSL https://opencode.ai/install \| bash`); `HarnessesPanel.tsx` already implements the polling UI |
 | Binary resolution + diagnostics | `crates/falcondeck-daemon/src/agent_binary.rs` | PATH, known locations, login shell; `ResolutionDiagnostics` supports "we looked here" messaging |
@@ -194,7 +194,10 @@ image-vision (gives screenshot support to models without native vision):
 ```
 
 FalconDeck currently never reads or writes OpenCode's own config
-(`~/.config/opencode/opencode.json`) — OpenCode fully owns it. Options:
+(`~/.config/opencode/opencode.json`) — OpenCode fully owns it. Native
+OpenCode sessions get FalconDeck connectors through the
+`OPENCODE_CONFIG_CONTENT` env overlay (runtime merge, no file edit). Options
+for *OpenCode plugins* (not MCP connectors) remain:
 
 - **A. Merge-write the user's global opencode.json** (recommended): daemon
   endpoint that reads, backs up, and merges the plugin entry if absent.

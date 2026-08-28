@@ -1563,16 +1563,19 @@ export default function ConversationQaScreen() {
   const {
     failResponses,
     composer,
+    handoff,
     unavailableActions,
     scenario: requestedScenario,
   } = useLocalSearchParams<{
     failResponses?: string;
     composer?: string;
+    handoff?: string;
     unavailableActions?: string;
     scenario?: string;
   }>();
   const shouldFailResponses = failResponses === "1";
   const showComposer = composer === "1";
+  const showHandoffComposer = handoff === "1";
   const actionsUnavailable = unavailableActions === "1";
   const [scenario, setScenario] = useState<QaScenario>(() =>
     normalizeQaScenario(requestedScenario),
@@ -2018,7 +2021,23 @@ export default function ConversationQaScreen() {
             selectedEffort="medium"
             effortOptions={["medium"]}
             selectedProvider="codex"
-            showProviderSelector={false}
+            providers={[
+              { provider: "codex", label: "Codex" },
+              { provider: "claude", label: "Claude" },
+              { provider: "grok", label: "Grok" },
+            ]}
+            showProviderSelector={!showHandoffComposer}
+            handoffProviders={
+              showHandoffComposer
+                ? [
+                    { provider: "claude", label: "Claude" },
+                    { provider: "grok", label: "Grok" },
+                  ]
+                : []
+            }
+            onHandoffProviderSelect={
+              showHandoffComposer ? () => {} : undefined
+            }
             onSelectModel={() => {}}
             onSelectEffort={() => {}}
             onSelectProvider={() => {}}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  fenceLanguageFromClassName,
   isMermaidLanguage,
   mermaidRenderOptions,
   mermaidThemeVariables,
@@ -39,6 +40,20 @@ describe("isMermaidLanguage", () => {
   });
 });
 
+describe("fenceLanguageFromClassName", () => {
+  it("reads a language tag from a string or class list", () => {
+    expect(fenceLanguageFromClassName("language-mermaid")).toBe("mermaid");
+    expect(fenceLanguageFromClassName(["language-mermaid"])).toBe("mermaid");
+    expect(fenceLanguageFromClassName(["hljs", "language-mmd"])).toBe("mmd");
+  });
+
+  it("ignores missing or unrelated class names", () => {
+    expect(fenceLanguageFromClassName(undefined)).toBeNull();
+    expect(fenceLanguageFromClassName("not-a-fence")).toBeNull();
+    expect(fenceLanguageFromClassName({ language: "mermaid" })).toBeNull();
+  });
+});
+
 describe("mermaidThemeVariables", () => {
   it("maps palette tokens onto mermaid's base theme", () => {
     const variables = mermaidThemeVariables(palette);
@@ -66,6 +81,8 @@ describe("mermaidRenderOptions", () => {
     const options = mermaidRenderOptions(palette);
     expect(options.securityLevel).toBe("strict");
     expect(options.startOnLoad).toBe(false);
+    expect(options.htmlLabels).toBe(false);
+    expect(options.look).toBe("classic");
     expect(options.flowchart.htmlLabels).toBe(false);
     expect(options.fontFamily).toBe(palette.fontFamily);
   });

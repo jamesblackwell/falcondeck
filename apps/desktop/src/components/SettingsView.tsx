@@ -120,6 +120,7 @@ export function SettingsView(props: SettingsViewProps) {
               workspaces={props.localWorkspaces.map((workspace) => ({
                 id: workspace.id,
                 path: workspace.path,
+                kind: workspace.kind,
               }))}
               onToast={props.onToast}
             />

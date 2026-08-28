@@ -5,6 +5,7 @@ import {
   Check,
   Activity,
   FolderClosed,
+  Gauge,
   Keyboard,
   MessageSquare,
   Monitor,
@@ -46,7 +47,13 @@ import { isComposingKeyboardEvent } from '../lib/keyboard'
 type PaletteItem = {
   id: string
   kind: 'thread' | 'action' | 'appearance'
-  section: 'Unread threads' | 'Threads' | 'Message matches' | 'Actions' | 'Appearance'
+  section:
+    | 'Needs attention'
+    | 'Recent'
+    | 'Message matches'
+    | 'Actions'
+    | 'Appearance'
+    | 'Projects'
   label: string
   sublabel?: string
   /** Second line under the label, used for message-content excerpts. */
@@ -58,13 +65,16 @@ type PaletteItem = {
   icon: PaletteIcon
   search: PaletteSearchFields
   active?: boolean
-  unread?: boolean
-  /** Live thread state ("Running", "Idle", …) shown right of the title. */
+  /** Live thread state ("Running", "Failed", …) shown right of the title. */
   status?: PaletteThreadStatus
+  /** Relative timestamp ("4m", "6d") right-aligned on thread rows. */
+  time?: string
   /** Rendered shortcut tokens ("⌘", "U") shown right-aligned on the row. */
   shortcut?: readonly string[]
   /** Applied to the document while the row is highlighted, then rolled back. */
   preview?: Partial<AppearanceSettings>
+  /** Steps into a nested palette view instead of running and closing. */
+  enters?: 'new-thread'
   run: () => void
 }
 
@@ -102,6 +112,38 @@ function threadPaletteStatus(
     default:
       return { label: 'Idle', tone: 'muted' }
   }
+}
+
+function timeAgo(dateStr: string) {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (seconds < 60) return 'now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d`
+}
+
+/** Whether a thread belongs in the palette's "Needs attention" section. */
+function needsAttention(attention: ThreadAttentionPresentation): boolean {
+  return (
+    attention.unread ||
+    attention.level === 'error' ||
+    attention.level === 'awaiting_response'
+  )
+}
+
+/**
+ * Row order and section membership are captured when the palette opens and
+ * kept for the whole open. Streaming snapshots keep repainting statuses and
+ * timestamps, but rows never trade places under the pointer — with many
+ * active threads the live priority sort made the list too jumpy to aim at.
+ */
+type FrozenThreadOrder = {
+  order: Map<string, number>
+  attention: Set<string>
+  next: number
 }
 
 /**
@@ -166,6 +208,7 @@ function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
 export type PaletteShortcutHints = {
   activity?: readonly string[]
   settings?: readonly string[]
+  usage?: readonly string[]
   keyboardShortcuts?: readonly string[]
 }
 
@@ -177,6 +220,9 @@ export type PaletteSearchFields = {
 
 const PRIORITY_THREAD_COMPARATOR = compareThreads('priority')
 const MAX_SEARCH_RESULTS = 30
+/** Browse-view teaser caps, per section, when no project scope is active. */
+const MAX_BROWSE_ATTENTION = 6
+const MAX_BROWSE_RECENT = 6
 /** Lowest score `fieldScore` gives a scattered-subsequence match. */
 const SUBSEQUENCE_SCORE_BASE = 120
 /** Added per token that only matched as a subsequence, to sort guesses last. */
@@ -396,6 +442,7 @@ export type CommandPaletteProps = {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
+  onOpenUsage?: () => void
   onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
   onOpenPlugins?: () => void
@@ -420,6 +467,7 @@ export const CommandPalette = memo(function CommandPalette({
   onSelectThread,
   onNewThread,
   onOpenSettings,
+  onOpenUsage,
   onOpenActivity,
   onOpenKeyboardShortcuts,
   onOpenPlugins,
@@ -435,7 +483,10 @@ export const CommandPalette = memo(function CommandPalette({
   const [query, setQuery] = useState('')
   // Scope chip: while set, the list only contains this project's threads.
   const [projectId, setProjectId] = useState<string | null>(null)
+  // 'new-thread' is the palette's one nested step: pick the project to start in.
+  const [mode, setMode] = useState<'root' | 'new-thread'>('root')
   const [highlight, setHighlight] = useState(0)
+  const frozenOrderRef = useRef<FrozenThreadOrder | null>(null)
   const listRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
@@ -480,7 +531,9 @@ export const CommandPalette = memo(function CommandPalette({
     if (!open) {
       setQuery(initialQuery)
       setProjectId(initialProjectId)
+      setMode('root')
       setHighlight(0)
+      frozenOrderRef.current = null
     }
   }, [initialProjectId, initialQuery, open])
 
@@ -495,12 +548,36 @@ export const CommandPalette = memo(function CommandPalette({
 
   const items = useMemo<PaletteItem[]>(() => {
     if (!open) return []
+
+    // The new-thread step swaps the whole list for a project picker: one row
+    // per project, searched with the same scorer, chosen with the same keys.
+    if (mode === 'new-thread') {
+      if (!onNewThread) return []
+      return groups.map((group) => {
+        const label = getProjectLabel(group.workspace.path)
+        return {
+          id: `new:${group.workspace.id}`,
+          kind: 'action' as const,
+          section: 'Projects' as const,
+          label,
+          sublabel: group.workspace.path,
+          projectId: group.workspace.id,
+          icon: { kind: 'glyph' as const, Glyph: FolderClosed },
+          search: normalizeSearchFields({
+            primary: label,
+            secondary: group.workspace.path,
+            keywords: 'new chat conversation thread create start project',
+          }),
+          run: () => onNewThread(group.workspace.id),
+        }
+      })
+    }
+
     const result: PaletteItem[] = []
     const searchCache = searchFieldsCacheRef.current
 
-    // Unread threads get their own section, then the remaining threads are
-    // ordered by actionable/running status. The running bucket stays stable
-    // while streaming; settled buckets use recency, matching the sidebar.
+    // Threads needing a decision (failed / awaiting / unread) come first, then
+    // the rest in priority order — running work above settled, recency inside.
     const threads = groups
       .flatMap((group) => {
         const projectLabel = getProjectLabel(group.workspace.path)
@@ -513,6 +590,7 @@ export const CommandPalette = memo(function CommandPalette({
               thread,
               projectLabel,
               unread: attention.unread,
+              attention,
               status: threadPaletteStatus(thread, attention),
             }
           })
@@ -524,71 +602,71 @@ export const CommandPalette = memo(function CommandPalette({
       if (!liveThreadIds.has(id)) searchCache.delete(id)
     }
 
-    for (const { group, thread, projectLabel: label, unread, status } of threads) {
-      if (!unread) continue
-
-      result.push({
-        id: `thread:${thread.id}`,
-        kind: 'thread',
-        section: 'Unread threads',
-        label: thread.title,
-        sublabel: label,
-        projectId: group.workspace.id,
-        icon: { kind: 'status', tone: status.tone },
-        status,
-        search: cachedThreadSearchFields(
-          searchCache,
-          thread.id,
-          thread.title,
-          `${label} ${group.workspace.path}`,
-          `unread chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
-        ),
-        unread: true,
-        run: () => onSelectThread(group.workspace.id, thread.id),
-      })
+    // Freeze order and section membership for this open (see FrozenThreadOrder).
+    // Threads created mid-open append after the frozen rows instead of cutting
+    // in, so an arrival cannot displace the row about to be clicked either.
+    let frozen = frozenOrderRef.current
+    if (!frozen) {
+      frozen = { order: new Map(), attention: new Set(), next: 0 }
+      frozenOrderRef.current = frozen
     }
+    for (const entry of threads) {
+      if (frozen.order.has(entry.thread.id)) continue
+      frozen.order.set(entry.thread.id, frozen.next++)
+      if (needsAttention(entry.attention)) frozen.attention.add(entry.thread.id)
+    }
+    const frozenOrder = frozen.order
+    const frozenAttention = frozen.attention
+    threads.sort(
+      (a, b) =>
+        (frozenOrder.get(a.thread.id) ?? 0) - (frozenOrder.get(b.thread.id) ?? 0),
+    )
 
-    for (const { group, thread, projectLabel: label, unread, status } of threads) {
-      if (unread) continue
+    for (const pass of ['attention', 'recent'] as const) {
+      for (const { group, thread, projectLabel: label, status } of threads) {
+        const attentionRow = frozenAttention.has(thread.id)
+        if ((pass === 'attention') !== attentionRow) continue
 
-      result.push({
-        id: `thread:${thread.id}`,
-        kind: 'thread',
-        section: 'Threads',
-        label: thread.title,
-        sublabel: label,
-        projectId: group.workspace.id,
-        icon: { kind: 'status', tone: status.tone },
-        status,
-        search: cachedThreadSearchFields(
-          searchCache,
-          thread.id,
-          thread.title,
-          `${label} ${group.workspace.path}`,
-          `chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
-        ),
-        run: () => onSelectThread(group.workspace.id, thread.id),
-      })
+        result.push({
+          id: `thread:${thread.id}`,
+          kind: 'thread',
+          section: attentionRow ? 'Needs attention' : 'Recent',
+          label: thread.title,
+          sublabel: label,
+          projectId: group.workspace.id,
+          icon: { kind: 'status', tone: status.tone },
+          // "Idle" said nothing the timestamp does not; quiet rows stay quiet.
+          status: status.label === 'Idle' ? undefined : status,
+          time: timeAgo(thread.updated_at),
+          search: cachedThreadSearchFields(
+            searchCache,
+            thread.id,
+            thread.title,
+            `${label} ${group.workspace.path}`,
+            `${attentionRow ? 'unread ' : ''}chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+          ),
+          run: () => onSelectThread(group.workspace.id, thread.id),
+        })
+      }
     }
 
     if (onNewThread) {
-      for (const group of groups) {
-        const label = getProjectLabel(group.workspace.path)
-        result.push({
-          id: `new:${group.workspace.id}`,
-          kind: 'action',
-          section: 'Actions',
-          label: `New thread in ${label}`,
-          projectId: group.workspace.id,
-          icon: { kind: 'glyph', Glyph: SquarePen },
-          search: normalizeSearchFields({
-            primary: `New thread in ${label}`,
-            secondary: group.workspace.path,
-            keywords: `new chat conversation thread create start`,
-          }),
-          run: () => onNewThread(group.workspace.id),
-        })
-      }
+      // One action for what used to be a row per project: choosing it keeps
+      // the palette open and steps into the project picker above.
+      result.push({
+        id: 'new-thread',
+        kind: 'action',
+        section: 'Actions',
+        label: 'New thread…',
+        icon: { kind: 'glyph', Glyph: SquarePen },
+        search: normalizeSearchFields({
+          primary: 'New thread',
+          secondary: '',
+          keywords: 'new chat conversation thread create start compose project',
+        }),
+        enters: 'new-thread',
+        run: () => {},
+      })
     }
     if (onOpenActivity) {
       result.push({
@@ -635,6 +713,22 @@ export const CommandPalette = memo(function CommandPalette({
         shortcut: shortcutHints.settings,
         search: normalizeSearchFields({ primary: 'Open settings', secondary: '', keywords: 'settings preferences options' }),
         run: onOpenSettings,
+      })
+    }
+    if (onOpenUsage) {
+      result.push({
+        id: 'usage',
+        kind: 'action',
+        section: 'Actions',
+        label: 'Subscription usage & limits',
+        icon: { kind: 'glyph', Glyph: Gauge },
+        shortcut: shortcutHints.usage,
+        search: normalizeSearchFields({
+          primary: 'Subscription usage & limits',
+          secondary: 'Codex, Claude Code, Grok',
+          keywords: 'usage limits subscription quota rate plan session tokens reset',
+        }),
+        run: onOpenUsage,
       })
     }
 
@@ -691,7 +785,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenPlugins, onOpenSettings, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, mode, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.
@@ -713,7 +807,12 @@ export const CommandPalette = memo(function CommandPalette({
 
   useEffect(() => {
     const trimmed = query.trim()
-    if (!open || !onSearchMessages || trimmed.length < MIN_MESSAGE_QUERY_CHARS) {
+    if (
+      !open ||
+      mode !== 'root' ||
+      !onSearchMessages ||
+      trimmed.length < MIN_MESSAGE_QUERY_CHARS
+    ) {
       setMessageMatches(NO_MESSAGE_MATCHES)
       return
     }
@@ -735,7 +834,7 @@ export const CommandPalette = memo(function CommandPalette({
       clearTimeout(timer)
       controller.abort()
     }
-  }, [onSearchMessages, open, query, scopedWorkspaceId])
+  }, [mode, onSearchMessages, open, query, scopedWorkspaceId])
 
   /** Threads by id, for turning message matches into rows. */
   const threadIndex = useMemo(() => {
@@ -753,22 +852,30 @@ export const CommandPalette = memo(function CommandPalette({
       : items
     if (activeProject) {
       const scopeId = activeProject.workspace.id
-      scopedItems = scopedItems.filter((item) => item.projectId === scopeId)
+      // The New thread action survives the scope: with the project already
+      // chosen it skips its picker step and creates there directly.
+      scopedItems = scopedItems.filter(
+        (item) => item.projectId === scopeId || item.enters === 'new-thread',
+      )
     }
     if (!query.trim()) {
-      // Browsing all projects shows a short teaser of threads; inside a single
-      // project the browse list *is* the answer, so let it run full length.
-      const threadLimit = activeProject ? MAX_SEARCH_RESULTS : 8
-      const threads: PaletteItem[] = []
+      // Browsing all projects shows a short teaser per thread section; inside
+      // a single project the browse list *is* the answer, so it runs longer.
+      const attentionLimit = activeProject ? MAX_SEARCH_RESULTS : MAX_BROWSE_ATTENTION
+      const recentLimit = activeProject ? MAX_SEARCH_RESULTS : MAX_BROWSE_RECENT
+      const attention: PaletteItem[] = []
+      const recent: PaletteItem[] = []
       const rest: PaletteItem[] = []
       for (const item of scopedItems) {
-        if (item.kind === 'thread') {
-          if (threads.length < threadLimit) threads.push(item)
-        } else {
+        if (item.kind !== 'thread') {
           rest.push(item)
+        } else if (item.section === 'Needs attention') {
+          if (attention.length < attentionLimit) attention.push(item)
+        } else if (recent.length < recentLimit) {
+          recent.push(item)
         }
       }
-      const browse = [...threads, ...rest]
+      const browse = [...attention, ...recent, ...rest]
       return { items: browse, strong: browse.length }
     }
     const normalizedQuery = normalizeSearchText(query)
@@ -850,7 +957,8 @@ export const CommandPalette = memo(function CommandPalette({
         snippetTokens,
         projectId: entry.group.workspace.id,
         icon: { kind: 'status', tone: status.tone },
-        status,
+        status: status.label === 'Idle' ? undefined : status,
+        time: timeAgo(entry.thread.updated_at),
         // Ranking is the daemon's; these rows bypass the fuzzy scorer.
         search: { primary: '', secondary: '', keywords: '' },
         run: () => onSelectThread(entry.group.workspace.id, entry.thread.id),
@@ -873,7 +981,7 @@ export const CommandPalette = memo(function CommandPalette({
 
   useEffect(() => {
     setHighlight(0)
-  }, [initialScope, projectId, query])
+  }, [initialScope, mode, projectId, query])
 
   useEffect(() => {
     setHighlight((current) => Math.min(current, Math.max(0, visible.length - 1)))
@@ -896,7 +1004,8 @@ export const CommandPalette = memo(function CommandPalette({
   // sidebar row's search icon sets.
   const handleQueryChange = useCallback(
     (value: string) => {
-      const match = projectId ? null : PROJECT_PREFIX_PATTERN.exec(value)
+      const match =
+        projectId || mode !== 'root' ? null : PROJECT_PREFIX_PATTERN.exec(value)
       const resolved = match ? resolveProjectToken(groups, match[1]!) : null
       if (match && resolved) {
         setProjectId(resolved)
@@ -905,7 +1014,7 @@ export const CommandPalette = memo(function CommandPalette({
       }
       setQuery(value)
     },
-    [groups, projectId],
+    [groups, mode, projectId],
   )
 
   const clearProjectScope = useCallback(() => {
@@ -915,10 +1024,24 @@ export const CommandPalette = memo(function CommandPalette({
 
   const runItem = useCallback(
     (item: PaletteItem) => {
+      if (item.enters === 'new-thread') {
+        // Already scoped to a project — the second step would only ask what
+        // the chip has answered.
+        if (scopedWorkspaceId && onNewThread) {
+          close()
+          onNewThread(scopedWorkspaceId)
+          return
+        }
+        setMode('new-thread')
+        setQuery('')
+        setHighlight(0)
+        inputRef.current?.focus()
+        return
+      }
       close()
       item.run()
     },
-    [close],
+    [close, onNewThread, scopedWorkspaceId],
   )
 
   const handleKeyDown = useCallback(
@@ -940,6 +1063,12 @@ export const CommandPalette = memo(function CommandPalette({
         event.preventDefault()
         const item = visible[highlight]
         if (item) runItem(item)
+      } else if (event.key === 'Backspace' && mode === 'new-thread' && query === '') {
+        // Chip-style deletion, one level at a time: back out of the picker
+        // step first, exactly like deleting a scope chip.
+        event.preventDefault()
+        setMode('root')
+        setQuery('')
       } else if (event.key === 'Backspace' && projectId && query === '') {
         // Chip-style deletion: the empty field's next backspace drops the
         // scope rather than closing the palette.
@@ -947,14 +1076,20 @@ export const CommandPalette = memo(function CommandPalette({
         clearProjectScope()
       } else if (event.key === 'Escape') {
         event.preventDefault()
-        close()
+        if (mode === 'new-thread') {
+          // Escape retreats one step; only the root view closes the palette.
+          setMode('root')
+          setQuery('')
+        } else {
+          close()
+        }
       } else if (event.key === 'Tab') {
         // A listbox is navigated with arrows; keep focus from escaping the
         // modal into the inert application underneath it.
         event.preventDefault()
       }
     },
-    [clearProjectScope, close, highlight, projectId, query, runItem, visible],
+    [clearProjectScope, close, highlight, mode, projectId, query, runItem, visible],
   )
 
   const scrolledQueryRef = useRef(query)
@@ -976,12 +1111,16 @@ export const CommandPalette = memo(function CommandPalette({
   if (!open || typeof document === 'undefined') return null
 
   let lastSection: PaletteItem['section'] | null = null
+  let renderedHeader = false
   const isSearching = query.trim().length > 0
-  const searchLabel = activeProjectLabel
-    ? `Search threads in ${activeProjectLabel}`
-    : initialScope === 'threads'
-      ? 'Search threads'
-      : 'Search threads and commands'
+  const searchLabel =
+    mode === 'new-thread'
+      ? 'Choose a project'
+      : activeProjectLabel
+        ? `Search threads in ${activeProjectLabel}`
+        : initialScope === 'threads'
+          ? 'Search threads'
+          : 'Search threads and commands'
 
   return createPortal(
     <div
@@ -999,6 +1138,14 @@ export const CommandPalette = memo(function CommandPalette({
       >
         <div className="flex items-center gap-2 border-b border-border-subtle px-3 py-2.5">
           <Search aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+          {mode === 'new-thread' ? (
+            // Breadcrumb for the step, styled like the project scope chip so
+            // "you are inside something" reads the same both ways.
+            <span className="flex shrink-0 items-center gap-1 rounded-[var(--fd-radius-sm)] bg-surface-3 px-1.5 py-0.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
+              <SquarePen aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
+              New thread
+            </span>
+          ) : null}
           {activeProjectLabel ? (
             <span className="flex max-w-[12rem] shrink-0 items-center gap-1 rounded-[var(--fd-radius-sm)] bg-surface-3 py-0.5 pl-1.5 pr-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
               <FolderClosed aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
@@ -1048,10 +1195,20 @@ export const CommandPalette = memo(function CommandPalette({
               item.section !== lastSection &&
               (!isSearching || item.section === 'Message matches')
             lastSection = item.section
+            const firstHeader = showHeader && !renderedHeader
+            if (showHeader) renderedHeader = true
             return (
               <React.Fragment key={item.id}>
                 {showHeader ? (
-                  <p role="presentation" className="px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.1em] text-fg-muted">
+                  // A hairline splits each later section from the one above,
+                  // so the groups read as bands rather than one long list.
+                  <p
+                    role="presentation"
+                    className={cn(
+                      'px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.1em] text-fg-muted',
+                      !firstHeader && 'mt-1.5 border-t border-border-subtle pt-2.5',
+                    )}
+                  >
                     {item.section}
                   </p>
                 ) : null}
@@ -1099,11 +1256,13 @@ export const CommandPalette = memo(function CommandPalette({
                   {/* Inside a project scope every row shares the same
                       project, so the per-row label is only repetition. */}
                   {item.sublabel && !activeProject ? (
-                    <span className="flex shrink-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
-                      {!item.unread ? (
-                        <FolderClosed aria-hidden="true" className="h-3 w-3" />
-                      ) : null}
+                    <span className="max-w-[40%] shrink-0 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                       {item.sublabel}
+                    </span>
+                  ) : null}
+                  {item.time ? (
+                    <span className="w-9 shrink-0 text-right text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted">
+                      {item.time}
                     </span>
                   ) : null}
                   {item.shortcut?.length ? (
@@ -1128,8 +1287,13 @@ export const CommandPalette = memo(function CommandPalette({
             <Kbd>↓</Kbd> navigate
           </span>
           <span className="flex items-center gap-1">
-            <Kbd>↵</Kbd> open
+            <Kbd>↵</Kbd> {mode === 'new-thread' ? 'create' : 'open'}
           </span>
+          {mode === 'new-thread' ? (
+            <span className="flex items-center gap-1">
+              <Kbd>esc</Kbd> back
+            </span>
+          ) : null}
           {shortcutHints.keyboardShortcuts?.length ? (
             <span className="ml-auto flex items-center gap-1">
               {shortcutHints.keyboardShortcuts.map((token, index) => (

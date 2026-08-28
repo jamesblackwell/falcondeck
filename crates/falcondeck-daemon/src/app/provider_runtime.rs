@@ -133,6 +133,9 @@ impl ProviderRuntime {
                 if provider.as_str().eq_ignore_ascii_case("grok") {
                     return crate::acp::grok_placeholder_capabilities();
                 }
+                if provider.as_str().eq_ignore_ascii_case("cursor") {
+                    return crate::acp::cursor_placeholder_capabilities();
+                }
                 let mut capabilities = AgentCapabilitySummary::acp_minimal();
                 capabilities.supports_images = crate::acp::acp_supports_images(
                     provider.as_str(),
@@ -331,6 +334,7 @@ impl ProviderRuntime {
                     spec.thread.agent.reasoning_effort.as_deref(),
                 )
                 .await?;
+                let casual_chat_root = app.casual_chat_documents_root(spec.workspace_id).await;
 
                 session
                     .send_request(
@@ -344,6 +348,7 @@ impl ProviderRuntime {
                             collaboration_mode,
                             sandbox_policy_payload(
                                 spec.thread.agent.sandbox_mode.as_deref(),
+                                casual_chat_root.as_deref(),
                             ),
                             Some(spec.approval_policy),
                             spec.service_tier,
@@ -401,19 +406,21 @@ impl ProviderRuntime {
                     thread.native_session_id = Some(spawn.session_id.clone());
                 })
                 .await?;
-                let app = app.clone();
-                let workspace_id = spec.workspace_id.to_string();
-                let thread_id = spec.thread_id.to_string();
-                tokio::spawn(async move {
-                    app.monitor_claude_turn(
-                        workspace_id,
-                        thread_id,
-                        spawn.generation,
-                        spawn.stdout,
-                        spawn.stderr,
-                    )
-                    .await;
-                });
+                if spawn.stdout.is_some() || spawn.stderr.is_some() {
+                    let app = app.clone();
+                    let workspace_id = spec.workspace_id.to_string();
+                    let thread_id = spec.thread_id.to_string();
+                    tokio::spawn(async move {
+                        app.monitor_claude_turn(
+                            workspace_id,
+                            thread_id,
+                            spawn.generation,
+                            spawn.stdout,
+                            spawn.stderr,
+                        )
+                        .await;
+                    });
+                }
                 Ok(())
             }
             Self::Agy => {
@@ -874,6 +881,7 @@ fn claude_goal_turn(workspace_id: &str, thread_id: &str, text: &str) -> SendTurn
         sandbox_mode: None,
         steer: false,
         user_item_id: None,
+        resume_interrupted: false,
     }
 }
 
@@ -989,5 +997,12 @@ mod tests {
                 .default_capabilities();
         assert!(!opencode_caps.supports_images);
         assert!(opencode_caps.supports_steering);
+        let cursor_caps = ProviderRuntime::for_provider(&AgentProvider::new("cursor".to_string()))
+            .default_capabilities();
+        assert!(cursor_caps.supports_images);
+        assert_eq!(
+            cursor_caps.permission_modes,
+            crate::acp::cursor_placeholder_permission_modes()
+        );
     }
 }

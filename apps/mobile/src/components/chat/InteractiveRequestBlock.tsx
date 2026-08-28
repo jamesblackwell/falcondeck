@@ -6,11 +6,13 @@ import { Ban, CheckCircle2, ChevronRight, Circle, Clock3 } from 'lucide-react-na
 import {
   interactiveRequestEvidencePresentation,
   interactiveRequestReceiptPresentation,
+  safeExternalUrl,
   type ConversationItem,
 } from '@falcondeck/client-core'
 
 import { Text } from '@/components/ui'
 import { CodeBlock } from './CodeBlock'
+import { useExternalUrl } from './useExternalUrl'
 
 type InteractiveRequestItem = Extract<ConversationItem, { kind: 'interactive_request' }>
 
@@ -24,6 +26,8 @@ export const InteractiveRequestBlock = memo(function InteractiveRequestBlock({
   const { theme } = useUnistyles()
   const request = item.request
   const evidence = interactiveRequestEvidencePresentation(request)
+  const evidenceUrl = safeExternalUrl(evidence.path)
+  const { open: openEvidenceUrl } = useExternalUrl(evidenceUrl ?? '')
   const [receiptExpanded, setReceiptExpanded] = useState(false)
 
   // Live requests belong to the pinned InteractiveRequestBanner, which knows
@@ -107,7 +111,17 @@ export const InteractiveRequestBlock = memo(function InteractiveRequestBlock({
           {evidence.command ? (
             <CodeBlock code={evidence.command} language="command" previewLines={3} />
           ) : null}
-          {evidence.path ? (
+          {evidenceUrl ? (
+            <Pressable
+              accessibilityRole="link"
+              accessibilityLabel={evidenceUrl}
+              onPress={() => void openEvidenceUrl()}
+            >
+              <Text selectable variant="caption" color="accent" size="xs">
+                {evidenceUrl}
+              </Text>
+            </Pressable>
+          ) : evidence.path ? (
             <Text selectable variant="mono" color="tertiary" size="xs">
               {evidence.path}
             </Text>

@@ -23,7 +23,13 @@ export type ThreadItemProps = {
   workspaceId: string
   isSelected: boolean
   onSelect: (workspaceId: string, threadId: string) => void
+  /** Invoked once the archive is confirmed; the row asks first. */
   onArchive?: ThreadItemArchiveHandler
+  /** Archive was requested for this row and it is waiting on the Confirm pill. */
+  archiveConfirmPending?: boolean
+  onArchiveConfirm?: () => void
+  /** Backs out of the pending archive (dimmed row click). */
+  onArchiveCancel?: () => void
   onOpenContextMenu?: (args: {
     workspaceId: string
     thread: ThreadSummary
@@ -63,9 +69,13 @@ export const ThreadItem = memo(
     nowTick = 0,
     tags = [],
     providerLabel = null,
+    archiveConfirmPending = false,
+    onArchiveConfirm,
+    onArchiveCancel,
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
+    const archiveConfirm = archiveConfirmPending && Boolean(onArchiveConfirm)
     const timeString = useMemo(
       () => timeAgo(thread.updated_at),
       [nowTick, thread.updated_at],
@@ -73,6 +83,7 @@ export const ThreadItem = memo(
 
     return (
       <div
+        data-archive-confirm={archiveConfirm ? "true" : undefined}
         className={cn(
           // A container so the provider label can bow out on a narrow sidebar
           // without the row measuring itself in JS.
@@ -87,7 +98,15 @@ export const ThreadItem = memo(
             ? 'fd-row-selected'
             : 'hover:bg-interactive-hover active:bg-interactive-selected',
         )}
-        onClick={() => onSelect(workspaceId, thread.id)}
+        onClick={() => {
+          // While the confirm pill is up, the row itself is the dismiss
+          // affordance; selecting a thread mid-confirm would be surprising.
+          if (archiveConfirm) {
+            onArchiveCancel?.()
+            return
+          }
+          onSelect(workspaceId, thread.id)
+        }}
         onContextMenu={(event: React.MouseEvent<HTMLDivElement>) => {
           if (!onOpenContextMenu) return
           event.preventDefault()
@@ -99,19 +118,26 @@ export const ThreadItem = memo(
           })
         }}
         onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) => {
-          if (!onRequestRename) return
+          if (archiveConfirm || !onRequestRename) return
           event.preventDefault()
           onRequestRename({ workspaceId, thread })
         }}
       >
         <button
           type="button"
-          className="fd-focus-inset flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--fd-radius-sm)] text-left"
+          className={cn(
+            'fd-focus-inset flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--fd-radius-sm)] text-left transition-opacity duration-[var(--fd-duration-fast)]',
+            archiveConfirm && 'pointer-events-none opacity-40',
+          )}
           onClick={(event) => {
             // Selection also lives on the full row so the timestamp and
             // trailing space match the hover/selected hit area. Keep the
             // title button from selecting twice as the click bubbles up.
             event.stopPropagation()
+            if (archiveConfirm) {
+              onArchiveCancel?.()
+              return
+            }
             onSelect(workspaceId, thread.id)
           }}
         >
@@ -183,84 +209,100 @@ export const ThreadItem = memo(
             </span>
           ) : null}
         </button>
-        {thread.provider ? (
-          // The harness rides along as its vendor mark in a quiet tile
-          // rather than a name that popped in on hover and shoved the
-          // timestamp around. Hidden on very narrow sidebars so the
-          // title keeps the room.
-          <span
-            data-testid="thread-provider-badge"
-            role="img"
-            aria-label={providerLabel ?? undefined}
-            title={providerLabel ?? undefined}
-            className="hidden h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] bg-surface-3 text-fg-muted @[13rem]:flex"
+        {archiveConfirm ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation()
+              onArchiveConfirm?.()
+            }}
+            aria-label={`Confirm archiving ${thread.title}`}
+            className="fd-focus-fill -my-1 flex h-6 shrink-0 items-center rounded-full bg-danger px-3 text-[length:var(--fd-text-xs)] font-medium text-white transition-colors duration-[var(--fd-duration-fast)] hover:bg-danger/90"
           >
-            <ProviderIcon className="h-2.5 w-2.5" provider={thread.provider} />
-          </span>
-        ) : null}
-        {thread.is_pinned ? (
-          <Pin
-            role="img"
-            aria-label="Pinned"
-            className="h-3 w-3 shrink-0 rotate-45 text-fg-muted"
-          />
-        ) : null}
-        {/*
-          The timestamp and the archive action share one grid cell and
-          crossfade, so hovering swaps them in place instead of reflowing
-          the row.
-        */}
-        <span className="group/actions grid shrink-0 grid-cols-1 items-center justify-items-end">
-          {wasInterrupted ? (
-            <Badge
-              variant="danger"
-              className={cn(
-                'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
-                onArchive &&
-                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+            Confirm
+          </button>
+        ) : (
+          <>
+            {thread.provider ? (
+              // The harness rides along as its vendor mark in a quiet tile
+              // rather than a name that popped in on hover and shoved the
+              // timestamp around. Hidden on very narrow sidebars so the
+              // title keeps the room.
+              <span
+                data-testid="thread-provider-badge"
+                role="img"
+                aria-label={providerLabel ?? undefined}
+                title={providerLabel ?? undefined}
+                className="hidden h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] bg-surface-3 text-fg-muted @[13rem]:flex"
+              >
+                <ProviderIcon className="h-2.5 w-2.5" provider={thread.provider} />
+              </span>
+            ) : null}
+            {thread.is_pinned || thread.is_pinned_in_project ? (
+              <Pin
+                role="img"
+                aria-label={thread.is_pinned ? 'Pinned' : 'Pinned in project'}
+                className="h-3 w-3 shrink-0 rotate-45 text-fg-muted"
+              />
+            ) : null}
+            {/*
+              The timestamp and the archive action share one grid cell and
+              crossfade, so hovering swaps them in place instead of reflowing
+              the row.
+            */}
+            <span className="group/actions grid shrink-0 grid-cols-1 items-center justify-items-end">
+              {wasInterrupted ? (
+                <Badge
+                  variant="danger"
+                  className={cn(
+                    'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
+                    onArchive &&
+                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                  )}
+                >
+                  Stopped
+                </Badge>
+              ) : attention.showBadge ? (
+                <Badge
+                  variant="success"
+                  className={cn(
+                    'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
+                    onArchive &&
+                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                  )}
+                >
+                  {attention.badgeLabel}
+                </Badge>
+              ) : (
+                <span
+                  className={cn(
+                    'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
+                    onArchive &&
+                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                  )}
+                >
+                  {timeString}
+                </span>
               )}
-            >
-              Stopped
-            </Badge>
-          ) : attention.showBadge ? (
-            <Badge
-              variant="success"
-              className={cn(
-                'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
-                onArchive &&
-                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
-              )}
-            >
-              {attention.badgeLabel}
-            </Badge>
-          ) : (
-            <span
-              className={cn(
-                'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
-                onArchive &&
-                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
-              )}
-            >
-              {timeString}
+              {onArchive ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void Promise.resolve(
+                      onArchive(workspaceId, thread.id),
+                    ).catch(() => {})
+                  }}
+                  title="Archive thread"
+                  aria-label={`Archive thread ${thread.title}`}
+                  className="fd-focus pointer-events-none col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                >
+                  <Archive aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              ) : null}
             </span>
-          )}
-          {onArchive ? (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                void Promise.resolve(
-                  onArchive(workspaceId, thread.id),
-                ).catch(() => {})
-              }}
-              title="Archive thread"
-              aria-label={`Archive thread ${thread.title}`}
-              className="fd-focus pointer-events-none col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
-            >
-              <Archive aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-        </span>
+          </>
+        )}
       </div>
     )
   },
@@ -275,6 +317,9 @@ export const ThreadItem = memo(
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&
+    prev.archiveConfirmPending === next.archiveConfirmPending &&
+    prev.onArchiveConfirm === next.onArchiveConfirm &&
+    prev.onArchiveCancel === next.onArchiveCancel &&
     prev.onOpenContextMenu === next.onOpenContextMenu &&
     prev.onRequestRename === next.onRequestRename &&
     tagsEqual(prev.tags, next.tags),
@@ -315,6 +360,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.status === b.status &&
     a.last_error === b.last_error &&
     a.is_pinned === b.is_pinned &&
+    a.is_pinned_in_project === b.is_pinned_in_project &&
     a.variant?.slug === b.variant?.slug &&
     originEqual(a.origin, b.origin) &&
     a.attention.unread === b.attention.unread &&

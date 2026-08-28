@@ -25,9 +25,13 @@ import {
   PromptInput,
   ComposerSuggestionPill,
   QueuedTurns,
+  type LocalPathEditor,
+  type LocalPathHandler,
+  type LocalPathKindResolver,
   type OpenFileDiff,
   type QuotedSelection,
   type ReadAloudController,
+  type WebLinkOpener,
 } from "@falcondeck/chat-ui";
 import { CollapseRegion, useLastPresent } from "@falcondeck/ui";
 
@@ -78,6 +82,13 @@ type DesktopConversationPaneProps = {
   queuedAttachmentBaseUrl?: string | null;
   canSteerQueuedTurn?: boolean;
   onOpenFile?: OpenFileDiff | null;
+  onLocalPath?: LocalPathHandler | null;
+  /** Editors offered in the local path context menu (desktop only). */
+  localPathEditors?: readonly LocalPathEditor[] | null;
+  /** File/directory lookup that gates the menu's file-only actions. */
+  describeLocalPath?: LocalPathKindResolver | null;
+  /** Opens external links in the system browser (desktop only). */
+  onOpenExternalLink?: WebLinkOpener | null;
   headerControls?: ReactNode;
   /** Sits at the head of the header's trailing group, before New. */
   headerLeadingControls?: ReactNode;
@@ -135,6 +146,10 @@ export function DesktopConversationPane({
   queuedAttachmentBaseUrl,
   canSteerQueuedTurn,
   onOpenFile,
+  onLocalPath,
+  localPathEditors,
+  describeLocalPath,
+  onOpenExternalLink,
   headerControls,
   onNewThread,
   onRetryResponse,
@@ -219,6 +234,10 @@ export function DesktopConversationPane({
         isLoadingOlder={isLoadingOlderMessages}
         onLoadOlder={onLoadOlderMessages}
         onOpenFile={onOpenFile}
+        onLocalPath={onLocalPath}
+        localPathEditors={localPathEditors}
+        describeLocalPath={describeLocalPath}
+        onOpenExternalLink={onOpenExternalLink}
         onRetryResponse={onRetryResponse}
         pinnedPlanId={pinnedPlan?.itemId ?? null}
         onQuoteSelection={onQuoteSelection}

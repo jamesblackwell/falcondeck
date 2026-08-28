@@ -107,6 +107,24 @@ pub(crate) fn hydrate_thread_response(
     }
 }
 
+/// Conversation items from a `thread/read` payload, including rollout-file
+/// history when app-server returns an empty `turns` array (legacy history
+/// mode on current Codex).
+pub(crate) fn conversation_items_from_read(
+    value: &Value,
+    workspace_path: &str,
+) -> Vec<ConversationItem> {
+    let mut items = hydrate_thread_items(value);
+    if let Some(path) = extract_thread_session_path(value) {
+        if items.is_empty() {
+            items = hydrate_thread_items_from_session_file(&path, workspace_path);
+        } else {
+            supplement_thread_items_with_session_tool_calls(&mut items, &path, workspace_path);
+        }
+    }
+    items
+}
+
 /// Build `thread/start` params for current Codex app-server (0.150.x).
 ///
 /// `effort` is not a `ThreadStartParams` field — turn-level effort is the
@@ -159,6 +177,7 @@ pub(crate) fn thread_resume_params(
 /// thread-level config changes take effect on `thread/start` or
 /// `thread/resume`. Null optional overrides are omitted so they do not clear
 /// the thread's current model, effort, or sandbox.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn turn_start_params(
     thread_id: &str,
     input: Vec<Value>,
@@ -193,10 +212,12 @@ pub(crate) fn turn_start_params(
 /// methods, including `item/tool/call`, must still get a JSON-RPC error or
 /// the app-server stalls the turn.
 pub(crate) fn server_request_expects_result(method: &str) -> bool {
-    method.ends_with("requestApproval") || method == "item/tool/requestUserInput"
+    method.ends_with("requestApproval")
+        || method == "item/tool/requestUserInput"
+        || method == "mcpServer/elicitation/request"
 }
 
-/// Config-style `AskForApproval` spelling for current Codex app-server. camelCase
+/// Config-style `AskForApproval` spelling for current app-server. camelCase
 /// aliases are accepted from stored thread state; `unlessTrusted` maps to
 /// `"untrusted"`, not `"unlessTrusted"`.
 pub(crate) fn app_server_approval_policy(value: &str) -> &str {
@@ -514,8 +535,18 @@ impl CodexSession {
                 .builtin_connectors(&AgentProvider::CODEX, &workspace_path, None)
                 .await,
         );
-        for override_arg in crate::connectors::codex_config_overrides(&mcp_servers) {
+        let mcp = crate::connectors::codex_mcp_config(&mcp_servers);
+        for override_arg in mcp.overrides {
             command.arg("-c").arg(override_arg);
+        }
+        command
+            .arg("-c")
+            .arg(crate::connectors::CODEX_TOOL_OUTPUT_TOKEN_LIMIT_OVERRIDE);
+        for (key, value) in mcp.env {
+            command.env(key, value);
+        }
+        for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
+            command.env(*key, *value);
         }
         // Codex's SQLite runtime permits one writer process per database.
         // FalconDeck keeps one app-server per workspace, so sharing the
@@ -638,16 +669,15 @@ impl CodexSession {
             // as a Codex extra skill root. Experimental and absent from some
             // older app-server releases, so failure must not make the
             // otherwise-stable bootstrap fail.
-            if let Some(skill_root) = state.agent_skill_root(&AgentProvider::CODEX).await {
-                if let Err(error) = session
+            if let Some(skill_root) = state.agent_skill_root(&AgentProvider::CODEX).await
+                && let Err(error) = session
                     .send_control_request(
                         "skills/extraRoots/set",
                         json!({ "extraRoots": [skill_root] }),
                     )
                     .await
-                {
-                    warn!("Codex skill roots unavailable: {error}");
-                }
+            {
+                warn!("Codex skill roots unavailable: {error}");
             }
 
             let account_value = session
@@ -992,89 +1022,119 @@ impl CodexSession {
     }
 
     async fn read_stdout(self: Arc<Self>, stdout: tokio::process::ChildStdout) {
-        let mut lines = BufReader::new(stdout).lines();
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    if line.trim().is_empty() {
+        enum StdoutEvent {
+            Line(String),
+            Disconnected(Option<String>),
+        }
+
+        // The pipe is drained by its own task, decoupled from event handling:
+        // the app-server stalls mid-turn if nothing empties the 64KB pipe
+        // buffer, so slow handling (snapshot broadcasts, state writes) must
+        // never be what reads stdout. Same pattern as the Claude CLI runtime.
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<StdoutEvent>();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if event_tx.send(StdoutEvent::Line(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        let _ = event_tx.send(StdoutEvent::Disconnected(Some(error.to_string())));
+                        return;
+                    }
+                }
+            }
+            let _ = event_tx.send(StdoutEvent::Disconnected(None));
+        });
+
+        while let Some(event) = event_rx.recv().await {
+            let line = match event {
+                StdoutEvent::Disconnected(error) => {
+                    let degraded = !self.expected_exit.load(Ordering::Acquire)
+                        && !self.state.is_shutting_down();
+                    match error {
+                        Some(error) => {
+                            warn!("codex stdout read error: {error}");
+                            if degraded {
+                                let _ = self.state.upsert_operational_condition(
+                                    self.workspace_id.clone(),
+                                    "codex_connection",
+                                    falcondeck_core::ServiceLevel::Error,
+                                    format!("Codex stream error: {error}"),
+                                    Some("stream-error".to_string()),
+                                );
+                            }
+                        }
+                        None => {
+                            if degraded {
+                                let _ = self.state.upsert_operational_condition(
+                                    self.workspace_id.clone(),
+                                    "codex_connection",
+                                    falcondeck_core::ServiceLevel::Warning,
+                                    "Codex app-server disconnected".to_string(),
+                                    Some("disconnect".to_string()),
+                                );
+                            }
+                        }
+                    }
+                    break;
+                }
+                StdoutEvent::Line(line) => line,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            self.touch();
+
+            match serde_json::from_str::<Value>(&line) {
+                Ok(message) => {
+                    if let Some(id) = message.get("id").and_then(Value::as_u64)
+                        && message.get("method").is_none()
+                    {
+                        if let Some(tx) = self.pending.lock().await.remove(&id) {
+                            if let Some(error) = message.get("error") {
+                                let _ = tx.send(Err(DaemonError::Rpc(error.to_string())));
+                            } else {
+                                let _ = tx.send(Ok(message
+                                    .get("result")
+                                    .cloned()
+                                    .unwrap_or(Value::Null)));
+                            }
+                        }
                         continue;
                     }
-                    self.touch();
 
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(message) => {
-                            if let Some(id) = message.get("id").and_then(Value::as_u64)
-                                && message.get("method").is_none()
-                            {
-                                if let Some(tx) = self.pending.lock().await.remove(&id) {
-                                    if let Some(error) = message.get("error") {
-                                        let _ = tx.send(Err(DaemonError::Rpc(error.to_string())));
-                                    } else {
-                                        let _ = tx.send(Ok(message
-                                            .get("result")
-                                            .cloned()
-                                            .unwrap_or(Value::Null)));
-                                    }
-                                }
-                                continue;
-                            }
-
-                            if let Some(method) = message.get("method").and_then(Value::as_str) {
-                                let params = message.get("params").cloned().unwrap_or(Value::Null);
-                                if message.get("id").is_some() {
-                                    if let Some(raw_id) = message.get("id").cloned()
-                                        && let Err(error) = self
-                                            .state
-                                            .ingest_server_request(
-                                                &self.workspace_id,
-                                                raw_id,
-                                                method,
-                                                params,
-                                            )
-                                            .await
-                                    {
-                                        warn!("failed to ingest server request {method}: {error}");
-                                    }
-                                } else if let Err(error) = self
+                    if let Some(method) = message.get("method").and_then(Value::as_str) {
+                        let params = message.get("params").cloned().unwrap_or(Value::Null);
+                        if message.get("id").is_some() {
+                            if let Some(raw_id) = message.get("id").cloned()
+                                && let Err(error) = self
                                     .state
-                                    .ingest_notification(&self.workspace_id, method, params)
+                                    .ingest_server_request(
+                                        &self.workspace_id,
+                                        raw_id,
+                                        method,
+                                        params,
+                                    )
                                     .await
-                                {
-                                    warn!("failed to ingest notification {method}: {error}");
-                                }
+                            {
+                                warn!("failed to ingest server request {method}: {error}");
                             }
-                        }
-                        Err(error) => {
-                            warn!("failed to parse codex message: {error}");
+                        } else if let Err(error) = self
+                            .state
+                            .ingest_notification(&self.workspace_id, method, params)
+                            .await
+                        {
+                            warn!("failed to ingest notification {method}: {error}");
                         }
                     }
-                }
-                Ok(None) => {
-                    if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down()
-                    {
-                        let _ = self.state.upsert_operational_condition(
-                            self.workspace_id.clone(),
-                            "codex_connection",
-                            falcondeck_core::ServiceLevel::Warning,
-                            "Codex app-server disconnected".to_string(),
-                            Some("disconnect".to_string()),
-                        );
-                    }
-                    break;
                 }
                 Err(error) => {
-                    warn!("codex stdout read error: {error}");
-                    if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down()
-                    {
-                        let _ = self.state.upsert_operational_condition(
-                            self.workspace_id.clone(),
-                            "codex_connection",
-                            falcondeck_core::ServiceLevel::Error,
-                            format!("Codex stream error: {error}"),
-                            Some("stream-error".to_string()),
-                        );
-                    }
-                    break;
+                    warn!("failed to parse codex message: {error}");
                 }
             }
         }
@@ -1215,6 +1275,10 @@ pub(crate) fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let turn_time = extract_datetime_or_timestamp(
+            &turn,
+            &["startedAt", "started_at", "completedAt", "completed_at"],
+        );
         let mut saw_user_message = false;
         for item in turn_items {
             let is_user_message = extract_string(&item, &["type"])
@@ -1225,6 +1289,7 @@ pub(crate) fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
                 editable_turn_id,
                 previous_turn_id.as_deref(),
                 turn_lifecycle,
+                turn_time,
             ) {
                 let existing_review_index = match &converted {
                     ConversationItem::CodeReview { id, .. } => items[turn_start_index..]
@@ -1357,11 +1422,13 @@ fn build_conversation_item_from_thread_item(
     turn_id: Option<&str>,
     previous_turn_id: Option<&str>,
     turn_lifecycle: ContentLifecycle,
+    fallback_created_at: Option<chrono::DateTime<Utc>>,
 ) -> Option<ConversationItem> {
     let id = extract_string(item, &["id"])?;
     let item_type = extract_string(item, &["type"])?;
-    let created_at =
-        extract_datetime(item, &["createdAt", "created_at", "timestamp"]).unwrap_or_else(Utc::now);
+    let created_at = extract_datetime_or_timestamp(item, &["createdAt", "created_at", "timestamp"])
+        .or(fallback_created_at)
+        .unwrap_or_else(Utc::now);
 
     match item_type.as_str() {
         "userMessage" | "user_message" => {
@@ -1567,6 +1634,13 @@ fn extract_cwd(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn is_codex_image_wrapper_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.eq_ignore_ascii_case("</image>")
+        || trimmed.starts_with("<image ")
+        || trimmed.starts_with("<image>")
+}
+
 fn parse_user_message_content(item_id: &str, content: &[Value]) -> (String, Vec<ImageInput>) {
     let mut text_parts = Vec::new();
     let mut attachments = Vec::new();
@@ -1576,16 +1650,21 @@ fn parse_user_message_content(item_id: &str, content: &[Value]) -> (String, Vec<
             continue;
         };
         match item_type.as_str() {
-            "text" => {
-                if let Some(text) = extract_string(entry, &["text"]) {
+            "text" | "input_text" | "inputText" => {
+                if let Some(text) = extract_string(entry, &["text"])
+                    && !is_codex_image_wrapper_text(&text)
+                {
                     text_parts.push(text);
                 }
             }
-            "image" | "localImage" => {
+            "image" | "localImage" | "input_image" | "inputImage" => {
                 let local_path = extract_string(entry, &["path"]).filter(|value| !value.is_empty());
-                let url = extract_string(entry, &["url", "value", "data", "source"])
-                    .or_else(|| local_path.clone())
-                    .unwrap_or_default();
+                let url = extract_string(
+                    entry,
+                    &["url", "imageUrl", "image_url", "value", "data", "source"],
+                )
+                .or_else(|| local_path.clone())
+                .unwrap_or_default();
                 if !url.is_empty() {
                     attachments.push(ImageInput {
                         id: format!("{item_id}-image-{index}"),
@@ -1767,17 +1846,50 @@ pub fn extract_thread_id(value: &Value) -> Option<String> {
 }
 
 pub fn extract_thread_title(value: &Value) -> Option<String> {
-    value
-        .get("title")
-        .or_else(|| value.get("name"))
+    // App-server's user-facing title is `name`. `title` is a legacy alias.
+    let raw = value
+        .get("name")
         .or_else(|| value.get("threadName"))
         .or_else(|| value.get("thread_name"))
-        .or_else(|| value.get("thread").and_then(|thread| thread.get("title")))
+        .or_else(|| value.get("title"))
         .or_else(|| value.get("thread").and_then(|thread| thread.get("name")))
+        .or_else(|| value.get("thread").and_then(|thread| thread.get("title")))
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .filter(|value| !value.is_empty())?;
+    sanitize_codex_preview(raw)
+}
+
+pub(crate) fn is_codex_attachment_manifest(text: &str) -> bool {
+    text.trim_start()
+        .trim_start_matches('#')
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("files mentioned by the user")
+}
+
+/// Codex Desktop / ChatGPT wrap pasted files in a markdown manifest and put
+/// the typed prompt after `## My request…`. App-server's `preview` is that
+/// whole blob, which is why the sidebar otherwise shows the heading.
+pub(crate) fn sanitize_codex_preview(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !is_codex_attachment_manifest(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    let heading = trimmed.find("## My request")?;
+    let colon = trimmed[heading..].find(':')? + heading;
+    let body = trimmed[colon + 1..].trim();
+    if body.is_empty() || is_codex_attachment_manifest(body) {
+        return None;
+    }
+    Some(collapse_whitespace(body))
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -1928,6 +2040,9 @@ mod tests {
             "item/commandExecution/requestApproval"
         ));
         assert!(server_request_expects_result("item/tool/requestUserInput"));
+        assert!(server_request_expects_result(
+            "mcpServer/elicitation/request"
+        ));
         assert!(!server_request_expects_result("item/tool/call"));
         assert!(!server_request_expects_result(
             "account/chatgptAuthTokens/refresh"
@@ -2306,6 +2421,92 @@ mod tests {
     }
 
     #[test]
+    fn prefers_codex_thread_name_over_preview() {
+        let threads = parse_threads(
+            "workspace-1",
+            "/Users/james/project-a",
+            &json!([{
+                "id": "thread-1",
+                "name": "Lucid Mobile app",
+                "preview": "# Files mentioned by the user:\n\n## codex-clipboard-5c77f1c0.png: /tmp/clip.png\n\n## My request for Codex:\nwhat is causing this prompt to be restricted?",
+                "cwd": "/Users/james/project-a"
+            }]),
+        );
+
+        assert_eq!(threads[0].summary.title, "Lucid Mobile app");
+        assert!(!threads[0].title_is_provider_preview);
+    }
+
+    #[test]
+    fn titles_codex_attachment_previews_from_the_typed_request() {
+        let threads = parse_threads(
+            "workspace-1",
+            "/Users/james/project-a",
+            &json!([{
+                "id": "thread-1",
+                "preview": "# Files mentioned by the user:\n\n## codex-clipboard-5c77f1c0-fabc.png: /var/folders/nv/T/codex-clipboard-5c77f1c0-fabc.png\n\n## My request for Codex:\nwhat is causing this prompt to be restricted?",
+                "cwd": "/Users/james/project-a"
+            }]),
+        );
+
+        assert_eq!(
+            threads[0].summary.title,
+            "what is causing this prompt to be restricted?"
+        );
+        assert!(threads[0].title_is_provider_preview);
+        assert_eq!(
+            threads[0].summary.last_message_preview.as_deref(),
+            Some("what is causing this prompt to be restricted?")
+        );
+    }
+
+    #[test]
+    fn drops_codex_attachment_previews_with_no_typed_request() {
+        let threads = parse_threads(
+            "workspace-1",
+            "/Users/james/project-a",
+            &json!([{
+                "id": "thread-1",
+                "preview": "# Files mentioned by the user:\n\n## codex-clipboard-86050d43.png: /tmp/clip.png\n\n## My request for Codex:\n",
+                "cwd": "/Users/james/project-a"
+            }]),
+        );
+
+        assert_eq!(threads[0].summary.title, "Untitled thread");
+        assert!(!threads[0].title_is_provider_preview);
+        assert_eq!(threads[0].summary.last_message_preview, None);
+    }
+
+    #[test]
+    fn sanitize_codex_preview_peels_attachment_manifests() {
+        assert_eq!(
+            sanitize_codex_preview("  Fix the waveform  ").as_deref(),
+            Some("Fix the waveform")
+        );
+        assert_eq!(sanitize_codex_preview("   "), None);
+        assert_eq!(
+            sanitize_codex_preview(
+                "# Files mentioned by the user:\n\n## clip.png: /tmp/clip.png\n\n## My request for Codex:\nwhat is causing this prompt to be restricted?"
+            )
+            .as_deref(),
+            Some("what is causing this prompt to be restricted?")
+        );
+        assert_eq!(
+            sanitize_codex_preview(
+                "# Files mentioned by the user:\n\n## clip.png: /tmp/clip.png\n\n## My request:\nship it"
+            )
+            .as_deref(),
+            Some("ship it")
+        );
+        assert_eq!(
+            sanitize_codex_preview(
+                "# Files mentioned by the user:\n\n## clip.png: /tmp/clip.png\n\n## My request for Codex:\n"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn hydrates_session_file_when_thread_is_not_loaded() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
@@ -2663,6 +2864,43 @@ mod tests {
         let account = parse_account(&json!({}));
         assert_eq!(account.status, AccountStatus::Unknown);
         assert_eq!(account.label, "Account status unknown");
+    }
+
+    #[test]
+    fn hydrates_codex_input_image_user_messages_without_wrapper_text() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-1",
+                    "startedAt": "2026-08-27T12:28:51Z",
+                    "items": [{
+                        "id": "item-40",
+                        "type": "userMessage",
+                        "content": [
+                            {"type": "input_text", "text": "Condense the top bar. "},
+                            {"type": "input_text", "text": "<image name=[Image #1] path=\"/tmp/shot.png\">"},
+                            {"type": "input_image", "imageUrl": "data:image/png;base64,aGVsbG8="},
+                            {"type": "input_text", "text": "</image>"}
+                        ]
+                    }]
+                }]
+            }
+        }));
+
+        match &items[0] {
+            ConversationItem::UserMessage {
+                text,
+                attachments,
+                created_at,
+                ..
+            } => {
+                assert_eq!(text, "Condense the top bar.");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].url, "data:image/png;base64,aGVsbG8=");
+                assert_eq!(created_at.to_rfc3339(), "2026-08-27T12:28:51+00:00");
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3419,6 +3657,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: Vec::new(),
                 variant: None,
@@ -3499,6 +3738,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: Vec::new(),
                 variant: None,
@@ -3545,6 +3785,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: Vec::new(),
                 variant: None,

@@ -15,8 +15,8 @@ use super::*;
 /// is most likely to look at are worth backfilling.
 const PREVIEW_TITLE_BACKFILL_LIMIT: usize = 5;
 
-const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 7_500_000;
-const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
+const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
+const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 15_000_000;
 
 pub(super) async fn connect_workspace(
     app: &AppState,
@@ -95,6 +95,85 @@ pub(super) async fn connect_workspace(
             .await
         {
             tracing::warn!(%error, path = %path_string, "failed to connect workspace");
+            let _ = app
+                .update_workspace_placeholder_status(
+                    &path_string,
+                    WorkspaceStatus::Disconnected,
+                    Some(error.to_string()),
+                )
+                .await;
+        }
+    });
+
+    Ok(summary)
+}
+
+pub(super) async fn create_chat(app: &AppState) -> Result<WorkspaceSummary, DaemonError> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| DaemonError::Process("home directory is unavailable".to_string()))?;
+    let now = chrono::Local::now();
+    let folder = format!(
+        "chat-{}-{}",
+        now.format("%H%M%S"),
+        &Uuid::new_v4().simple().to_string()[..6]
+    );
+    let path = home
+        .join("Documents")
+        .join("FalconDeck")
+        .join(now.format("%Y-%m-%d").to_string())
+        .join(folder);
+    create_chat_at(app, path).await
+}
+
+pub(super) async fn create_chat_at(
+    app: &AppState,
+    path: PathBuf,
+) -> Result<WorkspaceSummary, DaemonError> {
+    std::fs::create_dir_all(&path).map_err(|error| {
+        DaemonError::Process(format!("failed to create casual chat folder: {error}"))
+    })?;
+    let path = path.canonicalize().map_err(|error| {
+        DaemonError::Process(format!("failed to resolve casual chat folder: {error}"))
+    })?;
+    let path_string = path.to_string_lossy().to_string();
+    let persisted_workspace = PersistedWorkspaceState {
+        path: path_string.clone(),
+        id: Some(format!("workspace-{}", Uuid::new_v4().simple())),
+        current_thread_id: None,
+        updated_at: Some(Utc::now()),
+        default_provider: Some(AgentProvider::CODEX),
+        last_error: None,
+        archived_thread_ids: Vec::new(),
+        pinned_thread_ids: Vec::new(),
+        project_pinned_thread_ids: Vec::new(),
+        thread_states: Vec::new(),
+    };
+    let summary = app
+        .restore_workspace_placeholder(&persisted_workspace, WorkspaceStatus::Connecting, None)
+        .await?;
+    app.persist_local_state().await?;
+    app.emit(
+        Some(summary.id.clone()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Err(error) = app
+            .connect_workspace_internal(
+                ConnectWorkspaceRequest {
+                    path: path_string.clone(),
+                    kind: falcondeck_core::WorkspaceKind::Casual,
+                },
+                Some(&persisted_workspace),
+            )
+            .await
+        {
+            tracing::warn!(%error, path = %path_string, "failed to start casual chat workspace");
             let _ = app
                 .update_workspace_placeholder_status(
                     &path_string,
@@ -393,6 +472,11 @@ pub(super) async fn connect_workspace_internal(
     let summary = WorkspaceSummary {
         id: workspace_id.clone(),
         path: path_string.clone(),
+        kind: if persisted_workspace_ref.is_some() {
+            workspace_kind_for_path(&path_string)
+        } else {
+            request.kind.clone()
+        },
         status: if agents.iter().all(|agent| {
             matches!(
                 agent.account.status,
@@ -431,6 +515,12 @@ pub(super) async fn connect_workspace_internal(
                 .unwrap_or(false)
             {
                 thread.summary.is_pinned = true;
+                thread.summary.is_pinned_in_project = false;
+            } else if persisted_workspace_ref
+                .map(|pw| pw.project_pinned_thread_ids.contains(&thread.summary.id))
+                .unwrap_or(false)
+            {
+                thread.summary.is_pinned_in_project = true;
             }
             if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
                 if let Some(provider) = state.provider.clone() {
@@ -531,6 +621,7 @@ pub(super) async fn connect_workspace_internal(
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: Vec::new(),
         });
     // The saved record must carry the id the workspace actually connected
@@ -582,7 +673,7 @@ fn carry_over_live_threads(
     hydrated: &mut HashMap<String, ManagedThread>,
     previous: HashMap<String, ManagedThread>,
 ) {
-    for (thread_id, thread) in previous {
+    for (thread_id, mut thread) in previous {
         let keep_live = matches!(
             thread.summary.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
@@ -592,6 +683,16 @@ fn carry_over_live_threads(
             .is_some_and(|rebuilt| rebuilt.items.is_empty())
             && !thread.items.is_empty();
         if keep_live || keep_replayed_transcript {
+            // A startup placeholder is empty of queued requests even when
+            // disk still has them. The rebuilt copy carries that persist;
+            // keeping the live thread must not throw the outbox away.
+            if thread.queued_requests.is_empty()
+                && let Some(rebuilt) = hydrated.get(&thread_id)
+                && !rebuilt.queued_requests.is_empty()
+            {
+                thread.queued_requests = rebuilt.queued_requests.clone();
+                thread.summary.queued_turns = rebuilt.summary.queued_turns.clone();
+            }
             hydrated.insert(thread_id, thread);
         }
     }
@@ -608,7 +709,11 @@ fn restore_persisted_title_state(
     // incorrectly mark the preview itself as generated, so only preserve a
     // generated title when it differs from the hydrated preview.
     let persisted_generated_title = state.ai_title_generated
-        && (!title_is_provider_preview || state.title.as_deref() != Some(hydrated_title));
+        && (!title_is_provider_preview || state.title.as_deref() != Some(hydrated_title))
+        && state
+            .title
+            .as_deref()
+            .is_some_and(|title| !is_placeholder_thread_title(title));
     if (state.manual_title || persisted_generated_title)
         && let Some(title) = state.title.clone()
     {
@@ -670,13 +775,21 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         if persisted_thread_states
             .get(&thread.summary.id)
             .is_some_and(|state| {
-                matches!(state.status, Some(ThreadStatus::Running))
-                    || (matches!(state.status, Some(ThreadStatus::Error))
-                        && state.last_error.as_deref() == Some(SHUTDOWN_INTERRUPTED_TURN_ERROR))
+                persisted_turn_was_cut_off(state.status.as_ref(), state.last_error.as_deref())
             })
         {
             thread.summary.status = ThreadStatus::Error;
             thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+            settle_items_as_shutdown_interrupted(
+                &mut thread.items,
+                thread
+                    .summary
+                    .latest_turn_id
+                    .as_deref()
+                    .or(Some(thread.summary.id.as_str())),
+                now,
+                SHUTDOWN_INTERRUPTED_TURN_ERROR,
+            );
         }
         match session_owners.get(thread.summary.id.as_str()) {
             Some(owner) => {
@@ -702,13 +815,28 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         }
         let adopted = adopted_transcripts.remove(&state.thread_id);
         let restored_status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
-            ThreadStatus::Running => ThreadStatus::Error,
+            ThreadStatus::Running | ThreadStatus::WaitingForInput => ThreadStatus::Error,
             other => other,
         };
         let restored_last_error = state.last_error.clone().or_else(|| {
-            matches!(state.status, Some(ThreadStatus::Running))
-                .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
+            matches!(
+                state.status,
+                Some(ThreadStatus::Running | ThreadStatus::WaitingForInput)
+            )
+            .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
         });
+        let mut items = adopted
+            .as_ref()
+            .map(|transcript| transcript.items.clone())
+            .unwrap_or_default();
+        if is_shutdown_interrupted(&restored_status, restored_last_error.as_deref()) {
+            settle_items_as_shutdown_interrupted(
+                &mut items,
+                Some(state.thread_id.as_str()),
+                now,
+                SHUTDOWN_INTERRUPTED_TURN_ERROR,
+            );
+        }
         threads_out.push(crate::codex::HydratedThread {
             summary: ThreadSummary {
                 id: state.thread_id.clone(),
@@ -727,7 +855,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
                 origin: None,
-                status: restored_status,
+                status: restored_status.clone(),
                 updated_at: state
                     .updated_at
                     .max(
@@ -749,6 +877,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: state
                     .queued_requests
@@ -757,9 +886,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                     .collect(),
                 variant: state.variant.clone(),
             },
-            items: adopted
-                .map(|transcript| transcript.items)
-                .unwrap_or_default(),
+            items,
             title_is_provider_preview: false,
         });
     }
@@ -773,9 +900,9 @@ fn default_permission_mode(provider: &AgentProvider) -> Option<&'static str> {
         Some("never")
     } else if provider == &AgentProvider::CLAUDE {
         Some("bypassPermissions")
-    } else if provider.as_str().eq_ignore_ascii_case("grok") {
-        Some("always-approve")
-    } else if provider.as_str().eq_ignore_ascii_case("opencode") {
+    } else if provider.as_str().eq_ignore_ascii_case("grok")
+        || provider.as_str().eq_ignore_ascii_case("opencode")
+    {
         Some("always-approve")
     } else {
         None
@@ -823,16 +950,10 @@ pub(super) async fn start_thread(
             // cross-provider "switch harness" picker never offers the
             // current provider as a destination, so this relaxation only
             // ever matters for the fork path.
-            if thread_is_busy(&source.summary.status) {
-                return Err(DaemonError::BadRequest(
-                    "wait for the active turn to finish before handing off".to_string(),
-                ));
-            }
-            if source.summary.variant.is_some() {
-                return Err(DaemonError::BadRequest(
-                    "handoffs from isolated threads are not supported yet".to_string(),
-                ));
-            }
+            //
+            // Mid-turn and isolated sources are allowed. Handoff snapshots
+            // the transcript as it stands and never mutates the source, so
+            // a stuck or rate-limited turn can still continue elsewhere.
         }
         let agent = workspace
             .summary
@@ -958,6 +1079,7 @@ pub(super) async fn start_thread(
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant,
@@ -1060,6 +1182,7 @@ pub(super) async fn fork_thread(
     thread.attention = ThreadAttention::default();
     thread.is_archived = false;
     thread.is_pinned = false;
+    thread.is_pinned_in_project = false;
     thread.queued_turns.clear();
 
     let workspace_summary = {
@@ -1271,13 +1394,13 @@ fn record_image_attachment_size(
         .unwrap_or("Image");
     if bytes > MAX_IMAGE_ATTACHMENT_BYTES {
         return Err(DaemonError::BadRequest(format!(
-            "{label} is too large. Images must be 7.5 MB or smaller."
+            "{label} is too large. Images must be 10 MB or smaller."
         )));
     }
     let next_total = total_image_bytes.saturating_add(bytes);
     if next_total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES {
         return Err(DaemonError::BadRequest(
-            "Those images are too large together. Attach no more than 10 MB at once.".to_string(),
+            "Those images are too large together. Attach no more than 15 MB at once.".to_string(),
         ));
     }
     *total_image_bytes = next_total;
@@ -1561,6 +1684,11 @@ async fn try_steer_turn(
     if !request.steer {
         return Ok(None);
     }
+    let catalog = match refresh_workspace_skill_catalog(app, &request.workspace_id).await {
+        Ok(catalog) => catalog,
+        Err(DaemonError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let Some((thread, provider, selected_skills)) = ({
         let workspaces = app.inner.workspaces.lock().await;
         workspaces.get(&request.workspace_id).and_then(|workspace| {
@@ -1578,9 +1706,10 @@ async fn try_steer_turn(
             if !supports_steering {
                 return None;
             }
-            let selected_skills = resolve_selected_skills(
-                &workspace.summary.skills,
+            let selected_skills = resolve_turn_skills(
+                &catalog,
                 &request.selected_skills,
+                normalized_inputs,
                 &provider,
             );
             Some((thread.summary.clone(), provider, selected_skills))
@@ -1660,6 +1789,7 @@ pub(super) fn steer_error_downgrades_to_queue(error: &DaemonError) -> bool {
             message.contains("no active Codex turn to steer")
                 || message.contains("no active claude turn to steer")
                 || message.contains("no active ACP session to steer")
+                || message.contains("no active ACP turn to steer")
                 || message.contains("no longer accepting input")
         }
         DaemonError::Process(message) => {
@@ -1691,6 +1821,16 @@ async fn try_enqueue_turn(
         let Some(thread) = workspace.threads.get_mut(&request.thread_id) else {
             return Ok(None);
         };
+        if request.resume_interrupted {
+            return if thread_is_busy(&thread.summary.status) {
+                Err(DaemonError::BadRequest(
+                    "that session is already running a turn; wait for it to finish before resuming"
+                        .to_string(),
+                ))
+            } else {
+                Ok(None)
+            };
+        }
         if !thread_is_busy(&thread.summary.status) {
             return Ok(None);
         }
@@ -1754,7 +1894,7 @@ pub(super) async fn remove_queued_turn(
     thread_id: &str,
     queued_id: &str,
 ) -> Result<CommandResponse, DaemonError> {
-    let summary = {
+    let (summary, changed) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(workspace_id)
@@ -1768,16 +1908,22 @@ pub(super) async fn remove_queued_turn(
             .queued_requests
             .retain(|queued| queued.id != queued_id);
         if thread.queued_requests.len() == before {
-            return Err(DaemonError::NotFound("queued turn not found".to_string()));
+            // Same id already left the queue (steered, dispatched, or a
+            // stale chip after Grok's interject returned). Rebroadcast so
+            // the client drops it instead of surfacing a not-found banner.
+            (thread.summary.clone(), false)
+        } else {
+            thread
+                .summary
+                .queued_turns
+                .retain(|queued| queued.id != queued_id);
+            thread.summary.updated_at = Utc::now();
+            (thread.summary.clone(), true)
         }
-        thread
-            .summary
-            .queued_turns
-            .retain(|queued| queued.id != queued_id);
-        thread.summary.updated_at = Utc::now();
-        thread.summary.clone()
     };
-    app.persist_local_state().await?;
+    if changed {
+        app.persist_local_state().await?;
+    }
     app.emit(
         Some(workspace_id.to_string()),
         Some(thread_id.to_string()),
@@ -1785,7 +1931,7 @@ pub(super) async fn remove_queued_turn(
     );
     Ok(CommandResponse {
         ok: true,
-        message: Some("removed".to_string()),
+        message: Some(if changed { "removed" } else { "already gone" }.to_string()),
     })
 }
 
@@ -1804,7 +1950,7 @@ pub(super) async fn steer_queued_turn(
     // Taken out of the queue before the steer rather than after, so a turn
     // ending mid-steer cannot drain the same entry into a second send. The pop
     // is provisional: every failure path below puts it back where it was.
-    let (queued, queue_index, summary_entry) = {
+    let taken = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(workspace_id)
@@ -1834,19 +1980,41 @@ pub(super) async fn steer_queued_turn(
             .threads
             .get_mut(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        let queue_index = thread
+        match thread
             .queued_requests
             .iter()
             .position(|queued| queued.id == queued_id)
-            .ok_or_else(|| DaemonError::NotFound("queued turn not found".to_string()))?;
-        let queued = thread.queued_requests.remove(queue_index);
-        let summary_entry = thread
-            .summary
-            .queued_turns
-            .iter()
-            .position(|entry| entry.id == queued_id)
-            .map(|index| (index, thread.summary.queued_turns.remove(index)));
-        (queued, queue_index, summary_entry)
+        {
+            Some(queue_index) => {
+                let queued = thread.queued_requests.remove(queue_index);
+                let summary_entry = thread
+                    .summary
+                    .queued_turns
+                    .iter()
+                    .position(|entry| entry.id == queued_id)
+                    .map(|index| (index, thread.summary.queued_turns.remove(index)));
+                Ok((queued, queue_index, summary_entry))
+            }
+            None => Err(thread.summary.clone()),
+        }
+    };
+    let (queued, queue_index, summary_entry) = match taken {
+        Ok(taken) => taken,
+        Err(summary) => {
+            // Grok's `x.ai/interject` returns before the thread-updated event
+            // reaches a phone, so a second Steer tap (or a chip the client
+            // still holds after a successful first steer) must not banner
+            // "queued turn not found". Rebroadcast the live queue instead.
+            app.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread: summary },
+            );
+            return Ok(CommandResponse {
+                ok: true,
+                message: Some("already gone".to_string()),
+            });
+        }
     };
 
     let mut request = queued.request.clone();
@@ -2171,12 +2339,7 @@ impl AppState {
                 let Some(thread) = workspace.threads.get_mut(&thread_id) else {
                     return;
                 };
-                if matches!(
-                    thread.summary.status,
-                    ThreadStatus::Running | ThreadStatus::WaitingForInput
-                ) || thread.queued_requests.is_empty()
-                    || thread.dispatching_request.is_some()
-                {
+                if queued_turn_is_held(thread) {
                     return;
                 }
                 let next = thread.queued_requests.remove(0);
@@ -2266,7 +2429,12 @@ async fn send_turn_with_startup_mode(
             "daemon is shutting down".to_string(),
         ));
     }
-    let inputs = if request.inputs.is_empty() {
+    let inputs = if request.resume_interrupted {
+        vec![TurnInputItem::Text {
+            id: None,
+            text: super::harness_user_text::shutdown_resume_user_text(),
+        }]
+    } else if request.inputs.is_empty() {
         return Err(DaemonError::BadRequest(
             "at least one input item is required".to_string(),
         ));
@@ -2303,6 +2471,7 @@ async fn send_turn_with_startup_mode(
         return Ok(queued);
     }
 
+    let skill_catalog = refresh_workspace_skill_catalog(app, &request.workspace_id).await?;
     let (thread, provider, selected_skills, previous_turn_id, approval_policy) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -2319,41 +2488,51 @@ async fn send_turn_with_startup_mode(
                     .map(|thread| thread.summary.provider.clone())
             })
             .unwrap_or_else(|| workspace.summary.default_provider.clone());
-        let managed = workspace
-            .threads
-            .entry(request.thread_id.clone())
-            .or_insert_with(|| {
-                ManagedThread::new(ThreadSummary {
-                    id: request.thread_id.clone(),
-                    workspace_id: request.workspace_id.clone(),
-                    title: "Untitled thread".to_string(),
-                    provider: provider.clone(),
-                    native_session_id: None,
-                    provider_transport: None,
-                    handoff_from: None,
-                    origin: None,
-                    status: ThreadStatus::Idle,
-                    updated_at: now,
-                    last_message_preview: None,
-                    latest_turn_id: None,
-                    latest_plan: None,
-                    latest_diff: None,
-                    last_tool: None,
-                    last_error: None,
-                    agent: ThreadAgentParams::default(),
-                    attention: ThreadAttention::default(),
-                    is_archived: false,
-                    is_pinned: false,
-                    goal: None,
-                    queued_turns: Vec::new(),
-                    variant: None,
+        let managed = if request.resume_interrupted {
+            workspace.threads.get_mut(&request.thread_id).ok_or_else(|| {
+                DaemonError::NotFound(
+                    "that session is no longer on this project; FalconDeck will not start a blank one to resume it".to_string(),
+                )
+            })?
+        } else {
+            workspace
+                .threads
+                .entry(request.thread_id.clone())
+                .or_insert_with(|| {
+                    ManagedThread::new(ThreadSummary {
+                        id: request.thread_id.clone(),
+                        workspace_id: request.workspace_id.clone(),
+                        title: "Untitled thread".to_string(),
+                        provider: provider.clone(),
+                        native_session_id: None,
+                        provider_transport: None,
+                        handoff_from: None,
+                        origin: None,
+                        status: ThreadStatus::Idle,
+                        updated_at: now,
+                        last_message_preview: None,
+                        latest_turn_id: None,
+                        latest_plan: None,
+                        latest_diff: None,
+                        last_tool: None,
+                        last_error: None,
+                        agent: ThreadAgentParams::default(),
+                        attention: ThreadAttention::default(),
+                        is_archived: false,
+                        is_pinned: false,
+                        is_pinned_in_project: false,
+                        goal: None,
+                        queued_turns: Vec::new(),
+                        variant: None,
+                    })
                 })
-            });
+        };
         let permission_mode = request
             .permission_mode
             .clone()
             .or_else(|| managed.summary.agent.permission_mode.clone())
             .or_else(|| default_permission_mode(&provider).map(str::to_owned));
+        note_claude_post_plan_permission_mode(managed, permission_mode.as_deref());
         let sandbox_mode = request
             .sandbox_mode
             .clone()
@@ -2381,6 +2560,7 @@ async fn send_turn_with_startup_mode(
         }
         managed.summary.provider = provider.clone();
         managed.summary.status = ThreadStatus::Running;
+        managed.summary.last_error = None;
         managed.summary.agent.model_id = request.model_id.clone().or(managed
             .summary
             .agent
@@ -2399,12 +2579,10 @@ async fn send_turn_with_startup_mode(
             .clone());
         managed.summary.agent.permission_mode = permission_mode;
         managed.summary.agent.sandbox_mode = sandbox_mode;
-        let selected_skills = resolve_selected_skills(
-            &workspace.summary.skills,
-            &request.selected_skills,
-            &provider,
-        );
-        if !managed.manual_title
+        let selected_skills =
+            resolve_turn_skills(&skill_catalog, &request.selected_skills, &inputs, &provider);
+        if !request.resume_interrupted
+            && !managed.manual_title
             && !managed.ai_title_generated
             && is_placeholder_thread_title(&managed.summary.title)
             && let Some(title) = provisional_thread_title_from_inputs(&inputs)
@@ -2424,12 +2602,30 @@ async fn send_turn_with_startup_mode(
             approval_policy,
         )
     };
-    let user_message = build_user_message_item(
-        &inputs,
-        request.user_item_id.as_deref(),
-        None,
-        previous_turn_id,
-    );
+    let user_message = if request.resume_interrupted {
+        super::harness_user_text::conversation_item_from_projected_user(
+            request
+                .user_item_id
+                .clone()
+                .filter(|id| id.starts_with("user-"))
+                .unwrap_or_else(|| format!("user-{}", Uuid::new_v4().simple())),
+            &super::harness_user_text::shutdown_resume_user_text(),
+            Utc::now(),
+        )
+        .unwrap_or_else(|| ConversationItem::Service {
+            id: format!("service-{}", Uuid::new_v4().simple()),
+            level: falcondeck_core::ServiceLevel::Info,
+            message: "Resumed after FalconDeck closed".to_string(),
+            created_at: Utc::now(),
+        })
+    } else {
+        build_user_message_item(
+            &inputs,
+            request.user_item_id.as_deref(),
+            None,
+            previous_turn_id,
+        )
+    };
     app.push_conversation_item(
         &request.workspace_id,
         &request.thread_id,
@@ -2437,6 +2633,13 @@ async fn send_turn_with_startup_mode(
         true,
     )
     .await?;
+    if let Err(error) = app.persist_local_state().await {
+        tracing::warn!(
+            %error,
+            thread = %request.thread_id,
+            "failed to persist running turn status"
+        );
+    }
     app.emit(
         Some(request.workspace_id.clone()),
         Some(request.thread_id.clone()),
@@ -2563,17 +2766,26 @@ pub(super) async fn update_thread(
         }
         if let Some(pinned) = request.pinned {
             thread.summary.is_pinned = pinned;
+            if pinned {
+                thread.summary.is_pinned_in_project = false;
+            }
+        }
+        if let Some(pinned_in_project) = request.pinned_in_project {
+            thread.summary.is_pinned_in_project = pinned_in_project;
+            if pinned_in_project {
+                thread.summary.is_pinned = false;
+            }
         }
         if request.acknowledge_interruption == Some(true)
-            && matches!(thread.summary.status, ThreadStatus::Error)
-            && thread.summary.last_error.as_deref() == Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+            && is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref())
         {
             thread.summary.status = ThreadStatus::Idle;
             thread.summary.last_error = None;
         }
         if let Some(permission_mode) = request.permission_mode.clone() {
-            thread.summary.agent.permission_mode =
-                permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
+            let next = permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
+            note_claude_post_plan_permission_mode(thread, next.as_deref());
+            thread.summary.agent.permission_mode = next;
         }
         if let Some(approval_policy) = request.approval_policy.clone() {
             thread.summary.agent.approval_policy = approval_policy;
@@ -2591,7 +2803,9 @@ pub(super) async fn update_thread(
             && request.permission_mode.is_none()
             && request.approval_policy.is_none()
             && request.sandbox_mode.is_none()
-            && (request.pinned.is_some() || request.acknowledge_interruption.is_some());
+            && (request.pinned.is_some()
+                || request.pinned_in_project.is_some()
+                || request.acknowledge_interruption.is_some());
         if !is_non_recency_update {
             thread.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(request.thread_id.clone());
@@ -2612,6 +2826,9 @@ pub(super) async fn update_thread(
         },
     );
     let _ = app.persist_local_state().await;
+    if request.acknowledge_interruption == Some(true) {
+        app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id);
+    }
 
     Ok(ThreadHandle {
         workspace: workspace_summary,
@@ -2672,10 +2889,16 @@ pub(super) fn codex_approval_response(
 /// Maps the simple sandbox mode strings stored on threads to the tagged
 /// `SandboxPolicy` object the Codex `turn/start` request expects. `None`
 /// leaves the provider on its config default.
-pub(super) fn sandbox_policy_payload(mode: Option<&str>) -> Value {
+pub(super) fn sandbox_policy_payload(
+    mode: Option<&str>,
+    additional_writable_root: Option<&str>,
+) -> Value {
     match mode.map(str::trim) {
         Some("read-only") => json!({ "type": "readOnly" }),
-        Some("workspace-write") => json!({ "type": "workspaceWrite" }),
+        Some("workspace-write") => match additional_writable_root {
+            Some(root) => json!({ "type": "workspaceWrite", "writableRoots": [root] }),
+            None => json!({ "type": "workspaceWrite" }),
+        },
         Some("danger-full-access") => json!({ "type": "dangerFullAccess" }),
         _ => Value::Null,
     }
@@ -2983,13 +3206,37 @@ pub(super) async fn respond_to_interactive_request(
         .await
         .contains_key(&request_key);
     if is_claude_approval {
-        let InteractiveResponsePayload::Approval { decision } = response else {
-            return Err(DaemonError::BadRequest(
-                "Claude interactive requests require an approval response".to_string(),
-            ));
+        let reply = match (&pending.request.kind, &response) {
+            (
+                InteractiveRequestKind::Approval,
+                InteractiveResponsePayload::Approval { decision },
+            ) => crate::claude::ClaudeHookReply::Approval(decision.clone()),
+            (
+                InteractiveRequestKind::Question,
+                InteractiveResponsePayload::Question { answers },
+            ) => crate::claude::ClaudeHookReply::QuestionAnswers(answers.clone()),
+            (
+                InteractiveRequestKind::PlanApproval,
+                InteractiveResponsePayload::PlanApproval { outcome, feedback },
+            ) => {
+                if *outcome == falcondeck_core::PlanApprovalOutcome::Approved
+                    && let Some(thread_id) = pending.request.thread_id.as_deref()
+                {
+                    restore_claude_permission_after_plan(app, &workspace_id, thread_id).await?;
+                }
+                crate::claude::ClaudeHookReply::Plan {
+                    outcome: outcome.clone(),
+                    feedback: feedback.clone(),
+                }
+            }
+            _ => {
+                return Err(DaemonError::BadRequest(
+                    "Claude interactive response did not match the pending request".to_string(),
+                ));
+            }
         };
         if let Some(sender) = app.inner.claude_approvals.lock().await.remove(&request_key) {
-            let _ = sender.send(decision);
+            let _ = sender.send(reply);
         }
         app.inner
             .interactive_requests
@@ -3098,7 +3345,7 @@ pub(super) async fn respond_to_interactive_request(
             message: Some("response sent".to_string()),
         });
     }
-    if pending.request.method == "x.ai/exit_plan_mode" {
+    if crate::acp::is_acp_plan_approval_method(&pending.request.method) {
         let InteractiveResponsePayload::PlanApproval { outcome, feedback } = response else {
             return Err(DaemonError::BadRequest(
                 "ACP plan reviews require a plan approval response".to_string(),
@@ -3124,6 +3371,69 @@ pub(super) async fn respond_to_interactive_request(
                 .await;
                 return Err(DaemonError::BadRequest(
                     "This plan review is no longer live — the agent exited before it was answered. Send the message again.".to_string(),
+                ));
+            }
+            return Err(error);
+        }
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        if let Some(thread_id) = pending.request.thread_id {
+            let still_waiting =
+                thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
+            app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+                if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
+                    thread.status = ThreadStatus::Running;
+                }
+            })
+            .await?;
+            app.resolve_interactive_request_item(
+                &workspace_id,
+                &thread_id,
+                &request_id,
+                Some(resolution),
+            )
+            .await?;
+        }
+        app.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
+    if pending.request.method == "cursor/ask_question" {
+        let InteractiveResponsePayload::Question { answers } = response else {
+            return Err(DaemonError::BadRequest(
+                "Cursor questions require question answers".to_string(),
+            ));
+        };
+        if let Err(error) = app
+            .respond_acp_question(
+                &workspace_id,
+                pending.request.thread_id.as_deref(),
+                &request_id,
+                &answers,
+            )
+            .await
+        {
+            if matches!(error, DaemonError::NotFound(_)) {
+                discard_unanswerable_interactive_request(
+                    app,
+                    &workspace_id,
+                    &request_id,
+                    pending.request.thread_id.as_deref(),
+                )
+                .await;
+                return Err(DaemonError::BadRequest(
+                    "This question is no longer live — the agent exited before it was answered. Send the message again.".to_string(),
                 ));
             }
             return Err(error);
@@ -3256,35 +3566,41 @@ pub(super) async fn respond_to_interactive_request(
     }
     let session = app.session_for(&workspace_id).await?;
 
-    let result = match (&pending.request.kind, response) {
-        (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
-            codex_approval_response(&pending.request.method, &pending.params, &decision)
-        }
-        (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => {
-            json!({
+    let result = if is_mcp_elicitation_method(&pending.request.method) {
+        mcp_elicitation_rpc_result(&response, &pending.params).map_err(DaemonError::BadRequest)?
+    } else {
+        match (&pending.request.kind, response) {
+            (
+                InteractiveRequestKind::Approval,
+                InteractiveResponsePayload::Approval { decision },
+            ) => codex_approval_response(&pending.request.method, &pending.params, &decision),
+            (
+                InteractiveRequestKind::Question,
+                InteractiveResponsePayload::Question { answers },
+            ) => json!({
                 "answers": answers
                     .into_iter()
                     .map(|(question_id, question_answers)| {
                         (question_id, json!({ "answers": question_answers }))
                     })
                     .collect::<serde_json::Map<String, Value>>()
-            })
-        }
-        (InteractiveRequestKind::Approval, _) => {
-            return Err(DaemonError::BadRequest(
-                "interactive approval requires an approval response".to_string(),
-            ));
-        }
-        (InteractiveRequestKind::Question, _) => {
-            return Err(DaemonError::BadRequest(
-                "interactive question requires question answers".to_string(),
-            ));
-        }
-        (InteractiveRequestKind::PlanApproval, _) => {
-            return Err(DaemonError::BadRequest(
-                "plan approval requests are only supported by their originating ACP runtime"
-                    .to_string(),
-            ));
+            }),
+            (InteractiveRequestKind::Approval, _) => {
+                return Err(DaemonError::BadRequest(
+                    "interactive approval requires an approval response".to_string(),
+                ));
+            }
+            (InteractiveRequestKind::Question, _) => {
+                return Err(DaemonError::BadRequest(
+                    "interactive question requires question answers".to_string(),
+                ));
+            }
+            (InteractiveRequestKind::PlanApproval, _) => {
+                return Err(DaemonError::BadRequest(
+                    "plan approval requests are only supported by their originating ACP runtime"
+                        .to_string(),
+                ));
+            }
         }
     };
 
@@ -3329,6 +3645,41 @@ pub(super) async fn respond_to_interactive_request(
         ok: true,
         message: Some("response sent".to_string()),
     })
+}
+
+fn note_claude_post_plan_permission_mode(thread: &mut ManagedThread, next_mode: Option<&str>) {
+    if thread.summary.provider != AgentProvider::CLAUDE {
+        return;
+    }
+    let next_is_plan = crate::claude::is_claude_plan_mode(next_mode);
+    let current_is_plan =
+        crate::claude::is_claude_plan_mode(thread.summary.agent.permission_mode.as_deref());
+    if next_is_plan && !current_is_plan {
+        thread.claude_post_plan_permission_mode = thread
+            .summary
+            .agent
+            .permission_mode
+            .clone()
+            .filter(|mode| !crate::claude::is_claude_plan_mode(Some(mode)));
+    }
+}
+
+async fn restore_claude_permission_after_plan(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<(), DaemonError> {
+    app.with_managed_thread_mut(workspace_id, thread_id, |thread| {
+        let restored = thread
+            .claude_post_plan_permission_mode
+            .take()
+            .filter(|mode| !crate::claude::is_claude_plan_mode(Some(mode)))
+            .unwrap_or_else(|| crate::claude::CLAUDE_POST_PLAN_PERMISSION_MODE.to_string());
+        thread.summary.agent.permission_mode = Some(restored);
+    })
+    .await?;
+    let _ = app.persist_local_state().await;
+    Ok(())
 }
 
 fn validate_interactive_response(
@@ -3389,6 +3740,12 @@ fn validate_interactive_response(
             }
             Ok(())
         }
+        (
+            InteractiveRequestKind::Question,
+            InteractiveResponsePayload::Approval {
+                decision: ApprovalDecision::Deny,
+            },
+        ) if is_mcp_elicitation_method(&request.method) => Ok(()),
         (InteractiveRequestKind::Question, _) => Err(DaemonError::BadRequest(
             "interactive question requires question answers".to_string(),
         )),
@@ -3399,6 +3756,40 @@ fn validate_interactive_response(
             "interactive plan review requires a plan approval response".to_string(),
         )),
     }
+}
+
+pub(super) async fn refresh_workspace_skill_catalog(
+    app: &AppState,
+    workspace_id: &str,
+) -> Result<Vec<SkillSummary>, DaemonError> {
+    let (path, cached) = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        (
+            workspace.summary.path.clone(),
+            workspace.summary.skills.clone(),
+        )
+    };
+    let catalog = live_workspace_skills(&path, &cached);
+    let mut workspaces = app.inner.workspaces.lock().await;
+    if let Some(workspace) = workspaces.get_mut(workspace_id) {
+        workspace.summary.skills = catalog.clone();
+    }
+    Ok(catalog)
+}
+
+pub(super) async fn list_workspace_skills(
+    app: &AppState,
+    workspace_id: &str,
+    provider: Option<&AgentProvider>,
+) -> Result<Vec<SkillSummary>, DaemonError> {
+    let catalog = refresh_workspace_skill_catalog(app, workspace_id).await?;
+    Ok(match provider {
+        Some(provider) => skills_for_provider(&catalog, provider.clone()),
+        None => catalog,
+    })
 }
 
 pub(super) async fn collaboration_modes(
@@ -3775,7 +4166,7 @@ pub(super) async fn thread_detail(
     let workspace_summary = workspace.summary.clone();
     let thread_summary = thread.summary.clone();
     let mut detail = thread_detail_window(&thread.items, request)?;
-    settle_thread_detail_tool_items(&mut detail.items, &thread.summary.status, Utc::now());
+    settle_thread_detail_items(&mut detail.items, &thread.summary, Utc::now());
     // A restored ACP thread carries only its summary; the transcript lives in
     // the agent's session store. Kick off a background session/load replay so
     // opening the thread fills it in instead of showing an empty conversation.
@@ -3833,19 +4224,42 @@ fn native_opencode_transcript_needs_hydration(thread: &ManagedThread) -> bool {
         && (thread.items.is_empty() || !thread.native_transcript_synced)
 }
 
+fn queued_turn_is_held(thread: &ManagedThread) -> bool {
+    matches!(
+        thread.summary.status,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput
+    ) || is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref())
+        || thread.queued_requests.is_empty()
+        || thread.dispatching_request.is_some()
+}
+
 /// Projects stale transient tools using the containing thread's terminal
 /// outcome. This is a read-path safety net only; authoritative stored items
 /// are settled by the normal terminal turn handlers.
-fn settle_thread_detail_tool_items(
-    items: &mut [ConversationItem],
-    thread_status: &ThreadStatus,
+fn settle_thread_detail_items(
+    items: &mut Vec<ConversationItem>,
+    thread: &ThreadSummary,
     settled_at: chrono::DateTime<Utc>,
 ) {
-    let settlement = match thread_status {
+    let shutdown = is_shutdown_interrupted(&thread.status, thread.last_error.as_deref());
+    let settlement = match thread.status {
         ThreadStatus::Idle => ToolSettlement::Completed,
+        ThreadStatus::Error if shutdown => ToolSettlement::Interrupted,
         ThreadStatus::Error => ToolSettlement::Failed,
         ThreadStatus::Running | ThreadStatus::WaitingForInput => return,
     };
+    if shutdown {
+        settle_items_as_shutdown_interrupted(
+            items,
+            thread
+                .latest_turn_id
+                .as_deref()
+                .or(Some(thread.id.as_str())),
+            settled_at,
+            SHUTDOWN_INTERRUPTED_TURN_ERROR,
+        );
+        return;
+    }
     settle_tool_call_items(items, settled_at, settlement);
 }
 
@@ -3885,8 +4299,31 @@ fn thread_detail_window(
         ThreadDetailMode::Full => Ok(build_window(items.to_vec(), false, false)),
         ThreadDetailMode::Tail => {
             let limit = clamp_limit(request.limit, DEFAULT_TAIL_LIMIT);
-            let start = items.len().saturating_sub(limit);
-            let window = items[start..].to_vec();
+            let mut start = items.len().saturating_sub(limit);
+            if let Some(user_start) = latest_user_message_index(items)
+                && user_start < start
+            {
+                let from_user = items.len() - user_start;
+                if from_user <= MAX_PAGE_SIZE {
+                    start = user_start;
+                }
+            }
+            let mut window = items[start..].to_vec();
+            // A verbose Codex turn can emit more items than the requested
+            // tail. Keep the prompt that started it even when the rest of
+            // that turn has to stay capped.
+            if let Some(user_start) = latest_user_message_index(items)
+                && user_start < start
+            {
+                let user = items[user_start].clone();
+                let user_id = conversation_item_id(&user);
+                if !window
+                    .iter()
+                    .any(|item| conversation_item_id(item) == user_id)
+                {
+                    window.insert(0, user);
+                }
+            }
             Ok(build_window(window, start > 0, start > 0))
         }
         ThreadDetailMode::Before => {
@@ -3907,6 +4344,12 @@ fn thread_detail_window(
             Ok(build_window(window, start > 0, true))
         }
     }
+}
+
+fn latest_user_message_index(items: &[ConversationItem]) -> Option<usize> {
+    items
+        .iter()
+        .rposition(|item| matches!(item, ConversationItem::UserMessage { .. }))
 }
 
 fn conversation_item_id(item: &ConversationItem) -> &str {
@@ -4237,6 +4680,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn elicitation_form_requests_can_be_declined() {
+        let request = InteractiveRequest {
+            method: MCP_ELICITATION_METHOD.to_string(),
+            ..question_request(&["name"])
+        };
+        assert!(
+            validate_interactive_response(
+                &request,
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Deny,
+                },
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_interactive_response(
+                &question_request(&["name"]),
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Deny,
+                },
+            )
+            .is_err()
+        );
+    }
+
     fn assistant_message(id: &str) -> ConversationItem {
         ConversationItem::AssistantMessage {
             id: id.to_string(),
@@ -4246,6 +4715,17 @@ mod tests {
             citations: Vec::new(),
             lifecycle: ContentLifecycle::Complete,
             error: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    fn user_message(id: &str, text: &str) -> ConversationItem {
+        ConversationItem::UserMessage {
+            id: id.to_string(),
+            text: text.to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
             created_at: Utc::now(),
         }
     }
@@ -4273,6 +4753,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                is_pinned_in_project: false,
                 goal: None,
                 queued_turns: Vec::new(),
                 variant: None,
@@ -4395,6 +4876,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn reconnecting_a_live_thread_keeps_persisted_queued_turns() {
+        let queued = super::super::QueuedTurnRequest {
+            id: "queued-1".to_string(),
+            request: SendTurnRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "grok-thread".to_string(),
+                inputs: vec![TurnInputItem::Text {
+                    id: None,
+                    text: "steer this".to_string(),
+                }],
+                selected_skills: Vec::new(),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                user_item_id: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                resume_interrupted: false,
+            },
+            summary: falcondeck_core::QueuedTurnSummary {
+                id: "queued-1".to_string(),
+                preview: "steer this".to_string(),
+                text: "steer this".to_string(),
+                attachment_count: 0,
+                queued_at: Utc::now(),
+            },
+        };
+        let mut hydrated = HashMap::from([("grok-thread".to_string(), {
+            let mut restored = managed_thread("grok-thread", ThreadStatus::WaitingForInput);
+            restored.queued_requests = vec![queued.clone()];
+            restored.summary.queued_turns = vec![queued.summary.clone()];
+            restored
+        })]);
+        let previous = HashMap::from([("grok-thread".to_string(), {
+            managed_thread("grok-thread", ThreadStatus::WaitingForInput)
+        })]);
+
+        carry_over_live_threads(&mut hydrated, previous);
+
+        assert_eq!(hydrated["grok-thread"].queued_requests.len(), 1);
+        assert_eq!(
+            hydrated["grok-thread"].summary.queued_turns[0].id,
+            "queued-1"
+        );
+    }
+
     fn persisted_thread(thread_id: &str, session_id: Option<&str>) -> PersistedThreadState {
         PersistedThreadState {
             thread_id: thread_id.to_string(),
@@ -4441,6 +4972,30 @@ mod tests {
             previous_turn_id: None,
         });
         assert!(super::should_generate_ai_thread_title(&managed));
+    }
+
+    #[test]
+    fn files_mentioned_persisted_title_does_not_count_as_generated() {
+        let mut hydrated = hydrated_thread("thread-1", "answer");
+        hydrated.summary.title = "what is causing this prompt to be restricted?".to_string();
+        let mut managed = ManagedThread::with_items(hydrated.summary, hydrated.items);
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.title =
+            Some("# Files mentioned by the user: ## codex-clipboard-5c77f1c0.png".to_string());
+
+        restore_persisted_title_state(
+            &mut managed,
+            &state,
+            "what is causing this prompt to be restricted?",
+            true,
+        );
+
+        assert_eq!(
+            managed.summary.title,
+            "what is causing this prompt to be restricted?"
+        );
+        assert!(!managed.ai_title_generated);
+        assert!(managed.title_is_provider_preview);
     }
 
     #[test]
@@ -4515,18 +5070,25 @@ mod tests {
         assert_eq!(merged.len(), 1);
         let thread = &merged[0];
         assert_eq!(thread.summary.id, "claude-thread-x");
-        assert_eq!(thread.items.len(), 1);
         assert_eq!(
             thread.summary.last_message_preview.as_deref(),
             Some("hello")
         );
         // A turn that was mid-flight when the daemon went away is surfaced as
-        // an error, not left phantom-running.
+        // an error, not left phantom-running, and the transcript gets an
+        // interruption receipt so it does not look finished.
         assert_eq!(thread.summary.status, ThreadStatus::Error);
         assert_eq!(
             thread.summary.last_error.as_deref(),
             Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
         );
+        assert!(thread.items.iter().any(|item| matches!(
+            item,
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Interrupted,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -4550,7 +5112,119 @@ mod tests {
             merged[0].summary.last_error.as_deref(),
             Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
         );
-        assert_eq!(merged[0].items.len(), 1);
+        assert!(merged[0].items.iter().any(|item| matches!(
+            item,
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Interrupted,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn persisted_waiting_for_input_becomes_shutdown_interrupted() {
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.status = Some(ThreadStatus::WaitingForInput);
+        let states = HashMap::from([("thread-1".to_string(), state)]);
+
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("thread-1", "partial answer")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary.status, ThreadStatus::Error);
+        assert_eq!(
+            merged[0].summary.last_error.as_deref(),
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+    }
+
+    #[test]
+    fn shutdown_interrupted_threads_hold_their_queued_turns() {
+        let mut thread = managed_thread("thread-1", ThreadStatus::Error);
+        thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+        thread.queued_requests.push(super::QueuedTurnRequest {
+            id: "queued-1".to_string(),
+            request: SendTurnRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                inputs: vec![TurnInputItem::Text {
+                    id: None,
+                    text: "follow up".to_string(),
+                }],
+                selected_skills: Vec::new(),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                user_item_id: None,
+                resume_interrupted: false,
+            },
+            summary: falcondeck_core::QueuedTurnSummary {
+                id: "queued-1".to_string(),
+                preview: "follow up".to_string(),
+                text: "follow up".to_string(),
+                attachment_count: 0,
+                queued_at: Utc::now(),
+            },
+        });
+        assert!(queued_turn_is_held(&thread));
+        thread.summary.last_error = None;
+        thread.summary.status = ThreadStatus::Idle;
+        assert!(!queued_turn_is_held(&thread));
+        thread.queued_requests.clear();
+        assert!(queued_turn_is_held(&thread));
+    }
+
+    #[tokio::test]
+    async fn resume_interrupted_does_not_invent_a_blank_thread() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+
+        let error = send_turn(
+            &app,
+            SendTurnRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "missing-thread".to_string(),
+                inputs: Vec::new(),
+                selected_skills: Vec::new(),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                user_item_id: None,
+                resume_interrupted: true,
+            },
+        )
+        .await
+        .expect_err("resume must not create a session");
+        assert!(
+            error.to_string().contains("no longer on this project"),
+            "{error}"
+        );
+        let workspaces = app.inner.workspaces.lock().await;
+        assert!(
+            !workspaces["workspace-1"]
+                .threads
+                .contains_key("missing-thread")
+        );
     }
 
     #[test]
@@ -4604,11 +5278,13 @@ mod tests {
             attention: ThreadAttention::default(),
             is_archived: false,
             is_pinned: false,
+            is_pinned_in_project: false,
             goal: None,
             queued_turns: Vec::new(),
             variant: None,
         };
         let workspace = WorkspaceSummary {
+            kind: falcondeck_core::WorkspaceKind::Project,
             id: workspace_id.to_string(),
             path: "/tmp/project".to_string(),
             status: WorkspaceStatus::Ready,
@@ -4669,6 +5345,7 @@ mod tests {
                 collaboration_mode_id: None,
                 service_tier: None,
                 pinned: None,
+                pinned_in_project: None,
                 acknowledge_interruption: Some(true),
                 permission_mode: None,
                 approval_policy: None,
@@ -4681,6 +5358,76 @@ mod tests {
         assert_eq!(handle.thread.status, ThreadStatus::Idle);
         assert_eq!(handle.thread.last_error, None);
         assert_eq!(handle.thread.updated_at, interrupted_at);
+    }
+
+    #[tokio::test]
+    async fn pin_in_project_clears_global_pin_without_bumping_recency() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        let original_updated_at = Utc::now() - chrono::Duration::hours(3);
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.is_pinned = true;
+            thread.updated_at = original_updated_at;
+        })
+        .await
+        .unwrap();
+
+        let handle = update_thread(
+            &app,
+            falcondeck_core::UpdateThreadRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                title: None,
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                collaboration_mode_id: None,
+                service_tier: None,
+                pinned: None,
+                pinned_in_project: Some(true),
+                acknowledge_interruption: None,
+                permission_mode: None,
+                approval_policy: None,
+                sandbox_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.thread.is_pinned_in_project);
+        assert!(!handle.thread.is_pinned);
+        assert_eq!(handle.thread.updated_at, original_updated_at);
+
+        let handle = update_thread(
+            &app,
+            falcondeck_core::UpdateThreadRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                title: None,
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                collaboration_mode_id: None,
+                service_tier: None,
+                pinned: Some(true),
+                pinned_in_project: None,
+                acknowledge_interruption: None,
+                permission_mode: None,
+                approval_policy: None,
+                sandbox_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(handle.thread.is_pinned);
+        assert!(!handle.thread.is_pinned_in_project);
+        assert_eq!(handle.thread.updated_at, original_updated_at);
     }
 
     #[tokio::test]
@@ -4730,6 +5477,7 @@ mod tests {
                         permission_mode: None,
                         sandbox_mode: None,
                         steer: false,
+                        resume_interrupted: false,
                     },
                     summary: falcondeck_core::QueuedTurnSummary {
                         id: "queued-1".to_string(),
@@ -5004,7 +5752,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("panorama.png is too large. Images must be 7.5 MB or smaller.")
+                .contains("panorama.png is too large. Images must be 10 MB or smaller.")
         );
     }
 
@@ -5039,7 +5787,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("panorama.png is too large. Images must be 7.5 MB or smaller.")
+                .contains("panorama.png is too large. Images must be 10 MB or smaller.")
         );
         assert!(!temp_dir.path().join("attachments").exists());
     }
@@ -5059,7 +5807,7 @@ mod tests {
 
         assert!(
             error.to_string().contains(
-                "Those images are too large together. Attach no more than 10 MB at once."
+                "Those images are too large together. Attach no more than 15 MB at once."
             )
         );
     }
@@ -5097,6 +5845,59 @@ mod tests {
         assert_eq!(detail.oldest_item_id.as_deref(), Some("msg-3"));
         assert_eq!(detail.newest_item_id.as_deref(), Some("msg-4"));
         assert!(detail.is_partial);
+    }
+
+    #[test]
+    fn thread_detail_window_keeps_the_latest_user_message_in_a_verbose_tail() {
+        let mut items = vec![user_message("user-1", "look at this screenshot")];
+        items.extend((0..8).map(|index| assistant_message(&format!("tool-{index}"))));
+
+        let detail = thread_detail_window(
+            &items,
+            &ThreadDetailRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                mode: ThreadDetailMode::Tail,
+                limit: Some(3),
+                before_item_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(conversation_item_id(&detail.items[0]), "user-1");
+        assert!(matches!(
+            &detail.items[0],
+            ConversationItem::UserMessage { text, .. }
+                if text == "look at this screenshot"
+        ));
+        assert_eq!(conversation_item_id(detail.items.last().unwrap()), "tool-7");
+        assert!(!detail.has_older);
+    }
+
+    #[test]
+    fn thread_detail_window_prepends_the_latest_user_message_when_the_turn_exceeds_the_page_cap() {
+        let mut items = vec![user_message("user-1", "keep this prompt")];
+        items.extend((0..501).map(|index| assistant_message(&format!("tool-{index}"))));
+
+        let detail = thread_detail_window(
+            &items,
+            &ThreadDetailRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                mode: ThreadDetailMode::Tail,
+                limit: Some(3),
+                before_item_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(conversation_item_id(&detail.items[0]), "user-1");
+        assert_eq!(detail.items.len(), 4);
+        assert_eq!(
+            conversation_item_id(detail.items.last().unwrap()),
+            "tool-500"
+        );
+        assert!(detail.has_older);
     }
 
     #[test]
@@ -5146,9 +5947,19 @@ mod tests {
             completed_at: None,
         };
         let settled_at = Utc::now();
+        let summary_with = |status: ThreadStatus, last_error: Option<&str>| {
+            let mut summary = hydrated_thread("thread-1", "preview").summary;
+            summary.status = status;
+            summary.last_error = last_error.map(str::to_string);
+            summary
+        };
 
         let mut failed_items = vec![pending_file_change()];
-        settle_thread_detail_tool_items(&mut failed_items, &ThreadStatus::Error, settled_at);
+        settle_thread_detail_items(
+            &mut failed_items,
+            &summary_with(ThreadStatus::Error, Some("tool exploded")),
+            settled_at,
+        );
         assert!(matches!(
             &failed_items[0],
             ConversationItem::FileChange {
@@ -5160,7 +5971,11 @@ mod tests {
         ));
 
         let mut idle_items = vec![pending_file_change()];
-        settle_thread_detail_tool_items(&mut idle_items, &ThreadStatus::Idle, settled_at);
+        settle_thread_detail_items(
+            &mut idle_items,
+            &summary_with(ThreadStatus::Idle, None),
+            settled_at,
+        );
         assert!(matches!(
             &idle_items[0],
             ConversationItem::FileChange {
@@ -5171,7 +5986,11 @@ mod tests {
         ));
 
         let mut running_items = vec![pending_file_change()];
-        settle_thread_detail_tool_items(&mut running_items, &ThreadStatus::Running, settled_at);
+        settle_thread_detail_items(
+            &mut running_items,
+            &summary_with(ThreadStatus::Running, None),
+            settled_at,
+        );
         assert!(matches!(
             &running_items[0],
             ConversationItem::FileChange {
@@ -5180,6 +5999,21 @@ mod tests {
                 completed_at: None,
                 ..
             } if status == "awaiting_approval"
+        ));
+
+        let mut shutdown_items = vec![pending_file_change()];
+        settle_thread_detail_items(
+            &mut shutdown_items,
+            &summary_with(ThreadStatus::Error, Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)),
+            settled_at,
+        );
+        assert!(matches!(
+            &shutdown_items[0],
+            ConversationItem::FileChange {
+                status,
+                lifecycle: falcondeck_core::ToolLifecycle::Interrupted,
+                ..
+            } if status == "interrupted"
         ));
     }
 
@@ -5220,6 +6054,7 @@ mod tests {
             "workspace-1".to_string(),
             ManagedWorkspace {
                 summary: WorkspaceSummary {
+                    kind: falcondeck_core::WorkspaceKind::Project,
                     id: "workspace-1".to_string(),
                     path: temp_dir.path().to_string_lossy().to_string(),
                     status: WorkspaceStatus::Ready,

@@ -3,10 +3,10 @@
 Bundled official extension, enabled by default.
 
 It publishes one agent tool — `suggest-follow-ups` — through the built-in
-`falcondeck-extensions` MCP bridge. An agent may call it near the end of a turn
-to offer the user between one and five short next actions. FalconDeck renders
-them as a single compact pill above the composer, and only once that turn has
-gone idle.
+`falcondeck-extensions` MCP bridge, as `falcondeck_suggest_follow_ups`. An
+agent may call it near the end of a turn to offer the user between one and
+five short next actions. FalconDeck renders them as a single compact pill
+above the composer, and only once that turn has gone idle.
 
 ## Why it is shaped this way
 

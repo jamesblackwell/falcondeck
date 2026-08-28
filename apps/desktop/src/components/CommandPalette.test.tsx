@@ -53,6 +53,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_error: null,
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     agent: {
       model_id: null,
@@ -97,6 +98,22 @@ describe("CommandPalette controlled requests", () => {
     expect(onOpenActivity).toHaveBeenCalledOnce();
   });
 
+  it("opens Usage from the Actions section", () => {
+    const onOpenUsage = vi.fn();
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        onOpenUsage={onOpenUsage}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: /Subscription usage & limits/i }));
+    expect(onOpenUsage).toHaveBeenCalledOnce();
+  });
+
   it("teaches the bindings for the actions it offers", () => {
     const onOpenKeyboardShortcuts = vi.fn();
     render(
@@ -104,9 +121,11 @@ describe("CommandPalette controlled requests", () => {
         groups={[]}
         onSelectThread={vi.fn()}
         onOpenActivity={vi.fn()}
+        onOpenUsage={vi.fn()}
         onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
         shortcutHints={{
           activity: ["⌘", "U"],
+          usage: ["⌘", "⇧", "U"],
           keyboardShortcuts: ["⇧", "/"],
         }}
         openRequestKey={1}
@@ -116,6 +135,9 @@ describe("CommandPalette controlled requests", () => {
 
     expect(
       within(screen.getByRole("option", { name: /Open Activity/i })).getByText("⌘"),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("option", { name: /Subscription usage & limits/i })).getByText("⇧"),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -223,7 +245,7 @@ describe("CommandPalette controlled requests", () => {
     );
 
     const dialog = screen.getByRole("dialog", { name: "Command palette" });
-    expect(within(dialog).getByText("Unread threads")).toBeInTheDocument();
+    expect(within(dialog).getByText("Needs attention")).toBeInTheDocument();
     const threadButtons = within(dialog)
       .getAllByRole("option")
       .filter((button) =>
@@ -276,7 +298,166 @@ describe("CommandPalette controlled requests", () => {
     expect(screen.getByRole("option", { name: /Working thread\s*Running/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Blocked thread\s*Awaiting response/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Failed thread\s*Failed/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Quiet thread\s*Idle/ })).toBeInTheDocument();
+    // A quiet thread carries its timestamp but no "Idle" label — the age
+    // already says it is settled.
+    const quiet = screen.getByRole("option", { name: /Quiet thread/ });
+    expect(quiet).not.toHaveTextContent("Idle");
+    expect(quiet).toHaveTextContent(/\d+d/);
+  });
+
+  it("shows a relative timestamp on every thread row", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({
+            id: "aged",
+            title: "Aged thread",
+            updated_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+          }),
+        ],
+      },
+    ];
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    expect(
+      screen.getByRole("option", { name: /Aged thread/ }),
+    ).toHaveTextContent("3h");
+  });
+
+  it("keeps row order frozen while statuses stream", () => {
+    const first = thread({
+      id: "first",
+      title: "First thread",
+      updated_at: "2026-08-10T12:00:00Z",
+    });
+    const second = thread({
+      id: "second",
+      title: "Second thread",
+      updated_at: "2026-08-09T12:00:00Z",
+    });
+    const groups: ProjectGroup[] = [
+      { workspace: workspace(), threads: [first, second] },
+    ];
+
+    const props = {
+      groups,
+      onSelectThread: vi.fn(),
+      openRequestKey: 1,
+      requestMode: "open" as const,
+    };
+    const { rerender } = render(<CommandPalette {...props} />);
+
+    const titlesOf = () =>
+      screen
+        .getAllByRole("option")
+        .map((option) => option.textContent ?? "")
+        .filter((text) => text.includes("thread"));
+    expect(titlesOf()[0]).toContain("First thread");
+
+    // The second thread starts running mid-open; live priority order would
+    // hoist it above the first, but the open palette must not reshuffle.
+    rerender(
+      <CommandPalette
+        {...props}
+        groups={[
+          {
+            workspace: workspace(),
+            threads: [
+              first,
+              { ...second, status: "running", updated_at: "2026-08-11T12:00:00Z" },
+            ],
+          },
+        ]}
+      />,
+    );
+    expect(titlesOf()[0]).toContain("First thread");
+  });
+
+  it("starts a new thread in two steps: action, then project", () => {
+    const onNewThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      { workspace: workspace(), threads: [thread()] },
+      {
+        workspace: workspace({ id: "workspace-2", path: "/Users/james/miner" }),
+        threads: [],
+      },
+    ];
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={vi.fn()}
+        onNewThread={onNewThread}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: "New thread…" }));
+
+    // Still open, now asking which project; nothing has been created yet.
+    const dialog = screen.getByRole("dialog", { name: "Command palette" });
+    expect(onNewThread).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Projects")).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole("option", { name: /miner/ }));
+    expect(onNewThread).toHaveBeenCalledWith("workspace-2");
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("escapes back from the project picker instead of closing", () => {
+    render(
+      <CommandPalette
+        groups={[{ workspace: workspace(), threads: [thread()] }]}
+        onSelectThread={vi.fn()}
+        onNewThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: "New thread…" }));
+    const dialog = screen.getByRole("dialog", { name: "Command palette" });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    // First escape retreats to the root list; the palette stays open.
+    expect(
+      screen.getByRole("dialog", { name: "Command palette" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "New thread…" })).toBeInTheDocument();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("creates directly when a project scope is already active", () => {
+    const onNewThread = vi.fn();
+    render(
+      <CommandPalette
+        groups={[{ workspace: workspace(), threads: [thread()] }]}
+        onSelectThread={vi.fn()}
+        onNewThread={onNewThread}
+        openRequestKey={1}
+        requestMode="open"
+        initialProjectId="workspace-1"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: "New thread…" }));
+    expect(onNewThread).toHaveBeenCalledWith("workspace-1");
   });
 
   it("gives title and word-prefix matches priority while tolerating fuzzy input", () => {

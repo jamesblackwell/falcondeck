@@ -1,6 +1,15 @@
-import { Fragment, memo, useDeferredValue, useMemo, type ReactNode } from "react";
+import {
+  Fragment,
+  memo,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ScrollView, View } from "react-native";
-import { Check, GitCommitHorizontal, Terminal, Upload } from "lucide-react-native";
+import { Check, GitCommitHorizontal, Split, Terminal, Upload } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -108,6 +117,7 @@ function markdownDefinitionFooter(root: MarkdownRoot) {
 const DIRECTIVE_ICONS = {
   "git-commit": GitCommitHorizontal,
   "git-push": Upload,
+  breakout: Split,
 } as const;
 
 function directiveAttrValue(key: string, value: string) {
@@ -129,6 +139,12 @@ function DirectiveAnnotation({
   const { theme } = useUnistyles();
   const Icon =
     DIRECTIVE_ICONS[name as keyof typeof DIRECTIVE_ICONS] ?? Terminal;
+  const tone =
+    name === "git-push"
+      ? theme.colors.info.default
+      : name === "git-commit" || name === "breakout"
+        ? theme.colors.accent.default
+        : theme.colors.fg.muted;
   const label = agentDirectiveLabel(name);
   const visibleAttrs = [
     ...attrs.map(([key, value]) => `${key}: ${directiveAttrValue(key, value)}`),
@@ -149,9 +165,9 @@ function DirectiveAnnotation({
       <Icon
         accessible={false}
         size={theme.iconSize.xs}
-        color={theme.colors.fg.muted}
+        color={tone}
       />
-      <Text variant="label" size="xs" color="muted" weight="medium">
+      <Text variant="label" size="xs" color="muted" weight="medium" style={{ color: tone }}>
         {label}
       </Text>
       {visibleAttrs ? (
@@ -636,7 +652,7 @@ export function renderMarkdownBlocks(
   definitions: MarkdownDefinitions,
   keyPrefix = "markdown",
   highlightCommands = false,
-  allowMermaid = true,
+  mermaidPending = false,
 ): ReactNode[] {
   const blocks = nodes ?? [];
   const renderedIndexes = blocks.flatMap((node, index) =>
@@ -668,7 +684,7 @@ export function renderMarkdownBlocks(
           blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
       },
       highlightCommands,
-      allowMermaid,
+      mermaidPending,
     ),
   );
 }
@@ -679,7 +695,7 @@ function renderMarkdownBlock(
   key: string,
   position: { isFirst: boolean; isLast: boolean; previousType: string | null },
   highlightCommands: boolean,
-  allowMermaid: boolean,
+  mermaidPending: boolean,
 ): ReactNode {
   switch (node.type) {
     case "blockquote":
@@ -691,7 +707,7 @@ function renderMarkdownBlock(
               definitions,
               key,
               highlightCommands,
-              allowMermaid,
+              mermaidPending,
             )}
           </View>
         </View>
@@ -709,8 +725,11 @@ function renderMarkdownBlock(
             position.isLast ? styles.codeBlockLast : undefined,
           ]}
         >
-          {allowMermaid && isMermaidLanguage(node.lang) ? (
-            <MermaidBlock code={node.value ?? ""} />
+          {isMermaidLanguage(node.lang) ? (
+            <MermaidBlock
+              code={node.value ?? ""}
+              pending={mermaidPending}
+            />
           ) : (
             <CodeBlock
               code={node.value ?? ""}
@@ -738,7 +757,7 @@ function renderMarkdownBlock(
             definitions,
             key,
             highlightCommands,
-            allowMermaid,
+            mermaidPending,
           )}
         </View>
       );
@@ -783,7 +802,7 @@ function renderMarkdownBlock(
                   definitions,
                   `${key}-item-${index}`,
                   highlightCommands,
-                  allowMermaid,
+                  mermaidPending,
                 )}
               </View>
             </View>
@@ -817,12 +836,18 @@ function renderMarkdownBlock(
             definitions,
             key,
             highlightCommands,
-            allowMermaid,
+            mermaidPending,
           )}
         </View>
       );
   }
 }
+
+/**
+ * Minimum wall-clock gap between full remark parses of the accumulated
+ * message while stream deltas keep arriving.
+ */
+const PARSE_THROTTLE_MS = 120;
 
 export const MarkdownRenderer = memo(
   function MarkdownRenderer({
@@ -836,14 +861,57 @@ export const MarkdownRenderer = memo(
     // the deferred tree would paint stale and then grow the row — a height
     // correction the transcript list reads as a yank toward the tail.
     const renderedText = streaming ? deferredStreamingText : text;
+
+    // Full-text remark parsing (definitions pass plus per-segment passes) on
+    // every delta costs more than the deltas themselves once messages grow,
+    // and the memo comparator intentionally fails on each one. Coalesce
+    // re-parses to at most one per PARSE_THROTTLE_MS while chunks arrive
+    // rapidly: the first change outside the window flushes immediately, rapid
+    // successors share one trailing parse, and that trailing parse ALWAYS
+    // fires with the latest settled text — the finished message is never left
+    // stale-parsed. The streaming tail still repaints promptly on each tick
+    // because the timer picks up whatever text has accumulated by the time it
+    // runs. The very first render parses synchronously via `useState` below.
+    const [parsedText, setParsedText] = useState(renderedText);
+    const latestTextRef = useRef(renderedText);
+    const lastParseAtRef = useRef(0);
+    const parseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+      latestTextRef.current = renderedText;
+      if (parseTimerRef.current !== null) {
+        // A trailing parse is already scheduled; it will pick up this newer
+        // text, so back-to-back deltas need no extra scheduling work.
+        return;
+      }
+      const elapsed = Date.now() - lastParseAtRef.current;
+      if (elapsed >= PARSE_THROTTLE_MS) {
+        lastParseAtRef.current = Date.now();
+        setParsedText(renderedText);
+        return;
+      }
+      parseTimerRef.current = setTimeout(() => {
+        parseTimerRef.current = null;
+        lastParseAtRef.current = Date.now();
+        setParsedText(latestTextRef.current);
+      }, PARSE_THROTTLE_MS - elapsed);
+    }, [renderedText]);
+
+    useEffect(
+      () => () => {
+        if (parseTimerRef.current !== null) clearTimeout(parseTimerRef.current);
+      },
+      [],
+    );
+
     const renderedBlocks = useMemo(() => {
       const segments = interpretDirectives
-        ? splitAgentMessageSegments(renderedText, streaming)
-        : [{ kind: "markdown" as const, text: renderedText }];
+        ? splitAgentMessageSegments(parsedText, streaming)
+        : [{ kind: "markdown" as const, text: parsedText }];
       // Definitions apply across directive boundaries. Parse the clean full
       // message once for the lookup, then render each Markdown segment in
       // order around the native annotations.
-      const cleanTree = parseMarkdown(stripAgentDirectiveLines(renderedText));
+      const cleanTree = parseMarkdown(stripAgentDirectiveLines(parsedText));
       const definitions = buildMarkdownDefinitions(cleanTree);
       const definitionFooter = markdownDefinitionFooter(cleanTree);
       const blocks: ReactNode[] = [];
@@ -874,12 +942,12 @@ export const MarkdownRenderer = memo(
             definitions,
             `segment-${index}`,
             highlightCommands,
-            !streaming,
+            streaming,
           ),
         );
       });
       return blocks;
-    }, [highlightCommands, interpretDirectives, renderedText, streaming]);
+    }, [highlightCommands, interpretDirectives, parsedText, streaming]);
 
     return <View style={styles.container}>{renderedBlocks}</View>;
   },

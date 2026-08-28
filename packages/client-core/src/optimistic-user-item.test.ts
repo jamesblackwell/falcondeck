@@ -7,18 +7,22 @@ import {
   removeConversationItem,
   upsertConversationItem,
 } from "./conversation";
-import type { ConversationItem, ThreadDetail } from "./types";
+import type { ConversationItem, ImageInput, ThreadDetail } from "./types";
 
 function userItem(
   id: string,
   text: string,
-  options: { pending?: boolean; createdAt?: string } = {},
+  options: {
+    pending?: boolean;
+    createdAt?: string;
+    attachments?: ImageInput[];
+  } = {},
 ): ConversationItem {
   return {
     kind: "user_message",
     id,
     text,
-    attachments: [],
+    attachments: options.attachments ?? [],
     created_at: options.createdAt ?? "2026-08-11T10:00:00.000Z",
     ...(options.pending ? { pending: true } : {}),
   };
@@ -186,6 +190,79 @@ describe("mergeThreadDetailPage with pending items", () => {
       "user-old",
       "user-daemon",
     ]);
+  });
+
+  it("keeps a just-sent echoed prompt when a verbose tail races past it", () => {
+    const now = new Date().toISOString();
+    const acknowledged = userItem("user-old", "earlier");
+    const sent = userItem("user-new", "look at this screenshot", {
+      createdAt: now,
+      attachments: [
+        {
+          type: "image",
+          id: "img-1",
+          name: "shot.png",
+          mime_type: "image/png",
+          url: "data:image/png;base64,aGVsbG8=",
+          local_path: null,
+        },
+      ],
+    });
+    const tool: ConversationItem = {
+      kind: "assistant_message",
+      id: "tool-later",
+      text: "working",
+      phase: "commentary",
+      memory_citation: null,
+      citations: [],
+      lifecycle: "streaming",
+      created_at: now,
+    };
+    const merged = mergeThreadDetailPage(
+      detailWith([acknowledged, sent]),
+      detailWith([tool]),
+      "refresh",
+    );
+    expect(merged.items.map((item) => item.id)).toEqual([
+      "user-new",
+      "tool-later",
+    ]);
+    expect(
+      merged.items[0]?.kind === "user_message"
+        ? merged.items[0].attachments.map((attachment) => attachment.id)
+        : [],
+    ).toEqual(["img-1"]);
+  });
+
+  it("prefers the attachment-rich copy when a tail echo strips images", () => {
+    const now = new Date().toISOString();
+    const sent = userItem("user-new", "look at this screenshot", {
+      createdAt: now,
+      attachments: [
+        {
+          type: "image",
+          id: "img-1",
+          name: "shot.png",
+          mime_type: "image/png",
+          url: "data:image/png;base64,aGVsbG8=",
+          local_path: null,
+        },
+      ],
+    });
+    const stripped = userItem("user-new", "look at this screenshot", {
+      createdAt: now,
+    });
+    const merged = mergeThreadDetailPage(
+      detailWith([sent]),
+      detailWith([stripped]),
+      "refresh",
+    );
+    expect(merged.items).toHaveLength(1);
+    expect(
+      merged.items[0]?.kind === "user_message"
+        ? merged.items[0].attachments.map((attachment) => attachment.id)
+        : [],
+    ).toEqual(["img-1"]);
   });
 
   it("expires a stale pending item instead of preserving it forever", () => {

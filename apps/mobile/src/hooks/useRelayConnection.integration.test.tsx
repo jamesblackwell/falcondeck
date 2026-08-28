@@ -1021,6 +1021,9 @@ describe('useRelayConnection session rotation', () => {
     })
     expect(callRpc).toHaveBeenCalledTimes(1)
     expect(useRelayStore.getState().isSyncing).toBe(true)
+    // The last-known project list stays on screen while recovery waits for
+    // desktop — wiping it is what flashed the sidebar skeleton on reconnect.
+    expect(useSessionStore.getState().snapshot).not.toBeNull()
 
     await act(async () => {
       socket.onmessage?.({

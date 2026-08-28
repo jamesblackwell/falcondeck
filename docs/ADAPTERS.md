@@ -24,8 +24,8 @@ advertise lights up the corresponding UI affordance the user already knows.
 | **3. Native adapter** | large — a new backend module + `ProviderRuntime` variant | everything, including harness-specific RPCs (Codex: goals, review; Claude: hooks-based approvals) |
 
 Tier 1 is the answer to "a new agent harness launches tomorrow". ACP is the
-industry's common denominator (Zed's protocol; spoken by OpenCode, Gemini
-CLI, Goose, Grok…), so most new harnesses arrive with an ACP mode. Native
+industry's common denominator (Zed's protocol; spoken by OpenCode, Goose,
+Grok…), so most new harnesses arrive with an ACP mode. Native
 adapters are reserved for harnesses whose extra surface earns the maintenance
 (today: Codex, Claude, and Antigravity).
 
@@ -408,11 +408,16 @@ those tables is one the attach-time check cannot defend.
 ## Cursor
 
 Cursor's agent CLI (`cursor-agent`) ships a built-in ACP server behind its
-`acp` subcommand, so it rides the generic ACP tier. Install and authenticate
-per Cursor's docs (`curl -fsSL https://cursor.com/install | bash`, then
-`cursor-agent login`; verify with `cursor-agent status`). Then choose
-**Settings → Agents → Recommended → Configure Cursor**, which writes the
-equivalent of:
+`acp` subcommand, so it rides the generic ACP tier. Current docs call the
+binary `agent`; FalconDeck always launches `cursor-agent`, because `agent` is
+also Grok's install name. Install and authenticate per Cursor's docs
+(`curl -fsSL https://cursor.com/install | bash`, then `cursor-agent login`;
+verify with `cursor-agent status`). The harness upgrade command restores any
+pre-existing non-Cursor `~/.local/bin/agent` symlink after the official
+installer rewrites it.
+
+Then choose **Settings → Agents → Recommended → Configure Cursor**, which
+writes the equivalent of:
 
 ```json
 {
@@ -425,18 +430,32 @@ equivalent of:
 }
 ```
 
-One adapter quirk: Cursor does not advertise its model catalog over ACP, so
-`advertised_models` falls back to probing `cursor-agent --list-models` once
-per agent process (mirroring the spawn environment). Variant ids are exposed
-verbatim — they encode effort and service tiers (`gpt-5.6-sol-medium`,
-`composer-2.5-fast`) and are sent back to the session unchanged on selection.
-Session model selection uses the standard ACP `session/set_config_option` /
-`session/set_model` path, and failures there are non-fatal (the turn
-continues with the CLI's own default model). **Known limitation:** Cursor
-builds have existed that ignore ACP runtime model switching entirely and only
-honor a `cursor-agent --model <id>` startup flag (the mechanism bb uses); on
-such builds a picker selection is logged as a daemon warning but the turn
-runs the CLI default. If that is observed on a current build, the fix is
-launch-flag selection at spawn time — a per-thread-process design decision,
-not a parser tweak. If a future Cursor build starts advertising models over
-ACP, the protocol catalog wins and the CLI probe never runs.
+Current Cursor (2026.08+) negotiates protocol 1 with `loadSession`, image
+prompts, HTTP/SSE MCP, and `cursor_login`. FalconDeck completes
+`authenticate` with `cursor_login` after `initialize` (it reuses `agent
+login` credentials; it does not open a browser). `session/new` advertises
+modes (`agent` / `plan` / `ask`) and a parameterized model catalog
+(`composer-2.5[fast=true]`, `default[]`, …). Those ACP ids win; older builds
+that publish no catalog still fall back to `cursor-agent --list-models`
+(`auto`, `composer-2.5-fast`, `gpt-5.6-sol-medium`). Session model selection
+uses `session/set_config_option` / `session/set_model`. Failures there are
+non-fatal. **Known limitation:** some Cursor builds ignored ACP model
+switching and only honored `--model` at spawn; on those builds a picker
+selection is logged as a warning and the turn runs the CLI default.
+
+Cursor does not publish a permission `configOption`. The CLI's `--force` /
+`--yolo` / `--auto-review` flags are not available on `cursor-agent acp`.
+FalconDeck therefore seeds the composer Permissions picker with
+`always-approve` (the default) and `default` (Ask to approve). The daemon
+auto-answers `session/request_permission` when the thread is on
+`always-approve`. Agent / Plan / Ask remain the Mode picker
+(`session/set_mode`).
+
+Cursor also sends vendor reverse RPCs. FalconDeck maps `cursor/create_plan`
+onto the existing plan-review banner and `cursor/ask_question` onto the
+question banner. Notification methods (`cursor/update_todos`, `cursor/task`,
+`cursor/generate_image`) are acknowledged so they cannot stall a turn.
+
+The 2025 beta (`cursor-agent --version` prints a bare commit hash) has no
+`acp` subcommand and cannot be used as a FalconDeck provider. Upgrade it
+before configuring Cursor.

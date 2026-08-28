@@ -13,6 +13,13 @@ const SUPERSEDED_DEFAULT_MODELS = [
   "openai/whisper-large-v3-turbo",
   "openai/gpt-transcribe",
 ];
+// Deliberately a different vendor from the default model: a fallback only
+// earns its keep when an OpenAI outage cannot take out both attempts. Voxtral
+// Mini transcribes long-form audio and costs about the same per minute.
+const DEFAULT_FALLBACK_MODEL = "mistralai/voxtral-mini-transcribe";
+// Recordings are kept only long enough to retry a bad transcript.
+const DEFAULT_HISTORY_RETENTION_HOURS = 6;
+export const DICTATION_RETENTION_CHOICES = [0, 1, 6, 24] as const;
 
 export type DictationShortcut = "right_command" | "left_function";
 export type DictationActivation = "hold" | "toggle";
@@ -30,6 +37,25 @@ export type DictationSettings = {
   // Cmd+Shift+V inside FalconDeck re-inserts the last transcript, for when a
   // paste landed nowhere because the caret had moved.
   repasteShortcutEnabled: boolean;
+  // Tried right after `model` when the preferred model fails or is rejected.
+  // Null falls straight through to FalconDeck's built-in chain.
+  fallbackModel: string | null;
+  // How long recordings stay on this computer so a failed or wrong transcript
+  // can be retried with another model. Zero deletes them immediately.
+  historyRetentionHours: number;
+};
+
+export type DictationHistoryEntry = {
+  id: string;
+  path: string;
+  recordedAtMs: number;
+  durationSeconds: number;
+  bytes: number;
+  provider: DictationProvider;
+  model: string | null;
+  text: string | null;
+  error: string | null;
+  audioAvailable: boolean;
 };
 
 export type DictationAudioDevice = {
@@ -65,6 +91,8 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   inputDeviceId: null,
   model: DEFAULT_TRANSCRIPTION_MODEL,
   repasteShortcutEnabled: true,
+  fallbackModel: DEFAULT_FALLBACK_MODEL,
+  historyRetentionHours: DEFAULT_HISTORY_RETENTION_HOURS,
 };
 
 function isDictationShortcut(value: unknown): value is DictationShortcut {
@@ -77,6 +105,15 @@ function isDictationActivation(value: unknown): value is DictationActivation {
 
 function isDictationProvider(value: unknown): value is DictationProvider {
   return value === "system" || value === "open_router";
+}
+
+function normalizeRetentionHours(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_DICTATION_SETTINGS.historyRetentionHours;
+  }
+  // Anything outside the offered choices is clamped rather than rejected, so a
+  // hand-edited value still bounds how long audio lingers.
+  return Math.min(Math.round(value), 24);
 }
 
 export function normalizeDictationSettings(value: unknown): DictationSettings {
@@ -108,6 +145,16 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
       typeof candidate.repasteShortcutEnabled === "boolean"
         ? candidate.repasteShortcutEnabled
         : DEFAULT_DICTATION_SETTINGS.repasteShortcutEnabled,
+    fallbackModel:
+      candidate.fallbackModel === null
+        ? null
+        : typeof candidate.fallbackModel === "string" &&
+            candidate.fallbackModel.trim()
+          ? candidate.fallbackModel.trim()
+          : DEFAULT_DICTATION_SETTINGS.fallbackModel,
+    historyRetentionHours: normalizeRetentionHours(
+      candidate.historyRetentionHours,
+    ),
   };
 }
 
@@ -223,4 +270,34 @@ export async function requestDictationPermission(
   if (!isTauriDesktop()) return;
   const { invoke } = await import("@tauri-apps/api/core");
   await invoke("request_dictation_permission", { permission });
+}
+
+export async function readDictationHistory(): Promise<DictationHistoryEntry[]> {
+  if (!isTauriDesktop()) return [];
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<DictationHistoryEntry[]>("dictation_history");
+}
+
+// Transcribes a kept recording again, optionally with a different model.
+export async function retryDictationHistoryEntry(
+  id: string,
+  model?: string,
+): Promise<DictationHistoryEntry> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<DictationHistoryEntry>("dictation_history_retry", {
+    id,
+    model: model ?? null,
+  });
+}
+
+export async function deleteDictationHistoryEntry(id: string): Promise<void> {
+  if (!isTauriDesktop()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("dictation_history_delete", { id });
+}
+
+export async function clearDictationHistory(): Promise<void> {
+  if (!isTauriDesktop()) return;
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("dictation_history_clear");
 }

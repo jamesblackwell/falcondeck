@@ -80,6 +80,7 @@ export function buildProjectGroups(
   workspaces: WorkspaceSummary[],
   threads: ThreadSummary[],
   workspaceOrder: readonly string[] = [],
+  previous?: ProjectGroup[] | null,
 ): ProjectGroup[] {
   const threadsByWorkspace = new Map<string, ThreadSummary[]>()
   for (const thread of threads) {
@@ -96,7 +97,7 @@ export function buildProjectGroups(
 
   // Paths are the fallback for workspaces that have not been placed yet. This
   // keeps newly connected projects predictable without disturbing saved ones.
-  return [...workspaces]
+  const built = [...workspaces]
     .sort((left, right) => {
       const leftRank = workspaceRanks.get(left.id)
       const rightRank = workspaceRanks.get(right.id)
@@ -111,6 +112,98 @@ export function buildProjectGroups(
       workspace,
       threads: (threadsByWorkspace.get(workspace.id) ?? []).sort(compareByRecency),
     }))
+
+  if (!previous || previous.length === 0) return built
+
+  // Snapshots rebuild every summary object, so without reuse each build hands
+  // callers brand-new groups, workspaces, and threads even when nothing
+  // changed, invalidating every downstream memo on every event. Compare the
+  // fresh build field-by-field against the previous one and keep the old
+  // objects wherever content is equal.
+  const previousByWorkspaceId = new Map(
+    previous.map((group) => [group.workspace.id, group]),
+  )
+  let allSame = previous.length === built.length
+  const reused = built.map((group, index) => {
+    const prior = previousByWorkspaceId.get(group.workspace.id)
+    if (!prior) {
+      allSame = false
+      return group
+    }
+    const workspace = sameSnapshotValue(prior.workspace, group.workspace)
+      ? prior.workspace
+      : group.workspace
+    const threads = reuseThreadsById(prior.threads, group.threads)
+    const merged =
+      workspace === prior.workspace && threads === prior.threads
+        ? prior
+        : { workspace, threads }
+    // Reordering shows up positionally: same groups in a new sequence still
+    // produce a new top-level array, which is exactly what consumers keyed on
+    // order need to see.
+    if (merged !== previous[index]) allSame = false
+    return merged
+  })
+
+  return allSame ? previous : reused
+}
+
+/**
+ * Field-wise equality for plain JSON-shaped payloads (summaries, plans,
+ * queues). Scalars use strict equality; nested objects and arrays fall back
+ * to a structural fingerprint, which stays sound because producers serialize
+ * these shapes with stable key order. Covers future fields automatically, so
+ * a new summary property can never slip past reuse unnoticed.
+ */
+function sameSnapshotValue(previous: unknown, next: unknown): boolean {
+  if (previous === next) return true
+  if (
+    typeof previous !== 'object' ||
+    typeof next !== 'object' ||
+    previous === null ||
+    next === null
+  ) {
+    return false
+  }
+  return JSON.stringify(previous) === JSON.stringify(next)
+}
+
+/** Mirrors reuseById in conversation.ts: match by id, keep the previous
+ * object when unchanged, and return the previous array untouched only when
+ * every row kept its slot, so reordering still surfaces a new list. */
+function reuseThreadsById(
+  previous: readonly ThreadSummary[],
+  next: readonly ThreadSummary[],
+): ThreadSummary[] {
+  let previousById: Map<string, ThreadSummary> | null = null
+  let allSame = previous.length === next.length
+  const reused = next.map((thread, index) => {
+    let prior: ThreadSummary | undefined = previous[index]
+    if (prior?.id !== thread.id) {
+      previousById ??= new Map(
+        previous.map((candidate) => [candidate.id, candidate]),
+      )
+      prior = previousById.get(thread.id)
+    }
+    const value =
+      prior && sameSnapshotValue(prior, thread) ? prior : thread
+    if (value !== previous[index]) allSame = false
+    return value
+  })
+  return allSame ? (previous as ThreadSummary[]) : reused
+}
+
+/** Splits a project's chats by pin placement. Global pins leave the project. */
+export function partitionSidebarThreads(threads: readonly ThreadSummary[]) {
+  const globallyPinned: ThreadSummary[] = []
+  const pinnedInProject: ThreadSummary[] = []
+  const unpinned: ThreadSummary[] = []
+  for (const thread of threads) {
+    if (thread.is_pinned) globallyPinned.push(thread)
+    else if (thread.is_pinned_in_project) pinnedInProject.push(thread)
+    else unpinned.push(thread)
+  }
+  return { globallyPinned, pinnedInProject, unpinned }
 }
 
 /** Reorders chats inside each project. Pinned rows are sorted separately. */
@@ -119,10 +212,19 @@ export function sortProjectGroupThreads(
   mode: ThreadSortMode,
 ): ProjectGroup[] {
   const compare = compareThreads(mode)
-  return groups.map((group) => ({
-    ...group,
-    threads: [...group.threads].sort(compare),
-  }))
+  return groups.map((group) => {
+    const { globallyPinned, pinnedInProject, unpinned } = partitionSidebarThreads(
+      group.threads,
+    )
+    return {
+      ...group,
+      threads: [
+        ...globallyPinned.sort(compare),
+        ...pinnedInProject.sort(compare),
+        ...unpinned.sort(compare),
+      ],
+    }
+  })
 }
 
 export function projectLabel(path: string) {

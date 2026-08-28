@@ -10,8 +10,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use falcondeck_core::{
-    AccountStatus, AccountSummary, AgentCapabilitySummary, AgentProvider, CollaborationModeSummary,
-    ContentLifecycle, ConversationItem, ImageInput, ModelSummary, ReasoningEffortSummary,
+    AccountStatus, AccountSummary, AgentCapabilitySummary, AgentProvider, ApprovalDecision,
+    CollaborationModeSummary, ContentLifecycle, ConversationItem, ImageInput, InteractiveQuestion,
+    InteractiveQuestionOption, ModelSummary, PlanApprovalOutcome, ReasoningEffortSummary,
     ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary, merge_conversation_citations,
 };
 use serde_json::{Value, json};
@@ -35,6 +36,13 @@ use crate::app::agent_helpers::{
 };
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
+
+mod stream;
+pub(crate) use stream::{
+    ClaudeLiveContextUsage, ClaudeNdjsonFramer, ClaudeStreamLine, encode_control_response_error,
+    is_resume_startup_failure, live_context_usage, parse_claude_stream_lines, result_is_cancelled,
+    result_model_context_window, synthetic_permission_requests,
+};
 
 pub struct ClaudeBootstrap {
     pub runtime: Arc<ClaudeRuntime>,
@@ -123,10 +131,28 @@ impl TurnInput {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TurnConstruction {
+    session_id: String,
+    cwd: String,
+    model_id: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
+    hooks_enabled: bool,
+    control_mcp: bool,
+    extensions_mcp: bool,
+}
+
 struct ActiveTurn {
     generation: u64,
     child: Child,
     input: Arc<TurnInput>,
+    construction: TurnConstruction,
+    /// True after a successful `result` while stdin is still open, so the
+    /// next turn can write another user line instead of spawning `--resume`.
+    awaiting_next_turn: bool,
+    /// Per-launch `--mcp-config`; unlinked when this turn is dropped.
+    _mcp_config: Option<crate::connectors::LeasedMcpConfig>,
 }
 
 /// How long to wait for the CLI to exit cleanly after SIGTERM before
@@ -174,8 +200,7 @@ impl ClaudeRuntime {
             next_turn_generation: std::sync::atomic::AtomicU64::new(1),
         });
 
-        let account = read_auth_status(&resolved.executable).await;
-        let models = curated_models();
+        let (account, models) = tokio::join!(read_auth_status(&resolved.executable), list_models());
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
         // Hydration reads and parses every session file for the workspace —
@@ -235,22 +260,78 @@ impl ClaudeRuntime {
         let next_session_id = session_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let bypassing_permissions = permission_mode
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("bypasspermissions"));
+        let hooks_enabled =
+            daemon_base_url.is_some() && claude_approvals_enabled() && !bypassing_permissions;
+        let construction = TurnConstruction {
+            session_id: next_session_id.clone(),
+            cwd: cwd.to_string(),
+            model_id: model_id.map(str::to_string),
+            effort: effort.map(str::to_string),
+            permission_mode: permission_mode
+                .map(str::trim)
+                .filter(|mode| !mode.is_empty() && !mode.eq_ignore_ascii_case("default"))
+                .map(str::to_string),
+            hooks_enabled,
+            control_mcp: builtin.control.is_some(),
+            extensions_mcp: builtin.extensions.is_some(),
+        };
         // Clear any interrupt aimed at earlier turns; interrupts arriving from
         // here on target this spawn and are re-checked after insertion below.
         self.interrupted_turns.lock().await.remove(thread_id);
-        // A thread maps to one Claude session; two concurrent CLI processes
-        // resuming the same session corrupt its transcript. Stop any previous
-        // turn for this thread before spawning a replacement.
         let previous = self.active_turns.lock().await.remove(thread_id);
         if let Some(mut turn) = previous {
-            turn.input.close().await;
-            let _ = request_graceful_stop(&mut turn.child);
-            if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
-                .await
-                .is_err()
-            {
-                let _ = turn.child.start_kill();
-                let _ = turn.child.wait().await;
+            let still_alive = turn.child.try_wait().ok().flatten().is_none();
+            if still_alive && turn.awaiting_next_turn && turn.construction == construction {
+                turn.awaiting_next_turn = false;
+                let generation = turn.generation;
+                let input = Arc::clone(&turn.input);
+                let session_id = turn.construction.session_id.clone();
+                self.active_turns
+                    .lock()
+                    .await
+                    .insert(thread_id.to_string(), turn);
+                let input_line = build_claude_stream_json_input(prompt, images).await;
+                match input.write_line(&input_line).await {
+                    Ok(()) => {
+                        return Ok(ClaudeTurnSpawn {
+                            session_id,
+                            generation,
+                            stdout: None,
+                            stderr: None,
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "failed to write next prompt to parked claude turn: {error}; respawning"
+                        );
+                        if let Some(mut parked) = self.active_turns.lock().await.remove(thread_id) {
+                            parked.input.close().await;
+                            let _ = request_graceful_stop(&mut parked.child);
+                            if tokio::time::timeout(INTERRUPT_GRACE, parked.child.wait())
+                                .await
+                                .is_err()
+                            {
+                                let _ = parked.child.start_kill();
+                                let _ = parked.child.wait().await;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // A thread maps to one Claude session; two concurrent CLI processes
+                // resuming the same session corrupt its transcript. Stop any previous
+                // turn for this thread before spawning a replacement.
+                turn.input.close().await;
+                let _ = request_graceful_stop(&mut turn.child);
+                if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
+                    .await
+                    .is_err()
+                {
+                    let _ = turn.child.start_kill();
+                    let _ = turn.child.wait().await;
+                }
             }
         }
 
@@ -288,26 +369,26 @@ impl ClaudeRuntime {
         if let Some(effort) = effort {
             command.arg("--effort").arg(effort);
         }
-        if let Some(permission_mode) = permission_mode
-            .map(str::trim)
-            .filter(|mode| !mode.is_empty() && !mode.eq_ignore_ascii_case("default"))
-        {
+        if let Some(permission_mode) = construction.permission_mode.as_deref() {
             command.arg("--permission-mode").arg(permission_mode);
         }
         // Claude runs PreToolUse hooks regardless of permission mode, so the
         // approval-broker hook must not be installed when the user chose
         // bypassPermissions — otherwise "bypass" still prompts for every tool
         // call, just from FalconDeck instead of Claude.
-        let bypassing_permissions = permission_mode
-            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("bypasspermissions"));
         if let Some(settings_path) = daemon_base_url
             .filter(|_| claude_approvals_enabled() && !bypassing_permissions)
             .and_then(|base_url| self.write_hook_settings_file(base_url, settings_dir))
         {
             command.arg("--settings").arg(settings_path);
         }
-        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir, builtin) {
-            command.arg("--mcp-config").arg(mcp_config_path);
+        let mcp_config = self.write_mcp_config_file(settings_dir, builtin);
+        if let Some(lease) = &mcp_config {
+            command.arg("--mcp-config").arg(lease.path());
+            command.arg("--strict-mcp-config");
+        }
+        for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
+            command.env(*key, *value);
         }
         if let Some(instructions) = agent_context.map(str::trim).filter(|text| !text.is_empty()) {
             command.arg("--append-system-prompt").arg(instructions);
@@ -343,6 +424,9 @@ impl ClaudeRuntime {
                 generation,
                 child,
                 input,
+                construction,
+                awaiting_next_turn: false,
+                _mcp_config: mcp_config,
             },
         );
         {
@@ -400,15 +484,49 @@ impl ClaudeRuntime {
         // and spawns on every other thread.
         let input = {
             let active = self.active_turns.lock().await;
-            active
-                .get(thread_id)
-                .map(|turn| Arc::clone(&turn.input))
-                .ok_or_else(|| {
-                    DaemonError::BadRequest("no active claude turn to steer".to_string())
-                })?
+            let turn = active.get(thread_id).ok_or_else(|| {
+                DaemonError::BadRequest("no active claude turn to steer".to_string())
+            })?;
+            if turn.awaiting_next_turn {
+                return Err(DaemonError::BadRequest(
+                    "no active claude turn to steer".to_string(),
+                ));
+            }
+            Arc::clone(&turn.input)
         };
         let line = build_claude_stream_json_input(prompt, images).await;
         input.write_line(&line).await
+    }
+
+    /// Writes a protocol line to the live CLI stdin, including while the
+    /// process is parked between turns. Control replies must not wait for a
+    /// new user turn — an ignored `control_request` stalls the CLI.
+    pub async fn write_protocol_line(
+        &self,
+        thread_id: &str,
+        line: &str,
+    ) -> Result<(), DaemonError> {
+        let input = {
+            let active = self.active_turns.lock().await;
+            let turn = active.get(thread_id).ok_or_else(|| {
+                DaemonError::BadRequest("no active claude turn to write to".to_string())
+            })?;
+            Arc::clone(&turn.input)
+        };
+        input.write_line(line).await
+    }
+
+    /// Keeps the CLI process after a successful `result` so the next turn can
+    /// write another stdin line. Returns false when this generation is gone.
+    pub async fn park_turn(&self, thread_id: &str, generation: u64) -> bool {
+        let mut active = self.active_turns.lock().await;
+        match active.get_mut(thread_id) {
+            Some(turn) if turn.generation == generation => {
+                turn.awaiting_next_turn = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Ends a turn that reported its terminal `result` event. Closes stdin so
@@ -623,9 +741,10 @@ impl ClaudeRuntime {
     }
 
     pub async fn provider_metadata(&self) -> ClaudeProviderMetadata {
+        let (account, models) = tokio::join!(read_auth_status(&self.claude_bin), list_models());
         ClaudeProviderMetadata {
-            account: read_auth_status(&self.claude_bin).await,
-            models: curated_models(),
+            account,
+            models,
             collaboration_modes: Vec::new(),
             capabilities: default_capabilities(),
         }
@@ -685,48 +804,22 @@ impl ClaudeRuntime {
         }
     }
 
-    /// Materialize a `--mcp-config` file from the merged connector config.
-    /// Same private-dir/0600 handling as the hook settings file — connector
-    /// env blocks routinely hold API keys.
+    /// Per-launch `--mcp-config`, including an empty `mcpServers` map so
+    /// `--strict-mcp-config` cannot fall through to the user's global Claude
+    /// MCP list. The file is 0400 in the daemon's 0700 state dir and is
+    /// unlinked when the turn is dropped.
     fn write_mcp_config_file(
         &self,
         settings_dir: &Path,
         builtin: &crate::connectors::BuiltinConnectors,
-    ) -> Option<PathBuf> {
+    ) -> Option<crate::connectors::LeasedMcpConfig> {
         let servers = crate::connectors::with_builtin_servers(
             crate::connectors::load_mcp_servers(&self.workspace_path, "claude"),
             builtin,
         );
-        let body = crate::connectors::claude_mcp_config_json(&servers)?;
-        if let Err(error) = fs::create_dir_all(settings_dir) {
-            tracing::warn!("failed to create claude mcp config dir: {error}");
-            return None;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(error) = fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o700))
-            {
-                tracing::warn!("failed to restrict claude mcp config dir: {error}");
-                return None;
-            }
-        }
-        let path = settings_dir.join(format!(
-            "claude-mcp-{:016x}.json",
-            stable_workspace_hash(&self.workspace_path)
-        ));
-        let mut options = fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let written = options
-            .open(&path)
-            .and_then(|mut file| file.write_all(body.as_bytes()));
-        match written {
-            Ok(()) => Some(path),
+        let body = crate::connectors::claude_mcp_config_json(&servers);
+        match crate::connectors::write_leased_claude_mcp_config(settings_dir, &body) {
+            Ok(lease) => Some(lease),
             Err(error) => {
                 tracing::warn!("failed to write claude mcp config file: {error}");
                 None
@@ -737,6 +830,135 @@ impl ClaudeRuntime {
 
 pub(crate) fn claude_approvals_enabled() -> bool {
     env::var("FALCONDECK_DISABLE_CLAUDE_APPROVALS").as_deref() != Ok("1")
+}
+
+pub(crate) const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+pub(crate) const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
+pub(crate) const CLAUDE_POST_PLAN_PERMISSION_MODE: &str = "acceptEdits";
+
+/// Reply the PreToolUse hook waiter accepts from the interactive-request path.
+#[derive(Debug, Clone)]
+pub(crate) enum ClaudeHookReply {
+    Approval(ApprovalDecision),
+    QuestionAnswers(std::collections::HashMap<String, Vec<String>>),
+    Plan {
+        outcome: PlanApprovalOutcome,
+        feedback: Option<String>,
+    },
+}
+
+pub(crate) fn is_claude_plan_mode(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| mode.trim().eq_ignore_ascii_case("plan"))
+}
+
+pub(crate) struct ParsedAskUserQuestion {
+    pub questions: Vec<InteractiveQuestion>,
+    pub original_questions: Value,
+}
+
+pub(crate) fn parse_ask_user_question(input: &Value) -> Option<ParsedAskUserQuestion> {
+    let original_questions = input.get("questions")?.as_array()?.clone();
+    if original_questions.is_empty() {
+        return None;
+    }
+    let mut questions = Vec::new();
+    let mut prompts = HashSet::new();
+    for (index, entry) in original_questions.iter().enumerate() {
+        let prompt = entry
+            .get("question")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|prompt| !prompt.is_empty())?;
+        if !prompts.insert(prompt.to_string()) {
+            return None;
+        }
+        let header = entry
+            .get("header")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|header| !header.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| prompt.chars().take(12).collect());
+        let options = entry
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        let label = option
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|label| !label.is_empty())?;
+                        let description = option
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .unwrap_or("");
+                        Some(InteractiveQuestionOption {
+                            label: label.to_string(),
+                            description: description.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+        questions.push(InteractiveQuestion {
+            id: format!("q{index}"),
+            header,
+            question: prompt.to_string(),
+            is_other: false,
+            is_secret: false,
+            options,
+        });
+    }
+    (!questions.is_empty()).then_some(ParsedAskUserQuestion {
+        questions,
+        original_questions: Value::Array(original_questions),
+    })
+}
+
+pub(crate) fn parse_exit_plan_mode(input: &Value) -> Option<String> {
+    input
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(crate) fn ask_user_question_updated_input(
+    original_questions: &Value,
+    questions: &[InteractiveQuestion],
+    answers: &std::collections::HashMap<String, Vec<String>>,
+) -> Value {
+    let mut mapped = serde_json::Map::new();
+    for question in questions {
+        let text = answers
+            .get(&question.id)
+            .map(|values| values.join(", "))
+            .unwrap_or_default();
+        mapped.insert(question.question.clone(), json!(text));
+    }
+    json!({
+        "questions": original_questions,
+        "answers": mapped
+    })
+}
+
+pub(crate) fn exit_plan_mode_rejection_message(feedback: Option<&str>) -> String {
+    let base = "The user rejected this plan. Do not call ExitPlanMode again with the same plan. Use AskUserQuestion to find out what they want changed, revise the plan, and only then propose it again.";
+    match feedback
+        .map(str::trim)
+        .filter(|feedback| !feedback.is_empty())
+    {
+        Some(feedback) => format!("{base} Requested changes: {feedback}"),
+        None => base.to_string(),
+    }
+}
+
+pub(crate) fn exit_plan_mode_abandon_message() -> String {
+    "The user abandoned this plan. Do not continue implementing it.".to_string()
 }
 
 /// Whether `curl` (the transport for the PreToolUse hook command) is on PATH.
@@ -801,7 +1023,8 @@ const MAX_EMBEDDED_IMAGE_BYTES: u64 = 7_500_000;
 
 /// Aggregate base64-encoded budget across all images in one turn; images past
 /// the budget degrade to text references instead of ballooning the input line.
-const MAX_TOTAL_ENCODED_IMAGE_BYTES: usize = 14_000_000;
+/// 15 MB decoded expands to 20 MB encoded.
+const MAX_TOTAL_ENCODED_IMAGE_BYTES: usize = 20_000_000;
 
 pub async fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
     build_claude_stream_json_input_with_budget(prompt, images, MAX_TOTAL_ENCODED_IMAGE_BYTES).await
@@ -953,54 +1176,220 @@ pub const REQUIRED_CLI_FLAGS: &[&str] = &[
     "--permission-mode",
     "--settings",
     "--mcp-config",
+    "--strict-mcp-config",
 ];
 
+fn claude_effort(reasoning_effort: &str, description: &str) -> ReasoningEffortSummary {
+    ReasoningEffortSummary {
+        reasoning_effort: reasoning_effort.to_string(),
+        description: description.to_string(),
+    }
+}
+
+fn claude_base_efforts() -> Vec<ReasoningEffortSummary> {
+    vec![
+        claude_effort("low", "Fastest responses"),
+        claude_effort("medium", "Balanced reasoning"),
+        claude_effort("high", "Deeper reasoning"),
+        claude_effort("xhigh", "Extended reasoning"),
+    ]
+}
+
+fn claude_max_efforts() -> Vec<ReasoningEffortSummary> {
+    let mut efforts = claude_base_efforts();
+    efforts.push(claude_effort("max", "Maximum effort"));
+    efforts
+}
+
+fn claude_haiku_efforts() -> Vec<ReasoningEffortSummary> {
+    vec![claude_effort("low", "Fastest responses")]
+}
+
+fn claude_model(
+    id: &str,
+    label: &str,
+    is_default: bool,
+    default_reasoning_effort: &str,
+    efforts: Vec<ReasoningEffortSummary>,
+) -> ModelSummary {
+    ModelSummary {
+        id: id.to_string(),
+        label: label.to_string(),
+        is_default,
+        default_reasoning_effort: Some(default_reasoning_effort.to_string()),
+        supported_reasoning_efforts: efforts,
+        // The Claude CLI has no headless fast-mode control yet, so no
+        // curated model advertises a service tier.
+        service_tiers: Vec::new(),
+        default_service_tier: None,
+    }
+}
+
 pub fn curated_models() -> Vec<ModelSummary> {
-    fn effort(reasoning_effort: &str, description: &str) -> ReasoningEffortSummary {
-        ReasoningEffortSummary {
-            reasoning_effort: reasoning_effort.to_string(),
-            description: description.to_string(),
+    vec![
+        claude_model("haiku", "Haiku 4.5", false, "medium", claude_base_efforts()),
+        claude_model("sonnet", "Sonnet 5", true, "medium", claude_base_efforts()),
+        claude_model("opus", "Opus 5", false, "high", claude_max_efforts()),
+        claude_model("fable", "Fable 5", false, "high", claude_max_efforts()),
+    ]
+}
+
+/// Extra Claude model id the CLI or the user's config advertised outside the
+/// curated alias list. Labels come from the source when it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredClaudeModel {
+    pub id: String,
+    pub label: String,
+}
+
+/// CLI flags that are not required to spawn a turn, but that later Claude
+/// control-plane work (native fork) depends on still being advertised.
+pub const CONTROL_PLANE_CLI_FLAGS: &[&str] = &["--fork-session"];
+
+fn claude_account_config_path() -> Option<PathBuf> {
+    Some(PathBuf::from(env::var_os("HOME")?).join(".claude.json"))
+}
+
+/// Quoted tokens from the `--model` help paragraph. The CLI has no model-list
+/// command; this is the documented alias set (`fable`, `opus`, `sonnet`, …).
+pub fn parse_help_model_ids(help: &str) -> Vec<String> {
+    let Some(after_flag) = help.split_once("--model").map(|(_, rest)| rest) else {
+        return Vec::new();
+    };
+    let section = after_flag.split("\n  --").next().unwrap_or(after_flag);
+    let mut ids = Vec::new();
+    let chars: Vec<char> = section.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        if character != '\'' && character != '"' {
+            index += 1;
+            continue;
+        }
+        // `model's` uses an apostrophe; only treat a quote as a delimiter
+        // when it does not sit inside a word.
+        if index > 0 && chars[index - 1].is_ascii_alphabetic() {
+            index += 1;
+            continue;
+        }
+        let quote = character;
+        index += 1;
+        let mut token = String::new();
+        while index < chars.len() && chars[index] != quote {
+            token.push(chars[index]);
+            index += 1;
+        }
+        if index < chars.len() {
+            index += 1;
+        }
+        let token = token.trim();
+        if !is_claude_model_id(token) {
+            continue;
+        }
+        if !ids.iter().any(|existing| existing == token) {
+            ids.push(token.to_string());
         }
     }
-    fn model(
-        id: &str,
-        label: &str,
-        is_default: bool,
-        default_reasoning_effort: &str,
-        efforts: Vec<ReasoningEffortSummary>,
-    ) -> ModelSummary {
-        ModelSummary {
+    ids
+}
+
+fn is_claude_model_id(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 80 {
+        return false;
+    }
+    value.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '[' | ']')
+    })
+}
+
+/// Entries from `additionalModelOptionsCache` in `~/.claude.json`.
+pub fn parse_additional_model_options(value: &Value) -> Vec<DiscoveredClaudeModel> {
+    let Some(entries) = value
+        .get("additionalModelOptionsCache")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut models = Vec::new();
+    for entry in entries {
+        let id = entry
+            .get("value")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| is_claude_model_id(id));
+        let Some(id) = id else {
+            continue;
+        };
+        if models
+            .iter()
+            .any(|existing: &DiscoveredClaudeModel| existing.id == id)
+        {
+            continue;
+        }
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id);
+        models.push(DiscoveredClaudeModel {
             id: id.to_string(),
             label: label.to_string(),
-            is_default,
-            default_reasoning_effort: Some(default_reasoning_effort.to_string()),
-            supported_reasoning_efforts: efforts,
-            // The Claude CLI has no headless fast-mode control yet, so no
-            // curated model advertises a service tier.
-            service_tiers: Vec::new(),
-            default_service_tier: None,
-        }
+        });
     }
-    let base_efforts = || {
-        vec![
-            effort("low", "Fastest responses"),
-            effort("medium", "Balanced reasoning"),
-            effort("high", "Deeper reasoning"),
-            effort("xhigh", "Extended reasoning"),
-        ]
-    };
-    let max_efforts = || {
-        let mut efforts = base_efforts();
-        efforts.push(effort("max", "Maximum effort"));
-        efforts
-    };
+    models
+}
 
-    vec![
-        model("haiku", "Haiku 4.5", false, "medium", base_efforts()),
-        model("sonnet", "Sonnet 5", true, "medium", base_efforts()),
-        model("opus", "Opus 5", false, "high", max_efforts()),
-        model("fable", "Fable 5", false, "high", max_efforts()),
-    ]
+/// Curated aliases first (labels and efforts stay ours). Discovered ids that
+/// are not already in that list are appended so extras such as a 1M variant
+/// appear in the picker. An empty discovery result never blanks the catalog.
+pub fn merge_claude_models(
+    curated: Vec<ModelSummary>,
+    discovered: &[DiscoveredClaudeModel],
+) -> Vec<ModelSummary> {
+    let mut models = curated;
+    for extra in discovered {
+        if models
+            .iter()
+            .any(|model| model.id.eq_ignore_ascii_case(&extra.id))
+        {
+            continue;
+        }
+        models.push(model_summary_for_discovered(extra));
+    }
+    models
+}
+
+fn model_summary_for_discovered(extra: &DiscoveredClaudeModel) -> ModelSummary {
+    let id_lower = extra.id.to_ascii_lowercase();
+    let (default_effort, efforts) = if id_lower.contains("haiku") {
+        ("low", claude_haiku_efforts())
+    } else if id_lower.contains("opus") || id_lower.contains("fable") {
+        ("high", claude_max_efforts())
+    } else {
+        ("medium", claude_base_efforts())
+    };
+    claude_model(&extra.id, &extra.label, false, default_effort, efforts)
+}
+
+async fn read_additional_model_options() -> Vec<DiscoveredClaudeModel> {
+    let Some(path) = claude_account_config_path() else {
+        return Vec::new();
+    };
+    let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    parse_additional_model_options(&value)
+}
+
+/// Picker catalog: curated aliases plus any extra ids the CLI config advertises.
+pub async fn list_models() -> Vec<ModelSummary> {
+    let extras = read_additional_model_options().await;
+    merge_claude_models(curated_models(), &extras)
 }
 
 pub async fn read_auth_status(claude_bin: &str) -> AccountSummary {
@@ -1424,6 +1813,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -1660,6 +2050,133 @@ mod tests {
         assert_eq!(models[2].label, "Opus 5");
         assert_eq!(models[3].id, "fable");
         assert_eq!(models[3].label, "Fable 5");
+    }
+
+    #[test]
+    fn merge_keeps_curated_when_discovery_is_empty() {
+        let merged = merge_claude_models(curated_models(), &[]);
+        assert_eq!(merged, curated_models());
+    }
+
+    #[test]
+    fn merge_appends_unknown_discovered_ids_and_skips_duplicates() {
+        let extras = vec![
+            DiscoveredClaudeModel {
+                id: "sonnet".to_string(),
+                label: "Should not replace curated".to_string(),
+            },
+            DiscoveredClaudeModel {
+                id: "claude-fable-5[1m]".to_string(),
+                label: "Fable".to_string(),
+            },
+        ];
+        let merged = merge_claude_models(curated_models(), &extras);
+        assert_eq!(merged.len(), 5);
+        assert_eq!(merged[1].label, "Sonnet 5");
+        assert!(merged[1].is_default);
+        let extra = merged.last().unwrap();
+        assert_eq!(extra.id, "claude-fable-5[1m]");
+        assert_eq!(extra.label, "Fable");
+        assert!(!extra.is_default);
+        assert!(
+            extra
+                .supported_reasoning_efforts
+                .iter()
+                .any(|effort| effort.reasoning_effort == "max")
+        );
+    }
+
+    #[test]
+    fn parses_additional_model_options_cache() {
+        let extras = parse_additional_model_options(&json!({
+            "additionalModelOptionsCache": [
+                {
+                    "value": "claude-fable-5[1m]",
+                    "label": "Fable",
+                    "description": "ignored"
+                },
+                { "value": "" },
+                { "label": "orphan" }
+            ]
+        }));
+        assert_eq!(
+            extras,
+            vec![DiscoveredClaudeModel {
+                id: "claude-fable-5[1m]".to_string(),
+                label: "Fable".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_ask_user_question_input() {
+        let parsed = parse_ask_user_question(&json!({
+            "questions": [{
+                "question": "Which flavor?",
+                "header": "Flavor",
+                "options": [
+                    { "label": "Vanilla", "description": "classic" },
+                    { "label": "Chocolate", "description": "rich" }
+                ]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(parsed.questions[0].id, "q0");
+        assert_eq!(parsed.questions[0].question, "Which flavor?");
+        assert_eq!(
+            parsed.questions[0].options.as_ref().unwrap()[0].label,
+            "Vanilla"
+        );
+        let updated = ask_user_question_updated_input(
+            &parsed.original_questions,
+            &parsed.questions,
+            &std::collections::HashMap::from([("q0".to_string(), vec!["Vanilla".to_string()])]),
+        );
+        assert_eq!(updated["answers"]["Which flavor?"], "Vanilla");
+    }
+
+    #[test]
+    fn rejects_ask_user_question_with_duplicate_prompts() {
+        assert!(
+            parse_ask_user_question(&json!({
+                "questions": [
+                    { "question": "Same?" },
+                    { "question": "Same?" }
+                ]
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parses_exit_plan_mode_plan_text() {
+        assert_eq!(
+            parse_exit_plan_mode(&json!({ "plan": "  Ship it.  " })).as_deref(),
+            Some("Ship it.")
+        );
+        assert!(parse_exit_plan_mode(&json!({ "plan": "   " })).is_none());
+    }
+
+    #[test]
+    fn parses_model_aliases_from_help_model_section() {
+        let help = "\
+  --mcp-config <configs...>             Load MCP servers
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'fable', 'opus', or 'sonnet') or a
+                                        model's full name (e.g.
+                                        'claude-fable-5').
+  --name <name>                         Set a display name
+";
+        assert_eq!(
+            parse_help_model_ids(help),
+            vec![
+                "fable".to_string(),
+                "opus".to_string(),
+                "sonnet".to_string(),
+                "claude-fable-5".to_string()
+            ]
+        );
     }
 
     #[test]

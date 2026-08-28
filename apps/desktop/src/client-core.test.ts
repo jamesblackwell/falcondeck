@@ -97,6 +97,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_error: null,
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     agent: {
       model_id: null,

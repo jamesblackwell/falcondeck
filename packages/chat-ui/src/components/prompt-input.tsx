@@ -37,10 +37,9 @@ import type {
 import {
   activeSlashQuery,
   anyModelHasFastTier,
-  canonicalSkillAlias,
+  filterSlashSkills,
   modelFastTier,
   NO_AGENT_CAPABILITIES,
-  providerSupportsSkill,
   resolveServiceTier,
 } from "@falcondeck/client-core";
 import { ActivityDiamond, Button, Tooltip, cn } from "@falcondeck/ui";
@@ -123,6 +122,11 @@ export type PromptInputProps = {
   /** Browser files currently being read into this conversation's attachments. */
   preparingAttachmentCount?: number;
   skills?: SkillSummary[];
+  /**
+   * Live catalog loader. Called when the slash menu opens and when the
+   * provider changes while it is open. Typing filters the last result locally.
+   */
+  loadSkills?: (provider: AgentProvider) => Promise<SkillSummary[]>;
   selectedProvider: AgentProvider;
   onProviderChange: (value: AgentProvider) => void;
   /** Providers the active workspace offers; defaults to the built-in pair. */
@@ -249,6 +253,7 @@ export const PromptInput = memo(function PromptInput({
   attachments,
   preparingAttachmentCount = 0,
   skills = [],
+  loadSkills,
   selectedProvider,
   onProviderChange,
   providers = DEFAULT_PROVIDER_OPTIONS,
@@ -309,6 +314,9 @@ export const PromptInput = memo(function PromptInput({
   // the last shortcut and pop its menu open.
   const handledMenuRequestKeyRef = useRef(menuRequest?.key ?? 0);
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null);
+  const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null);
+  const loadSkillsRef = useRef(loadSkills);
+  loadSkillsRef.current = loadSkills;
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const [draggedFileKind, setDraggedFileKind] = useState<
     "images" | "unsupported" | "unknown" | null
@@ -339,26 +347,37 @@ export const PromptInput = memo(function PromptInput({
     models.find((model) => model.is_default) ??
     null;
 
-  const filteredSkills = useMemo(() => {
-    const query = slashQuery?.query.trim().toLowerCase() ?? "";
-    const visibleSkills = skills.filter((skill) => {
-      if (!query) return true;
-      return (
-        canonicalSkillAlias(skill.alias).includes(`/${query}`) ||
-        skill.label.toLowerCase().includes(query) ||
-        (skill.description ?? "").toLowerCase().includes(query)
-      );
-    });
+  const slashOpen = slashQuery !== null;
+  useEffect(() => {
+    if (!slashOpen) return;
+    const load = loadSkillsRef.current;
+    if (!load) {
+      setLiveSkills(null);
+      return;
+    }
+    let cancelled = false;
+    void load(selectedProvider).then(
+      (next) => {
+        if (!cancelled) setLiveSkills(next);
+      },
+      () => {
+        if (!cancelled) setLiveSkills(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProvider, slashOpen]);
 
-    return visibleSkills.sort((left, right) => {
-      const leftSupported = providerSupportsSkill(left, selectedProvider);
-      const rightSupported = providerSupportsSkill(right, selectedProvider);
-      if (leftSupported !== rightSupported) {
-        return leftSupported ? -1 : 1;
-      }
-      return left.alias.localeCompare(right.alias);
-    });
-  }, [selectedProvider, skills, slashQuery?.query]);
+  const filteredSkills = useMemo(
+    () =>
+      filterSlashSkills(
+        liveSkills ?? skills,
+        selectedProvider,
+        slashQuery?.query ?? "",
+      ),
+    [liveSkills, selectedProvider, skills, slashQuery?.query],
+  );
 
   const showGoalCommand =
     Boolean(goal) &&
@@ -430,7 +449,9 @@ export const PromptInput = memo(function PromptInput({
         Boolean(onPermissionModeChange),
       sandbox:
         capabilities.sandbox_modes.length > 0 && Boolean(onSandboxModeChange),
-      model: models.length > 0,
+      model:
+        models.length > 0 ||
+        (handoffProviders.length > 0 && Boolean(onHandoffProviderSelect)),
     };
     if (!available[menuRequest.menu]) return;
     setOpenOptionMenu(menuRequest.menu);
@@ -439,8 +460,10 @@ export const PromptInput = memo(function PromptInput({
     capabilities.sandbox_modes,
     compact,
     disabled,
+    handoffProviders.length,
     menuRequest,
     models.length,
+    onHandoffProviderSelect,
     onPermissionModeChange,
     onSandboxModeChange,
     providerLocked,
@@ -1047,26 +1070,19 @@ export const PromptInput = memo(function PromptInput({
                   </button>
                 ) : null}
                 {filteredSkills.map((skill, index) => {
-                  const supported = providerSupportsSkill(
-                    skill,
-                    selectedProvider,
-                  );
                   const active =
                     index + (showGoalCommand ? 1 : 0) === activeSkillIndex;
                   return (
                     <button
                       key={skill.id}
                       type="button"
-                      disabled={!supported}
                       onMouseDown={(event) => {
                         event.preventDefault();
-                        if (supported) {
-                          insertSkillAlias(skill.alias);
-                        }
+                        insertSkillAlias(skill.alias);
                       }}
-                      className={`flex w-full items-start gap-3 px-3 py-2 text-left transition-colors ${
+                      className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
                         active ? "bg-surface-3" : "hover:bg-surface-2"
-                      } ${supported ? "text-fg-primary" : "cursor-not-allowed text-fg-muted opacity-70"}`}
+                      }`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
@@ -1079,11 +1095,6 @@ export const PromptInput = memo(function PromptInput({
                           {skill.description ?? skill.label}
                         </div>
                       </div>
-                      {!supported ? (
-                        <span className="shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted">
-                          {selectedProvider} only unavailable
-                        </span>
-                      ) : null}
                     </button>
                   );
                 })}

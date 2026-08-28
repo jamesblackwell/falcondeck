@@ -13,6 +13,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@bsky.app/react-native-uitextview": "2.7.1",
     "@falcondeck/client-core": "*",
     "@react-navigation/drawer": "^7.5.0",
     "@shopify/flash-list": "2.3.2",

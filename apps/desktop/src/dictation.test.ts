@@ -95,6 +95,52 @@ describe("dictation settings", () => {
     ).toBe(false);
   });
 
+  it("gives settings saved before history a fallback model and a retention window", () => {
+    const upgraded = normalizeDictationSettings({ enabled: true });
+    expect(upgraded.fallbackModel).toBe(
+      DEFAULT_DICTATION_SETTINGS.fallbackModel,
+    );
+    expect(upgraded.historyRetentionHours).toBe(
+      DEFAULT_DICTATION_SETTINGS.historyRetentionHours,
+    );
+  });
+
+  it("defaults the fallback model to a different vendor from the primary one", () => {
+    const vendor = (model: string | null) => model?.split("/")[0];
+    expect(vendor(DEFAULT_DICTATION_SETTINGS.fallbackModel)).not.toBe(
+      vendor(DEFAULT_DICTATION_SETTINGS.model),
+    );
+  });
+
+  it("keeps an explicit choice of no fallback model", () => {
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        fallbackModel: null,
+      }).fallbackModel,
+    ).toBeNull();
+    // An unusable value is not a choice, so the default comes back.
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        fallbackModel: "   ",
+      }).fallbackModel,
+    ).toBe(DEFAULT_DICTATION_SETTINGS.fallbackModel);
+  });
+
+  it("bounds how long recordings can be kept", () => {
+    const retention = (value: unknown) =>
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        historyRetentionHours: value as number,
+      }).historyRetentionHours;
+    expect(retention(0)).toBe(0);
+    expect(retention(24)).toBe(24);
+    expect(retention(1000)).toBe(24);
+    expect(retention(-5)).toBe(DEFAULT_DICTATION_SETTINGS.historyRetentionHours);
+    expect(retention("6")).toBe(DEFAULT_DICTATION_SETTINGS.historyRetentionHours);
+  });
+
   it("updates subscribers in the same window", () => {
     const { result } = renderHook(() => useDictationSettings());
     act(() => {

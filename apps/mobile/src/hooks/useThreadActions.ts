@@ -117,6 +117,28 @@ export function useThreadActions() {
     [],
   )
 
+  const setThreadPinnedInProject = useCallback(
+    async (workspaceId: string, threadId: string, pinnedInProject: boolean) => {
+      const relay = useRelayStore.getState()
+      try {
+        await relay._callRpc(
+          'thread.update',
+          {
+            workspace_id: workspaceId,
+            thread_id: threadId,
+            pinned_in_project: pinnedInProject,
+          },
+          { requestIdPrefix: 'mobile-thread' },
+        )
+        relay._setError(null)
+      } catch (e) {
+        relay._setError(e instanceof Error ? e.message : 'Failed to update pin')
+        throw e
+      }
+    },
+    [],
+  )
+
   const markThreadRead = useCallback(
     async (workspaceId: string, threadId: string, readSeq: number) => {
       const relay = useRelayStore.getState()
@@ -267,7 +289,15 @@ export function useThreadActions() {
         )
         relay._setError(null)
       } catch (e) {
-        relay._setError(e instanceof Error ? e.message : 'Failed to steer queued message')
+        const message = e instanceof Error ? e.message : 'Failed to steer queued message'
+        // Grok's interject returns before the thread-updated event reaches
+        // the phone, so a second Steer tap (or a stale chip) used to banner
+        // the daemon's "queued turn not found". Treat that as already gone.
+        if (/queued turn not found/i.test(message)) {
+          relay._setError(null)
+          return
+        }
+        relay._setError(message)
         throw e
       }
     },
@@ -313,6 +343,7 @@ export function useThreadActions() {
     renameThread,
     suggestThreadTitle,
     setThreadPinned,
+    setThreadPinnedInProject,
     markThreadRead,
     markThreadUnread,
     setThreadMode,

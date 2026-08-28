@@ -207,11 +207,11 @@ impl TerminalManager {
             .filter(|session| session.info.workspace_id == workspace_id)
             .map(|session| session.info.clone())
             .collect();
-        sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        sessions.sort_by_key(|session| session.created_at);
         sessions
     }
 
-    pub fn get(&self, id: &str) -> Option<Arc<TerminalSession>> {
+    fn get(&self, id: &str) -> Option<Arc<TerminalSession>> {
         self.sessions
             .lock()
             .expect("sessions lock")

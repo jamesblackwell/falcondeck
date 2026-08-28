@@ -502,7 +502,7 @@ describe("provider-native tool output", () => {
     );
     fireEvent.click(
       screen.getByRole("button", {
-        name: /Spawn sub-agent details, Completed$/,
+        name: /Toggle Breakout 1 agent details, Completed$/,
       }),
     );
     expect(screen.getByText("Audit VoiceOver and streaming")).toBeVisible();
@@ -524,7 +524,7 @@ describe("provider-native tool output", () => {
     );
     fireEvent.click(
       screen.getByRole("button", {
-        name: /Sub-agent interacted details, Completed$/,
+        name: /Toggle Breakout qa\/mobile details, Completed$/,
       }),
     );
     expect(screen.getByText("Interacted")).toBeVisible();

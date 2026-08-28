@@ -462,6 +462,10 @@ function skillProvidersFromAvailability(
   return [availability];
 }
 
+export function normalizeSkillSummaries(value: unknown): SkillSummary[] {
+  return Array.isArray(value) ? value.map((entry) => normalizeSkill(entry)) : []
+}
+
 function normalizeSkill(value: unknown): SkillSummary {
   const skill = (value ?? {}) as Partial<SkillSummary>;
   const alias =
@@ -637,6 +641,7 @@ export function normalizeThreadSummary(
     },
     is_archived: thread.is_archived ?? false,
     is_pinned: thread.is_pinned ?? false,
+    is_pinned_in_project: thread.is_pinned_in_project ?? false,
     goal: thread.goal ?? null,
     queued_turns: Array.isArray(thread.queued_turns)
       ? thread.queued_turns.filter(
@@ -677,6 +682,7 @@ export function normalizeWorkspaceSummary(
   return {
     id: workspace.id ?? "",
     path: workspace.path ?? "",
+    kind: workspace.kind === "casual" ? "casual" : "project",
     status: workspace.status ?? "disconnected",
     agents: agents.length > 0 ? agents : [fallbackWorkspaceAgent(workspace)],
     skills: (workspace.skills ?? []).map((skill) => normalizeSkill(skill)),

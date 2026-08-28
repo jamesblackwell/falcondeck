@@ -119,10 +119,11 @@ mermaid's `base` theme rather than one of its built-in themes.
 
 Desktop and remote web import mermaid on demand and inject the SVG
 (`packages/chat-ui/src/lib/mermaid.ts`); the block re-renders when the appearance
-changes. Mobile has no DOM, so it renders inside a WebView from a document built
-in `apps/mobile/src/components/chat/mermaidHtml.ts`. The engine ships as an asset
-that `metro.config.js` vendors from `node_modules`, keeping 3.5 MB of parser out
-of the JS bundle and off the cold-start path.
+changes. A closed mermaid fence draws as soon as it arrives, even while the rest
+of the message is still streaming. Mobile has no DOM, so it renders inside a
+WebView from a document built in `apps/mobile/src/components/chat/mermaidHtml.ts`.
+The engine ships as an asset that `metro.config.js` vendors from `node_modules`,
+keeping 3.5 MB of parser out of the JS bundle and off the cold-start path.
 
 Rendering is strict and best-effort: `securityLevel: "strict"`, no HTML labels,
 and any parse or load failure falls back to the source text with a "Could not

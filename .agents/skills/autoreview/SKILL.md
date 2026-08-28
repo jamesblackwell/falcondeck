@@ -7,7 +7,7 @@ description: "Structured Codex, Claude, Amp, Pi, Kimi, or OpenCode code review w
 
 Run the bundled structured review helper only when the user explicitly asks for autoreview, a second-model review, or one of its named review engines. This is code review, not Guardian `auto_review` approval routing.
 
-OpenCode review with `zai-coding-plan/glm-5.3` is the repo-configured default when configured via `.agents/skills/autoreview/config.env`. Codex review uses `gpt-5.6-sol` with `high` reasoning by default, then retries once with `gpt-5.6-terra` only when the account cannot access Sol. Claude review uses `claude-fable-5` by default. Amp review uses `openai/gpt-5.6-sol` with `high` reasoning by default. Pi and Kimi use the model configured by their respective CLIs unless `--model` overrides it.
+OpenCode review with `openrouter/z-ai/glm-5.3-flash` is the repo-configured default when configured via `.agents/skills/autoreview/config.env`. Codex review uses `gpt-5.6-sol` with `high` reasoning by default, then retries once with `gpt-5.6-terra` only when the account cannot access Sol. Claude review uses `claude-fable-5` by default. Amp review uses `openai/gpt-5.6-sol` with `high` reasoning by default. Pi and Kimi use the model configured by their respective CLIs unless `--model` overrides it.
 
 Do not invoke Autoreview automatically before a commit, push, PR, merge, deploy, or final reply. Repository or workflow rules may call it only when they explicitly name it.
 
@@ -184,7 +184,7 @@ Recommended model defaults:
 
 | Engine              | Default model                                      | Source note                                           |
 | ------------------- | -------------------------------------------------- | ----------------------------------------------------- |
-| **opencode**        | `zai-coding-plan/glm-5.3`                          | OpenCode GLM 5.3 review default                       |
+| **opencode**        | `openrouter/z-ai/glm-5.3-flash`                    | OpenRouter GLM 5.3 Flash review default               |
 | **codex** (default) | `gpt-5.6-sol` -> `gpt-5.6-terra` on access failure | OpenClaw org review default                           |
 | **claude**          | `claude-fable-5`                                   | Anthropic's most capable widely released Claude model |
 | **amp**             | `openai/gpt-5.6-sol`                               | Amp structured-generation review default              |
@@ -193,7 +193,7 @@ CLI flags and environment variables override these defaults. Amp model IDs must 
 
 | Engine              | Model flag                 | Example model IDs                                                            | Thinking flag                             | Accepted levels                                            |
 | ------------------- | -------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------- |
-| **opencode**        | `opencode run -m X`        | `zai-coding-plan/glm-5.3`, `opencode/north-mini-code-free`                    | `--variant Y`                             | `minimal`, `low`, `medium`, `high`, `max`                  |
+| **opencode**        | `opencode run -m X`        | `openrouter/z-ai/glm-5.3-flash`, `opencode/north-mini-code-free`              | `--variant Y`                             | `minimal`, `low`, `medium`, `high`, `max`                  |
 | **codex** (default) | `codex --model X exec ...` | `gpt-5.6-sol`, then `gpt-5.6-terra` on Sol access failure                    | `-c model_reasoning_effort=Y`             | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 | **claude**          | `claude --model X`         | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` | `--effort Y`                              | `low`, `medium`, `high`, `xhigh`, `max`                    |
 | **amp**             | Amp `amp.ai.generate`      | `openai/gpt-5.6-sol`                                                         | `reasoningEffort`                         | `none`, `low`, `medium`, `high`, `xhigh`, `max`            |

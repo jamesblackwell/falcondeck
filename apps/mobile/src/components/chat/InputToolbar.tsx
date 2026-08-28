@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { View, Pressable, ScrollView } from 'react-native'
+import { Pressable, ScrollView } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { ChevronDown, Zap } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -18,7 +18,6 @@ import {
 import {
   glassEdge,
   glassFill,
-  glassFillStrong,
   OptionSheet,
   ProviderIcon,
   Text,
@@ -33,6 +32,7 @@ import {
   sandboxChipLabel,
   sandboxModeItems,
 } from './composerModes'
+import { agentModelChipLabel, ComposerModelSheet } from './ComposerModelSheet'
 
 interface InputToolbarProps {
   models: ModelSummary[]
@@ -47,6 +47,10 @@ interface InputToolbarProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** Destinations offered behind the model sheet on an existing thread. */
+  handoffProviders?: ProviderOption[]
+  onHandoffProviderSelect?: (provider: AgentProvider) => void
+  handoffDisabledReason?: string | null
   /** Tier id while fast mode is on; null is the provider's standard tier. */
   selectedServiceTier?: string | null
   onSelectServiceTier?: (tier: string | null) => void
@@ -72,8 +76,6 @@ const DEFAULT_PROVIDERS: ProviderOption[] = [
   { provider: 'agy', label: 'Antigravity' },
 ]
 
-const MODEL_DEFAULT_VALUE = '__default__'
-
 type SheetConfig = {
   title: string
   items: readonly OptionSheetItem[]
@@ -93,6 +95,9 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  handoffProviders = [],
+  onHandoffProviderSelect,
+  handoffDisabledReason = null,
   selectedServiceTier = null,
   onSelectServiceTier,
   capabilities = NO_AGENT_CAPABILITIES,
@@ -103,35 +108,42 @@ export const InputToolbar = memo(function InputToolbar({
   showModePickers = true,
   modelsLoading = false,
 }: InputToolbarProps) {
-  const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
+  const [modelSheetOpen, setModelSheetOpen] = useState(false)
 
   useEffect(() => {
     if (disabled) {
       setSheet(null)
+      setModelSheetOpen(false)
     }
   }, [disabled])
 
   const currentModel = selectedModel ? models.find((m) => m.id === selectedModel) : null
-  const modelDisplayLabel = currentModel ? formatModelLabel(currentModel.label) : 'Default'
+  const providerLabel =
+    providers.find((option) => option.provider === selectedProvider)?.label ??
+    selectedProvider
+  const modelDisplayLabel = currentModel
+    ? formatModelLabel(currentModel.label)
+    : models.length > 0 || modelsLoading
+      ? modelsLoading && models.length === 0
+        ? 'Loading…'
+        : 'Default'
+      : null
+  const agentModelLabel = agentModelChipLabel(providerLabel, modelDisplayLabel)
+  const showHandoff =
+    handoffProviders.length > 0 && Boolean(onHandoffProviderSelect)
+  const showAgentModelChip =
+    models.length > 0 ||
+    modelsLoading ||
+    (showProviderSelector && providers.length > 0) ||
+    showHandoff
 
   const openModelSheet = useCallback(() => {
     if (disabled) return
     triggerComposerSelectionHaptic()
-
-    setSheet({
-      title: 'Model',
-      items: [
-        { value: MODEL_DEFAULT_VALUE, label: 'Default' },
-        ...models.map((m) => ({ value: m.id, label: formatModelLabel(m.label) })),
-      ],
-      selected: selectedModel ?? MODEL_DEFAULT_VALUE,
-      onSelect: (id) => {
-        onSelectModel(id === MODEL_DEFAULT_VALUE ? null : id)
-        setSheet(null)
-      },
-    })
-  }, [disabled, models, selectedModel, onSelectModel])
+    setSheet(null)
+    setModelSheetOpen(true)
+  }, [disabled])
 
   const effortItems = useMemo(
     () => effortOptions.map((e) => ({ value: e, label: capitalize(e) })),
@@ -216,46 +228,8 @@ export const InputToolbar = memo(function InputToolbar({
         style={styles.scroll}
         contentContainerStyle={styles.container}
       >
-        {showProviderSelector && providers.length > 0 ? (
-          <View style={[styles.providerToggle, disabled && styles.controlDisabled]}>
-            {providers.map((p) => {
-              const active = p.provider === selectedProvider
-              return (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`${p.label} agent`}
-                  accessibilityState={{ selected: active, disabled }}
-                  key={p.provider}
-                  style={[styles.providerSegment, active && styles.providerSegmentActive]}
-                  disabled={disabled}
-                  onPress={() => {
-                    if (!active) {
-                      void Haptics.selectionAsync()
-                      onSelectProvider(p.provider)
-                    }
-                  }}
-                >
-                  <ProviderIcon
-                    provider={p.provider}
-                    size={theme.iconSize.xs}
-                    color={active ? theme.colors.fg.primary : theme.colors.fg.muted}
-                  />
-                  <Text
-                    variant="caption"
-                    color={active ? 'primary' : 'muted'}
-                    size="xs"
-                    weight={active ? 'semibold' : 'normal'}
-                  >
-                    {p.label}
-                  </Text>
-                </Pressable>
-              )
-            })}
-          </View>
-        ) : null}
-
-        {/* Order matches the desktop composer: what the agent may do, then
-            where it may do it, then which model and how hard it thinks. */}
+        {/* New threads open the agent list first, then models. An existing
+            thread skips straight to models. */}
         {showModePickers && showPermissionPicker ? (
           <Chip
             label={permissionChipLabel(selectedPermissionMode, permissionModes)}
@@ -274,12 +248,13 @@ export const InputToolbar = memo(function InputToolbar({
           />
         ) : null}
 
-        {models.length > 0 || modelsLoading ? (
+        {showAgentModelChip ? (
           <Chip
-            label={modelsLoading && models.length === 0 ? 'Loading…' : modelDisplayLabel}
-            accessibilityLabel="Model"
-            disabled={disabled || (modelsLoading && models.length === 0)}
+            label={agentModelLabel}
+            accessibilityLabel="Agent and model"
+            disabled={disabled || (modelsLoading && models.length === 0 && !showHandoff && !showProviderSelector)}
             onPress={openModelSheet}
+            provider={selectedProvider}
           />
         ) : null}
 
@@ -312,6 +287,23 @@ export const InputToolbar = memo(function InputToolbar({
           onClose={() => setSheet(null)}
         />
       ) : null}
+
+      {modelSheetOpen ? (
+        <ComposerModelSheet
+          models={models}
+          selectedModel={selectedModel}
+          onSelectModel={onSelectModel}
+          selectedProvider={selectedProvider}
+          providers={providers}
+          showProviderSelector={showProviderSelector}
+          onSelectProvider={onSelectProvider}
+          handoffProviders={handoffProviders}
+          onHandoffProviderSelect={onHandoffProviderSelect}
+          handoffDisabledReason={handoffDisabledReason}
+          modelsLoading={modelsLoading}
+          onClose={() => setModelSheetOpen(false)}
+        />
+      ) : null}
     </>
   )
 })
@@ -321,11 +313,13 @@ const Chip = memo(function Chip({
   accessibilityLabel,
   disabled,
   onPress,
+  provider,
 }: {
   label: string
   accessibilityLabel: string
   disabled: boolean
   onPress: () => void
+  provider?: AgentProvider
 }) {
   const { theme } = useUnistyles()
 
@@ -339,6 +333,13 @@ const Chip = memo(function Chip({
       onPress={onPress}
       disabled={disabled}
     >
+      {provider ? (
+        <ProviderIcon
+          provider={provider}
+          size={theme.iconSize.xs}
+          color={theme.colors.fg.secondary}
+        />
+      ) : null}
       <Text variant="caption" color="secondary" size="xs" numberOfLines={1}>
         {label}
       </Text>
@@ -395,25 +396,6 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],
-  },
-  providerToggle: {
-    flexDirection: 'row',
-    borderRadius: theme.radius.full,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: glassEdge(theme.isDark),
-    backgroundColor: glassFill(theme.isDark),
-    padding: theme.spacing[0.5],
-  },
-  providerSegment: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing[1.5],
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1.5],
-    borderRadius: theme.radius.full,
-  },
-  providerSegmentActive: {
-    backgroundColor: glassFillStrong(theme.isDark),
   },
   chip: {
     flexDirection: 'row',

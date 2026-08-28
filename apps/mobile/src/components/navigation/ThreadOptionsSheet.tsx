@@ -9,6 +9,7 @@ import type { ThreadSummary } from '@falcondeck/client-core'
 import { Button, Input, NativeSheet, Text } from '@/components/ui'
 import { useThreadActions } from '@/hooks/useThreadActions'
 import { triggerThreadArchiveHaptic } from '@/lib/haptics'
+import { useSessionStore } from '@/store/session-store'
 
 interface ThreadOptionsSheetProps {
   workspaceId: string
@@ -22,12 +23,23 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   onClose,
 }: ThreadOptionsSheetProps) {
   const { theme } = useUnistyles()
-  const { archiveThread, renameThread, suggestThreadTitle, setThreadPinned, markThreadUnread } =
-    useThreadActions()
+  const {
+    archiveThread,
+    renameThread,
+    suggestThreadTitle,
+    setThreadPinned,
+    setThreadPinnedInProject,
+    markThreadUnread,
+  } = useThreadActions()
+  const canPinInProject = useSessionStore(
+    (state) =>
+      state.snapshot?.workspaces.find((workspace) => workspace.id === workspaceId)?.kind !==
+      'casual',
+  )
   const [mode, setMode] = useState<'menu' | 'rename'>('menu')
   const [renameValue, setRenameValue] = useState(thread.title)
   const [pendingAction, setPendingAction] = useState<
-    'rename' | 'suggest' | 'pin' | 'unread' | null
+    'rename' | 'suggest' | 'pin' | 'pin-in-project' | 'unread' | null
   >(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
@@ -44,6 +56,30 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
       setPendingAction(null)
     }
   }, [onClose, setThreadPinned, thread.id, thread.is_pinned, workspaceId])
+
+  const handleTogglePinInProject = useCallback(async () => {
+    void Haptics.selectionAsync()
+    setPendingAction('pin-in-project')
+    setActionError(null)
+    try {
+      await setThreadPinnedInProject(
+        workspaceId,
+        thread.id,
+        !thread.is_pinned_in_project,
+      )
+      onClose()
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Failed to update pin')
+    } finally {
+      setPendingAction(null)
+    }
+  }, [
+    onClose,
+    setThreadPinnedInProject,
+    thread.id,
+    thread.is_pinned_in_project,
+    workspaceId,
+  ])
 
   // Unread is `last_agent_activity_seq > last_read_seq`, so a thread the agent
   // never replied in cannot be made unread — hide the row instead of offering
@@ -187,7 +223,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             accessibilityRole="button"
             accessibilityLabel={thread.is_pinned ? 'Unpin thread' : 'Pin thread'}
             onPress={() => void handleTogglePin()}
-            disabled={pendingAction === 'pin'}
+            disabled={pendingAction === 'pin' || pendingAction === 'pin-in-project'}
           >
             <View style={styles.itemLabel}>
               <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
@@ -196,6 +232,24 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               </Text>
             </View>
           </Pressable>
+          {canPinInProject ? (
+            <Pressable
+              style={styles.item}
+              accessibilityRole="button"
+              accessibilityLabel={
+                thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'
+              }
+              onPress={() => void handleTogglePinInProject()}
+              disabled={pendingAction === 'pin' || pendingAction === 'pin-in-project'}
+            >
+              <View style={styles.itemLabel}>
+                <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
+                <Text variant="label" color="primary">
+                  {thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'}
+                </Text>
+              </View>
+            </Pressable>
+          ) : null}
           <Pressable
             style={styles.item}
             accessibilityRole="button"

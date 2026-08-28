@@ -469,6 +469,32 @@ async fn connect_workspace_bootstraps_codex_when_available() {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let workspace: falcondeck_core::WorkspaceSummary = response.json().await.unwrap();
     assert_eq!(workspace.path, repo_root().to_string_lossy());
+    assert_eq!(workspace.status, WorkspaceStatus::Connecting);
+
+    let workspace_id = workspace.id;
+    let workspace = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let snapshot = client
+                .get(format!("{}/api/snapshot", daemon.base_url()))
+                .send()
+                .await
+                .unwrap()
+                .json::<DaemonSnapshot>()
+                .await
+                .unwrap();
+            let workspace = snapshot
+                .workspaces
+                .into_iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .expect("connected workspace should remain in the snapshot");
+            if workspace.status != WorkspaceStatus::Connecting {
+                break workspace;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("workspace bootstrap should finish");
     assert!(matches!(
         workspace.status,
         WorkspaceStatus::Ready | WorkspaceStatus::NeedsAuth

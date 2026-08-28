@@ -33,6 +33,7 @@ import type {
   SpeechCredentialStatus,
   ProviderUsageOverview,
   SelectedSkillReference,
+  SkillSummary,
   TerminalListResponse,
   TerminalOpenedResponse,
   FalconDeckPreferences,
@@ -65,6 +66,7 @@ import {
   normalizeHarnessesOverview,
   normalizeHarnessUpgradeJob,
   normalizePreferences,
+  normalizeSkillSummaries,
   normalizeThreadDetail,
   normalizeThreadHandle,
   normalizeThreadSummary,
@@ -109,6 +111,11 @@ export type SendTurnPayload = {
    * reconciles in place instead of duplicating.
    */
   user_item_id?: string | null;
+  /**
+   * Resume a turn FalconDeck interrupted by closing. The daemon sends the
+   * agent a continuation instruction without recording a user bubble.
+   */
+  resume_interrupted?: boolean;
 };
 
 export type StartThreadPayload = {
@@ -443,6 +450,15 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       );
     },
+    async createChat() {
+      return parseJson<WorkspaceSummary>(
+        await fetch(`${baseUrl}/api/chats`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
+      );
+    },
     async removeWorkspace(workspaceId: string) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(
@@ -530,6 +546,24 @@ export function createDaemonApiClient(baseUrl: string) {
           `${baseUrl}/api/workspaces/${workspaceId}/collaboration-modes`,
         ),
       );
+    },
+    /**
+     * Live disk scan of the workspace skill catalog for the slash menu.
+     * Does not round-trip Codex `skills/list`. Reopening `/` should call
+     * this again; typing after that filters locally.
+     */
+    async listWorkspaceSkills(workspaceId: string, provider?: string | null) {
+      const params = new URLSearchParams();
+      if (provider && provider.trim()) params.set("provider", provider.trim());
+      const query = params.toString();
+      const payload = await parseJson<{ skills?: SkillSummary[] }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/skills${
+            query ? `?${query}` : ""
+          }`,
+        ),
+      );
+      return normalizeSkillSummaries(payload.skills);
     },
     /**
      * Warms a lazily-started provider's model catalog because the user

@@ -29,12 +29,14 @@ pub struct ResolutionDiagnostics {
 /// Whether a binary resolves to an existing file, cached for a short window.
 /// The uncached resolver can fall through to a blocking login-shell probe;
 /// hot paths that only need existence (provider filtering, the settings
-/// overview) must not pay that per call. Installations are rare, so a stale
-/// answer self-corrects within the TTL.
+/// overview) must not pay that per call. This cache sits on the daemon
+/// snapshot path, where an expired entry would otherwise re-run the
+/// login-shell spawn synchronously mid-turn, so the window errs generous.
+/// Installations are rare, so a stale answer self-corrects within the TTL.
 pub(crate) fn agent_binary_available_cached(bin_name: &str, configured: &str) -> bool {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-    const TTL: Duration = Duration::from_secs(30);
+    const TTL: Duration = Duration::from_secs(120);
     static CACHE: Mutex<Option<std::collections::HashMap<String, (Instant, bool)>>> =
         Mutex::new(None);
 
@@ -101,13 +103,13 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     }
     diagnostics.searched_path = true;
 
-    if !prefer_known_locations {
-        if let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics) {
-            return AgentBinaryResolution {
-                executable: path,
-                diagnostics,
-            };
-        }
+    if !prefer_known_locations
+        && let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics)
+    {
+        return AgentBinaryResolution {
+            executable: path,
+            diagnostics,
+        };
     }
 
     if let Some(path) = resolve_from_login_shell(bin_name) {

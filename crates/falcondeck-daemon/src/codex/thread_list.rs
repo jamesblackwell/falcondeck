@@ -130,7 +130,8 @@ pub(super) fn parse_threads(
         })
         .filter_map(|entry| {
             let id = extract_thread_id(entry)?;
-            let preview = extract_string(entry, &["preview"]);
+            let preview =
+                extract_string(entry, &["preview"]).and_then(|text| sanitize_codex_preview(&text));
             let provider_title = extract_thread_title(entry);
             Some(HydratedThread {
                 summary: ThreadSummary {
@@ -188,6 +189,7 @@ pub(super) fn parse_threads(
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,

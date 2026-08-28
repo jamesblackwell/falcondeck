@@ -40,6 +40,10 @@ export default defineConfig({
       'react-native-safe-area-context': path.resolve(__dirname, 'src/test/__mocks__/react-native-safe-area-context.ts'),
       'react-native-markdown-display': path.resolve(__dirname, 'src/test/__mocks__/react-native-markdown-display.ts'),
       '@shopify/flash-list': path.resolve(__dirname, 'src/test/__mocks__/flash-list.tsx'),
+      '@bsky.app/react-native-uitextview': path.resolve(
+        __dirname,
+        'src/test/__mocks__/react-native-uitextview.ts',
+      ),
     },
   },
   esbuild: {

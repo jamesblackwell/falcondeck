@@ -30,7 +30,7 @@ export const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      'group fd-focus inline-flex max-w-full items-center text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
+      'group fd-focus inline-flex min-w-0 max-w-full items-center overflow-hidden whitespace-nowrap text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
       SELECT_TRIGGER_VARIANTS[variant],
       className,
     )}

@@ -30,7 +30,7 @@ use falcondeck_core::{
 
 use crate::{
     app::{
-        AppState,
+        AppState, CachedEnvelope,
         host_provisioning::{
             HostCommandRequest, HostCommandResponse, ProvisionHostRequest, ProvisionJob,
             StartProvisionResponse,
@@ -53,10 +53,10 @@ const ALLOWED_BROWSER_ORIGINS: [&str; 5] = [
 ];
 
 /// Turn requests can carry base64 image data. The cross-provider attachment
-/// budget allows 10 MB of decoded images, which expands to roughly 13.4 MB on
-/// the wire; Axum's 2 MB JSON default would reject valid sends before the
-/// daemon can materialize and validate them.
-const TURN_REQUEST_BODY_LIMIT_BYTES: usize = 16 << 20;
+/// budget allows 15 MB of decoded images, which expands to 20 MB on the wire;
+/// Axum's 2 MB JSON default would reject valid sends before the daemon can
+/// materialize and validate them.
+const TURN_REQUEST_BODY_LIMIT_BYTES: usize = 24 << 20;
 
 /// Rejects any request whose `Host` is not a loopback authority. CORS cannot
 /// stop DNS rebinding (the origin looks same-site to the browser), but the
@@ -142,11 +142,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/control/get", post(control_get))
         .route("/api/control/execute", post(control_execute))
         .route("/api/threads/search", post(search_thread_messages))
+        .route("/api/chats", post(create_chat))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
         .route(
             "/api/workspaces/{workspace_id}/collaboration-modes",
             get(collaboration_modes),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/skills",
+            get(list_workspace_skills),
         )
         .route(
             "/api/workspaces/{workspace_id}/providers/{provider}/hydrate",
@@ -227,6 +232,17 @@ pub fn router(state: AppState) -> Router {
             "/api/connectors",
             get(read_connectors).put(update_connectors),
         )
+        .route("/api/connectors/catalog", get(read_connector_catalog))
+        .route(
+            "/api/connectors/catalog/install",
+            post(install_catalog_connector),
+        )
+        .route("/api/connectors/oauth/start", post(start_connector_oauth))
+        .route(
+            "/api/connectors/oauth/callback",
+            get(connector_oauth_callback),
+        )
+        .route("/api/plugin-logos", get(read_plugin_logo))
         .route("/api/skills", get(read_skill_library))
         .route("/api/skills/registry", get(search_skill_registry))
         .route("/api/skills/install", post(install_library_skill))
@@ -549,11 +565,40 @@ async fn connect_workspace(
     Ok(Json(state.connect_workspace(request).await?))
 }
 
+async fn create_chat(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::WorkspaceSummary>, DaemonError> {
+    Ok(Json(state.create_chat().await?))
+}
+
 async fn collaboration_modes(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Vec<falcondeck_core::CollaborationModeSummary>>, DaemonError> {
     Ok(Json(state.collaboration_modes(&workspace_id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct ListWorkspaceSkillsQuery {
+    provider: Option<String>,
+}
+
+async fn list_workspace_skills(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<ListWorkspaceSkillsQuery>,
+) -> Result<Json<falcondeck_core::WorkspaceSkillsResponse>, DaemonError> {
+    let provider = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(falcondeck_core::AgentProvider::new);
+    Ok(Json(falcondeck_core::WorkspaceSkillsResponse {
+        skills: state
+            .list_workspace_skills(&workspace_id, provider.as_ref())
+            .await?,
+    }))
 }
 
 /// Warms one provider's model/config catalog because the user selected it in
@@ -905,13 +950,10 @@ async fn connectors_workspace_path(
     let Some(workspace_id) = workspace_id else {
         return Ok(None);
     };
-    let snapshot = state.snapshot().await;
-    snapshot
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == workspace_id)
-        .map(|workspace| Some(workspace.path.clone()))
-        .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))
+    match state.workspace_path(workspace_id).await {
+        Some(path) => Ok(Some(path)),
+        None => Err(DaemonError::NotFound("workspace not found".to_string())),
+    }
 }
 
 fn providers_state_dir(state: &AppState) -> Result<std::path::PathBuf, DaemonError> {
@@ -1053,6 +1095,97 @@ async fn update_connectors(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+async fn read_connector_catalog() -> Json<serde_json::Value> {
+    Json(crate::connector_catalog::overview())
+}
+
+#[derive(serde::Deserialize)]
+struct CatalogInstallRequest {
+    id: String,
+    api_key: Option<String>,
+}
+
+async fn install_catalog_connector(
+    Json(request): Json<CatalogInstallRequest>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    crate::connector_catalog::install_api_key(
+        &request.id,
+        request.api_key.as_deref().unwrap_or(""),
+    )
+    .map_err(DaemonError::BadRequest)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct OauthStartRequest {
+    id: String,
+}
+
+async fn start_connector_oauth(
+    State(state): State<AppState>,
+    Json(request): Json<OauthStartRequest>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    let redirect_base = state.local_base_url().ok_or_else(|| {
+        DaemonError::Process("daemon loopback URL is not available yet".to_string())
+    })?;
+    crate::connector_oauth::start_authorization(&request.id, &redirect_base)
+        .await
+        .map(Json)
+        .map_err(DaemonError::BadRequest)
+}
+
+#[derive(serde::Deserialize)]
+struct OauthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct PluginLogoQuery {
+    domain: String,
+}
+
+async fn read_plugin_logo(Query(query): Query<PluginLogoQuery>) -> Response {
+    match crate::connector_logos::load(&query.domain).await {
+        Ok((bytes, content_type)) => {
+            let content_type = HeaderValue::from_str(&content_type)
+                .unwrap_or_else(|_| HeaderValue::from_static("image/png"));
+            (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static("public, max-age=86400"),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn connector_oauth_callback(Query(query): Query<OauthCallbackQuery>) -> Response {
+    let (status, html) = crate::connector_oauth::complete_authorization(
+        query.code.as_deref(),
+        query.state.as_deref(),
+        query.error.as_deref(),
+    )
+    .await;
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        html,
+    )
+        .into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct GitDiffQuery {
     path: Option<String>,
@@ -1184,19 +1317,15 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
     // re-delivered afterwards, which clients apply as idempotent upserts.
     let mut receiver = state.subscribe();
     let snapshot = state.snapshot().await;
-    let initial_event = falcondeck_core::EventEnvelope {
+    let initial_event = CachedEnvelope::new(falcondeck_core::EventEnvelope {
         seq: 0,
         emitted_at: chrono::Utc::now(),
         workspace_id: None,
         thread_id: None,
         event: UnifiedEvent::Snapshot { snapshot },
-    };
+    });
     if socket
-        .send(Message::Text(
-            serde_json::to_string(&initial_event)
-                .unwrap_or_else(|_| "{}".to_string())
-                .into(),
-        ))
+        .send(Message::Text(initial_event.serialized().to_owned().into()))
         .await
         .is_err()
     {
@@ -1209,11 +1338,7 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
                 match event_result {
                     Ok(event) => {
                         if socket
-                            .send(Message::Text(
-                                serde_json::to_string(&event)
-                                    .unwrap_or_else(|_| "{}".to_string())
-                                    .into(),
-                            ))
+                            .send(Message::Text(event.serialized().to_owned().into()))
                             .await
                             .is_err()
                         {
@@ -1223,19 +1348,15 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!("local daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
                         let snapshot = state.snapshot().await;
-                        let snapshot_event = falcondeck_core::EventEnvelope {
+                        let snapshot_event = CachedEnvelope::new(falcondeck_core::EventEnvelope {
                             seq: 0,
                             emitted_at: chrono::Utc::now(),
                             workspace_id: None,
                             thread_id: None,
                             event: UnifiedEvent::Snapshot { snapshot },
-                        };
+                        });
                         if socket
-                            .send(Message::Text(
-                                serde_json::to_string(&snapshot_event)
-                                    .unwrap_or_else(|_| "{}".to_string())
-                                    .into(),
-                            ))
+                            .send(Message::Text(snapshot_event.serialized().to_owned().into()))
                             .await
                             .is_err()
                         {
@@ -1268,7 +1389,7 @@ async fn open_terminal(
     Path(workspace_id): Path<String>,
     Json(request): Json<OpenTerminalRequest>,
 ) -> Result<Json<TerminalOpenedResponse>, DaemonError> {
-    let Some(cwd) = state.terminal_workspace_path(&workspace_id).await else {
+    let Some(cwd) = state.workspace_path(&workspace_id).await else {
         return Err(DaemonError::NotFound(format!(
             "workspace not found: {workspace_id}"
         )));
@@ -1425,6 +1546,9 @@ fn control_error_response(error: crate::control::ControlError) -> Response {
     (status, Json(body)).into_response()
 }
 
+// Axum's concrete response is intentionally the error side of these handler
+// results; boxing it would make the handlers incompatible with `Handler`.
+#[allow(clippy::result_large_err)]
 async fn control_search(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1440,6 +1564,7 @@ async fn control_search(
         .map_err(control_error_response)
 }
 
+#[allow(clippy::result_large_err)]
 async fn control_get(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1455,6 +1580,7 @@ async fn control_get(
         .map_err(control_error_response)
 }
 
+#[allow(clippy::result_large_err)]
 async fn control_execute(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1472,9 +1598,9 @@ mod tests {
 
     #[test]
     fn turn_request_limit_has_headroom_for_the_image_budget() {
-        // 10 MB of raw images becomes at most this many base64 bytes before
+        // 15 MB of raw images becomes at most this many base64 bytes before
         // the small JSON envelope is added.
-        let max_encoded_image_bytes = 10_000_000_usize.div_ceil(3) * 4;
+        let max_encoded_image_bytes = 15_000_000_usize.div_ceil(3) * 4;
         assert!(TURN_REQUEST_BODY_LIMIT_BYTES > max_encoded_image_bytes);
     }
 

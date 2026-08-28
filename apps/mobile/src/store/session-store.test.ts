@@ -599,10 +599,11 @@ describe('session-store', () => {
       useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot()))
       expect(loadMobileSessionCache()).not.toBeNull()
 
-      // A relay history truncation resets state but preserves the cache…
+      // A relay history truncation keeps the last-known snapshot on screen and
+      // preserves the disk cache. A later persist from a null snapshot (the
+      // historical blank-UI path) must skip the write, not delete the cache.
       useSessionStore.getState().reset({ preserveCache: true })
-      // …and the flush that follows persists while the snapshot is still
-      // null. That write must be skipped, not turned into a delete.
+      useSessionStore.setState({ snapshot: null })
       __resetSessionCachePersistThrottleForTests()
       useSessionStore.getState().applyDaemonEvent(
         conversationItemAddedEvent(assistantMessage('msg-1', 'streamed')),
@@ -737,7 +738,7 @@ describe('session-store', () => {
     it('is a no-op when restoring after the snapshot has been cleared', () => {
       loadThreads()
       const undo = useSessionStore.getState().archiveThreadLocally('t1')
-      useSessionStore.getState().reset({ preserveCache: true })
+      useSessionStore.setState({ snapshot: null })
       useSessionStore.getState().restoreArchivedThread(undo!)
 
       expect(useSessionStore.getState().snapshot).toBeNull()
@@ -853,18 +854,21 @@ describe('session-store', () => {
       expect(state.threadItems).toEqual({})
     })
 
-    it('can clear derived state while preserving the current conversation selection', () => {
-      const { applyDaemonEvent, selectThread, reset } = useSessionStore.getState()
+    it('keeps the last-known snapshot on screen when the disk cache is preserved', () => {
+      const { applyDaemonEvent, selectThread, reset, setThreadDetail } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snapshot()))
-      selectThread('w1', 't1')
+      selectThread('workspace-1', 'thread-1')
+      setThreadDetail(threadDetail({
+        items: [assistantMessage('msg-1', 'hello')],
+      }))
 
       reset({ preserveCache: true, preserveSelection: true })
 
       const state = useSessionStore.getState()
-      expect(state.snapshot).toBeNull()
-      expect(state.selectedWorkspaceId).toBe('w1')
-      expect(state.selectedThreadId).toBe('t1')
-      expect(state.threadItems).toEqual({})
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['thread-1'])
+      expect(state.selectedWorkspaceId).toBe('workspace-1')
+      expect(state.selectedThreadId).toBe('thread-1')
+      expect(state.threadItems['thread-1']?.map((item) => item.id)).toEqual(['msg-1'])
     })
   })
 })

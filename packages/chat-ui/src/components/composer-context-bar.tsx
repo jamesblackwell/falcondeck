@@ -8,6 +8,7 @@ import {
   Laptop,
   Plus,
   Split,
+  X,
 } from 'lucide-react'
 
 import {
@@ -55,6 +56,8 @@ export type ComposerContextBarProps = {
   remoteHosts?: ComposerRemoteHostOption[]
   /** Opens the local folder picker and connects the path on this machine. */
   onAddLocalProject?: () => void | Promise<void>
+  /** Creates and selects a FalconDeck-managed conversation folder. */
+  onNewChat?: () => void | Promise<void>
   /**
    * Connects an absolute path on the given remote host. The menu collects host
    * + path; the host app performs the RPC and selects the new workspace.
@@ -96,15 +99,19 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   workspaceHosts = {},
   remoteHosts = [],
   onAddLocalProject,
+  onNewChat,
   onAddRemoteProject,
   isAddingProject = false,
 }: ComposerContextBarProps) {
   const selectedHost = selectedWorkspace
     ? workspaceHosts[selectedWorkspace.id] ?? null
     : null
-  const projectLabel = selectedWorkspace
-    ? projectName(selectedWorkspace.path)
-    : 'Select a project'
+  const isCasualChat = selectedWorkspace?.kind === 'casual'
+  const projectLabel = isCasualChat
+    ? 'No project'
+    : selectedWorkspace
+      ? projectName(selectedWorkspace.path)
+      : 'Select a project'
 
   return (
     <div className="relative z-0 mx-3 -mb-3 flex items-center gap-0.5 rounded-t-[var(--fd-radius-xl)] border border-b-0 border-border-subtle bg-surface-3/60 px-2 pb-4 pt-1.5">
@@ -119,6 +126,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         openRequestKey={projectMenuRequestKey}
         shortcut={projectShortcut}
         onAddLocalProject={onAddLocalProject}
+        onNewChat={onNewChat}
         onAddRemoteProject={onAddRemoteProject}
         isAddingProject={isAddingProject}
         disabled={disabled}
@@ -155,28 +163,35 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         ) : null}
       </span>
 
-      <Select
-        value={selectedIsolation}
-        onValueChange={(next) => onIsolationChange(next as ThreadIsolation)}
-        disabled={disabled}
-      >
-        <SelectTrigger variant="quiet" aria-label="Work in" className={CHIP_CLASS}>
-          {selectedIsolation === 'isolated' ? (
-            <Split aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-          ) : (
-            <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-          )}
-          <span className="truncate">
-            {selectedIsolation === 'isolated' ? 'Isolated copy' : 'Project folder'}
-          </span>
-        </SelectTrigger>
-        <SelectContent align="start">
-          <SelectItem value="project_folder">Project folder</SelectItem>
-          <SelectItem value="isolated">Isolated copy</SelectItem>
-        </SelectContent>
-      </Select>
+      {isCasualChat ? (
+        <span className={cn(CHIP_CLASS, 'cursor-default hover:bg-transparent')}>
+          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          <span>Chat folder</span>
+        </span>
+      ) : (
+        <Select
+          value={selectedIsolation}
+          onValueChange={(next) => onIsolationChange(next as ThreadIsolation)}
+          disabled={disabled}
+        >
+          <SelectTrigger variant="quiet" aria-label="Work in" className={CHIP_CLASS}>
+            {selectedIsolation === 'isolated' ? (
+              <Split aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            ) : (
+              <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            )}
+            <span className="truncate">
+              {selectedIsolation === 'isolated' ? 'Isolated copy' : 'Project folder'}
+            </span>
+          </SelectTrigger>
+          <SelectContent align="start">
+            <SelectItem value="project_folder">Project folder</SelectItem>
+            <SelectItem value="isolated">Isolated copy</SelectItem>
+          </SelectContent>
+        </Select>
+      )}
 
-      {branches && onCheckoutBranch ? (
+      {!isCasualChat && branches && onCheckoutBranch ? (
         <BranchMenu
           branches={branches}
           uncommittedCount={uncommittedCount}
@@ -202,6 +217,7 @@ function ProjectMenu({
   openRequestKey,
   shortcut,
   onAddLocalProject,
+  onNewChat,
   onAddRemoteProject,
   isAddingProject,
   disabled,
@@ -216,6 +232,7 @@ function ProjectMenu({
   openRequestKey: number
   shortcut?: string[]
   onAddLocalProject?: () => void | Promise<void>
+  onNewChat?: () => void | Promise<void>
   onAddRemoteProject?: (hostId: string, path: string) => void | Promise<void>
   isAddingProject: boolean
   disabled: boolean
@@ -237,16 +254,20 @@ function ProjectMenu({
   )
   const canAddRemote =
     Boolean(onAddRemoteProject) && connectedRemoteHosts.length > 0
-  const searchable = workspaces.length >= SEARCHABLE_OPTION_THRESHOLD
+  const projectWorkspaces = useMemo(
+    () => workspaces.filter((workspace) => workspace.kind !== 'casual'),
+    [workspaces],
+  )
+  const searchable = projectWorkspaces.length >= SEARCHABLE_OPTION_THRESHOLD
   const visibleWorkspaces = useMemo(
     () =>
       searchable
-        ? filterOptionsByQuery(workspaces, query, (workspace) => {
+        ? filterOptionsByQuery(projectWorkspaces, query, (workspace) => {
             const host = workspaceHosts[workspace.id]
             return `${workspace.path} ${workspace.id} ${host?.name ?? 'local'}`
           })
-        : workspaces,
-    [query, searchable, workspaceHosts, workspaces],
+        : projectWorkspaces,
+    [projectWorkspaces, query, searchable, workspaceHosts],
   )
 
   const resetAddFlow = () => {
@@ -296,8 +317,10 @@ function ProjectMenu({
   }
 
   const selectedRemoteHost = remoteHosts.find((host) => host.id === remoteHostId) ?? null
-  const ProjectIcon = selectedHost ? Globe : FolderClosed
-  const menuDisabled = disabled || (workspaces.length === 0 && !onAddLocalProject && !canAddRemote)
+  const ProjectIcon = selectedWorkspace?.kind === 'casual' ? X : selectedHost ? Globe : FolderClosed
+  const menuDisabled =
+    disabled ||
+    (projectWorkspaces.length === 0 && !onAddLocalProject && !canAddRemote && !onNewChat)
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
@@ -391,7 +414,7 @@ function ProjectMenu({
                   </p>
                 ) : null}
               </div>
-              {onAddLocalProject || canAddRemote || remoteHosts.length > 0 ? (
+              {onAddLocalProject || canAddRemote || remoteHosts.length > 0 || onNewChat ? (
                 <div className="mt-1 border-t border-border-subtle pt-1">
                   {canAddRemote ? (
                     <button
@@ -426,6 +449,20 @@ function ProjectMenu({
                         <Plus aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
                       )}
                       <span>New project</span>
+                    </button>
+                  ) : null}
+                  {onNewChat ? (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        void onNewChat()
+                        setOpen(false)
+                      }}
+                      className={MENU_ITEM_CLASS}
+                    >
+                      <X aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                      <span>Don’t work in a project</span>
                     </button>
                   ) : null}
                 </div>

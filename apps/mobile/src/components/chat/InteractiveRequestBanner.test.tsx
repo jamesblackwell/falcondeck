@@ -375,4 +375,61 @@ describe("InteractiveRequestBanner", () => {
       renderer.root.findByProps({ accessibilityRole: "alert" }),
     ).toBeDefined();
   });
+
+  it("renders MCP URL elicitation as Continue/Cancel with a tappable link", async () => {
+    const onRespond = vi.fn(async () => undefined);
+    const url = "https://dash.cloudflare.com/oauth/authorize?client_id=abc";
+    const renderer = renderComponent(
+      <InteractiveRequestBanner
+        request={request({
+          method: "mcpServer/elicitation/request",
+          kind: "approval",
+          approval_decisions: ["allow", "deny"],
+          title: "Sign in to cloudflare",
+          detail: "Sign in to Cloudflare to continue.",
+          command: null,
+          path: url,
+          questions: [],
+        })}
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(textOf(renderer)).toContain("Sign in required");
+    expect(textOf(renderer)).toContain(url);
+    expect(pressableWithText(renderer, "Continue")).toBeDefined();
+    expect(pressableWithText(renderer, "Cancel")).toBeDefined();
+    expect(pressableWithText(renderer, "Allow")).toBeUndefined();
+
+    await act(async () => {
+      pressableWithText(renderer, "Continue")?.props.onPress();
+      await Promise.resolve();
+    });
+    expect(onRespond).toHaveBeenCalledWith({
+      kind: "approval",
+      decision: "allow",
+    });
+  });
+
+  it("lets form elicitation be declined", async () => {
+    const onRespond = vi.fn(async () => undefined);
+    const renderer = renderComponent(
+      <InteractiveRequestBanner
+        request={request({
+          method: "mcpServer/elicitation/request",
+        })}
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(pressableWithText(renderer, "Decline")).toBeDefined();
+    await act(async () => {
+      pressableWithText(renderer, "Decline")?.props.onPress();
+      await Promise.resolve();
+    });
+    expect(onRespond).toHaveBeenCalledWith({
+      kind: "approval",
+      decision: "deny",
+    });
+  });
 });

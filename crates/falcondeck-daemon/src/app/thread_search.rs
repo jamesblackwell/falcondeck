@@ -391,49 +391,9 @@ fn user_message_text(value: &Value) -> Option<String> {
 /// Grok session directories hold sibling logs that are not transcripts.
 const GROK_IGNORED_FILES: [&str; 3] = ["events.jsonl", "updates.jsonl", "rewind_points.jsonl"];
 
-/// Grok wraps the operator's own words in this tag, around injected context.
-const GROK_QUERY_OPEN: &str = "<user_query>";
-const GROK_QUERY_CLOSE: &str = "</user_query>";
-
-/// Injected preambles that arrive wearing the user's role.
-const INJECTED_PREFIXES: [&str; 15] = [
-    "<environment_context>",
-    "<recommended_plugins>",
-    "<user_instructions>",
-    "<system-reminder>",
-    "<command-name>",
-    "<command-message>",
-    "<local-command-stdout>",
-    "Caveat: The messages below were generated",
-    "# Files mentioned by the user",
-    "# AGENTS.md instructions for",
-    "<INSTRUCTIONS>",
-    "The following is the Codex agent history",
-    "<task-notification>",
-    "<user_info>",
-    "<local-command-caveat>",
-];
-
-/// Codex prefixes attachment turns with a file manifest and marks the operator's
-/// own words with this header; everything before it is machine-written.
-const CODEX_REQUEST_MARKER: &str = "## My request:";
-
 fn clean_message(text: &str) -> Option<String> {
-    // Grok surrounds the typed prompt with context blocks; take just the tag.
-    let text = match (text.find(GROK_QUERY_OPEN), text.rfind(GROK_QUERY_CLOSE)) {
-        (Some(open), Some(close)) if close > open => &text[open + GROK_QUERY_OPEN.len()..close],
-        _ => text,
-    };
-    let text = match text.find(CODEX_REQUEST_MARKER) {
-        Some(at)
-            if text
-                .trim_start()
-                .starts_with("# Files mentioned by the user") =>
-        {
-            &text[at + CODEX_REQUEST_MARKER.len()..]
-        }
-        _ => text,
-    };
+    let text = super::harness_user_text::visible_user_prompt(text)?;
+    let text = crate::codex::sanitize_codex_preview(&text)?;
     let mut cleaned = String::with_capacity(text.len().min(MAX_MESSAGE_CHARS * 2));
     let mut last_was_space = false;
     for character in text.chars() {
@@ -449,12 +409,6 @@ fn clean_message(text: &str) -> Option<String> {
     }
     let cleaned = cleaned.trim();
     if cleaned.is_empty() {
-        return None;
-    }
-    if INJECTED_PREFIXES
-        .iter()
-        .any(|prefix| cleaned.starts_with(prefix))
-    {
         return None;
     }
     Some(truncate_chars(cleaned, MAX_MESSAGE_CHARS))
@@ -733,6 +687,23 @@ mod tests {
         assert_eq!(narrowed[0].thread_id, "thread-b");
 
         assert!(search(&index, &threads, "   ", 10).is_empty());
+    }
+
+    #[test]
+    fn indexes_the_typed_request_from_a_codex_attachment_turn() {
+        let line = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "# Files mentioned by the user:\n\n## codex-clipboard-5c77f1c0.png: /tmp/clip.png\n\n## My request for Codex:\nwhat is causing this prompt to be restricted?"
+            }
+        })
+        .to_string();
+        let value = serde_json::from_str::<Value>(&line).expect("json");
+        assert_eq!(
+            user_message_text(&value).as_deref(),
+            Some("what is causing this prompt to be restricted?")
+        );
     }
 
     #[test]

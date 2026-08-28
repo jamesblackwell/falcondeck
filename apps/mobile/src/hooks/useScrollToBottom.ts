@@ -4,6 +4,11 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native'
 
 const SHOW_JUMP_OFFSET = 200
 const RESUME_FOLLOW_OFFSET = 44
+// A peek this far from the tail is a read-back, not finger jitter. Layout
+// corrections on old / freshly-loaded threads routinely move the raw offset
+// by more than this while the viewport stays put, so we compare distance
+// from the tail rather than y.
+const UPWARD_PEEK = 8
 // FlashList's own bottom-pinning, permanently off: a negative threshold makes
 // its bound detection skip the near-bottom bookkeeping entirely.
 const AUTOSCROLL_DISABLED = -1
@@ -32,19 +37,29 @@ function distanceFromBottom(event: NativeSyntheticEvent<NativeScrollEvent>) {
  * pixels from the tail; that small gap is how you start reading back, and
  * snapping it shut feels like the list is fighting you.
  *
- * While following, content-size changes pin instantly through the native
- * scroller. FlashList.scrollToEnd is animated and defers its native call with
- * setTimeout(0), so a late markdown/actions/mermaid layout after the turn
- * finishes can start a glide that keeps running after the reader has already
- * grabbed the list. Instant native pinning cannot wrestle a drag, and a drag
- * start cancels any jump-button glide still in flight.
+ * Distance from the tail is the gesture signal, not raw offset. Opening an
+ * old or just-unread thread keeps measuring markdown / mermaid / images, and
+ * FlashList's position corrections raise `contentOffset.y` to keep the
+ * viewport still. Comparing y then misses an upward peek, `resumeFollowing`
+ * animates `scrollToEnd`, and the reader is pinged back to the bottom.
+ *
+ * While a finger is down, content-size pins and the post-load snap are
+ * skipped — otherwise the first frames of a scroll lose to a mermaid or
+ * detail-refresh layout. While following and the finger is up, content-size
+ * changes pin instantly through the native scroller. FlashList.scrollToEnd is
+ * animated and defers its native call with setTimeout(0), so a late
+ * markdown/actions/mermaid layout after the turn finishes can start a glide
+ * that keeps running after the reader has already grabbed the list. Instant
+ * native pinning cannot wrestle a drag, and a drag start cancels any
+ * jump-button glide still in flight.
  */
 export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
   const [showJumpButton, setShowJumpButton] = useState(false)
   const showJumpButtonRef = useRef(false)
   const isFollowingRef = useRef(true)
-  const dragStartOffsetRef = useRef<number | null>(null)
+  const fingerDownRef = useRef(false)
+  const dragStartDistanceRef = useRef<number | null>(null)
   const suppressFollowResumeRef = useRef(false)
 
   const setFollowing = useCallback((next: boolean) => {
@@ -62,8 +77,26 @@ export function useScrollToBottom<T>() {
     list.scrollToEnd({ animated: false })
   }, [])
 
+  const onTouchStart = useCallback(() => {
+    fingerDownRef.current = true
+  }, [])
+
+  const onTouchEnd = useCallback(() => {
+    fingerDownRef.current = false
+  }, [])
+
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const nextVisible = distanceFromBottom(event) > SHOW_JUMP_OFFSET
+    const distance = distanceFromBottom(event)
+    // Mark a read-back as soon as it happens, not only on release. End-drag
+    // can see a later layout correction that collapses the gap and would
+    // otherwise look like "still at the tail".
+    if (
+      dragStartDistanceRef.current !== null &&
+      distance > dragStartDistanceRef.current + UPWARD_PEEK
+    ) {
+      suppressFollowResumeRef.current = true
+    }
+    const nextVisible = distance > SHOW_JUMP_OFFSET
     if (nextVisible === showJumpButtonRef.current) return
 
     showJumpButtonRef.current = nextVisible
@@ -73,7 +106,7 @@ export function useScrollToBottom<T>() {
   const onScrollBeginDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const offset = event.nativeEvent.contentOffset.y
-      dragStartOffsetRef.current = offset
+      dragStartDistanceRef.current = distanceFromBottom(event)
       suppressFollowResumeRef.current = false
       setFollowing(false)
       // Kill an in-flight jump-button (or leftover) glide so the finger owns
@@ -86,23 +119,27 @@ export function useScrollToBottom<T>() {
   const resumeFollowing = useCallback(() => {
     suppressFollowResumeRef.current = false
     setFollowing(true)
-    listRef.current?.scrollToEnd({ animated: true })
+    // No scrollToEnd: the reader is already at the tail. Animating shut a
+    // leftover 10–40px gap is the ping this hook exists to prevent.
   }, [setFollowing])
 
   const onScrollEndDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const dragStart = dragStartOffsetRef.current
-      dragStartOffsetRef.current = null
-      // Only resume when the drag ended near the bottom AND wasn't a net
-      // upward pull — resuming on an upward fling's release would scrollToEnd
-      // right over the gesture this hook exists to protect. Momentum must
-      // honour the same veto: it fires after endDrag and used to snap a
-      // 20–40px read-back shut because it still looked "near the tail".
-      if (dragStart !== null && event.nativeEvent.contentOffset.y < dragStart) {
+      const startDistance = dragStartDistanceRef.current
+      const endDistance = distanceFromBottom(event)
+      dragStartDistanceRef.current = null
+      fingerDownRef.current = false
+      // Only resume when the drag ended near the bottom AND moved toward it.
+      // An upward peek — even one whose raw offset rose because a row above
+      // finished measuring — must not scrollToEnd over the gesture.
+      if (
+        suppressFollowResumeRef.current ||
+        (startDistance !== null && endDistance > startDistance + UPWARD_PEEK)
+      ) {
         suppressFollowResumeRef.current = true
         return
       }
-      if (distanceFromBottom(event) <= RESUME_FOLLOW_OFFSET) {
+      if (endDistance <= RESUME_FOLLOW_OFFSET) {
         resumeFollowing()
       }
     },
@@ -125,10 +162,11 @@ export function useScrollToBottom<T>() {
   /**
    * The pin itself. Content grows from streamed output, from rows that finish
    * measuring, and from the composer resizing the viewport — every one of those
-   * lands here, and none of them move the list unless the reader is following.
+   * lands here, and none of them move the list unless the reader is following
+   * and does not have a finger on the list.
    */
   const onContentSizeChange = useCallback(() => {
-    if (!isFollowingRef.current) return
+    if (!isFollowingRef.current || fingerDownRef.current) return
     pinToBottomInstant()
   }, [pinToBottomInstant])
 
@@ -150,11 +188,12 @@ export function useScrollToBottom<T>() {
   /**
    * For callers that want the tail in view after data lands — opening a thread,
    * a reconnect refresh — without stealing the position of a reader who has
-   * scrolled back through the transcript.
+   * scrolled back through the transcript, or one whose finger is already on
+   * the list.
    */
   const scrollToBottomIfFollowing = useCallback(
     (animated = true) => {
-      if (!isFollowingRef.current) return
+      if (!isFollowingRef.current || fingerDownRef.current) return
       scrollToBottom(animated)
     },
     [scrollToBottom],
@@ -176,6 +215,8 @@ export function useScrollToBottom<T>() {
     showJumpButtonRef.current = false
     setShowJumpButton(false)
     suppressFollowResumeRef.current = false
+    fingerDownRef.current = false
+    dragStartDistanceRef.current = null
     setFollowing(true)
   }, [setFollowing])
 
@@ -188,6 +229,8 @@ export function useScrollToBottom<T>() {
     onScrollBeginDrag,
     onScrollEndDrag,
     onMomentumScrollEnd,
+    onTouchStart,
+    onTouchEnd,
     resetScrollState,
     scrollToBottom,
     scrollToBottomIfFollowing,

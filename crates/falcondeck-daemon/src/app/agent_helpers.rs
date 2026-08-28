@@ -6,9 +6,12 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    app::conversation_helpers::{should_suppress_tool_output, synthesize_tool_title},
+    app::{
+        conversation_helpers::{should_suppress_tool_output, synthesize_tool_title},
+        harness_user_text::falcondeck_skill_path_preamble,
+    },
     codex::extract_string,
-    skills::canonical_skill_alias,
+    skills::{canonical_skill_alias, slash_command_aliases_in_text},
 };
 
 #[derive(Debug, Clone)]
@@ -24,23 +27,83 @@ pub(super) fn resolve_selected_skills(
 ) -> Vec<ResolvedSelectedSkill> {
     selected_skills
         .iter()
-        .filter_map(|selection| {
-            available_skills
-                .iter()
-                .find(|skill| {
-                    skill.id == selection.skill_id
-                        || skill.alias.eq_ignore_ascii_case(&selection.alias)
-                        || canonical_skill_alias(&skill.alias)
-                            == canonical_skill_alias(&selection.alias)
-                })
-                .filter(|skill| skill.supports_provider(provider))
-                .cloned()
-                .map(|summary| ResolvedSelectedSkill {
-                    alias: selection.alias.clone(),
-                    summary,
-                })
-        })
+        .filter_map(|selection| resolve_one_selected_skill(available_skills, selection, provider))
         .collect()
+}
+
+/// Resolves explicit picker selections, then any `/alias` mentions in the
+/// turn text against the live catalog so a skill added after connect still
+/// applies when the user types it.
+pub(super) fn resolve_turn_skills(
+    available_skills: &[SkillSummary],
+    selected_skills: &[SelectedSkillReference],
+    inputs: &[TurnInputItem],
+    provider: &AgentProvider,
+) -> Vec<ResolvedSelectedSkill> {
+    let mut resolved = resolve_selected_skills(available_skills, selected_skills, provider);
+    let mut seen: std::collections::HashSet<String> = resolved
+        .iter()
+        .map(|skill| skill.summary.id.clone())
+        .collect();
+    for selection in selected_skill_refs_from_inputs(inputs, available_skills) {
+        let Some(skill) = resolve_one_selected_skill(available_skills, &selection, provider) else {
+            continue;
+        };
+        if !seen.insert(skill.summary.id.clone()) {
+            continue;
+        }
+        resolved.push(skill);
+    }
+    resolved
+}
+
+fn resolve_one_selected_skill(
+    available_skills: &[SkillSummary],
+    selection: &SelectedSkillReference,
+    provider: &AgentProvider,
+) -> Option<ResolvedSelectedSkill> {
+    available_skills
+        .iter()
+        .find(|skill| {
+            skill.id == selection.skill_id
+                || skill.alias.eq_ignore_ascii_case(&selection.alias)
+                || canonical_skill_alias(&skill.alias) == canonical_skill_alias(&selection.alias)
+        })
+        .filter(|skill| skill.supports_provider(provider))
+        .cloned()
+        .map(|summary| ResolvedSelectedSkill {
+            alias: selection.alias.clone(),
+            summary,
+        })
+}
+
+fn selected_skill_refs_from_inputs(
+    inputs: &[TurnInputItem],
+    available_skills: &[SkillSummary],
+) -> Vec<SelectedSkillReference> {
+    let mut selections = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for input in inputs {
+        let TurnInputItem::Text { text, .. } = input else {
+            continue;
+        };
+        for alias in slash_command_aliases_in_text(text) {
+            let Some(skill) = available_skills
+                .iter()
+                .find(|skill| canonical_skill_alias(&skill.alias) == alias)
+            else {
+                continue;
+            };
+            if !seen.insert(skill.id.clone()) {
+                continue;
+            }
+            selections.push(SelectedSkillReference {
+                skill_id: skill.id.clone(),
+                alias: skill.alias.clone(),
+            });
+        }
+    }
+    selections
 }
 
 pub(super) fn codex_inputs(
@@ -259,7 +322,8 @@ fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSk
     let prompt_preambles = selected_skills
         .iter()
         .filter_map(|skill| {
-            skill.summary
+            skill
+                .summary
                 .provider_translations
                 .claude
                 .as_ref()
@@ -267,11 +331,10 @@ fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSk
                     if translation.command_name.is_some() {
                         None
                     } else {
-                        translation.prompt_reference_path.as_ref().map(|path| {
-                            format!(
-                                "Use the FalconDeck skill defined at {path}. Follow it as the governing skill for this request."
-                            )
-                        })
+                        translation
+                            .prompt_reference_path
+                            .as_ref()
+                            .map(|path| falcondeck_skill_path_preamble(path))
                     }
                 })
         })
@@ -1045,11 +1108,10 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// something the user typed, and must neither render as user bubbles nor seed
 /// provisional titles and previews.
 fn accept_claude_user_text(text: String) -> Option<String> {
-    let probe = text.trim_start();
-    let internal = probe.starts_with("<command-name>")
-        || probe.starts_with("<local-command-stdout>")
-        || probe.starts_with("[Request interrupted");
-    (!internal).then_some(text)
+    match super::harness_user_text::project_user_text(&text) {
+        super::harness_user_text::ProjectedUserText::Prompt(text) => Some(text),
+        _ => None,
+    }
 }
 
 pub(crate) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
@@ -1447,6 +1509,7 @@ mod user_message_tests {
             "<local-command-stdout>(no content)</local-command-stdout>",
             "[Request interrupted by user]",
             "[Request interrupted by user for tool use]",
+            "<system-reminder>The following skills are available for use:</system-reminder>",
         ] {
             assert_eq!(
                 extract_claude_user_message_text(&user_line(json!(content))),
@@ -1689,5 +1752,74 @@ mod subagent_stream_tests {
         .unwrap();
 
         assert_eq!(event.status, "running");
+    }
+}
+
+#[cfg(test)]
+mod turn_skill_resolution_tests {
+    use falcondeck_core::{
+        AgentProvider, SelectedSkillReference, SkillAvailability, SkillProviderTranslations,
+        SkillSourceKind, SkillSummary, TurnInputItem,
+    };
+
+    use super::{resolve_selected_skills, resolve_turn_skills};
+
+    fn skill(alias: &str, providers: Vec<AgentProvider>) -> SkillSummary {
+        SkillSummary {
+            id: format!("skill:{}", alias.trim_start_matches('/')),
+            label: alias.trim_start_matches('/').to_string(),
+            alias: alias.to_string(),
+            availability: SkillAvailability::Both,
+            providers,
+            source_kind: SkillSourceKind::ProjectFile,
+            source_path: Some("/tmp/SKILL.md".to_string()),
+            description: None,
+            provider_translations: SkillProviderTranslations::default(),
+        }
+    }
+
+    #[test]
+    fn turn_text_picks_up_a_catalog_skill_the_client_did_not_select() {
+        let lint = skill("/lint", vec![AgentProvider::CODEX, AgentProvider::GROK]);
+        let resolved = resolve_turn_skills(
+            &[lint],
+            &[],
+            &[TurnInputItem::Text {
+                id: None,
+                text: "please run /lint on this".to_string(),
+            }],
+            &AgentProvider::GROK,
+        );
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].summary.alias, "/lint");
+    }
+
+    #[test]
+    fn turn_text_does_not_select_a_skill_the_provider_cannot_use() {
+        let lint = skill("/lint", vec![AgentProvider::CODEX]);
+        let resolved = resolve_turn_skills(
+            &[lint],
+            &[],
+            &[TurnInputItem::Text {
+                id: None,
+                text: "/lint".to_string(),
+            }],
+            &AgentProvider::GROK,
+        );
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn explicit_selection_still_wins_without_text_mentions() {
+        let lint = skill("/lint", vec![AgentProvider::CODEX]);
+        let resolved = resolve_selected_skills(
+            &[lint],
+            &[SelectedSkillReference {
+                skill_id: "skill:lint".to_string(),
+                alias: "/lint".to_string(),
+            }],
+            &AgentProvider::CODEX,
+        );
+        assert_eq!(resolved.len(), 1);
     }
 }

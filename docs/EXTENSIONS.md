@@ -369,6 +369,13 @@ that has moved on. The rename dialog's Suggest title control is a separate,
 user-initiated path that generates a candidate through the same cheap utility
 models as auto-titling and fills the field without saving.
 
+Published extension tool names must not contain `__` and must stay at most 41
+characters. Clients such as Grok qualify every MCP tool as `server__tool` and
+skip names that make that qualifier longer than 64 characters or split into
+more than two parts. Follow-up suggestions therefore publishes as
+`falcondeck_suggest_follow_ups`, not a concatenation of the full extension id
+and tool id.
+
 ### Composer suggestions
 
 `context.composer.publish(...)` offers a thread between one and five next

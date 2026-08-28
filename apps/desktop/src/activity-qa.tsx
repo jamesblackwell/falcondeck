@@ -62,6 +62,7 @@ const thread = (
     },
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     queued_turns: [],
     variant: null,

@@ -10,7 +10,7 @@ use falcondeck_core::{
     AgentProvider, ApprovalDecision, AssistantMessagePhase, ContentLifecycle,
     ConversationFileChange, ConversationItem, InteractiveRequest, InteractiveRequestKind,
     ModelSummary, PlanApprovalOutcome, ServiceLevel, ThreadStatus, ThreadTokenUsage,
-    TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
+    TokenUsageBreakdown, TurnInputItem, UnifiedEvent, WorkspaceStatus,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -20,6 +20,10 @@ use crate::error::DaemonError;
 
 use super::agent_helpers::ResolvedSelectedSkill;
 use super::conversation_helpers::{ToolSettlement, tool_display_metadata};
+use super::harness_user_text::{
+    conversation_item_from_projected_user, falcondeck_skill_name_preamble,
+    falcondeck_skill_path_preamble,
+};
 use super::provider_runtime::ProviderRuntime;
 use super::{AppState, PendingServerRequest};
 
@@ -267,11 +271,14 @@ impl AppState {
                 // reset the runtime's accumulators so the next real turn starts
                 // fresh items instead of extending replayed ones.
                 runtime.end_turn(&native_session).await;
-                let settlement = if prior_error.is_some() {
-                    ToolSettlement::Failed
-                } else {
-                    ToolSettlement::Completed
-                };
+                let settlement =
+                    if prior_error.as_deref() == Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR) {
+                        ToolSettlement::Interrupted
+                    } else if prior_error.is_some() {
+                        ToolSettlement::Failed
+                    } else {
+                        ToolSettlement::Completed
+                    };
                 app.settle_turn_items_with_error(
                     &workspace_id,
                     &thread_id,
@@ -507,56 +514,73 @@ impl AppState {
             // placeholder lives in a clone), so seed one here or the refinement
             // has nothing to land on and the picker reports "not started"
             // forever.
-            let agent = match workspace
-                .summary
-                .agents
-                .iter_mut()
-                .position(|agent| &agent.provider == provider)
-            {
-                Some(index) => &mut workspace.summary.agents[index],
-                None => {
-                    let grok = provider.as_str().eq_ignore_ascii_case("grok");
-                    let mut placeholder = if grok {
-                        crate::acp::grok_placeholder_capabilities()
-                    } else {
-                        falcondeck_core::AgentCapabilitySummary::acp_minimal()
-                    };
-                    placeholder.supports_images = crate::acp::acp_supports_images(
-                        provider.as_str(),
-                        placeholder.supports_images,
-                    );
-                    workspace
-                        .summary
-                        .agents
-                        .push(falcondeck_core::WorkspaceAgentSummary {
-                            provider: provider.clone(),
-                            label: runtime.config.label.clone(),
-                            account: falcondeck_core::AccountSummary {
-                                status: falcondeck_core::AccountStatus::Unknown,
-                                label: format!("{} not started", runtime.config.label),
-                            },
-                            models: if grok {
-                                crate::acp::grok_placeholder_models()
-                            } else {
-                                Vec::new()
-                            },
-                            collaboration_modes: Vec::new(),
-                            skills: Vec::new(),
-                            capabilities: placeholder,
-                        });
-                    workspace.summary.agents.last_mut().expect("just pushed")
+            let account_status = {
+                let agent = match workspace
+                    .summary
+                    .agents
+                    .iter_mut()
+                    .position(|agent| &agent.provider == provider)
+                {
+                    Some(index) => &mut workspace.summary.agents[index],
+                    None => {
+                        let grok = provider.as_str().eq_ignore_ascii_case("grok");
+                        let cursor = provider.as_str().eq_ignore_ascii_case("cursor");
+                        let mut placeholder = if grok {
+                            crate::acp::grok_placeholder_capabilities()
+                        } else if cursor {
+                            crate::acp::cursor_placeholder_capabilities()
+                        } else {
+                            falcondeck_core::AgentCapabilitySummary::acp_minimal()
+                        };
+                        placeholder.supports_images = crate::acp::acp_supports_images(
+                            provider.as_str(),
+                            placeholder.supports_images,
+                        );
+                        workspace
+                            .summary
+                            .agents
+                            .push(falcondeck_core::WorkspaceAgentSummary {
+                                provider: provider.clone(),
+                                label: runtime.config.label.clone(),
+                                account: falcondeck_core::AccountSummary {
+                                    status: falcondeck_core::AccountStatus::Unknown,
+                                    label: format!("{} not started", runtime.config.label),
+                                },
+                                models: if grok {
+                                    crate::acp::grok_placeholder_models()
+                                } else {
+                                    Vec::new()
+                                },
+                                collaboration_modes: if cursor {
+                                    crate::acp::cursor_placeholder_collaboration_modes()
+                                } else {
+                                    Vec::new()
+                                },
+                                skills: Vec::new(),
+                                capabilities: placeholder,
+                            });
+                        workspace.summary.agents.last_mut().expect("just pushed")
+                    }
+                };
+                agent.account = falcondeck_core::AccountSummary {
+                    status: falcondeck_core::AccountStatus::Ready,
+                    label: format!("{} connected", runtime.config.label),
+                };
+                agent.capabilities = capabilities;
+                if !models.is_empty() {
+                    agent.models = merged_models(provider, &agent.models, models);
                 }
+                if !collaboration_modes.is_empty() {
+                    agent.collaboration_modes = collaboration_modes;
+                }
+                agent.account.status.clone()
             };
-            agent.account = falcondeck_core::AccountSummary {
-                status: falcondeck_core::AccountStatus::Ready,
-                label: format!("{} connected", runtime.config.label),
-            };
-            agent.capabilities = capabilities;
-            if !models.is_empty() {
-                agent.models = merged_models(provider, &agent.models, models);
-            }
-            if !collaboration_modes.is_empty() {
-                agent.collaboration_modes = collaboration_modes;
+            workspace.summary.status = super::workspace_status_after_account_update(
+                &workspace.summary.status,
+                &account_status,
+            );
+            if workspace.summary.status == WorkspaceStatus::Ready {
+                workspace.summary.last_error = None;
             }
         }
         // Clients only refresh workspace agent entries on a full snapshot
@@ -687,37 +711,37 @@ impl AppState {
                 let (item_id, full_text) = runtime
                     .append_user_text(&session_id, message_id.as_deref(), &text)
                     .await;
-                // Cancel+re-prompt steering re-bundles the interrupted
-                // user text. If the adapter echoes that wrapper, drop it
-                // — the client already appended the steering bubble.
-                if full_text.contains("<interrupted_user_messages>")
-                    || full_text.contains("<steering_messages>")
-                {
+                let Some(item) =
+                    conversation_item_from_projected_user(item_id, &full_text, Utc::now())
+                else {
                     return Ok(());
-                }
-                let is_submitted_message_echo = {
-                    let workspaces = self.inner.workspaces.lock().await;
-                    workspaces
-                        .get(workspace_id)
-                        .and_then(|workspace| workspace.threads.get(&thread_id))
-                        .is_some_and(|thread| {
-                            latest_user_message_contains_echo(&thread.items, &full_text)
-                        })
                 };
-                if is_submitted_message_echo {
-                    return Ok(());
+                if let ConversationItem::UserMessage { text: prompt, .. } = &item {
+                    // Cancel+re-prompt steering re-bundles the interrupted
+                    // user text. If the adapter echoes that wrapper, drop it
+                    // — the client already appended the steering bubble.
+                    if prompt.contains("<interrupted_user_messages>")
+                        || prompt.contains("<steering_messages>")
+                    {
+                        return Ok(());
+                    }
+                    let is_submitted_message_echo = {
+                        let workspaces = self.inner.workspaces.lock().await;
+                        workspaces
+                            .get(workspace_id)
+                            .and_then(|workspace| workspace.threads.get(&thread_id))
+                            .is_some_and(|thread| {
+                                latest_user_message_contains_echo(&thread.items, prompt)
+                            })
+                    };
+                    if is_submitted_message_echo {
+                        return Ok(());
+                    }
                 }
                 self.insert_acp_conversation_item(
                     workspace_id,
                     &thread_id,
-                    ConversationItem::UserMessage {
-                        id: item_id,
-                        text: full_text,
-                        attachments: Vec::new(),
-                        turn_id: None,
-                        previous_turn_id: None,
-                        created_at: Utc::now(),
-                    },
+                    item,
                     true,
                     replaying_sessions.contains(&session_id),
                 )
@@ -1095,6 +1119,7 @@ impl AppState {
             AcpEvent::PlanApprovalRequest {
                 session_id,
                 request_id,
+                method,
                 tool_call_id,
                 plan_content,
             } => {
@@ -1108,7 +1133,7 @@ impl AppState {
                     request_id: request_id.clone(),
                     workspace_id: workspace_id.to_string(),
                     thread_id: Some(thread_id.clone()),
-                    method: "x.ai/exit_plan_mode".to_string(),
+                    method,
                     kind: InteractiveRequestKind::PlanApproval,
                     approval_decisions: None,
                     title: "Review implementation plan".to_string(),
@@ -1147,6 +1172,81 @@ impl AppState {
                     },
                 );
                 self.notify_remote_attention("approval", workspace_id, Some(thread_id.clone()))
+                    .await;
+                self.push_conversation_item(
+                    workspace_id,
+                    &thread_id,
+                    ConversationItem::InteractiveRequest {
+                        id: request_id,
+                        request: Box::new(request),
+                        created_at: Utc::now(),
+                        resolved: false,
+                        resolution: None,
+                    },
+                    false,
+                )
+                .await?;
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: self.snapshot().await,
+                    },
+                );
+            }
+            AcpEvent::QuestionRequest {
+                session_id,
+                request_id,
+                title,
+                questions,
+            } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    runtime.cancel_question(&request_id).await?;
+                    return Ok(());
+                };
+                let request = InteractiveRequest {
+                    request_id: request_id.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    thread_id: Some(thread_id.clone()),
+                    method: "cursor/ask_question".to_string(),
+                    kind: InteractiveRequestKind::Question,
+                    approval_decisions: None,
+                    title,
+                    detail: None,
+                    command: None,
+                    path: None,
+                    turn_id: None,
+                    item_id: None,
+                    questions,
+                    created_at: Utc::now(),
+                };
+                self.inner.interactive_requests.lock().await.insert(
+                    (workspace_id.to_string(), request_id.clone()),
+                    PendingServerRequest {
+                        raw_id: Value::Null,
+                        request: request.clone(),
+                        params: Value::Null,
+                    },
+                );
+                let thread = self
+                    .upsert_thread(workspace_id, &thread_id, |thread| {
+                        thread.status = ThreadStatus::WaitingForInput;
+                        thread.updated_at = Utc::now();
+                    })
+                    .await?;
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.clone()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.clone()),
+                    UnifiedEvent::InteractiveRequest {
+                        request: request.clone(),
+                    },
+                );
+                self.notify_remote_attention("question", workspace_id, Some(thread_id.clone()))
                     .await;
                 self.push_conversation_item(
                     workspace_id,
@@ -1211,14 +1311,8 @@ impl AppState {
                     // do the same with a successful stopReason while the
                     // cause lives only on stderr (`TurnEnded.error`).
                     if !had_output && acp_empty_turn_stop_reason(stop_reason.as_deref()) {
-                        let message = match error
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|text| !text.is_empty())
-                        {
-                            Some(detail) => {
-                                format!("The agent finished without a reply. {detail}")
-                            }
+                        let message = match error.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
+                            Some(detail) => format!("The agent finished without a reply. {detail}"),
                             None => "The agent finished without a reply. Check that this harness is authenticated and the selected model can run.".to_string(),
                         };
                         self.push_conversation_item(
@@ -1427,6 +1521,33 @@ impl AppState {
             .respond_plan_approval(request_id, outcome, feedback)
             .await
     }
+
+    /// Answers a pending Cursor clarifying question on the runtime that raised it.
+    pub(super) async fn respond_acp_question(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        request_id: &str,
+        answers: &std::collections::HashMap<String, Vec<String>>,
+    ) -> Result<(), DaemonError> {
+        let Some(thread_id) = thread_id else {
+            return Err(DaemonError::BadRequest(
+                "ACP question has no thread".to_string(),
+            ));
+        };
+        let provider = self.thread_provider(workspace_id, thread_id).await?;
+        let runtime = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .filter(|runtime| !runtime.is_closed())
+                .map(Arc::clone)
+        };
+        let runtime = runtime
+            .ok_or_else(|| DaemonError::NotFound("ACP question request not found".to_string()))?;
+        runtime.respond_question(request_id, answers).await
+    }
 }
 
 /// Reconciles an ACP session's model catalog with what the workspace already
@@ -1588,10 +1709,14 @@ pub(super) async fn set_acp_thread_permission_mode(
 
     let runtime = app.acp_runtime_for(workspace_id, &provider).await?;
     let available_modes = runtime.capability_summary().await.permission_modes;
-    let desired_mode = requested_mode
+    let Some(desired_mode) = requested_mode
         .as_deref()
-        .or_else(|| default_acp_mode(&available_modes));
-    let Some(desired_mode) = desired_mode else {
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    else {
+        // Clearing the picker restores the provider's own default. Do not
+        // fall through to the most permissive advertised mode — that would
+        // YOLO a thread the user just set to "Ask to approve".
         return Ok(());
     };
     if !available_modes.iter().any(|mode| mode == desired_mode) {
@@ -1615,10 +1740,12 @@ pub(super) async fn set_acp_thread_permission_mode(
         }
         return runtime.set_session_mode(&session_id, desired_mode).await;
     }
-    // No session-level lever for this harness. Blanket-approval modes are
-    // still fully honored: the daemon auto-answers permission requests from
-    // the stored thread mode, so persisting the choice is all that's needed.
-    if crate::acp::is_blanket_approval_mode(desired_mode) {
+    // No session-level lever for this harness. Daemon-enforced modes
+    // (blanket approval, or the provider's "ask" default) only need to live
+    // on the thread: the next permission request reads that stored value.
+    if crate::acp::is_blanket_approval_mode(desired_mode)
+        || desired_mode.eq_ignore_ascii_case("default")
+    {
         return Ok(());
     }
     Err(DaemonError::BadRequest(format!(
@@ -2174,9 +2301,23 @@ pub(super) async fn steer_acp_turn(
     };
     let content = acp_turn_content(&runtime, inputs, selected_skills).await;
     if runtime.supports_interject() {
-        return runtime
-            .interject(&session_id, &content.text, content.blocks)
-            .await;
+        match runtime
+            .interject(&session_id, &content.text, content.blocks.clone())
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // The probe treats any non-"method not found" reply as
+                // support, including Grok builds that accept the method
+                // then reject a live session. Cancel-and-re-prompt still
+                // lands the steer on those.
+                tracing::info!(
+                    %error,
+                    session = %session_id,
+                    "ACP vendor interject failed; steering via cancel-and-re-prompt"
+                );
+            }
+        }
     }
     runtime.steer_with_cancel(&session_id, content.blocks).await
 }
@@ -2211,17 +2352,9 @@ async fn acp_turn_content(
                 .claude
                 .as_ref()
                 .and_then(|translation| translation.prompt_reference_path.as_deref())
-                .map(|path| {
-                    format!(
-                        "Use the FalconDeck skill defined at {path}. Follow it as the governing skill for this request."
-                    )
-                })
-                .or_else(|| {
-                    Some(format!(
-                        "Apply the FalconDeck skill named '{}' to this request.",
-                        skill.summary.label
-                    ))
-                })
+                .or(skill.summary.source_path.as_deref())
+                .map(falcondeck_skill_path_preamble)
+                .or_else(|| Some(falcondeck_skill_name_preamble(&skill.summary.label)))
         })
         .collect::<Vec<_>>();
     if !skill_preambles.is_empty() {
@@ -2269,7 +2402,10 @@ async fn acp_turn_content(
 mod tests {
     use chrono::Utc;
 
-    use super::{acp_empty_turn_stop_reason, default_acp_mode, latest_user_message_contains_echo};
+    use super::{
+        acp_empty_turn_stop_reason, conversation_item_from_projected_user, default_acp_mode,
+        falcondeck_skill_path_preamble, latest_user_message_contains_echo,
+    };
     use falcondeck_core::{ContentLifecycle, ConversationItem};
 
     fn user_message(text: &str) -> ConversationItem {
@@ -2405,6 +2541,34 @@ mod tests {
     }
 
     #[test]
+    fn skill_preamble_echo_collapses_to_the_typed_prompt() {
+        let items = vec![user_message("/tldr")];
+        let echoed = format!(
+            "{}\n\n/tldr",
+            falcondeck_skill_path_preamble("/tmp/tldr/SKILL.md")
+        );
+        let item = conversation_item_from_projected_user(
+            "echoed-user-message".to_string(),
+            &echoed,
+            Utc::now(),
+        )
+        .expect("typed prompt remains");
+        let ConversationItem::UserMessage { text, .. } = item else {
+            panic!("expected user message");
+        };
+        assert_eq!(text, "/tldr");
+        assert!(latest_user_message_contains_echo(&items, &text));
+        assert!(
+            conversation_item_from_projected_user(
+                "partial-preamble".to_string(),
+                "Use the FalconDeck skill defined at /tmp/tldr/SKILL.md",
+                Utc::now(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn latest_user_message_contains_echo_matches_after_interrupt_with_progress() {
         let items = vec![
             user_message("Map the onboarding flow"),
@@ -2441,5 +2605,11 @@ mod tests {
         let modes = vec!["safe".to_string(), "fast".to_string()];
         assert_eq!(default_acp_mode(&modes), Some("safe"));
         assert_eq!(default_acp_mode(&[]), None);
+    }
+
+    #[test]
+    fn cursor_permission_modes_default_to_always_approve() {
+        let modes = crate::acp::cursor_placeholder_permission_modes();
+        assert_eq!(default_acp_mode(&modes), Some("always-approve"));
     }
 }

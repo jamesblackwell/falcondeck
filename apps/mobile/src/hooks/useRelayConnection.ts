@@ -429,7 +429,7 @@ export function useRelayConnection() {
         }
       }
     }
-  }, [applyAuthoritativeSnapshot, checkpointPendingSnapshotCursor])
+  }, [applyAuthoritativeSnapshot])
 
   const processRpcResult = useCallback(async (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => {
     const relay = useRelayStore.getState()
@@ -965,6 +965,10 @@ export function useRelayConnection() {
     // we return, skip backoff and reconnect right away.
     const appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
       if (!isCurrent || !shouldReconnect) return
+      if (nextAppState !== 'active') {
+        persistSessionCacheNow()
+        relay._persistSession()
+      }
       if (shouldPingRelayOnLeavingForeground(nextAppState, activeSocket?.readyState ?? null)) {
         if (sendRelayPing(activeSocket) && nextAppState === 'background') {
           logConnection('info', 'App left the foreground; pinging the relay to hold the session.')
@@ -1069,13 +1073,14 @@ export function useRelayConnection() {
                 relay._setMachinePresence(payload.presence)
               }
               if (payload.history_truncated) {
-                // Updates were lost server-side; recover derived state from a
-                // fresh snapshot, but keep the offline cache so the UI does
-                // not go blank if the app restarts before it arrives. The
-                // cursor is left to the flush: retained updates advance it as
-                // they are consumed, and the truncation's next_seq is adopted
-                // at flush end so a truncated sync with no updates at all
-                // still advances past the lost window.
+                // Updates were lost server-side; recover from a fresh
+                // snapshot.current. Keep the in-memory list on screen so the
+                // sidebar does not flash empty while that RPC is in flight —
+                // the disk cache is the restart fallback, not the live UI.
+                // The cursor is left to the flush: retained updates advance
+                // it as they are consumed, and the truncation's next_seq is
+                // adopted at flush end so a truncated sync with no updates
+                // at all still advances past the lost window.
                 pendingTruncationNextSeq.current = Math.max(
                   pendingTruncationNextSeq.current ?? 0,
                   payload.next_seq,

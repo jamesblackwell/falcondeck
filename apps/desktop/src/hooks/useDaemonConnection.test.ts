@@ -121,6 +121,47 @@ describe('useDaemonConnection thread restoration', () => {
     }
   })
 
+  it('pauses the remote status poll while hidden and refreshes on visible', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    const fireVisibilityChange = () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    }
+    try {
+      visibility.mockReturnValue('visible')
+      mocks.remoteStatus.mockResolvedValue({ status: 'connected' })
+      const { result } = renderHook(() => useDaemonConnection())
+
+      await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+      await waitFor(() => expect(result.current.remoteStatus?.status).toBe('connected'))
+      mocks.remoteStatus.mockClear()
+
+      // Hidden: the interval stops and no background fetches run.
+      act(() => {
+        visibility.mockReturnValue('hidden')
+        fireVisibilityChange()
+      })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000)
+      })
+      expect(mocks.remoteStatus).not.toHaveBeenCalled()
+
+      // Visible again: poll immediately, then back on the 2s cadence.
+      act(() => {
+        visibility.mockReturnValue('visible')
+        fireVisibilityChange()
+      })
+      await waitFor(() => expect(mocks.remoteStatus).toHaveBeenCalledTimes(1))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000)
+      })
+      expect(mocks.remoteStatus).toHaveBeenCalledTimes(2)
+    } finally {
+      visibility.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('waits for workspace hydration before fetching a restored thread detail', async () => {
     const { result } = renderHook(() => useDaemonConnection())
 

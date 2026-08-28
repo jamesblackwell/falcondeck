@@ -4,12 +4,15 @@ import { memo, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import {
   interactiveRequestEvidencePresentation,
   interactiveApprovalDecisions,
+  isMcpElicitationRequest,
+  safeExternalUrl,
   type InteractiveRequest,
   type InteractiveResponsePayload,
 } from '@falcondeck/client-core'
 import { Badge, Button, Input, Textarea } from '@falcondeck/ui'
 
 import { isComposingKeyboardEvent } from '../lib/keyboard'
+import { WebLinkAnchor } from '../lib/web-link-context'
 import { CodeBlock } from './code-block'
 import { MessageMarkdown } from './message-markdown'
 
@@ -42,6 +45,8 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   const [planFeedback, setPlanFeedback] = useState('')
   const evidence = interactiveRequestEvidencePresentation(request)
   const approvalDecisions = interactiveApprovalDecisions(request)
+  const elicitation = isMcpElicitationRequest(request)
+  const externalUrl = safeExternalUrl(evidence.path)
 
   const canRespond = !!onRespond && !resolved
   const questionAnswers = useMemo(
@@ -94,6 +99,17 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
     } finally {
       setIsSubmitting(false)
     }
+  }
+
+  function openElicitationUrl() {
+    if (!externalUrl || typeof document === 'undefined') return
+    const anchor = document.createElement('a')
+    anchor.href = externalUrl
+    anchor.target = '_blank'
+    anchor.rel = 'noopener noreferrer'
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
   }
 
   function handleQuestionChange(questionId: string, value: string) {
@@ -153,9 +169,11 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 ? 'Resolved'
                 : request.kind === 'plan_approval'
                   ? 'Plan review required'
-                  : request.kind === 'approval'
-                    ? 'Approval required'
-                    : 'Response required'}
+                  : elicitation && request.kind === 'approval'
+                    ? 'Sign in required'
+                    : request.kind === 'approval'
+                      ? 'Approval required'
+                      : 'Response required'}
             </Badge>
             {!resolved && pendingCount > 1 ? (
               <span className="text-[length:var(--fd-text-xs)] text-fg-muted">1 of {pendingCount}</span>
@@ -171,8 +189,22 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
               <CodeBlock code={evidence.command} language="command" previewLines={4} />
             </div>
           ) : null}
-          {evidence.path ? (
+          {externalUrl ? (
+            <p className="mt-2">
+              <WebLinkAnchor
+                href={externalUrl}
+                className="break-all text-[length:var(--fd-text-xs)] text-accent underline-offset-2 hover:underline"
+              >
+                {externalUrl}
+              </WebLinkAnchor>
+            </p>
+          ) : evidence.path ? (
             <p className="mt-1 break-all font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">{evidence.path}</p>
+          ) : null}
+          {elicitation && externalUrl && canRespond ? (
+            <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-secondary">
+              Open the link to finish sign-in, then continue.
+            </p>
           ) : null}
 
           {request.kind === 'plan_approval' ? (
@@ -287,7 +319,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                       disabled={isSubmitting}
                       onClick={() => void submit({ kind: 'approval', decision: 'deny' })}
                     >
-                      Deny
+                      {elicitation ? 'Cancel' : 'Deny'}
                     </Button>
                   ) : null}
                   {approvalDecisions.includes('allow') ? (
@@ -295,9 +327,12 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                       type="button"
                       size="sm"
                       disabled={isSubmitting}
-                      onClick={() => void submit({ kind: 'approval', decision: 'allow' })}
+                      onClick={() => {
+                        if (elicitation) openElicitationUrl()
+                        void submit({ kind: 'approval', decision: 'allow' })
+                      }}
                     >
-                      Allow
+                      {elicitation ? 'Continue' : 'Allow'}
                     </Button>
                   ) : null}
                   {approvalDecisions.includes('always_allow') ? (
@@ -374,6 +409,17 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 </div>
               ) : (
                 <>
+                  {elicitation ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={isSubmitting}
+                      onClick={() => void submit({ kind: 'approval', decision: 'deny' })}
+                    >
+                      Decline
+                    </Button>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"

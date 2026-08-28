@@ -10,6 +10,7 @@ import {
   isDaemonRpcReady,
   normalizeDaemonSnapshot,
   normalizeThreadDetail,
+  normalizeSkillSummaries,
   normalizeThreadHandle,
   normalizeThreadSummary,
   mergeThreadDetailPage,
@@ -41,6 +42,7 @@ import {
   type ScheduledTaskRunSummary,
   type ScheduledTaskSummary,
   type SetThreadGoalPayload,
+  type SkillSummary,
   type StartThreadPayload,
   type SuggestThreadTitleResponse,
   type ThreadDetail,
@@ -134,6 +136,7 @@ export type WorkspaceScopedApi = {
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   hydrateProvider(workspaceId: string, provider: string): Promise<{ ok: boolean; message?: string | null }>
+  listWorkspaceSkills(workspaceId: string, provider?: string | null): Promise<SkillSummary[]>
   removeQueuedTurn(
     workspaceId: string,
     threadId: string,
@@ -501,6 +504,13 @@ export class HostConnection {
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
       hydrateProvider: (workspaceId, provider) =>
         this.rpc('provider.hydrate', { workspace_id: workspaceId, provider }),
+      listWorkspaceSkills: async (workspaceId, provider) => {
+        const payload = await this.rpc<{ skills?: SkillSummary[] }>('workspace.skills', {
+          workspace_id: workspaceId,
+          ...(provider ? { provider } : {}),
+        })
+        return normalizeSkillSummaries(payload.skills)
+      },
       removeQueuedTurn: (workspaceId, threadId, queuedId) =>
         this.rpc('thread.queue.remove', {
           workspace_id: workspaceId,

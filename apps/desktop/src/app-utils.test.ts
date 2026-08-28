@@ -28,7 +28,27 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
   }
 }
 
-describe('workspaceSendBlockReason', () => {
+describe('workspaceComposerDisabled', () => {
+  it('disables the composer only when no project is selected', () => {
+    expect(workspaceComposerDisabled(null)).toBe(true)
+    expect(workspaceComposerDisabled(undefined)).toBe(true)
+    expect(workspaceComposerDisabled(workspace())).toBe(false)
+  })
+
+  it('keeps the composer interactive while a selected project reconnects or times out', () => {
+    expect(workspaceComposerDisabled(workspace({ status: 'connecting' }))).toBe(false)
+    expect(
+      workspaceComposerDisabled(
+        workspace({
+          status: 'disconnected',
+          last_error: 'workspace restore timed out',
+        }),
+      ),
+    ).toBe(false)
+    expect(workspaceComposerDisabled(workspace({ status: 'error' }))).toBe(false)
+    expect(workspaceComposerDisabled(workspace({ status: 'needs_auth' }))).toBe(false)
+  })
+
   it('keeps the composer interactive when only the selected provider needs auth', () => {
     expect(
       workspaceComposerDisabled(
@@ -46,7 +66,9 @@ describe('workspaceSendBlockReason', () => {
       ),
     ).toBe(false)
   })
+})
 
+describe('workspaceSendBlockReason', () => {
   it('surfaces concise reconnecting project guidance', () => {
     expect(
       workspaceSendBlockReason(
@@ -57,6 +79,79 @@ describe('workspaceSendBlockReason', () => {
         'codex',
       ),
     ).toBe('Reconnecting to alpha. You can keep drafting while it reconnects.')
+  })
+
+  it('lets a lazy ACP catalog send while the rest of the project is still reconnecting', () => {
+    expect(
+      workspaceSendBlockReason(
+        workspace({
+          status: 'connecting',
+          path: '/Users/james/lucidpic',
+          agents: [
+            {
+              provider: 'grok',
+              label: 'Grok',
+              account: { status: 'unknown', label: 'Grok not started' },
+              models: [
+                {
+                  id: 'grok-4.6',
+                  label: 'grok-4.6',
+                  is_default: true,
+                  default_reasoning_effort: null,
+                  supported_reasoning_efforts: [],
+                },
+              ],
+              collaboration_modes: [],
+            },
+          ],
+        }),
+        'grok',
+      ),
+    ).toBeNull()
+  })
+
+  it('lets a connected provider send even when workspace restore timed out', () => {
+    expect(
+      workspaceSendBlockReason(
+        workspace({
+          status: 'disconnected',
+          last_error: 'workspace restore timed out',
+          default_provider: 'grok',
+          agents: [
+            {
+              provider: 'grok',
+              label: 'Grok',
+              account: { status: 'ready', label: 'Grok connected' },
+              models: [],
+              collaboration_modes: [],
+            },
+          ],
+        }),
+        'grok',
+      ),
+    ).toBeNull()
+  })
+
+  it('still blocks send on a timed-out project when the selected provider never came up', () => {
+    expect(
+      workspaceSendBlockReason(
+        workspace({
+          status: 'disconnected',
+          last_error: 'workspace restore timed out',
+          path: '/Users/james/lucidpic',
+          agents: [
+            {
+              provider: 'codex',
+              label: 'Codex',
+              account: { status: 'unknown', label: 'Codex reconnecting' },
+              models: [],
+              collaboration_modes: [],
+            },
+          ],
+        }),
+        'codex',
+      ),
+    ).toBe('workspace restore timed out')
   })
 
   it('blocks when the selected provider needs auth', () => {
@@ -95,6 +190,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_error: SHUTDOWN_INTERRUPTED_TURN_ERROR,
     is_archived: false,
     is_pinned: false,
+    is_pinned_in_project: false,
     goal: null,
     queued_turns: [],
     variant: null,

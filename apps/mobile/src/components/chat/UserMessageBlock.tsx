@@ -3,13 +3,17 @@ import { Pressable, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { ChevronDown, ChevronUp } from "lucide-react-native";
 
-import type { ConversationItem } from "@falcondeck/client-core";
+import {
+  projectHarnessUserText,
+  type ConversationItem,
+} from "@falcondeck/client-core";
 
 import { Text } from "@/components/ui";
 import { useCollapseLongUserMessages } from "@/store";
 import { AttachmentPreviewList } from "./AttachmentPreviewList";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { MessageActions } from "./MessageActions";
+import { ServiceBlock } from "./ServiceBlock";
 type UserMessage = Extract<ConversationItem, { kind: "user_message" }>;
 
 /** Six-ish body lines; a taller sent message (a pasted wall of text, a
@@ -31,11 +35,13 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   item,
 }: UserMessageBlockProps) {
   const { theme } = useUnistyles();
+  const projected = projectHarnessUserText(item.text);
+  const text = projected.kind === "prompt" ? projected.text : "";
   const collapseLongMessages = useCollapseLongUserMessages();
-  const collapsible = collapseLongMessages && item.text.trim().length > 0;
+  const collapsible = collapseLongMessages && text.trim().length > 0;
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(
-    () => collapsible && looksLong(item.text),
+    () => collapsible && looksLong(text),
   );
   // A collapsed bubble's onLayout often reports the cap, not the content.
   // Once we've seen a real tall layout, ignore those capped reports so we
@@ -48,7 +54,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   if (appliedItemId !== item.id) {
     setAppliedItemId(item.id);
     setExpanded(false);
-    setOverflowing(collapseLongMessages && looksLong(item.text));
+    setOverflowing(collapseLongMessages && looksLong(text));
     seenTallRef.current = false;
   }
 
@@ -68,6 +74,26 @@ export const UserMessageBlock = memo(function UserMessageBlock({
 
   const collapsed = collapsible && overflowing && !expanded;
 
+  if (projected.kind === "service") {
+    return (
+      <ServiceBlock
+        item={{
+          kind: "service",
+          id: item.id,
+          level: projected.level,
+          message: projected.message,
+          created_at: item.created_at,
+        }}
+      />
+    );
+  }
+  if (
+    (projected.kind === "hidden" || projected.kind === "incomplete") &&
+    item.attachments.length === 0
+  ) {
+    return null;
+  }
+
   return (
     <View style={styles.row}>
       <View style={styles.bubble}>
@@ -79,7 +105,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
             style={styles.measure}
           >
             <MarkdownRenderer
-              text={item.text}
+              text={text}
               interpretDirectives={false}
               highlightCommands
             />
@@ -123,7 +149,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
         ) : null}
       </View>
       <MessageActions
-        text={item.text}
+        text={text}
         accessibilityLabel="Copy message"
         readAloudKey={item.id}
       />

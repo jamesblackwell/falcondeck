@@ -67,6 +67,10 @@ struct ConnectorEntry {
     url: Option<String>,
     #[serde(default)]
     headers: BTreeMap<String, String>,
+    /// `"oauth"` means FalconDeck holds the token and injects a Bearer header
+    /// at materialize time. The token is not stored in this file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auth: Option<String>,
     #[serde(default = "default_enabled")]
     enabled: bool,
     /// Provider ids this server is offered to; empty = all providers.
@@ -325,10 +329,22 @@ fn load_mcp_servers_from(
                     args: entry.args,
                     env: entry.env,
                 },
-                (_, Some(url)) if !url.trim().is_empty() => McpTransport::Http {
-                    url,
-                    headers: entry.headers,
-                },
+                (_, Some(url)) if !url.trim().is_empty() => {
+                    let mut headers = entry.headers;
+                    if entry.auth.as_deref() == Some("oauth") {
+                        if let Some(token) = crate::connector_oauth::access_token(&name) {
+                            headers
+                                .entry("Authorization".to_string())
+                                .or_insert_with(|| format!("Bearer {token}"));
+                        } else {
+                            tracing::warn!(
+                                server = %name,
+                                "oauth connector has no stored access token"
+                            );
+                        }
+                    }
+                    McpTransport::Http { url, headers }
+                }
                 _ => {
                     tracing::warn!(server = %name, "connectors.json entry has neither command nor url");
                     return None;
@@ -339,11 +355,10 @@ fn load_mcp_servers_from(
         .collect()
 }
 
-/// JSON body for a Claude `--mcp-config` file; `None` when no servers apply.
-pub fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<String> {
-    if servers.is_empty() {
-        return None;
-    }
+/// JSON body for a Claude `--mcp-config` file. Always a document, including
+/// `{"mcpServers":{}}` when nothing is configured, so `--strict-mcp-config`
+/// can keep the user's global Claude MCP servers from leaking into a spawn.
+pub fn claude_mcp_config_json(servers: &[McpServerConfig]) -> String {
     let mut map = serde_json::Map::new();
     for server in servers {
         let value = match &server.transport {
@@ -360,7 +375,161 @@ pub fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<String> {
         };
         map.insert(server.name.clone(), value);
     }
-    serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(map) })).ok()
+    serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(map) }))
+        .unwrap_or_else(|_| "{\"mcpServers\":{}}".to_string())
+}
+
+/// CLI-side MCP timeouts and output budgets applied to spawned agent
+/// processes. Without these, long connector results get truncated or the
+/// handshake dies while a slow remote MCP starts.
+pub const MCP_CLI_TIMEOUT_ENV: &[(&str, &str)] = &[
+    ("MCP_TIMEOUT", "30000"),
+    ("MCP_TOOL_TIMEOUT", "10800000"),
+    ("MAX_MCP_OUTPUT_TOKENS", "25000"),
+];
+
+/// Codex `-c` override so MCP tool payloads are not clipped at the default.
+pub const CODEX_TOOL_OUTPUT_TOKEN_LIMIT_OVERRIDE: &str = "tool_output_token_limit=25000";
+
+/// One-launch Claude `--mcp-config` file. Dropping the lease unlinks the file
+/// only when the path still names the inode we created.
+pub struct LeasedMcpConfig {
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: Option<UnixFileIdentity>,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnixFileIdentity {
+    device: u64,
+    inode: u64,
+    owner: u32,
+}
+
+impl LeasedMcpConfig {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn release(&mut self) {
+        #[cfg(unix)]
+        {
+            let Some(expected) = self.identity else {
+                return;
+            };
+            if unix_file_identity(&self.path) != Some(expected) {
+                return;
+            }
+        }
+        let _ = std::fs::remove_file(&self.path);
+        #[cfg(unix)]
+        {
+            self.identity = None;
+        }
+    }
+}
+
+impl Drop for LeasedMcpConfig {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+#[cfg(unix)]
+fn unix_file_identity(path: &Path) -> Option<UnixFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    Some(UnixFileIdentity {
+        device: meta.dev(),
+        inode: meta.ino(),
+        owner: meta.uid(),
+    })
+}
+
+/// Writes a unique 0400 `--mcp-config` file in `dir` (0700).
+pub fn write_leased_claude_mcp_config(
+    dir: &Path,
+    body: &str,
+) -> Result<LeasedMcpConfig, std::io::Error> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let path = dir.join(format!("claude-mcp-{}.json", uuid::Uuid::new_v4().simple()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o400);
+    }
+    let mut file = options.open(&path)?;
+    if let Err(error) = file.write_all(body.as_bytes()) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+        {
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+        let identity = unix_file_identity(&path).ok_or_else(|| {
+            let _ = std::fs::remove_file(&path);
+            std::io::Error::other("failed to stat leased mcp config")
+        })?;
+        Ok(LeasedMcpConfig {
+            path,
+            identity: Some(identity),
+        })
+    }
+    #[cfg(not(unix))]
+    Ok(LeasedMcpConfig { path })
+}
+
+/// OpenCode `OPENCODE_CONFIG_CONTENT` overlay. Merges on top of the user's
+/// `opencode.json`; it does not replace that file. Remote entries that already
+/// carry an Authorization header disable OpenCode's own OAuth attempt.
+pub fn opencode_config_content(servers: &[McpServerConfig]) -> String {
+    let mut mcp = serde_json::Map::new();
+    for server in servers {
+        mcp.insert(server.name.clone(), opencode_mcp_entry(server));
+    }
+    json!({ "mcp": mcp }).to_string()
+}
+
+fn opencode_mcp_entry(server: &McpServerConfig) -> Value {
+    match &server.transport {
+        McpTransport::Stdio { command, args, env } => {
+            let mut command_argv = vec![command.clone()];
+            command_argv.extend(args.iter().cloned());
+            json!({
+                "type": "local",
+                "command": command_argv,
+                "environment": env,
+                "enabled": true,
+                "timeout": 10_800_000,
+            })
+        }
+        McpTransport::Http { url, headers } => {
+            let has_authorization = headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("Authorization"));
+            json!({
+                "type": "remote",
+                "url": url,
+                "headers": headers,
+                "enabled": true,
+                "oauth": !has_authorization,
+                "timeout": 10_800_000,
+            })
+        }
+    }
 }
 
 /// `mcpServers` array for an ACP session lifecycle request. Stdio is mandatory
@@ -396,43 +565,113 @@ pub fn acp_mcp_servers(servers: &[McpServerConfig], supports_http: bool) -> Valu
     Value::Array(entries)
 }
 
-/// `-c key=value` config overrides for a Codex spawn. HTTP servers are
-/// skipped: Codex configures stdio MCP servers via `mcp_servers.*` tables.
+/// Codex app-server MCP injection: `-c` overrides plus env for Bearer tokens
+/// so access tokens never appear on the process command line.
+pub struct CodexMcpConfig {
+    pub overrides: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
+/// `-c key=value` config overrides for a Codex spawn.
+#[cfg(test)]
 pub fn codex_config_overrides(servers: &[McpServerConfig]) -> Vec<String> {
+    codex_mcp_config(servers).overrides
+}
+
+pub fn codex_mcp_config(servers: &[McpServerConfig]) -> CodexMcpConfig {
     let mut overrides = Vec::new();
+    let mut inject_env = BTreeMap::new();
     for server in servers {
-        let McpTransport::Stdio { command, args, env } = &server.transport else {
-            tracing::info!(server = %server.name, "skipping http MCP server for Codex");
-            continue;
-        };
         // Codex consumes these as `-c key=value`, split at the first '='.
         // A '=' inside the (user-controlled) server or env-var name would
         // corrupt the split and can fail the whole app-server spawn.
-        if server.name.contains('=') || env.keys().any(|name| name.contains('=')) {
+        if server.name.contains('=') {
             tracing::warn!(
                 server = %server.name,
-                "skipping MCP server for Codex: '=' in server or env name breaks -c overrides"
+                "skipping MCP server for Codex: '=' in server name breaks -c overrides"
             );
             continue;
         }
-        let key = toml_quoted_key(&server.name);
-        overrides.push(format!(
-            "mcp_servers.{key}.command={}",
-            toml_string(command)
-        ));
-        if !args.is_empty() {
-            let list = args.iter().map(|a| toml_string(a)).collect::<Vec<_>>();
-            overrides.push(format!("mcp_servers.{key}.args=[{}]", list.join(",")));
-        }
-        if !env.is_empty() {
-            let table = env
-                .iter()
-                .map(|(name, value)| format!("{}={}", toml_quoted_key(name), toml_string(value)))
-                .collect::<Vec<_>>();
-            overrides.push(format!("mcp_servers.{key}.env={{{}}}", table.join(",")));
+        match &server.transport {
+            McpTransport::Stdio { command, args, env } => {
+                if env.keys().any(|name| name.contains('=')) {
+                    tracing::warn!(
+                        server = %server.name,
+                        "skipping MCP server for Codex: '=' in env name breaks -c overrides"
+                    );
+                    continue;
+                }
+                let key = toml_quoted_key(&server.name);
+                overrides.push(format!(
+                    "mcp_servers.{key}.command={}",
+                    toml_string(command)
+                ));
+                if !args.is_empty() {
+                    let list = args.iter().map(|a| toml_string(a)).collect::<Vec<_>>();
+                    overrides.push(format!("mcp_servers.{key}.args=[{}]", list.join(",")));
+                }
+                if !env.is_empty() {
+                    let table = env
+                        .iter()
+                        .map(|(name, value)| {
+                            format!("{}={}", toml_quoted_key(name), toml_string(value))
+                        })
+                        .collect::<Vec<_>>();
+                    overrides.push(format!("mcp_servers.{key}.env={{{}}}", table.join(",")));
+                }
+            }
+            McpTransport::Http { url, headers } => {
+                let key = toml_quoted_key(&server.name);
+                overrides.push(format!("mcp_servers.{key}.url={}", toml_string(url)));
+                let mut extra_headers = BTreeMap::new();
+                for (name, value) in headers {
+                    if name.eq_ignore_ascii_case("Authorization")
+                        && let Some(token) = value
+                            .strip_prefix("Bearer ")
+                            .or_else(|| value.strip_prefix("bearer "))
+                    {
+                        let env_name = codex_bearer_env_name(&server.name);
+                        inject_env.insert(env_name.clone(), token.to_string());
+                        overrides.push(format!(
+                            "mcp_servers.{key}.bearer_token_env_var={}",
+                            toml_string(&env_name)
+                        ));
+                    } else {
+                        extra_headers.insert(name.clone(), value.clone());
+                    }
+                }
+                if !extra_headers.is_empty() {
+                    let table = extra_headers
+                        .iter()
+                        .map(|(name, value)| {
+                            format!("{}={}", toml_quoted_key(name), toml_string(value))
+                        })
+                        .collect::<Vec<_>>();
+                    overrides.push(format!(
+                        "mcp_servers.{key}.http_headers={{{}}}",
+                        table.join(",")
+                    ));
+                }
+            }
         }
     }
-    overrides
+    CodexMcpConfig {
+        overrides,
+        env: inject_env,
+    }
+}
+
+fn codex_bearer_env_name(server: &str) -> String {
+    let mut name = String::from("FALCONDECK_MCP_");
+    for ch in server.chars() {
+        if ch.is_ascii_alphanumeric() {
+            name.push(ch.to_ascii_uppercase());
+        } else {
+            name.push('_');
+        }
+    }
+    name.push_str("_TOKEN");
+    name
 }
 
 /// Which connectors file an edit targets.
@@ -514,6 +753,51 @@ pub fn write_mcp_servers(
         }
     };
     write_mcp_servers_at(&path, mcp_servers)
+}
+
+/// Server names currently in the machine-global connectors file.
+pub fn global_server_names() -> std::collections::BTreeSet<String> {
+    read_connectors_file(&global_connectors_path())
+        .into_keys()
+        .collect()
+}
+
+/// Inserts or updates a global HTTP connector. Used by the catalog installer.
+pub fn upsert_global_http_connector(
+    name: &str,
+    url: &str,
+    auth: Option<&str>,
+    headers: BTreeMap<String, String>,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("connector name is required".to_string());
+    }
+    let path = global_connectors_path();
+    let mut servers = read_connectors_file(&path);
+    let mut extra = BTreeMap::new();
+    let enabled = if let Some(existing) = servers.remove(name) {
+        extra = existing.extra;
+        existing.enabled
+    } else {
+        true
+    };
+    servers.insert(
+        name.to_string(),
+        ConnectorEntry {
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            url: Some(url.to_string()),
+            headers,
+            auth: auth.map(str::to_string),
+            enabled,
+            providers: Vec::new(),
+            extra,
+        },
+    );
+    let value = serde_json::to_value(&servers)
+        .map_err(|error| format!("failed to encode connectors: {error}"))?;
+    write_mcp_servers_at(&path, &value)
 }
 
 fn write_mcp_servers_at(path: &Path, mcp_servers: &Value) -> Result<(), String> {
@@ -655,11 +939,11 @@ mod tests {
                 },
             },
         ];
-        let parsed: Value =
-            serde_json::from_str(&claude_mcp_config_json(&servers).unwrap()).unwrap();
+        let parsed: Value = serde_json::from_str(&claude_mcp_config_json(&servers)).unwrap();
         assert_eq!(parsed["mcpServers"]["local"]["command"], "npx");
         assert_eq!(parsed["mcpServers"]["remote"]["type"], "http");
-        assert!(claude_mcp_config_json(&[]).is_none());
+        let empty: Value = serde_json::from_str(&claude_mcp_config_json(&[])).unwrap();
+        assert_eq!(empty["mcpServers"], json!({}));
     }
 
     #[test]
@@ -817,9 +1101,7 @@ mod tests {
         assert!(names.contains(&BUILTIN_CONNECTOR_NAME));
         assert!(names.contains(&BUILTIN_EXTENSIONS_CONNECTOR_NAME));
 
-        let claude: Value =
-            serde_json::from_str(&claude_mcp_config_json(&servers).expect("claude config"))
-                .unwrap();
+        let claude: Value = serde_json::from_str(&claude_mcp_config_json(&servers)).unwrap();
         assert_eq!(
             claude["mcpServers"][BUILTIN_EXTENSIONS_CONNECTOR_NAME]["args"],
             json!(["mcp-extensions"])
@@ -895,9 +1177,7 @@ mod tests {
         let servers = with_builtin_control(user.clone(), Some(&spec(None)));
 
         // Claude --mcp-config JSON carries the falcondeck entry.
-        let claude: Value =
-            serde_json::from_str(&claude_mcp_config_json(&servers).expect("claude config"))
-                .unwrap();
+        let claude: Value = serde_json::from_str(&claude_mcp_config_json(&servers)).unwrap();
         assert_eq!(
             claude["mcpServers"][BUILTIN_CONNECTOR_NAME]["command"],
             json!(std::env::current_exe().unwrap().display().to_string())
@@ -1007,5 +1287,139 @@ mod tests {
                 "mcp_servers.\"my server\".env={K=\"v\"}".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn codex_http_servers_use_url_and_bearer_env() {
+        let servers = vec![McpServerConfig {
+            name: "notion".into(),
+            transport: McpTransport::Http {
+                url: "https://mcp.notion.com/mcp".into(),
+                headers: BTreeMap::from([
+                    (
+                        "Authorization".to_string(),
+                        "Bearer secret-token".to_string(),
+                    ),
+                    ("X-Region".to_string(), "us".to_string()),
+                ]),
+            },
+        }];
+        let config = codex_mcp_config(&servers);
+        assert_eq!(
+            config.overrides,
+            vec![
+                "mcp_servers.notion.url=\"https://mcp.notion.com/mcp\"".to_string(),
+                "mcp_servers.notion.bearer_token_env_var=\"FALCONDECK_MCP_NOTION_TOKEN\""
+                    .to_string(),
+                "mcp_servers.notion.http_headers={X-Region=\"us\"}".to_string(),
+            ]
+        );
+        assert_eq!(
+            config
+                .env
+                .get("FALCONDECK_MCP_NOTION_TOKEN")
+                .map(String::as_str),
+            Some("secret-token")
+        );
+    }
+
+    #[test]
+    fn oauth_connectors_receive_stored_bearer_tokens() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        crate::connector_oauth::save_token(
+            "notion",
+            crate::connector_oauth::StoredToken {
+                access_token: "ntn_live".into(),
+                refresh_token: None,
+                expires_at: None,
+                token_endpoint: "https://mcp.notion.com/token".into(),
+                client_id: "cid".into(),
+            },
+        )
+        .unwrap();
+        let connectors = write(
+            dir.path(),
+            r#"{"mcpServers":{"notion":{"url":"https://mcp.notion.com/mcp","auth":"oauth"}}}"#,
+        );
+        let servers =
+            load_mcp_servers_from(&connectors, &dir.path().join("missing.json"), "claude");
+        assert_eq!(servers.len(), 1);
+        let McpTransport::Http { url, headers } = &servers[0].transport else {
+            panic!("http");
+        };
+        assert_eq!(url, "https://mcp.notion.com/mcp");
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer ntn_live")
+        );
+    }
+
+    #[test]
+    fn opencode_overlay_maps_stdio_and_bearer_http() {
+        let servers = vec![
+            McpServerConfig {
+                name: "local".into(),
+                transport: McpTransport::Stdio {
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "s".into()],
+                    env: BTreeMap::from([("K".to_string(), "v".to_string())]),
+                },
+            },
+            McpServerConfig {
+                name: "remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://mcp.example.com/mcp".into(),
+                    headers: BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer tok".to_string(),
+                    )]),
+                },
+            },
+        ];
+        let parsed: Value = serde_json::from_str(&opencode_config_content(&servers)).unwrap();
+        assert_eq!(parsed["mcp"]["local"]["type"], json!("local"));
+        assert_eq!(parsed["mcp"]["local"]["command"], json!(["npx", "-y", "s"]));
+        assert_eq!(parsed["mcp"]["local"]["environment"]["K"], json!("v"));
+        assert_eq!(parsed["mcp"]["remote"]["type"], json!("remote"));
+        assert_eq!(parsed["mcp"]["remote"]["oauth"], json!(false));
+        assert_eq!(
+            parsed["mcp"]["remote"]["headers"]["Authorization"],
+            json!("Bearer tok")
+        );
+    }
+
+    #[test]
+    fn leased_claude_config_is_unique_and_unlinked_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_leased_claude_mcp_config(dir.path(), "{\"mcpServers\":{}}").unwrap();
+        let second = write_leased_claude_mcp_config(dir.path(), "{\"mcpServers\":{}}").unwrap();
+        assert_ne!(first.path(), second.path());
+        let first_path = first.path().to_path_buf();
+        drop(first);
+        assert!(!first_path.exists());
+        assert!(second.path().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(second.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o400);
+        }
+    }
+
+    #[test]
+    fn leased_claude_config_does_not_unlink_a_replaced_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = write_leased_claude_mcp_config(dir.path(), "original").unwrap();
+        let path = lease.path().to_path_buf();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "replacement").unwrap();
+        drop(lease);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
     }
 }

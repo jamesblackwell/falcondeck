@@ -3,6 +3,7 @@ import {
   interactiveResolutionFromResponse,
   wasTurnInterruptedByShutdown,
   workspaceAccount,
+  workspaceAgent,
   workspaceProviderLabel,
   type AgentProvider,
   type ConversationItem,
@@ -57,17 +58,22 @@ export function providerLabel(provider: AgentProvider) {
 }
 
 export function workspaceComposerDisabled(workspace: WorkspaceSummary | null | undefined) {
-  if (!workspace) return true
+  // Status is not "no project". A selected workspace must stay typeable while
+  // restore catches up; send is gated separately.
+  return !workspace
+}
 
-  switch (workspace.status) {
-    case 'connecting':
-    case 'disconnected':
-    case 'error':
-    case 'needs_auth':
-      return true
-    default:
-      return false
-  }
+function workspaceProviderCanSend(
+  workspace: WorkspaceSummary,
+  provider: AgentProvider,
+) {
+  const agent = workspaceAgent(workspace, provider)
+  if (!agent) return false
+  if (agent.account.status === 'needs_auth') return false
+  if (agent.account.status === 'ready') return true
+  // Placeholder catalogs (Grok models before the first handshake) are enough
+  // to start a turn; the daemon connects that provider on first use.
+  return agent.models.length > 0
 }
 
 export function workspaceSendBlockReason(
@@ -75,6 +81,10 @@ export function workspaceSendBlockReason(
   provider: AgentProvider,
 ) {
   if (!workspace) return 'Select a project to get started.'
+
+  if (workspaceProviderCanSend(workspace, provider)) {
+    return null
+  }
 
   switch (workspace.status) {
     case 'connecting':

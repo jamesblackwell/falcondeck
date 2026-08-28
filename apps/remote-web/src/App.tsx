@@ -20,6 +20,7 @@ import {
   countAwaitingResponseThreads,
   conversationItemsForSelection,
   currentTurnPlan,
+  wasTurnInterruptedByShutdown,
   DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
   decryptUtf8Batch,
@@ -37,6 +38,10 @@ import {
   fetchWithTimeout,
   filesToImageInputs,
   forkThread,
+  HandoffIncompleteError,
+  handoffBlockedReason,
+  handoffDestinationSettings,
+  handoffThread,
   generateBoxKeyPair,
   generateUserItemId,
   imageAttachmentSendBlockReason,
@@ -77,6 +82,8 @@ import {
   shouldYieldBeforeRelayDisplayFlush,
   shouldYieldRelayDisplayFrame,
   yieldRelayDisplayFrame,
+  composerSkillCatalog,
+  normalizeSkillSummaries,
   selectedSkillsFromText,
   serviceTierForTurn,
   speechSynthesisBlob,
@@ -103,6 +110,8 @@ import {
   workspaceProviderOptions,
   threadForSelection,
   type AgentProvider,
+  type LiveSkillCatalog,
+  type SkillSummary,
   type AttachmentPreparationCounts,
   type ClaimPairingRequest,
   type ClaimPairingResponse,
@@ -125,6 +134,7 @@ import {
   type PersistedComposerSelection,
   type PersistedComposerState,
   type PersistedRemoteSession,
+  type ProjectGroup,
   type QueuedRemoteAction,
   type RelayServerMessage,
   type RelayRpcFailureCode,
@@ -145,6 +155,7 @@ import {
 } from "@falcondeck/client-core";
 import {
   Conversation,
+  InterruptedTurnNotice,
   ComposerSuggestionPill,
   GoalBubble,
   GoalControl,
@@ -196,6 +207,8 @@ import {
   CLIENT_KEYPAIR_STORAGE_KEY,
   collectConversationItemUpdates,
   connectionBadgeState,
+  boundRetainedThreadItems,
+  createSnapshotCacheScheduler,
   deriveConnectionHelpState,
   encryptedRpcErrorMessage,
   getDeviceLabel,
@@ -228,6 +241,7 @@ import {
   snapshotRetryDelayMs,
   waitForPollInterval,
   type NotificationPreference,
+  type SnapshotCacheScheduler,
 } from "./lib/remoteAppUtils";
 import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
@@ -460,12 +474,19 @@ function RemoteApp() {
   );
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerState>(() => readPersistedComposerState());
+  const [handoffPending, setHandoffPending] = useState(false);
+  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
+    string | null
+  >(null);
+  const handoffPendingRef = useRef(false);
 
   // Each conversation keeps its own unsent input, keyed by workspace + thread
   // ('new' for a thread not yet created), so navigating never carries text or
   // attachments across. Draft text is device-local persistent; attachments
   // follow their conversation for the session only.
   const conversationKey = draftKeyFor(selectedWorkspaceId, selectedThreadId);
+  const isPreparingSelectedHandoff =
+    handoffPendingThreadKey === conversationKey;
   const conversationKeyRef = useRef(conversationKey);
   const draft = drafts[conversationKey]?.text ?? "";
   const attachments =
@@ -602,7 +623,7 @@ function RemoteApp() {
     snapshot: DaemonSnapshot;
     lastReceivedSeq: number;
   } | null>(null);
-  const snapshotCacheTimerRef = useRef<number | null>(null);
+  const snapshotCacheSchedulerRef = useRef<SnapshotCacheScheduler | null>(null);
   const pendingRelayUpdatesRef = useRef<RelayUpdate[]>([]);
   const ephemeralAudioChainRef = useRef<Promise<void>>(Promise.resolve());
   // Cancels whichever scheduling mechanism the pending flush was booked on
@@ -736,6 +757,26 @@ function RemoteApp() {
     cancelRelayFlushRef.current = null;
   }, []);
 
+  const writePendingSnapshotCache = useCallback(() => {
+    const pending = pendingSnapshotCacheRef.current;
+    pendingSnapshotCacheRef.current = null;
+    if (!pending) return;
+
+    persistRemoteSnapshot(
+      pending.sessionId,
+      pending.snapshot,
+      pending.lastReceivedSeq,
+    );
+  }, []);
+
+  // Created once; the write closure reads refs, so the scheduler survives
+  // every render without re-arming its timer.
+  if (snapshotCacheSchedulerRef.current === null) {
+    snapshotCacheSchedulerRef.current =
+      createSnapshotCacheScheduler(writePendingSnapshotCache);
+  }
+  const snapshotCacheScheduler = snapshotCacheSchedulerRef.current;
+
   const resetSavedRemoteConnection = useCallback(() => {
     suppressReconnectRef.current = true;
     abortPendingActionPolls();
@@ -747,10 +788,7 @@ function RemoteApp() {
       window.clearTimeout(sessionPersistTimerRef.current);
       sessionPersistTimerRef.current = null;
     }
-    if (snapshotCacheTimerRef.current !== null) {
-      window.clearTimeout(snapshotCacheTimerRef.current);
-      snapshotCacheTimerRef.current = null;
-    }
+    snapshotCacheScheduler.cancel();
     pendingSnapshotCacheRef.current = null;
     clearPersistedRemoteSnapshot(sessionId);
     cancelRelayFlush();
@@ -796,7 +834,7 @@ function RemoteApp() {
     setSelectedWorkspaceId(null);
     setSelectedThreadId(null);
     setError(null);
-  }, [abortPendingActionPolls, cancelRelayFlush, sessionId]);
+  }, [abortPendingActionPolls, cancelRelayFlush, snapshotCacheScheduler, sessionId]);
 
   const persistCurrentSession = useCallback(
     (overrides?: Partial<PersistedRemoteSession>) => {
@@ -837,21 +875,8 @@ function RemoteApp() {
   }, [persistCurrentSession]);
 
   const flushPersistedSnapshotCache = useCallback(() => {
-    if (snapshotCacheTimerRef.current !== null) {
-      window.clearTimeout(snapshotCacheTimerRef.current);
-      snapshotCacheTimerRef.current = null;
-    }
-
-    const pending = pendingSnapshotCacheRef.current;
-    pendingSnapshotCacheRef.current = null;
-    if (!pending) return;
-
-    persistRemoteSnapshot(
-      pending.sessionId,
-      pending.snapshot,
-      pending.lastReceivedSeq,
-    );
-  }, []);
+    snapshotCacheScheduler.flush();
+  }, [snapshotCacheScheduler]);
 
   const schedulePersistCurrentSession = useCallback(
     (
@@ -881,9 +906,11 @@ function RemoteApp() {
     [flushPersistedSession],
   );
 
-  // Snapshot writes are intentionally trailing and throttled. A stream can
-  // produce many state updates per second; localStorage should only receive
-  // a stable warm-start image, never become part of the hot path.
+  // Snapshot writes are intentionally trailing and spaced at least
+  // SNAPSHOT_CACHE_MIN_INTERVAL_MS apart: a stream can produce many state
+  // updates per second, and each write stringifies the whole snapshot, so the
+  // pending image keeps refreshing while localStorage only sees stable
+  // warm-start images instead of becoming part of the hot path.
   useEffect(() => {
     if (!sessionId || !snapshot) return;
 
@@ -892,12 +919,8 @@ function RemoteApp() {
       snapshot,
       lastReceivedSeq: lastReceivedSeqRef.current,
     };
-    if (snapshotCacheTimerRef.current !== null) return;
-
-    snapshotCacheTimerRef.current = window.setTimeout(() => {
-      flushPersistedSnapshotCache();
-    }, 1_000);
-  }, [flushPersistedSnapshotCache, sessionId, snapshot]);
+    snapshotCacheScheduler.schedule();
+  }, [snapshotCacheScheduler, sessionId, snapshot]);
 
   const failCurrentConnection = useCallback(
     (message: string) => {
@@ -973,6 +996,7 @@ function RemoteApp() {
       const deadline = options?.timeoutMs
         ? Date.now() + options.timeoutMs
         : null;
+      let pollAttempt = 0;
 
       for (;;) {
         if (options?.signal?.aborted) {
@@ -1008,7 +1032,14 @@ function RemoteApp() {
         if (action.status === "failed") {
           throw new Error(action.error ?? "Remote action failed");
         }
-        await waitForPollInterval(800, options?.signal);
+        // An answered action usually completes within the first few polls, so
+        // keep the snappy 800ms cadence there, then ease off toward a 3s cap —
+        // the deadline below still bounds the total wait.
+        await waitForPollInterval(
+          Math.min(800 * 2 ** Math.floor(pollAttempt / 4), 3_000),
+          options?.signal,
+        );
+        pollAttempt += 1;
       }
     },
     [clientToken, relayUrl, sessionId],
@@ -1212,19 +1243,24 @@ function RemoteApp() {
     },
     [],
   );
-  const groups = useMemo(
-    () =>
-      buildProjectGroups(
-        snapshot?.workspaces ?? [],
-        snapshot?.threads ?? [],
-        snapshot?.preferences.workspace_order,
-      ),
-    [
+  // Feeding the last build back lets buildProjectGroups return identical
+  // group/thread objects while snapshot content is unchanged, so the memoized
+  // sidebar sections hold still across streaming-driven snapshot churn.
+  const previousGroupsRef = useRef<ProjectGroup[] | null>(null);
+  const groups = useMemo(() => {
+    const nextGroups = buildProjectGroups(
+      snapshot?.workspaces ?? [],
+      snapshot?.threads ?? [],
       snapshot?.preferences.workspace_order,
-      snapshot?.threads,
-      snapshot?.workspaces,
-    ],
-  );
+      previousGroupsRef.current,
+    );
+    previousGroupsRef.current = nextGroups;
+    return nextGroups;
+  }, [
+    snapshot?.preferences.workspace_order,
+    snapshot?.threads,
+    snapshot?.workspaces,
+  ]);
   const interactiveRequests = useMemo(
     () =>
       selectedThreadId
@@ -1926,11 +1962,8 @@ function RemoteApp() {
             // snapshot that can no longer be trusted until bootstrap and a
             // fresh snapshot recovery complete.
             snapshotPresentRef.current = false;
+            snapshotCacheScheduler.cancel();
             pendingSnapshotCacheRef.current = null;
-            if (snapshotCacheTimerRef.current !== null) {
-              window.clearTimeout(snapshotCacheTimerRef.current);
-              snapshotCacheTimerRef.current = null;
-            }
             clearPersistedRemoteSnapshot(sessionId);
             setSnapshot(null);
             setThreadItems({});
@@ -2123,6 +2156,7 @@ function RemoteApp() {
     pairingId,
     schedulePersistCurrentSession,
     sessionId,
+    snapshotCacheScheduler,
   ]);
 
   const scheduleRelayFlush = useCallback(() => {
@@ -2578,10 +2612,7 @@ function RemoteApp() {
     pendingSnapshotCursorRef.current = null;
     pendingRelayUpdatesRef.current = [];
     cancelRelayFlush();
-    if (snapshotCacheTimerRef.current !== null) {
-      window.clearTimeout(snapshotCacheTimerRef.current);
-      snapshotCacheTimerRef.current = null;
-    }
+    snapshotCacheScheduler.cancel();
     pendingSnapshotCacheRef.current = null;
     clearPersistedRemoteSnapshot();
     trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key;
@@ -2829,6 +2860,38 @@ function RemoteApp() {
     [clientToken, pollQueuedAction, relayUrl, reportError, sessionId],
   );
 
+  const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
+  const snapshotSkillsRef = useRef(selectedWorkspace?.skills ?? []);
+  snapshotSkillsRef.current = selectedWorkspace?.skills ?? [];
+  useEffect(() => {
+    liveSkillsRef.current = null;
+  }, [selectedWorkspace?.id]);
+  const loadSkills = useCallback(
+    async (provider: AgentProvider) => {
+      const workspaceId = selectedWorkspace?.id;
+      if (!workspaceId) return [];
+      try {
+        const payload = await callRpc<{ skills?: SkillSummary[] }>(
+          "workspace.skills",
+          {
+            workspace_id: workspaceId,
+            provider,
+          },
+        );
+        const skills = normalizeSkillSummaries(payload.skills);
+        liveSkillsRef.current = {
+          workspaceId,
+          provider,
+          skills,
+        };
+        return skills;
+      } catch {
+        return snapshotSkillsRef.current;
+      }
+    },
+    [callRpc, selectedWorkspace?.id],
+  );
+
   async function handleStop() {
     if (!selectedWorkspace || !selectedThreadId) return;
     if (selectedThread?.status !== "running") return;
@@ -2855,7 +2918,9 @@ function RemoteApp() {
    * suggestion. It carries no attachments and leaves the composer's own draft
    * where it was, so choosing a suggestion never eats work in progress.
    */
-  async function handleSubmit(override?: { text: string }) {
+  async function handleSubmit(
+    override?: { text: string; resumeInterrupted?: boolean },
+  ) {
     if ((attachmentPreparationCountsRef.current[conversationKey] ?? 0) > 0) {
       setError("Wait for image preparation to finish before sending.");
       return;
@@ -2864,7 +2929,9 @@ function RemoteApp() {
     const submittedAttachments = override ? [] : attachments;
     if (
       !selectedWorkspace ||
-      (!submittedDraft.trim() && submittedAttachments.length === 0)
+      (!override?.resumeInterrupted &&
+        !submittedDraft.trim() &&
+        submittedAttachments.length === 0)
     )
       return;
     const submitProvider = selectedThread?.provider ?? selectedProvider;
@@ -2878,7 +2945,11 @@ function RemoteApp() {
     }
     const submittedSkills = selectedSkillsFromText(
       submittedDraft,
-      selectedWorkspace.skills ?? [],
+      composerSkillCatalog(
+        liveSkillsRef.current,
+        selectedWorkspace,
+        selectedThread?.provider ?? selectedProvider,
+      ),
     );
     const userItemId = generateUserItemId();
     const submittedKey = conversationKey;
@@ -2981,6 +3052,7 @@ function RemoteApp() {
           service_tier: serviceTierForTurn(selectedServiceTier, activeModel),
           permission_mode: selectedPermissionMode,
           sandbox_mode: selectedSandboxMode,
+          resume_interrupted: Boolean(override?.resumeInterrupted),
         },
         { awaitCompletion: false },
       );
@@ -3266,6 +3338,26 @@ function RemoteApp() {
     );
   }, []);
 
+  const handleContinueInterruptedTurn = () => {
+    void handleSubmit({ text: "", resumeInterrupted: true });
+  };
+
+  const handleDismissInterruptedTurn = useCallback(() => {
+    if (!selectedWorkspace || !selectedThreadId) return;
+    void submitQueuedAction<ThreadHandle>("thread.update", {
+      workspace_id: selectedWorkspace.id,
+      thread_id: selectedThreadId,
+      acknowledge_interruption: true,
+    })
+      .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
+      .catch(() => {});
+  }, [
+    applyThreadHandle,
+    selectedThreadId,
+    selectedWorkspace,
+    submitQueuedAction,
+  ]);
+
   const applyThreadSummary = useCallback((thread: ThreadSummary) => {
     setSnapshot((current) =>
       current
@@ -3331,6 +3423,25 @@ function RemoteApp() {
             workspace_id: workspaceId,
             thread_id: threadId,
             pinned,
+          }),
+        );
+        applyThreadHandle(handle);
+        setError(null);
+      } catch (e) {
+        reportError(e, "Failed to update pin");
+      }
+    },
+    [applyThreadHandle, reportError, submitQueuedAction],
+  );
+
+  const handleTogglePinThreadInProject = useCallback(
+    async (workspaceId: string, threadId: string, pinnedInProject: boolean) => {
+      try {
+        const handle = normalizeThreadHandle(
+          await submitQueuedAction<ThreadHandle>("thread.update", {
+            workspace_id: workspaceId,
+            thread_id: threadId,
+            pinned_in_project: pinnedInProject,
           }),
         );
         applyThreadHandle(handle);
@@ -3624,6 +3735,18 @@ function RemoteApp() {
     () => workspaceProviderOptions(selectedWorkspace),
     [selectedWorkspace],
   );
+  const handoffProviderOptions = useMemo(
+    () =>
+      selectedThread
+        ? providerOptions.filter(
+            (option) => option.provider !== selectedThread.provider,
+          )
+        : [],
+    [providerOptions, selectedThread],
+  );
+  const handoffDisabledReason = handoffBlockedReason(selectedThread, {
+    pending: handoffPending,
+  });
   const activeCapabilities = useMemo(
     () =>
       threadAgentCapabilities(
@@ -3779,7 +3902,11 @@ function RemoteApp() {
             ],
             selected_skills: selectedSkillsFromText(
               item.text,
-              selectedWorkspace.skills ?? [],
+              composerSkillCatalog(
+                liveSkillsRef.current,
+                selectedWorkspace,
+                selectedThread.provider,
+              ),
             ),
             provider: selectedThread.provider,
             model_id: selectedThread.agent.model_id,
@@ -3972,6 +4099,124 @@ function RemoteApp() {
       reportError(e, "Failed to fork thread");
     }
   }
+
+  const handleHandoffProviderSelect = useCallback(
+    async (provider: AgentProvider) => {
+      if (
+        !selectedWorkspace ||
+        !selectedThread ||
+        provider === selectedThread.provider
+      ) {
+        return;
+      }
+      if (handoffPendingRef.current) return;
+      handoffPendingRef.current = true;
+      setHandoffPending(true);
+
+      const destination = handoffDestinationSettings(
+        selectedWorkspace,
+        provider,
+        persistedComposerSelections,
+      );
+      const targetLabel = destination.destinationLabel;
+      const showHandoffThread = (handle: ThreadHandle) => {
+        const destinationKey = draftKeyFor(
+          handle.workspace.id,
+          handle.thread.id,
+        );
+        const emptyDetail: ThreadDetail = {
+          workspace: handle.workspace,
+          thread: handle.thread,
+          items: [],
+          has_older: false,
+          oldest_item_id: null,
+          newest_item_id: null,
+          is_partial: false,
+        };
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                workspaces: current.workspaces.map((workspace) =>
+                  workspace.id === handle.workspace.id
+                    ? handle.workspace
+                    : workspace,
+                ),
+                threads: [
+                  handle.thread,
+                  ...current.threads.filter(
+                    (thread) => thread.id !== handle.thread.id,
+                  ),
+                ],
+              }
+            : current,
+        );
+        conversationKeyRef.current = destinationKey;
+        threadDetailRef.current = emptyDetail;
+        setHandoffPendingThreadKey(destinationKey);
+        setThreadDetail(emptyDetail);
+        setSelectedWorkspaceId(handle.workspace.id);
+        setSelectedThreadId(handle.thread.id);
+      };
+
+      try {
+        await handoffThread(
+          forkApi,
+          {
+            workspace: selectedWorkspace,
+            thread: selectedThread,
+            provider,
+            ...destination,
+          },
+          { onDestinationReady: showHandoffThread },
+        );
+        setError(null);
+        toast({
+          variant: "success",
+          title: `Continuing with ${targetLabel}`,
+          description:
+            "The source conversation was carried over verbatim. The original is unchanged.",
+        });
+      } catch (error: unknown) {
+        if (error instanceof HandoffIncompleteError) {
+          showHandoffThread(error.handle);
+          if (error.detail) {
+            threadDetailRef.current = error.detail;
+            setThreadDetail(error.detail);
+          }
+          if (!error.turnStarted) {
+            setDraftForConversation(
+              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
+              error.prompt,
+            );
+          }
+          setError(error.message);
+          toast({
+            variant: "warning",
+            title: `Linked ${targetLabel} thread created`,
+            description: error.turnStarted
+              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
+              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
+          });
+          return;
+        }
+        reportError(error, "Failed to create handoff");
+      } finally {
+        handoffPendingRef.current = false;
+        setHandoffPending(false);
+        setHandoffPendingThreadKey(null);
+      }
+    },
+    [
+      forkApi,
+      persistedComposerSelections,
+      reportError,
+      selectedThread,
+      selectedWorkspace,
+      setDraftForConversation,
+      toast,
+    ],
+  );
 
   // Set by "Mark as unread" so the auto-read effect does not undo it while
   // the thread is still selected.
@@ -4296,14 +4541,15 @@ function RemoteApp() {
 
   useEffect(() => {
     if (!snapshot) return;
-    const valid = new Set(snapshot.threads.map((t) => t.id));
-    setThreadItems((current) => {
-      const next = Object.entries(current).filter(([id]) => valid.has(id));
-      return next.length === Object.keys(current).length
-        ? current
-        : Object.fromEntries(next);
-    });
-  }, [snapshot]);
+    // Streaming deltas create an item cache for every thread they mention,
+    // but only the selected thread reads its cache — selecting a thread
+    // rehydrates through thread.detail regardless. Bound the cache so a
+    // long-lived session cannot accumulate one growing array per streamed
+    // thread; see boundRetainedThreadItems for the eviction rules.
+    setThreadItems((current) =>
+      boundRetainedThreadItems(current, snapshot.threads, selectedThreadId),
+    );
+  }, [selectedThreadId, snapshot]);
 
   useEffect(() => {
     const count = countAwaitingResponseThreads(snapshot?.threads ?? []);
@@ -4658,6 +4904,7 @@ function RemoteApp() {
                 onSuggestThreadTitle={handleSuggestThreadTitle}
                 onForkThread={handleForkThread}
                 onTogglePinThread={handleTogglePinThread}
+                onTogglePinThreadInProject={handleTogglePinThreadInProject}
                 onMarkThreadRead={handleMarkThreadRead}
                 onMarkThreadUnread={handleMarkThreadUnread}
                 onRemoveWorkspace={handleRemoveWorkspace}
@@ -4719,6 +4966,7 @@ function RemoteApp() {
           onSuggestThreadTitle={handleSuggestThreadTitle}
           onForkThread={handleForkThread}
           onTogglePinThread={handleTogglePinThread}
+          onTogglePinThreadInProject={handleTogglePinThreadInProject}
           onMarkThreadRead={handleMarkThreadRead}
           onMarkThreadUnread={handleMarkThreadUnread}
           onRemoveWorkspace={handleRemoveWorkspace}
@@ -4796,7 +5044,12 @@ function RemoteApp() {
                   exportTitle={selectedThread?.title}
                   preferences={snapshot?.preferences ?? null}
                   emptyState={conversationEmptyState}
-                  isSending={isSubmitting}
+                  isSending={isSubmitting || isPreparingSelectedHandoff}
+                  sendingLabel={
+                    isPreparingSelectedHandoff
+                      ? "Starting the linked thread…"
+                      : null
+                  }
                   isThinking={selectedThread?.status === "running"}
                   isWaitingForInput={
                     selectedThread?.status === "waiting_for_input"
@@ -4840,6 +5093,13 @@ function RemoteApp() {
                     )
                   }
                 />
+                {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
+                  <InterruptedTurnNotice
+                    onContinue={handleContinueInterruptedTurn}
+                    onDismiss={handleDismissInterruptedTurn}
+                    isContinuing={isSubmitting}
+                  />
+                ) : null}
                 {selectedThread ? (
                   <QueuedTurns
                     queuedTurns={selectedThread.queued_turns}
@@ -4878,12 +5138,18 @@ function RemoteApp() {
                   attachments={attachments}
                   preparingAttachmentCount={preparingAttachmentCount}
                   skills={selectedWorkspace?.skills ?? []}
+                  loadSkills={loadSkills}
                   selectedProvider={activeProvider}
                   onProviderChange={handleProviderChange}
                   providers={providerOptions}
                   capabilities={activeCapabilities}
                   providerLocked={Boolean(selectedThread)}
                   showProviderSelector={!selectedThread}
+                  handoffProviders={handoffProviderOptions}
+                  onHandoffProviderSelect={
+                    selectedThread ? handleHandoffProviderSelect : undefined
+                  }
+                  handoffDisabledReason={handoffDisabledReason}
                   models={models}
                   selectedModelId={selectedModel}
                   onModelChange={handleModelChange}
@@ -4910,10 +5176,16 @@ function RemoteApp() {
                   }
                   sendDisabled={
                     isSubmitting ||
+                    isPreparingSelectedHandoff ||
                     preparingAttachmentCount > 0 ||
                     Boolean(attachmentSendBlockReason)
                   }
-                  sendDisabledReason={attachmentSendBlockReason ?? undefined}
+                  sendDisabledReason={
+                    attachmentSendBlockReason ??
+                    (isPreparingSelectedHandoff
+                      ? "Wait for the handoff turn to start"
+                      : undefined)
+                  }
                   isRunning={
                     selectedThread?.status === "running" ||
                     selectedThread?.status === "waiting_for_input"

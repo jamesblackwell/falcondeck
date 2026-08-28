@@ -91,46 +91,50 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
   const previewUrl = useAttachmentPreview(queued.id, attachmentCount > 0, getAttachmentPreview)
 
   return (
-    <Pressable
-      style={[styles.row, isFirst ? null : styles.rowDivided, isPending ? styles.rowPending : null]}
-      disabled={isPending}
-      accessibilityRole="button"
-      accessibilityLabel={`Queued message: ${label}`}
-      accessibilityHint="Opens actions for this queued message"
-      accessibilityState={{ disabled: isPending }}
-      onPress={onOpenActions}
-    >
-      {isPending ? (
-        <ActivityDiamond size={theme.iconSize.sm} color={theme.colors.fg.muted} />
-      ) : (
-        <CornerDownRight size={theme.iconSize.sm} color={theme.colors.fg.muted} />
-      )}
+    <View style={[styles.row, isFirst ? null : styles.rowDivided, isPending ? styles.rowPending : null]}>
+      <Pressable
+        style={styles.rowMain}
+        disabled={isPending}
+        accessibilityRole="button"
+        accessibilityLabel={`Queued message: ${label}`}
+        accessibilityHint="Opens actions for this queued message"
+        accessibilityState={{ disabled: isPending }}
+        onPress={onOpenActions}
+      >
+        {isPending ? (
+          <ActivityDiamond size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+        ) : (
+          <CornerDownRight size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+        )}
 
-      {previewUrl ? (
-        <Image
-          source={{ uri: previewUrl }}
-          style={styles.thumbnail}
-          contentFit="cover"
-          accessibilityIgnoresInvertColors
-        />
-      ) : null}
+        {previewUrl ? (
+          <Image
+            source={{ uri: previewUrl }}
+            style={styles.thumbnail}
+            contentFit="cover"
+            accessibilityIgnoresInvertColors
+          />
+        ) : null}
 
-      <Text variant="label" color="primary" numberOfLines={1} style={styles.label}>
-        {label}
-      </Text>
+        <Text variant="label" color="primary" numberOfLines={1} style={styles.label}>
+          {label}
+        </Text>
 
-      {attachmentCount > 0 ? (
-        <View style={styles.attachments}>
-          <Paperclip size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-          <Text variant="caption" size="2xs" color="muted">
-            {attachmentCount}
-          </Text>
-        </View>
-      ) : null}
+        {attachmentCount > 0 ? (
+          <View style={styles.attachments}>
+            <Paperclip size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+            <Text variant="caption" size="2xs" color="muted">
+              {attachmentCount}
+            </Text>
+          </View>
+        ) : null}
+      </Pressable>
 
       {/* Steering is the action worth a tap of its own: it is the difference
           between the message landing now and landing after the turn. Disabled
-          rather than hidden where the agent cannot take it, like desktop. */}
+          rather than hidden where the agent cannot take it, like desktop.
+          Kept outside the row pressable so a Steer tap cannot also open the
+          sheet (and fire Steer a second time). */}
       <Pressable
         style={({ pressed }) => [
           styles.steerButton,
@@ -163,7 +167,7 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
       >
         <Trash2 size={theme.iconSize.sm} color={theme.colors.fg.muted} />
       </Pressable>
-    </Pressable>
+    </View>
   )
 })
 
@@ -289,6 +293,13 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: theme.minTouchTarget,
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[1.5],
+  },
+  rowMain: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
+    minHeight: theme.minTouchTarget,
   },
   rowDivided: {
     borderTopWidth: 1,

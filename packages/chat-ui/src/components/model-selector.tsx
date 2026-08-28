@@ -78,7 +78,7 @@ export function ProviderSelector({
   disabled?: boolean;
 } & MenuOpenProps) {
   // A dropdown rather than a segmented control: the provider roster keeps
-  // growing (Codex, Claude, Grok, Gemini, OpenCode, …) and segments don't scale.
+  // growing (Codex, Claude, Grok, OpenCode, …) and segments don't scale.
   // An empty roster greys the control rather than removing it, so the toggle
   // row keeps its shape while a workspace is still connecting.
   return (
@@ -216,6 +216,8 @@ export function ModelMenu({
   const [modelQuery, setModelQuery] = useState("");
   const [panel, setPanel] = useState<"model" | "handoff">("model");
   const [starredIds, setStarredIds] = useState(readStoredStarredModelIds);
+  const canHandoff =
+    handoffProviders.length > 0 && Boolean(onHandoffProviderSelect);
   const modelSearchable = models.length >= SEARCHABLE_OPTION_THRESHOLD;
   const filteredModels = useMemo(
     () =>
@@ -241,8 +243,19 @@ export function ModelMenu({
   const triggerLabel = selectedModel
     ? formatModelLabel(selectedModel.label)
     : "Model";
+  const modelEncodesEffort = Boolean(
+    selectedModel &&
+      selectedEffort &&
+      (selectedModel.id
+        .toLowerCase()
+        .endsWith(`-${selectedEffort.toLowerCase()}`) ||
+        selectedModel.label
+          .trim()
+          .toLowerCase()
+          .endsWith(`(${selectedEffort.toLowerCase()})`)),
+  );
   const effortLabel =
-    selectedEffort && reasoningOptions.length > 0
+    selectedEffort && reasoningOptions.length > 0 && !modelEncodesEffort
       ? capitalize(selectedEffort)
       : null;
 
@@ -283,13 +296,12 @@ export function ModelMenu({
       list.push({ kind: "effort", id: "effort" });
     if (showFastRow && onFastActiveChange && fastTier !== null)
       list.push({ kind: "fast", id: "fast" });
-    if (handoffProviders.length > 0 && onHandoffProviderSelect)
-      list.push({ kind: "handoff", id: "handoff" });
+    if (canHandoff) list.push({ kind: "handoff", id: "handoff" });
     return list;
   }, [
+    canHandoff,
     fastTier,
     handoffProviders,
-    onHandoffProviderSelect,
     onFastActiveChange,
     panel,
     reasoningOptions.length,
@@ -414,8 +426,8 @@ export function ModelMenu({
             aria-label="Model"
             aria-haspopup="menu"
             aria-expanded={open}
-            disabled={disabled || models.length === 0}
-            className="fd-focus group inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
+            disabled={disabled || (models.length === 0 && !canHandoff)}
+            className="fd-focus group inline-flex h-7 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
           >
             {isFastOn ? (
               <Zap
@@ -642,7 +654,7 @@ export function ModelMenu({
                   </button>
                 </div>
               ) : null}
-              {handoffProviders.length > 0 && onHandoffProviderSelect ? (
+              {canHandoff ? (
                 <div className="mt-1 border-t border-border-subtle pt-1">
                   <button
                     id={`${menuId}-handoff`}
@@ -769,6 +781,10 @@ const PERMISSION_MODE_LABELS: Record<string, string> = {
   never: "Never ask",
 };
 
+const PERMISSION_MODE_TRIGGER_LABELS: Record<string, string> = {
+  bypassPermissions: "Bypass",
+};
+
 const SANDBOX_MODE_LABELS: Record<string, string> = {
   "read-only": "Read only",
   "workspace-write": "Workspace write",
@@ -810,6 +826,7 @@ export function PermissionModeSelector({
   // Greyed, not removed: our provider set is open, so hiding the control makes
   // the composer reflow every time the agent changes.
   const unavailable = modes.length === 0;
+  const selectedMode = value ?? (hasDefaultMode ? "default" : null);
 
   return (
     <Select
@@ -835,7 +852,12 @@ export function PermissionModeSelector({
           disabled={disabled || unavailable}
           aria-label="Permission mode"
         >
-          <SelectValue placeholder="Permissions" />
+          <SelectValue placeholder="Permissions">
+            {selectedMode
+              ? (PERMISSION_MODE_TRIGGER_LABELS[selectedMode] ??
+                modeLabel(PERMISSION_MODE_LABELS, selectedMode))
+              : undefined}
+          </SelectValue>
         </SelectTrigger>
       </Tooltip>
       <SelectContent
@@ -895,7 +917,9 @@ export function SandboxSelector({
           disabled={disabled || unavailable}
           aria-label="Sandbox mode"
         >
-          <SelectValue placeholder="Sandbox" />
+          <SelectValue placeholder="Sandbox">
+            {value ? modeLabel(SANDBOX_MODE_LABELS, value) : "Default"}
+          </SelectValue>
         </SelectTrigger>
       </Tooltip>
       <SelectContent

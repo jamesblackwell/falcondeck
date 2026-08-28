@@ -52,6 +52,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 // Undo, so Esc stays recoverable. Held in memory only, and dropped from Rust
 // when the undo window closes.
 @property(nonatomic) BOOL cancelledRecordingPending;
+// While dictation history is on, a pasted transcript no longer means the audio
+// can go: Rust keeps it for the retention window and deletes it from there.
+@property(nonatomic) BOOL retainRecordings;
 // Provider used for the retained recording; -1 when unknown (no recording,
 // or a recording that predates this field).
 @property(nonatomic) NSInteger retainedProvider;
@@ -177,7 +180,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                  shortcut:(FDShortcut)shortcut
            activationMode:(FDActivationMode)activationMode
                   provider:(FDProvider)provider
-             inputDeviceID:(NSString *)inputDeviceID {
+             inputDeviceID:(NSString *)inputDeviceID
+         retainRecordings:(BOOL)retainRecordings {
+  self.retainRecordings = retainRecordings;
   BOOL shouldResetModifier = self.enabled != enabled || self.shortcut != shortcut;
   self.enabled = enabled;
   self.shortcut = shortcut;
@@ -561,6 +566,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     }
     if (self.recordingProvider == FDProviderSystem) {
       if (@available(macOS 10.15, *)) {
+        // The OpenRouter path carries the path in FDEventAudioReady; Apple
+        // Speech never leaves this process, so announce it separately.
+        FDEmit(FDEventAudioRecorded, url.path);
         [self transcribeSystemRecording:url];
       } else {
         FDEmit(FDEventFailedRetained,
@@ -635,7 +643,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
         FDEmit(FDEventPasteFailed, text);
         return;
       }
-      [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+      if (!self.retainRecordings) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+      }
       [self setRetainedRecordingURL:nil provider:0];
       FDEmit(FDEventCompleted, text);
     });
@@ -766,6 +776,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   FDEmit(FDEventProcessing, @"");
   if (provider == FDProviderSystem) {
     if (@available(macOS 10.15, *)) {
+      FDEmit(FDEventAudioRecorded, url.path);
       [self transcribeSystemRecording:url];
     } else {
       FDEmit(FDEventFailedRetained,
@@ -865,7 +876,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 void fd_dictation_configure(bool enabled, int32_t shortcut,
                             int32_t activation_mode, int32_t provider,
-                            const char *input_device_id) {
+                            const char *input_device_id,
+                            bool retain_recordings) {
   NSString *inputDeviceID = input_device_id
       ? [NSString stringWithUTF8String:input_device_id]
       : nil;
@@ -875,8 +887,26 @@ void fd_dictation_configure(bool enabled, int32_t shortcut,
                shortcut:(FDShortcut)shortcut
          activationMode:(FDActivationMode)activation_mode
                 provider:(FDProvider)provider
-           inputDeviceID:inputDeviceID];
+           inputDeviceID:inputDeviceID
+        retainRecordings:retain_recordings];
   });
+}
+
+// The recording the overlay would retry, so a retry that already happened
+// elsewhere can clear it without disturbing a different pending one.
+char *fd_dictation_retained_recording_path(void) {
+  @autoreleasepool {
+    __block NSString *path = nil;
+    void (^read)(void) = ^{
+      path = [FDDictationController sharedController].recordingURL.path;
+    };
+    if (NSThread.isMainThread) {
+      read();
+    } else {
+      dispatch_sync(dispatch_get_main_queue(), read);
+    }
+    return path.length > 0 ? strdup(path.UTF8String) : NULL;
+  }
 }
 
 char *fd_dictation_audio_devices_json(void) {

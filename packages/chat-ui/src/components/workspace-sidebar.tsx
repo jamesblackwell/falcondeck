@@ -1,6 +1,7 @@
 import * as React from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import * as Collapsible from "@radix-ui/react-collapsible";
 import {
   ChevronDown,
   FolderClosed,
@@ -13,6 +14,7 @@ import {
 import {
   compareThreads,
   filterProjectGroupsByExtensions,
+  partitionSidebarThreads,
   THREAD_TAGS_EXTENSION_ID,
   threadProviderLabel,
   threadPriorityRank,
@@ -59,6 +61,13 @@ const VISIBLE_THREAD_LIMIT = 5;
 const SHOW_MORE_STEP = 10;
 const THREAD_PAGER_BUTTON_CLASS =
   "fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary";
+// Same chrome as the Projects sort/filter triggers and per-project SquarePen.
+const SIDEBAR_SECTION_ICON_BUTTON_CLASS =
+  "fd-focus -my-0.5 shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:pointer-events-none disabled:opacity-40";
+const SIDEBAR_SECTION_HEADING_BUTTON_CLASS =
+  "fd-focus relative rounded-[var(--fd-radius-sm)] pr-4 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted transition-colors hover:text-fg-secondary disabled:cursor-default disabled:opacity-60";
+const SIDEBAR_SECTION_HEADING_LABEL_CLASS =
+  "text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted";
 const RELATIVE_TIME_TICK_MS = 60_000;
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500;
 const WORKSPACE_DRAG_THRESHOLD_PX = 4;
@@ -79,6 +88,8 @@ export type WorkspaceSidebarProps = {
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread?: (workspaceId: string) => void;
+  /** Creates a conversation outside a user project. */
+  onNewChat?: () => Promise<void> | void;
   /** Open the command palette scoped to one project's threads. */
   onSearchProjectThreads?: (workspaceId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
@@ -106,6 +117,11 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     threadId: string,
     pinned: boolean,
+  ) => Promise<void> | void;
+  onTogglePinThreadInProject?: (
+    workspaceId: string,
+    threadId: string,
+    pinnedInProject: boolean,
   ) => Promise<void> | void;
   onMarkThreadRead?: (
     workspaceId: string,
@@ -141,6 +157,9 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     collapsed: boolean,
   ) => void;
+  /** When true, the Chats list is folded away. Host-owned like project collapse. */
+  chatsCollapsed?: boolean;
+  onChatsCollapsedChange?: (collapsed: boolean) => void;
   isAddingProject?: boolean;
   /** Optional chrome label. Desktop and the hosted app omit it so the
    *  titlebar is just window controls and search. */
@@ -317,12 +336,39 @@ function useStableRecencyOrder<Item>(
   }, [active, items, keyFor, threadFor]);
 }
 
+function useOrderedThreads(threads: ThreadSummary[], sortMode: ThreadSortMode) {
+  const stablePriorityThreads = useStablePriorityOrder(
+    threads,
+    sortMode === "priority",
+    summaryKey,
+    summaryThread,
+  );
+  const stableRecencyThreads = useStableRecencyOrder(
+    threads,
+    sortMode === "last_updated",
+    summaryKey,
+    summaryThread,
+  );
+  return useMemo(
+    () =>
+      sortMode === "priority"
+        ? stablePriorityThreads
+        : sortMode === "last_updated"
+          ? stableRecencyThreads
+          : [...threads].sort(compareThreads(sortMode)),
+    [sortMode, stablePriorityThreads, stableRecencyThreads, threads],
+  );
+}
+
 const ThreadList = memo(function ThreadList({
   group,
   sortMode,
   selectedThreadId,
   onSelectThread,
   onArchiveThread,
+  onArchiveConfirm,
+  onArchiveCancel,
+  pendingArchive,
   onOpenThreadContextMenu,
   onRequestRenameThread,
   nowTick,
@@ -333,6 +379,9 @@ const ThreadList = memo(function ThreadList({
   selectedThreadId: string | null;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  onArchiveConfirm?: () => void;
+  onArchiveCancel?: () => void;
+  pendingArchive?: { workspaceId: string; threadId: string } | null;
   onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
   onRequestRenameThread?: (args: {
     workspaceId: string;
@@ -342,31 +391,12 @@ const ThreadList = memo(function ThreadList({
   threadTagsById?: Record<string, ThreadTag[]>;
 }) {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT);
-  const unpinned = useMemo(
-    () => group.threads.filter((thread) => !thread.is_pinned),
+  const { pinnedInProject, unpinned } = useMemo(
+    () => partitionSidebarThreads(group.threads),
     [group.threads],
   );
-  const stablePriorityThreads = useStablePriorityOrder(
-    unpinned,
-    sortMode === "priority",
-    summaryKey,
-    summaryThread,
-  );
-  const stableRecencyThreads = useStableRecencyOrder(
-    unpinned,
-    sortMode === "last_updated",
-    summaryKey,
-    summaryThread,
-  );
-  const unpinnedThreads = useMemo(
-    () =>
-      sortMode === "priority"
-        ? stablePriorityThreads
-        : sortMode === "last_updated"
-          ? stableRecencyThreads
-          : [...unpinned].sort(compareThreads(sortMode)),
-    [sortMode, stablePriorityThreads, stableRecencyThreads, unpinned],
-  );
+  const pinnedInProjectThreads = useOrderedThreads(pinnedInProject, sortMode);
+  const unpinnedThreads = useOrderedThreads(unpinned, sortMode);
 
   const visible = unpinnedThreads.slice(0, visibleCount);
   const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length);
@@ -393,7 +423,7 @@ const ThreadList = memo(function ThreadList({
           No threads yet
         </p>
       ) : null}
-      {visible.map((thread) => (
+      {[...pinnedInProjectThreads, ...visible].map((thread) => (
         <ThreadItem
           key={thread.id}
           thread={thread}
@@ -401,6 +431,13 @@ const ThreadList = memo(function ThreadList({
           isSelected={selectedThreadId === thread.id}
           onSelect={onSelectThread}
           onArchive={onArchiveThread}
+          archiveConfirmPending={Boolean(
+            pendingArchive &&
+              pendingArchive.workspaceId === group.workspace.id &&
+              pendingArchive.threadId === thread.id,
+          )}
+          onArchiveConfirm={onArchiveConfirm}
+          onArchiveCancel={onArchiveCancel}
           onOpenContextMenu={onOpenThreadContextMenu}
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
@@ -416,6 +453,13 @@ const ThreadList = memo(function ThreadList({
           isSelected
           onSelect={onSelectThread}
           onArchive={onArchiveThread}
+          archiveConfirmPending={Boolean(
+            pendingArchive &&
+              pendingArchive.workspaceId === group.workspace.id &&
+              pendingArchive.threadId === trailingSelected.id,
+          )}
+          onArchiveConfirm={onArchiveConfirm}
+          onArchiveCancel={onArchiveCancel}
           onOpenContextMenu={onOpenThreadContextMenu}
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
@@ -482,6 +526,9 @@ const PinnedThreadList = memo(function PinnedThreadList({
   selectedThreadId,
   onSelectThread,
   onArchiveThread,
+  onArchiveConfirm,
+  onArchiveCancel,
+  pendingArchive,
   onOpenThreadContextMenu,
   onRequestRenameThread,
   nowTick,
@@ -491,6 +538,9 @@ const PinnedThreadList = memo(function PinnedThreadList({
   selectedThreadId: string | null;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  onArchiveConfirm?: () => void;
+  onArchiveCancel?: () => void;
+  pendingArchive?: { workspaceId: string; threadId: string } | null;
   onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
   onRequestRenameThread?: (args: {
     workspaceId: string;
@@ -518,6 +568,13 @@ const PinnedThreadList = memo(function PinnedThreadList({
             isSelected={selectedThreadId === thread.id}
             onSelect={onSelectThread}
             onArchive={onArchiveThread}
+            archiveConfirmPending={Boolean(
+              pendingArchive &&
+                pendingArchive.workspaceId === workspaceId &&
+                pendingArchive.threadId === thread.id,
+            )}
+            onArchiveConfirm={onArchiveConfirm}
+            onArchiveCancel={onArchiveCancel}
             onOpenContextMenu={onOpenThreadContextMenu}
             onRequestRename={onRequestRenameThread}
             nowTick={nowTick}
@@ -538,6 +595,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onSelectWorkspace,
   onSelectThread,
   onNewThread,
+  onNewChat,
   onSearchProjectThreads,
   onArchiveThread,
   onDeleteThread,
@@ -545,6 +603,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onSuggestThreadTitle,
   onForkThread,
   onTogglePinThread,
+  onTogglePinThreadInProject,
   onMarkThreadRead,
   onMarkThreadUnread,
   onAddProject,
@@ -560,6 +619,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onWorkspaceOrderChange,
   collapsedWorkspaceIds,
   onWorkspaceCollapsedChange,
+  chatsCollapsed: chatsCollapsedProp,
+  onChatsCollapsedChange,
   isAddingProject = false,
   title,
   errors = [],
@@ -595,10 +656,29 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     uncontrolledCollapsedWorkspaceIds,
     setUncontrolledCollapsedWorkspaceIds,
   ] = useState<Set<string>>(() => new Set());
+  const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
+    useState(false);
   const [selectedExtensionFilterValues, setSelectedExtensionFilterValues] =
     useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [threadContextMenu, setThreadContextMenu] =
     useState<ThreadContextMenuState | null>(null);
+  // Archive asks before it acts: the target row dims and shows a Confirm pill
+  // until the user confirms, dismisses, or clicks elsewhere.
+  const [pendingArchive, setPendingArchiveState] = useState<{
+    workspaceId: string;
+    threadId: string;
+  } | null>(null);
+  const pendingArchiveRef = useRef<{
+    workspaceId: string;
+    threadId: string;
+  } | null>(null);
+  const updatePendingArchive = useCallback(
+    (next: { workspaceId: string; threadId: string } | null) => {
+      pendingArchiveRef.current = next;
+      setPendingArchiveState(next);
+    },
+    [],
+  );
   const [renameTarget, setRenameTarget] = useState<{
     workspaceId: string;
     thread: ThreadSummary;
@@ -750,14 +830,37 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [],
   );
 
+  const chatGroups = useMemo(
+    () => displayGroups.filter((group) => group.workspace.kind === "casual"),
+    [displayGroups],
+  );
+  const projectDisplayGroups = useMemo(
+    () => displayGroups.filter((group) => group.workspace.kind !== "casual"),
+    [displayGroups],
+  );
+  const chatEntries = useMemo(() => {
+    const compare = compareThreads(threadSort);
+    return chatGroups
+      .flatMap((group) =>
+        group.threads
+          .filter((thread) => !thread.is_pinned)
+          .map((thread) => ({ workspaceId: group.workspace.id, thread })),
+      )
+      .sort((left, right) => {
+        const pinDelta =
+          Number(right.thread.is_pinned_in_project) -
+          Number(left.thread.is_pinned_in_project);
+        return pinDelta || compare(left.thread, right.thread);
+      });
+  }, [chatGroups, threadSort]);
   const orderedGroups = useMemo(() => {
-    if (!optimisticWorkspaceOrder) return displayGroups;
+    if (!optimisticWorkspaceOrder) return projectDisplayGroups;
     const groupsById = new Map(
-      displayGroups.map((group) => [group.workspace.id, group]),
+      projectDisplayGroups.map((group) => [group.workspace.id, group]),
     );
     const orderedIds = [
       ...optimisticWorkspaceOrder,
-      ...displayGroups.map((group) => group.workspace.id),
+      ...projectDisplayGroups.map((group) => group.workspace.id),
     ];
     const seen = new Set<string>();
     return orderedIds.flatMap((workspaceId) => {
@@ -766,7 +869,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       const group = groupsById.get(workspaceId);
       return group ? [group] : [];
     });
-  }, [displayGroups, optimisticWorkspaceOrder]);
+  }, [optimisticWorkspaceOrder, projectDisplayGroups]);
 
   const workspaceOrder = useMemo(
     () => orderedGroups.map((group) => group.workspace.id),
@@ -788,6 +891,25 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const allProjectsCollapsed =
     workspaceOrder.length > 0 &&
     workspaceOrder.every((workspaceId) => collapsedWorkspaces.has(workspaceId));
+
+  const chatsCollapsed = onChatsCollapsedChange
+    ? Boolean(chatsCollapsedProp)
+    : uncontrolledChatsCollapsed;
+
+  const handleChatsCollapsedChange = useCallback(
+    (collapsed: boolean) => {
+      if (onChatsCollapsedChange) {
+        onChatsCollapsedChange(collapsed);
+        return;
+      }
+      setUncontrolledChatsCollapsed(collapsed);
+    },
+    [onChatsCollapsedChange],
+  );
+
+  const handleToggleChats = useCallback(() => {
+    handleChatsCollapsedChange(!chatsCollapsed);
+  }, [chatsCollapsed, handleChatsCollapsedChange]);
 
   const handleWorkspaceOpenChange = useCallback(
     (workspaceId: string, open: boolean) => {
@@ -1080,6 +1202,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onRenameThread &&
         !onForkThread &&
         !onTogglePinThread &&
+        !onTogglePinThreadInProject &&
         !onMarkThreadRead &&
         !onMarkThreadUnread &&
         !onSetThreadStage
@@ -1097,6 +1220,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onRenameThread,
       onSetThreadStage,
       onTogglePinThread,
+      onTogglePinThreadInProject,
     ],
   );
 
@@ -1131,14 +1255,57 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     }
   }, [deleteTarget, onDeleteThread]);
 
+  const requestArchiveConfirm = useCallback(
+    (workspaceId: string, threadId: string) => {
+      updatePendingArchive({ workspaceId, threadId });
+    },
+    [updatePendingArchive],
+  );
+
+  const cancelArchiveConfirm = useCallback(() => {
+    updatePendingArchive(null);
+  }, [updatePendingArchive]);
+
+  const confirmArchive = useCallback(() => {
+    const pending = pendingArchiveRef.current;
+    updatePendingArchive(null);
+    if (!pending || !onArchiveThread) return;
+    void Promise.resolve(
+      onArchiveThread(pending.workspaceId, pending.threadId),
+    ).catch(() => {});
+  }, [onArchiveThread, updatePendingArchive]);
+
+  useEffect(() => {
+    if (!pendingArchive) return;
+    // Any press outside the confirming row, or Escape, backs out. Presses on
+    // the row itself are left to the row (click = dismiss, pill = confirm).
+    const handlePointerDown = (event: PointerEvent) => {
+      const { target } = event;
+      if (
+        target instanceof Element &&
+        target.closest('[data-archive-confirm="true"]')
+      ) {
+        return;
+      }
+      updatePendingArchive(null);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") updatePendingArchive(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [pendingArchive, updatePendingArchive]);
+
   const handleArchiveFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onArchiveThread) return;
     const { workspaceId, thread } = threadContextMenu;
     setThreadContextMenu(null);
-    void Promise.resolve(onArchiveThread(workspaceId, thread.id)).catch(
-      () => {},
-    );
-  }, [onArchiveThread, threadContextMenu]);
+    requestArchiveConfirm(workspaceId, thread.id);
+  }, [requestArchiveConfirm, threadContextMenu]);
 
   const handleStartRenameFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onRenameThread) return;
@@ -1176,6 +1343,19 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onTogglePinThread(workspaceId, thread.id, !thread.is_pinned),
     ).catch(() => {});
   }, [onTogglePinThread, threadContextMenu]);
+
+  const handleTogglePinInProjectFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onTogglePinThreadInProject) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    void Promise.resolve(
+      onTogglePinThreadInProject(
+        workspaceId,
+        thread.id,
+        !thread.is_pinned_in_project,
+      ),
+    ).catch(() => {});
+  }, [onTogglePinThreadInProject, threadContextMenu]);
 
   const handleMarkReadFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onMarkThreadRead) return;
@@ -1370,17 +1550,20 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     null;
 
   const newThreadRow =
-    onNewThread && newThreadWorkspaceId ? (
-      <Tooltip label="New thread" shortcut={newThreadShortcut}>
+    onNewChat || (onNewThread && newThreadWorkspaceId) ? (
+      <Tooltip label={onNewChat ? "New chat" : "New thread"} shortcut={newThreadShortcut}>
         <button
           type="button"
-          onClick={() => handleNewThread(newThreadWorkspaceId)}
+          onClick={() => {
+            if (onNewChat) void onNewChat();
+            else if (newThreadWorkspaceId) handleNewThread(newThreadWorkspaceId);
+          }}
           className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
         >
           <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
             <Plus aria-hidden="true" className="h-3.5 w-3.5" />
           </span>
-          <span className="min-w-0 flex-1">New thread</span>
+          <span className="min-w-0 flex-1">{onNewChat ? "New chat" : "New thread"}</span>
           {newThreadShortcut?.length ? (
             <span
               aria-hidden="true"
@@ -1658,7 +1841,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           entries={pinnedThreads}
           selectedThreadId={visualSelectedThreadId}
           onSelectThread={handleSelectThread}
-          onArchiveThread={onArchiveThread}
+          onArchiveThread={requestArchiveConfirm}
+          onArchiveConfirm={confirmArchive}
+          onArchiveCancel={cancelArchiveConfirm}
+          pendingArchive={pendingArchive}
           onOpenThreadContextMenu={handleOpenThreadContextMenu}
           onRequestRenameThread={handleRequestRenameThread}
           nowTick={nowTick}
@@ -1670,15 +1856,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onSelectThread={handleSelectThread}
         />
         <section aria-labelledby="fd-projects-heading">
-          {/* The action icons are optically aligned with the per-project new
-              thread button below: that glyph sits 10px from the sidebar edge
-              (px-2 row + p-0.5 button), while these 24px icon buttons inset
-              their 14px glyph by 5px — so the trailing padding drops to match. */}
-          <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-[5px]">
+          {/* The action icons match the per-project new-thread button: that
+              glyph sits 10px from the sidebar edge (px-2 row + p-0.5 button).
+              These heading buttons use the same padding, so the trailing
+              gutter is pr-2. */}
+          <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-2">
             <h2 id="fd-projects-heading">
               <button
                 type="button"
-                className="group/projects fd-focus relative rounded-[var(--fd-radius-sm)] pr-4 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted transition-colors hover:text-fg-secondary disabled:cursor-default disabled:opacity-60"
+                className={cn(
+                  "group/projects",
+                  SIDEBAR_SECTION_HEADING_BUTTON_CLASS,
+                )}
                 onClick={handleToggleAllProjects}
                 disabled={workspaceOrder.length === 0}
                 aria-expanded={!allProjectsCollapsed}
@@ -1728,22 +1917,20 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               {/* Adding a project belongs beside the projects it adds to. */}
               {onAddProject ? (
                 <Tooltip label="Add project" shortcut={addProjectShortcut}>
-                  <Button
+                  <button
                     type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-6 w-6"
+                    className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
                     onClick={onAddProject}
                     disabled={isAddingProject}
                     aria-label="Add project"
                     aria-busy={isAddingProject}
                   >
                     {isAddingProject ? (
-                      <ActivityDiamond size="md" />
+                      <ActivityDiamond size="sm" tone="current" />
                     ) : (
                       <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
                     )}
-                  </Button>
+                  </button>
                 </Tooltip>
               ) : null}
             </div>
@@ -1833,7 +2020,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                         sortMode={threadSort}
                         selectedThreadId={visualSelectedThreadId}
                         onSelectThread={handleSelectThread}
-                        onArchiveThread={onArchiveThread}
+                        onArchiveThread={requestArchiveConfirm}
+                        onArchiveConfirm={confirmArchive}
+                        onArchiveCancel={cancelArchiveConfirm}
+                        pendingArchive={pendingArchive}
                         onOpenThreadContextMenu={handleOpenThreadContextMenu}
                         onRequestRenameThread={handleRequestRenameThread}
                         nowTick={nowTick}
@@ -1849,7 +2039,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 );
               });
             })()}
-            {groups.length === 0 ? (
+            {orderedGroups.length === 0 && chatGroups.length === 0 ? (
               <EmptyState
                 icon={
                   onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined
@@ -1860,6 +2050,79 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ) : null}
           </div>
         </section>
+        {onNewChat || chatEntries.length > 0 ? (
+          <section aria-labelledby="fd-chats-heading" className="mt-4">
+            <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-2">
+              <h2 id="fd-chats-heading">
+                {chatEntries.length > 0 ? (
+                  <button
+                    type="button"
+                    className={cn(
+                      "group/chats",
+                      SIDEBAR_SECTION_HEADING_BUTTON_CLASS,
+                    )}
+                    onClick={handleToggleChats}
+                    aria-expanded={!chatsCollapsed}
+                    aria-label={
+                      chatsCollapsed ? "Expand chats" : "Collapse chats"
+                    }
+                    title={chatsCollapsed ? "Expand chats" : "Collapse chats"}
+                  >
+                    Chats
+                    <ChevronDown
+                      aria-hidden="true"
+                      className={cn(
+                        "absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 opacity-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)] group-hover/chats:opacity-100 group-focus-visible/chats:opacity-100",
+                        chatsCollapsed && "-rotate-90",
+                      )}
+                    />
+                  </button>
+                ) : (
+                  <span className={SIDEBAR_SECTION_HEADING_LABEL_CLASS}>
+                    Chats
+                  </span>
+                )}
+              </h2>
+              {onNewChat ? (
+                <Tooltip label="Start new chat">
+                  <button
+                    type="button"
+                    className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
+                    onClick={() => void onNewChat()}
+                    aria-label="Start new chat"
+                  >
+                    <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+              ) : null}
+            </div>
+            <Collapsible.Root open={!chatsCollapsed}>
+              <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+                {chatEntries.map(({ workspaceId, thread }) => (
+                  <ThreadItem
+                    key={`${workspaceId}:${thread.id}`}
+                    thread={thread}
+                    workspaceId={workspaceId}
+                    isSelected={visualSelectedThreadId === thread.id}
+                    onSelect={handleSelectThread}
+                    onArchive={requestArchiveConfirm}
+                    archiveConfirmPending={Boolean(
+                      pendingArchive &&
+                        pendingArchive.workspaceId === workspaceId &&
+                        pendingArchive.threadId === thread.id,
+                    )}
+                    onArchiveConfirm={confirmArchive}
+                    onArchiveCancel={cancelArchiveConfirm}
+                    onOpenContextMenu={handleOpenThreadContextMenu}
+                    onRequestRename={handleRequestRenameThread}
+                    nowTick={nowTick}
+                    tags={threadTagsById?.[thread.id]}
+                  />
+                ))}
+              </Collapsible.Content>
+            </Collapsible.Root>
+          </section>
+        ) : null}
       </SidebarContent>
       {footer ? (
         <div className="border-t border-border-subtle p-3">{footer}</div>
@@ -1877,6 +2140,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         canArchive={Boolean(onArchiveThread)}
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
+        canPinInProject={
+          Boolean(onTogglePinThreadInProject) &&
+          threadContextMenu != null &&
+          groups.find(
+            (group) => group.workspace.id === threadContextMenu.workspaceId,
+          )?.workspace.kind !== "casual"
+        }
         canMarkRead={Boolean(onMarkThreadRead)}
         canMarkUnread={Boolean(onMarkThreadUnread)}
         stageOptions={
@@ -1898,6 +2168,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onArchive={handleArchiveFromContextMenu}
         onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
+        onTogglePinInProject={handleTogglePinInProjectFromContextMenu}
         onMarkRead={handleMarkReadFromContextMenu}
         onMarkUnread={handleMarkUnreadFromContextMenu}
         onSetStage={handleSetStageFromContextMenu}

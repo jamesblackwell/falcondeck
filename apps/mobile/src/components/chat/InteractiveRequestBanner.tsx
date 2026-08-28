@@ -6,6 +6,7 @@ import * as Haptics from "expo-haptics";
 
 import {
   interactiveApprovalDecisions,
+  isMcpElicitationRequest,
   type ApprovalDecision,
   InteractiveRequest,
   InteractiveResponsePayload,
@@ -272,6 +273,23 @@ const QuestionBanner = memo(function QuestionBanner({
     }
   }
 
+  async function declineElicitation() {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onRespond({ kind: "approval", decision: "deny" });
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Failed to send your response",
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
   function advance() {
     if (!answered || isSubmitting) return;
     if (lastQuestion) {
@@ -445,6 +463,15 @@ const QuestionBanner = memo(function QuestionBanner({
 
       {question ? (
         <View style={styles.actions}>
+          {isMcpElicitationRequest(request) ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              label="Decline"
+              disabled={isSubmitting}
+              onPress={() => void declineElicitation()}
+            />
+          ) : null}
           <Button
             variant="ghost"
             size="sm"

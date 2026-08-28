@@ -94,6 +94,20 @@ describe('MermaidBlock', () => {
     expect(textOf(renderer)).toContain('Could not render')
   })
 
+  it('hides the render error while the enclosing message is still pending', async () => {
+    setMermaidAssetLoader(async () => {
+      throw new Error('Parse error')
+    })
+    const renderer = renderComponent(
+      <MermaidBlock code={'flowchart TD\n  A-->'} pending />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(textOf(renderer)).toContain('flowchart TD')
+    expect(textOf(renderer)).not.toContain('Could not render')
+  })
+
   it('keeps an empty fence as source without loading mermaid', async () => {
     const load = vi.fn(async () => 'window.mermaid={}')
     setMermaidAssetLoader(load)

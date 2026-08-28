@@ -517,6 +517,8 @@ export type ToolCallDetail =
 export type WorkspaceSummary = {
   id: string;
   path: string;
+  /** Omitted by older daemons, where every workspace was a project. */
+  kind?: "project" | "casual";
   status: WorkspaceStatus;
   agents: WorkspaceAgentSummary[];
   skills?: SkillSummary[];
@@ -590,6 +592,7 @@ export type ThreadSummary = {
   attention: ThreadAttention;
   is_archived: boolean;
   is_pinned: boolean;
+  is_pinned_in_project: boolean;
   goal: ThreadGoal | null;
   queued_turns: QueuedTurnSummary[];
   variant: ThreadVariant | null;
@@ -1467,6 +1470,8 @@ export type UpdateThreadPayload = {
   /** Tier id for future turns; `"default"` is the provider's standard tier. */
   service_tier?: string | null;
   pinned?: boolean;
+  /** Pin the thread to the top of its project instead of the global Pinned section. */
+  pinned_in_project?: boolean;
   /** Clear the retained app-shutdown interruption after user acknowledgement. */
   acknowledge_interruption?: boolean;
   permission_mode?: string | null;

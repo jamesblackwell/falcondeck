@@ -56,6 +56,7 @@ const testSnapshot = vi.hoisted(() => ({
       },
       is_archived: false,
       is_pinned: false,
+      is_pinned_in_project: false,
       goal: null,
       queued_turns: [],
       variant: null,
@@ -264,7 +265,8 @@ describe("Activity takeover wiring", () => {
     render(<App />);
     expect(screen.getByTestId("sidebar")).toHaveAttribute("data-visible", "true");
 
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Options" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Settings/ }));
     expect(await screen.findByText("Back to app")).toBeInTheDocument();
     expect(screen.getByTestId("sidebar")).toHaveAttribute(
       "data-visible",
@@ -318,7 +320,9 @@ describe("Activity takeover wiring", () => {
       await screen.findByRole("heading", { name: "Plugins" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Start new thread in falcon" }),
+    );
 
     expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
     expect(

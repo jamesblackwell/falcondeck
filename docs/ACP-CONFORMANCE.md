@@ -25,6 +25,7 @@ One adapter, no model call:
 cargo run -p falcondeck-daemon --example acp_conformance -- -- pi-acp
 cargo run -p falcondeck-daemon --example acp_conformance -- -- opencode acp
 cargo run -p falcondeck-daemon --example acp_conformance -- -- grok agent stdio
+cargo run -p falcondeck-daemon --example acp_conformance -- -- cursor-agent acp
 ```
 
 The default mode opens a discovery session and reports **Catalog discovery**:
@@ -109,9 +110,9 @@ Run it with:
 cargo test -p falcondeck-daemon --test acp_conformance
 ```
 
-The path-scoped `ACP conformance` GitHub Actions workflow runs this deterministic
-suite for daemon/protocol changes. It does not use model credentials or contact
-external harnesses.
+That deterministic suite does not use model credentials or contact external
+harnesses. The installed-binary matrix lives in `make harness-conformance`
+(see [HARNESS-CONFORMANCE.md](HARNESS-CONFORMANCE.md)).
 
 ## Shared event classification
 

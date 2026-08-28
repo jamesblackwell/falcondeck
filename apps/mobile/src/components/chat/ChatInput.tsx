@@ -14,10 +14,9 @@ import * as Haptics from 'expo-haptics'
 
 import {
   activeSlashQuery,
-  canonicalSkillAlias,
+  filterSlashSkills,
   insertTranscript,
   NO_AGENT_CAPABILITIES,
-  providerSupportsSkill,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
   type AgentProvider,
@@ -73,6 +72,7 @@ interface ChatInputProps {
   placeholder?: string
   attachments: ImageInput[]
   skills: SkillSummary[]
+  loadSkills?: (provider: AgentProvider) => Promise<SkillSummary[]>
   models: ModelSummary[]
   selectedModel: string | null
   selectedEffort: string | null
@@ -83,6 +83,10 @@ interface ChatInputProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** Other agents offered as linked-thread destinations on an existing thread. */
+  handoffProviders?: ProviderOption[]
+  onHandoffProviderSelect?: (provider: AgentProvider) => void
+  handoffDisabledReason?: string | null
   /** Tier id while fast mode is on; null is the provider's standard tier. */
   selectedServiceTier?: string | null
   onSelectServiceTier?: (tier: string | null) => void
@@ -132,6 +136,7 @@ export const ChatInput = memo(function ChatInput({
   placeholder = 'Ask anything',
   attachments,
   skills,
+  loadSkills,
   models,
   selectedModel,
   selectedEffort,
@@ -142,6 +147,9 @@ export const ChatInput = memo(function ChatInput({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  handoffProviders = [],
+  onHandoffProviderSelect,
+  handoffDisabledReason = null,
   selectedServiceTier = null,
   onSelectServiceTier,
   isRunning = false,
@@ -179,11 +187,14 @@ export const ChatInput = memo(function ChatInput({
     submit: boolean
   } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
+  const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null)
+  const loadSkillsRef = useRef(loadSkills)
+  loadSkillsRef.current = loadSkills
   const [voiceProvider, setVoiceProvider] = useState<SpeechProvider | null>(
     null,
   )
   const [openSheet, setOpenSheet] = useState<
-    'more' | 'provider' | 'permission' | 'sandbox' | 'voice-provider' | null
+    'more' | 'permission' | 'sandbox' | 'voice-provider' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const inputRef = useRef<TextInput | null>(null)
@@ -200,28 +211,37 @@ export const ChatInput = memo(function ChatInput({
   // draft instead of being the thing an empty composer does instead of Send.
   const showStop = Boolean(onStop) && isRunning && !hasContent
 
-  const filteredSkills = useMemo(() => {
-    const query = slashQuery?.query.trim().toLowerCase() ?? ''
-    const visibleSkills = skills.filter((skill) => {
-      if (!query) return true
+  const slashOpen = slashQuery !== null
+  useEffect(() => {
+    if (!slashOpen) return
+    const load = loadSkillsRef.current
+    if (!load) {
+      setLiveSkills(null)
+      return
+    }
+    let cancelled = false
+    void load(selectedProvider).then(
+      (next) => {
+        if (!cancelled) setLiveSkills(next)
+      },
+      () => {
+        if (!cancelled) setLiveSkills(null)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [selectedProvider, slashOpen])
 
-      return (
-        canonicalSkillAlias(skill.alias).includes(`/${query}`) ||
-        skill.label.toLowerCase().includes(query) ||
-        (skill.description ?? '').toLowerCase().includes(query)
-      )
-    })
-
-    return visibleSkills.sort((left, right) => {
-      const leftSupported = providerSupportsSkill(left, selectedProvider)
-      const rightSupported = providerSupportsSkill(right, selectedProvider)
-      if (leftSupported !== rightSupported) {
-        return leftSupported ? -1 : 1
-      }
-
-      return left.alias.localeCompare(right.alias)
-    })
-  }, [selectedProvider, skills, slashQuery?.query])
+  const filteredSkills = useMemo(
+    () =>
+      filterSlashSkills(
+        liveSkills ?? skills,
+        selectedProvider,
+        slashQuery?.query ?? '',
+      ),
+    [liveSkills, selectedProvider, skills, slashQuery?.query],
+  )
   const showGoalCommand =
     Boolean(onGoalCommand) &&
     capabilities.supports_goals &&
@@ -414,15 +434,6 @@ export const ChatInput = memo(function ChatInput({
         })
       }
     }
-    if (showProviderSelector && providerOptions.length > 0) {
-      items.push({
-        value: 'provider',
-        label: 'Agent',
-        description:
-          providerOptions.find((option) => option.provider === selectedProvider)
-            ?.label ?? selectedProvider,
-      })
-    }
     if (onSelectPermissionMode && capabilities.permission_modes.length > 0) {
       items.push({
         value: 'permission',
@@ -449,11 +460,8 @@ export const ChatInput = memo(function ChatInput({
     onSelectSandboxMode,
     onPasteImage,
     onTakePhoto,
-    providerOptions,
     selectedPermissionMode,
-    selectedProvider,
     selectedSandboxMode,
-    showProviderSelector,
   ])
 
   const handleMoreAction = useCallback(
@@ -467,8 +475,6 @@ export const ChatInput = memo(function ChatInput({
       } else if (value === 'camera') {
         setOpenSheet(null)
         onTakePhoto?.()
-      } else if (value === 'provider') {
-        setOpenSheet('provider')
       } else if (value === 'permission') {
         setOpenSheet('permission')
       } else if (value === 'sandbox') {
@@ -552,7 +558,6 @@ export const ChatInput = memo(function ChatInput({
                   </Pressable>
                 ) : null}
                 {filteredSkills.map((skill) => {
-                const supported = providerSupportsSkill(skill, selectedProvider)
                 const lastItem =
                   filteredSkills[filteredSkills.length - 1]?.id === skill.id
 
@@ -562,7 +567,6 @@ export const ChatInput = memo(function ChatInput({
                     style={[
                       styles.skillItem,
                       lastItem && styles.skillItemLast,
-                      !supported && styles.skillItemDisabled,
                     ]}
                     onPress={() => handleInsertSkill(skill.alias)}
                   >
@@ -579,14 +583,10 @@ export const ChatInput = memo(function ChatInput({
                           </Text>
                         </View>
                         <Text variant="caption" size="2xs" color="muted">
-                          {skill.providers.join(' / ')}
+                          {skill.source_kind.replace('_', ' ')}
                         </Text>
                       </View>
-                      <Text
-                        color={supported ? 'primary' : 'muted'}
-                        size="sm"
-                        weight="medium"
-                      >
+                      <Text color="primary" size="sm" weight="medium">
                         {skill.label}
                       </Text>
                       {skill.description ? (
@@ -652,12 +652,15 @@ export const ChatInput = memo(function ChatInput({
               selectedEffort={selectedEffort}
               effortOptions={effortOptions}
               selectedProvider={selectedProvider}
-              providers={providers}
-              showProviderSelector={false}
+              providers={providerOptions}
+              showProviderSelector={showProviderSelector}
               disabled={disabled}
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectEffort}
               onSelectProvider={onSelectProvider}
+              handoffProviders={handoffProviders}
+              onHandoffProviderSelect={onHandoffProviderSelect}
+              handoffDisabledReason={handoffDisabledReason}
               selectedServiceTier={selectedServiceTier}
               onSelectServiceTier={onSelectServiceTier}
               capabilities={capabilities}
@@ -757,21 +760,6 @@ export const ChatInput = memo(function ChatInput({
           onClose={() => setOpenSheet(null)}
         />
       ) : null}
-      {openSheet === 'provider' ? (
-        <OptionSheet
-          title="Agent"
-          items={providerOptions.map((option) => ({
-            value: option.provider,
-            label: option.label,
-          }))}
-          selected={selectedProvider}
-          onSelect={(value) => {
-            onSelectProvider(value as AgentProvider)
-            setOpenSheet(null)
-          }}
-          onClose={() => setOpenSheet(null)}
-        />
-      ) : null}
       {openSheet === 'sandbox' && onSelectSandboxMode ? (
         <OptionSheet
           title="Sandbox"
@@ -859,9 +847,6 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[3],
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: glassEdge(theme.isDark),
-  },
-  skillItemDisabled: {
-    opacity: 0.6,
   },
   skillItemLast: {
     borderBottomWidth: 0,

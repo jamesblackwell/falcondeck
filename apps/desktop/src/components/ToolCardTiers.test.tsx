@@ -56,6 +56,29 @@ describe('tool card tiers', () => {
     }
   })
 
+  it('breaks out commits, pushes, and isolated work from generic execute rows', () => {
+    const cases = [
+      {
+        title: 'Execute `git commit -m "feat: keep Studio"`',
+        label: 'Commit feat: keep Studio',
+        action: 'commit',
+      },
+      { title: 'Execute `git push origin main`', label: 'Push origin main', action: 'push' },
+      {
+        title: 'Agent: explore the auth flow',
+        label: 'Breakout explore the auth flow',
+        action: 'breakout',
+      },
+    ] as const
+    for (const { title, label, action } of cases) {
+      const { unmount } = renderTool(toolCall({ activity_kind: 'other' }, { title }))
+      expect(tier()).toHaveAttribute('data-tool-tier', 'card')
+      expect(tier()).toHaveAttribute('data-tool-action', action)
+      expect(screen.getByText(label)).toBeVisible()
+      unmount()
+    }
+  })
+
   it('leaves reads, searches, and fetches as quiet rows', () => {
     for (const activityKind of ['read', 'search', 'list', 'web_search', 'context'] as const) {
       const { unmount } = renderTool(toolCall({ activity_kind: activityKind }))

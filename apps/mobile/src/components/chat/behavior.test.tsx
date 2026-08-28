@@ -271,7 +271,7 @@ describe("chat behavior components", () => {
     [
       "interrupted",
       "Partial response",
-      "Response interrupted",
+      "Interrupted",
       "Response interrupted",
       "polite",
     ],
@@ -322,7 +322,7 @@ describe("chat behavior components", () => {
       />,
     );
 
-    expect(textOf(renderer)).toContain("Response interrupted");
+    expect(textOf(renderer)).toContain("Interrupted");
     expect(
       renderer.root.findAllByProps({ accessibilityLabel: "Copy response" }),
     ).toHaveLength(0);
@@ -372,6 +372,7 @@ describe("chat behavior components", () => {
   });
 
   it("renders model and effort chips in the toolbar", () => {
+    const onSelectProvider = vi.fn();
     const renderer = renderComponent(
       <InputToolbar
         models={[
@@ -382,17 +383,31 @@ describe("chat behavior components", () => {
         selectedEffort="medium"
         effortOptions={["low", "medium", "high"]}
         selectedProvider="codex"
+        providers={[
+          { provider: "codex", label: "Codex" },
+          { provider: "claude", label: "Claude" },
+        ]}
         showProviderSelector
         onSelectModel={vi.fn()}
         onSelectEffort={vi.fn()}
-        onSelectProvider={vi.fn()}
+        onSelectProvider={onSelectProvider}
       />,
     );
 
-    expect(textOf(renderer)).toContain("gpt-5");
+    expect(textOf(renderer)).toContain("Codex · gpt-5");
     expect(textOf(renderer)).toContain("Medium");
-    expect(textOf(renderer)).toContain("Codex");
+    expect(textOf(renderer)).not.toContain("Claude");
+
+    act(() => {
+      renderer.root
+        .findByProps({ accessibilityLabel: "Agent and model: Codex · gpt-5" })
+        .props.onPress();
+    });
     expect(textOf(renderer)).toContain("Claude");
+    act(() => {
+      renderer.root.findByProps({ accessibilityLabel: "Claude" }).props.onPress();
+    });
+    expect(onSelectProvider).toHaveBeenCalledWith("claude");
   });
 
   it("disables toolbar controls when the composer is disabled", () => {

@@ -1,13 +1,19 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import {
   approvalPolicyForProvider,
   buildOptimisticUserItem,
   generateUserItemId,
+  HandoffIncompleteError,
+  handoffDestinationSettings,
+  handoffThread,
+  type HandoffThreadApi,
   normalizeThreadDetail,
   normalizeThreadHandle,
   draftKeyFor,
   imageAttachmentSendBlockReason,
+  composerSkillCatalog,
+  normalizeSkillSummaries,
   selectedSkillsFromText,
   serviceTierForTurn,
   threadForSelection,
@@ -17,12 +23,16 @@ import {
   workspaceAgentCapabilities,
 } from "@falcondeck/client-core";
 import type {
+  AgentProvider,
   ConversationItem,
   InteractiveResponsePayload,
+  LiveSkillCatalog,
+  SkillSummary,
   ThreadDetail,
   ThreadHandle,
 } from "@falcondeck/client-core";
 
+import { isDemoSession } from "@/features/demo/demoRpc";
 import { isRelayTransportError } from "@/lib/connection-copy";
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
@@ -58,8 +68,59 @@ const nextPaint = () =>
     }
   });
 
+function emptyDestinationDetail(handle: ThreadHandle): ThreadDetail {
+  return {
+    workspace: handle.workspace,
+    thread: handle.thread,
+    items: [],
+    has_older: false,
+    oldest_item_id: null,
+    newest_item_id: null,
+    is_partial: false,
+  };
+}
+
+function demoThreadDetail(
+  workspaceId: string,
+  threadId: string,
+): ThreadDetail | null {
+  const session = useSessionStore.getState();
+  const workspace = session.snapshot?.workspaces.find(
+    (entry) => entry.id === workspaceId,
+  );
+  const thread = session.snapshot?.threads.find(
+    (entry) => entry.id === threadId,
+  );
+  if (!workspace || !thread) return null;
+  const items = session.threadItems[threadId] ?? [];
+  const detail: ThreadDetail = {
+    workspace,
+    thread,
+    items,
+    has_older: false,
+    oldest_item_id: items[0]?.id ?? null,
+    newest_item_id: items.at(-1)?.id ?? null,
+    is_partial: false,
+  };
+  session.setThreadDetail(detail);
+  return detail;
+}
+
+function showHandoffDestination(handle: ThreadHandle) {
+  const session = useSessionStore.getState();
+  session.applyThreadHandle(handle);
+  session.setThreadDetail(emptyDestinationDetail(handle));
+  session.selectThread(handle.workspace.id, handle.thread.id);
+}
+
 export function useSessionActions() {
   const detailRequestVersion = useRef(0);
+  const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
+  const handoffPendingRef = useRef(false);
+  const [handoffPending, setHandoffPending] = useState(false);
+  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
+    string | null
+  >(null);
 
   const startThread = useCallback(async () => {
     const relay = useRelayStore.getState();
@@ -103,7 +164,10 @@ export function useSessionActions() {
    * suggestion. It carries no attachments and leaves the composer's own draft
    * alone, so choosing a suggestion never eats work in progress.
    */
-  const submitTurn = useCallback(async (override?: { text: string }) => {
+  const submitTurn = useCallback(async (override?: {
+    text: string
+    resumeInterrupted?: boolean
+  }) => {
     const relay = useRelayStore.getState();
     const session = useSessionStore.getState();
     const ui = useUIStore.getState();
@@ -116,7 +180,9 @@ export function useSessionActions() {
     const submittedKey = ui.conversationKey;
     if (
       !workspace ||
-      (!submittedDraft.trim() && submittedAttachments.length === 0)
+      (!override?.resumeInterrupted &&
+        !submittedDraft.trim() &&
+        submittedAttachments.length === 0)
     )
       return;
     const activeThread = threadForSelection(
@@ -139,7 +205,7 @@ export function useSessionActions() {
     }
     const submittedSkills = selectedSkillsFromText(
       submittedDraft,
-      workspace.skills ?? [],
+      composerSkillCatalog(liveSkillsRef.current, workspace, provider),
     );
 
     ui.setIsSubmitting(true, submittedKey);
@@ -202,7 +268,7 @@ export function useSessionActions() {
       const expectQueued =
         activeThread?.status === "running" ||
         activeThread?.status === "waiting_for_input";
-      if (!expectQueued) {
+      if (!expectQueued && !override?.resumeInterrupted) {
         useSessionStore
           .getState()
           .upsertLocalThreadItem(activeThreadId, optimisticItem);
@@ -232,6 +298,7 @@ export function useSessionActions() {
           service_tier: serviceTierForTurn(ui.selectedServiceTier, activeModel),
           permission_mode: ui.selectedPermissionMode,
           sandbox_mode: ui.selectedSandboxMode,
+          resume_interrupted: Boolean(override?.resumeInterrupted),
         },
         { requestIdPrefix: "mobile-turn" },
       );
@@ -346,11 +413,11 @@ export function useSessionActions() {
     ) => {
       const relay = useRelayStore.getState();
       const session = useSessionStore.getState();
-      if (relay.sessionId === "demo-session") {
-        return session.threadDetail?.workspace.id === workspaceId &&
-          session.threadDetail.thread.id === threadId
-          ? session.threadDetail
-          : null;
+      // The demo workspace has no daemon to page against: its transcripts are
+      // whatever is already cached locally, and there is never anything older.
+      if (isDemoSession(relay.sessionId)) {
+        if (options?.older) return null;
+        return demoThreadDetail(workspaceId, threadId);
       }
       const history = session.threadHistory[threadId];
       const beforeItemId = options?.older
@@ -467,7 +534,7 @@ export function useSessionActions() {
    */
   const prefetchRecentThreadDetails = useCallback(async () => {
     const relay = useRelayStore.getState();
-    if (relay.sessionId === "demo-session") return;
+    if (isDemoSession(relay.sessionId)) return;
     if (!relay._getSessionCrypto()) return;
     const session = useSessionStore.getState();
     if (!session.snapshot) return;
@@ -607,7 +674,11 @@ export function useSessionActions() {
             ],
             selected_skills: selectedSkillsFromText(
               item.text,
-              sourceWorkspace.skills ?? [],
+              composerSkillCatalog(
+                liveSkillsRef.current,
+                sourceWorkspace,
+                sourceThread.provider,
+              ),
             ),
             provider: sourceThread.provider,
             model_id: sourceThread.agent.model_id,
@@ -641,13 +712,158 @@ export function useSessionActions() {
     [branchFromMessage],
   );
 
+  const handoffToProvider = useCallback(async (provider: AgentProvider) => {
+    const relay = useRelayStore.getState();
+    const session = useSessionStore.getState();
+    const ui = useUIStore.getState();
+    const workspace = session.snapshot?.workspaces.find(
+      (entry) => entry.id === session.selectedWorkspaceId,
+    );
+    const thread = threadForSelection(
+      session.snapshot?.threads ?? [],
+      session.selectedWorkspaceId,
+      session.selectedThreadId,
+    );
+    if (!workspace || !thread || provider === thread.provider) return;
+    if (handoffPendingRef.current) return;
+    handoffPendingRef.current = true;
+    setHandoffPending(true);
+
+    const api: HandoffThreadApi = {
+      async startThread(payload) {
+        return normalizeThreadHandle(
+          await relay._callRpc<ThreadHandle>("thread.start", payload, {
+            requestIdPrefix: "mobile-handoff",
+          }),
+        );
+      },
+      async updateThread(payload) {
+        return normalizeThreadHandle(
+          await relay._callRpc<ThreadHandle>("thread.update", payload, {
+            requestIdPrefix: "mobile-handoff",
+          }),
+        );
+      },
+      async sendTurn(payload) {
+        const result = await relay._callRpc<{
+          ok: boolean;
+          message?: string | null;
+        }>("turn.start", payload, { requestIdPrefix: "mobile-handoff-turn" });
+        return result ?? { ok: true };
+      },
+      async threadDetail(workspaceId, threadId, request) {
+        return normalizeThreadDetail(
+          await relay._callRpc<ThreadDetail>(
+            "thread.detail",
+            {
+              workspace_id: workspaceId,
+              thread_id: threadId,
+              ...request,
+            },
+            { requestIdPrefix: "mobile-handoff-detail" },
+          ),
+        );
+      },
+    };
+
+    const destination = handoffDestinationSettings(
+      workspace,
+      provider,
+      ui.persistedComposerSelections,
+    );
+
+    try {
+      await handoffThread(
+        api,
+        {
+          workspace,
+          thread,
+          provider,
+          ...destination,
+        },
+        {
+          onDestinationReady: (handle) => {
+            showHandoffDestination(handle);
+            setHandoffPendingThreadKey(
+              draftKeyFor(handle.workspace.id, handle.thread.id),
+            );
+          },
+        },
+      );
+      relay._setError(null);
+    } catch (error) {
+      if (error instanceof HandoffIncompleteError) {
+        showHandoffDestination(error.handle);
+        if (error.detail) {
+          useSessionStore.getState().setThreadDetail(error.detail);
+        }
+        if (!error.turnStarted) {
+          useUIStore.getState().setComposerForConversation(
+            draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
+            error.prompt,
+            [],
+          );
+        }
+        if (!isRelayTransportError(error)) {
+          relay._setError(
+            error.turnStarted
+              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
+              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
+          );
+        }
+        return;
+      }
+      if (!isRelayTransportError(error)) {
+        relay._setError(
+          error instanceof Error ? error.message : "Failed to create handoff",
+        );
+      }
+    } finally {
+      handoffPendingRef.current = false;
+      setHandoffPending(false);
+      setHandoffPendingThreadKey(null);
+    }
+  }, []);
+
+  const loadWorkspaceSkills = useCallback(async (provider: AgentProvider) => {
+    const relay = useRelayStore.getState();
+    const session = useSessionStore.getState();
+    const workspace = session.snapshot?.workspaces.find(
+      (entry) => entry.id === session.selectedWorkspaceId,
+    );
+    if (!workspace) return [];
+    try {
+      const payload = await relay._callRpc<{ skills?: SkillSummary[] }>(
+        "workspace.skills",
+        {
+          workspace_id: workspace.id,
+          provider,
+        },
+        { requestIdPrefix: "mobile-skills" },
+      );
+      const skills = normalizeSkillSummaries(payload.skills);
+      liveSkillsRef.current = {
+        workspaceId: workspace.id,
+        provider,
+        skills,
+      };
+      return skills;
+    } catch {
+      return workspace.skills ?? [];
+    }
+  }, []);
+
   return {
     startThread,
     submitTurn,
+    loadWorkspaceSkills,
     respondApproval,
     respondInteractive,
     loadThreadDetail,
     prefetchRecentThreadDetails,
     retryResponse,
+    handoffToProvider,
+    handoffPending,
+    handoffPendingThreadKey,
   };
 }

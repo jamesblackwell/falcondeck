@@ -19,6 +19,8 @@ import {
   conversationRenderBlockType,
   defaultProvider,
   deriveComposerSuggestions,
+  draftKeyFor,
+  handoffBlockedReason,
   imageAttachmentSendBlockReason,
   latestVisibleAssistantMessageId,
   operationalConditionDismissalKey,
@@ -36,6 +38,7 @@ import {
   threadAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
+  wasTurnInterruptedByShutdown,
   type AgentProvider,
   type ComposerSuggestion,
   type ConversationPresentation,
@@ -47,6 +50,7 @@ import {
 import { useShallow } from "zustand/react/shallow";
 
 import {
+  useConnectionLogStore,
   useInteractiveRequests,
   useRelayStore,
   useSessionStore,
@@ -81,6 +85,7 @@ import {
   LiveActivityLane,
   MessageRouter,
   GoalBanner,
+  InterruptedTurnNotice,
   ComposerSuggestionPill,
   ComposerSuggestionSheet,
   GoalSheet,
@@ -185,8 +190,13 @@ export default function HomeScreen() {
     })),
   );
   const syncStatus = useSessionSyncStatus();
+  // The debug screen subscribes to every connection-log append, so keep it
+  // unmounted whenever it cannot be or become visible: manual opens flip
+  // `visible`, and auto-show only ever fires while a connection run is busy —
+  // which is exactly when this condition keeps it mounted for its own 7s
+  // timer to decide visibility.
+  const isConnectionDebugMounted = useConnectionLogStore((s) => s.visible || syncStatus.isBusy);
   const daemonRpcReady = isDaemonRpcReady(machinePresence);
-  const isDemoMode = sessionId === "demo-session";
   const {
     attachments,
     draft,
@@ -232,6 +242,10 @@ export default function HomeScreen() {
     loadThreadDetail,
     prefetchRecentThreadDetails,
     retryResponse,
+    loadWorkspaceSkills,
+    handoffToProvider,
+    handoffPending,
+    handoffPendingThreadKey,
   } = useSessionActions();
   const interruptTurn = useInterruptTurn();
   const {
@@ -252,6 +266,8 @@ export default function HomeScreen() {
     onScrollBeginDrag,
     onScrollEndDrag,
     onMomentumScrollEnd,
+    onTouchStart,
+    onTouchEnd,
     resetScrollState,
     scrollToBottom,
     scrollToBottomIfFollowing,
@@ -294,6 +310,21 @@ export default function HomeScreen() {
     () => workspaceProviderOptions(workspace),
     [workspace],
   );
+  const handoffProviderOptions = useMemo(
+    () =>
+      selectedThread
+        ? providerOptions.filter(
+            (option) => option.provider !== selectedThread.provider,
+          )
+        : [],
+    [providerOptions, selectedThread],
+  );
+  const isPreparingSelectedHandoff =
+    handoffPendingThreadKey ===
+    draftKeyFor(selectedWorkspaceId, selectedThreadId);
+  const handoffDisabledReason = handoffBlockedReason(selectedThread, {
+    pending: handoffPending,
+  });
 
   // Which mode pickers the composer shows, and whether a queued message can be
   // steered — both are per-provider, so they change with the active agent.
@@ -329,6 +360,27 @@ export default function HomeScreen() {
     },
     [scrollToBottomIfNear, submitTurn],
   );
+  const handleContinueInterruptedTurn = useCallback(() => {
+    void submitTurn({ text: "", resumeInterrupted: true });
+  }, [submitTurn]);
+  const handleDismissInterruptedTurn = useCallback(() => {
+    const session = useSessionStore.getState();
+    const workspaceId = session.selectedWorkspaceId;
+    const threadId = session.selectedThreadId;
+    if (!workspaceId || !threadId) return;
+    void useRelayStore
+      .getState()
+      ._callRpc(
+        "thread.update",
+        {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          acknowledge_interruption: true,
+        },
+        { requestIdPrefix: "mobile-thread" },
+      )
+      .catch(() => {});
+  }, []);
   const handleDismissComposerSuggestions = useCallback(() => {
     const key = composerSuggestionOffer?.key;
     if (!key || !selectedThreadId) return;
@@ -442,7 +494,7 @@ export default function HomeScreen() {
   const isThreadRunning = selectedThread?.status === "running";
   const showThinking = shouldShowThinkingIndicator(
     presentation,
-    isThreadRunning,
+    isThreadRunning || isPreparingSelectedHandoff,
   );
   const isSelectedThreadLoading =
     !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
@@ -634,6 +686,30 @@ export default function HomeScreen() {
       setSelectedEffort(fallback);
     }
   }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort]);
+
+  // Optional providers start lazily in the daemon; picking one on a new-thread
+  // composer is the signal to warm its runtime so the model list fills in.
+  const hydratedProvidersRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (selectedThread || !workspace || !selectedProvider) return;
+    if (!isEncrypted || !daemonRpcReady) return;
+    const key = `${workspace.id}:${selectedProvider}`;
+    if (hydratedProvidersRef.current.has(key)) return;
+    hydratedProvidersRef.current.add(key);
+    void useRelayStore
+      .getState()
+      ._callRpc("provider.hydrate", {
+        workspace_id: workspace.id,
+        provider: selectedProvider,
+      })
+      .catch(() => {});
+  }, [
+    daemonRpcReady,
+    isEncrypted,
+    selectedProvider,
+    selectedThread,
+    workspace,
+  ]);
 
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
@@ -890,8 +966,23 @@ export default function HomeScreen() {
     setIsThreadOptionsOpen(false);
   }, []);
 
-  const handleNewThreadFromCurrent = useCallback(() => {
+  const handleNewThreadFromCurrent = useCallback(async () => {
     if (!workspace) return;
+
+    if (workspace.kind === "casual") {
+      try {
+        const next = await useRelayStore
+          .getState()
+          ._callRpc<{ id: string }>("chat.create", { create: true });
+        triggerThreadSelectionHaptic();
+        useSessionStore.getState().selectNewThread(next.id);
+      } catch (error) {
+        useRelayStore
+          .getState()
+          ._setError(error instanceof Error ? error.message : "Failed to create chat");
+      }
+      return;
+    }
 
     // Keep the current project and agent setup, but start with an empty transcript.
     rememberWorkspaceProvider(workspace.path, activeProvider);
@@ -1070,7 +1161,12 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted || !daemonRpcReady) {
+    if (
+      !selectedWorkspaceId ||
+      !selectedThreadId ||
+      !isEncrypted ||
+      !daemonRpcReady
+    ) {
       setDetailLoadingThreadId(null);
       setIsLoadingOlder(false);
       useSessionStore.getState().setThreadDetail(null);
@@ -1155,7 +1251,11 @@ export default function HomeScreen() {
           onPress={handleOpenDrawer}
           hitSlop={theme.spacing[2]}
           accessibilityRole="button"
-          accessibilityLabel={`Project: ${getWorkspaceTitle(workspace?.path)}`}
+          accessibilityLabel={
+            workspace?.kind === "casual"
+              ? "Casual chat"
+              : `Project: ${getWorkspaceTitle(workspace?.path)}`
+          }
           accessibilityHint="Opens the project and thread list"
         >
           <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
@@ -1166,7 +1266,7 @@ export default function HomeScreen() {
             numberOfLines={1}
             style={styles.headerTitle}
           >
-            {getWorkspaceTitle(workspace?.path)}
+            {workspace?.kind === "casual" ? "Chat" : getWorkspaceTitle(workspace?.path)}
           </Text>
         </Pressable>
         <View style={styles.headerRight}>
@@ -1246,13 +1346,17 @@ export default function HomeScreen() {
         ) : !selectedThread && blocks.length === 0 ? (
           <View style={styles.newThreadState}>
             <Text variant="heading" color="primary">
-              Let's build
+              {workspace?.kind === "casual" ? "What’s on your mind?" : "Let's build"}
             </Text>
             <Text variant="body" size="lg" color="muted">
-              {workspace?.path.split("/").pop() ?? "Select a project"}
+              {workspace?.kind === "casual"
+                ? "This chat isn’t attached to a project"
+                : (workspace?.path.split("/").pop() ?? "Select a project")}
             </Text>
           </View>
-        ) : blocks.length === 0 && isSelectedThreadLoading ? (
+        ) : blocks.length === 0 &&
+          isSelectedThreadLoading &&
+          !isPreparingSelectedHandoff ? (
           <View style={styles.syncState}>
             <ActivityDiamond
               size={theme.iconSize.md}
@@ -1265,6 +1369,7 @@ export default function HomeScreen() {
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
+          !isPreparingSelectedHandoff &&
           selectedThreadDetailError ? (
           <View style={styles.syncState}>
             <Text variant="label" color="secondary" weight="semibold">
@@ -1282,7 +1387,8 @@ export default function HomeScreen() {
           </View>
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
-          !isThreadRunning ? (
+          !isThreadRunning &&
+          !isPreparingSelectedHandoff ? (
           <EmptyState
             title="No messages yet"
             description="Send a message to get started"
@@ -1310,6 +1416,10 @@ export default function HomeScreen() {
             onScrollBeginDrag={onScrollBeginDrag}
             onScrollEndDrag={onScrollEndDrag}
             onMomentumScrollEnd={onMomentumScrollEnd}
+            onTouchStart={onTouchStart}
+            onTouchEnd={onTouchEnd}
+            onTouchCancel={onTouchEnd}
+            onResponderRelease={onTouchEnd}
             scrollEventThrottle={16}
             contentContainerStyle={styles.listContent}
             ListHeaderComponent={
@@ -1341,6 +1451,14 @@ export default function HomeScreen() {
       </View>
 
       <LiveActivityLane groups={liveActivityGroups} />
+
+      {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
+        <InterruptedTurnNotice
+          onContinue={handleContinueInterruptedTurn}
+          onDismiss={handleDismissInterruptedTurn}
+          isContinuing={isSubmitting}
+        />
+      ) : null}
 
       <GoalBanner
         goal={selectedThread?.goal ?? null}
@@ -1386,21 +1504,27 @@ export default function HomeScreen() {
           onPasteImage={handlePasteImage}
           onTakePhoto={handleTakePhoto}
           onRemoveAttachment={removeAttachment}
-          disabled={!workspace || isDemoMode}
+          disabled={!workspace}
           sendDisabled={
-            isSubmitting || !isEncrypted || Boolean(attachmentSendBlockReason)
+            isSubmitting ||
+            !isEncrypted ||
+            Boolean(attachmentSendBlockReason) ||
+            isPreparingSelectedHandoff
           }
           sendDisabledReason={
             // Submitting is transient and self-evident; only surface a reason
             // when the block is something the user has to act on.
             isSubmitting
               ? undefined
-              : !isEncrypted
-                ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
-                : (attachmentSendBlockReason ?? undefined)
+              : isPreparingSelectedHandoff
+                ? "Wait for the handoff turn to start"
+                : !isEncrypted
+                  ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
+                  : (attachmentSendBlockReason ?? undefined)
           }
           attachments={attachments}
           skills={workspace?.skills ?? []}
+          loadSkills={loadWorkspaceSkills}
           // No live or cached models means the harness catalog is still
           // hydrating (the daemon fills OpenCode's list via a later snapshot).
           modelsLoading={Boolean(workspace) && effectiveModels.length === 0}
@@ -1416,6 +1540,11 @@ export default function HomeScreen() {
           selectedServiceTier={selectedServiceTier}
           onSelectServiceTier={handleServiceTierChange}
           onSelectProvider={handleProviderChange}
+          handoffProviders={handoffProviderOptions}
+          onHandoffProviderSelect={
+            selectedThread ? handoffToProvider : undefined
+          }
+          handoffDisabledReason={handoffDisabledReason}
           isRunning={isThreadRunning}
           isStopping={isStopping}
           capabilities={capabilities}
@@ -1454,7 +1583,7 @@ export default function HomeScreen() {
         />
       ) : null}
 
-      <ConnectionDebugScreen />
+      {isConnectionDebugMounted ? <ConnectionDebugScreen /> : null}
     </KeyboardAvoidingView>
   );
 }

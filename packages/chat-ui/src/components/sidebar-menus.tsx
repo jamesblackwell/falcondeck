@@ -112,6 +112,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canArchive,
   canDelete,
   canPin,
+  canPinInProject,
   canMarkRead,
   canMarkUnread,
   stageOptions,
@@ -122,6 +123,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onArchive,
   onDelete,
   onTogglePin,
+  onTogglePinInProject,
   onMarkRead,
   onMarkUnread,
   onSetStage,
@@ -136,6 +138,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canArchive: boolean
   canDelete: boolean
   canPin: boolean
+  canPinInProject: boolean
   canMarkRead: boolean
   canMarkUnread: boolean
   stageOptions: ThreadTag[]
@@ -146,6 +149,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onArchive: () => void
   onDelete: () => void
   onTogglePin: () => void
+  onTogglePinInProject: () => void
   onMarkRead: () => void
   onMarkUnread: () => void
   onSetStage: (stage: ThreadTag | null) => void
@@ -238,6 +242,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   const canSetStage = stageOptions.length > 0
   const rowCount =
     Number(canPin) +
+    Number(canPinInProject) +
     Number(canRename) +
     Number(canFork) +
     Number(showMarkRead) +
@@ -340,6 +345,23 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           }
           label={target.thread.is_pinned ? 'Unpin chat' : 'Pin chat'}
           onClick={onTogglePin}
+        />
+      ) : null}
+      {canPinInProject ? (
+        <ThreadMenuItem
+          icon={
+            target.thread.is_pinned_in_project ? (
+              <PinOff className={iconClassName} />
+            ) : (
+              <Pin className={iconClassName} />
+            )
+          }
+          label={
+            target.thread.is_pinned_in_project
+              ? 'Unpin from project'
+              : 'Pin in project'
+          }
+          onClick={onTogglePinInProject}
         />
       ) : null}
       {canRename ? (

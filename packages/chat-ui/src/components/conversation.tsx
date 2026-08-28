@@ -31,8 +31,15 @@ import {
 import { ActivityDiamond, EmptyState, cn } from "@falcondeck/ui";
 
 import { FileDiffProvider, type OpenFileDiff } from "../lib/file-diff-context";
+import {
+  LocalPathProvider,
+  type LocalPathEditor,
+  type LocalPathHandler,
+  type LocalPathKindResolver,
+} from "../lib/local-path-context";
 import { normalizeQuotedSelection } from "../lib/quoted-selection";
 import type { ReadAloudController } from "../lib/read-aloud";
+import { WebLinkProvider, type WebLinkOpener } from "../lib/web-link-context";
 import { ConversationExportButton } from "./conversation-export-button";
 import {
   AGENT_STATUS_ROW_CLASS,
@@ -172,6 +179,10 @@ export const Conversation = memo(function Conversation({
   isLoadingOlder = false,
   onLoadOlder,
   onOpenFile = null,
+  onLocalPath = null,
+  localPathEditors = null,
+  describeLocalPath = null,
+  onOpenExternalLink = null,
   onRetryResponse,
   exportTitle = null,
   pinnedPlanId = null,
@@ -201,6 +212,15 @@ export const Conversation = memo(function Conversation({
   onLoadOlder?: () => void;
   /** Opens a file's diff in the host's side panel; omit where there is none. */
   onOpenFile?: OpenFileDiff | null;
+  /** Opens or reveals an absolute local path; omit on clients without a local disk. */
+  onLocalPath?: LocalPathHandler | null;
+  /** Editors offered in the path context menu; omit where there is no local disk. */
+  localPathEditors?: readonly LocalPathEditor[] | null;
+  /** Reports file vs directory so the path menu can hide file-only actions. */
+  describeLocalPath?: LocalPathKindResolver | null;
+  /** Opens an external URL in the system browser; omit where links should
+      keep native browser behaviour. */
+  onOpenExternalLink?: WebLinkOpener | null;
   onRetryResponse?: EditResendHandler;
   /** Human thread title used for the Markdown export heading and filename. */
   exportTitle?: string | null;
@@ -824,214 +844,222 @@ export const Conversation = memo(function Conversation({
 
   return (
     <FileDiffProvider onOpenFile={onOpenFile}>
-      <div className="fd-type-scope fd-scope-chat flex min-h-0 flex-1 flex-col">
-        <div className="relative min-h-0 flex-1">
-          <div
-            ref={scrollRef}
-            data-selectable
-            role="log"
-            aria-label="Conversation"
-            aria-live="off"
-            aria-busy={isBusy}
-            className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
-            onScroll={handleScroll}
-            onMouseUp={captureSelectedExcerpt}
-          >
-            <div
-              ref={contentRef}
-              data-conversation-transcript
-              className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-3 px-3 pt-4 pb-10 md:px-6 md:pb-12"
-            >
-              {hasOlder && onLoadOlder ? (
-                <div className="flex min-h-9 items-center justify-center px-1 pb-1">
-                  <button
-                    type="button"
-                    onClick={loadOlder}
-                    disabled={isLoadingOlder}
-                    aria-label={
-                      isLoadingOlder
-                        ? "Loading earlier messages"
-                        : "Load earlier messages"
-                    }
-                    className="fd-focus inline-flex min-h-8 items-center gap-2 rounded-full border border-border-subtle bg-surface-2 px-3 text-[length:var(--fd-text-xs)] font-medium text-fg-muted transition-colors hover:border-border-default hover:bg-surface-3 hover:text-fg-primary disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {isLoadingOlder ? <ActivityDiamond /> : null}
-                    {isLoadingOlder
-                      ? "Loading earlier messages…"
-                      : "Load earlier messages"}
-                  </button>
-                </div>
-              ) : null}
-
-              {showEmptyState ||
-              (renderBlocks.length === 0 &&
-                (isBusy || isWaitingForInput) &&
-                liveActivityGroups.length === 0) ? (
-                <div className="flex min-h-full flex-1 flex-col gap-3">
-                  {showEmptyState
-                    ? (emptyState ?? (
-                        <EmptyState
-                          icon={<MessageSquare className="h-6 w-6" />}
-                          title="Ready for instructions"
-                          description="Send a prompt to start a conversation."
-                        />
-                      ))
-                    : null}
-                  {isWaitingForInput && liveActivityGroups.length === 0 ? (
-                    <WaitingForApprovalNotice />
-                  ) : isBusy && liveActivityGroups.length === 0 ? (
-                    <div
-                      role="status"
-                      className={AGENT_STATUS_ROW_CLASS}
+      <WebLinkProvider onOpenLink={onOpenExternalLink}>
+        <LocalPathProvider
+          onLocalPath={onLocalPath}
+          editors={localPathEditors ?? undefined}
+          describePath={describeLocalPath}
+        >
+          <div className="fd-type-scope fd-scope-chat flex min-h-0 flex-1 flex-col">
+            <div className="relative min-h-0 flex-1">
+              <div
+                ref={scrollRef}
+                data-selectable
+                role="log"
+                aria-label="Conversation"
+                aria-live="off"
+                aria-busy={isBusy}
+                className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
+                onScroll={handleScroll}
+                onMouseUp={captureSelectedExcerpt}
+              >
+              <div
+                ref={contentRef}
+                data-conversation-transcript
+                className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-3 px-3 pt-4 pb-10 md:px-6 md:pb-12"
+              >
+                {hasOlder && onLoadOlder ? (
+                  <div className="flex min-h-9 items-center justify-center px-1 pb-1">
+                    <button
+                      type="button"
+                      onClick={loadOlder}
+                      disabled={isLoadingOlder}
+                      aria-label={
+                        isLoadingOlder
+                          ? "Loading earlier messages"
+                          : "Load earlier messages"
+                      }
+                      className="fd-focus inline-flex min-h-8 items-center gap-2 rounded-full border border-border-subtle bg-surface-2 px-3 text-[length:var(--fd-text-xs)] font-medium text-fg-muted transition-colors hover:border-border-default hover:bg-surface-3 hover:text-fg-primary disabled:cursor-wait disabled:opacity-70"
                     >
-                      <ActivityDiamond />
-                      <span className="font-medium">
-                        {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
+                      {isLoadingOlder ? <ActivityDiamond /> : null}
+                      {isLoadingOlder
+                        ? "Loading earlier messages…"
+                        : "Load earlier messages"}
+                    </button>
+                  </div>
+                ) : null}
 
-              {items.length > 0 ? (
-                <div className="flex items-center justify-end gap-2 px-1">
-                  {normalizedPreferences.conversation
-                    .show_expand_all_controls ? (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => setExpansionMode("expanded")}
-                        className="fd-focus min-h-8 rounded-[var(--fd-radius-sm)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-primary"
+                {showEmptyState ||
+                (renderBlocks.length === 0 &&
+                  (isBusy || isWaitingForInput) &&
+                  liveActivityGroups.length === 0) ? (
+                  <div className="flex min-h-full flex-1 flex-col gap-3">
+                    {showEmptyState
+                      ? (emptyState ?? (
+                          <EmptyState
+                            icon={<MessageSquare className="h-6 w-6" />}
+                            title="Ready for instructions"
+                            description="Send a prompt to start a conversation."
+                          />
+                        ))
+                      : null}
+                    {isWaitingForInput && liveActivityGroups.length === 0 ? (
+                      <WaitingForApprovalNotice />
+                    ) : isBusy && liveActivityGroups.length === 0 ? (
+                      <div
+                        role="status"
+                        className={AGENT_STATUS_ROW_CLASS}
                       >
-                        Expand all
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setExpansionMode("collapsed")}
-                        className="fd-focus min-h-8 rounded-[var(--fd-radius-sm)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-primary"
-                      >
-                        Collapse all
-                      </button>
-                    </>
-                  ) : null}
-                  <ConversationExportButton
-                    items={items}
-                    title={exportTitle}
-                    partial={hasOlder}
+                        <ActivityDiamond />
+                        <span className="font-medium">
+                          {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                        </span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {items.length > 0 ? (
+                  <div className="flex items-center justify-end gap-2 px-1">
+                    {normalizedPreferences.conversation
+                      .show_expand_all_controls ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setExpansionMode("expanded")}
+                          className="fd-focus min-h-8 rounded-[var(--fd-radius-sm)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-primary"
+                        >
+                          Expand all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setExpansionMode("collapsed")}
+                          className="fd-focus min-h-8 rounded-[var(--fd-radius-sm)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-primary"
+                        >
+                          Collapse all
+                        </button>
+                      </>
+                    ) : null}
+                    <ConversationExportButton
+                      items={items}
+                      title={exportTitle}
+                      partial={hasOlder}
+                    />
+                  </div>
+                ) : null}
+
+                {renderBlocks.map((block, index) => (
+                  <ConversationHistoryRow
+                    key={block.id}
+                    block={block}
+                    deferred={
+                      index < renderBlocks.length - EAGER_RECENT_BLOCK_COUNT
+                    }
+                    animateEnter={enteringBlockIds.has(block.id)}
+                    expansionMode={expansionMode}
+                    thinkingDisplay={thinkingDisplay}
+                    collapseLongUserMessages={collapseLongUserMessages}
+                    isStreamingReasoning={
+                      block.kind === "item" &&
+                      block.item.id === streamingReasoningId
+                    }
+                    retrySource={
+                      block.kind === "item" &&
+                      block.item.kind === "assistant_message"
+                        ? (retrySources?.get(block.item.id) ?? null)
+                        : null
+                    }
+                    onRetryResponse={onRetryResponse}
+                    readAloud={readAloud}
+                    showReceivedAt={
+                      block.kind === "item" &&
+                      block.item.kind === "assistant_message" &&
+                      block.item.id === lastAssistantMessageId
+                    }
                   />
-                </div>
-              ) : null}
+                ))}
 
-              {renderBlocks.map((block, index) => (
-                <ConversationHistoryRow
-                  key={block.id}
-                  block={block}
-                  deferred={
-                    index < renderBlocks.length - EAGER_RECENT_BLOCK_COUNT
-                  }
-                  animateEnter={enteringBlockIds.has(block.id)}
-                  expansionMode={expansionMode}
-                  thinkingDisplay={thinkingDisplay}
-                  collapseLongUserMessages={collapseLongUserMessages}
-                  isStreamingReasoning={
-                    block.kind === "item" &&
-                    block.item.id === streamingReasoningId
-                  }
-                  retrySource={
-                    block.kind === "item" &&
-                    block.item.kind === "assistant_message"
-                      ? (retrySources?.get(block.item.id) ?? null)
-                      : null
-                  }
-                  onRetryResponse={onRetryResponse}
-                  readAloud={readAloud}
-                  showReceivedAt={
-                    block.kind === "item" &&
-                    block.item.kind === "assistant_message" &&
-                    block.item.id === lastAssistantMessageId
-                  }
-                />
-              ))}
+                {/* A blocked turn outranks every indicator heuristic: whatever the
+                  transcript's tail looks like, the user must see that the agent
+                  is waiting on them. */}
+                {renderBlocks.length > 0 && isWaitingForInput ? (
+                  <WaitingForApprovalNotice />
+                ) : null}
 
-              {/* A blocked turn outranks every indicator heuristic: whatever the
-                transcript's tail looks like, the user must see that the agent
-                is waiting on them. */}
-              {renderBlocks.length > 0 && isWaitingForInput ? (
-                <WaitingForApprovalNotice />
-              ) : null}
+                {/* Sending is purely optimistic, so show it even if stale live
+                  presentation data is still settling. A streaming thought
+                  already says "Thinking…" in its own header. */}
+                {(renderBlocks.length > 0 || liveActivityGroups.length > 0) &&
+                !isWaitingForInput &&
+                (isSending ||
+                  (isThinking &&
+                    liveActivityGroups.length === 0 &&
+                    !hasRunningWorkSession &&
+                    !streamingReasoningId)) ? (
+                  <div
+                    role="status"
+                    className={AGENT_STATUS_ROW_CLASS}
+                  >
+                    <ActivityDiamond />
+                    <span className="font-medium">
+                      {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                    </span>
+                  </div>
+                ) : null}
 
-              {/* Sending is purely optimistic, so show it even if stale live
-                presentation data is still settling. A streaming thought
-                already says "Thinking…" in its own header. */}
-              {(renderBlocks.length > 0 || liveActivityGroups.length > 0) &&
-              !isWaitingForInput &&
-              (isSending ||
-                (isThinking &&
-                  liveActivityGroups.length === 0 &&
-                  !hasRunningWorkSession &&
-                  !streamingReasoningId)) ? (
-                <div
-                  role="status"
-                  className={AGENT_STATUS_ROW_CLASS}
-                >
-                  <ActivityDiamond />
-                  <span className="font-medium">
-                    {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
-                  </span>
-                </div>
-              ) : null}
-
-              {/* In-flight tool activity renders in the thread flow, where the
-                completed groups it becomes will also live. */}
-              <LiveActivityLane groups={liveActivityGroups} />
+                {/* In-flight tool activity renders in the thread flow, where the
+                  completed groups it becomes will also live. */}
+                <LiveActivityLane groups={liveActivityGroups} />
+              </div>
             </div>
-          </div>
 
-          {selectedExcerpt ? (
-            <button
-              type="button"
-              aria-label="Add selected text to chat"
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => {
-                onQuoteSelection?.(selectedExcerpt.text);
-                window.getSelection()?.removeAllRanges();
-                setSelectedExcerpt(null);
-              }}
-              className="fd-focus absolute z-30 inline-flex h-9 -translate-x-1/2 items-center gap-2 rounded-full border border-border-default bg-surface-4 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)] transition-[transform,background-color] hover:scale-[1.03] hover:bg-surface-3"
-              style={{ left: selectedExcerpt.left, top: selectedExcerpt.top }}
-            >
-              <Quote aria-hidden="true" className="h-3.5 w-3.5" />
-              Add to chat
-            </button>
-          ) : null}
-
-          <div
-            data-response-completion-announcer
-            aria-live="polite"
-            aria-atomic="true"
-            className="sr-only"
-          >
-            {completionAnnouncement ? (
-              <span key={completionAnnouncement.sequence}>
-                {completionAnnouncement.message}
-              </span>
-            ) : null}
-          </div>
-
-          {showJump ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-3">
+            {selectedExcerpt ? (
               <button
                 type="button"
-                onClick={jumpToBottom}
-                aria-label="Jump to latest message"
-                className="fd-focus pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                aria-label="Add selected text to chat"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onQuoteSelection?.(selectedExcerpt.text);
+                  window.getSelection()?.removeAllRanges();
+                  setSelectedExcerpt(null);
+                }}
+                className="fd-focus absolute z-30 inline-flex h-9 -translate-x-1/2 items-center gap-2 rounded-full border border-border-default bg-surface-4 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)] transition-[transform,background-color] hover:scale-[1.03] hover:bg-surface-3"
+                style={{ left: selectedExcerpt.left, top: selectedExcerpt.top }}
               >
-                <ChevronDown className="h-4 w-4" />
+                <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+                Add to chat
               </button>
+            ) : null}
+
+            <div
+              data-response-completion-announcer
+              aria-live="polite"
+              aria-atomic="true"
+              className="sr-only"
+            >
+              {completionAnnouncement ? (
+                <span key={completionAnnouncement.sequence}>
+                  {completionAnnouncement.message}
+                </span>
+              ) : null}
             </div>
-          ) : null}
-        </div>
-      </div>
+
+            {showJump ? (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-3">
+                <button
+                  type="button"
+                  onClick={jumpToBottom}
+                  aria-label="Jump to latest message"
+                  className="fd-focus pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </button>
+              </div>
+            ) : null}
+            </div>
+          </div>
+        </LocalPathProvider>
+      </WebLinkProvider>
     </FileDiffProvider>
   );
 });

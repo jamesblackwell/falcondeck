@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactFilePath, describeToolCall, toolCallFilePath, toolCallLabel } from './tool-label'
+import {
+  compactFilePath,
+  describeToolCall,
+  notableToolAction,
+  toolCallFilePath,
+  toolCallLabel,
+} from './tool-label'
 
 describe('tool call labels', () => {
   it('shrinks an absolute path to the file being edited', () => {
@@ -115,5 +121,78 @@ describe('tool call labels', () => {
   it('reads only the head of a result, not a whole file of output', () => {
     const decoy = `${'x'.repeat(2000)}\nThe file /repo/src/decoy.ts has been updated.`
     expect(toolCallLabel({ title: 'Edit', output: decoy })).toBe('Edit')
+  })
+
+  it('unwraps an ACP execute wrapper before labelling the command', () => {
+    expect(toolCallLabel({ title: 'Execute `ls crates/`' })).toBe('ls crates/')
+    expect(toolCallLabel({ title: 'Run checks' })).toBe('Run checks')
+  })
+})
+
+describe('notable tool actions', () => {
+  it('rewrites git commits and commit helpers as Commit', () => {
+    expect(notableToolAction({ title: 'git commit -m "feat: keep Studio"' })).toEqual({
+      kind: 'commit',
+      label: 'Commit feat: keep Studio',
+    })
+    expect(
+      notableToolAction({
+        title: 'Execute `node scripts/commit.js "feat: keep Studio in the session"`',
+      }),
+    ).toEqual({
+      kind: 'commit',
+      label: 'Commit feat: keep Studio in the session',
+    })
+    expect(toolCallLabel({ title: "/bin/zsh -lc 'git commit -m foo'" })).toBe('Commit foo')
+  })
+
+  it('rewrites git pushes as Push with the remote and ref', () => {
+    expect(notableToolAction({ title: 'Execute `git push origin main`' })).toEqual({
+      kind: 'push',
+      label: 'Push origin main',
+    })
+    expect(notableToolAction({ title: 'git push' })).toEqual({
+      kind: 'push',
+      label: 'Push',
+    })
+  })
+
+  it('rewrites isolated work and sub-agents as Breakout', () => {
+    expect(notableToolAction({ title: 'git worktree add -b fd/fix-login ../fix-login' })).toEqual({
+      kind: 'breakout',
+      label: 'Breakout fd/fix-login',
+    })
+    expect(notableToolAction({ title: 'Agent: explore the auth flow' })).toEqual({
+      kind: 'breakout',
+      label: 'Breakout explore the auth flow',
+    })
+    expect(notableToolAction({ title: 'spawn_subagent', tool_kind: 'spawn_subagent' })).toEqual({
+      kind: 'breakout',
+      label: 'Breakout',
+    })
+    expect(
+      notableToolAction({
+        title: 'Task',
+        tool_kind: 'task',
+        detail: {
+          kind: 'dynamic',
+          tool: 'task',
+          namespace: null,
+          arguments: { description: 'review the diff', isolation: 'worktree' },
+          content_items: [],
+          success: true,
+          duration_ms: null,
+        },
+      }),
+    ).toEqual({
+      kind: 'breakout',
+      label: 'Breakout review the diff',
+    })
+  })
+
+  it('leaves ordinary commands alone', () => {
+    expect(notableToolAction({ title: 'Execute `git status --short`' })).toBeNull()
+    expect(notableToolAction({ title: 'npm test' })).toBeNull()
+    expect(notableToolAction({ title: 'Read /repo/src/app.tsx' })).toBeNull()
   })
 })

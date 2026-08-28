@@ -14,6 +14,9 @@ mod api;
 mod app;
 mod claude;
 mod codex;
+mod connector_catalog;
+mod connector_logos;
+mod connector_oauth;
 mod connectors;
 pub mod control;
 mod error;
@@ -240,15 +243,38 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     })
 }
 
-/// Runs the daemon until the process receives `Ctrl-C`.
+/// Runs the daemon until the process receives `Ctrl-C` or `SIGTERM`.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     // Logging is installed by `spawn_embedded`, which this shares with the
     // desktop app so both get the same sink.
     let handle = spawn_embedded(config).await?;
     tracing::info!("falcondeck-daemon listening on {}", handle.local_addr);
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await;
     handle.shutdown().await?;
     Ok(())
+}
+
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(_) => {
+                    let _ = ctrl_c.await;
+                    return;
+                }
+            };
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ctrl_c.await;
+    }
 }
 
 #[cfg(test)]

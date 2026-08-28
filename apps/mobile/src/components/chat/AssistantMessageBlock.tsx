@@ -7,7 +7,6 @@ import {
   CircleX,
   ExternalLink,
   FileText,
-  PauseCircle,
 } from "lucide-react-native";
 
 import {
@@ -440,61 +439,62 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
       {item.memory_citation ? (
         <MemoryCitationBlock citation={item.memory_citation} />
       ) : null}
-      <View style={styles.actions} accessible={false}>
-        {lifecycle === "complete" && item.text.trim() ? (
-          <View style={styles.actionRow}>
-            <MessageActions text={item.text} readAloudKey={item.id} />
-            {receivedAt}
-          </View>
-        ) : receivedAt ? (
-          receivedAt
-        ) : null}
-        {lifecycle === "interrupted" ? (
-          <View
-            style={styles.status}
-            accessible
-            accessibilityLabel="Response interrupted"
-            accessibilityLiveRegion="polite"
+      {lifecycle === "complete" && item.text.trim() ? (
+        <View style={styles.actionRow} accessible={false}>
+          <MessageActions text={item.text} readAloudKey={item.id} />
+          {receivedAt}
+        </View>
+      ) : receivedAt ? (
+        receivedAt
+      ) : null}
+      {lifecycle === "interrupted" ? (
+        <View
+          style={styles.interruptRule}
+          accessible
+          accessibilityLabel="Response interrupted"
+          accessibilityLiveRegion="polite"
+        >
+          <View accessible={false} style={styles.interruptRuleLine} />
+          <Text
+            variant="meta"
+            size="2xs"
+            weight="medium"
+            color="muted"
+            style={styles.interruptRuleLabel}
           >
-            <PauseCircle
-              accessible={false}
-              size={theme.iconSize.xs}
-              color={theme.colors.warning.default}
-            />
-            <Text variant="caption" size="xs" color="warning">
-              Response interrupted
+            Interrupted
+          </Text>
+          <View accessible={false} style={styles.interruptRuleLine} />
+        </View>
+      ) : lifecycle === "error" ? (
+        <View
+          style={styles.status}
+          accessible
+          accessibilityRole="alert"
+          accessibilityLabel={
+            failureDetail
+              ? `Response failed. ${failureDetail}`
+              : "Response failed"
+          }
+          accessibilityLiveRegion="assertive"
+        >
+          <CircleX
+            accessible={false}
+            size={theme.iconSize.xs}
+            color={theme.colors.danger.default}
+          />
+          <View style={styles.failureCopy}>
+            <Text variant="caption" size="xs" color="danger">
+              Response failed
             </Text>
-          </View>
-        ) : lifecycle === "error" ? (
-          <View
-            style={styles.status}
-            accessible
-            accessibilityRole="alert"
-            accessibilityLabel={
-              failureDetail
-                ? `Response failed. ${failureDetail}`
-                : "Response failed"
-            }
-            accessibilityLiveRegion="assertive"
-          >
-            <CircleX
-              accessible={false}
-              size={theme.iconSize.xs}
-              color={theme.colors.danger.default}
-            />
-            <View style={styles.failureCopy}>
-              <Text variant="caption" size="xs" color="danger">
-                Response failed
+            {failureDetail ? (
+              <Text variant="caption" size="sm" color="danger">
+                {failureDetail}
               </Text>
-              {failureDetail ? (
-                <Text variant="caption" size="sm" color="danger">
-                  {failureDetail}
-                </Text>
-              ) : null}
-            </View>
+            ) : null}
           </View>
-        ) : null}
-      </View>
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -511,16 +511,28 @@ const styles = StyleSheet.create((theme) => ({
     borderLeftWidth: 2,
     borderLeftColor: theme.colors.border.subtle,
   },
-  actions: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: theme.spacing[2],
-  },
   actionRow: {
     minHeight: theme.minTouchTarget,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
+  },
+  interruptRule: {
+    marginTop: theme.spacing[2],
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  interruptRuleLine: {
+    flex: 1,
+    minWidth: theme.spacing[6],
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: theme.colors.border.default,
+  },
+  interruptRuleLabel: {
+    flexShrink: 0,
+    letterSpacing: 0.9,
+    textTransform: "uppercase",
   },
   status: {
     minHeight: theme.minTouchTarget,

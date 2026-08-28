@@ -75,6 +75,14 @@ still needs the scenario coverage below before it can be considered complete.
 | Sub-agent work         | Parent relationship and compact progress/report                                      | starting, running, waiting, complete, interrupted, error                                                      |
 | Context/compaction     | Non-alarming first-class lifecycle receipt                                           | queued, running, complete, interrupted, error; token/context metadata only when provided                      |
 
+Harness-injected envelopes that arrive wearing the user's role are not user
+text. `<user_query>` wrappers unwrap to the typed prompt. Background-task
+`<system-reminder>` completions become quiet service receipts. Other injected
+preambles (`<user_info>`, skill catalogues, MCP connection notices, Claude
+slash-command bookkeeping, FalconDeck skill file-reference wrappers) are
+omitted or unwrapped to the typed prompt. Raw XML and skill path plumbing
+never reach the bubble, export, or search index.
+
 On native clients, selection means the rendered transcript text itself is
 long-press selectable, including user and assistant Markdown, table cells,
 footnotes, fenced code, and diff lines. Copy-whole-message and copy-code actions
@@ -86,13 +94,22 @@ every client, including consecutive fences. A fence at the start or end of a
 message does not add empty outer space beyond the message itself.
 
 Image input is bounded consistently before it enters a provider stream: one
-image may contain at most 7.5 MB of decoded data and one turn may contain at
-most 10 MB across all images. Browser clients reject over-budget files before
-reading them into base64, native clients reject the materialized picker result
-before relay encryption, and the daemon repeats the check authoritatively before
-writing inline data to disk. The local turn endpoint and encrypted relay frame
-limits include headroom for base64 expansion at that aggregate ceiling. The
-error names an oversized image or explains the aggregate limit; attachments
+image may contain at most 10 MB of decoded data and one turn may contain at
+most 15 MB across all images. Those are FalconDeck ingest caps: the local turn
+body is 24 MiB and the relay encrypted frame is 40 MiB, which cover 15 MB
+decoded plus base64 and AES-GCM expansion. Claude still embeds at most 7.5 MB
+raw (10 MB encoded); client-side JPEG rewrite is what keeps typical screenshots
+under that so the model actually sees them. They are not the provider vision
+ceilings (ChatGPT/OpenAI accept 20 MB originals because that client compresses
+before upload). Browser and desktop clients downscale pasted, dropped, and
+picked files to a 2048px long edge and JPEG-encode anything over 1 MB (typical
+macOS webpage screenshots) so several can share the 15 MB turn budget. HEIC/AVIF
+becomes JPEG. Anything still over budget, or larger than 32 MB at the source, is
+rejected. WKWebView encode uses `toDataURL` when `toBlob` returns nothing. Native
+library and camera picks already request JPEG quality 0.8; mobile clipboard
+pastes still enforce the decoded budget before relay encryption. The daemon
+repeats the 10/15 MB check authoritatively before writing inline data to disk.
+The error names an oversized image or explains the aggregate limit; attachments
 already in the composer remain intact.
 
 Browser image preparation is part of the conversation-scoped composer state.

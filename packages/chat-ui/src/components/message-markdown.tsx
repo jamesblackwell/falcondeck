@@ -6,25 +6,30 @@ import {
   useRef,
   type ComponentProps,
 } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
-import { GitCommitHorizontal, Terminal, Upload } from "lucide-react";
+import { GitCommitHorizontal, Split, Terminal, Upload } from "lucide-react";
 
 import {
   agentDirectiveLabel,
+  fenceLanguageFromClassName,
   isMermaidLanguage,
+  parseLocalFilePath,
   safeExternalUrl,
   splitAgentMessageSegments,
+  splitLocalPathSegments,
   splitSlashCommandSegments,
   type AgentDirectiveAttribute,
 } from "@falcondeck/client-core";
 
+import { cn } from "@falcondeck/ui";
+
+import { LocalPathLink } from "../lib/local-path-context";
+import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
 import { MermaidBlock } from "./mermaid-block";
-
-const remarkPlugins = [remarkGfm];
 const markdownProcessor = unified().use(remarkParse).use(remarkGfm);
 
 /* --- Slash-command mentions ------------------------------------------ */
@@ -64,9 +69,44 @@ function remarkSlashCommands() {
   return (tree: SlashCommandMdastNode) => highlightSlashCommandNodes(tree);
 }
 
-const slashCommandRemarkPlugins = [remarkGfm, remarkSlashCommands];
+const LOCAL_PATH_NODE = "localFilePath";
 
-const slashCommandRemarkRehypeOptions = {
+function highlightLocalPathNodes(node: SlashCommandMdastNode) {
+  if (!node.children) return;
+  if (
+    node.type === "link" ||
+    node.type === "linkReference" ||
+    node.type === "image"
+  ) {
+    return;
+  }
+  node.children = node.children.flatMap((child) => {
+    if (child.type !== "text" || !child.value) {
+      highlightLocalPathNodes(child);
+      return [child];
+    }
+    const segments = splitLocalPathSegments(child.value);
+    if (!segments.some((segment) => segment.kind === "path")) return [child];
+    return segments.map((segment) =>
+      segment.kind === "path"
+        ? { type: LOCAL_PATH_NODE, value: segment.value }
+        : { type: "text", value: segment.value },
+    );
+  });
+}
+
+function remarkLocalPaths() {
+  return (tree: SlashCommandMdastNode) => highlightLocalPathNodes(tree);
+}
+
+const remarkPlugins = [remarkGfm, remarkLocalPaths];
+const slashCommandRemarkPlugins = [
+  remarkGfm,
+  remarkSlashCommands,
+  remarkLocalPaths,
+];
+
+const markdownRemarkRehypeOptions = {
   handlers: {
     [SLASH_COMMAND_NODE]: (
       _state: unknown,
@@ -77,10 +117,36 @@ const slashCommandRemarkRehypeOptions = {
       properties: { className: "font-medium text-accent" },
       children: [{ type: "text" as const, value: node.value ?? "" }],
     }),
+    [LOCAL_PATH_NODE]: (_state: unknown, node: { value?: string }) => ({
+      type: "element" as const,
+      tagName: "localpath",
+      properties: {},
+      children: [{ type: "text" as const, value: node.value ?? "" }],
+    }),
   },
   // mdast-util-to-hast types `handlers` with only built-in node names, but
   // runtime dispatch is by node type string, custom types included.
 } as unknown as ComponentProps<typeof ReactMarkdown>["remarkRehypeOptions"];
+
+function markdownNodeText(children: React.ReactNode): string {
+  if (children == null || children === false) return "";
+  if (typeof children === "string" || typeof children === "number") {
+    return String(children);
+  }
+  if (Array.isArray(children)) return children.map(markdownNodeText).join("");
+  return "";
+}
+
+function MarkdownLocalPath({ children }: { children?: React.ReactNode }) {
+  const text = markdownNodeText(children);
+  const path = parseLocalFilePath(text);
+  if (!path) return <>{children}</>;
+  return (
+    <LocalPathLink path={path} variant="text">
+      {children}
+    </LocalPathLink>
+  );
+}
 
 type MarkdownDefinitionNode = {
   type: string;
@@ -218,26 +284,35 @@ function safeMarkdownLinkUrl(url: string | undefined) {
   return null;
 }
 
+function markdownUrlTransform(url: string) {
+  return parseLocalFilePath(url) ? url : defaultUrlTransform(url);
+}
+
 function markdownCodeComponent(highlight: boolean) {
   return function MarkdownCode(props: {
     children?: React.ReactNode;
-    className?: string;
+    className?: string | string[];
+    node?: { properties?: { className?: unknown } };
   }) {
     const { children, className } = props;
-    const match = /language-(\w+)/.exec(className ?? "");
+    const language = fenceLanguageFromClassName(
+      className ?? props.node?.properties?.className,
+    );
     // A streamed fence can have a language header before its first content
     // token. react-markdown represents that legitimate empty body with no
     // children; coercing it directly would expose the word "undefined" in the
     // transcript until the next delta arrives.
-    const rawCode = children == null ? "" : String(children);
+    const rawCode = markdownNodeText(children);
     // react-markdown retains a trailing newline for fenced blocks, including
     // an unlabeled fence containing only one line. Inline code never has it.
-    const isBlock = Boolean(match) || rawCode.includes("\n");
+    const isBlock = Boolean(language) || rawCode.includes("\n");
     const code = rawCode.replace(/\n$/, "");
     if (isBlock) {
-      const language = match?.[1] ?? null;
-      if (highlight && isMermaidLanguage(language)) {
-        return <MermaidBlock code={code} />;
+      // Closed mermaid fences can render while the rest of the message is
+      // still streaming. Shiki highlighting still waits until the message
+      // settles; mermaid only needs a complete fence.
+      if (isMermaidLanguage(language)) {
+        return <MermaidBlock code={code} pending={!highlight} />;
       }
       return (
         <CodeBlock
@@ -245,6 +320,14 @@ function markdownCodeComponent(highlight: boolean) {
           language={language}
           highlight={highlight}
         />
+      );
+    }
+    const localPath = parseLocalFilePath(code);
+    if (localPath) {
+      return (
+        <LocalPathLink path={localPath} variant="code">
+          {children}
+        </LocalPathLink>
       );
     }
     return (
@@ -358,19 +441,25 @@ const markdownComponents = {
     // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
     // stretching the message bubble past the column edge.
     const safeHref = safeMarkdownLinkUrl(href);
-    if (!safeHref) {
-      return <span className="[overflow-wrap:anywhere]">{children}</span>;
+    if (safeHref) {
+      return (
+        <WebLinkAnchor href={safeHref} className={linkClassName}>
+          {children}
+        </WebLinkAnchor>
+      );
     }
-    return (
-      <a
-        href={safeHref}
-        className={linkClassName}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        {children}
-      </a>
-    );
+    const localPath = parseLocalFilePath(href ?? "");
+    if (localPath) {
+      return (
+        <LocalPathLink path={localPath} variant="text">
+          {children}
+        </LocalPathLink>
+      );
+    }
+    return <span className="[overflow-wrap:anywhere]">{children}</span>;
+  },
+  localpath({ children }: { children?: React.ReactNode }) {
+    return <MarkdownLocalPath>{children}</MarkdownLocalPath>;
   },
   img({ src, alt }: { src?: string; alt?: string }) {
     const externalUrl = safeExternalUrl(src);
@@ -381,14 +470,9 @@ const markdownComponents = {
     // user explicitly chooses the external handoff; typed image outputs own
     // in-app loading and preview behavior.
     return (
-      <a
-        href={externalUrl}
-        className={linkClassName}
-        target="_blank"
-        rel="noopener noreferrer"
-      >
+      <WebLinkAnchor href={externalUrl} className={linkClassName}>
         [{label}]
-      </a>
+      </WebLinkAnchor>
     );
   },
   /* Bordered card with a filled header, matching the mobile renderer: a table
@@ -445,9 +529,8 @@ export function renderMarkdown(
   return (
     <ReactMarkdown
       remarkPlugins={highlightCommands ? slashCommandRemarkPlugins : remarkPlugins}
-      remarkRehypeOptions={
-        highlightCommands ? slashCommandRemarkRehypeOptions : undefined
-      }
+      remarkRehypeOptions={markdownRemarkRehypeOptions}
+      urlTransform={markdownUrlTransform}
       components={
         highlightCode ? markdownComponents : streamingMarkdownComponents
       }
@@ -465,6 +548,13 @@ export function renderMarkdown(
 const DIRECTIVE_ICONS: Record<string, typeof Terminal> = {
   "git-commit": GitCommitHorizontal,
   "git-push": Upload,
+  breakout: Split,
+};
+
+const DIRECTIVE_TONE: Record<string, string> = {
+  "git-commit": "text-accent",
+  "git-push": "text-info",
+  breakout: "text-accent",
 };
 
 function directiveAttrLabel(key: string, value: string) {
@@ -484,10 +574,12 @@ function DirectiveChip({
   unparsed: string | null;
 }) {
   const Icon = DIRECTIVE_ICONS[name] ?? Terminal;
+  const tone = DIRECTIVE_TONE[name] ?? "text-fg-muted";
   // Styled like the compact tool rows (bare icon + muted mono text) so it
-  // reads as an activity annotation, not a pressable button.
+  // reads as an activity annotation, not a pressable button. Commits, pushes,
+  // and breakouts keep the same density but pick up a distinct tone.
   return (
-    <div className="my-1.5 flex max-w-full items-center gap-2 px-1 text-fg-muted">
+    <div className={cn("my-1.5 flex max-w-full items-center gap-2 px-1", tone)}>
       <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
       <span className="shrink-0 text-[length:var(--fd-text-xs)] font-medium">
         {agentDirectiveLabel(name)}

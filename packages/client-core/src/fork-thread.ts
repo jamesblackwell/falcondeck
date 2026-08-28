@@ -1,15 +1,9 @@
 import { buildForkPrompt } from "./handoff";
+import type { HandoffThreadApi } from "./handoff-thread";
+import type { ForkThreadPayload } from "./daemon-client";
 import type {
-  ForkThreadPayload,
-  SendTurnPayload,
-  StartThreadPayload,
-} from "./daemon-client";
-import type {
-  ThreadDetail,
-  ThreadDetailRequest,
   ThreadHandle,
   ThreadSummary,
-  UpdateThreadPayload,
   WorkspaceSummary,
 } from "./types";
 
@@ -17,18 +11,8 @@ import type {
  * The subset of `DaemonApiClient` "Fork thread" needs. Kept narrow so
  * callers can pass a plain object in tests without a full client.
  */
-export interface ForkThreadApi {
+export interface ForkThreadApi extends HandoffThreadApi {
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>;
-  startThread(payload: StartThreadPayload): Promise<ThreadHandle>;
-  updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>;
-  sendTurn(
-    payload: SendTurnPayload,
-  ): Promise<{ ok: boolean; message?: string | null }>;
-  threadDetail(
-    workspaceId: string,
-    threadId: string,
-    request?: Omit<ThreadDetailRequest, "workspace_id" | "thread_id">,
-  ): Promise<ThreadDetail>;
 }
 
 /**

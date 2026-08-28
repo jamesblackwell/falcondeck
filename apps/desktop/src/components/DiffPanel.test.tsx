@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ToastProvider } from '@falcondeck/ui'
 
@@ -33,6 +33,34 @@ function renderPanel(
 }
 
 describe('DiffPanel', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('keeps casual chat folders out of the git review surface', () => {
+    render(
+      <ToastProvider>
+        <DiffPanel
+          api={api}
+          workspaceId="chat-workspace"
+          refreshTrigger={0}
+          selection={null}
+          onSelectionChange={vi.fn()}
+          info={{
+            workspacePath: '/Users/James/Documents/FalconDeck/2026-08-25/chat-test',
+            workspaceKind: 'casual',
+            hostName: null,
+            thread: null,
+          }}
+        />
+      </ToastProvider>,
+    )
+
+    expect(screen.queryByRole('button', { name: /changes/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /files/i })).toBeInTheDocument()
+    expect(api.gitStatus).not.toHaveBeenCalled()
+  })
+
   it('closes an open preview when the selected thread changes', async () => {
     const onSelectionChange = vi.fn()
     const selection = { workspaceId: 'workspace-1', filePath: 'README.md', view: 'changes' as const }

@@ -12,7 +12,6 @@ import {
 
 import {
   buildOptimisticUserItem,
-  buildHandoffPrompt,
   buildProjectGroups,
   approvalPolicyForProvider,
   composerProviderFor,
@@ -32,6 +31,10 @@ import {
   filesToImageInputs,
   forkThread,
   generateUserItemId,
+  HandoffIncompleteError,
+  handoffBlockedReason,
+  handoffDestinationSettings,
+  handoffThread,
   imageAttachmentSendBlockReason,
   insertTranscript,
   operationalConditionDismissalKey,
@@ -45,6 +48,7 @@ import {
   resolvePersistedMode,
   resolvePermissionMode,
   resolveServiceTier,
+  composerSkillCatalog,
   selectedSkillsFromText,
   serviceTierForTurn,
   speechSynthesisBlob,
@@ -61,10 +65,10 @@ import {
   threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
-  workspaceProviderLabel,
   workspaceProviderOptions,
   threadForSelection,
   type AgentProvider,
+  type LiveSkillCatalog,
   type AttachmentPreparationCounts,
   type ComposerDrafts,
   type ConversationItem,
@@ -73,6 +77,7 @@ import {
   type ImageInput,
   type PersistedComposerSelection,
   type PersistedComposerState,
+  type ProjectGroup,
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type OperationalCondition,
@@ -97,6 +102,7 @@ import {
   normalizeQuotedSelection,
   useReadAloud,
   type ComposerMenuRequest,
+  type LocalPathAction,
   type QuotedSelection,
 } from "@falcondeck/chat-ui";
 import { useExtensionApps } from "@falcondeck/extension-sdk/app-host";
@@ -120,7 +126,19 @@ import {
   workspaceComposerDisabled,
   workspaceSendBlockReason,
 } from "./app-utils";
-import { isTauriDesktop, openActivityWindow, openExternalUrl } from "./api";
+import {
+  isTauriDesktop,
+  listDesktopEditors,
+  localPathKind,
+  openActivityWindow,
+  openExternalUrl,
+  openLocalPath,
+  openLocalPathWithEditor,
+  readLocalTextFile,
+  revealLocalPath,
+  saveLocalFileAs,
+  type DesktopEditor,
+} from "./api";
 import { CONNECTION_COPY } from "./connection-copy";
 import { activityTailStore, threadTailKey } from "./activity-tails";
 import {
@@ -144,6 +162,7 @@ import {
 import {
   clearStoredOnboarding,
   preferencesWithThinkingDisplay,
+  readStoredChatsCollapsed,
   readStoredCollapsedWorkspaces,
   readStoredOnboarding,
   readStoredThinkingDisplay,
@@ -151,6 +170,7 @@ import {
   shouldShowFirstRunOnboarding,
   splitPreferencesUpdate,
   CURRENT_ONBOARDING_WIZARD_VERSION,
+  writeStoredChatsCollapsed,
   writeStoredCollapsedWorkspaces,
   writeStoredOnboarding,
   writeStoredThinkingDisplay,
@@ -171,6 +191,7 @@ import type { DiffPanelSelection } from "./components/DiffPanel";
 import { PanelToggles } from "./components/PanelToggles";
 import { ProjectImportOverlay } from "./components/ProjectImportOverlay";
 import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDialog";
+import { UsageDialog } from "./components/UsageDialog";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
@@ -368,6 +389,7 @@ function AppInner() {
     () => ({
       activity: shortcutHintTokens("openActivity", shortcutSettings),
       settings: shortcutHintTokens("openSettings", shortcutSettings),
+      usage: shortcutHintTokens("openUsage", shortcutSettings),
       keyboardShortcuts: shortcutHintTokens(
         "openKeyboardShortcuts",
         shortcutSettings,
@@ -430,6 +452,7 @@ function AppInner() {
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isUsageOpen, setIsUsageOpen] = useState(false);
   // Launch-time "continue everything the quit stopped" prompt. Null means no
   // prompt; the ref makes the offer once per app launch.
   const [resumePromptThreads, setResumePromptThreads] = useState<
@@ -631,6 +654,9 @@ function AppInner() {
     useState<ThreadSortMode>(readStoredThreadSort);
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = useState<string[]>(
     readStoredCollapsedWorkspaces,
+  );
+  const [chatsCollapsed, setChatsCollapsed] = useState(
+    readStoredChatsCollapsed,
   );
   const selectionSeedRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
@@ -1120,6 +1146,68 @@ function AppInner() {
     },
     [selectedWorkspaceId, showRail],
   );
+  // Transcript path/link actions. Detected editors load once per session so
+  // the context menu can offer "Open in Zed" (or whatever is installed).
+  const [desktopEditors, setDesktopEditors] = useState<DesktopEditor[]>([]);
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let cancelled = false;
+    listDesktopEditors()
+      .then((editors) => {
+        if (!cancelled) setDesktopEditors(editors);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const describeLocalPath = useCallback(
+    (path: string) => localPathKind(path).catch(() => null),
+    [],
+  );
+  const handleLocalPath = useCallback(
+    (action: LocalPathAction, path: string, editorId?: string) => {
+      const report = (title: string) => (error: unknown) => {
+        toast({
+          variant: "danger",
+          title,
+          description: error instanceof Error ? error.message : String(error),
+        });
+      };
+      switch (action) {
+        case "open":
+          void openLocalPath(path).catch(report("Could not open path"));
+          break;
+        case "reveal":
+          void revealLocalPath(path).catch(report("Could not reveal path"));
+          break;
+        case "open-with":
+          if (!editorId) return;
+          void openLocalPathWithEditor(path, editorId).catch(
+            report("Could not open path"),
+          );
+          break;
+        case "save-as":
+          void saveLocalFileAs(path)
+            .then((saved) => {
+              if (saved) {
+                toast({ variant: "success", title: "File saved" });
+              }
+            })
+            .catch(report("Could not save file"));
+          break;
+        case "copy-contents":
+          void readLocalTextFile(path)
+            .then((contents) => navigator.clipboard.writeText(contents))
+            .then(() => {
+              toast({ variant: "success", title: "File contents copied" });
+            })
+            .catch(report("Could not copy file contents"));
+          break;
+      }
+    },
+    [toast],
+  );
   const workspaceProviderIds = (selectedWorkspace?.agents ?? [])
     .map((agent) => agent.provider)
     .sort()
@@ -1200,6 +1288,7 @@ function AppInner() {
     const host = workspaceHostBadges[selectedWorkspace.id] ?? null;
     return {
       workspacePath: selectedWorkspace.path,
+      workspaceKind: selectedWorkspace.kind,
       hostName: host?.name ?? null,
       hostConnected: host?.connected,
       thread: selectedThread,
@@ -1217,7 +1306,10 @@ function AppInner() {
     isCheckoutPending,
     checkout: checkoutBranch,
   } = useGitBranches(
-    !selectedThread && !isRemoteWorkspaceSelected && !isSettingsOpen
+    !selectedThread &&
+      selectedWorkspace?.kind !== "casual" &&
+      !isRemoteWorkspaceSelected &&
+      !isSettingsOpen
       ? api
       : null,
     selectedWorkspaceId,
@@ -1239,19 +1331,28 @@ function AppInner() {
     openUrl: openExternalUrl,
     onShipped: () => setLocalGitBump((bump) => bump + 1),
   });
-  const groups = useMemo(
-    () =>
-      buildProjectGroups(
-        viewSnapshot?.workspaces ?? [],
-        viewSnapshot?.threads ?? [],
-        viewSnapshot?.preferences.workspace_order,
-      ),
-    [
+  // Feeding the last build back lets buildProjectGroups return identical
+  // group/thread objects while snapshot content is unchanged, so the memoized
+  // sidebar sections hold still across streaming-driven snapshot churn.
+  /* eslint-disable react-hooks/refs -- stable group identity needs the prior
+     build synchronously inside useMemo; deferring it to an effect would lag
+     the sidebar by one committed render. */
+  const previousGroupsRef = useRef<ProjectGroup[] | null>(null);
+  const groups = useMemo(() => {
+    const nextGroups = buildProjectGroups(
+      viewSnapshot?.workspaces ?? [],
+      viewSnapshot?.threads ?? [],
       viewSnapshot?.preferences.workspace_order,
-      viewSnapshot?.threads,
-      viewSnapshot?.workspaces,
-    ],
-  );
+      previousGroupsRef.current,
+    );
+    previousGroupsRef.current = nextGroups;
+    return nextGroups;
+  }, [
+    viewSnapshot?.preferences.workspace_order,
+    viewSnapshot?.threads,
+    viewSnapshot?.workspaces,
+  ]);
+  /* eslint-enable react-hooks/refs */
   const activityCounts = useMemo(
     () =>
       countActivityEntries(groups, viewSnapshot?.interactive_requests ?? []),
@@ -2312,6 +2413,30 @@ function AppInner() {
       .catch(() => {});
   }, [apiFor, selectedProvider, selectedThread, selectedWorkspace]);
 
+  const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
+  const snapshotSkillsRef = useRef(selectedWorkspace?.skills ?? []);
+  useEffect(() => {
+    snapshotSkillsRef.current = selectedWorkspace?.skills ?? [];
+  }, [selectedWorkspace?.skills]);
+  useEffect(() => {
+    liveSkillsRef.current = null;
+  }, [selectedWorkspace?.id]);
+  const loadSkills = useCallback(
+    async (provider: AgentProvider) => {
+      const workspaceId = selectedWorkspace?.id;
+      const client = workspaceId ? apiFor(workspaceId) : null;
+      if (!workspaceId || !client) return [];
+      try {
+        const skills = await client.listWorkspaceSkills(workspaceId, provider);
+        liveSkillsRef.current = { workspaceId, provider, skills };
+        return skills;
+      } catch {
+        return snapshotSkillsRef.current;
+      }
+    },
+    [apiFor, selectedWorkspace?.id],
+  );
+
   const handleHandoffProviderSelect = useCallback(
     async (provider: AgentProvider) => {
       if (
@@ -2325,9 +2450,12 @@ function AppInner() {
       const client = apiFor(selectedWorkspace.id);
       if (!client) return;
 
-      let createdHandoff: ThreadHandle | null = null;
-      let handoffPrompt: string | null = null;
-      let targetLabel = provider;
+      const destination = handoffDestinationSettings(
+        selectedWorkspace,
+        provider,
+        persistedComposerSelections,
+      );
+      const targetLabel = destination.destinationLabel;
       const showHandoffThread = (handle: ThreadHandle) => {
         const destinationKey = draftKeyFor(
           handle.workspace.id,
@@ -2368,85 +2496,16 @@ function AppInner() {
 
       setHandoffPendingProvider(provider);
       try {
-        // Read the complete source before creating anything, so failed source
-        // hydration cannot leave a destination thread behind.
-        const sourceDetail = await client.threadDetail(
-          selectedWorkspace.id,
-          selectedThread.id,
-          { mode: "full" },
-        );
-        targetLabel = workspaceProviderLabel(selectedWorkspace, provider);
-        const preferred = composerSelectionFor(
-          persistedComposerSelections,
-          selectedWorkspace.path,
-          provider,
-        );
-        const targetCapabilities = workspaceAgentCapabilities(
-          selectedWorkspace,
-          provider,
-        );
-        const modelId = resolveThreadModelId(
-          null,
-          selectedWorkspace,
-          preferred?.modelId,
-          provider,
-        );
-        const permissionMode = resolvePermissionMode(
-          preferred?.permissionMode,
-          targetCapabilities.permission_modes,
-        );
-        const sandboxMode = resolvePersistedMode(
-          preferred?.sandboxMode,
-          targetCapabilities.sandbox_modes,
-        );
-        const started = await client.startThread({
-          workspace_id: selectedWorkspace.id,
-          provider,
-          model_id: modelId,
-          permission_mode: permissionMode,
-          approval_policy: approvalPolicyForProvider(provider, permissionMode),
-          sandbox_mode: sandboxMode,
-          isolation: "project_folder",
-          handoff_from: {
-            thread_id: selectedThread.id,
-            provider: selectedThread.provider,
+        await handoffThread(
+          client,
+          {
+            workspace: selectedWorkspace,
+            thread: selectedThread,
+            provider,
+            ...destination,
           },
-        });
-        createdHandoff = started;
-        const titled = await client.updateThread({
-          workspace_id: selectedWorkspace.id,
-          thread_id: started.thread.id,
-          title: `${selectedThread.title} · ${targetLabel}`,
-        });
-        createdHandoff = titled;
-        showHandoffThread(titled);
-
-        // The source transcript is handed over directly — bounded head +
-        // tail only when it cannot fit a destination context window. No
-        // summarization pass runs; timestamps and repeated workspace chrome
-        // are stripped. That keeps handoffs working without any background
-        // model signed in.
-        handoffPrompt = buildHandoffPrompt({
-          items: sourceDetail.items,
-          sourceTitle: selectedThread.title,
-          workspacePath: selectedWorkspace.path,
-        });
-
-        await client.sendTurn({
-          workspace_id: titled.workspace.id,
-          thread_id: titled.thread.id,
-          provider,
-          model_id: modelId,
-          permission_mode: permissionMode,
-          approval_policy: approvalPolicyForProvider(provider, permissionMode),
-          sandbox_mode: sandboxMode,
-          inputs: [
-            {
-              type: "text",
-              text: handoffPrompt,
-            },
-          ],
-        });
+          { onDestinationReady: showHandoffThread },
+        );
         setActionError(null);
         toast({
           variant: "success",
@@ -2455,43 +2514,28 @@ function AppInner() {
             "The source conversation was carried over verbatim. The original is unchanged.",
         });
       } catch (error: unknown) {
-        const message =
-          error instanceof Error ? error.message : "Failed to create handoff";
-        setActionError(message);
-        if (createdHandoff) {
-          showHandoffThread(createdHandoff);
-          const recoveredDetail = await client
-            .threadDetail(
-              createdHandoff.workspace.id,
-              createdHandoff.thread.id,
-              { mode: "full" },
-            )
-            .catch(() => null);
-          const turnStarted = Boolean(
-            recoveredDetail &&
-            (recoveredDetail.items.length > 0 ||
-              recoveredDetail.thread.status === "running" ||
-              recoveredDetail.thread.status === "waiting_for_input"),
-          );
-          if (recoveredDetail) setThreadDetail(recoveredDetail);
-          if (!turnStarted && handoffPrompt) {
+        if (error instanceof HandoffIncompleteError) {
+          showHandoffThread(error.handle);
+          if (error.detail) setThreadDetail(error.detail);
+          if (!error.turnStarted) {
             setDraftForConversation(
-              draftKeyFor(
-                createdHandoff.workspace.id,
-                createdHandoff.thread.id,
-              ),
-              handoffPrompt,
+              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
+              error.prompt,
             );
           }
+          setActionError(error.message);
           toast({
             variant: "warning",
             title: `Linked ${targetLabel} thread created`,
-            description: turnStarted
+            description: error.turnStarted
               ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
               : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
           });
           return;
         }
+        const message =
+          error instanceof Error ? error.message : "Failed to create handoff";
+        setActionError(message);
         toast({
           variant: "danger",
           title: "Failed to create handoff",
@@ -2562,6 +2606,40 @@ function AppInner() {
     setSnapshot,
     setSelectedThreadId,
     setSelectedWorkspaceId,
+    setThreadDetail,
+    toast,
+  ]);
+
+  const handleNewChat = useCallback(async () => {
+    if (!api) return;
+    try {
+      const workspace = await api.createChat();
+      setSnapshot(await api.snapshot());
+      setSelectedWorkspaceId(workspace.id);
+      setSelectedThreadId(null);
+      setThreadDetail(null);
+      setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
+      setIsActivityOpen(false);
+      setIsExtensionsOpen(false);
+      setIsPluginsOpen(false);
+      setActionError(null);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to create chat";
+      setActionError(message);
+      toast({
+        variant: "danger",
+        title: "Failed to create chat",
+        description: message,
+      });
+    }
+  }, [
+    api,
+    setActionError,
+    setSelectedThreadId,
+    setSelectedWorkspaceId,
+    setSnapshot,
     setThreadDetail,
     toast,
   ]);
@@ -2706,7 +2784,11 @@ function AppInner() {
 
   async function handleSubmit(
     steer = false,
-    override?: { text: string; preserveComposer: boolean },
+    override?: {
+      text: string;
+      preserveComposer: boolean;
+      resumeInterrupted?: boolean;
+    },
   ) {
     if ((attachmentPreparationCountsRef.current[conversationKey] ?? 0) > 0) {
       setActionError("Wait for image preparation to finish before sending.");
@@ -2722,13 +2804,19 @@ function AppInner() {
     if (
       !client ||
       !selectedWorkspace ||
-      (!submittedDraft.trim() && (override ? 0 : attachments.length) === 0)
+      (!override?.resumeInterrupted &&
+        !submittedDraft.trim() &&
+        (override ? 0 : attachments.length) === 0)
     )
       return;
     const submittedAttachments = override ? NO_ATTACHMENTS : attachments;
     const submittedSkills = selectedSkillsFromText(
       submittedUserDraft,
-      selectedWorkspace.skills ?? [],
+      composerSkillCatalog(
+        liveSkillsRef.current,
+        selectedWorkspace,
+        selectedThread?.provider ?? selectedProvider,
+      ),
     );
     const activeProvider = selectedThread?.provider ?? selectedProvider;
     const imageBlockReason = imageAttachmentSendBlockReason(
@@ -2767,9 +2855,10 @@ function AppInner() {
       !steer &&
       (selectedThread?.status === "running" ||
         selectedThread?.status === "waiting_for_input");
-    const optimisticItem = expectQueued
-      ? null
-      : buildOptimisticUserItem(userItemId, inputs, new Date().toISOString());
+    const optimisticItem =
+      expectQueued || override?.resumeInterrupted
+        ? null
+        : buildOptimisticUserItem(userItemId, inputs, new Date().toISOString());
     if (!selectedThreadId && optimisticItem) {
       setPendingNewThreadItem({
         conversationKey: submittedKey,
@@ -2948,6 +3037,7 @@ function AppInner() {
         sandbox_mode: selectedSandboxMode,
         steer,
         user_item_id: userItemId,
+        resume_interrupted: Boolean(override?.resumeInterrupted),
       });
       // The thread turned busy between our status check and the daemon's:
       // the send landed in the queue chip, so the transcript copy comes out.
@@ -3313,21 +3403,15 @@ function AppInner() {
   }, [draft, pendingVoiceSubmit]);
 
   const handleContinueInterruptedTurn = useCallback(() => {
-    // Retire the interruption as part of continuing. Without this the thread
-    // keeps its stopped marker in persisted state, and the next reconnect
-    // restores it as stopped even though the turn is running again.
-    const client = apiFor(selectedWorkspace?.id);
-    if (client && selectedWorkspace && selectedThreadId) {
-      void client
-        .updateThread({
-          workspace_id: selectedWorkspace.id,
-          thread_id: selectedThreadId,
-          acknowledge_interruption: true,
-        })
-        .then(applyThreadHandle)
-        .catch(() => {});
-    }
-    void handleSubmit(false, { text: "Continue", preserveComposer: true });
+    // sendTurn with resume_interrupted clears the stopped marker itself.
+    // Acknowledging first would Idle the thread and dispatch any queued
+    // follow-up before the resume, which can start that follow-up in a
+    // blank session if the original thread id is gone.
+    void handleSubmit(false, {
+      text: "",
+      preserveComposer: true,
+      resumeInterrupted: true,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     api,
@@ -3420,6 +3504,7 @@ function AppInner() {
     }
     setIsContinuingStoppedThreads(true);
     const failures: string[] = [];
+    const succeeded: typeof targets = [];
     // Sequential: a burst of parallel turns would have every agent CLI cold
     // starting at once on the machine the user just opened.
     for (const thread of targets) {
@@ -3429,20 +3514,11 @@ function AppInner() {
         continue;
       }
       try {
-        // Clear the interruption before sending. The daemon persists that
-        // acknowledgement, so a later reconnect cannot restore the thread
-        // from state that still calls the last turn interrupted.
-        await client
-          .updateThread({
-            workspace_id: thread.workspace_id,
-            thread_id: thread.id,
-            acknowledge_interruption: true,
-          })
-          .catch(() => {});
         await client.sendTurn({
           workspace_id: thread.workspace_id,
           thread_id: thread.id,
-          inputs: [{ type: "text", text: "Continue" }],
+          inputs: [],
+          resume_interrupted: true,
           // The thread's own settings, not the composer's current selection.
           provider: thread.provider,
           model_id: thread.agent.model_id,
@@ -3452,12 +3528,25 @@ function AppInner() {
           permission_mode: thread.agent.permission_mode ?? null,
           sandbox_mode: thread.agent.sandbox_mode ?? null,
         });
+        succeeded.push(thread);
       } catch {
         failures.push(thread.title);
       }
     }
     setIsContinuingStoppedThreads(false);
     setResumePromptThreads(null);
+    const focus =
+      succeeded.find(
+        (thread) =>
+          thread.workspace_id === selectedWorkspaceId &&
+          thread.id === selectedThreadId,
+      ) ??
+      succeeded.find((thread) => thread.workspace_id === selectedWorkspaceId) ??
+      succeeded[0];
+    if (focus) {
+      setSelectedWorkspaceId(focus.workspace_id);
+      setSelectedThreadId(focus.id);
+    }
     if (api) {
       try {
         setSnapshot(await api.snapshot());
@@ -3484,7 +3573,17 @@ function AppInner() {
           ? "Continued 1 stopped session"
           : `Continued ${continued} stopped sessions`,
     });
-  }, [api, apiFor, resumePromptThreads, setSnapshot, toast]);
+  }, [
+    api,
+    apiFor,
+    resumePromptThreads,
+    selectedThreadId,
+    selectedWorkspaceId,
+    setSelectedThreadId,
+    setSelectedWorkspaceId,
+    setSnapshot,
+    toast,
+  ]);
 
   const handleDismissStoppedThreadsPrompt = useCallback(() => {
     setResumePromptThreads(null);
@@ -3708,6 +3807,10 @@ function AppInner() {
     setIsExtensionsOpen(false);
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenUsage = useCallback(() => {
+    setIsUsageOpen(true);
   }, []);
 
   const handleOpenKeyboardShortcuts = useCallback(() => {
@@ -4340,7 +4443,11 @@ function AppInner() {
           ],
           selected_skills: selectedSkillsFromText(
             item.text,
-            selectedWorkspace.skills ?? [],
+            composerSkillCatalog(
+              liveSkillsRef.current,
+              selectedWorkspace,
+              selectedThread.provider,
+            ),
           ),
           provider: selectedThread.provider,
           model_id: selectedThread.agent.model_id,
@@ -4404,6 +4511,32 @@ function AppInner() {
           workspace_id: workspaceId,
           thread_id: threadId,
           pinned,
+        });
+        applyThreadHandle(handle);
+        setActionError(null);
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : "Failed to update pin";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to update pin",
+          description: msg,
+        });
+      }
+    },
+    [apiFor, applyThreadHandle, setActionError, toast],
+  );
+
+  const handleTogglePinThreadInProject = useCallback(
+    async (workspaceId: string, threadId: string, pinnedInProject: boolean) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      try {
+        const handle = await client.updateThread({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          pinned_in_project: pinnedInProject,
         });
         applyThreadHandle(handle);
         setActionError(null);
@@ -4521,7 +4654,14 @@ function AppInner() {
         workspace_id: workspaceId,
         thread_id: threadId,
         inputs: [{ type: "text", text }],
-        selected_skills: selectedSkillsFromText(text, workspace?.skills ?? []),
+        selected_skills: selectedSkillsFromText(
+          text,
+          composerSkillCatalog(
+            liveSkillsRef.current,
+            workspace,
+            workspace?.default_provider ?? "codex",
+          ),
+        ),
         steer: false,
         user_item_id: userItemId,
       });
@@ -4655,7 +4795,10 @@ function AppInner() {
         workspace_id: workspaceId,
         thread_id: handle.thread.id,
         inputs: [{ type: "text", text: prompt.trim() }],
-        selected_skills: selectedSkillsFromText(prompt, workspace.skills ?? []),
+        selected_skills: selectedSkillsFromText(
+          prompt,
+          composerSkillCatalog(liveSkillsRef.current, workspace, provider),
+        ),
         provider,
         model_id: modelId,
         reasoning_effort: effort,
@@ -4938,6 +5081,14 @@ function AppInner() {
     [],
   );
 
+  const handleChatsCollapsedChange = useCallback((collapsed: boolean) => {
+    setChatsCollapsed((current) => {
+      if (current === collapsed) return current;
+      writeStoredChatsCollapsed(collapsed);
+      return collapsed;
+    });
+  }, []);
+
   // Memoized derived values
   const isThreadDetailPending = Boolean(
     selectedThreadId &&
@@ -5027,14 +5178,9 @@ function AppInner() {
         : [],
     [providerOptions, selectedThread],
   );
-  const handoffDisabledReason = handoffPendingProvider
-    ? "Creating the linked handoff thread…"
-    : selectedThread?.status === "running" ||
-        selectedThread?.status === "waiting_for_input"
-      ? "Wait for the current turn to finish before handing off"
-      : selectedThread?.variant
-        ? "Handoffs from isolated threads are not supported yet"
-        : null;
+  const handoffDisabledReason = handoffBlockedReason(selectedThread, {
+    pending: Boolean(handoffPendingProvider),
+  });
   const activeCapabilities = useMemo(
     () =>
       threadAgentCapabilities(
@@ -5207,6 +5353,9 @@ function AppInner() {
         case "openActivity":
           handleOpenActivity();
           break;
+        case "openUsage":
+          handleOpenUsage();
+          break;
         case "openKeyboardShortcuts":
           handleOpenKeyboardShortcuts();
           break;
@@ -5317,6 +5466,7 @@ function AppInner() {
     handleNewThread,
     handleOpenActivity,
     handleOpenKeyboardShortcuts,
+    handleOpenUsage,
     handleStopCallback,
     isSettingsOpen,
     navigateSelectionHistory,
@@ -5417,6 +5567,7 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onOpenSettings={handleOpenSettings}
+            onOpenUsage={handleOpenUsage}
             onOpenActivity={handleOpenActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenPlugins={handleOpenPlugins}
@@ -5440,12 +5591,14 @@ function AppInner() {
             onSelectWorkspace={handleSelectWorkspace}
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
+            onNewChat={handleNewChat}
             onArchiveThread={handleArchiveThread}
             onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}
             onSuggestThreadTitle={handleSuggestThreadTitle}
             onForkThread={handleForkThread}
             onTogglePinThread={handleTogglePinThread}
+            onTogglePinThreadInProject={handleTogglePinThreadInProject}
             onMarkThreadRead={handleMarkThreadRead}
             onMarkThreadUnread={handleMarkThreadUnread}
             onAddProject={handleAddProject}
@@ -5459,9 +5612,15 @@ function AppInner() {
             onWorkspaceColorChange={handleWorkspaceColorChange}
             collapsedWorkspaceIds={collapsedWorkspaceIds}
             onWorkspaceCollapsedChange={handleWorkspaceCollapsedChange}
+            chatsCollapsed={chatsCollapsed}
+            onChatsCollapsedChange={handleChatsCollapsedChange}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
+            onOpenUsage={handleOpenUsage}
+            onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
+            onOpenSpeechSettings={openSpeechSettings}
+            onCheckForUpdates={handleCheckForUpdates}
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
@@ -5716,7 +5875,7 @@ function AppInner() {
               isSending={isSending || isPreparingSelectedHandoff}
               sendingLabel={
                 isPreparingSelectedHandoff
-                  ? "Summarizing previous conversation…"
+                  ? "Starting the linked thread…"
                   : isPreparingIsolation
                     ? "Setting up isolated copy…"
                     : null
@@ -5750,6 +5909,22 @@ function AppInner() {
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.
               onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}
+              onLocalPath={
+                isTauriDesktop() && !isRemoteWorkspaceSelected
+                  ? handleLocalPath
+                  : null
+              }
+              localPathEditors={
+                isTauriDesktop() && !isRemoteWorkspaceSelected
+                  ? desktopEditors
+                  : null
+              }
+              describeLocalPath={
+                isTauriDesktop() && !isRemoteWorkspaceSelected
+                  ? describeLocalPath
+                  : null
+              }
+              onOpenExternalLink={isTauriDesktop() ? openExternalUrl : null}
               onStartPairing={handleStartPairingCallback}
               onInteractiveResponse={handleInteractiveResponseCallback}
               promptInputKey={`${conversationKey}:${activeProvider}:${activeCapabilities.supports_images ? "images" : "no-images"}`}
@@ -5819,6 +5994,7 @@ function AppInner() {
                 attachments,
                 preparingAttachmentCount,
                 skills: selectedWorkspace?.skills ?? [],
+                loadSkills,
                 selectedProvider,
                 onProviderChange: handleProviderChange,
                 providers: providerOptions,
@@ -5869,6 +6045,7 @@ function AppInner() {
                     workspaceHosts={workspaceHostBadges}
                     remoteHosts={composerRemoteHosts}
                     onAddLocalProject={handleAddProject}
+                    onNewChat={handleNewChat}
                     onAddRemoteProject={handleAddRemoteProject}
                     isAddingProject={
                       isAddingProject || isImportingProjectSessions
@@ -5888,7 +6065,7 @@ function AppInner() {
                   attachmentSendBlockReason ??
                   (isPreparingSelectedHandoff
                     ? "Wait for the handoff turn to start"
-                    : undefined),
+                    : (sendBlockReason ?? undefined)),
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.
@@ -5994,6 +6171,14 @@ function AppInner() {
           }}
           onDismiss={handleDismissStoppedThreadsPrompt}
           isContinuing={isContinuingStoppedThreads}
+        />
+      ) : null}
+      {isUsageOpen ? (
+        <UsageDialog
+          open={isUsageOpen}
+          onClose={() => setIsUsageOpen(false)}
+          baseUrl={baseUrl}
+          onToast={toast}
         />
       ) : null}
     </>

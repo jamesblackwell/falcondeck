@@ -4,7 +4,7 @@ type ToolCallItem = Extract<ConversationItem, { kind: 'tool_call' }>
 
 /** Enough of a tool call to label it; keeps callers free of the full item shape. */
 export type ToolCallLabelSource = Pick<ToolCallItem, 'title'> &
-  Partial<Pick<ToolCallItem, 'output' | 'detail'>>
+  Partial<Pick<ToolCallItem, 'output' | 'detail' | 'tool_kind'>>
 
 export type ToolCallDescription = {
   /** Header text: the verb plus the file's name, never a screen-wide path. */
@@ -13,6 +13,19 @@ export type ToolCallDescription = {
   path: string | null
   /** True when `label` already names the file, so callers need not repeat it. */
   namesPath: boolean
+}
+
+/**
+ * Git commits, git pushes, and isolated/sub-agent breakouts. These land as
+ * ordinary execute rows from most harnesses, but they are the moments the
+ * user actually cares about in a transcript.
+ */
+export type NotableToolKind = 'commit' | 'push' | 'breakout'
+
+export type NotableToolAction = {
+  kind: NotableToolKind
+  /** Header text: `Commit feat: keep Studio`, never the raw execute line. */
+  label: string
 }
 
 /** `/bin/zsh -lc 'git diff --stat'` is a wrapper, not the work the agent did. */
@@ -114,7 +127,12 @@ export function stripFileLocation(token: string) {
  * once and shortens it for display, keeping the full path for links.
  */
 export function describeToolCall(item: ToolCallLabelSource): ToolCallDescription {
-  const title = unwrapShellCommand(item.title.trim())
+  const notable = notableToolAction(item)
+  if (notable) {
+    return { label: notable.label, path: null, namesPath: false }
+  }
+
+  const title = unwrapAgentCommand(item.title.trim())
   const url = URL_TITLE_RE.exec(title)
   if (url) {
     return { label: `${url[1] ?? ''}${compactUrl(url[2])}`, path: null, namesPath: false }
@@ -152,6 +170,233 @@ export function toolCallFilePath(item: ToolCallLabelSource) {
 export function unwrapShellCommand(title: string) {
   const shellMatch = SHELL_WRAPPER_RE.exec(title)
   return shellMatch ? shellMatch[2].trim() : title
+}
+
+const EXECUTE_WRAPPED_RE =
+  /^(?:execute|run_terminal_command|run_terminal_cmd)\s+`([^`]*)`?/i
+const EXECUTE_NAMED_RE = /^(?:run_terminal_command|run_terminal_cmd)\s+/i
+const COMMIT_HELPER_RE = /(?:^|\/)commit\.(?:js|mjs|cjs|ts|py|sh)$/i
+const SPAWN_KIND_RE = /^(?:spawn(?:_sub)?agent|spawn_agent|subagent(?:_activity)?|task|agent)$/i
+
+/**
+ * Drop the ACP `Execute \`…\`` wrapper, then any shell `-lc` wrapper, so a
+ * git push reads as a git push whether Codex, Claude, or Grok ran it.
+ */
+export function unwrapAgentCommand(title: string) {
+  let text = unwrapShellCommand(title.trim())
+  const wrapped = EXECUTE_WRAPPED_RE.exec(text)
+  if (wrapped) {
+    return unwrapShellCommand((wrapped[1] ?? '').trim())
+  }
+  const named = EXECUTE_NAMED_RE.exec(text)
+  if (named) {
+    text = unwrapShellCommand(text.slice(named[0].length).trim())
+  }
+  return text
+}
+
+/** Commits, pushes, and breakouts — or null when this is ordinary tool work. */
+export function notableToolAction(item: ToolCallLabelSource): NotableToolAction | null {
+  if (isBreakoutItem(item)) {
+    return { kind: 'breakout', label: breakoutLabel(item) }
+  }
+
+  const command = unwrapAgentCommand(item.title)
+  if (!command) return null
+
+  const helper = commitHelperMessage(command)
+  if (helper !== undefined) {
+    return { kind: 'commit', label: notableLabel('Commit', helper) }
+  }
+
+  const git = gitVerb(command)
+  if (git === 'commit') {
+    return { kind: 'commit', label: notableLabel('Commit', gitCommitMessage(command)) }
+  }
+  if (git === 'push') {
+    return { kind: 'push', label: notableLabel('Push', gitPushTarget(command)) }
+  }
+  if (git === 'worktree') {
+    return { kind: 'breakout', label: notableLabel('Breakout', gitWorktreeDetail(command)) }
+  }
+  return null
+}
+
+function notableLabel(verb: string, detail: string | null) {
+  return detail ? `${verb} ${detail}` : verb
+}
+
+function isBreakoutItem(item: ToolCallLabelSource) {
+  const detailKind = item.detail?.kind
+  if (detailKind === 'subagent_activity' || detailKind === 'collab_agent') return true
+  const kind = (item.tool_kind ?? '').trim()
+  if (SPAWN_KIND_RE.test(kind.replace(/[\s-]+/g, '_'))) return true
+  const command = unwrapAgentCommand(item.title).toLowerCase()
+  if (command.startsWith('agent:') || command.startsWith('breakout')) return true
+  if (isolationArgument(item.detail) === 'worktree') return true
+  return false
+}
+
+function breakoutLabel(item: ToolCallLabelSource) {
+  if (item.detail?.kind === 'subagent_activity') {
+    return notableLabel('Breakout', item.detail.agent_path || null)
+  }
+  if (item.detail?.kind === 'collab_agent') {
+    const count = item.detail.receiver_thread_ids.length
+    return notableLabel(
+      'Breakout',
+      count > 0 ? `${count} agent${count === 1 ? '' : 's'}` : item.detail.model,
+    )
+  }
+  const command = unwrapAgentCommand(item.title)
+  const agent = /^agent:\s*(.+)$/i.exec(command)
+  if (agent) return notableLabel('Breakout', collapseHeaderDetail(agent[1]))
+  const type = argumentString(item.detail, ['description', 'subagent_type', 'prompt'])
+  return notableLabel('Breakout', type ? collapseHeaderDetail(type) : null)
+}
+
+function isolationArgument(detail: ToolCallItem['detail'] | undefined) {
+  const value = argumentString(detail, ['isolation'])
+  return value ? value.toLowerCase() : null
+}
+
+function argumentString(detail: ToolCallItem['detail'] | undefined, keys: string[]) {
+  if (!detail || (detail.kind !== 'dynamic' && detail.kind !== 'mcp')) return null
+  const args = detail.arguments
+  if (!args || typeof args !== 'object') return null
+  for (const key of keys) {
+    const value = (args as Record<string, unknown>)[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function commitHelperMessage(command: string) {
+  const tokens = tokenizeCommand(command)
+  if (tokens.length === 0) return undefined
+  let index = 0
+  const program = basename(tokens[index] ?? '')
+  if (['node', 'nodejs', 'bun', 'deno', 'python', 'python3', 'bash', 'sh', 'zsh'].includes(program)) {
+    index += 1
+    while (index < tokens.length && tokens[index]!.startsWith('-')) index += 1
+  }
+  const script = tokens[index]
+  if (!script || !COMMIT_HELPER_RE.test(script.replace(/\\/g, '/'))) return undefined
+  const message = tokens[index + 1]
+  return message ? collapseHeaderDetail(message) : null
+}
+
+function gitVerb(command: string) {
+  const tokens = tokenizeCommand(command)
+  const program = tokens[0]
+  if (!program || basename(program) !== 'git') return null
+  let index = 1
+  while (index < tokens.length) {
+    const token = tokens[index]!
+    if (token === '-C' || token === '-c') {
+      index += 2
+      continue
+    }
+    if (token.startsWith('--git-dir') || token.startsWith('--work-tree')) {
+      index += token.includes('=') ? 1 : 2
+      continue
+    }
+    if (token.startsWith('-')) {
+      index += 1
+      continue
+    }
+    return token
+  }
+  return null
+}
+
+function gitCommitMessage(command: string) {
+  const tokens = tokenizeCommand(command)
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!
+    if (token === '-m' || token === '--message') {
+      const next = tokens[index + 1]
+      return next ? collapseHeaderDetail(next) : null
+    }
+    if (token.startsWith('--message=')) {
+      return collapseHeaderDetail(token.slice('--message='.length))
+    }
+  }
+  return null
+}
+
+function gitPushTarget(command: string) {
+  const tokens = tokenizeCommand(command)
+  const rest: string[] = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!
+    if (rest.length === 0 && basename(token) === 'git') continue
+    if (rest.length === 0 && token === 'push') continue
+    if (token === '-C' || token === '-c') {
+      index += 1
+      continue
+    }
+    if (token.startsWith('-')) continue
+    rest.push(token)
+    if (rest.length === 2) break
+  }
+  return rest.length > 0 ? rest.join(' ') : null
+}
+
+function gitWorktreeDetail(command: string) {
+  const tokens = tokenizeCommand(command)
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]
+    if ((token === '-b' || token === '--branch') && tokens[index + 1]) {
+      return tokens[index + 1] ?? null
+    }
+  }
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    const token = tokens[index]!
+    if (token.startsWith('-') || token === 'git' || token === 'worktree' || token === 'add') continue
+    return basename(token)
+  }
+  return null
+}
+
+function collapseHeaderDetail(value: string) {
+  const trimmed = value.trim().replace(/\s+/g, ' ')
+  if (trimmed.length <= 72) return trimmed
+  return `${trimmed.slice(0, 71).trimEnd()}…`
+}
+
+function basename(path: string) {
+  return path.split(/[/\\]/).filter(Boolean).pop() ?? path
+}
+
+function tokenizeCommand(command: string) {
+  const tokens: string[] = []
+  let current = ''
+  let quote: '"' | "'" | '`' | null = null
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) {
+        quote = null
+      } else {
+        current += char
+      }
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      continue
+    }
+    current += char
+  }
+  if (current) tokens.push(current)
+  return tokens
 }
 
 function looksLikePath(token: string) {

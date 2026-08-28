@@ -1,18 +1,21 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   generateBoxKeyPair,
   REMOTE_SESSION_STORAGE_VERSION,
   secretKeyToBase64,
+  type ConversationItem,
   type DaemonSnapshot,
 } from '@falcondeck/client-core'
 
 import {
   AwaitedActionTimeoutError,
+  boundRetainedThreadItems,
   canPostNotifications,
   canWarmStartFromSnapshotCache,
   clearPairingParamsFromUrl,
   connectionBadgeState,
+  createSnapshotCacheScheduler,
   deriveConnectionHelpState,
   loadPersistedRemoteSnapshot,
   loadNotificationPreference,
@@ -299,6 +302,149 @@ describe('scheduleVisibilityAwareFlush', () => {
     cancel()
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(callback).not.toHaveBeenCalled()
+  })
+})
+
+describe('createSnapshotCacheScheduler', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('lands the first pending image without waiting', () => {
+    const write = vi.fn()
+    const scheduler = createSnapshotCacheScheduler(write)
+
+    scheduler.schedule()
+    expect(write).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(0)
+    expect(write).toHaveBeenCalledTimes(1)
+  })
+
+  it('coalesces a burst into one write per interval with the newest image', () => {
+    const write = vi.fn()
+    const scheduler = createSnapshotCacheScheduler(write)
+
+    // A stream floods schedule() calls; only the booked trailing timer runs.
+    for (let i = 0; i < 50; i += 1) {
+      scheduler.schedule()
+      vi.advanceTimersByTime(100)
+    }
+    expect(write).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps writes at least the minimum interval apart while updates flow', () => {
+    const write = vi.fn()
+    const scheduler = createSnapshotCacheScheduler(write, 5_000)
+
+    scheduler.schedule()
+    vi.advanceTimersByTime(0)
+    expect(write).toHaveBeenCalledTimes(1)
+
+    // The next update lands a full interval later, however often it schedules.
+    scheduler.schedule()
+    scheduler.schedule()
+    vi.advanceTimersByTime(4_999)
+    expect(write).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
+    expect(write).toHaveBeenCalledTimes(2)
+
+    scheduler.schedule()
+    vi.advanceTimersByTime(5_000)
+    expect(write).toHaveBeenCalledTimes(3)
+  })
+
+  it('flushes immediately on demand and resets the spacing clock', () => {
+    const write = vi.fn()
+    const scheduler = createSnapshotCacheScheduler(write, 5_000)
+
+    scheduler.schedule()
+    scheduler.flush()
+    expect(write).toHaveBeenCalledTimes(1)
+
+    // Hide/unload just wrote, so the next scheduled write still waits.
+    scheduler.schedule()
+    vi.advanceTimersByTime(4_999)
+    expect(write).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(1)
+    expect(write).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores a flush with nothing pending and cancels drops the write', () => {
+    const write = vi.fn()
+    const scheduler = createSnapshotCacheScheduler(write)
+
+    scheduler.flush()
+    expect(write).not.toHaveBeenCalled()
+
+    scheduler.schedule()
+    scheduler.cancel()
+    vi.advanceTimersByTime(10_000)
+    expect(write).not.toHaveBeenCalled()
+  })
+})
+
+describe('boundRetainedThreadItems', () => {
+  const item = (id: string) => ({ id }) as ConversationItem
+  const cache = (...threadIds: string[]) =>
+    Object.fromEntries(threadIds.map((id) => [id, [item(`${id}-item`)]]))
+  const thread = (id: string, updated_at: string) => ({ id, updated_at })
+
+  it('drops caches for threads that left the snapshot and keeps identity otherwise', () => {
+    const current = cache('t-1', 't-2')
+    const threads = [
+      thread('t-1', '2026-08-12T12:00:00Z'),
+      thread('t-2', '2026-08-12T11:00:00Z'),
+    ]
+
+    expect(boundRetainedThreadItems(current, threads, null)).toBe(current)
+    expect(
+      boundRetainedThreadItems(current, [threads[0]!], null),
+    ).toEqual(cache('t-1'))
+  })
+
+  it('evicts the least recently updated threads beyond the cap', () => {
+    // Cap 2, no selection: t-3 is freshest, t-1 is oldest.
+    const current = cache('t-1', 't-2', 't-3')
+    const threads = [
+      thread('t-1', '2026-08-12T08:00:00Z'),
+      thread('t-2', '2026-08-12T09:00:00Z'),
+      thread('t-3', '2026-08-12T10:00:00Z'),
+    ]
+
+    expect(
+      Object.keys(boundRetainedThreadItems(current, threads, null, 2)),
+    ).toEqual(['t-3', 't-2'])
+  })
+
+  it('never evicts the selected thread even when it is the stalest', () => {
+    const current = cache('t-1', 't-2', 't-3')
+    const threads = [
+      thread('t-1', '2026-08-12T08:00:00Z'),
+      thread('t-2', '2026-08-12T09:00:00Z'),
+      thread('t-3', '2026-08-12T10:00:00Z'),
+    ]
+
+    expect(
+      Object.keys(boundRetainedThreadItems(current, threads, 't-1', 2)).sort(),
+    ).toEqual(['t-1', 't-3'])
+  })
+
+  it('rehydrates evicted threads from scratch: a missing cache stays empty-safe', () => {
+    const pruned = boundRetainedThreadItems(
+      cache('t-9'),
+      [thread('t-other', '2026-08-12T10:00:00Z')],
+      null,
+      32,
+    )
+
+    expect(pruned).toEqual({})
+    // The streaming applier treats an empty base as "no cached items", which
+    // the detail RPC then replaces on selection.
+    expect(pruned['t-other'] ?? []).toEqual([])
   })
 })
 

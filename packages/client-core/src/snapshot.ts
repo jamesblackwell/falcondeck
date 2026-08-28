@@ -14,6 +14,7 @@ import {
   normalizeScheduledTaskRun,
   normalizeThreadSummary,
 } from "./normalization";
+import { prepareImageFile } from "./image-prepare";
 
 export type SnapshotSelection = {
   workspaceId: string | null;
@@ -45,10 +46,13 @@ export function threadForSelection(
   );
 }
 
-/** Cross-provider attachment ceiling. The daemon enforces the same limits
+/** Cross-provider attachment ceiling after client-side prepare. 10 MB decoded
+ * is FalconDeck ingest (HTTP 24 MiB / relay 40 MiB cover the base64 expansion).
+ * Claude still embeds at most 7.5 MB raw (10 MB encoded); JPEG rewrite is what
+ * keeps typical screenshots under that. The daemon enforces the same limits
  * authoritatively; clients use them to fail before allocating relay payloads. */
-export const MAX_IMAGE_ATTACHMENT_BYTES = 7_500_000;
-export const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 10_000_000;
+export const MAX_IMAGE_ATTACHMENT_BYTES = 10_000_000;
+export const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 15_000_000;
 
 function base64PayloadByteSize(value: string): number | null {
   const comma = value.indexOf(",");
@@ -73,14 +77,14 @@ function validateImageByteEntries(
   for (const entry of entries) {
     if (entry.bytes > MAX_IMAGE_ATTACHMENT_BYTES) {
       throw new Error(
-        `${entry.name} is too large. Images must be 7.5 MB or smaller.`,
+        `${entry.name} is too large. Images must be 10 MB or smaller.`,
       );
     }
     total += entry.bytes;
   }
   if (total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES) {
     throw new Error(
-      "Those images are too large together. Attach no more than 10 MB at once.",
+      "Those images are too large together. Attach no more than 15 MB at once.",
     );
   }
 }
@@ -666,6 +670,11 @@ export function reconcileSnapshotSelection(
 /**
  * Convert file inputs to ImageInput objects.
  * Shared by both desktop and remote-web apps.
+ *
+ * Screenshot-sized and oversized files are downscaled and JPEG-encoded
+ * before the wire budget is applied, so a macOS webpage screenshot paste
+ * does not fail the 10 MB cap and several of them can share the 15 MB
+ * turn budget.
  */
 export async function filesToImageInputs(
   files: FileList | readonly File[] | null,
@@ -679,36 +688,46 @@ export async function filesToImageInputs(
       `Only image attachments are supported. ${unsupported.name || "That file"} was not attached.`,
     );
   }
+  const existingEntries = existing.flatMap((image) => {
+    const bytes = imageInputByteSize(image);
+    return bytes == null
+      ? []
+      : [{ name: image.name?.trim() || "Image", bytes }];
+  });
+  let usedBytes = existingEntries.reduce((total, entry) => total + entry.bytes, 0);
+  const prepared: File[] = [];
+  for (const file of selected) {
+    const remaining = MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - usedBytes;
+    const next = await prepareImageFile(
+      file,
+      Math.min(MAX_IMAGE_ATTACHMENT_BYTES, remaining),
+    );
+    prepared.push(next);
+    usedBytes += next.size;
+  }
   validateImageByteEntries([
-    ...existing.flatMap((image) => {
-      const bytes = imageInputByteSize(image);
-      return bytes == null
-        ? []
-        : [{ name: image.name?.trim() || "Image", bytes }];
-    }),
-    ...selected.map((file) => ({
+    ...existingEntries,
+    ...prepared.map((file) => ({
       name: file.name || "Image",
       bytes: file.size || 0,
     })),
   ]);
-  const images = selected;
-  return Promise.all(
-    images.map(
-      (file) =>
-        new Promise<ImageInput>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onerror = () => reject(reader.error);
-          reader.onload = () =>
-            resolve({
-              type: "image",
-              id: crypto.randomUUID(),
-              name: file.name,
-              mime_type: file.type,
-              url: String(reader.result),
-              local_path: null,
-            });
-          reader.readAsDataURL(file);
-        }),
-    ),
-  );
+  return Promise.all(prepared.map(fileToImageInput));
+}
+
+function fileToImageInput(file: File): Promise<ImageInput> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () =>
+      resolve({
+        type: "image",
+        id: crypto.randomUUID(),
+        name: file.name,
+        mime_type: file.type,
+        url: String(reader.result),
+        local_path: null,
+      });
+    reader.readAsDataURL(file);
+  });
 }

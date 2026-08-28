@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
+import { Alert } from "react-native";
 import { Drawer } from "expo-router/drawer";
-import { Redirect, useRouter, type Href } from "expo-router";
+import { Redirect, usePathname, useRouter, type Href } from "expo-router";
 import { DrawerActions } from "@react-navigation/native";
 import type { DrawerContentComponentProps } from "@react-navigation/drawer";
 
@@ -10,6 +11,7 @@ import {
   buildProjectGroups,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
+  type WorkspaceSummary,
 } from "@falcondeck/client-core";
 
 import { useRelayStore, useSessionStore } from "@/store";
@@ -18,7 +20,12 @@ import { triggerThreadSelectionHaptic } from "@/lib/haptics";
 
 export default function AppLayout() {
   const router = useRouter();
+  const pathname = usePathname();
   const { theme } = useUnistyles();
+  const settingsOpen =
+    pathname === "/settings" || pathname.startsWith("/settings/");
+  const automationsOpen =
+    pathname === "/automations" || pathname.startsWith("/automations/");
   const sessionId = useRelayStore((s) => s.sessionId);
   const snapshot = useSessionStore((s) => s.snapshot);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
@@ -70,6 +77,21 @@ export default function AppLayout() {
     [router, selectedThreadId, selectedWorkspaceId],
   );
 
+  const handleNewChat = useCallback(async () => {
+    try {
+      const workspace = await useRelayStore
+        .getState()
+        ._callRpc<WorkspaceSummary>("chat.create", { create: true });
+      useSessionStore.getState().selectNewThread(workspace.id);
+      router.navigate("/(app)");
+    } catch (error) {
+      Alert.alert(
+        "Couldn't create chat",
+        error instanceof Error ? error.message : "The desktop could not create the chat folder.",
+      );
+    }
+  }, [router]);
+
   const handleOpenSettings = useCallback(() => {
     router.navigate("/(app)/settings");
   }, [router]);
@@ -88,8 +110,11 @@ export default function AppLayout() {
         selectedThreadId={selectedThreadId}
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
+        onNewChat={handleNewChat}
         onOpenSettings={handleOpenSettings}
+        settingsOpen={settingsOpen}
         onOpenAutomations={handleOpenAutomations}
+        automationsOpen={automationsOpen}
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
         threadTagsById={threadTags.byThreadId}
         threadTagOptions={threadTags.tags}
@@ -105,8 +130,11 @@ export default function AppLayout() {
       groups,
       handleSelectThread,
       handleNewThread,
+      handleNewChat,
       handleOpenSettings,
       handleOpenAutomations,
+      settingsOpen,
+      automationsOpen,
       selectedThreadId,
       selectedWorkspaceId,
       threadTags.byThreadId,

@@ -198,8 +198,8 @@ export function DictationOverlay() {
       <section
         className={
           failed
-            ? "w-full rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 shadow-[var(--fd-shadow-lg)] backdrop-blur-xl"
-            : "flex h-14 w-full items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 shadow-[var(--fd-shadow-lg)] backdrop-blur-xl"
+            ? "w-full rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 backdrop-blur-xl"
+            : "flex h-14 w-full items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 backdrop-blur-xl"
         }
         role="status"
         aria-live="polite"

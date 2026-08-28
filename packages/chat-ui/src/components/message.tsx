@@ -21,12 +21,15 @@ import {
   ExternalLink,
   FileDiff,
   FileText,
+  GitCommitHorizontal,
   ImageIcon,
   Info,
   PauseCircle,
   Radio,
   Search,
+  Split,
   Square,
+  Upload,
   Volume2,
 } from "lucide-react";
 import * as Collapsible from "@radix-ui/react-collapsible";
@@ -62,12 +65,14 @@ import {
   isSafeMediaUrl,
   providerOutputKindLabel,
   parseMcpResult,
+  projectHarnessUserText,
   serviceMessagePresentation,
   safeExternalUrl,
   safeArtifactFilename,
   safeArtifactMimeType,
   summarizeParsedMcpArtifacts,
   describeToolCall,
+  notableToolAction,
   toolCallLabel,
   toolLifecycle,
   toolLifecycleLabel,
@@ -86,6 +91,7 @@ import { ActivityDiamond, CopyButton, cn } from "@falcondeck/ui";
 
 import { FileDiffLink, useOpenFileDiff } from "../lib/file-diff-context";
 import { extractFilePath, fileBaseName } from "../lib/tool-file-path";
+import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
 import { DiffBlock } from "./diff-block";
 import { useParsedDiff } from "./diff-lines";
@@ -223,6 +229,19 @@ function ImagePreviewDialog({
     bubble instead of pages of scrollback. */
 const COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX = 160;
 
+/** Copy/read-aloud chrome stays visible on touch. A fine pointer hides it
+    until this item is hovered or focused. Tailwind's `group-hover` variant
+    is wrapped in `(hover: hover)`, which some desktop WebViews report as
+    false even with a mouse, so reveal uses `group-[:hover]` instead. */
+function hoverRevealActions(group: "message" | "review") {
+  return [
+    "transition-opacity",
+    "[@media(pointer:fine)]:opacity-0",
+    `group-[:hover]/${group}:opacity-100`,
+    `group-focus-within/${group}:opacity-100`,
+  ].join(" ");
+}
+
 function UserMessage({
   item,
   collapseLongMessages = true,
@@ -230,6 +249,8 @@ function UserMessage({
   item: Extract<ConversationItem, { kind: "user_message" }>;
   collapseLongMessages?: boolean;
 }) {
+  const projected = projectHarnessUserText(item.text);
+  const text = projected.kind === "prompt" ? projected.text : "";
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
     null,
   );
@@ -250,7 +271,7 @@ function UserMessage({
     () => setPreviewAttachmentId(null),
     [],
   );
-  const hasText = item.text.trim().length > 0;
+  const hasText = text.trim().length > 0;
   const collapsible = collapseLongMessages && hasText;
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
@@ -282,9 +303,29 @@ function UserMessage({
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [collapsible, item.text]);
+  }, [collapsible, text]);
 
   const collapsed = collapsible && overflowing && !expanded;
+
+  if (projected.kind === "service") {
+    return (
+      <ServiceMessage
+        item={{
+          kind: "service",
+          id: item.id,
+          level: projected.level,
+          message: projected.message,
+          created_at: item.created_at,
+        }}
+      />
+    );
+  }
+  if (
+    (projected.kind === "hidden" || projected.kind === "incomplete") &&
+    item.attachments.length === 0
+  ) {
+    return null;
+  }
 
   return (
     <div className="group/message relative ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
@@ -302,7 +343,7 @@ function UserMessage({
           className="fd-type-body max-w-none break-words text-fg-primary"
         >
           <MessageMarkdown
-            text={item.text}
+            text={text}
             defer={false}
             interpretDirectives={false}
             highlightCommands
@@ -345,8 +386,14 @@ function UserMessage({
         </div>
       ) : null}
       {hasText ? (
-        <div className="absolute -top-3 right-2 z-10 flex justify-end rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 shadow-sm opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:static [@media(hover:none)]:mt-1 [@media(hover:none)]:min-h-6 [@media(hover:none)]:border-0 [@media(hover:none)]:shadow-none [@media(hover:none)]:opacity-100">
-          <CopyButton text={item.text} label="Copy message" />
+        <div
+          className={cn(
+            "absolute -top-3 right-2 z-10 flex justify-end rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 shadow-sm",
+            hoverRevealActions("message"),
+            "[@media(pointer:coarse)]:static [@media(pointer:coarse)]:mt-1 [@media(pointer:coarse)]:min-h-6 [@media(pointer:coarse)]:border-0 [@media(pointer:coarse)]:shadow-none",
+          )}
+        >
+          <CopyButton text={text} label="Copy message" />
         </div>
       ) : null}
       {previewAttachment ? (
@@ -599,6 +646,34 @@ function MessageReceivedAt({ createdAt }: { createdAt: string }) {
   );
 }
 
+/** Transcript cut for a stopped turn. Interruption is expected, not a warning. */
+function InterruptedResponseRule() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-label="Response interrupted"
+      className="flex items-center gap-3 py-2"
+    >
+      <span
+        aria-hidden="true"
+        className="h-px min-w-8 flex-1 bg-[linear-gradient(90deg,transparent,var(--fd-border-2)_22%,var(--fd-border-2))]"
+      />
+      <span
+        aria-hidden="true"
+        className="fd-type-eyebrow fd-type-eyebrow--sm shrink-0 text-fg-muted"
+      >
+        Interrupted
+      </span>
+      <span
+        aria-hidden="true"
+        className="h-px min-w-8 flex-1 bg-[linear-gradient(90deg,var(--fd-border-2),var(--fd-border-2)_78%,transparent)]"
+      />
+    </div>
+  );
+}
+
 function AssistantMessage({
   item,
   showReceivedAt = false,
@@ -612,21 +687,11 @@ function AssistantMessage({
   const isCommentary = item.phase === "commentary";
   const memoryCitationEntries = item.memory_citation?.entries ?? [];
   const citations = item.citations ?? [];
-  const terminalStatus =
-    lifecycle === "interrupted"
-      ? {
-          label: "Response interrupted",
-          icon: PauseCircle,
-          className: "text-warning",
-        }
-      : lifecycle === "error"
-        ? { label: "Response failed", icon: CircleX, className: "text-danger" }
-        : null;
   const failureDetail =
     lifecycle === "error" ? assistantFailureDetail(item) : null;
   const canReadAloud =
     lifecycle === "complete" && item.text.trim().length > 0 && readAloud;
-  const TerminalStatusIcon = terminalStatus?.icon;
+  const hasText = Boolean(item.text.trim());
   const receivedAt =
     showReceivedAt && lifecycle !== "pending" && lifecycle !== "streaming" ? (
       <MessageReceivedAt createdAt={item.created_at} />
@@ -670,11 +735,16 @@ function AssistantMessage({
       {memoryCitationEntries.length > 0 && item.memory_citation ? (
         <MemoryCitationSources citation={item.memory_citation} />
       ) : null}
-      {item.text.trim() || terminalStatus || receivedAt ? (
+      {hasText || receivedAt || lifecycle === "error" ? (
         <div className="mt-1 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
-          {item.text.trim() || receivedAt ? (
-            <span className="inline-flex items-center gap-2 opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
-              {item.text.trim() ? (
+          {hasText || receivedAt ? (
+            <span
+              className={cn(
+                "inline-flex items-center gap-2",
+                hoverRevealActions("message"),
+              )}
+            >
+              {hasText ? (
                 <span className="inline-flex items-center gap-0.5">
                   <CopyButton
                     text={assistantMessageCopyText(
@@ -724,18 +794,15 @@ function AssistantMessage({
               {receivedAt}
             </span>
           ) : null}
-          {terminalStatus && TerminalStatusIcon ? (
+          {lifecycle === "error" ? (
             <span
-              role={lifecycle === "error" ? "alert" : "status"}
-              aria-live={lifecycle === "error" ? "assertive" : "polite"}
+              role="alert"
+              aria-live="assertive"
               aria-atomic="true"
-              className={cn(
-                "inline-flex flex-wrap items-center gap-x-1 gap-y-1 text-[length:var(--fd-text-xs)]",
-                terminalStatus.className,
-              )}
+              className="inline-flex flex-wrap items-center gap-x-1 gap-y-1 text-[length:var(--fd-text-xs)] text-danger"
             >
-              <TerminalStatusIcon aria-hidden="true" className="h-3.5 w-3.5" />
-              {terminalStatus.label}
+              <CircleX aria-hidden="true" className="h-3.5 w-3.5" />
+              Response failed
               {failureDetail ? (
                 <span className="basis-full break-words pl-5 text-[length:var(--fd-text-sm)]">
                   {" "}
@@ -746,6 +813,7 @@ function AssistantMessage({
           ) : null}
         </div>
       ) : null}
+      {lifecycle === "interrupted" ? <InterruptedResponseRule /> : null}
     </article>
   );
 }
@@ -1016,13 +1084,21 @@ function ToolCallCompactRow({
 }) {
   const lifecycleLabel = toolLifecycleLabel(toolLifecycle(item));
   const label = toolCallLabel(item);
+  const notable = notableToolAction(item);
+  const notableStyle = notable ? NOTABLE_TOOL_STYLE[notable.kind] : null;
   return (
     <div
-      className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-muted"
+      className={cn(
+        "flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1",
+        notableStyle ? notableStyle.tone : "text-fg-muted",
+      )}
       aria-label={`${label}, ${lifecycleLabel}`}
       aria-live="polite"
     >
       <ToolStatusIcon item={item} className="h-3.5 w-3.5 shrink-0" />
+      {notableStyle ? (
+        <notableStyle.Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+      ) : null}
       <span
         className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]"
         title={item.title}
@@ -1060,6 +1136,27 @@ function useExpansionState(
  * reads, searches, fetches — stays a quiet one-line row.
  */
 const CARD_ACTIVITY_KINDS = new Set(["edit", "diff", "command", "test"]);
+
+const NOTABLE_TOOL_STYLE = {
+  commit: {
+    Icon: GitCommitHorizontal,
+    tone: "text-accent",
+    border: "border-accent/35",
+    surface: "bg-accent/5",
+  },
+  push: {
+    Icon: Upload,
+    tone: "text-info",
+    border: "border-info/35",
+    surface: "bg-info/5",
+  },
+  breakout: {
+    Icon: Split,
+    tone: "text-accent",
+    border: "border-accent/35",
+    surface: "bg-accent/5",
+  },
+} as const;
 
 function ToolCallMessage({
   item,
@@ -1126,6 +1223,8 @@ function ToolCallMessage({
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
 
   const activityKind = item.display.activity_kind;
+  const notable = notableToolAction(item);
+  const notableStyle = notable ? NOTABLE_TOOL_STYLE[notable.kind] : null;
   const touchesFile = activityKind === "edit" || activityKind === "diff";
   // The header shows the file's name, so links and highlighting work from the
   // full path the label shortened away. Both come from one pass over the
@@ -1154,7 +1253,8 @@ function ToolCallMessage({
   const asCard =
     awaitingConfirmation ||
     CARD_ACTIVITY_KINDS.has(activityKind) ||
-    mcpArtifactSummary.total > 0;
+    mcpArtifactSummary.total > 0 ||
+    Boolean(notable);
   const effectiveOpen = awaitingConfirmation ? true : open;
 
   const detail = detailAvailable ? (
@@ -1480,9 +1580,16 @@ function ToolCallMessage({
   const headerContent = (
     <>
       <ToolStatusIcon item={item} />
+      {notableStyle ? (
+        <notableStyle.Icon
+          aria-hidden="true"
+          className={cn("h-3.5 w-3.5 shrink-0", notableStyle.tone)}
+        />
+      ) : null}
       <span
         className={cn(
           "flex-1 truncate font-mono text-[length:var(--fd-text-xs)]",
+          notableStyle && notableStyle.tone,
           (lifecycle === "failed" || lifecycle === "denied") && "text-danger",
         )}
         // The shortened label keeps the row readable; the hover keeps the
@@ -1543,6 +1650,7 @@ function ToolCallMessage({
         data-tool-tier={
           awaitingConfirmation ? "confirm" : asCard ? "card" : "row"
         }
+        data-tool-action={notable?.kind}
         className={cn(
           "group",
           asCard &&
@@ -1550,7 +1658,9 @@ function ToolCallMessage({
           asCard &&
             (awaitingConfirmation
               ? "border-warning/40"
-              : "border-border-subtle"),
+              : notableStyle
+                ? cn(notableStyle.border, notableStyle.surface)
+                : "border-border-subtle"),
         )}
       >
         <div
@@ -2530,6 +2640,7 @@ function ResolvedInteractiveRequestRow({
     item.resolution,
   );
   const evidence = interactiveRequestEvidencePresentation(request);
+  const evidenceUrl = safeExternalUrl(evidence.path);
   const hasDetail = Boolean(
     evidence.command ||
     evidence.path ||
@@ -2577,7 +2688,16 @@ function ResolvedInteractiveRequestRow({
                 previewLines={4}
               />
             ) : null}
-            {evidence.path ? (
+            {evidenceUrl ? (
+              <p className="break-all text-[length:var(--fd-text-xs)]">
+                <WebLinkAnchor
+                  href={evidenceUrl}
+                  className="text-accent underline-offset-2 hover:underline"
+                >
+                  {evidenceUrl}
+                </WebLinkAnchor>
+              </p>
+            ) : evidence.path ? (
               <p className="break-all font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">
                 {evidence.path}
               </p>
@@ -2784,7 +2904,7 @@ function CodeReviewMessage({
         />
       </div>
       <div className="mt-2 flex min-h-8 items-center gap-2">
-        <span className="opacity-0 transition-opacity group-focus-within/review:opacity-100 group-hover/review:opacity-100 [@media(hover:none)]:opacity-100">
+        <span className={hoverRevealActions("review")}>
           <CopyButton text={item.content} label="Copy code review" />
         </span>
         {lifecycle === "error" || lifecycle === "interrupted" ? (

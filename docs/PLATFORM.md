@@ -208,13 +208,17 @@ without a daemon restart. What remains for Phase 2 is the UI:
   hardcoded `.codex/skills`/`.claude/commands` scan generalized per provider.
 
 Skills install/browse **shipped 2026-08-21** as the desktop **Plugins** view
-("plugin" being our sanctioned informal synonym for connectors, per §2): one
-top-level surface with a Skills section (the managed library under
-`~/.agents/skills`, plus search/trending browse of the skills.sh registry) and
-an MCP servers section (the existing Connectors panel). The daemon side is
+("plugin" being our sanctioned informal synonym for connectors, per §2): Plugins
+and Skills as top-level tabs. Plugins shows installed MCP servers, a curated
+catalog, and the Connectors panel behind add/manage. Skills shows the managed
+library under `~/.agents/skills` plus search/trending browse of the skills.sh
+registry. The daemon side is
 `crates/falcondeck-daemon/src/skill_library.rs` — `GET /api/skills`,
 `GET /api/skills/registry`, `POST /api/skills/install`,
-`DELETE /api/skills/{name}`, mirrored as `skills.*` relay RPCs. Installs
+`DELETE /api/skills/{name}`, mirrored as `skills.*` relay RPCs. The composer
+slash menu does not use that library snapshot: `GET /api/workspaces/{id}/skills`
+(relay `workspace.skills`) rescans disk for the selected provider when `/`
+opens, then filters locally while typing. Installs
 download one bounded skill tree from the source GitHub repo (no `npx`, no
 symlinks, ≤64 files / 5 MB) into `~/.agents/skills/<id>` — already a scan root
 for every provider — and write a `.falcondeck-skill.json` provenance marker;

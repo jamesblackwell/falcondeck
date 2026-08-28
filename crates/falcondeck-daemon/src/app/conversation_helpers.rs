@@ -5,15 +5,15 @@ use chrono::{DateTime, Utc};
 use falcondeck_core::{
     ApprovalDecision, AssistantMessagePhase, ContentLifecycle, ConversationArtifact,
     ConversationFileChange, ConversationImage, ConversationItem, ConversationMemoryCitation,
-    ConversationWebSearch, InteractiveQuestion, InteractiveQuestionOption,
-    InteractiveResponsePayload, MemoryCitationEntry, PlanApprovalOutcome, ServiceLevel, ThreadPlan,
-    ThreadStatus, ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolCallDisplay,
-    ToolCommandAction, ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem,
+    ConversationWebSearch, InteractiveQuestion, InteractiveQuestionOption, InteractiveRequest,
+    InteractiveRequestKind, InteractiveResponsePayload, MemoryCitationEntry, PlanApprovalOutcome,
+    ServiceLevel, ThreadPlan, ThreadStatus, ToolActivityKind, ToolArtifactKind, ToolCallDetail,
+    ToolCallDisplay, ToolCommandAction, ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem,
     ToolProviderOutputSummary, ToolTestSummary, TurnInputItem, WebSearchActionKind,
 };
 use futures_util::future::join_all;
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
@@ -1236,7 +1236,10 @@ fn attachment_preview_mime_type(
 }
 
 use super::ManagedThread;
-use crate::codex::{extract_datetime_or_timestamp, extract_string};
+use crate::codex::{
+    extract_datetime_or_timestamp, extract_string, is_codex_attachment_manifest,
+    sanitize_codex_preview,
+};
 
 /// Accepts a client-supplied item id only when it is unmistakably one of ours:
 /// `user-` followed by 1–64 id-safe characters. Anything else falls back to a
@@ -1291,6 +1294,33 @@ pub(super) enum ToolSettlement {
     Completed,
     Failed,
     Interrupted,
+}
+
+/// Marks in-flight tools and streaming content as interrupted and adds one
+/// terminal receipt so a restored transcript matches the shutdown thread
+/// status instead of looking finished.
+pub(super) fn settle_items_as_shutdown_interrupted(
+    items: &mut Vec<ConversationItem>,
+    latest_turn_id: Option<&str>,
+    settled_at: DateTime<Utc>,
+    error: &str,
+) {
+    settle_tool_call_items(items, settled_at, ToolSettlement::Interrupted);
+    settle_content_items(
+        items,
+        ContentLifecycle::Interrupted,
+        settled_at,
+        Some(error),
+    );
+    if let Some(receipt) = terminal_assistant_receipt_with_error(
+        items,
+        ContentLifecycle::Interrupted,
+        settled_at,
+        latest_turn_id,
+        Some(error),
+    ) {
+        items.push(receipt);
+    }
 }
 
 impl ToolSettlement {
@@ -1489,10 +1519,12 @@ pub(super) fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
         return false;
     }
 
-    let has_user_message = thread
-        .items
-        .iter()
-        .any(|item| matches!(item, ConversationItem::UserMessage { .. }));
+    let has_user_message = thread.items.iter().any(|item| match item {
+        ConversationItem::UserMessage { text, .. } => {
+            !super::harness_user_text::is_shutdown_resume_user_text(text)
+        }
+        _ => false,
+    });
     // Reasoning counts: a thread that is still thinking has already committed
     // to the user's request, and waiting for prose or a tool call leaves the
     // opening-prompt preview on screen for the whole first turn.
@@ -1520,14 +1552,16 @@ pub(super) fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
 }
 
 pub(super) fn is_placeholder_thread_title(title: &str) -> bool {
-    matches!(
-        title.trim().to_ascii_lowercase().as_str(),
-        "" | "untitled thread"
-            | "new thread"
-            | "new claude thread"
-            | "claude thread"
-            | "restored thread"
-    )
+    let trimmed = title.trim();
+    is_codex_attachment_manifest(trimmed)
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "" | "untitled thread"
+                | "new thread"
+                | "new claude thread"
+                | "claude thread"
+                | "restored thread"
+        )
 }
 
 pub(super) fn is_provisional_thread_title(title: &str) -> bool {
@@ -1569,10 +1603,12 @@ The conversation may have moved on from that name. Write a title that reflects t
     let user_messages = items
         .iter()
         .filter_map(|item| match item {
-            ConversationItem::UserMessage { text, .. } => Some(text.trim()),
+            ConversationItem::UserMessage { text, .. } => {
+                super::harness_user_text::visible_user_prompt(text)
+                    .and_then(|text| sanitize_codex_preview(&text))
+            }
             _ => None,
         })
-        .filter(|text| !text.is_empty())
         .collect::<Vec<_>>();
     if let Some(first) = user_messages.first() {
         excerpts.push(format!(
@@ -1585,7 +1621,11 @@ The conversation may have moved on from that name. Write a title that reflects t
         .iter()
         .rev()
         .filter_map(|item| match item {
-            ConversationItem::UserMessage { text, .. } => Some(format!("User: {}", text.trim())),
+            ConversationItem::UserMessage { text, .. } => {
+                super::harness_user_text::visible_user_prompt(text)
+                    .and_then(|text| sanitize_codex_preview(&text))
+                    .map(|text| format!("User: {text}"))
+            }
             ConversationItem::AssistantMessage { text, .. } => {
                 Some(format!("Assistant: {}", text.trim()))
             }
@@ -1678,8 +1718,15 @@ pub(super) fn approval_title(method: &str) -> String {
         "item/commandExecution/requestApproval" => "Approve command".to_string(),
         "item/fileChange/requestApproval" => "Approve file change".to_string(),
         "skill/requestApproval" => "Approve skill".to_string(),
+        MCP_ELICITATION_METHOD => "MCP server needs your input".to_string(),
         other => format!("Approve {}", other.rsplit('/').next().unwrap_or("request")),
     }
+}
+
+pub(super) const MCP_ELICITATION_METHOD: &str = "mcpServer/elicitation/request";
+
+pub(super) fn is_mcp_elicitation_method(method: &str) -> bool {
+    method == MCP_ELICITATION_METHOD
 }
 
 pub(super) fn notification_timestamp(
@@ -1768,6 +1815,491 @@ pub(super) fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQues
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Codex `mcpServer/elicitation/request` — URL-mode OAuth or a form schema.
+pub(super) fn mcp_elicitation_interactive_request(
+    request_id: String,
+    workspace_id: String,
+    method: String,
+    params: &Value,
+) -> InteractiveRequest {
+    let body = elicitation_body(params);
+    let mode = extract_string(body, &["mode"]).or_else(|| extract_string(params, &["mode"]));
+    let url = elicitation_url(body).or_else(|| elicitation_url(params));
+    let message =
+        extract_string(body, &["message"]).or_else(|| extract_string(params, &["message"]));
+    let server = extract_string(params, &["serverName", "server_name"])
+        .or_else(|| extract_string(body, &["serverName", "server_name"]));
+    let url_mode = mode.as_deref() == Some("url")
+        || (mode.as_deref() != Some("form") && url.as_deref().is_some_and(is_http_elicitation_url));
+
+    if url_mode {
+        let title = server
+            .as_deref()
+            .map(|name| format!("Sign in to {name}"))
+            .unwrap_or_else(|| "Sign in to continue".to_string());
+        return InteractiveRequest {
+            request_id,
+            workspace_id,
+            thread_id: elicitation_thread_id(params),
+            method,
+            kind: InteractiveRequestKind::Approval,
+            approval_decisions: Some(vec![ApprovalDecision::Allow, ApprovalDecision::Deny]),
+            title,
+            detail: message,
+            command: None,
+            path: url,
+            turn_id: extract_string(params, &["turnId", "turn_id"]),
+            item_id: extract_string(params, &["itemId", "item_id"]),
+            questions: Vec::new(),
+            created_at: Utc::now(),
+        };
+    }
+
+    let schema = body
+        .get("requestedSchema")
+        .or_else(|| body.get("requested_schema"))
+        .or_else(|| params.get("requestedSchema"))
+        .or_else(|| params.get("requested_schema"));
+    let questions = questions_from_elicitation_schema(schema);
+    let title = server
+        .as_deref()
+        .map(|name| format!("{name} needs more information"))
+        .unwrap_or_else(|| "MCP server needs more information".to_string());
+    InteractiveRequest {
+        request_id,
+        workspace_id,
+        thread_id: elicitation_thread_id(params),
+        method,
+        kind: InteractiveRequestKind::Question,
+        approval_decisions: Some(Vec::new()),
+        title,
+        detail: message,
+        command: None,
+        path: None,
+        turn_id: extract_string(params, &["turnId", "turn_id"]),
+        item_id: extract_string(params, &["itemId", "item_id"]),
+        questions,
+        created_at: Utc::now(),
+    }
+}
+
+fn elicitation_body(params: &Value) -> &Value {
+    ["request", "elicitation"]
+        .iter()
+        .find_map(|key| params.get(*key).filter(|value| value.is_object()))
+        .unwrap_or(params)
+}
+
+fn elicitation_thread_id(params: &Value) -> Option<String> {
+    extract_string(params, &["threadId", "thread_id"]).or_else(|| {
+        params
+            .get("thread")
+            .and_then(|thread| extract_string(thread, &["id"]))
+    })
+}
+
+fn elicitation_url(value: &Value) -> Option<String> {
+    extract_string(value, &["url", "uri"]).filter(|candidate| is_http_elicitation_url(candidate))
+}
+
+fn is_http_elicitation_url(value: &str) -> bool {
+    let trimmed = value.trim();
+    (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.contains(['\r', '\n', '\0'])
+}
+
+fn questions_from_elicitation_schema(schema: Option<&Value>) -> Vec<InteractiveQuestion> {
+    let Some(properties) = schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return vec![InteractiveQuestion {
+            id: "value".to_string(),
+            header: "Response".to_string(),
+            question: "Provide the requested information.".to_string(),
+            is_other: false,
+            is_secret: false,
+            options: None,
+        }];
+    };
+
+    let questions: Vec<InteractiveQuestion> = properties
+        .iter()
+        .map(|(name, property)| {
+            let title = extract_string(property, &["title"]).unwrap_or_else(|| name.clone());
+            let description = extract_string(property, &["description"]);
+            let options = options_from_elicitation_property(property);
+            InteractiveQuestion {
+                id: name.clone(),
+                header: title.clone(),
+                question: description.unwrap_or(title),
+                is_other: false,
+                is_secret: extract_string(property, &["format"]).as_deref() == Some("password"),
+                options,
+            }
+        })
+        .collect();
+    if questions.is_empty() {
+        vec![InteractiveQuestion {
+            id: "value".to_string(),
+            header: "Response".to_string(),
+            question: "Provide the requested information.".to_string(),
+            is_other: false,
+            is_secret: false,
+            options: None,
+        }]
+    } else {
+        questions
+    }
+}
+
+fn options_from_elicitation_property(property: &Value) -> Option<Vec<InteractiveQuestionOption>> {
+    if extract_string(property, &["type"]).as_deref() == Some("boolean") {
+        return Some(vec![
+            InteractiveQuestionOption {
+                label: "Yes".to_string(),
+                description: String::new(),
+            },
+            InteractiveQuestionOption {
+                label: "No".to_string(),
+                description: String::new(),
+            },
+        ]);
+    }
+    if let Some(values) = property.get("enum").and_then(Value::as_array) {
+        let options: Vec<_> = values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|label| InteractiveQuestionOption {
+                label: label.to_string(),
+                description: String::new(),
+            })
+            .collect();
+        if !options.is_empty() {
+            return Some(options);
+        }
+    }
+    let one_of = property.get("oneOf").and_then(Value::as_array)?;
+    let options: Vec<_> = one_of
+        .iter()
+        .filter_map(|entry| {
+            let label = extract_string(entry, &["const"])?;
+            Some(InteractiveQuestionOption {
+                label,
+                description: extract_string(entry, &["title"]).unwrap_or_default(),
+            })
+        })
+        .collect();
+    (!options.is_empty()).then_some(options)
+}
+
+pub(super) fn mcp_elicitation_rpc_result(
+    response: &InteractiveResponsePayload,
+    params: &Value,
+) -> Result<Value, String> {
+    match response {
+        InteractiveResponsePayload::Approval { decision } => Ok(match decision {
+            ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => {
+                json!({ "action": "accept" })
+            }
+            ApprovalDecision::Deny => json!({ "action": "decline" }),
+        }),
+        InteractiveResponsePayload::Question { answers } => Ok(json!({
+            "action": "accept",
+            "content": elicitation_content_from_answers(answers, params),
+        })),
+        InteractiveResponsePayload::PlanApproval { .. } => {
+            Err("elicitation does not accept a plan response".to_string())
+        }
+    }
+}
+
+fn elicitation_content_from_answers(
+    answers: &std::collections::HashMap<String, Vec<String>>,
+    params: &Value,
+) -> Value {
+    let body = elicitation_body(params);
+    let schema = body
+        .get("requestedSchema")
+        .or_else(|| body.get("requested_schema"))
+        .or_else(|| params.get("requestedSchema"));
+    let properties = schema
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object);
+
+    if let Some(properties) = properties {
+        let mut content = serde_json::Map::new();
+        for (name, property) in properties {
+            let raw = answers
+                .get(name)
+                .and_then(|values| values.first())
+                .cloned()
+                .unwrap_or_default();
+            content.insert(name.clone(), coerce_elicitation_value(property, &raw));
+        }
+        return Value::Object(content);
+    }
+
+    let mut content = serde_json::Map::new();
+    for (id, values) in answers {
+        if let Some(value) = values.first() {
+            content.insert(id.clone(), json!(value));
+        }
+    }
+    Value::Object(content)
+}
+
+fn coerce_elicitation_value(property: &Value, raw: &str) -> Value {
+    match extract_string(property, &["type"]).as_deref() {
+        Some("boolean") => json!(matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "true" | "yes" | "1"
+        )),
+        Some("integer") => raw
+            .trim()
+            .parse::<i64>()
+            .map(Value::from)
+            .unwrap_or_else(|_| json!(raw)),
+        Some("number") => raw
+            .trim()
+            .parse::<f64>()
+            .map(|number| {
+                serde_json::Number::from_f64(number)
+                    .map(Value::Number)
+                    .unwrap_or_else(|| json!(raw))
+            })
+            .unwrap_or_else(|_| json!(raw)),
+        _ => json!(raw),
+    }
+}
+
+#[cfg(test)]
+mod mcp_elicitation_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn request(params: Value) -> InteractiveRequest {
+        mcp_elicitation_interactive_request(
+            "req-1".to_string(),
+            "ws-1".to_string(),
+            MCP_ELICITATION_METHOD.to_string(),
+            &params,
+        )
+    }
+
+    #[test]
+    fn url_mode_nested_request_becomes_a_sign_in_approval() {
+        let interactive = request(json!({
+            "threadId": "thread-abc",
+            "turnId": "turn-1",
+            "serverName": "cloudflare",
+            "id": "not-the-thread",
+            "request": {
+                "mode": "url",
+                "url": "https://dash.cloudflare.com/oauth/authorize?client_id=abc",
+                "message": "Sign in to Cloudflare to continue.",
+                "elicitationId": "elicit-1"
+            }
+        }));
+
+        assert_eq!(interactive.kind, InteractiveRequestKind::Approval);
+        assert_eq!(interactive.thread_id.as_deref(), Some("thread-abc"));
+        assert_eq!(interactive.title, "Sign in to cloudflare");
+        assert_eq!(
+            interactive.detail.as_deref(),
+            Some("Sign in to Cloudflare to continue.")
+        );
+        assert_eq!(
+            interactive.path.as_deref(),
+            Some("https://dash.cloudflare.com/oauth/authorize?client_id=abc")
+        );
+        assert_eq!(
+            interactive.approval_decisions,
+            Some(vec![ApprovalDecision::Allow, ApprovalDecision::Deny])
+        );
+        assert!(interactive.questions.is_empty());
+    }
+
+    #[test]
+    fn url_mode_without_thread_id_does_not_steal_elicitation_id() {
+        let interactive = request(json!({
+            "id": "elicit-uuid",
+            "mode": "url",
+            "url": "https://example.com/oauth/authorize",
+            "message": "Authorize access"
+        }));
+
+        assert_eq!(interactive.kind, InteractiveRequestKind::Approval);
+        assert_eq!(interactive.thread_id, None);
+        assert_eq!(
+            interactive.path.as_deref(),
+            Some("https://example.com/oauth/authorize")
+        );
+    }
+
+    #[test]
+    fn form_schema_becomes_questions_including_booleans_and_one_of() {
+        let interactive = request(json!({
+            "threadId": "thread-abc",
+            "serverName": "docs",
+            "message": "Need a bit more information.",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "boolean",
+                        "title": "Confirm",
+                        "description": "Proceed with the change?"
+                    },
+                    "choice": {
+                        "title": "Choice",
+                        "oneOf": [
+                            { "const": "keep", "title": "Keep the rewrite" },
+                            { "const": "edit", "title": "Edit the rewrite" }
+                        ]
+                    },
+                    "token": {
+                        "type": "string",
+                        "title": "Token",
+                        "format": "password"
+                    }
+                }
+            }
+        }));
+
+        assert_eq!(interactive.kind, InteractiveRequestKind::Question);
+        assert_eq!(interactive.thread_id.as_deref(), Some("thread-abc"));
+        assert_eq!(interactive.title, "docs needs more information");
+        assert_eq!(interactive.questions.len(), 3);
+        let confirm = interactive
+            .questions
+            .iter()
+            .find(|question| question.id == "confirm")
+            .expect("confirm field");
+        assert_eq!(confirm.question, "Proceed with the change?");
+        assert_eq!(
+            confirm.options.as_ref().map(|options| options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["Yes", "No"])
+        );
+        let choice = interactive
+            .questions
+            .iter()
+            .find(|question| question.id == "choice")
+            .expect("choice field");
+        assert_eq!(
+            choice.options,
+            Some(vec![
+                InteractiveQuestionOption {
+                    label: "keep".to_string(),
+                    description: "Keep the rewrite".to_string(),
+                },
+                InteractiveQuestionOption {
+                    label: "edit".to_string(),
+                    description: "Edit the rewrite".to_string(),
+                },
+            ])
+        );
+        let token = interactive
+            .questions
+            .iter()
+            .find(|question| question.id == "token")
+            .expect("token field");
+        assert!(token.is_secret);
+        assert!(token.options.is_none());
+    }
+
+    #[test]
+    fn form_mode_wins_over_a_url_field() {
+        let interactive = request(json!({
+            "threadId": "thread-abc",
+            "mode": "form",
+            "url": "https://example.com/should-not-open",
+            "message": "Name please",
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "title": "Name" }
+                }
+            }
+        }));
+
+        assert_eq!(interactive.kind, InteractiveRequestKind::Question);
+        assert_eq!(interactive.path, None);
+        assert_eq!(interactive.questions[0].id, "name");
+    }
+
+    #[test]
+    fn accept_and_decline_map_to_codex_elicitation_actions() {
+        assert_eq!(
+            mcp_elicitation_rpc_result(
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Allow,
+                },
+                &json!({}),
+            )
+            .expect("accept"),
+            json!({ "action": "accept" })
+        );
+        assert_eq!(
+            mcp_elicitation_rpc_result(
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Deny,
+                },
+                &json!({}),
+            )
+            .expect("decline"),
+            json!({ "action": "decline" })
+        );
+    }
+
+    #[test]
+    fn form_answers_are_coerced_to_the_requested_schema() {
+        let params = json!({
+            "requestedSchema": {
+                "type": "object",
+                "properties": {
+                    "confirm": { "type": "boolean" },
+                    "count": { "type": "integer" },
+                    "name": { "type": "string" }
+                }
+            }
+        });
+        let mut answers = HashMap::new();
+        answers.insert("confirm".to_string(), vec!["Yes".to_string()]);
+        answers.insert("count".to_string(), vec!["3".to_string()]);
+        answers.insert("name".to_string(), vec!["Ada".to_string()]);
+
+        assert_eq!(
+            mcp_elicitation_rpc_result(&InteractiveResponsePayload::Question { answers }, &params,)
+                .expect("form accept"),
+            json!({
+                "action": "accept",
+                "content": {
+                    "confirm": true,
+                    "count": 3,
+                    "name": "Ada"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn plan_responses_are_rejected_for_elicitation() {
+        let error = mcp_elicitation_rpc_result(
+            &InteractiveResponsePayload::PlanApproval {
+                outcome: PlanApprovalOutcome::Approved,
+                feedback: None,
+            },
+            &json!({}),
+        )
+        .expect_err("plan response");
+        assert!(error.contains("elicitation"));
+    }
 }
 
 pub(super) fn parse_interactive_response_params(
@@ -2291,6 +2823,7 @@ pub(crate) fn tool_display_metadata(
     output: Option<&str>,
 ) -> ToolCallDisplay {
     let normalized_title = title.to_ascii_lowercase();
+    let command_line = unwrap_agent_command(&normalized_title);
     let normalized_kind = kind.to_ascii_lowercase();
     let normalized_output = output.unwrap_or_default().to_ascii_lowercase();
     let errored = matches!(
@@ -2312,11 +2845,11 @@ pub(crate) fn tool_display_metadata(
             | ToolActivityKind::WebSearch
             | ToolActivityKind::ImageView
             | ToolActivityKind::Context
-    ) || normalized_title.starts_with("git status")
-        || normalized_title.starts_with("pwd")
-        || normalized_title.starts_with("ls ")
-        || normalized_title.starts_with("find ")
-        || normalized_title.starts_with("rg ");
+    ) || command_line.starts_with("git status")
+        || command_line.starts_with("pwd")
+        || command_line.starts_with("ls ")
+        || command_line.starts_with("find ")
+        || command_line.starts_with("rg ");
 
     let artifact_kind = if matches!(activity_kind, ToolActivityKind::Diff) {
         ToolArtifactKind::Diff
@@ -2656,6 +3189,11 @@ fn classify_tool_activity_kind(
     normalized_output: &str,
     errored: bool,
 ) -> ToolActivityKind {
+    // ACP agents title shell work `Execute \`git push\``. Unwrap that so the
+    // command itself is what we classify, not the word "execute".
+    let command_line = unwrap_agent_command(normalized_title);
+    let command_line = command_line.as_str();
+
     // Only the CLI's own "requested permissions" denial marks approval
     // traffic, and a denial always accompanies a failed call. Matching the
     // bare word "permission" in outputs or titles turned every `Read` of a
@@ -2678,38 +3216,37 @@ fn classify_tool_activity_kind(
     } else if normalized_kind.contains("filechange")
         || normalized_kind.contains("file_change")
         || normalized_kind.contains("diff")
-        || normalized_title.contains("apply_patch")
-        || normalized_title.starts_with("git diff")
+        || command_line.contains("apply_patch")
+        || command_line.starts_with("git diff")
     {
         ToolActivityKind::Diff
-    } else if title_is_test_invocation(normalized_title)
+    } else if title_is_test_invocation(command_line)
         || normalized_kind.contains("test")
         || normalized_output.contains("test failed")
         || normalized_output.contains("failing")
     {
         ToolActivityKind::Test
     } else if normalized_kind.contains("webfetch")
-        || normalized_title.starts_with("web fetch")
+        || command_line.starts_with("web fetch")
         || normalized_kind.contains("websearch")
         || normalized_kind.contains("web_search")
-        || normalized_title.starts_with("web search")
+        || command_line.starts_with("web search")
     {
         ToolActivityKind::WebSearch
-    } else if normalized_kind.contains("toolsearch") || normalized_title.starts_with("search tools")
-    {
+    } else if normalized_kind.contains("toolsearch") || command_line.starts_with("search tools") {
         ToolActivityKind::Search
     } else if normalized_kind.contains("imageview")
         || normalized_kind.contains("image_view")
-        || normalized_title.starts_with("image view")
+        || command_line.starts_with("image view")
     {
         ToolActivityKind::ImageView
     } else if normalized_kind.contains("contextcompact")
         || normalized_kind.contains("context_compaction")
         || normalized_kind.contains("compaction")
-        || normalized_title.contains("context compaction")
+        || command_line.contains("context compaction")
     {
         ToolActivityKind::Context
-    } else if let Some(shell_kind) = classify_shell_command(normalized_title) {
+    } else if let Some(shell_kind) = classify_shell_command(command_line) {
         // Shell-first agents (Codex) surface most work as raw commands;
         // parsing the command line is what lets `grep`/`cat`/`sed -i` group
         // and collapse as richly as native Read/Search/Edit tools do.
@@ -2717,38 +3254,38 @@ fn classify_tool_activity_kind(
     } else if normalized_kind.contains("edit")
         || normalized_kind.contains("write")
         || normalized_kind.contains("patch")
-        || normalized_title.starts_with("edit ")
+        || command_line.starts_with("edit ")
     {
         ToolActivityKind::Edit
-    } else if normalized_kind.contains("skill") || normalized_title.starts_with("load skill") {
+    } else if normalized_kind.contains("skill") || command_line.starts_with("load skill") {
         ToolActivityKind::Context
     } else if normalized_kind.contains("read")
         || normalized_kind.contains("inspect")
-        || normalized_title.starts_with("cat ")
-        || normalized_title.starts_with("sed -n ")
-        || normalized_title.starts_with("read ")
-        || normalized_title.starts_with("read /")
+        || command_line.starts_with("cat ")
+        || command_line.starts_with("sed -n ")
+        || command_line.starts_with("read ")
+        || command_line.starts_with("read /")
     {
         ToolActivityKind::Read
-    } else if normalized_kind.contains("glob") || normalized_title.starts_with("find ") {
+    } else if normalized_kind.contains("glob") || command_line.starts_with("find ") {
         ToolActivityKind::List
     } else if normalized_kind.contains("grep")
         || normalized_kind.contains("search")
-        || normalized_title.starts_with("read ")
-        || normalized_title.starts_with("rg ")
+        || command_line.starts_with("read ")
+        || command_line.starts_with("rg ")
     {
         ToolActivityKind::Search
-    } else if normalized_kind.contains("list") || normalized_title.starts_with("ls ") {
+    } else if normalized_kind.contains("list") || command_line.starts_with("ls ") {
         ToolActivityKind::List
     } else if normalized_kind.contains("command")
         || normalized_kind.contains("bash")
-        || normalized_title.starts_with("bash:")
-        || normalized_title.starts_with("python")
-        || normalized_title.starts_with("python3")
-        || normalized_title.starts_with("node ")
-        || normalized_title.starts_with("/bin/")
-        || normalized_title.starts_with("git ")
-        || normalized_title.starts_with("pwd")
+        || command_line.starts_with("bash:")
+        || command_line.starts_with("python")
+        || command_line.starts_with("python3")
+        || command_line.starts_with("node ")
+        || command_line.starts_with("/bin/")
+        || command_line.starts_with("git ")
+        || command_line.starts_with("pwd")
     {
         ToolActivityKind::Command
     } else {
@@ -2785,6 +3322,20 @@ fn classify_shell_command(raw: &str) -> Option<ToolActivityKind> {
         });
     }
     result
+}
+
+/// Strips ACP `execute \`…\`` titles and `bash -lc "…"` wrappers down to the
+/// command the agent actually ran.
+fn unwrap_agent_command(raw: &str) -> String {
+    let line = unwrap_shell_wrapper(raw.trim());
+    let lower = line.to_ascii_lowercase();
+    for prefix in ["execute ", "run_terminal_command ", "run_terminal_cmd "] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let rest = line[line.len() - rest.len()..].trim();
+            return unwrap_shell_wrapper(rest.trim_matches('`').trim());
+        }
+    }
+    line
 }
 
 /// Strips `bash -lc "…"` / `sh -c '…'` wrappers down to the inner command.
@@ -2882,7 +3433,7 @@ fn has_file_write_redirect(segment: &str) -> bool {
 /// into a loud Test card, so the runner must appear at command position in
 /// one of the title's shell segments.
 fn title_is_test_invocation(normalized_title: &str) -> bool {
-    let command_line = unwrap_shell_wrapper(normalized_title.trim());
+    let command_line = unwrap_agent_command(normalized_title.trim());
     split_shell_segments(&command_line).any(is_test_runner_segment)
 }
 
@@ -2941,10 +3492,23 @@ fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<
     if trimmed.starts_with("find ") {
         return Some("List files".to_string());
     }
-    if trimmed.starts_with("git status") {
+    let command = unwrap_agent_command(trimmed);
+    if command.starts_with("git status") {
         return Some("Check git status".to_string());
     }
-    if trimmed.starts_with("pwd") {
+    if command.starts_with("git commit")
+        || command.contains("commit.js")
+        || command.contains("commit.ts")
+    {
+        return Some("Commit changes".to_string());
+    }
+    if command.starts_with("git push") {
+        return Some("Push branch".to_string());
+    }
+    if command.starts_with("git worktree") {
+        return Some("Break out copy".to_string());
+    }
+    if command.starts_with("pwd") {
         return Some("Show working directory".to_string());
     }
 
@@ -4060,6 +4624,35 @@ mod shell_classification_tests {
     }
 
     #[test]
+    fn unwraps_acp_execute_titles_before_classifying() {
+        assert_eq!(
+            unwrap_agent_command("execute `git push origin main`"),
+            "git push origin main"
+        );
+        assert_eq!(
+            unwrap_agent_command("execute `cat Cargo.toml`"),
+            "cat Cargo.toml"
+        );
+        assert_eq!(
+            classify_tool_activity_kind("execute `git push origin main`", "execute", "", false,),
+            ToolActivityKind::Command
+        );
+        assert_eq!(
+            classify_tool_activity_kind("execute `cat cargo.toml`", "execute", "", false),
+            ToolActivityKind::Read
+        );
+        assert_eq!(
+            classify_tool_activity_kind(
+                "execute `node scripts/commit.js \"feat: keep studio\"`",
+                "execute",
+                "",
+                false,
+            ),
+            ToolActivityKind::Command
+        );
+    }
+
+    #[test]
     fn test_cards_require_a_runner_at_command_position() {
         for title in [
             "cargo test -p falcondeck-daemon",
@@ -4293,5 +4886,23 @@ mod user_item_id_tests {
         };
         assert_ne!(id, "evil id");
         assert!(id.starts_with("user-"));
+    }
+}
+
+#[cfg(test)]
+mod thread_title_placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn treats_codex_attachment_manifests_as_placeholder_titles() {
+        assert!(is_placeholder_thread_title(
+            "# Files mentioned by the user: ## codex-clipboard-5c77f1c0.png"
+        ));
+        assert!(is_placeholder_thread_title(
+            "Files mentioned by the user: ## codex-clipboard-5c77f1c0.png"
+        ));
+        assert!(!is_placeholder_thread_title(
+            "what is causing this prompt to be restricted?"
+        ));
     }
 }

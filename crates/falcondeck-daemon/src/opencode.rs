@@ -176,7 +176,11 @@ impl OpenCodeRuntime {
             // provider config to replace either value would expose an
             // unauthenticated or unexpectedly credentialed local server.
             .env("OPENCODE_SERVER_PASSWORD", &password)
-            .env("OPENCODE_SERVER_USERNAME", "opencode")
+            .env("OPENCODE_SERVER_USERNAME", "opencode");
+        for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
+            command.env(*key, *value);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1553,8 +1557,7 @@ pub async fn reap_orphaned_servers(state_dir: &std::path::Path) {
                 kept.push(entry);
                 continue;
             }
-            if entry.daemon_pid != std::process::id()
-                && is_opencode_serve_process(entry.server_pid)
+            if entry.daemon_pid != std::process::id() && is_opencode_serve_process(entry.server_pid)
             {
                 let _ = std::process::Command::new("kill")
                     .arg(entry.server_pid.to_string())
@@ -1569,7 +1572,10 @@ pub async fn reap_orphaned_servers(state_dir: &std::path::Path) {
     .await;
     match result {
         Ok(reaped) if reaped > 0 => {
-            tracing::info!(reaped, "reaped orphaned OpenCode servers from prior daemons");
+            tracing::info!(
+                reaped,
+                "reaped orphaned OpenCode servers from prior daemons"
+            );
         }
         Ok(_) => {}
         Err(error) => tracing::warn!(%error, "OpenCode orphan reap task failed"),

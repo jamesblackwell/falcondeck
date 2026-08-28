@@ -141,8 +141,9 @@ process, structured permission requests.
 
 ## 4. The key finding: ACP is the common denominator
 
-Both OpenCode and Grok Build speak the Agent Client Protocol. So do Gemini CLI
-and several others. ACP is JSON-RPC over stdio, and its method set is already
+Both OpenCode and Grok Build speak the Agent Client Protocol. So do several
+others (Pi, Cursor). Gemini CLI is deprecated in favor of Antigravity (`agy`).
+ACP is JSON-RPC over stdio, and its method set is already
 close to what our adapter trait needs. Client→agent: `initialize`,
 `authenticate`, `session/new`, `session/load`, `session/prompt`,
 `session/cancel`, `session/set_mode`. Agent→client: `session/update`
@@ -165,8 +166,8 @@ Rust changes.
 ```jsonc
 // falcondeck.json
 "providers": {
-  "grok":   { "kind": "acp", "command": ["grok", "agent", "stdio"], "label": "Grok" },
-  "gemini": { "kind": "acp", "command": ["gemini", "--experimental-acp"], "label": "Gemini" }
+  "grok": { "kind": "acp", "command": ["grok", "agent", "stdio"], "label": "Grok" },
+  "pi": { "kind": "acp", "command": ["pi-acp"], "label": "Pi" }
 }
 ```
 
@@ -442,16 +443,18 @@ Phases 3 and 4 are independent and could run in parallel. Phase 1 gates both.
 
 ## 11. Experiment: Claude over ACP (Aug 2026)
 
-The Claude runtime is the one provider still driven by heuristics: it parses
-`claude -p` stream-json (whole-message dedupe/merge in `agent_helpers.rs`) and
-transports approvals over a curl `PreToolUse` hook with a 540s deny timeout.
-Codex feels smoother precisely because it speaks a structured protocol. Zed
-closes the same gap by running Claude through their ACP adapter,
-[`@zed-industries/claude-code-acp`](https://github.com/zed-industries/claude-code-acp),
-which is built on the Claude Code SDK and emits structured `session/update`
-events: thought chunks (live thinking, which the stream-json path drops),
-tool calls with status transitions, and permissions as blocking
-`session/request_permission` RPCs — no hook, no silent timeout-deny.
+Native Claude stays `claude -p` stream-json. The control-plane gaps we are
+closing on that path (picker extras, `--fork-session`, hook-based
+AskUserQuestion / ExitPlanMode, long-lived stdin) are tracked in
+`docs/CLAUDE-CONTROL-PLANE.md`, probed against Claude Code 2.1.238.
+
+ACP remains a **side-by-side** experiment, not the default. Zed's adapter
+([`@zed-industries/claude-code-acp`](https://github.com/zed-industries/claude-code-acp),
+also published as `@agentclientprotocol/claude-agent-acp`) wraps the Claude
+Agent SDK and emits structured `session/update` events and blocking
+`session/request_permission` RPCs. Native already streams thinking
+(`extract_claude_thinking_chunk`); compare ACP for permissions and
+`session/load` vs `--resume`, not for reasoning cards.
 
 Because the generic `AcpAdapter` is configured by data, the experiment needs no
 Rust changes. Add to `providers.json` in the daemon state dir (or via Settings →

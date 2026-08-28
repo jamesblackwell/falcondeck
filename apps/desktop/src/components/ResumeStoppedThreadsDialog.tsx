@@ -54,8 +54,8 @@ export function ResumeStoppedThreadsDialog({
               className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary"
             >
               {count === 1
-                ? "1 session was stopped when the app quit"
-                : `${count} sessions were stopped when the app quit`}
+                ? "1 session was stopped when FalconDeck closed"
+                : `${count} sessions were stopped when FalconDeck closed`}
             </h2>
             <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
               {count === 1

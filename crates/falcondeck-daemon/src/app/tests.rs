@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use falcondeck_core::{
     AgentProvider, ContentLifecycle, ConversationItem, ExtensionThreadSummary, ImageInput,
-    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome, ServiceLevel,
-    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
-    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
-    TurnInputItem, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome,
+    InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel, SnapshotRequest,
+    ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary, ToolActivityKind,
+    ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem,
+    UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
 use serde_json::{Value, json};
@@ -32,6 +33,38 @@ use super::{
     },
     should_surface_tool_item, workspace_status_after_account_update,
 };
+
+#[cfg(unix)]
+#[tokio::test]
+async fn create_chat_returns_placeholder_while_provider_bootstraps() {
+    let temp = tempdir().unwrap();
+    let hanging_provider = temp.path().join("slow-codex");
+    std::fs::write(&hanging_provider, "#!/bin/sh\nsleep 5\n").unwrap();
+    let mut permissions = std::fs::metadata(&hanging_provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hanging_provider, permissions).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([(
+            AgentProvider::CODEX,
+            hanging_provider.to_string_lossy().to_string(),
+        )]),
+        temp.path().join("state.json"),
+    );
+    let chat_path = temp
+        .path()
+        .join("Documents/FalconDeck/2026-08-25/chat-120000-test");
+
+    let summary = tokio::time::timeout(
+        TokioDuration::from_millis(500),
+        super::workspace_ops::create_chat_at(&app, chat_path),
+    )
+    .await
+    .expect("chat creation should not wait for provider bootstrap")
+    .unwrap();
+
+    assert_eq!(summary.status, WorkspaceStatus::Connecting);
+}
 
 #[cfg(unix)]
 #[tokio::test]
@@ -66,6 +99,7 @@ async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
             TokioDuration::from_millis(500),
             app.connect_workspace(falcondeck_core::ConnectWorkspaceRequest {
                 path: workspace_path.to_string_lossy().to_string(),
+                kind: falcondeck_core::WorkspaceKind::Project,
             }),
         )
     };
@@ -79,12 +113,16 @@ async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
 
     assert_eq!(first.status, WorkspaceStatus::Connecting);
     assert_eq!(second.id, first.id);
-    for _ in 0..20 {
-        if tokio::fs::try_exists(&launch_log).await.unwrap_or(false) {
-            break;
+    tokio::time::timeout(TokioDuration::from_secs(5), async {
+        while !tokio::fs::try_exists(&launch_log).await.unwrap_or(false) {
+            sleep(TokioDuration::from_millis(25)).await;
         }
-        sleep(TokioDuration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("provider bootstrap should start");
+    // If the path gate is missing, both spawned connect tasks reach the
+    // provider at nearly the same time. Give that duplicate time to append.
+    sleep(TokioDuration::from_millis(250)).await;
     let launches = tokio::fs::read_to_string(&launch_log).await.unwrap();
     assert_eq!(launches.lines().count(), 1);
 }
@@ -740,12 +778,12 @@ async fn emits_bounded_realtime_audio_lifecycle_without_retaining_pcm() {
     .unwrap();
 
     assert!(matches!(
-        events.recv().await.unwrap().event,
+        events.recv().await.unwrap().event.clone(),
         falcondeck_core::UnifiedEvent::RealtimeAudioStarted { session_id }
             if session_id.as_deref() == Some("voice-1")
     ));
     assert!(matches!(
-        events.recv().await.unwrap().event,
+        events.recv().await.unwrap().event.clone(),
         falcondeck_core::UnifiedEvent::RealtimeAudioDelta { audio }
             if audio.item_id.as_deref() == Some("item-1")
                 && audio.sample_rate == 24_000
@@ -753,7 +791,7 @@ async fn emits_bounded_realtime_audio_lifecycle_without_retaining_pcm() {
                 && audio.samples_per_channel == Some(1)
     ));
     assert!(matches!(
-        events.recv().await.unwrap().event,
+        events.recv().await.unwrap().event.clone(),
         falcondeck_core::UnifiedEvent::RealtimeAudioEnded {
             reason: None,
             interrupted: false
@@ -965,21 +1003,49 @@ fn parses_thread_goal_notifications() {
 fn maps_sandbox_modes_to_codex_policy_payloads() {
     use super::workspace_ops::sandbox_policy_payload;
     assert_eq!(
-        sandbox_policy_payload(Some("read-only")),
+        sandbox_policy_payload(Some("read-only"), None),
         json!({ "type": "readOnly" })
     );
     assert_eq!(
-        sandbox_policy_payload(Some("workspace-write")),
+        sandbox_policy_payload(Some("workspace-write"), None),
         json!({ "type": "workspaceWrite" })
     );
     assert_eq!(
-        sandbox_policy_payload(Some("danger-full-access")),
+        sandbox_policy_payload(
+            Some("workspace-write"),
+            Some("/Users/test/Documents/FalconDeck")
+        ),
+        json!({
+            "type": "workspaceWrite",
+            "writableRoots": ["/Users/test/Documents/FalconDeck"]
+        })
+    );
+    assert_eq!(
+        sandbox_policy_payload(Some("danger-full-access"), None),
         json!({ "type": "dangerFullAccess" })
     );
-    assert_eq!(sandbox_policy_payload(None), serde_json::Value::Null);
+    assert_eq!(sandbox_policy_payload(None, None), serde_json::Value::Null);
     assert_eq!(
-        sandbox_policy_payload(Some("bogus")),
+        sandbox_policy_payload(Some("bogus"), None),
         serde_json::Value::Null
+    );
+}
+
+#[test]
+fn recognizes_only_managed_casual_chat_paths() {
+    assert_eq!(
+        super::workspace_kind_for_path(
+            "/Users/test/Documents/FalconDeck/2026-08-24/chat-120000-abcdef"
+        ),
+        falcondeck_core::WorkspaceKind::Casual
+    );
+    assert_eq!(
+        super::workspace_kind_for_path("/Users/test/Documents/FalconDeck/my-project"),
+        falcondeck_core::WorkspaceKind::Project
+    );
+    assert_eq!(
+        super::workspace_kind_for_path("/tmp/2026-08-24/chat-120000-abcdef"),
+        falcondeck_core::WorkspaceKind::Project
     );
 }
 
@@ -1161,6 +1227,20 @@ fn account_updates_do_not_clobber_runtime_status() {
             &falcondeck_core::AccountStatus::NeedsAuth,
         ),
         WorkspaceStatus::NeedsAuth
+    );
+    assert_eq!(
+        workspace_status_after_account_update(
+            &WorkspaceStatus::Disconnected,
+            &falcondeck_core::AccountStatus::Ready,
+        ),
+        WorkspaceStatus::Ready
+    );
+    assert_eq!(
+        workspace_status_after_account_update(
+            &WorkspaceStatus::Connecting,
+            &falcondeck_core::AccountStatus::Ready,
+        ),
+        WorkspaceStatus::Ready
     );
 }
 
@@ -1990,6 +2070,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
+                project_pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
             super::PersistedWorkspaceState {
@@ -2001,6 +2082,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
+                project_pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
         ]
@@ -2030,6 +2112,7 @@ fn persisted_state_reads_workspace_thread_selection() {
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: Vec::new(),
         }]
     );
@@ -2058,6 +2141,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -2168,6 +2252,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
         workspace_id.clone(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.clone(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -2210,6 +2295,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,
@@ -2245,6 +2331,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
         workspace_id.clone(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.clone(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -2287,6 +2374,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,
@@ -2346,6 +2434,7 @@ fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -2385,6 +2474,7 @@ async fn update_thread_title_marks_thread_as_manual() {
         workspace_id.clone(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.clone(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -2427,6 +2517,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,
@@ -2448,6 +2539,7 @@ async fn update_thread_title_marks_thread_as_manual() {
             collaboration_mode_id: None,
             service_tier: None,
             pinned: None,
+            pinned_in_project: None,
             acknowledge_interruption: None,
             permission_mode: None,
             approval_policy: None,
@@ -2484,6 +2576,7 @@ async fn update_thread_title_marks_thread_as_manual() {
         collaboration_mode_id: None,
         service_tier: None,
         pinned: None,
+        pinned_in_project: None,
         acknowledge_interruption: None,
         permission_mode: None,
         approval_policy: None,
@@ -2502,6 +2595,7 @@ async fn update_thread_title_marks_thread_as_manual() {
             collaboration_mode_id: None,
             service_tier: None,
             pinned: Some(true),
+            pinned_in_project: None,
             acknowledge_interruption: None,
             permission_mode: None,
             approval_policy: None,
@@ -3073,6 +3167,7 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -3166,6 +3261,7 @@ async fn restored_caught_up_thread_app(
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -3374,6 +3470,7 @@ async fn restore_seeds_sequence_counter_past_persisted_attention_seqs() {
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -3439,6 +3536,7 @@ async fn transcript_replay_does_not_flip_a_read_thread_unread() {
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -3565,6 +3663,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             last_error: Some("Previous reconnect failed".to_string()),
             archived_thread_ids: vec!["thread-1".to_string()],
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(thread_updated_at),
@@ -3690,6 +3789,7 @@ async fn workspace_id_survives_daemon_restarts() {
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
             thread_states: Vec::new(),
         }],
         remote: None,
@@ -3770,6 +3870,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
+                project_pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-a".to_string(),
                     updated_at: None,
@@ -3803,6 +3904,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 last_error: Some("Still disconnected".to_string()),
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
+                project_pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-b".to_string(),
                     updated_at: None,
@@ -3853,11 +3955,13 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         },
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     let live_workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: live_workspace_id.clone(),
         path: workspace_a.to_string_lossy().to_string(),
         status: WorkspaceStatus::Ready,
@@ -3962,11 +4066,13 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: workspace_path.to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,
@@ -4021,6 +4127,87 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
 }
 
 #[tokio::test]
+async fn shutdown_marks_waiting_threads_as_error_and_persists_them() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-waiting");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let workspace_id = "workspace-1".to_string();
+    let mut thread = ThreadSummary {
+        id: "thread-1".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Waiting thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: Some("native-session-1".to_string()),
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::WaitingForInput,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    thread.status = ThreadStatus::WaitingForInput;
+    let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
+        id: workspace_id.clone(),
+        path: workspace_path.to_string_lossy().to_string(),
+        status: WorkspaceStatus::Busy,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        default_provider: AgentProvider::CODEX,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("thread-1".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id,
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+
+    app.shutdown().await.unwrap();
+
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.threads[0].status, ThreadStatus::Error);
+    assert_eq!(
+        snapshot.threads[0].last_error.as_deref(),
+        Some("FalconDeck was closed while this turn was running")
+    );
+}
+
+#[tokio::test]
 async fn provider_disconnect_fails_only_that_providers_active_threads() {
     let temp_dir = tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
@@ -4051,6 +4238,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -4058,6 +4246,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
     let codex = make_thread("codex-thread", AgentProvider::CODEX);
     let claude = make_thread("claude-thread", AgentProvider::CLAUDE);
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: temp_dir.path().to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,
@@ -4107,7 +4296,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
     assert_eq!(codex.last_error.as_deref(), Some("Codex disconnected"));
     assert_eq!(claude.status, ThreadStatus::Running);
     assert!(matches!(
-        events.recv().await.unwrap().event,
+        events.recv().await.unwrap().event.clone(),
         falcondeck_core::UnifiedEvent::ThreadUpdated { thread }
             if thread.id == "codex-thread" && thread.status == ThreadStatus::Error
     ));
@@ -4442,6 +4631,7 @@ async fn insert_claude_workspace_with_session(
         workspace_id.to_string(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.to_string(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -4484,6 +4674,7 @@ async fn insert_claude_workspace_with_session(
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    is_pinned_in_project: false,
                     goal: None,
                     queued_turns: Vec::new(),
                     variant: None,
@@ -4723,6 +4914,222 @@ async fn claude_pre_tool_use_auto_allows_subagent_spawns() {
 }
 
 #[tokio::test]
+async fn claude_ask_user_question_is_never_auto_allowed() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        temp_dir.path(),
+    )
+    .await;
+    app.with_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.agent.permission_mode = Some("bypassPermissions".to_string());
+    })
+    .await
+    .unwrap();
+
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(json!({
+                "session_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "tool_name": "AskUserQuestion",
+                "tool_input": {
+                    "questions": [{
+                        "question": "Which flavor?",
+                        "header": "Flavor",
+                        "options": [
+                            { "label": "Vanilla", "description": "classic" },
+                            { "label": "Chocolate", "description": "rich" }
+                        ]
+                    }]
+                }
+            }))
+            .await
+        }
+    });
+
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    {
+        let requests = app.inner.interactive_requests.lock().await;
+        let pending = requests
+            .get(&("workspace-1".to_string(), request_id.clone()))
+            .unwrap();
+        assert_eq!(pending.request.kind, InteractiveRequestKind::Question);
+        assert_eq!(pending.request.questions[0].question, "Which flavor?");
+    }
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        InteractiveResponsePayload::Question {
+            answers: HashMap::from([("q0".to_string(), vec!["Vanilla".to_string()])]),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = hook_task.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert_eq!(
+        response["hookSpecificOutput"]["updatedInput"]["answers"]["Which flavor?"],
+        "Vanilla"
+    );
+}
+
+#[tokio::test]
+async fn claude_exit_plan_mode_prompts_even_in_bypass_and_restores_permission_mode() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        temp_dir.path(),
+    )
+    .await;
+    app.with_managed_thread_mut("workspace-1", "thread-1", |thread| {
+        thread.summary.agent.permission_mode = Some("plan".to_string());
+        thread.claude_post_plan_permission_mode = Some("acceptEdits".to_string());
+    })
+    .await
+    .unwrap();
+
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(json!({
+                "session_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "tool_name": "ExitPlanMode",
+                "tool_input": { "plan": "Ship the patch." }
+            }))
+            .await
+        }
+    });
+
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    {
+        let requests = app.inner.interactive_requests.lock().await;
+        let pending = requests
+            .get(&("workspace-1".to_string(), request_id.clone()))
+            .unwrap();
+        assert_eq!(pending.request.kind, InteractiveRequestKind::PlanApproval);
+        assert_eq!(pending.request.detail.as_deref(), Some("Ship the patch."));
+    }
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        InteractiveResponsePayload::PlanApproval {
+            outcome: PlanApprovalOutcome::Approved,
+            feedback: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = hook_task.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.agent.permission_mode.as_deref(), Some("acceptEdits"));
+}
+
+#[tokio::test]
+async fn claude_exit_plan_mode_rejection_denies_with_feedback() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        temp_dir.path(),
+    )
+    .await;
+
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(json!({
+                "session_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "tool_name": "ExitPlanMode",
+                "tool_input": { "plan": "Ship the patch." }
+            }))
+            .await
+        }
+    });
+
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        InteractiveResponsePayload::PlanApproval {
+            outcome: PlanApprovalOutcome::Cancelled,
+            feedback: Some("Add a rollback test".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = hook_task.await.unwrap();
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("Add a rollback test"));
+}
+
+#[tokio::test]
+async fn claude_invalid_ask_user_question_denies_without_a_card() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        temp_dir.path(),
+    )
+    .await;
+
+    let response = app
+        .handle_claude_pre_tool_use(json!({
+            "session_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            "tool_name": "AskUserQuestion",
+            "tool_input": { "questions": [] }
+        }))
+        .await;
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn claude_pre_tool_use_labels_subagent_tool_calls() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
@@ -4883,9 +5290,23 @@ async fn claude_pre_tool_use_cleans_up_when_the_hook_client_disconnects() {
 
     // Cleanup runs on a spawned task; allow it a moment to land.
     for _ in 0..200 {
-        if app.inner.interactive_requests.lock().await.is_empty()
-            && app.inner.claude_approvals.lock().await.is_empty()
-        {
+        let maps_are_empty = app.inner.interactive_requests.lock().await.is_empty()
+            && app.inner.claude_approvals.lock().await.is_empty();
+        let item_is_cancelled = {
+            let workspaces = app.inner.workspaces.lock().await;
+            matches!(
+                workspaces["workspace-1"].threads["thread-1"]
+                    .items
+                    .iter()
+                    .find(|item| matches!(item, ConversationItem::InteractiveRequest { id, .. } if id == &request_id)),
+                Some(ConversationItem::InteractiveRequest {
+                    resolved: true,
+                    resolution: Some(resolution),
+                    ..
+                }) if resolution.outcome == InteractiveRequestOutcome::Cancelled
+            )
+        };
+        if maps_are_empty && item_is_cancelled {
             break;
         }
         sleep(TokioDuration::from_millis(10)).await;
@@ -5107,6 +5528,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -5132,6 +5554,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         attention: ThreadAttention::default(),
         is_archived: true,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -5141,6 +5564,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         workspace_id.clone(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.clone(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -5287,6 +5711,7 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
@@ -5296,6 +5721,7 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
         workspace_id.clone(),
         super::ManagedWorkspace {
             summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
                 id: workspace_id.clone(),
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
@@ -5437,11 +5863,13 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: workspace_path.to_string_lossy().to_string(),
         status: WorkspaceStatus::Ready,
@@ -5488,6 +5916,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         sandbox_mode: None,
         steer: false,
         user_item_id: Some("user-clientchosen42".to_string()),
+        resume_interrupted: false,
     };
 
     // Dispatch fails (no Codex session) after the user item is committed; the
@@ -5545,11 +5974,13 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: workspace_path.to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,
@@ -5596,6 +6027,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         sandbox_mode: None,
         steer: false,
         user_item_id: None,
+        resume_interrupted: false,
     };
 
     // Busy thread: the send queues instead of dispatching (dispatching would
@@ -5662,12 +6094,11 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         .unwrap();
     let snapshot = app.snapshot().await;
     assert!(snapshot.threads[0].queued_turns.is_empty());
-    assert!(
-        app.remove_queued_turn(&workspace_id, "thread-q", &first_id)
-            .await
-            .is_err(),
-        "removing twice reports not found"
-    );
+    let twice = app
+        .remove_queued_turn(&workspace_id, "thread-q", &first_id)
+        .await
+        .expect("a second remove is a reconcile no-op");
+    assert_eq!(twice.message.as_deref(), Some("already gone"));
 }
 
 /// Builds a workspace holding one busy thread on `provider`, with that
@@ -5721,11 +6152,13 @@ async fn busy_thread_app(
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: workspace_path.to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,
@@ -5786,6 +6219,16 @@ async fn queued_turn_is_persisted_before_enqueue_returns() {
     let persisted = super::load_persisted_app_state(&state_path).await.unwrap();
     let queued = &persisted.workspaces[0].thread_states[0].queued_requests[0];
     assert_eq!(queued.summary.text, "actually, use the other endpoint");
+
+    let restored =
+        AppState::new_with_state_path("test".to_string(), HashMap::new(), state_path.clone());
+    restored.restore_local_state().await.unwrap();
+    let snapshot = restored.snapshot().await;
+    assert_eq!(snapshot.threads[0].queued_turns.len(), 1);
+    assert_eq!(
+        snapshot.threads[0].queued_turns[0].text,
+        "actually, use the other endpoint"
+    );
 }
 
 fn steer_request(workspace_id: &str, steer: bool) -> falcondeck_core::SendTurnRequest {
@@ -5806,6 +6249,7 @@ fn steer_request(workspace_id: &str, steer: bool) -> falcondeck_core::SendTurnRe
         sandbox_mode: None,
         steer,
         user_item_id: None,
+        resume_interrupted: false,
     }
 }
 
@@ -5929,6 +6373,7 @@ fn a_steer_race_where_the_turn_already_ended_downgrades_to_the_queue_path() {
     for error in [
         DaemonError::BadRequest("no active Codex turn to steer".to_string()),
         DaemonError::BadRequest("no active claude turn to steer".to_string()),
+        DaemonError::BadRequest("no active ACP turn to steer".to_string()),
         DaemonError::BadRequest("claude turn is no longer accepting input".to_string()),
         DaemonError::Process("timed out writing to claude turn".to_string()),
         DaemonError::Process("failed to write to claude turn: broken pipe".to_string()),
@@ -6103,7 +6548,7 @@ async fn a_queued_turn_cannot_be_steered_on_a_provider_without_steering() {
 }
 
 #[tokio::test]
-async fn steering_an_unknown_queued_id_reports_not_found() {
+async fn steering_an_unknown_queued_id_is_a_reconcile_noop() {
     let temp_dir = tempdir().unwrap();
     let (app, workspace_id) = busy_thread_app(
         &temp_dir,
@@ -6113,14 +6558,11 @@ async fn steering_an_unknown_queued_id_reports_not_found() {
     .await;
     queue_messages(&app, &workspace_id, 1).await;
 
-    let error = app
+    let response = app
         .steer_queued_turn(&workspace_id, "thread-steer", "queued-nope")
         .await
-        .expect_err("unknown queued id");
-    assert!(
-        error.to_string().contains("queued turn not found"),
-        "unexpected error: {error}"
-    );
+        .expect("a missing queued id must not fail the steer");
+    assert_eq!(response.message.as_deref(), Some("already gone"));
     assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
 }
 
@@ -6154,12 +6596,14 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        is_pinned_in_project: false,
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
     };
     thread.agent.permission_mode = Some("bypassPermissions".to_string());
     let workspace = WorkspaceSummary {
+        kind: falcondeck_core::WorkspaceKind::Project,
         id: workspace_id.clone(),
         path: temp_dir.path().to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,

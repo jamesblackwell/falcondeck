@@ -41,6 +41,55 @@ describe("createDaemonApiClient sendTurn", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
   });
 
+  it("lists workspace skills for the selected provider", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            skills: [
+              {
+                id: "skill:lint",
+                label: "Lint",
+                alias: "/lint",
+                availability: "both",
+                providers: ["grok"],
+                source_kind: "project_file",
+              },
+            ],
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient(
+      "http://daemon.test",
+    ).listWorkspaceSkills("ws-1", "grok");
+
+    expect(result).toEqual([
+      expect.objectContaining({ alias: "/lint", providers: ["grok"] }),
+    ]);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/ws-1/skills?provider=grok",
+    );
+  });
+
+  it("creates a daemon-managed casual chat", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ id: "chat-workspace", kind: "casual" }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient("http://daemon.test").createChat();
+
+    expect(result).toMatchObject({ id: "chat-workspace", kind: "casual" });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://daemon.test/api/chats");
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+  });
+
   it("saves speech credentials only to the daemon credential endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

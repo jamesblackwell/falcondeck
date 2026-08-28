@@ -17,6 +17,7 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 mod desktop_notifications;
 mod dictation;
+mod dictation_history;
 
 /// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
 const ACTIVITY_WINDOW_LABEL: &str = "activity";
@@ -510,6 +511,395 @@ fn open_external_url(url: String) -> Result<(), String> {
     open::that_detached(url).map_err(|error| error.to_string())
 }
 
+fn missing_local_path_error() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        "This path is not on this Mac.".to_string()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "This path is not on this computer.".to_string()
+    }
+}
+
+fn from_hex_digit(digit: u8) -> Result<u8, String> {
+    match digit {
+        b'0'..=b'9' => Ok(digit - b'0'),
+        b'a'..=b'f' => Ok(digit - b'a' + 10),
+        b'A'..=b'F' => Ok(digit - b'A' + 10),
+        _ => Err("Invalid percent-encoding in path.".to_string()),
+    }
+}
+
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return Err("Invalid percent-encoding in path.".to_string());
+            }
+            let value =
+                (from_hex_digit(bytes[index + 1])? << 4) | from_hex_digit(bytes[index + 2])?;
+            out.push(value);
+            index += 3;
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).map_err(|_| "Path is not valid UTF-8.".to_string())
+}
+
+fn decode_file_url(raw: &str) -> Result<String, String> {
+    if !raw
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        return Err("Not a file URL.".to_string());
+    }
+    let rest = &raw[7..];
+    let path_part = if rest.starts_with('/') {
+        rest
+    } else {
+        let slash = rest
+            .find('/')
+            .ok_or_else(|| "Invalid file URL.".to_string())?;
+        let host = &rest[..slash];
+        if !host.is_empty() && host != "localhost" && host != "127.0.0.1" {
+            return Err("FalconDeck can only open local file URLs.".to_string());
+        }
+        &rest[slash..]
+    };
+    let decoded = percent_decode(path_part)?;
+    if decoded.len() >= 3
+        && decoded.starts_with('/')
+        && decoded.as_bytes()[1].is_ascii_alphabetic()
+        && decoded.as_bytes()[2] == b':'
+    {
+        return Ok(decoded[1..].to_string());
+    }
+    Ok(decoded)
+}
+
+fn home_dir() -> Option<String> {
+    env::var("HOME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            env::var("USERPROFILE")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn expand_tilde(raw: &str) -> Result<String, String> {
+    if raw == "~" {
+        return home_dir().ok_or_else(|| "Home directory is unknown.".to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let home = home_dir().ok_or_else(|| "Home directory is unknown.".to_string())?;
+        return Ok(format!("{}/{}", home.trim_end_matches(['/', '\\']), rest));
+    }
+    Ok(raw.to_string())
+}
+
+fn parse_local_path_input(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Path is empty.".to_string());
+    }
+    if trimmed.chars().any(|character| character.is_control()) {
+        return Err("Path contains invalid characters.".to_string());
+    }
+
+    let without_file = if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        decode_file_url(trimmed)?
+    } else {
+        trimmed.to_string()
+    };
+    let expanded = expand_tilde(&without_file)?;
+    let path = PathBuf::from(expanded);
+    if !path.is_absolute() {
+        return Err("FalconDeck can only open absolute local paths.".to_string());
+    }
+    Ok(path)
+}
+
+fn resolve_existing_local_path(raw: &str) -> Result<PathBuf, String> {
+    let path = parse_local_path_input(raw)?;
+    let metadata = fs::metadata(&path).map_err(|_| missing_local_path_error())?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("FalconDeck can only open files and folders.".to_string());
+    }
+    Ok(path.canonicalize().unwrap_or(path))
+}
+
+#[tauri::command]
+fn open_local_path(path: String) -> Result<(), String> {
+    let resolved = resolve_existing_local_path(&path)?;
+    open::that_detached(&resolved).map_err(|error| error.to_string())
+}
+
+fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Finder could not reveal that path.".to_string())
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("Explorer could not reveal that path.".to_string())
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let parent = path.parent().unwrap_or(path);
+        open::that_detached(parent).map_err(|error| error.to_string())
+    }
+}
+
+#[tauri::command]
+fn reveal_local_path(path: String) -> Result<(), String> {
+    let resolved = resolve_existing_local_path(&path)?;
+    reveal_in_file_manager(&resolved)
+}
+
+/// Editors the transcript's path menu can hand a path to, most common first.
+/// `id` crosses the bridge; the platform opener resolves it per OS.
+const EDITOR_CANDIDATES: &[(&str, &str)] = &[
+    ("zed", "Zed"),
+    ("vscode", "VS Code"),
+    ("cursor", "Cursor"),
+    ("windsurf", "Windsurf"),
+    ("sublime", "Sublime Text"),
+];
+
+#[derive(Serialize)]
+struct InstalledEditor {
+    id: String,
+    name: String,
+}
+
+#[cfg(target_os = "macos")]
+fn editor_app_name(editor: &str) -> Option<&'static str> {
+    match editor {
+        "zed" => Some("Zed"),
+        "vscode" => Some("Visual Studio Code"),
+        "cursor" => Some("Cursor"),
+        "windsurf" => Some("Windsurf"),
+        "sublime" => Some("Sublime Text"),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn editor_installed(editor: &str) -> bool {
+    let Some(app) = editor_app_name(editor) else {
+        return false;
+    };
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = home_dir() {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    roots
+        .iter()
+        .any(|root| root.join(format!("{app}.app")).exists())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn editor_binary(editor: &str) -> Option<&'static str> {
+    match editor {
+        "zed" => Some("zed"),
+        "vscode" => Some("code"),
+        "cursor" => Some("cursor"),
+        "windsurf" => Some("windsurf"),
+        "sublime" => Some("subl"),
+        _ => None,
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn editor_installed(editor: &str) -> bool {
+    let Some(binary) = editor_binary(editor) else {
+        return false;
+    };
+    env::var("PATH")
+        .ok()
+        .map(|search| env::split_paths(&search).any(|dir| dir.join(binary).exists()))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn editor_executable(editor: &str) -> Option<PathBuf> {
+    let local = env::var("LOCALAPPDATA").ok()?;
+    let programs = PathBuf::from(local).join("Programs");
+    let executable = match editor {
+        "zed" => programs.join(r"Zed\Zed.exe"),
+        "vscode" => programs.join(r"Microsoft VS Code\Code.exe"),
+        "cursor" => programs.join(r"cursor\Cursor.exe"),
+        "windsurf" => programs.join(r"windsurf\Windsurf.exe"),
+        _ => return None,
+    };
+    Some(executable)
+}
+
+#[cfg(target_os = "windows")]
+fn editor_installed(editor: &str) -> bool {
+    editor_executable(editor).is_some_and(|path| path.exists())
+}
+
+#[tauri::command]
+fn list_installed_editors() -> Vec<InstalledEditor> {
+    EDITOR_CANDIDATES
+        .iter()
+        .filter(|(id, _)| editor_installed(id))
+        .map(|(id, name)| InstalledEditor {
+            id: (*id).to_string(),
+            name: (*name).to_string(),
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn open_path_in_editor(resolved: &Path, editor: &str) -> Result<(), String> {
+    let app = editor_app_name(editor).ok_or_else(|| "Unknown editor.".to_string())?;
+    let status = Command::new("open")
+        .arg("-a")
+        .arg(app)
+        .arg(resolved)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{app} could not open that path."))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path_in_editor(resolved: &Path, editor: &str) -> Result<(), String> {
+    let binary = editor_binary(editor).ok_or_else(|| "Unknown editor.".to_string())?;
+    Command::new(binary)
+        .arg(resolved)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn open_path_in_editor(resolved: &Path, editor: &str) -> Result<(), String> {
+    let executable = editor_executable(editor).ok_or_else(|| "Unknown editor.".to_string())?;
+    Command::new(executable)
+        .arg(resolved)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn open_path_with_editor(path: String, editor: String) -> Result<(), String> {
+    let resolved = resolve_existing_local_path(&path)?;
+    open_path_in_editor(&resolved, &editor)
+}
+
+/// "file" or "directory" for existing paths, None otherwise. The transcript
+/// menu uses this to decide which file-only actions to offer.
+#[tauri::command]
+fn local_path_kind(path: String) -> Result<Option<&'static str>, String> {
+    let parsed = parse_local_path_input(&path)?;
+    let Ok(metadata) = fs::metadata(&parsed) else {
+        return Ok(None);
+    };
+    if metadata.is_file() {
+        Ok(Some("file"))
+    } else if metadata.is_dir() {
+        Ok(Some("directory"))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Clipboard copy only carries text, so cap the size and refuse anything that
+/// is not UTF-8 before it reaches the webview.
+const COPY_CONTENTS_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+fn read_text_file_contents(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|_| missing_local_path_error())?;
+    if !metadata.is_file() {
+        return Err("Only file contents can be copied, not folders.".to_string());
+    }
+    if metadata.len() > COPY_CONTENTS_MAX_BYTES {
+        return Err("File is too large to copy (limit is 2 MB).".to_string());
+    }
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    if bytes.contains(&0) {
+        return Err("Binary file contents cannot be copied as text.".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "File is not UTF-8 text.".to_string())
+}
+
+#[tauri::command]
+fn read_local_text_file(path: String) -> Result<String, String> {
+    let resolved = resolve_existing_local_path(&path)?;
+    read_text_file_contents(&resolved)
+}
+
+#[tauri::command]
+fn copy_local_file(source: String, dest: String) -> Result<(), String> {
+    let resolved_source = resolve_existing_local_path(&source)?;
+    if !resolved_source.is_file() {
+        return Err("Only files can be saved to a new location.".to_string());
+    }
+    let resolved_dest = parse_local_path_input(&dest)?;
+    if resolved_dest == resolved_source {
+        return Err("Choose a different save location.".to_string());
+    }
+    if resolved_dest.is_dir() {
+        return Err("That location is a folder. Pick a file name.".to_string());
+    }
+    fs::copy(&resolved_source, &resolved_dest)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 /// Open (or re-focus) the detached Activity window.
 ///
 /// Built here rather than from JS so the label, chrome, and size stay in one
@@ -614,6 +1004,13 @@ pub fn run() {
             ensure_daemon_running,
             restart_app,
             open_external_url,
+            open_local_path,
+            reveal_local_path,
+            list_installed_editors,
+            open_path_with_editor,
+            local_path_kind,
+            read_local_text_file,
+            copy_local_file,
             open_activity_window,
             focus_main_window,
             desktop_notifications::macos_notification_permission_state,
@@ -630,6 +1027,10 @@ pub fn run() {
             dictation::discard_dictation,
             dictation::last_dictation_transcript,
             dictation::copy_dictation_transcript,
+            dictation::dictation_history,
+            dictation::dictation_history_retry,
+            dictation::dictation_history_delete,
+            dictation::dictation_history_clear,
             dictation::open_dictation_accessibility_settings
         ])
         .build(tauri::generate_context!())
@@ -683,7 +1084,11 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::quit_warning_message;
+    use super::{
+        decode_file_url, expand_tilde, parse_local_path_input, quit_warning_message,
+        resolve_existing_local_path,
+    };
+    use std::{env, fs};
 
     #[test]
     fn quit_warning_uses_singular_copy_for_one_active_thread() {
@@ -699,5 +1104,106 @@ mod tests {
             quit_warning_message(2),
             "2 threads have active turns. Quitting FalconDeck will stop them. You can resume them after reopening the app."
         );
+    }
+
+    #[test]
+    fn file_url_decodes_percent_encoding() {
+        assert_eq!(
+            decode_file_url("file:///Users/James/My%20File.mp4").unwrap(),
+            "/Users/James/My File.mp4"
+        );
+        assert_eq!(
+            decode_file_url("file://localhost/Users/James/clip.mp4").unwrap(),
+            "/Users/James/clip.mp4"
+        );
+    }
+
+    #[test]
+    fn file_url_rejects_remote_hosts() {
+        assert!(decode_file_url("file://evil.example/Users/foo").is_err());
+    }
+
+    #[test]
+    fn tilde_expands_to_home() {
+        let previous = env::var("HOME").ok();
+        env::set_var("HOME", "/Users/qa");
+        let expanded = expand_tilde("~/Desktop/clip.mp4").unwrap();
+        match previous {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        assert_eq!(expanded, "/Users/qa/Desktop/clip.mp4");
+    }
+
+    #[test]
+    fn relative_paths_are_rejected() {
+        assert!(parse_local_path_input("src/App.tsx").is_err());
+        assert!(parse_local_path_input("kitchen.mp4").is_err());
+    }
+
+    #[test]
+    fn missing_paths_are_rejected() {
+        assert!(
+            resolve_existing_local_path("/tmp/falcondeck-missing-local-path-test")
+                .unwrap_err()
+                .contains("not on this")
+        );
+    }
+
+    #[test]
+    fn existing_temp_file_resolves() {
+        let path = env::temp_dir().join("falcondeck-local-path-open-test.txt");
+        fs::write(&path, "ok").unwrap();
+        let resolved = resolve_existing_local_path(&path.display().to_string()).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(resolved.ends_with("falcondeck-local-path-open-test.txt"));
+    }
+
+    #[test]
+    fn text_file_contents_round_trip() {
+        let path = env::temp_dir().join("falcondeck-copy-contents-test.txt");
+        fs::write(&path, "hello falcondeck\n").unwrap();
+        let contents = super::read_text_file_contents(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_eq!(contents, "hello falcondeck\n");
+    }
+
+    #[test]
+    fn binary_file_contents_are_rejected() {
+        let path = env::temp_dir().join("falcondeck-copy-contents-test.bin");
+        fs::write(&path, [0x89, b'P', 0x4e, 0x00, 0x47]).unwrap();
+        let error = super::read_text_file_contents(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(error.contains("Binary"));
+    }
+
+    #[test]
+    fn oversized_file_contents_are_rejected() {
+        let path = env::temp_dir().join("falcondeck-copy-contents-test-big.txt");
+        fs::write(
+            &path,
+            vec![b'a'; super::COPY_CONTENTS_MAX_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = super::read_text_file_contents(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(error.contains("too large"));
+    }
+
+    #[test]
+    fn local_path_kind_reports_files_and_directories() {
+        let file = env::temp_dir().join("falcondeck-path-kind-test.txt");
+        fs::write(&file, "x").unwrap();
+        let dir = env::temp_dir().join("falcondeck-path-kind-test-dir");
+        fs::create_dir_all(&dir).unwrap();
+        let file_kind = super::local_path_kind(file.display().to_string()).unwrap();
+        let dir_kind = super::local_path_kind(dir.display().to_string()).unwrap();
+        let missing_kind =
+            super::local_path_kind("/tmp/falcondeck-path-kind-missing".to_string()).unwrap();
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(file_kind.as_deref(), Some("file"));
+        assert_eq!(dir_kind.as_deref(), Some("directory"));
+        assert_eq!(missing_kind, None);
     }
 }

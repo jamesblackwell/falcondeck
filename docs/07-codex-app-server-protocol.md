@@ -348,6 +348,7 @@ These are requests the server sends TO the client, requiring a response.
 | `item/fileChange/requestApproval`       | FileChangeRequestApprovalParams       | Approve file modification       |
 | `item/tool/requestUserInput`            | ToolRequestUserInputParams            | Request structured user input   |
 | `skill/requestApproval`                 | SkillRequestApprovalParams            | Approve skill execution         |
+| `mcpServer/elicitation/request`         | MCP elicitation params                | MCP URL-mode or form input      |
 | `item/tool/call`                        | DynamicToolCallParams                 | Dynamic tool call               |
 | `account/chatgptAuthTokens/refresh`     | ChatgptAuthTokensRefreshParams        | Refresh auth tokens             |
 
@@ -370,6 +371,21 @@ instead of silently substituting another option. Legacy requests without a
 capability set conservatively permit one-time allow or deny only. Permission
 profile requests use the same normalized UI choices but respond with the
 granted profile and `turn` or `session` scope.
+
+## MCP elicitation response format
+
+```json
+{
+  "id": <rpc_id>,
+  "result": {
+    "action": "accept" | "decline",
+    "content": { "field": "value" }
+  }
+}
+```
+
+`content` is present only for form-mode `accept`. URL-mode accept is consent
+to open the supplied link; it does not mean the out-of-band flow is finished.
 
 ## turn/start Input Format
 

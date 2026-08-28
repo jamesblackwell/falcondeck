@@ -541,9 +541,7 @@ impl PersistenceBackend for PostgresBackend {
     ) -> Result<(), RelayError> {
         with_reconnect!(self, |client| {
             upsert_session(client, session).await?;
-            for action in actions {
-                upsert_action(client, action).await?;
-            }
+            upsert_actions_batch(client, actions).await?;
             Ok(())
         })
     }
@@ -689,8 +687,12 @@ async fn persist_state_to_file(path: &Path, state: &PersistedState) -> Result<()
     // Unique tmp name per write: concurrent writers sharing one tmp path
     // can tear each other's files or rename a partial write into place.
     let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
-    let json = serde_json::to_vec_pretty(state)
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    // Compact JSON: the file backend rewrites the entire state (every
+    // session's retained replay) per flush, so pretty-printing doubled both
+    // the serialized bytes and the fsync window for no benefit — this file is
+    // only ever machine-read.
+    let json =
+        serde_json::to_vec(state).map_err(|error| RelayError::StatePersist(error.to_string()))?;
     let result = async {
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -1170,14 +1172,44 @@ async fn upsert_relay_update(
     Ok(())
 }
 
-async fn upsert_action(
+/// One statement for the whole dispatch batch: action persistence used to
+/// issue one round trip per record, and a full dispatch pass can carry 64
+/// actions, which serialized the single shared connection on per-row latency.
+async fn upsert_actions_batch(
     client: &mut PostgresClient,
-    action: &QueuedActionRecord,
+    actions: &[QueuedActionRecord],
 ) -> Result<(), RelayError> {
+    if actions.is_empty() {
+        return Ok(());
+    }
+    let action_ids: Vec<&str> = actions.iter().map(|a| a.action_id.as_str()).collect();
+    let session_ids: Vec<&str> = actions.iter().map(|a| a.session_id.as_str()).collect();
+    let device_ids: Vec<&str> = actions.iter().map(|a| a.device_id.as_str()).collect();
+    let action_types: Vec<&str> = actions.iter().map(|a| a.action_type.as_str()).collect();
+    let idempotency_keys: Vec<&str> = actions.iter().map(|a| a.idempotency_key.as_str()).collect();
+    let mut payloads = Vec::with_capacity(actions.len());
+    for action in actions {
+        payloads.push(encode_json_field(&action.payload)?);
+    }
+    let statuses: Vec<&'static str> = actions
+        .iter()
+        .map(|a| queued_action_status_to_db(&a.status))
+        .collect();
+    let created_at: Vec<DateTime<Utc>> = actions.iter().map(|a| a.created_at).collect();
+    let updated_at: Vec<DateTime<Utc>> = actions.iter().map(|a| a.updated_at).collect();
+    let errors: Vec<Option<&str>> = actions.iter().map(|a| a.error.as_deref()).collect();
+    let mut results = Vec::with_capacity(actions.len());
+    for action in actions {
+        results.push(encode_optional_json_field(action.result.as_ref())?);
+    }
+
     client
         .execute(
             "INSERT INTO relay_actions (action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             SELECT action_id, session_id, device_id, action_type, idempotency_key,
+                    payload::jsonb, status, created_at, updated_at, error, result::jsonb
+             FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::timestamptz[], $9::timestamptz[], $10::text[], $11::text[])
+             AS t(action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
              ON CONFLICT (action_id) DO UPDATE SET
                session_id = EXCLUDED.session_id,
                device_id = EXCLUDED.device_id,
@@ -1190,17 +1222,17 @@ async fn upsert_action(
                error = EXCLUDED.error,
                result = EXCLUDED.result",
             &[
-                &action.action_id,
-                &action.session_id,
-                &action.device_id,
-                &action.action_type,
-                &action.idempotency_key,
-                &encode_json_field(&action.payload)?,
-                &queued_action_status_to_db(&action.status),
-                &action.created_at,
-                &action.updated_at,
-                &action.error,
-                &encode_optional_json_field(action.result.as_ref())?,
+                &action_ids,
+                &session_ids,
+                &device_ids,
+                &action_types,
+                &idempotency_keys,
+                &payloads,
+                &statuses,
+                &created_at,
+                &updated_at,
+                &errors,
+                &results,
             ],
         )
         .await

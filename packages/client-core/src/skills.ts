@@ -22,6 +22,53 @@ export function providerSupportsSkill(skill: SkillSummary, provider: AgentProvid
   return skill.availability === 'both' || skill.availability === provider
 }
 
+/** Last live slash-menu fetch, keyed so a provider switch cannot reuse it. */
+export type LiveSkillCatalog = {
+  workspaceId: string
+  provider: AgentProvider
+  skills: SkillSummary[]
+}
+
+/** Catalog used when submitting `/alias` mentions. Prefers a matching live fetch. */
+export function composerSkillCatalog(
+  live: LiveSkillCatalog | null,
+  workspace: { id: string; skills?: SkillSummary[] } | null | undefined,
+  provider: AgentProvider,
+): SkillSummary[] {
+  if (
+    live &&
+    workspace &&
+    live.workspaceId === workspace.id &&
+    live.provider === provider
+  ) {
+    return live.skills
+  }
+  return workspace?.skills ?? []
+}
+
+/**
+ * Provider-scoped slash rows. Unsupported skills are omitted rather than
+ * shown greyed; the query only filters, it does not refetch.
+ */
+export function filterSlashSkills(
+  skills: SkillSummary[],
+  provider: AgentProvider,
+  query: string,
+): SkillSummary[] {
+  const needle = query.trim().toLowerCase()
+  return skills
+    .filter((skill) => providerSupportsSkill(skill, provider))
+    .filter((skill) => {
+      if (!needle) return true
+      return (
+        canonicalSkillAlias(skill.alias).includes(`/${needle}`) ||
+        skill.label.toLowerCase().includes(needle) ||
+        (skill.description ?? '').toLowerCase().includes(needle)
+      )
+    })
+    .sort((left, right) => left.alias.localeCompare(right.alias))
+}
+
 /**
  * A slash-command mention: preceded by start-of-text or whitespace, a `/`
  * followed by a word, and not a path segment (`/api/provider` never matches).
@@ -101,8 +148,9 @@ export function activeSlashQuery(value: string, caretIndex: number): ActiveSlash
   const token = value.slice(start, caretIndex)
   if (token.length === 0 || /\s/.test(token) || token.slice(1).includes('/')) return null
 
+  const rest = token.slice(1)
   return {
-    query: canonicalSkillAlias(token).slice(1),
+    query: rest.length === 0 ? '' : canonicalSkillAlias(token).slice(1),
     rangeStart: start,
     rangeEnd: caretIndex,
   }

@@ -50,6 +50,85 @@ describe('buildSidebarRows', () => {
     ])
   })
 
+  it('renders casual chats flat below projects', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'chat-w', kind: 'casual' }),
+          threads: [thread({ id: 'chat-t', workspace_id: 'chat-w', title: 'Weekend plans' })],
+        },
+        {
+          workspace: workspace({ id: 'project-w', kind: 'project', path: '/tmp/project' }),
+          threads: [thread({ id: 'project-t', workspace_id: 'project-w' })],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+    )
+
+    expect(rows.map((row) => row.key)).toEqual([
+      'section:projects',
+      'workspace:project-w',
+      'thread:project-t',
+      'section:chats',
+      'chat:chat-w:chat-t',
+    ])
+  })
+
+  it('keeps chat rows for a collapsed chats section but marks them collapsed', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'chat-w', kind: 'casual' }),
+          threads: [thread({ id: 'chat-t', workspace_id: 'chat-w', title: 'Weekend plans' })],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+      'last_updated',
+      true,
+      true,
+    )
+
+    expect(rows).toEqual([
+      {
+        key: 'section:chats',
+        type: 'section',
+        title: 'Chats',
+        isOpen: false,
+      },
+      expect.objectContaining({
+        key: 'chat:chat-w:chat-t',
+        type: 'thread',
+        isCollapsed: true,
+      }),
+    ])
+  })
+
+  it('keeps the Chats section visible before the first casual chat exists', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'project-w', kind: 'project', path: '/tmp/project' }),
+          threads: [],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+      'last_updated',
+      true,
+    )
+
+    expect(rows.map((row) => row.key)).toEqual([
+      'section:projects',
+      'workspace:project-w',
+      'section:chats',
+    ])
+  })
+
   it('falls back to the full workspace path when no basename exists', () => {
     const rows = buildSidebarRows(
       [
@@ -105,6 +184,7 @@ describe('buildSidebarRows', () => {
               workspace_id: 'w1',
               title: 'Zebra',
               is_pinned: true,
+              is_pinned_in_project: false,
               updated_at: '2026-03-16T12:00:00Z',
             }),
             thread({ id: 'regular', workspace_id: 'w1', title: 'Regular' }),
@@ -118,6 +198,7 @@ describe('buildSidebarRows', () => {
               workspace_id: 'w2',
               title: 'Alpha',
               is_pinned: true,
+              is_pinned_in_project: false,
               updated_at: '2026-03-16T11:00:00Z',
             }),
           ],
@@ -161,6 +242,41 @@ describe('buildSidebarRows', () => {
     ])
     expect(rows[1]).toMatchObject({ isCollapsed: false })
     expect(rows[4]).toMatchObject({ isCollapsed: true })
+  })
+
+  it('keeps pin-in-project chats at the top of their project', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project' }),
+          threads: [
+            thread({
+              id: 'regular',
+              workspace_id: 'w1',
+              title: 'Regular',
+              updated_at: '2026-03-16T12:00:00Z',
+            }),
+            thread({
+              id: 'project-pinned',
+              workspace_id: 'w1',
+              title: 'Pinned in project',
+              is_pinned_in_project: true,
+              updated_at: '2026-03-10T10:00:00Z',
+            }),
+          ],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+    )
+
+    expect(rows.map((row) => row.key)).toEqual([
+      'section:projects',
+      'workspace:w1',
+      'thread:project-pinned',
+      'thread:regular',
+    ])
   })
 
   it('limits visible threads and shows overflow row', () => {

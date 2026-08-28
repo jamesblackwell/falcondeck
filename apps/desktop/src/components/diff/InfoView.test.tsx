@@ -93,6 +93,13 @@ describe('InfoView', () => {
     expect(screen.queryByText('Uncommitted')).not.toBeInTheDocument()
   })
 
+  it('describes casual storage without showing git state', () => {
+    renderInfo({ workspaceKind: 'casual' }, 0)
+    expect(screen.getByText('Chat folder')).toBeInTheDocument()
+    expect(screen.queryByText('Working tree clean')).not.toBeInTheDocument()
+    expect(screen.queryByText('main')).not.toBeInTheDocument()
+  })
+
   it('hands a changeset too large to expand over to the changes tab', () => {
     const { onViewAllChanges } = renderInfo({}, 40)
     expect(screen.queryByRole('button', { name: /Show 35 more/ })).not.toBeInTheDocument()

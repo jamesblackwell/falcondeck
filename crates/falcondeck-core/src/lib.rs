@@ -1226,7 +1226,7 @@ pub struct ExtensionAgentToolContribution {
 /// One agent tool as published to a harness by the MCP bridge.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExtensionAgentTool {
-    /// Namespaced MCP tool name, such as `falcondeck_follow_up_suggestions_suggest`.
+    /// Namespaced MCP tool name, such as `falcondeck_suggest_follow_ups`.
     pub name: String,
     /// Extension that declared the tool.
     pub extension_id: String,
@@ -1789,6 +1789,20 @@ pub struct HealthResponse {
 pub struct ConnectWorkspaceRequest {
     /// Filesystem path for the workspace to connect.
     pub path: String,
+    /// Whether this is a user project or a FalconDeck-managed casual chat.
+    #[serde(default)]
+    pub kind: WorkspaceKind,
+}
+
+/// How a connected workspace should be presented by FalconDeck clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    /// A user-selected project folder.
+    #[default]
+    Project,
+    /// A FalconDeck-managed folder for a casual conversation.
+    Casual,
 }
 
 /// Optional filters applied when materializing a daemon snapshot.
@@ -1990,9 +2004,15 @@ pub struct UpdateThreadRequest {
     /// Service tier override for future turns; explicit `null` clears it.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub service_tier: Option<Option<String>>,
-    /// Optional pin state override for the thread.
+    /// Optional global pin override. A global pin lifts the thread above
+    /// every project. Setting this `true` clears [`Self::pinned_in_project`].
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Optional pin-in-project override. Keeps the thread at the top of its
+    /// project list instead of the global Pinned section. Setting this `true`
+    /// clears [`Self::pinned`].
+    #[serde(default)]
+    pub pinned_in_project: Option<bool>,
     /// Clear the retained app-shutdown interruption after the user has seen it.
     #[serde(default)]
     pub acknowledge_interruption: Option<bool>,
@@ -2692,6 +2712,11 @@ pub struct SendTurnRequest {
     /// like a well-formed `user-*` id.
     #[serde(default)]
     pub user_item_id: Option<String>,
+    /// Resume a turn that FalconDeck interrupted by closing. The daemon
+    /// clears the shutdown marker, does not record a user bubble, and sends
+    /// the agent a continuation instruction. Older clients omit this.
+    #[serde(default)]
+    pub resume_interrupted: bool,
 }
 
 /// Request payload used to start a code review flow.
@@ -2862,12 +2887,17 @@ pub struct WorkspaceSummary {
     pub id: String,
     /// Filesystem path for the workspace root.
     pub path: String,
+    /// Presentation and lifecycle category for this workspace.
+    #[serde(default)]
+    pub kind: WorkspaceKind,
     /// Current lifecycle state for the workspace.
     pub status: WorkspaceStatus,
     /// Provider-specific agent summaries for the workspace.
     #[serde(default)]
     pub agents: Vec<WorkspaceAgentSummary>,
-    /// Merged workspace-level skill catalog for the universal picker.
+    /// Merged workspace-level skill catalog from the last connect or live
+    /// rescan. The composer slash menu refetches via `workspace.skills` rather
+    /// than treating this as a live disk view.
     #[serde(default)]
     pub skills: Vec<SkillSummary>,
     /// Default provider used for new threads in the workspace.
@@ -2891,6 +2921,14 @@ pub struct WorkspaceSummary {
     pub updated_at: DateTime<Utc>,
     /// Most recent workspace-level error, if any.
     pub last_error: Option<String>,
+}
+
+/// Live skill catalog for one workspace, rescanned from disk on demand.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSkillsResponse {
+    /// Skills available to the requested provider, or the full merged catalog
+    /// when no provider was specified.
+    pub skills: Vec<SkillSummary>,
 }
 
 /// Provider capability flags exposed in workspace summaries.
@@ -3416,9 +3454,12 @@ pub struct ThreadSummary {
     /// Whether the thread has been archived.
     #[serde(default)]
     pub is_archived: bool,
-    /// Whether the thread is pinned to the top of its project group.
+    /// Whether the thread is pinned above every project (global pin).
     #[serde(default)]
     pub is_pinned: bool,
+    /// Whether the thread is pinned to the top of its project group.
+    #[serde(default)]
+    pub is_pinned_in_project: bool,
     /// Active goal attached to the thread, if any.
     #[serde(default)]
     pub goal: Option<ThreadGoal>,

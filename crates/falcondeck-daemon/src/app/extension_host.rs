@@ -293,6 +293,7 @@ impl ExtensionHost {
 
     /// Routes one agent tool call into the extension's isolated host, using
     /// the same storage/publication commit path as an action.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn invoke_tool(
         &mut self,
         package: &ExtensionPackage,

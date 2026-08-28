@@ -61,6 +61,52 @@ describe('AgentsPanel recommended agents', () => {
     })
   })
 
+  it('configures Cursor with its built-in ACP command', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(emptyOverview), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            providers: { cursor: { label: 'Cursor', command: ['cursor-agent', 'acp'] } },
+            resolved: [
+              {
+                id: 'cursor',
+                label: 'Cursor',
+                command: ['cursor-agent', 'acp'],
+                binary_found: true,
+                reserved: false,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const onToast = vi.fn()
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure Cursor' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: { cursor: { label: 'Cursor', command: ['cursor-agent', 'acp'] } },
+    })
+    expect(onToast).toHaveBeenCalledWith({
+      variant: 'success',
+      title: 'Cursor configured',
+      description: 'FalconDeck will run cursor-agent acp on this host.',
+    })
+  })
+
   it('configures OpenCode with its built-in ACP command', async () => {
     const fetchMock = vi
       .fn()

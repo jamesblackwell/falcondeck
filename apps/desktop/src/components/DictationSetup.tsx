@@ -205,7 +205,11 @@ export function DictationSetup({
     <div className={compact ? "space-y-4" : "space-y-5"}>
       <SettingsSection
         title="Desktop dictation"
-        description="Dictate into the app under your cursor while FalconDeck is running. Audio is deleted after a confirmed transcript is pasted."
+        description={
+          settings.historyRetentionHours > 0
+            ? "Dictate into the app under your cursor while FalconDeck is running. Recordings stay on this Mac for the window set under Recording history, then FalconDeck deletes them."
+            : "Dictate into the app under your cursor while FalconDeck is running. Audio is deleted as soon as a transcript is pasted."
+        }
         actions={
           permissionsSupported ? (
             <Badge variant={permissionsReady ? "success" : "warning"} dot>
@@ -368,6 +372,36 @@ export function DictationSetup({
               >
                 {!models.some((model) => model.id === settings.model) ? (
                   <option value={settings.model}>{settings.model}</option>
+                ) : null}
+                {models.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+
+            <Field
+              label="Fallback model"
+              htmlFor="dictation-fallback-model"
+              hint="Tried when the first model fails or is rejected. Pick a different vendor so one provider's outage cannot take out both attempts."
+            >
+              <select
+                id="dictation-fallback-model"
+                className={SELECT_CLASS}
+                value={settings.fallbackModel ?? ""}
+                onChange={(event) =>
+                  updateSettings({ fallbackModel: event.target.value || null })
+                }
+              >
+                <option value="">
+                  No second choice — use FalconDeck's chain
+                </option>
+                {settings.fallbackModel &&
+                !models.some((model) => model.id === settings.fallbackModel) ? (
+                  <option value={settings.fallbackModel}>
+                    {settings.fallbackModel}
+                  </option>
                 ) : null}
                 {models.map((model) => (
                   <option key={model.id} value={model.id}>

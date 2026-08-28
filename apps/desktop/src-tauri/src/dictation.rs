@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition};
 
+use crate::dictation_history;
+
 const DICTATION_WINDOW_LABEL: &str = "dictation";
 const MAIN_WINDOW_LABEL: &str = "main";
 const DICTATION_EVENT: &str = "falcondeck://dictation-state";
@@ -26,7 +28,13 @@ const OVERLAY_PILL_WIDTH: f64 = 504.0;
 const OVERLAY_PILL_HEIGHT: f64 = 84.0;
 const OVERLAY_FAILED_WIDTH: f64 = 720.0;
 const OVERLAY_FAILED_HEIGHT: f64 = 156.0;
-const OPENROUTER_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(75);
+// Client-side ceiling for a short dictation. Long recordings scale this up so
+// the daemon's own (longer) budget is what decides the outcome; see
+// `transcription_timeout`.
+const BASE_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(1500);
+// 32 kbps mono AAC: a second of speech is about 4 kB.
+const RECORDING_BYTES_PER_SECOND: f64 = 4_000.0;
 // How long the cancelled pill stays up offering Undo. Mirrored by
 // UNDO_WINDOW_SECONDS in DictationOverlay.tsx, which counts it down.
 const CANCEL_UNDO_WINDOW: Duration = Duration::from_secs(10);
@@ -41,12 +49,14 @@ static ACTIVE_OPENROUTER_TRANSCRIPTION: AtomicU64 = AtomicU64::new(0);
 // in the app) or copy it after a failed paste. Session-scoped on purpose.
 static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
 
-static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(OPENROUTER_TRANSCRIPTION_TIMEOUT)
-        .build()
-        .unwrap_or_default()
-});
+// Timeouts are per request rather than per client: a 30-second dictation and
+// a 30-minute one deserve very different ceilings.
+static OPENROUTER_CLIENT: LazyLock<reqwest::Client> =
+    LazyLock::new(|| reqwest::Client::builder().build().unwrap_or_default());
+
+/// The recording the native side is currently working on, so a transcript or
+/// a failure arriving from Apple Speech can be filed against its audio.
+static CURRENT_RECORDING: RwLock<Option<PathBuf>> = RwLock::new(None);
 
 /// Mirrors `FDEventKind` in `dictation_events.h`; a unit test asserts the two
 /// definitions stay in sync.
@@ -62,6 +72,7 @@ mod event_kind {
     pub const SELF_INSERT: i32 = 8;
     pub const PASTE_FAILED: i32 = 9;
     pub const CANCELLED_RETAINED: i32 = 11;
+    pub const AUDIO_RECORDED: i32 = 10;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -106,6 +117,13 @@ pub struct DictationConfiguration {
     pub input_device_id: Option<String>,
     pub daemon_url: Option<String>,
     pub model: String,
+    /// Tried straight after `model`, ideally from a different vendor.
+    #[serde(default)]
+    pub fallback_model: Option<String>,
+    /// Hours a recording is kept on this computer so a bad transcript can be
+    /// retried. Zero deletes audio as soon as the transcript is pasted.
+    #[serde(default)]
+    pub history_retention_hours: u32,
 }
 
 impl Default for DictationConfiguration {
@@ -118,6 +136,8 @@ impl Default for DictationConfiguration {
             input_device_id: None,
             daemon_url: None,
             model: "openai/gpt-4o-mini-transcribe".to_string(),
+            fallback_model: Some("mistralai/voxtral-mini-transcribe".to_string()),
+            history_retention_hours: 6,
         }
     }
 }
@@ -151,10 +171,14 @@ pub struct DictationAudioDevice {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
 struct TranscriptionRequest {
     audio_base64: String,
     format: &'static str,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_model: Option<String>,
+    duration_seconds: f64,
 }
 
 #[cfg(target_os = "macos")]
@@ -165,7 +189,9 @@ unsafe extern "C" {
         activation_mode: i32,
         provider: i32,
         input_device_id: *const std::ffi::c_char,
+        retain_recordings: bool,
     );
+    fn fd_dictation_retained_recording_path() -> *mut std::ffi::c_char;
     fn fd_dictation_audio_devices_json() -> *mut std::ffi::c_char;
     fn fd_dictation_temp_directory() -> *mut std::ffi::c_char;
     fn fd_dictation_free_string(value: *mut std::ffi::c_char);
@@ -271,6 +297,20 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
     if config.model.trim().is_empty() || config.model.len() > 200 {
         return Err("The transcription model is invalid.".to_string());
     }
+    if config
+        .fallback_model
+        .as_deref()
+        .is_some_and(|model| model.trim().is_empty() || model.len() > 200)
+    {
+        return Err("The fallback transcription model is invalid.".to_string());
+    }
+    // A shortened retention window has to take effect immediately, not at the
+    // next dictation: the writer just asked for that audio to be gone. The
+    // deletions happen off this thread — configure is called from the UI.
+    let retention_hours = config.history_retention_hours;
+    tauri::async_runtime::spawn_blocking(move || {
+        dictation_history::prune(&dictation_temp_dir(), retention_hours);
+    });
 
     #[cfg(target_os = "macos")]
     unsafe {
@@ -289,6 +329,7 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
             input_device_id
                 .as_ref()
                 .map_or(std::ptr::null(), |value| value.as_ptr()),
+            config.history_retention_hours > 0,
         );
     }
     *CONFIG
@@ -442,6 +483,142 @@ pub fn copy_dictation_transcript() -> Result<(), String> {
     {
         let _ = text;
         Err("Dictation clipboard copy is currently available on macOS only.".to_string())
+    }
+}
+
+fn current_dictation_config() -> Result<DictationConfiguration, String> {
+    CONFIG
+        .read()
+        .map_err(|_| "Dictation settings are unavailable.".to_string())
+        .map(|config| config.clone())
+}
+
+/// Stops the overlay from offering to retry a recording that history has just
+/// transcribed. Only clears the native pointer when it still refers to this
+/// recording, so a different pending one is left alone.
+#[cfg(target_os = "macos")]
+fn forget_native_retained_recording(path: &Path) {
+    unsafe {
+        let value = fd_dictation_retained_recording_path();
+        if value.is_null() {
+            return;
+        }
+        let retained = CStr::from_ptr(value).to_string_lossy().into_owned();
+        fd_dictation_free_string(value);
+        if Path::new(&retained) == path {
+            fd_dictation_mark_completed();
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn forget_native_retained_recording(_path: &Path) {}
+
+/// Runs a history operation off the webview's command thread. History does
+/// file IO — and a prune can delete a stack of recordings — so none of it
+/// belongs anywhere near the UI thread.
+async fn run_history_op<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|error| format!("dictation history task failed: {error}"))
+}
+
+#[tauri::command]
+pub async fn dictation_history() -> Result<Vec<dictation_history::DictationHistoryEntry>, String> {
+    let config = current_dictation_config()?;
+    run_history_op(move || {
+        dictation_history::entries(&dictation_temp_dir(), config.history_retention_hours)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn dictation_history_delete(id: String) -> Result<bool, String> {
+    let config = current_dictation_config()?;
+    run_history_op(move || {
+        dictation_history::delete(&dictation_temp_dir(), config.history_retention_hours, &id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn dictation_history_clear() -> Result<usize, String> {
+    run_history_op(|| dictation_history::clear(&dictation_temp_dir())).await
+}
+
+/// Transcribes a kept recording again, optionally with a different model.
+/// This is the whole reason recordings are kept: a transcript that came back
+/// wrong is worth another attempt, and re-recording is not.
+#[tauri::command]
+pub async fn dictation_history_retry(
+    id: String,
+    model: Option<String>,
+) -> Result<dictation_history::DictationHistoryEntry, String> {
+    let config = current_dictation_config()?;
+    let retention_hours = config.history_retention_hours;
+    let temp_dir = dictation_temp_dir();
+    let entry = dictation_history::find(&temp_dir, retention_hours, &id)
+        .ok_or_else(|| "That recording is no longer available.".to_string())?;
+    let path = PathBuf::from(&entry.path);
+    validate_recording_path(&path)?;
+    let daemon_url = config
+        .daemon_url
+        .clone()
+        .ok_or_else(|| "FalconDeck is not connected.".to_string())?;
+    let model = model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(|| config.model.clone());
+    if model.len() > 200 {
+        return Err("The transcription model is invalid.".to_string());
+    }
+    let audio = tokio::fs::read(&path)
+        .await
+        .map_err(|error| format!("Could not read the kept recording: {error}"))?;
+    match request_transcription(
+        &daemon_url,
+        audio,
+        model.clone(),
+        config.fallback_model.clone(),
+    )
+    .await
+    {
+        Ok(transcription) => {
+            remember_transcript(&transcription.text);
+            forget_native_retained_recording(&path);
+            let Transcription { text, model } = transcription;
+            // The entry can expire out of the index while the request is in
+            // flight. The transcription still succeeded — hand it back on a
+            // synthesized row rather than claiming it failed.
+            Ok(dictation_history::record_retry(
+                &temp_dir,
+                &id,
+                Some(model.clone()),
+                Some(text.clone()),
+                None,
+                retention_hours,
+            )
+            .unwrap_or_else(|| dictation_history::DictationHistoryEntry {
+                model: Some(model),
+                text: Some(text),
+                error: None,
+                audio_available: path.is_file(),
+                ..entry
+            }))
+        }
+        Err(error) => {
+            dictation_history::record_retry(
+                &temp_dir,
+                &id,
+                Some(model),
+                entry.text,
+                Some(error.clone()),
+                retention_hours,
+            );
+            Err(error)
+        }
     }
 }
 
@@ -640,6 +817,140 @@ fn validate_recording_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What the daemon actually managed to transcribe, including which model
+/// produced it — the daemon may have fallen through to another one.
+struct Transcription {
+    text: String,
+    model: String,
+}
+
+/// Client-side ceiling for one transcription. It sits above the daemon's own
+/// per-model budget on purpose: the daemon's error message is far more useful
+/// than a bare client timeout, so it should be the one to give up first.
+fn transcription_timeout(audio_bytes: usize) -> Duration {
+    let audio_seconds = audio_bytes as f64 / RECORDING_BYTES_PER_SECOND;
+    (BASE_TRANSCRIPTION_TIMEOUT + Duration::from_secs_f64(audio_seconds * 1.5))
+        .min(MAX_TRANSCRIPTION_TIMEOUT)
+}
+
+async fn request_transcription(
+    daemon_url: &str,
+    audio: Vec<u8>,
+    model: String,
+    fallback_model: Option<String>,
+) -> Result<Transcription, String> {
+    let duration_seconds = audio.len() as f64 / RECORDING_BYTES_PER_SECOND;
+    let response = OPENROUTER_CLIENT
+        .post(format!("{daemon_url}/api/speech/transcribe"))
+        .timeout(transcription_timeout(audio.len()))
+        .json(&TranscriptionRequest {
+            audio_base64: STANDARD.encode(audio),
+            format: "m4a",
+            model: model.clone(),
+            fallback_model,
+            duration_seconds,
+        })
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "Transcription timed out. Your recording is retained, so you can retry.".to_string()
+            } else {
+                format!("OpenRouter transcription failed: {error}")
+            }
+        })?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .or_else(|| body.get("message").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Transcription failed ({})", status.as_u16())));
+    }
+    let text = body
+        .get("text")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.chars().count() < 3 {
+        return Err(
+            "No speech was detected. Your recording is safe, so you can retry.".to_string(),
+        );
+    }
+    let model = body
+        .get("model")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&model)
+        .to_string();
+    Ok(Transcription { text, model })
+}
+
+/// Keeps the recording for the retention window, or deletes it when history
+/// is switched off. Either way the audio stops being the recorder's problem.
+fn file_recording(
+    path: &Path,
+    provider: &str,
+    model: Option<String>,
+    text: Option<String>,
+    error: Option<String>,
+    retention_hours: u32,
+) {
+    let kept = dictation_history::record(
+        &dictation_temp_dir(),
+        path,
+        provider,
+        model,
+        text,
+        error,
+        retention_hours,
+    );
+    if !kept {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Files a recording without ever deleting it, detached from the caller's
+/// thread. For paths where the audio must survive a declined filing — the
+/// native side still retains it for the overlay's Retry.
+fn record_recording_detached(
+    path: PathBuf,
+    provider: &'static str,
+    model: Option<String>,
+    text: Option<String>,
+    error: Option<String>,
+    retention_hours: u32,
+) {
+    tauri::async_runtime::spawn_blocking(move || {
+        dictation_history::record(
+            &dictation_temp_dir(),
+            &path,
+            provider,
+            model,
+            text,
+            error,
+            retention_hours,
+        );
+    });
+}
+
+/// `file_recording`, but detached: the success and paste-failed paths run on
+/// the main thread, which must not wait on index IO and expiry deletions.
+fn file_recording_detached(
+    path: PathBuf,
+    provider: &'static str,
+    model: Option<String>,
+    text: Option<String>,
+    error: Option<String>,
+    retention_hours: u32,
+) {
+    tauri::async_runtime::spawn_blocking(move || {
+        file_recording(&path, provider, model, text, error, retention_hours);
+    });
+}
+
 async fn transcribe_openrouter(
     app: AppHandle,
     path: PathBuf,
@@ -657,38 +968,33 @@ async fn transcribe_openrouter(
     let audio = tokio::fs::read(&path)
         .await
         .map_err(|error| format!("Could not read the retained recording: {error}"))?;
-    let response = OPENROUTER_CLIENT
-        .post(format!("{daemon_url}/api/speech/transcribe"))
-        .json(&TranscriptionRequest {
-            audio_base64: STANDARD.encode(audio),
-            format: "m4a",
-            model: config.model,
-        })
-        .send()
-        .await
-        .map_err(|error| format!("OpenRouter transcription failed: {error}"))?;
-    let status = response.status();
-    let body = response.json::<Value>().await.unwrap_or(Value::Null);
-    if !status.is_success() {
-        let message = body
-            .get("error")
-            .and_then(|value| value.as_str())
-            .or_else(|| body.get("message").and_then(|value| value.as_str()))
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Transcription failed ({})", status.as_u16()));
-        return Err(message);
-    }
-    let text = body
-        .get("text")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if text.chars().count() < 3 {
-        return Err(
-            "No speech was detected. Your recording is safe, so you can retry.".to_string(),
-        );
-    }
+    let retention_hours = config.history_retention_hours;
+    let transcription = match request_transcription(
+        daemon_url,
+        audio,
+        config.model.clone(),
+        config.fallback_model.clone(),
+    )
+    .await
+    {
+        Ok(transcription) => transcription,
+        Err(error) => {
+            // The audio stays put either way — the native side retains it for
+            // the overlay's Retry — but filing it here is what lets the writer
+            // come back later and retry with a different model.
+            dictation_history::record(
+                &dictation_temp_dir(),
+                &path,
+                "open_router",
+                Some(config.model.clone()),
+                None,
+                Some(error.clone()),
+                retention_hours,
+            );
+            return Err(error);
+        }
+    };
+    let Transcription { text, model } = transcription;
     remember_transcript(&text);
 
     let finish_app = app.clone();
@@ -717,6 +1023,14 @@ async fn transcribe_openrouter(
         #[cfg(not(target_os = "macos"))]
         let pasted = false;
         if !pasted {
+            record_recording_detached(
+                path.clone(),
+                "open_router",
+                Some(model),
+                Some(text.clone()),
+                None,
+                retention_hours,
+            );
             emit_failure_with_transcript(
                 &finish_app,
                 "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
@@ -726,7 +1040,14 @@ async fn transcribe_openrouter(
             );
             return;
         }
-        let _ = std::fs::remove_file(&path);
+        file_recording_detached(
+            path.clone(),
+            "open_router",
+            Some(model),
+            Some(text.clone()),
+            None,
+            retention_hours,
+        );
         #[cfg(target_os = "macos")]
         unsafe {
             fd_dictation_mark_completed();
@@ -744,6 +1065,30 @@ async fn transcribe_openrouter(
         hide_overlay_after(finish_app, generation, Duration::from_millis(900));
     })
     .map_err(|error| error.to_string())
+}
+
+/// Files the recording the native recorder is working on. Deletion stays with
+/// the native side for this path — a failed transcript keeps its audio for the
+/// overlay's Retry — so this only ever adds to history.
+fn file_native_recording(text: Option<String>, error: Option<String>) {
+    let Some(path) = CURRENT_RECORDING
+        .write()
+        .ok()
+        .and_then(|mut current| current.take())
+    else {
+        return;
+    };
+    let Ok(config) = current_dictation_config() else {
+        return;
+    };
+    record_recording_detached(
+        path,
+        "system",
+        None,
+        text,
+        error,
+        config.history_retention_hours,
+    );
 }
 
 /// Receives lifecycle callbacks from the Objective-C bridge. Payload pointers
@@ -788,6 +1133,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
         ),
         event_kind::COMPLETED => {
             remember_transcript(&payload);
+            file_native_recording(Some(payload.clone()), None);
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -802,6 +1148,9 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
         }
         event_kind::FAILED => emit_failure(&app, payload, false),
         event_kind::CANCELLED => {
+            // The native side deletes cancelled audio, so there is nothing to
+            // keep — just stop tracking it.
+            let _ = CURRENT_RECORDING.write().map(|mut current| current.take());
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -855,7 +1204,17 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 }
             });
         }
-        event_kind::FAILED_RETAINED => emit_failure(&app, payload, true),
+        event_kind::FAILED_RETAINED => {
+            file_native_recording(None, Some(payload.clone()));
+            emit_failure(&app, payload, true);
+        }
+        // Apple Speech transcribes in-process, so this is the only chance to
+        // learn which file the transcript (or failure) will belong to.
+        event_kind::AUDIO_RECORDED => {
+            if let Ok(mut current) = CURRENT_RECORDING.write() {
+                *current = Some(PathBuf::from(payload));
+            }
+        }
         // The paste target is FalconDeck itself: native paste is unreliable
         // against the webview, so the transcript goes straight to the frontend
         // for a deterministic composer insertion.
@@ -865,6 +1224,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
         }
         event_kind::PASTE_FAILED => {
             remember_transcript(&payload);
+            file_native_recording(Some(payload.clone()), None);
             emit_failure_with_transcript(
                 &app,
                 "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
@@ -904,6 +1264,7 @@ mod tests {
             ("SelfInsert", super::event_kind::SELF_INSERT),
             ("PasteFailed", super::event_kind::PASTE_FAILED),
             ("CancelledRetained", super::event_kind::CANCELLED_RETAINED),
+            ("AudioRecorded", super::event_kind::AUDIO_RECORDED),
         ];
         for (name, value) in expected {
             assert!(

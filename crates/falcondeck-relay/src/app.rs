@@ -145,15 +145,23 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
         .collect()
 }
 
+/// Wire-size estimate for chunking decisions without a serde pass per
+/// update. `estimated_update_retained_bytes` undercounts encrypted payloads
+/// (their ciphertext rides JSON as base64, ~4/3 the raw size), so round up
+/// generously; `WS_SYNC_CHUNK_MAX_BYTES` is a comfort cap and the websocket
+/// frame limit remains the final guard.
+fn sync_wire_bytes(update: &RelayUpdate) -> usize {
+    let retained = estimated_update_retained_bytes(update);
+    retained.saturating_add(retained / 2)
+}
+
 fn chunk_replay_updates(updates: Vec<RelayUpdate>) -> Vec<Vec<RelayUpdate>> {
     let mut chunks = Vec::new();
     let mut chunk = Vec::new();
     let mut chunk_bytes = 0usize;
 
     for update in updates {
-        let update_bytes = serde_json::to_vec(&update)
-            .map(|encoded| encoded.len())
-            .unwrap_or(0);
+        let update_bytes = sync_wire_bytes(&update);
         let would_exceed_limits = !chunk.is_empty()
             && (chunk.len() >= WS_SYNC_CHUNK_MAX_UPDATES
                 || chunk_bytes.saturating_add(update_bytes) > WS_SYNC_CHUNK_MAX_BYTES);
@@ -1465,8 +1473,18 @@ impl AppState {
         session_id: &str,
         token: &str,
         after_seq: u64,
+        limit: Option<usize>,
     ) -> Result<RelayUpdatesResponse, RelayError> {
         let _ = self.authenticate_session(session_id, token).await?;
+
+        // The REST path mirrors the websocket replay window: uncapped
+        // responses serializing every retained update were an easy way to
+        // pin the store lock and allocate tens of megabytes per request.
+        // Clients paginate with `after_seq` cursors or fall back to
+        // snapshot recovery via the cursor flags.
+        let max_updates = limit
+            .unwrap_or(WS_SYNC_REPLAY_MAX_UPDATES)
+            .clamp(1, WS_SYNC_REPLAY_MAX_UPDATES);
 
         let store = self.inner.store.lock().await;
         let session = store
@@ -1482,6 +1500,7 @@ impl AppState {
                 .updates
                 .iter()
                 .filter(|update| update.seq > after_seq)
+                .take(max_updates)
                 .cloned()
                 .collect(),
             next_seq: session.next_seq(),
@@ -2052,17 +2071,14 @@ impl AppState {
                 // dropping the superseded rows keeps churny peers from
                 // pushing real updates out of the retained window.
                 // Sequence numbers are never reused.
-                superseded_presence_ids = session
-                    .updates
-                    .iter()
-                    .filter(|update| matches!(update.body, RelayUpdateBody::Presence { .. }))
-                    .map(|update| update.id.clone())
-                    .collect();
-                if !superseded_presence_ids.is_empty() {
-                    session
-                        .updates
-                        .retain(|update| !matches!(update.body, RelayUpdateBody::Presence { .. }));
-                }
+                session.updates.retain(|update| {
+                    if matches!(update.body, RelayUpdateBody::Presence { .. }) {
+                        superseded_presence_ids.push(update.id.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
             }
             update = RelayUpdate {
                 id: format!("update-{}", Uuid::new_v4().simple()),

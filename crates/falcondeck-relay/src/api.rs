@@ -16,7 +16,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use falcondeck_core::{
     ClaimPairingRequest, PairingChallengeRequest, RelayClientMessage, RelayServerMessage,
-    RelayUpdatesQuery, StartPairingRequest, SubmitQueuedActionRequest,
+    StartPairingRequest, SubmitQueuedActionRequest,
 };
 
 use crate::{
@@ -89,6 +89,9 @@ const PAIRING_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
 #[derive(Debug, Deserialize)]
 struct UpdatesRequestQuery {
     after_seq: Option<u64>,
+    /// Caps the replay window; defaults to the relay's standard reconnect
+    /// window when absent.
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,13 +212,15 @@ async fn session_updates(
     Query(query): Query<UpdatesRequestQuery>,
     headers: HeaderMap,
 ) -> Result<Json<falcondeck_core::RelayUpdatesResponse>, RelayError> {
-    let relay_query = RelayUpdatesQuery {
-        after_seq: query.after_seq,
-    };
     let token = auth_token(&headers)?;
     Ok(Json(
         state
-            .session_updates(&session_id, &token, relay_query.after_seq.unwrap_or(0))
+            .session_updates(
+                &session_id,
+                &token,
+                query.after_seq.unwrap_or(0),
+                query.limit,
+            )
             .await?,
     ))
 }
@@ -234,8 +239,8 @@ async fn issue_ws_ticket(
 /// same socket and base64 inflates them by a third, so the cap must leave
 /// generous headroom. A maximum-size image turn is base64-encoded once as
 /// JSON image data and again after encryption, so it can legitimately exceed
-/// 16 MiB even though the decoded attachment budget is only 10 MB.
-const WS_MAX_MESSAGE_BYTES: usize = 24 << 20;
+/// 24 MiB even though the decoded attachment budget is only 15 MB.
+const WS_MAX_MESSAGE_BYTES: usize = 40 << 20;
 
 async fn updates_ws(
     ws: WebSocketUpgrade,
@@ -541,7 +546,7 @@ mod tests {
 
     #[test]
     fn websocket_limit_has_headroom_for_an_encrypted_image_turn() {
-        let max_turn_json_bytes = 16_usize << 20;
+        let max_turn_json_bytes = 24_usize << 20;
         // AES-GCM envelope: version + nonce + authentication tag, followed by
         // base64 and a small outer RPC JSON envelope.
         let encrypted_rpc_bytes = (max_turn_json_bytes + 1 + 12 + 16).div_ceil(3) * 4 + 1024;

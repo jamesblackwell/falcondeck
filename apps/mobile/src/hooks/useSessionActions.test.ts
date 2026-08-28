@@ -14,12 +14,15 @@ import { useRelayStore } from "@/store/relay-store";
 import { useSessionStore } from "@/store/session-store";
 import { useUIStore } from "@/store/ui-store";
 import { useSessionActions } from "./useSessionActions";
+import { draftKeyFor } from "@falcondeck/client-core";
+
 import {
   assistantMessage,
   snapshot,
   snapshotEvent,
   thread,
   threadDetail,
+  userMessage,
   workspace,
 } from "../test/factories";
 
@@ -470,6 +473,7 @@ describe("submitTurn guards", () => {
         service_tier: null,
         permission_mode: null,
         sandbox_mode: null,
+        resume_interrupted: false,
       },
       { requestIdPrefix: "mobile-turn" },
     );
@@ -1318,5 +1322,211 @@ describe("loadThreadDetail", () => {
         .getState()
         .threadItems["thread-1"]?.map((item) => item.id),
     ).toEqual(["fresh-boundary"]);
+  });
+});
+
+describe("handoffToProvider", () => {
+  beforeEach(resetAll);
+
+  function seedHandoffWorkspace() {
+    const source = thread({
+      id: "t1",
+      workspace_id: "w1",
+      title: "Fix the login bug",
+      provider: "codex",
+    });
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [
+            workspace({
+              id: "w1",
+              path: "/tmp/project",
+              current_thread_id: "t1",
+              agents: [
+                imageAgent("codex", true),
+                {
+                  ...imageAgent("claude", true),
+                  label: "Claude",
+                  models: [
+                    {
+                      id: "claude-opus",
+                      label: "Opus",
+                      is_default: true,
+                      default_reasoning_effort: "medium",
+                      supported_reasoning_efforts: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+          ],
+          threads: [source],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("w1", "t1");
+    return source;
+  }
+
+  it("creates a linked destination, titles it, and seeds the source transcript", async () => {
+    seedHandoffWorkspace();
+    const destination = thread({
+      id: "handoff-1",
+      workspace_id: "w1",
+      provider: "claude",
+      title: "Fix the login bug · Claude",
+    });
+    const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread.detail") {
+        return threadDetail({
+          items: [userMessage("u1", "Where does auth happen?")],
+        });
+      }
+      if (method === "thread.start") {
+        return { workspace: workspace({ id: "w1" }), thread: destination };
+      }
+      if (method === "thread.update") {
+        return {
+          workspace: workspace({ id: "w1" }),
+          thread: { ...destination, title: params.title as string },
+        };
+      }
+      if (method === "turn.start") {
+        return { ok: true };
+      }
+      return undefined;
+    });
+    const setError = vi.fn();
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().handoffToProvider("claude");
+      });
+      expect(harness.getActions().handoffPendingThreadKey).toBeNull();
+    } finally {
+      harness.unmount();
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      "thread.detail",
+      expect.objectContaining({
+        workspace_id: "w1",
+        thread_id: "t1",
+        mode: "full",
+      }),
+      { requestIdPrefix: "mobile-handoff-detail" },
+    );
+    expect(rpc).toHaveBeenCalledWith(
+      "thread.start",
+      expect.objectContaining({
+        workspace_id: "w1",
+        provider: "claude",
+        model_id: "claude-opus",
+        isolation: "project_folder",
+        handoff_from: { thread_id: "t1", provider: "codex" },
+      }),
+      { requestIdPrefix: "mobile-handoff" },
+    );
+    expect(rpc).toHaveBeenCalledWith(
+      "thread.update",
+      expect.objectContaining({
+        thread_id: "handoff-1",
+        title: "Fix the login bug · Claude",
+      }),
+      { requestIdPrefix: "mobile-handoff" },
+    );
+    const turnCall = rpc.mock.calls.find(([method]) => method === "turn.start");
+    expect(turnCall?.[1]).toEqual(
+      expect.objectContaining({
+        workspace_id: "w1",
+        thread_id: "handoff-1",
+        provider: "claude",
+      }),
+    );
+    const turnInputs = (
+      turnCall?.[1] as { inputs: { type: string; text: string }[] }
+    ).inputs;
+    expect(turnInputs[0]?.text).toContain("Where does auth happen?");
+    expect(turnInputs[0]?.text).toContain("can still be resumed separately");
+    expect(useSessionStore.getState().selectedThreadId).toBe("handoff-1");
+    expect(setError).toHaveBeenCalledWith(null);
+  });
+
+  it("does not create a destination for the same agent", async () => {
+    seedHandoffWorkspace();
+    const rpc = vi.fn();
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().handoffToProvider("codex");
+      });
+    } finally {
+      harness.unmount();
+    }
+
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("leaves the prompt in the destination composer when the seed turn does not start", async () => {
+    seedHandoffWorkspace();
+    const destination = thread({
+      id: "handoff-1",
+      workspace_id: "w1",
+      provider: "claude",
+      title: "Fix the login bug · Claude",
+    });
+    const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "thread.detail") {
+        if (params.thread_id === "handoff-1") {
+          return threadDetail({
+            thread: destination,
+            items: [],
+          });
+        }
+        return threadDetail({
+          items: [userMessage("u1", "Where does auth happen?")],
+        });
+      }
+      if (method === "thread.start" || method === "thread.update") {
+        return { workspace: workspace({ id: "w1" }), thread: destination };
+      }
+      if (method === "turn.start") {
+        throw new Error("turn.start failed");
+      }
+      return undefined;
+    });
+    const setError = vi.fn();
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().handoffToProvider("claude");
+      });
+    } finally {
+      harness.unmount();
+    }
+
+    expect(useSessionStore.getState().selectedThreadId).toBe("handoff-1");
+    expect(useUIStore.getState().drafts[draftKeyFor("w1", "handoff-1")]?.text).toContain(
+      "Where does auth happen?",
+    );
+    expect(setError).toHaveBeenCalledWith(
+      "The handoff turn did not start. Its prompt is ready in the composer to resend.",
+    );
   });
 });

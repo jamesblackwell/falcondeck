@@ -6,7 +6,9 @@ import {
   Badge,
   Button,
   Card,
+
   SettingsPage,
+
   SettingsPageHeader,
   CardContent,
   CardDescription,
@@ -29,6 +31,7 @@ export type UsagePanelProps = {
     title: string
     description?: string
   }) => void
+  hideHeader?: boolean
 }
 
 type ProviderConfig = {
@@ -179,7 +182,7 @@ function UsageBody({
   }
 }
 
-export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
+export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelProps) {
   const [overview, setOverview] = useState<ProviderUsageOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -223,10 +226,12 @@ export function UsagePanel({ baseUrl, onToast }: UsagePanelProps) {
 
   return (
     <SettingsPage>
-      <SettingsPageHeader
-        title="Usage"
-        description="How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
-      />
+      {!hideHeader ? (
+        <SettingsPageHeader
+          title="Usage"
+          description="How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
+        />
+      ) : null}
 
       <Card>
         <CardHeader className="flex-row items-center justify-between space-y-0">

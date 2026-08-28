@@ -24,6 +24,10 @@ function workspace(id: string, path: string): WorkspaceSummary {
 const localWorkspace = workspace('ws-1', '/Users/dev/falcondeck')
 const otherLocal = workspace('ws-2', '/Users/dev/lucidpic')
 const remoteWorkspace = workspace('ws-remote', '/home/forge/projects/quizgecko')
+const casualWorkspace = {
+  ...workspace('ws-chat', '/Users/dev/Documents/FalconDeck/2026-08-24/chat-120000-abcdef'),
+  kind: 'casual' as const,
+}
 
 const baseProps = {
   workspaces: [localWorkspace, otherLocal],
@@ -118,6 +122,30 @@ describe('ComposerContextBar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Project' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'New project' }))
     expect(onAddLocalProject).toHaveBeenCalled()
+  })
+
+  it('offers a no-project chat and presents its managed folder separately', () => {
+    const onNewChat = vi.fn()
+    render(
+      <ComposerContextBar
+        {...baseProps}
+        workspaces={[localWorkspace, casualWorkspace]}
+        selectedWorkspace={casualWorkspace}
+        onNewChat={onNewChat}
+        branches={{ current: 'main', branches: ['main'] }}
+        onCheckoutBranch={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Project' })).toHaveTextContent('No project')
+    expect(screen.getByText('Chat folder')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Work in' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Git branch' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    expect(screen.queryByRole('menuitemradio', { name: /chat-120000/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Don’t work in a project' }))
+    expect(onNewChat).toHaveBeenCalled()
   })
 
   it('hides the branch chip when the workspace has no branch data', () => {

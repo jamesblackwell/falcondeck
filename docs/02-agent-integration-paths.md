@@ -21,7 +21,7 @@ Claude Code does not have an app-server equivalent. The official integration sur
 | `--input-format stream-json` | Structured JSON input via stdin |
 | `--include-partial-messages` | Receive all streaming deltas as they're generated |
 | `--verbose` | Full turn-by-turn output |
-| `--permission-prompt-tool` | Route permission prompts to an MCP tool (enables interactive approvals in non-interactive mode) |
+| `--permission-prompt-tool` | **Removed as of Claude Code 2.1.238.** Native approvals stay the PreToolUse hook. See `docs/CLAUDE-CONTROL-PLANE.md`. |
 | `--resume <id>` | Resume a specific session by ID |
 | `--session-id <uuid>` | Set a specific session ID for the conversation |
 | `--continue` | Continue the most recent session in current directory |

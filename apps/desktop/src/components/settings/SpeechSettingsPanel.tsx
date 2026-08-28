@@ -1,6 +1,7 @@
 import { SettingsPage, SettingsPageHeader } from "@falcondeck/ui";
 
 import { DictationSetup, type DictationSetupToast } from "../DictationSetup";
+import { DictationHistoryCard } from "../DictationHistoryCard";
 
 type SpeechSettingsPanelProps = {
   baseUrl: string | null;
@@ -18,6 +19,7 @@ export function SpeechSettingsPanel({
         description="Dictate on this computer or configure cloud transcription for paired devices."
       />
       <DictationSetup baseUrl={baseUrl} onToast={onToast} />
+      <DictationHistoryCard baseUrl={baseUrl} onToast={onToast} />
     </SettingsPage>
   );
 }
