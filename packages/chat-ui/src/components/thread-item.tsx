@@ -294,7 +294,7 @@ export const ThreadItem = memo(
                   }}
                   title="Archive thread"
                   aria-label={`Archive thread ${thread.title}`}
-                  className="fd-focus pointer-events-none col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                  className="fd-focus pointer-events-none z-10 col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
                 >
                   <Archive aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>

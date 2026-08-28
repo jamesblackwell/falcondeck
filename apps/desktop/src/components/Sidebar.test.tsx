@@ -1307,12 +1307,14 @@ describe("DesktopSidebar", () => {
   it("asks for confirmation when the row's archive button is used", async () => {
     const { onArchiveThread } = renderSidebar();
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Archive thread Main thread",
-        hidden: true,
-      }),
-    );
+    const archiveButton = screen.getByRole("button", {
+      name: "Archive thread Main thread",
+      hidden: true,
+    });
+    // The archive and timestamp occupy the same grid cell. Keep the action
+    // above the timestamp so real pointer clicks reach the visible button.
+    expect(archiveButton).toHaveClass("z-10");
+    fireEvent.click(archiveButton);
 
     expect(onArchiveThread).not.toHaveBeenCalled();
     expect(
