@@ -1618,7 +1618,7 @@ describe("DesktopSidebar", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
   });
 
-  it("keeps the thread's provider on the row, revealed on hover once the row is wide", () => {
+  it("keeps the thread's provider on the row as an always-visible mark badge", () => {
     renderSidebar({
       groups: [
         {
@@ -1638,17 +1638,18 @@ describe("DesktopSidebar", () => {
       ],
     });
 
-    const label = screen.getByTestId("thread-provider-label");
-    expect(label).toHaveTextContent("OpenCode");
-    // Hidden until the row is both hovered and wide enough for it.
-    expect(label.className).toContain("hidden");
-    expect(label.className).toContain("@[15rem]:group-hover:block");
+    const badge = screen.getByTestId("thread-provider-badge");
+    expect(badge).toHaveAccessibleName("OpenCode");
+    // The badge is the icon-only form of the harness name, so it does not
+    // depend on hover — only on the sidebar being wide enough for it.
+    expect(badge.className).not.toContain("group-hover");
+    expect(badge.className).toContain("@[13rem]:flex");
   });
 
   it("title-cases a provider the workspace has not advertised yet", () => {
     renderSidebar();
 
-    expect(screen.getByTestId("thread-provider-label")).toHaveTextContent(
+    expect(screen.getByTestId("thread-provider-badge")).toHaveAccessibleName(
       "Codex",
     );
   });

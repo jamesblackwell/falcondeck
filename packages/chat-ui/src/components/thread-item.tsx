@@ -10,6 +10,7 @@ import {
 } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
+import { ProviderIcon } from './provider-icon'
 import { ThreadStageIcon } from './thread-stage-icon'
 
 export type ThreadItemArchiveHandler = (
@@ -35,7 +36,7 @@ export type ThreadItemProps = {
   }) => void
   nowTick?: number
   tags?: ThreadTag[]
-  /** Provider the thread runs on; revealed on hover when the row has room. */
+  /** Display name for the thread's harness; labels the trailing mark badge. */
   providerLabel?: string | null
 }
 
@@ -181,53 +182,85 @@ export const ThreadItem = memo(
               <Split aria-hidden="true" className="h-3 w-3" />
             </span>
           ) : null}
-          {thread.is_pinned ? (
-            <Pin
-              role="img"
-              aria-label="Pinned"
-              className="h-3 w-3 shrink-0 rotate-45 text-fg-muted"
-            />
-          ) : null}
         </button>
-        {providerLabel ? (
-          // Takes over the space the timestamp vacates on hover, and only once
-          // the row is wide enough that the title is not paying for it.
+        {thread.provider ? (
+          // The harness rides along as its vendor mark in a quiet tile
+          // rather than a name that popped in on hover and shoved the
+          // timestamp around. Hidden on very narrow sidebars so the
+          // title keeps the room.
           <span
-            data-testid="thread-provider-label"
-            className="fd-type-meta hidden max-w-[45%] shrink-0 truncate text-fg-muted @[15rem]:group-hover:block"
+            data-testid="thread-provider-badge"
+            role="img"
+            aria-label={providerLabel ?? undefined}
+            title={providerLabel ?? undefined}
+            className="hidden h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] bg-surface-3 text-fg-muted @[13rem]:flex"
           >
-            {providerLabel}
+            <ProviderIcon className="h-2.5 w-2.5" provider={thread.provider} />
           </span>
         ) : null}
-        {wasInterrupted ? (
-          <Badge variant="danger" className="shrink-0">
-            Stopped
-          </Badge>
-        ) : attention.showBadge ? (
-          <Badge variant="success" className="shrink-0">
-            {attention.badgeLabel}
-          </Badge>
-        ) : (
-          <span className="fd-type-meta shrink-0 text-fg-muted group-hover:hidden">
-            {timeString}
-          </span>
-        )}
-        {onArchive ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              void Promise.resolve(onArchive(workspaceId, thread.id)).catch(
-                () => {},
-              )
-            }}
-            title="Archive thread"
-            aria-label={`Archive thread ${thread.title}`}
-            className="fd-focus hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary focus-visible:block group-hover:block"
-          >
-            <Archive aria-hidden="true" className="h-3.5 w-3.5" />
-          </button>
+        {thread.is_pinned ? (
+          <Pin
+            role="img"
+            aria-label="Pinned"
+            className="h-3 w-3 shrink-0 rotate-45 text-fg-muted"
+          />
         ) : null}
+        {/*
+          The timestamp and the archive action share one grid cell and
+          crossfade, so hovering swaps them in place instead of reflowing
+          the row.
+        */}
+        <span className="group/actions grid shrink-0 grid-cols-1 items-center justify-items-end">
+          {wasInterrupted ? (
+            <Badge
+              variant="danger"
+              className={cn(
+                'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
+                onArchive &&
+                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+              )}
+            >
+              Stopped
+            </Badge>
+          ) : attention.showBadge ? (
+            <Badge
+              variant="success"
+              className={cn(
+                'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
+                onArchive &&
+                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+              )}
+            >
+              {attention.badgeLabel}
+            </Badge>
+          ) : (
+            <span
+              className={cn(
+                'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
+                onArchive &&
+                  'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+              )}
+            >
+              {timeString}
+            </span>
+          )}
+          {onArchive ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                void Promise.resolve(
+                  onArchive(workspaceId, thread.id),
+                ).catch(() => {})
+              }}
+              title="Archive thread"
+              aria-label={`Archive thread ${thread.title}`}
+              className="fd-focus pointer-events-none col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+            >
+              <Archive aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
+        </span>
       </div>
     )
   },
@@ -277,6 +310,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
   return (
     a.id === b.id &&
     a.title === b.title &&
+    a.provider === b.provider &&
     a.updated_at === b.updated_at &&
     a.status === b.status &&
     a.last_error === b.last_error &&
