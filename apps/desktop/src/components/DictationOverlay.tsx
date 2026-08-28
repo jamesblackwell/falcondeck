@@ -182,13 +182,19 @@ export function DictationOverlay() {
   }, []);
 
   const failed = event.state === "failed";
+  const copyTranscript = () => {
+    void invoke("copy_dictation_transcript").then(
+      () => setCopied(true),
+      () => setCopied(false),
+    );
+  };
   const label =
     event.state === "recording"
       ? "Listening"
       : event.state === "transcribing"
         ? "Transcribing"
         : event.state === "completed"
-          ? "Pasted"
+          ? "Paste sent"
           : event.state === "cancelled"
             ? "Cancelled"
             : "Dictation needs attention";
@@ -234,12 +240,7 @@ export function DictationOverlay() {
                 <button
                   type="button"
                   className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
-                  onClick={() =>
-                    void invoke("copy_dictation_transcript").then(
-                      () => setCopied(true),
-                      () => setCopied(false),
-                    )
-                  }
+                  onClick={copyTranscript}
                 >
                   {copied ? (
                     <Check aria-hidden="true" className="h-4 w-4" />
@@ -308,6 +309,19 @@ export function DictationOverlay() {
                 <span className="font-mono text-fg-muted">
                   {undoSecondsLeft}s
                 </span>
+              </button>
+            ) : event.state === "completed" && event.text ? (
+              <button
+                type="button"
+                className="fd-focus ml-auto inline-flex shrink-0 items-center gap-2 rounded-full border border-border-default px-3 py-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-primary hover:bg-surface-3"
+                onClick={copyTranscript}
+              >
+                {copied ? (
+                  <Check aria-hidden="true" className="h-3.5 w-3.5" />
+                ) : (
+                  <Copy aria-hidden="true" className="h-3.5 w-3.5" />
+                )}
+                {copied ? "Copied" : "Copy transcript"}
               </button>
             ) : (
               <span className="ml-auto shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">

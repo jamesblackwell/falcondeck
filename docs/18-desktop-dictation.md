@@ -21,8 +21,15 @@ status window, and paste-at-cursor behavior.
   credential store.
 - A transcript must contain at least three characters before FalconDeck treats
   it as confirmed.
-- FalconDeck pastes through the system clipboard, then restores the previous
-  clipboard contents if no other app changed them in the meantime.
+- When FalconDeck falls back to a targeted Command-V, it temporarily uses the
+  system clipboard, then restores the previous contents if no other app changed
+  them in the meantime.
+- Some controlled web composers report a successful Accessibility edit without
+  accepting it. FalconDeck bypasses that path for ChatGPT and sends its normal
+  targeted Command-V paste instead.
+- A completed transcript remains in the top pill for eight seconds with a Copy
+  action. Explicit copy leaves the transcript on the clipboard; automatic paste
+  still restores the clipboard contents it temporarily replaced.
 
 ## Native flow
 

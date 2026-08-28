@@ -38,6 +38,10 @@ const RECORDING_BYTES_PER_SECOND: f64 = 4_000.0;
 // How long the cancelled pill stays up offering Undo. Mirrored by
 // UNDO_WINDOW_SECONDS in DictationOverlay.tsx, which counts it down.
 const CANCEL_UNDO_WINDOW: Duration = Duration::from_secs(10);
+// External apps cannot acknowledge a synthetic paste reliably. Keep the
+// completed transcript reachable long enough for the writer to notice a miss
+// and explicitly copy it to the clipboard.
+const COMPLETED_FALLBACK_WINDOW: Duration = Duration::from_secs(8);
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static CONFIG: LazyLock<RwLock<DictationConfiguration>> =
@@ -208,6 +212,10 @@ unsafe extern "C" {
     fn fd_dictation_retry();
     fn fd_dictation_discard();
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
+    #[cfg(test)]
+    fn fd_dictation_should_use_accessibility_paste(
+        bundle_identifier: *const std::ffi::c_char,
+    ) -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
@@ -243,7 +251,8 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
     .visible(false)
     .build()
     .map(|window| {
-        // Armed only for the failure card, which is the one state with buttons.
+        // Start click-through; event state changes arm the pill only when it
+        // has a Copy, Retry, Discard, or Undo control.
         let _ = window.set_ignore_cursor_events(true);
     })
     .map_err(|error| error.to_string())
@@ -646,10 +655,12 @@ fn overlay_size(failed: bool) -> (f64, f64) {
     }
 }
 
-/// Only the states that carry buttons take clicks: the failure card, and a
-/// cancelled pill that still has audio to undo.
+/// Only states that carry buttons take clicks: failure, a completed transcript
+/// with a manual-copy fallback, and a cancelled take that can still be undone.
 fn overlay_takes_clicks(event: &DictationEvent) -> bool {
-    event.state == "failed" || (event.state == "cancelled" && event.retained_audio)
+    event.state == "failed"
+        || (event.state == "completed" && event.text.is_some())
+        || (event.state == "cancelled" && event.retained_audio)
 }
 
 /// Sizes and (dis)arms the overlay for a state. Most pill states have no
@@ -1062,7 +1073,7 @@ async fn transcribe_openrouter(
                 retained_audio: false,
             },
         );
-        hide_overlay_after(finish_app, generation, Duration::from_millis(900));
+        hide_overlay_after(finish_app, generation, COMPLETED_FALLBACK_WINDOW);
     })
     .map_err(|error| error.to_string())
 }
@@ -1144,7 +1155,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     retained_audio: false,
                 },
             );
-            hide_overlay_after(app, generation, Duration::from_millis(900));
+            hide_overlay_after(app, generation, COMPLETED_FALLBACK_WINDOW);
         }
         event_kind::FAILED => emit_failure(&app, payload, false),
         event_kind::CANCELLED => {
@@ -1281,6 +1292,23 @@ mod tests {
         assert!(devices
             .iter()
             .all(|device| { !device.id.is_empty() && !device.name.is_empty() }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn chatgpt_bypasses_accessibility_paste_false_successes() {
+        let prefers_accessibility = |bundle_identifier: &str| {
+            let bundle_identifier =
+                std::ffi::CString::new(bundle_identifier).expect("valid bundle identifier");
+            unsafe {
+                super::fd_dictation_should_use_accessibility_paste(bundle_identifier.as_ptr())
+            }
+        };
+
+        assert!(!prefers_accessibility("com.openai.codex"));
+        assert!(!prefers_accessibility("com.openai.chat"));
+        assert!(!prefers_accessibility("com.openai.ChatGPT"));
+        assert!(prefers_accessibility("com.apple.TextEdit"));
     }
 
     #[test]

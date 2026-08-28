@@ -36,6 +36,18 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
   fd_dictation_emit((int32_t)kind, (payload ?: @"").UTF8String);
 }
 
+// React-controlled web composers can acknowledge an Accessibility selected-text
+// write without committing it to application state. The current ChatGPT/Codex
+// app does exactly that, as did the older ChatGPT bundle. Route those apps
+// through their ordinary Cmd+V handling instead.
+static BOOL FDShouldUseAccessibilityPasteForBundleIdentifier(
+    NSString *bundleIdentifier) {
+  NSString *normalized = bundleIdentifier.lowercaseString;
+  return ![normalized isEqualToString:@"com.openai.codex"] &&
+         ![normalized isEqualToString:@"com.openai.chat"] &&
+         ![normalized isEqualToString:@"com.openai.chatgpt"];
+}
+
 @interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate> {
   AXUIElementRef _pasteTargetElement;
 }
@@ -666,10 +678,17 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return YES;
   }
 
-  // Most editable controls, including WebKit textareas, support replacing the
-  // selected text through Accessibility. This is the safest insertion path:
-  // no clipboard mutation and no synthetic global keyboard events.
-  if (_pasteTargetElement) {
+  NSRunningApplication *targetApplication =
+      [NSRunningApplication runningApplicationWithProcessIdentifier:
+                                targetProcessIdentifier];
+  BOOL shouldUseAccessibility =
+      FDShouldUseAccessibilityPasteForBundleIdentifier(
+          targetApplication.bundleIdentifier);
+
+  // Most editable controls support replacing selected text through
+  // Accessibility. Known controlled web composers bypass this path because a
+  // successful AX return value does not mean their framework accepted the edit.
+  if (_pasteTargetElement && shouldUseAccessibility) {
     Boolean selectedTextIsSettable = false;
     AXError settableError = AXUIElementIsAttributeSettable(
         _pasteTargetElement, kAXSelectedTextAttribute,
@@ -1045,6 +1064,17 @@ bool fd_dictation_paste_text(const char *utf8_text) {
   if (!utf8_text) return false;
   NSString *text = [NSString stringWithUTF8String:utf8_text];
   return [[FDDictationController sharedController] pasteText:text];
+}
+
+bool fd_dictation_should_use_accessibility_paste(
+    const char *utf8_bundle_identifier) {
+  @autoreleasepool {
+    NSString *bundleIdentifier = utf8_bundle_identifier
+                                     ? [NSString stringWithUTF8String:
+                                                     utf8_bundle_identifier]
+                                     : nil;
+    return FDShouldUseAccessibilityPasteForBundleIdentifier(bundleIdentifier);
+  }
 }
 
 bool fd_dictation_copy_text(const char *utf8_text) {

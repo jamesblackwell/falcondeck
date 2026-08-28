@@ -89,4 +89,22 @@ describe("DictationOverlay", () => {
     expect(screen.getByText("Esc to cancel")).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
+
+  it("keeps a completed transcript available to copy", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "completed",
+      text: "A transcript the destination may not have accepted.",
+      retainedAudio: false,
+    });
+
+    const copy = screen.getByRole("button", { name: "Copy transcript" });
+    await act(async () => {
+      fireEvent.click(copy);
+    });
+
+    expect(invoked).toContain("copy_dictation_transcript");
+    expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
 });
