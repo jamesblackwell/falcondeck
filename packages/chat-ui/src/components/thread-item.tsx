@@ -42,7 +42,7 @@ export type ThreadItemProps = {
   }) => void
   nowTick?: number
   tags?: ThreadTag[]
-  /** Display name for the thread's harness; labels the trailing mark badge. */
+  /** Display name for the thread's harness; labels the trailing mark. */
   providerLabel?: string | null
 }
 
@@ -224,16 +224,15 @@ export const ThreadItem = memo(
         ) : (
           <>
             {thread.provider ? (
-              // The harness rides along as its vendor mark in a quiet tile
-              // rather than a name that popped in on hover and shoved the
-              // timestamp around. Hidden on very narrow sidebars so the
-              // title keeps the room.
+              // Keep the mark's space stable so revealing it does not shove
+              // the timestamp around. Keyboard focus mirrors row hover, and
+              // very narrow sidebars leave it out so the title keeps the room.
               <span
-                data-testid="thread-provider-badge"
+                data-testid="thread-provider-mark"
                 role="img"
                 aria-label={providerLabel ?? undefined}
                 title={providerLabel ?? undefined}
-                className="hidden h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] bg-surface-3 text-fg-muted @[13rem]:flex"
+                className="pointer-events-none hidden h-[18px] w-[18px] shrink-0 items-center justify-center text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] group-focus-within:opacity-100 group-hover:opacity-100 @[13rem]:flex"
               >
                 <ProviderIcon className="h-2.5 w-2.5" provider={thread.provider} />
               </span>
