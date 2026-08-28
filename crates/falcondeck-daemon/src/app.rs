@@ -164,6 +164,7 @@ pub struct AppState {
 
 /// Keyed `(workspace_id, provider)` startup locks for ACP agent processes.
 type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
+type AcpHydrationGates = HashMap<(String, String), Arc<Mutex<()>>>;
 type CodexRuntimeGates = HashMap<String, Arc<Mutex<()>>>;
 type WorkspaceConnectGates = HashMap<String, Arc<Mutex<()>>>;
 
@@ -213,6 +214,10 @@ struct InnerState {
     /// Per-workspace/provider gates prevent background metadata hydration and
     /// a first user turn from spawning competing ACP processes.
     acp_runtime_gates: Mutex<AcpRuntimeGates>,
+    /// Per-thread gates keep transcript replay and a resumed prompt from
+    /// overlapping. Replay cleanup resets ACP turn accumulators, so it must
+    /// finish before the continuation is admitted.
+    acp_hydration_gates: Mutex<AcpHydrationGates>,
     /// Per-workspace gates collapse a cold Codex wake and a background
     /// reconnect into one app-server process.
     codex_runtime_gates: Mutex<CodexRuntimeGates>,
@@ -765,6 +770,7 @@ impl AppState {
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
                 acp_runtime_gates: Mutex::new(HashMap::new()),
+                acp_hydration_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
                 workspace_connect_gates: Mutex::new(HashMap::new()),
                 runtime_lifecycle: runtime_health::RuntimeLifecycle::default(),

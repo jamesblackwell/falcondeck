@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     AppState,
-    acp_threads::{start_acp_turn, steer_acp_turn},
+    acp_threads::{AcpTurnStartOptions, start_acp_turn, steer_acp_turn},
     agent_helpers::{
         ResolvedSelectedSkill, agy_prompt_from_inputs, claude_prompt_from_inputs, codex_inputs,
     },
@@ -85,6 +85,9 @@ pub(super) struct TurnSpec<'a> {
     /// Queue dispatch keeps its request pending until the provider really
     /// accepts the turn, so a startup failure can restore the authored entry.
     pub(super) wait_for_startup: bool,
+    /// App-shutdown recovery must attach the exact persisted provider session
+    /// and may never use a fresh-session fallback.
+    pub(super) resume_interrupted: bool,
 }
 
 impl ProviderRuntime {
@@ -360,6 +363,23 @@ impl ProviderRuntime {
             Self::Claude => {
                 let runtime = app.claude_runtime_for(spec.workspace_id).await?;
                 let session_id = spec.thread.native_session_id.clone();
+                let new_session_id = session_id.is_none().then(|| Uuid::new_v4().to_string());
+                if let Some(new_session_id) = new_session_id.as_deref() {
+                    app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                        thread.native_session_id = Some(new_session_id.to_string());
+                    })
+                    .await?;
+                    if let Err(error) = app.persist_local_state().await {
+                        let _ = app
+                            .with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                                if thread.native_session_id.as_deref() == Some(new_session_id) {
+                                    thread.native_session_id = None;
+                                }
+                            })
+                            .await;
+                        return Err(error);
+                    }
+                }
                 let images = spec
                     .inputs
                     .iter()
@@ -390,6 +410,7 @@ impl ProviderRuntime {
                     .spawn_turn(
                         spec.thread_id,
                         session_id.as_deref(),
+                        new_session_id.as_deref(),
                         &claude_prompt_from_inputs(spec.inputs, spec.selected_skills),
                         &images,
                         spec.thread.agent.model_id.as_deref(),
@@ -401,7 +422,31 @@ impl ProviderRuntime {
                         &builtin,
                         agent_context.as_deref(),
                     )
-                    .await?;
+                    .await;
+                let spawn = match spawn {
+                    Ok(spawn) => spawn,
+                    Err(error) => {
+                        if let Some(new_session_id) = new_session_id.as_deref() {
+                            let _ = app
+                                .with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                                    if thread.native_session_id.as_deref() == Some(new_session_id) {
+                                        thread.native_session_id = None;
+                                    }
+                                })
+                                .await;
+                            let _ = app.persist_local_state().await;
+                        }
+                        return Err(error);
+                    }
+                };
+                if spec.resume_interrupted
+                    && session_id.as_deref() != Some(spawn.session_id.as_str())
+                {
+                    return Err(DaemonError::BadRequest(
+                        "Claude resumed a different native session than FalconDeck requested"
+                            .to_string(),
+                    ));
+                }
                 app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
                     thread.native_session_id = Some(spawn.session_id.clone());
                 })
@@ -417,6 +462,7 @@ impl ProviderRuntime {
                             spawn.generation,
                             spawn.stdout,
                             spawn.stderr,
+                            spec.resume_interrupted,
                         )
                         .await;
                     });
@@ -452,6 +498,7 @@ impl ProviderRuntime {
                         thread.native_session_id = Some(spawn.session_id.clone());
                     })
                     .await?;
+                    app.persist_local_state().await?;
                 }
                 let app = app.clone();
                 let workspace_id = spec.workspace_id.to_string();
@@ -463,6 +510,7 @@ impl ProviderRuntime {
                         spawn.generation,
                         spawn.stdout,
                         spawn.stderr,
+                        spec.resume_interrupted,
                     )
                     .await;
                 });
@@ -486,7 +534,10 @@ impl ProviderRuntime {
                     provider,
                     spec.inputs,
                     spec.selected_skills,
-                    spec.wait_for_startup,
+                    AcpTurnStartOptions {
+                        wait_for_startup: spec.wait_for_startup,
+                        resume_interrupted: spec.resume_interrupted,
+                    },
                 )
                 .await
             }

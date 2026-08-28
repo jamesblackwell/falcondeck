@@ -241,6 +241,7 @@ impl ClaudeRuntime {
         self: &Arc<Self>,
         thread_id: &str,
         session_id: Option<&str>,
+        new_session_id: Option<&str>,
         prompt: &str,
         images: &[ImageInput],
         model_id: Option<&str>,
@@ -257,7 +258,9 @@ impl ClaudeRuntime {
         let turn_lock = self.turn_lock(thread_id).await;
         let _turn_guard = turn_lock.lock().await;
 
+        debug_assert!(session_id.is_none() || new_session_id.is_none());
         let next_session_id = session_id
+            .or(new_session_id)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let bypassing_permissions = permission_mode

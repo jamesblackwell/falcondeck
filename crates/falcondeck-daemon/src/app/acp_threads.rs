@@ -173,122 +173,18 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
-            async {
-                let (provider, native_session, cwd, prior_error) = {
-                    let workspaces = app.inner.workspaces.lock().await;
-                    let Some(workspace) = workspaces.get(&workspace_id) else {
-                        return;
-                    };
-                    let Some(thread) = workspace.threads.get(&thread_id) else {
-                        return;
-                    };
-                    // A running thread is already streaming into its items; an
-                    // empty-items check alone could race the first user message.
-                    if !thread.items.is_empty()
-                        || matches!(thread.summary.status, ThreadStatus::Running)
-                    {
-                        return;
-                    }
-                    let Some(native_session) = thread.summary.native_session_id.clone() else {
-                        return;
-                    };
-                    (
-                        thread.summary.provider.clone(),
-                        native_session,
-                        thread
-                            .summary
-                            .working_directory(&workspace.summary.path)
-                            .to_string(),
-                        (thread.summary.status == ThreadStatus::Error)
-                            .then(|| thread.summary.last_error.clone())
-                            .flatten(),
-                    )
-                };
-                let runtime = match app.acp_runtime_for(&workspace_id, &provider).await {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        tracing::info!(
-                            provider = %provider,
-                            thread = %thread_id,
-                            %error,
-                            "ACP thread hydration skipped: runtime unavailable"
-                        );
-                        return;
-                    }
-                };
-                // A live session is only authoritative when the transcript is
-                // already in memory. After a restart the desktop can open the
-                // thread (and session/load) before workspace reconnect rebuilds
-                // from persisted summaries; that wipe leaves the mapping in
-                // place and an empty conversation. Drop the mapping so
-                // session/load can replay again.
-                if runtime.session_for_thread(&thread_id).await.is_some() {
-                    if !app.acp_thread_items_empty(&workspace_id, &thread_id).await {
-                        return;
-                    }
-                    let already_reloaded = !app
-                        .inner
-                        .acp_hydration_reloads
-                        .lock()
-                        .expect("acp hydration reload set poisoned")
-                        .insert((workspace_id.clone(), thread_id.clone()));
-                    if already_reloaded {
-                        return;
-                    }
-                    runtime.forget_session(&thread_id).await;
-                }
-                let builtin = app
-                    .builtin_connectors(&provider, &cwd, Some(&thread_id))
-                    .await;
-                if let Err(error) = runtime
-                    .load_session(&thread_id, &native_session, &cwd, &builtin)
-                    .await
-                {
-                    tracing::info!(
-                        provider = %provider,
-                        thread = %thread_id,
-                        %error,
-                        "ACP thread hydration failed; transcript stays empty until next prompt"
-                    );
-                    return;
-                }
-                // session/load returns after the agent finishes sending
-                // replay notifications; the event pump may still be applying
-                // them. Wait for those items before settling, or we record an
-                // empty transcript and skip later retries.
-                let item_count = app
-                    .wait_for_acp_replay_items(&workspace_id, &thread_id)
-                    .await;
-                if item_count == 0 {
-                    tracing::info!(
-                        provider = %provider,
-                        thread = %thread_id,
-                        session = %native_session,
-                        "ACP thread hydration finished with no replayed items"
-                    );
-                }
-                // The replay has no turn end: settle the streamed lifecycles and
-                // reset the runtime's accumulators so the next real turn starts
-                // fresh items instead of extending replayed ones.
-                runtime.end_turn(&native_session).await;
-                let settlement =
-                    if prior_error.as_deref() == Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR) {
-                        ToolSettlement::Interrupted
-                    } else if prior_error.is_some() {
-                        ToolSettlement::Failed
-                    } else {
-                        ToolSettlement::Completed
-                    };
-                app.settle_turn_items_with_error(
-                    &workspace_id,
-                    &thread_id,
-                    Utc::now(),
-                    settlement,
-                    prior_error.as_deref(),
-                )
-                .await;
+            let gate = app.acp_hydration_gate(&workspace_id, &thread_id).await;
+            let _guard = gate.lock_owned().await;
+            if let Err(error) = app
+                .hydrate_acp_thread(&workspace_id, &thread_id, false)
+                .await
+            {
+                tracing::info!(
+                    thread = %thread_id,
+                    %error,
+                    "ACP thread hydration failed; transcript stays empty until next attempt"
+                );
             }
-            .await;
 
             // This set tracks in-flight hydration, not permanent attempts.
             // Failed startup/load operations must be retryable on a later
@@ -302,12 +198,175 @@ impl AppState {
         });
     }
 
-    async fn acp_thread_items_empty(&self, workspace_id: &str, thread_id: &str) -> bool {
-        let workspaces = self.inner.workspaces.lock().await;
-        workspaces
-            .get(workspace_id)
-            .and_then(|workspace| workspace.threads.get(thread_id))
-            .is_none_or(|thread| thread.items.is_empty())
+    /// Loads the exact provider session backing an interrupted ACP thread
+    /// before FalconDeck sends a continuation prompt. Unlike ordinary ACP
+    /// startup this path is fail-closed: it never substitutes `session/new`.
+    pub(super) async fn hydrate_acp_thread_for_resume(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, DaemonError> {
+        let gate = self.acp_hydration_gate(workspace_id, thread_id).await;
+        let guard = gate.lock_owned().await;
+        self.hydrate_acp_thread(workspace_id, thread_id, true)
+            .await
+            .map(|_| guard)
+    }
+
+    async fn acp_hydration_gate(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner
+            .acp_hydration_gates
+            .lock()
+            .await
+            .entry((workspace_id.to_string(), thread_id.to_string()))
+            .or_default()
+            .clone()
+    }
+
+    async fn hydrate_acp_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        exact_resume: bool,
+    ) -> Result<usize, DaemonError> {
+        let (provider, native_session, cwd, prior_error, item_count, running) = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let thread = workspace
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            (
+                thread.summary.provider.clone(),
+                thread.summary.native_session_id.clone().ok_or_else(|| {
+                    DaemonError::BadRequest(format!(
+                        "cannot safely continue {} because FalconDeck has no durable native session id",
+                        thread.summary.title
+                    ))
+                })?,
+                thread
+                    .summary
+                    .working_directory(&workspace.summary.path)
+                    .to_string(),
+                (thread.summary.status == ThreadStatus::Error)
+                    .then(|| thread.summary.last_error.clone())
+                    .flatten(),
+                thread.items.len(),
+                matches!(thread.summary.status, ThreadStatus::Running),
+            )
+        };
+        if running {
+            return if exact_resume {
+                Err(DaemonError::BadRequest(
+                    "that session is already running a turn".to_string(),
+                ))
+            } else {
+                Ok(item_count)
+            };
+        }
+
+        let runtime = self.acp_runtime_for(workspace_id, &provider).await?;
+        let mapped_session = runtime.session_for_thread(thread_id).await;
+        if item_count > 0 {
+            if !exact_resume {
+                return Ok(item_count);
+            }
+            match mapped_session {
+                Some(existing) if existing == native_session => {
+                    // Acquire the runtime's per-thread gate even when the
+                    // mapping already exists. A background session/load can
+                    // publish that mapping before its replay notifications
+                    // have all reached the event pump.
+                    let builtin = self
+                        .builtin_connectors(&provider, &cwd, Some(thread_id))
+                        .await;
+                    runtime
+                        .ensure_loaded_session(thread_id, &native_session, &cwd, &builtin)
+                        .await?;
+                    return Ok(item_count);
+                }
+                Some(existing) => {
+                    return Err(DaemonError::BadRequest(format!(
+                        "cannot safely continue: the live ACP session is {existing}, not the persisted session {native_session}"
+                    )));
+                }
+                None => {
+                    return Err(DaemonError::BadRequest(
+                        "cannot safely continue because the ACP transcript is present but its live session mapping is missing"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        // A live session is only authoritative when the transcript is also in
+        // memory. A workspace rebuild can retain the runtime mapping while
+        // replacing the replayed items with its empty persisted placeholder.
+        // Background hydration drops that mapping and replays again. Explicit
+        // resume instead validates the exact mapping under the runtime's
+        // session gate, so it cannot race an in-flight load.
+        if mapped_session.is_some() && !exact_resume {
+            let already_reloaded = !self
+                .inner
+                .acp_hydration_reloads
+                .lock()
+                .expect("acp hydration reload set poisoned")
+                .insert((workspace_id.to_string(), thread_id.to_string()));
+            if already_reloaded {
+                return Ok(0);
+            }
+            runtime.forget_session(thread_id).await;
+        }
+        let builtin = self
+            .builtin_connectors(&provider, &cwd, Some(thread_id))
+            .await;
+        if exact_resume {
+            runtime
+                .ensure_loaded_session(thread_id, &native_session, &cwd, &builtin)
+                .await?;
+        } else {
+            runtime
+                .load_session(thread_id, &native_session, &cwd, &builtin)
+                .await?;
+        }
+
+        // session/load returns after the read loop has queued every replay
+        // notification. Give the ordered event pump a chance to apply the
+        // first item before settling the restored turn.
+        let item_count = self
+            .wait_for_acp_replay_items(workspace_id, thread_id)
+            .await;
+        if item_count == 0 {
+            tracing::info!(
+                provider = %provider,
+                thread = %thread_id,
+                session = %native_session,
+                "ACP thread hydration finished with no replayed items"
+            );
+        }
+        runtime.end_turn(&native_session).await;
+        let settlement = if prior_error.as_deref() == Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR) {
+            ToolSettlement::Interrupted
+        } else if prior_error.is_some() {
+            ToolSettlement::Failed
+        } else {
+            ToolSettlement::Completed
+        };
+        self.settle_turn_items_with_error(
+            workspace_id,
+            thread_id,
+            Utc::now(),
+            settlement,
+            prior_error.as_deref(),
+        )
+        .await;
+        Ok(item_count)
     }
 
     async fn wait_for_acp_replay_items(&self, workspace_id: &str, thread_id: &str) -> usize {
@@ -1871,6 +1930,11 @@ fn normalize_acp_tool_status(status: &str) -> String {
 
 /// Runs one ACP turn: ensures the session, prompts, and settles thread status
 /// when the agent reports a stop reason.
+pub(super) struct AcpTurnStartOptions {
+    pub(super) wait_for_startup: bool,
+    pub(super) resume_interrupted: bool,
+}
+
 pub(super) async fn start_acp_turn(
     app: &AppState,
     workspace_id: &str,
@@ -1878,9 +1942,9 @@ pub(super) async fn start_acp_turn(
     provider: &AgentProvider,
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
-    wait_for_startup: bool,
+    options: AcpTurnStartOptions,
 ) -> Result<(), DaemonError> {
-    if wait_for_startup {
+    if options.wait_for_startup {
         return run_acp_turn_startup(
             app,
             workspace_id,
@@ -1888,6 +1952,7 @@ pub(super) async fn start_acp_turn(
             provider,
             inputs,
             selected_skills,
+            options.resume_interrupted,
         )
         .await;
     }
@@ -1905,6 +1970,7 @@ pub(super) async fn start_acp_turn(
             &provider,
             &inputs,
             &selected_skills,
+            options.resume_interrupted,
         )
         .await
         {
@@ -1974,6 +2040,7 @@ async fn run_acp_turn_startup(
     provider: &AgentProvider,
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
+    resume_interrupted: bool,
 ) -> Result<(), DaemonError> {
     let mut runtime = match app.acp_runtime_for(workspace_id, provider).await {
         Ok(runtime) => runtime,
@@ -2004,12 +2071,11 @@ async fn run_acp_turn_startup(
         Err(error) => return Err(error),
     };
     // A native session id persisted from a previous daemon run lets the agent
-    // resume via session/load instead of starting from a blank session. Only
-    // offered when the in-memory history is EMPTY: session/load replays the
-    // whole conversation through the event pump, so resuming into a thread
-    // that still holds its items (agent process died, daemon alive) would
-    // append the entire history a second time. That case takes session/new —
-    // the agent loses its context, which is the pre-resume status quo.
+    // resume via session/load instead of starting from a blank session. Normal
+    // sends only offer it when the in-memory history is empty because load
+    // replays the whole conversation. Explicit interrupted recovery already
+    // performed a strict preflight and must retain the id even after replay
+    // populated the thread.
     let (
         known_native_session,
         requested_model_id,
@@ -2023,7 +2089,7 @@ async fn run_acp_turn_startup(
         let thread = workspace.and_then(|workspace| workspace.threads.get(thread_id));
         (
             thread
-                .filter(|thread| thread.items.is_empty())
+                .filter(|thread| resume_interrupted || thread.items.is_empty())
                 .and_then(|thread| thread.summary.native_session_id.clone()),
             thread.and_then(|thread| thread.summary.agent.model_id.clone()),
             thread.and_then(|thread| thread.summary.agent.reasoning_effort.clone()),
@@ -2042,17 +2108,29 @@ async fn run_acp_turn_startup(
         .builtin_connectors(provider, &cwd, Some(thread_id))
         .await;
     let agent_context = app.agent_context_instructions(provider).await;
-    let first_start = runtime
-        .ensure_session(
-            thread_id,
-            known_native_session.as_deref(),
-            &cwd,
-            requested_permission_mode.as_deref(),
-            &builtin,
-            agent_context.as_deref(),
-            requested_model_id.as_deref(),
-        )
-        .await;
+    let first_start = if resume_interrupted {
+        let native_session = known_native_session.as_deref().ok_or_else(|| {
+            DaemonError::BadRequest(
+                "cannot safely continue because FalconDeck has no durable native session id"
+                    .to_string(),
+            )
+        })?;
+        runtime
+            .ensure_loaded_session(thread_id, native_session, &cwd, &builtin)
+            .await
+    } else {
+        runtime
+            .ensure_session(
+                thread_id,
+                known_native_session.as_deref(),
+                &cwd,
+                requested_permission_mode.as_deref(),
+                &builtin,
+                agent_context.as_deref(),
+                requested_model_id.as_deref(),
+            )
+            .await
+    };
     let session_id = match first_start {
         Ok(session_id) => session_id,
         Err(DaemonError::AcpRequestTimeout { ref method, .. }) if method == "session/new" => {
@@ -2116,6 +2194,10 @@ async fn run_acp_turn_startup(
         thread.native_session_id = Some(session_id.clone());
     })
     .await?;
+    // The provider owns the transcript; this id is FalconDeck's only durable
+    // join key. Commit it before the prompt can execute tools so killing the
+    // daemon mid-turn cannot strand an otherwise intact provider session.
+    app.persist_local_state().await?;
 
     // Discovery may have failed during background hydration (for example
     // while the CLI was still authenticating). A real session response is
@@ -2400,13 +2482,43 @@ async fn acp_turn_content(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
     use chrono::Utc;
+    use tempfile::tempdir;
 
     use super::{
         acp_empty_turn_stop_reason, conversation_item_from_projected_user, default_acp_mode,
         falcondeck_skill_path_preamble, latest_user_message_contains_echo,
     };
     use falcondeck_core::{ContentLifecycle, ConversationItem};
+
+    use crate::app::AppState;
+
+    #[tokio::test]
+    async fn transcript_hydration_is_serialized_per_thread() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        let first = app.acp_hydration_gate("workspace-1", "thread-1").await;
+        let second = app.acp_hydration_gate("workspace-1", "thread-1").await;
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let guard = first.lock_owned().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second.clone().lock_owned())
+                .await
+                .is_err(),
+            "a resumed turn must wait for background transcript replay"
+        );
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), second.lock_owned())
+            .await
+            .expect("the gate must release after replay");
+    }
 
     fn user_message(text: &str) -> ConversationItem {
         ConversationItem::UserMessage {

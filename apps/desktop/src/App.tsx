@@ -3503,14 +3503,17 @@ function AppInner() {
       return;
     }
     setIsContinuingStoppedThreads(true);
-    const failures: string[] = [];
+    const failures: Array<{ title: string; message: string }> = [];
     const succeeded: typeof targets = [];
     // Sequential: a burst of parallel turns would have every agent CLI cold
     // starting at once on the machine the user just opened.
     for (const thread of targets) {
       const client = apiFor(thread.workspace_id);
       if (!client) {
-        failures.push(thread.title);
+        failures.push({
+          title: thread.title,
+          message: "The workspace is not connected",
+        });
         continue;
       }
       try {
@@ -3529,8 +3532,14 @@ function AppInner() {
           sandbox_mode: thread.agent.sandbox_mode ?? null,
         });
         succeeded.push(thread);
-      } catch {
-        failures.push(thread.title);
+      } catch (error: unknown) {
+        failures.push({
+          title: thread.title,
+          message:
+            error instanceof Error
+              ? error.message
+              : "The saved provider session could not be loaded",
+        });
       }
     }
     setIsContinuingStoppedThreads(false);
@@ -3562,7 +3571,9 @@ function AppInner() {
           continued > 0
             ? `Continued ${continued} of ${targets.length} sessions`
             : "Failed to continue stopped sessions",
-        description: failures.join(", "),
+        description: failures
+          .map(({ title, message }) => `${title}: ${message}`)
+          .join("\n"),
       });
       return;
     }

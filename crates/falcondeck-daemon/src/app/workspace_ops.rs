@@ -829,7 +829,14 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
             .as_ref()
             .map(|transcript| transcript.items.clone())
             .unwrap_or_default();
-        if is_shutdown_interrupted(&restored_status, restored_last_error.as_deref()) {
+        // A bare restored ACP thread must remain internally empty: its native
+        // transcript is replayed lazily with session/load, and both the
+        // detail and turn paths use emptiness as the recovery signal. The
+        // read path still projects an interruption receipt immediately, so
+        // the UI remains honest while replay is in flight.
+        if !items.is_empty()
+            && is_shutdown_interrupted(&restored_status, restored_last_error.as_deref())
+        {
             settle_items_as_shutdown_interrupted(
                 &mut items,
                 Some(state.thread_id.as_str()),
@@ -1732,6 +1739,7 @@ async fn try_steer_turn(
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
                 wait_for_startup: false,
+                resume_interrupted: false,
             },
         )
         .await
@@ -2412,6 +2420,73 @@ pub(super) async fn send_turn(
     send_turn_with_startup_mode(app, request, false).await
 }
 
+/// Verifies and attaches the exact provider session before an interrupted
+/// continuation is allowed to mutate the thread. Resuming is qualitatively
+/// different from an ordinary send: falling back to a new provider session
+/// would silently discard the context the action promises to recover.
+async fn prepare_interrupted_resume(
+    app: &AppState,
+    request: &SendTurnRequest,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, DaemonError> {
+    let (provider, provider_transport, native_session_id, title) = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace.threads.get(&request.thread_id).ok_or_else(|| {
+            DaemonError::NotFound(
+                "that session is no longer on this project; FalconDeck will not start a blank one to resume it"
+                    .to_string(),
+            )
+        })?;
+        if !is_shutdown_interrupted(&thread.summary.status, thread.summary.last_error.as_deref()) {
+            return Err(DaemonError::BadRequest(
+                "that session is not waiting for interrupted-turn recovery".to_string(),
+            ));
+        }
+        if request
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider != &thread.summary.provider)
+        {
+            return Err(DaemonError::BadRequest(
+                "an interrupted session must resume with its original provider".to_string(),
+            ));
+        }
+        (
+            thread.summary.provider.clone(),
+            thread.summary.provider_transport.clone(),
+            thread
+                .summary
+                .native_session_id
+                .clone()
+                .filter(|id| !id.trim().is_empty()),
+            thread.summary.title.clone(),
+        )
+    };
+
+    // A Codex thread id is itself the provider-native id. Every other backend
+    // uses a FalconDeck-owned id and therefore needs its separately persisted
+    // join key before continuing can be safe.
+    if provider != AgentProvider::CODEX && native_session_id.is_none() {
+        return Err(DaemonError::BadRequest(format!(
+            "cannot safely continue {title} because FalconDeck has no durable native session id; no blank replacement was started"
+        )));
+    }
+
+    if matches!(
+        ProviderRuntime::for_provider(&provider),
+        ProviderRuntime::Acp(_)
+    ) && provider_transport.as_deref() != Some("native")
+    {
+        return app
+            .hydrate_acp_thread_for_resume(&request.workspace_id, &request.thread_id)
+            .await
+            .map(Some);
+    }
+    Ok(None)
+}
+
 async fn send_turn_waiting_for_provider_start(
     app: &AppState,
     request: SendTurnRequest,
@@ -2447,6 +2522,14 @@ async fn send_turn_with_startup_mode(
             return Err(DaemonError::NotFound("workspace not found".to_string()));
         }
     }
+    // Keep an ACP transcript-replay gate alive through provider startup. A
+    // background session/load that starts during this window will then recheck
+    // the Running status and leave the new prompt's accumulators untouched.
+    let _resume_hydration_guard = if request.resume_interrupted {
+        prepare_interrupted_resume(app, &request).await?
+    } else {
+        None
+    };
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
 
@@ -2478,16 +2561,20 @@ async fn send_turn_with_startup_mode(
             .get_mut(&request.workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
         let now = Utc::now();
-        let provider = request
-            .provider
-            .clone()
-            .or_else(|| {
+        let provider = if request.resume_interrupted {
+            workspace
+                .threads
+                .get(&request.thread_id)
+                .map(|thread| thread.summary.provider.clone())
+        } else {
+            request.provider.clone().or_else(|| {
                 workspace
                     .threads
                     .get(&request.thread_id)
                     .map(|thread| thread.summary.provider.clone())
             })
-            .unwrap_or_else(|| workspace.summary.default_provider.clone());
+        }
+        .unwrap_or_else(|| workspace.summary.default_provider.clone());
         let managed = if request.resume_interrupted {
             workspace.threads.get_mut(&request.thread_id).ok_or_else(|| {
                 DaemonError::NotFound(
@@ -2608,7 +2695,7 @@ async fn send_turn_with_startup_mode(
                 .user_item_id
                 .clone()
                 .filter(|id| id.starts_with("user-"))
-                .unwrap_or_else(|| format!("user-{}", Uuid::new_v4().simple())),
+                .unwrap_or_else(|| format!("user-resume-{}", request.thread_id)),
             &super::harness_user_text::shutdown_resume_user_text(),
             Utc::now(),
         )
@@ -2634,11 +2721,32 @@ async fn send_turn_with_startup_mode(
     )
     .await?;
     if let Err(error) = app.persist_local_state().await {
-        tracing::warn!(
-            %error,
-            thread = %request.thread_id,
-            "failed to persist running turn status"
-        );
+        let failed_at = Utc::now();
+        let retained_error = if request.resume_interrupted {
+            SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string()
+        } else {
+            format!("FalconDeck could not durably record the turn: {error}")
+        };
+        let _ = app
+            .with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+                thread.status = ThreadStatus::Error;
+                thread.last_error = Some(retained_error.clone());
+                thread.updated_at = failed_at;
+            })
+            .await;
+        app.settle_turn_items_with_error(
+            &request.workspace_id,
+            &request.thread_id,
+            failed_at,
+            if request.resume_interrupted {
+                ToolSettlement::Interrupted
+            } else {
+                ToolSettlement::Failed
+            },
+            Some(&retained_error),
+        )
+        .await;
+        return Err(error);
     }
     app.emit(
         Some(request.workspace_id.clone()),
@@ -2661,7 +2769,8 @@ async fn send_turn_with_startup_mode(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
-                wait_for_startup,
+                wait_for_startup: wait_for_startup || request.resume_interrupted,
+                resume_interrupted: request.resume_interrupted,
             },
         )
         .await;
@@ -2669,10 +2778,15 @@ async fn send_turn_with_startup_mode(
     if let Err(error) = start_result {
         let error_message = error.to_string();
         let failed_at = Utc::now();
+        let retained_error = if request.resume_interrupted {
+            SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string()
+        } else {
+            error_message.clone()
+        };
         let _ = app
             .with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
                 thread.status = ThreadStatus::Error;
-                thread.last_error = Some(error_message.clone());
+                thread.last_error = Some(retained_error.clone());
                 thread.updated_at = failed_at;
             })
             .await;
@@ -2680,8 +2794,12 @@ async fn send_turn_with_startup_mode(
             &request.workspace_id,
             &request.thread_id,
             failed_at,
-            ToolSettlement::Failed,
-            Some(&error_message),
+            if request.resume_interrupted {
+                ToolSettlement::Interrupted
+            } else {
+                ToolSettlement::Failed
+            },
+            Some(&retained_error),
         )
         .await;
         // Keep queued messages parked after a provider start failure. Advancing
@@ -5224,6 +5342,89 @@ mod tests {
             !workspaces["workspace-1"]
                 .threads
                 .contains_key("missing-thread")
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_interrupted_refuses_a_thread_without_a_durable_native_session() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.provider = AgentProvider::new("opencode");
+            thread.provider_transport = Some("acp".to_string());
+            thread.native_session_id = None;
+            thread.status = ThreadStatus::Error;
+            thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+        })
+        .await
+        .unwrap();
+
+        let error = send_turn(
+            &app,
+            SendTurnRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                inputs: Vec::new(),
+                selected_skills: Vec::new(),
+                provider: Some(AgentProvider::new("opencode")),
+                model_id: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                user_item_id: None,
+                resume_interrupted: true,
+            },
+        )
+        .await
+        .expect_err("resume without a provider session must fail closed");
+
+        assert!(
+            error.to_string().contains("no durable native session id"),
+            "{error}"
+        );
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = &workspaces["workspace-1"].threads["thread-1"];
+        assert!(thread.items.is_empty(), "resume must not append a receipt");
+        assert_eq!(thread.summary.status, ThreadStatus::Error);
+        assert_eq!(
+            thread.summary.last_error.as_deref(),
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+    }
+
+    #[test]
+    fn bare_interrupted_acp_thread_stays_empty_so_session_load_can_replay_it() {
+        let mut state = persisted_thread("opencode-thread-1", Some("ses-native-1"));
+        state.provider = Some(AgentProvider::new("opencode"));
+        state.provider_transport = Some("acp".to_string());
+        state.status = Some(ThreadStatus::Running);
+        let states = HashMap::from([("opencode-thread-1".to_string(), state)]);
+
+        let merged = merge_hydrated_threads_with_persisted_state(
+            Vec::new(),
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary.status, ThreadStatus::Error);
+        assert_eq!(
+            merged[0].summary.last_error.as_deref(),
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+        assert!(
+            merged[0].items.is_empty(),
+            "a synthetic interruption receipt must not block session/load"
         );
     }
 

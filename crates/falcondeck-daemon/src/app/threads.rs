@@ -865,6 +865,43 @@ impl AppState {
             .await;
     }
 
+    /// Records the provider's session identity without ever replacing an
+    /// established join key. A changed id means the CLI started a different
+    /// conversation; accepting it would silently detach FalconDeck from the
+    /// history the thread promised to continue.
+    async fn confirm_provider_native_session(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        provider_label: &str,
+        reported_session_id: &str,
+    ) -> Result<(), DaemonError> {
+        let mut expected = None;
+        let mut newly_recorded = false;
+        self.with_thread_mut(workspace_id, thread_id, |thread| {
+            match thread.native_session_id.as_deref() {
+                Some(existing) if existing != reported_session_id => {
+                    expected = Some(existing.to_string());
+                }
+                Some(_) => {}
+                None => {
+                    thread.native_session_id = Some(reported_session_id.to_string());
+                    newly_recorded = true;
+                }
+            }
+        })
+        .await?;
+        if let Some(expected) = expected {
+            return Err(DaemonError::BadRequest(format!(
+                "{provider_label} reported session {reported_session_id}, but this thread is bound to {expected}; FalconDeck kept the original session link"
+            )));
+        }
+        if newly_recorded {
+            self.persist_local_state().await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn monitor_claude_turn(
         &self,
         workspace_id: String,
@@ -872,6 +909,7 @@ impl AppState {
         turn_generation: u64,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
+        resume_interrupted: bool,
     ) {
         // Assistant prose and thinking accumulate per API message, so text
         // that follows a tool call starts a fresh conversation item below the
@@ -895,6 +933,7 @@ impl AppState {
         let mut last_line_at = tokio::time::Instant::now();
         let mut stall_warned = false;
         let mut turn_error: Option<String> = None;
+        let mut resume_session_confirmed = !resume_interrupted;
         let mut saw_agent_output = false;
         let stderr_task = stderr.map(|stderr| {
             let workspace_id = workspace_id.clone();
@@ -1220,27 +1259,25 @@ impl AppState {
                                 }
                                 continue;
                             }
-                            // The CLI is authoritative about which session it is
-                            // writing to. A mismatch with the daemon's assumed id
-                            // would make PreToolUse hook lookups (keyed by session
-                            // id) silently miss this thread.
+                            // The CLI must confirm the session FalconDeck
+                            // requested. A different id is a different
+                            // conversation, not permission to replace the
+                            // durable join key for this thread.
                             if let Some(init_session_id) = claude_init_session_id(&value) {
-                                let mut assumed: Option<Option<String>> = None;
-                                let _ = self
-                                    .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                                        if thread.native_session_id.as_deref()
-                                            != Some(init_session_id.as_str())
-                                        {
-                                            assumed = Some(thread.native_session_id.clone());
-                                            thread.native_session_id =
-                                                Some(init_session_id.clone());
-                                        }
-                                    })
-                                    .await;
-                                if let Some(assumed) = assumed {
-                                    tracing::warn!(
-                                        "claude session id mismatch: daemon assumed {assumed:?}, CLI reported {init_session_id}"
-                                    );
+                                match self
+                                    .confirm_provider_native_session(
+                                        &workspace_id,
+                                        &thread_id,
+                                        "Claude",
+                                        &init_session_id,
+                                    )
+                                    .await
+                                {
+                                    Ok(()) => resume_session_confirmed = true,
+                                    Err(error) => {
+                                        turn_error = Some(error.to_string());
+                                        break 'stdout;
+                                    }
                                 }
                             }
                             // Message boundary: start a fresh assistant item (and
@@ -1555,11 +1592,35 @@ impl AppState {
             was_interrupted = true;
             turn_error = None;
         }
+        if resume_interrupted
+            && !was_interrupted
+            && !resume_session_confirmed
+            && turn_error.is_none()
+        {
+            turn_error =
+                Some("Claude ended without confirming the saved session identity".to_string());
+        }
         let resume_failed = turn_error.as_deref().is_some_and(is_resume_startup_failure)
             || stderr_tail
                 .iter()
                 .any(|line| is_resume_startup_failure(line));
-        if resume_failed {
+        if resume_interrupted && !was_interrupted && (resume_failed || !resume_session_confirmed) {
+            let detail = turn_error
+                .clone()
+                .or_else(|| stderr_tail.last().cloned())
+                .unwrap_or_else(|| "the provider did not confirm the session".to_string());
+            self.push_conversation_diagnostic(
+                &workspace_id,
+                &thread_id,
+                ServiceLevel::Warning,
+                format!(
+                    "Could not verify the saved Claude session. FalconDeck kept the original session link so Continue can be retried. {detail}"
+                ),
+                Some("claude-interrupted-resume".to_string()),
+            )
+            .await;
+            turn_error = Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+        } else if resume_failed {
             self.drop_claude_native_session(&workspace_id, &thread_id)
                 .await;
             self.push_conversation_diagnostic(
@@ -1648,10 +1709,12 @@ impl AppState {
         turn_generation: u64,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
+        resume_interrupted: bool,
     ) {
         let mut last_line_at = tokio::time::Instant::now();
         let mut stall_warned = false;
         let mut turn_error: Option<String> = None;
+        let mut resume_session_confirmed = !resume_interrupted;
         let mut saw_agent_output = false;
         let mut assistant_text = HashMap::<String, String>::new();
         let mut running_tool_titles = HashMap::<String, String>::new();
@@ -1702,7 +1765,7 @@ impl AppState {
                     }
                 }
             });
-            loop {
+            'stdout: loop {
                 let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
                     Ok(Some(line)) => line,
                     Ok(None) => break,
@@ -1747,11 +1810,21 @@ impl AppState {
                 match event {
                     AgyStreamEvent::Init { conversation_id } => {
                         if !conversation_id.is_empty() {
-                            let _ = self
-                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                                    thread.native_session_id = Some(conversation_id);
-                                })
-                                .await;
+                            match self
+                                .confirm_provider_native_session(
+                                    &workspace_id,
+                                    &thread_id,
+                                    "Antigravity",
+                                    &conversation_id,
+                                )
+                                .await
+                            {
+                                Ok(()) => resume_session_confirmed = true,
+                                Err(error) => {
+                                    turn_error = Some(error.to_string());
+                                    break 'stdout;
+                                }
+                            }
                         }
                     }
                     AgyStreamEvent::Step {
@@ -1857,11 +1930,21 @@ impl AppState {
                         error,
                     } => {
                         if !conversation_id.is_empty() {
-                            let _ = self
-                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                                    thread.native_session_id = Some(conversation_id);
-                                })
-                                .await;
+                            match self
+                                .confirm_provider_native_session(
+                                    &workspace_id,
+                                    &thread_id,
+                                    "Antigravity",
+                                    &conversation_id,
+                                )
+                                .await
+                            {
+                                Ok(()) => resume_session_confirmed = true,
+                                Err(error) => {
+                                    turn_error = Some(error.to_string());
+                                    break 'stdout;
+                                }
+                            }
                         }
                         if let Some(response) = response.filter(|text| !text.trim().is_empty())
                             && !saw_agent_output
@@ -1960,6 +2043,22 @@ impl AppState {
                 Some("agy-interrupt".to_string()),
             )
             .await;
+        }
+        if resume_interrupted && !was_interrupted && !resume_session_confirmed {
+            let detail = turn_error.clone().unwrap_or_else(|| {
+                "Antigravity ended without confirming the saved session identity".to_string()
+            });
+            self.push_conversation_diagnostic(
+                &workspace_id,
+                &thread_id,
+                ServiceLevel::Warning,
+                format!(
+                    "Could not verify the saved Antigravity session. FalconDeck kept the original session link so Continue can be retried. {detail}"
+                ),
+                Some("agy-interrupted-resume".to_string()),
+            )
+            .await;
+            turn_error = Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
         }
         let final_error = turn_error.clone();
         let settled_at = Utc::now();
@@ -2580,6 +2679,7 @@ fn claude_init_session_id(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::tempdir;
 
     fn isolated_codex_thread() -> ManagedThread {
         ManagedThread::new(ThreadSummary {
@@ -2614,6 +2714,76 @@ mod tests {
                 base_branch: Some("main".to_string()),
             }),
         })
+    }
+
+    #[tokio::test]
+    async fn provider_session_confirmation_never_replaces_an_existing_join_key() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        let mut thread = isolated_codex_thread();
+        thread.summary.id = "thread-1".to_string();
+        thread.summary.provider = AgentProvider::CLAUDE;
+        thread.summary.native_session_id = Some("session-original".to_string());
+        let workspace = falcondeck_core::WorkspaceSummary {
+            kind: falcondeck_core::WorkspaceKind::Project,
+            id: "workspace-1".to_string(),
+            path: temp_dir.path().to_string_lossy().to_string(),
+            status: falcondeck_core::WorkspaceStatus::Ready,
+            agents: Vec::new(),
+            skills: Vec::new(),
+            default_provider: AgentProvider::CLAUDE,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some("thread-1".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            ManagedWorkspace {
+                summary: workspace,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::from([("thread-1".to_string(), thread)]),
+            },
+        );
+
+        app.confirm_provider_native_session(
+            "workspace-1",
+            "thread-1",
+            "Claude",
+            "session-original",
+        )
+        .await
+        .unwrap();
+        let error = app
+            .confirm_provider_native_session(
+                "workspace-1",
+                "thread-1",
+                "Claude",
+                "session-replacement",
+            )
+            .await
+            .expect_err("a provider must not relink an established thread");
+
+        assert!(error.to_string().contains("kept the original session link"));
+        assert_eq!(
+            app.thread_summary("workspace-1", "thread-1")
+                .await
+                .unwrap()
+                .native_session_id
+                .as_deref(),
+            Some("session-original")
+        );
     }
 
     #[test]

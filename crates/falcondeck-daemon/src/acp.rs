@@ -2486,6 +2486,36 @@ impl AcpRuntime {
             .await
     }
 
+    /// Ensures that `thread_id` is attached to this exact persisted session.
+    ///
+    /// Explicit interrupted-turn recovery must never inherit
+    /// [`Self::ensure_session`]'s fresh-session fallback: if the provider can
+    /// no longer load the saved session, starting a replacement would turn a
+    /// visible recovery action into a context-free conversation while also
+    /// overwriting the only durable join key FalconDeck has.
+    pub async fn ensure_loaded_session(
+        &self,
+        thread_id: &str,
+        native_session: &str,
+        cwd: &str,
+        builtin: &crate::connectors::BuiltinConnectors,
+    ) -> Result<String, DaemonError> {
+        let gate = self.session_gate(thread_id).await;
+        let _guard = gate.lock().await;
+        if let Some(existing) = self.sessions.lock().await.get(thread_id).cloned() {
+            return if existing == native_session {
+                Ok(existing)
+            } else {
+                Err(DaemonError::BadRequest(format!(
+                    "ACP thread is attached to session {existing}, not its persisted session {native_session}"
+                )))
+            };
+        }
+        self.load_session_locked(thread_id, native_session, cwd, builtin)
+            .await?;
+        Ok(native_session.to_string())
+    }
+
     async fn load_session_locked(
         &self,
         thread_id: &str,
@@ -4516,6 +4546,25 @@ mod tests {
             next_acp_event(&mut events_rx).await,
             AcpEvent::ReplayFinished { session_id } if session_id == "fixture-session-1"
         ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn required_session_resume_never_falls_back_to_session_new() {
+        let (runtime, _events) = fixture_runtime("load-failure").await;
+
+        let error = runtime
+            .ensure_loaded_session(
+                "thread-load",
+                "missing-native-session",
+                env!("CARGO_MANIFEST_DIR"),
+                &Default::default(),
+            )
+            .await
+            .expect_err("an explicit resume must fail when session/load fails");
+
+        assert!(error.to_string().contains("fixture session is unavailable"));
+        assert_eq!(runtime.session_for_thread("thread-load").await, None);
         runtime.shutdown().await;
     }
 

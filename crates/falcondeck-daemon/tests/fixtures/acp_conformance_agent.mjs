@@ -226,6 +226,14 @@ input.on('line', (line) => {
   }
 
   if (message.method === 'session/load') {
+    if (scenario === 'load-failure') {
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        error: { code: -32000, message: 'fixture session is unavailable' },
+      })
+      return
+    }
     update({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text: 'replayed fixture prompt' },
