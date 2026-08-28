@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use falcondeck_core::control::{
     AgentControlSettings, AuditResult, Automation, AutomationRun, AutomationRunStatus,
-    AutomationState, ControlAuditEntry, ControlDomain, ControlErrorDetail, ControlExecuteRequest,
-    ControlExecuteResponse, ControlGetRequest, ControlGetResponse, ControlOrigin,
-    ControlRequestContext, ControlSearchRequest, ControlSearchResponse, ControlStateChanged,
-    FieldError,
+    AutomationRunTrigger, AutomationState, ControlAuditEntry, ControlDomain, ControlErrorDetail,
+    ControlExecuteRequest, ControlExecuteResponse, ControlGetRequest, ControlGetResponse,
+    ControlOrigin, ControlRequestContext, ControlSearchRequest, ControlSearchResponse,
+    ControlStateChanged, FieldError,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, Semaphore};
@@ -280,6 +280,15 @@ pub enum RunSource {
     },
     /// The scheduler dispatching a due occurrence.
     Scheduled,
+}
+
+/// Result of importing one record from the retired scheduled-task store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyImportOutcome {
+    /// The definition and its run ledger were inserted.
+    Imported,
+    /// A previous migration already inserted the same stable id.
+    AlreadyPresent,
 }
 
 /// The daemon-owned control service.
@@ -1021,6 +1030,54 @@ impl ControlService {
         Ok(())
     }
 
+    /// Atomically imports one losslessly-converted legacy scheduled task.
+    ///
+    /// The legacy id is retained. If FalconDeck stopped after this store was
+    /// committed but before the old file was pruned, the next startup sees
+    /// the same id and removes the legacy copy without creating another
+    /// definition or executor.
+    pub async fn import_legacy_automation(
+        &self,
+        automation: Automation,
+        runs: Vec<AutomationRun>,
+    ) -> Result<LegacyImportOutcome, ControlError> {
+        let _guard = self.mutation.lock().await;
+        self.ensure_usable()?;
+        let mut next = self.state.lock().await.clone();
+        if next
+            .automations
+            .iter()
+            .any(|existing| existing.id == automation.id)
+        {
+            return Ok(LegacyImportOutcome::AlreadyPresent);
+        }
+        if !automation.id.starts_with("scheduled-") {
+            return Err(ControlError::invalid_arguments(
+                "legacy automation ids must use the scheduled- prefix",
+            ));
+        }
+        let automation_id = automation.id.clone();
+        let existing_run_ids = next
+            .runs
+            .iter()
+            .map(|run| run.id.clone())
+            .collect::<BTreeSet<_>>();
+        let imported_runs = runs
+            .into_iter()
+            .filter(|run| run.automation_id == automation_id)
+            .filter(|run| !existing_run_ids.contains(&run.id))
+            .collect::<Vec<_>>();
+        next.automations.push(automation);
+        next.runs.extend(imported_runs);
+        next.store_revision += 1;
+        let now = Utc::now();
+        store::compact(&mut next, now);
+        store::persist(&self.path, &next).await?;
+        *self.state.lock().await = next;
+        self.scheduler_notify.notify_one();
+        Ok(LegacyImportOutcome::Imported)
+    }
+
     /// Queues a run for an automation, respecting its concurrency policy.
     /// `scheduled_for` carries the occurrence time for scheduler dispatches;
     /// manual runs pass `None` and never consume a schedule occurrence.
@@ -1031,7 +1088,10 @@ impl ControlService {
         scheduled_for: Option<DateTime<Utc>>,
         source: RunSource,
     ) -> Result<AutomationRun, ControlError> {
-        let _ = source;
+        let trigger = match source {
+            RunSource::Scheduled => AutomationRunTrigger::Scheduled,
+            RunSource::Manual { .. } => AutomationRunTrigger::Manual,
+        };
         let automation_id = automation_id.to_string();
         self.mutate(move |state, now| {
             let automation = state
@@ -1072,6 +1132,7 @@ impl ControlService {
                 automation_name: automation.name.clone(),
                 automation_revision: automation.revision,
                 status: AutomationRunStatus::Queued,
+                trigger,
                 scheduled_for,
                 queued_at: now,
                 started_at: None,

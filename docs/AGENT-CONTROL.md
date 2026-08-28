@@ -112,11 +112,13 @@ and owns no state itself.
 - **Settings → Agent control**: global/provider toggles, default timezone,
   elevated-automation switch, agent-context injection toggle, recent control
   changes (audit).
-- **Settings → Automations**: list with schedule, provider, next run and
-  last outcome; create/edit with the same validated payloads the tools use;
-  pause/resume/run-now; run history; delete with confirmation. The panel
-  subscribes to `control-state-changed` events, so conversational changes
-  appear immediately.
+- **Sidebar → Scheduled**: the single automation/task manager. It combines
+  canonical control records with any non-losslessly-convertible legacy
+  scheduled records, routes actions to the owning daemon/store, and removes
+  stable-id duplicates during migration. Create/edit uses the same validated
+  control payloads as conversational tools; pause/resume/run-now, history, and
+  delete remain host-owned. `control-state-changed` events make conversational
+  changes appear immediately.
 
 ## Mobile
 
@@ -136,8 +138,11 @@ and owns no state itself.
 
 ## Persistence and bounds
 
-State lives in `~/.falcondeck/agent-control.json` beside the daemon state
-file (schema versioned, atomic 0600 writes). Retention: 100 runs per
+Canonical state lives in `~/.falcondeck/agent-control.json` beside the daemon
+state file (schema versioned, atomic 0600 writes). Compatible definitions in
+the retired `scheduled-tasks.json` store migrate into it under their existing
+ids; non-lossless RRULE records remain compatibility-owned and visible only
+through the same Scheduled dashboard. Retention: 100 runs per
 automation, 1,000 runs total, 500 audit entries, 128 idempotency records /
 24 hours, 1,000-character outcome previews. A malformed file is preserved
 under a recovery name and scheduling stays disabled until it is fixed; an
@@ -167,7 +172,7 @@ crates/falcondeck-daemon/src/control/
   scheduler.rs notify-driven dispatch through workspace/thread/turn machinery
   redaction.rs secret redaction
   mcp.rs       the stdio MCP server (`falcondeck-daemon mcp`)
-apps/desktop/src/components/…                 settings + automations panels
+apps/desktop/src/components/…                 settings + Scheduled dashboard
 apps/mobile/src/features/automations/          mobile payloads + event invalidation
 apps/mobile/src/store/automation-store.ts      relay reads/mutations + MMKV cache
 packages/client-core/src/control.ts            TS types and normalizers

@@ -1185,6 +1185,7 @@ impl AppState {
         // reconnects can persist state; starting them first could race with
         // remote restoration and overwrite a valid pairing with `remote: null`.
         self.restore_scheduled_tasks().await?;
+        scheduled_tasks::migrate_compatible(self).await;
         if !workspaces_to_restore.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {

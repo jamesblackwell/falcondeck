@@ -22,7 +22,8 @@ pub mod store;
 mod service;
 
 pub use service::{
-    ControlDeps, ControlError, ControlService, MAX_CONCURRENT_AUTOMATION_RUNS, RunSource,
+    ControlDeps, ControlError, ControlService, LegacyImportOutcome, MAX_CONCURRENT_AUTOMATION_RUNS,
+    RunSource,
 };
 
 #[cfg(test)]

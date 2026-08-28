@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::AgentProvider;
+use crate::{AgentProvider, ThreadIsolation};
 
 /// Global and per-provider settings for the conversational control surface.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -237,6 +237,19 @@ pub struct AutomationTarget {
     #[serde(default)]
     pub sandbox_mode: Option<String>,
 
+    /// Optional reasoning setting captured at definition time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Optional provider collaboration mode captured at definition time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode_id: Option<String>,
+    /// Explicit approval policy captured independently of permission mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    /// Checkout ownership for each newly-created execution thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<ThreadIsolation>,
+
     /// Skills to select for the dispatched turn.
     #[serde(default)]
     pub selected_skills: Vec<String>,
@@ -318,6 +331,9 @@ pub struct AutomationRun {
 
     /// Lifecycle status of the run.
     pub status: AutomationRunStatus,
+    /// Why this run was created.
+    #[serde(default)]
+    pub trigger: AutomationRunTrigger,
     /// Occurrence time this run was scheduled for, if any.
     #[serde(default)]
     pub scheduled_for: Option<DateTime<Utc>>,
@@ -347,6 +363,19 @@ pub struct AutomationRun {
     /// Structured failure detail.
     #[serde(default)]
     pub error: Option<ControlErrorDetail>,
+}
+
+/// Why an automation run was created.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutomationRunTrigger {
+    /// A normal scheduler occurrence.
+    #[default]
+    Scheduled,
+    /// A scheduled occurrence recovered after the daemon was offline.
+    Late,
+    /// A user explicitly selected Run now.
+    Manual,
 }
 
 /// Lifecycle status of an automation run.

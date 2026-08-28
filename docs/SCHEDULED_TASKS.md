@@ -1,12 +1,21 @@
 # Scheduled tasks
 
-Status: V1 implemented 2026-08-13.
+Status: V1 implemented 2026-08-13; persistence converged 2026-08-28.
 
 The daemon-owned scheduler, local and enrolled-host RPCs, durable task/run
 storage, unified events, generated-thread provenance, and desktop Scheduled UI
 are implemented. Agent-driven creation through a bundled skill/MCP bridge and
-the opt-in macOS LaunchAgent remain the explicitly deferred follow-up work
-described below.
+the opt-in macOS LaunchAgent remains a deferred follow-up.
+
+`agent-control.json` is now the canonical definition and run store for work
+created from either chat or the desktop Scheduled page. The original
+`scheduled-tasks.json` contract remains as a compatibility reader/executor:
+losslessly representable daily, weekly, and one-time records migrate at daemon
+startup under the same stable ids, with their execution settings and run
+history. RRULEs that cannot be represented exactly by the control scheduler
+remain legacy-owned and are projected into the same Scheduled dashboard. A
+stable-id dashboard dedupe and control-first migration order ensure that no
+record is shown or executed twice during the two-file transition.
 
 ## 1. Product decision
 
@@ -185,11 +194,11 @@ definition store -> recurrence calculation -> scheduler loop -> run dispatcher
 
 ### Persistence
 
-Store task definitions and the bounded ledger in a separate atomic file under
-the daemon state directory, for example `scheduled-tasks.json`. Do not continue
-expanding the closed `daemon-state.json` structure with independently growing
-run history. Use schema versioning, write-to-temp plus rename, size limits, and
-forward-compatible optional fields.
+Store canonical task definitions and the bounded ledger in the schema-versioned,
+atomic `agent-control.json` file. `scheduled-tasks.json` is retired persistence
+read only through the compatibility API and migration layer; it must not receive
+new definitions from the Scheduled UI. Both remain separate from the closed
+`daemon-state.json` structure.
 
 On restoration:
 
@@ -273,7 +282,10 @@ POST   /api/scheduled-tasks/{task_id}/run
 GET    /api/scheduled-tasks/{task_id}/runs
 ```
 
-Pause and resume are status patches, keeping update semantics in one place.
+These routes remain a compatibility contract for legacy clients and records.
+New desktop creation and all conversational creation use `control.get` and
+`control.execute`; pause/resume, run-now, history, and definition edits are
+routed to the store that owns the row.
 
 ### Encrypted remote RPC
 
@@ -345,6 +357,11 @@ Requirements:
 - loading, empty, no-search-results, unsupported-host, and failure states;
 - keyboard focus, screen-reader names, reduced-motion behavior, and no
   hover-only actions.
+
+This is the only desktop management surface. Agent-control settings configure
+access and safety defaults, but do not contain a second automation list.
+Control-state events refresh local rows immediately; paired-host events carry
+the owning daemon's control revision and refetch that host.
 
 The **New task** flow should be a focused sheet or page, not an overloaded
 single modal. Fields:

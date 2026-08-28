@@ -284,8 +284,8 @@ async fn execute_run(app: &AppState, run_id: &str) {
                 .collect(),
             provider: Some(automation.target.provider.clone()),
             model_id: automation.target.model_id.clone(),
-            reasoning_effort: None,
-            approval_policy: None,
+            reasoning_effort: automation.target.reasoning_effort.clone(),
+            approval_policy: automation.target.approval_policy.clone(),
             service_tier: None,
             permission_mode: automation.target.permission_mode.clone(),
             sandbox_mode: automation.target.sandbox_mode.clone(),
@@ -580,11 +580,15 @@ async fn start_automation_thread(
             workspace_id: workspace_id.to_string(),
             provider: Some(automation.target.provider.clone()),
             model_id: automation.target.model_id.clone(),
-            collaboration_mode_id: None,
-            approval_policy: None,
+            collaboration_mode_id: automation.target.collaboration_mode_id.clone(),
+            approval_policy: automation.target.approval_policy.clone(),
             sandbox_mode: automation.target.sandbox_mode.clone(),
             permission_mode: automation.target.permission_mode.clone(),
-            isolation: falcondeck_core::ThreadIsolation::ProjectFolder,
+            isolation: automation
+                .target
+                .isolation
+                .clone()
+                .unwrap_or(falcondeck_core::ThreadIsolation::ProjectFolder),
             handoff_from: None,
         })
         .await;

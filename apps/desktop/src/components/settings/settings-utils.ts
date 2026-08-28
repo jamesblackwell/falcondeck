@@ -7,7 +7,6 @@ import type {
 import {
   Blocks,
   Bot,
-  CalendarClock,
   Keyboard,
   Mic,
   Palette,
@@ -28,7 +27,6 @@ export type SettingsSectionId =
   | "servers"
   | "agents"
   | "agent-control"
-  | "automations"
   | "harnesses"
   | "usage"
   | "connectors"
@@ -79,12 +77,6 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Agent control",
     description: "Conversational control and automations access",
     icon: ShieldCheck,
-  },
-  {
-    id: "automations",
-    label: "Automations",
-    description: "Scheduled agent instructions and run history",
-    icon: CalendarClock,
   },
   {
     id: "harnesses",

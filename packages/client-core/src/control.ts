@@ -55,8 +55,14 @@ export type AutomationTarget = {
   model_id?: string | null;
   permission_mode?: string | null;
   sandbox_mode?: string | null;
+  reasoning_effort?: string | null;
+  collaboration_mode_id?: string | null;
+  approval_policy?: string | null;
+  isolation?: "project_folder" | "isolated" | null;
   selected_skills?: string[];
 };
+
+export type AutomationRunTrigger = "scheduled" | "late" | "manual";
 
 export type AutomationRunStatus =
   | "queued"
@@ -102,6 +108,7 @@ export type AutomationRun = {
   automation_name: string;
   automation_revision: number;
   status: AutomationRunStatus;
+  trigger: AutomationRunTrigger;
   scheduled_for?: string | null;
   queued_at: string;
   started_at?: string | null;
@@ -394,7 +401,13 @@ export function normalizeAutomationRun(value: unknown): AutomationRun | null {
   ) {
     return null;
   }
-  return run as AutomationRun;
+  const trigger =
+    run.trigger === "scheduled" ||
+    run.trigger === "late" ||
+    run.trigger === "manual"
+      ? run.trigger
+      : "scheduled";
+  return { ...run, trigger } as AutomationRun;
 }
 
 export function normalizeAgentControlSettings(

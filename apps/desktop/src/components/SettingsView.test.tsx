@@ -52,4 +52,9 @@ describe('SettingsView deep links', () => {
     rerender(<SettingsView {...props} initialSection="keyboard" sectionRequestKey={1} />)
     expect(screen.getByRole('heading', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
   })
+
+  it('does not expose a second settings-only automation manager', () => {
+    render(<SettingsView {...props} />)
+    expect(screen.queryByRole('button', { name: /Automations/ })).not.toBeInTheDocument()
+  })
 })

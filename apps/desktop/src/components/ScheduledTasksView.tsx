@@ -1,5 +1,7 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -22,6 +24,9 @@ import {
 
 import type {
   AgentProvider,
+  AgentControlSettings,
+  Automation,
+  AutomationRun,
   CreateScheduledTaskPayload,
   DaemonSnapshot,
   ScheduledTaskDetail,
@@ -34,7 +39,15 @@ import { approvalPolicyForProvider } from "@falcondeck/client-core";
 import { Button, Popover, cn } from "@falcondeck/ui";
 
 import type { HostManager, HostScopedApi, HostView } from "../hosts";
+import { useControlStateEvents } from "../hooks/useControlStateEvents";
 import { utcToWallTime, wallTimeToUtc } from "../scheduled-time";
+import {
+  AutomationEditor,
+} from "./AutomationsView";
+import {
+  automationDraftArguments,
+  automationDraftFrom,
+} from "./automation-draft";
 
 type Toast = (toast: {
   variant: "default" | "success" | "danger";
@@ -49,15 +62,31 @@ type TaskEntry = {
   supported: boolean;
   workspaces: WorkspaceSummary[];
   task: ScheduledTaskSummary;
+  automation: Automation | null;
 };
 
-type EditorState =
+type LegacyEditorState =
   | { kind: "create" }
   | { kind: "edit"; entry: TaskEntry; detail: ScheduledTaskDetail }
   | null;
 
+type AutomationEditorSelection = {
+  entry: TaskEntry;
+  automation: Automation;
+};
+
 function taskEntryKey(entry: TaskEntry) {
   return `${entry.hostId ?? "local"}:${entry.task.id}`;
+}
+
+function controlErrorMessage(
+  response: Awaited<ReturnType<HostScopedApi["controlExecute"]>>,
+) {
+  return (
+    response.error?.suggested_action ??
+    response.error?.message ??
+    "FalconDeck could not complete the automation action."
+  );
 }
 
 function handleMenuKeyDown(
@@ -88,6 +117,16 @@ function handleMenuKeyDown(
 const inputClass =
   "fd-focus w-full rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-3 py-2 text-[length:var(--fd-text-sm)] text-fg-primary placeholder:text-fg-muted";
 
+const RRULE_TO_CRON_DAY: Record<string, string> = {
+  MO: "MON",
+  TU: "TUE",
+  WE: "WED",
+  TH: "THU",
+  FR: "FRI",
+  SA: "SAT",
+  SU: "SUN",
+};
+
 function hostApi(
   hostId: string | null,
   localApi: HostScopedApi | null,
@@ -98,7 +137,19 @@ function hostApi(
     : localApi;
 }
 
-function humanSchedule(task: ScheduledTaskSummary) {
+function humanSchedule(entry: TaskEntry) {
+  const automation = entry.automation;
+  if (automation) {
+    if (automation.resolved_schedule) return automation.resolved_schedule;
+    if (automation.trigger.kind === "cron") {
+      return `Cron ${automation.trigger.expression} (${automation.trigger.timezone})`;
+    }
+    if (automation.trigger.kind === "interval") {
+      return `Every ${Math.round(automation.trigger.every_seconds / 60)} minutes`;
+    }
+    return `Once · ${new Date(automation.trigger.run_at).toLocaleString()}`;
+  }
+  const task = entry.task;
   if (task.schedule.kind === "once") {
     return `Once · ${new Date(task.schedule.run_at).toLocaleString(undefined, { timeZone: task.schedule.timezone })} (${task.schedule.timezone})`;
   }
@@ -121,11 +172,73 @@ function humanSchedule(task: ScheduledTaskSummary) {
   return `Daily at ${time} (${task.schedule.timezone})`;
 }
 
-function nextRunLabel(task: ScheduledTaskSummary) {
+function nextRunLabel(entry: TaskEntry) {
+  if (entry.automation?.state === "failed") return "Failed";
+  const task = entry.task;
   if (task.status === "paused") return "Paused";
   if (task.status === "completed") return "Completed";
   if (!task.next_run_at) return "Not scheduled";
   return `Next ${new Date(task.next_run_at).toLocaleString(undefined, { timeZone: task.schedule.timezone })}`;
+}
+
+function automationStatus(automation: Automation): ScheduledTaskSummary["status"] {
+  if (automation.state === "enabled") return "active";
+  if (automation.state === "paused" || automation.state === "failed")
+    return "paused";
+  return "completed";
+}
+
+function automationAsScheduledTask(
+  automation: Automation,
+  workspaces: WorkspaceSummary[],
+): ScheduledTaskSummary {
+  const workspace = workspaces.find(
+    (candidate) => candidate.path === automation.target.workspace_path,
+  );
+  const timezone =
+    automation.trigger.kind === "cron" ? automation.trigger.timezone : "UTC";
+  const schedule: ScheduledTaskSummary["schedule"] =
+    automation.trigger.kind === "once"
+      ? { kind: "once", run_at: automation.trigger.run_at, timezone }
+      : {
+          kind: "recurring",
+          rrule:
+            automation.trigger.kind === "interval"
+              ? `FREQ=MINUTELY;INTERVAL=${Math.max(1, Math.round(automation.trigger.every_seconds / 60))}`
+              : "FREQ=DAILY;BYHOUR=0;BYMINUTE=0",
+          timezone,
+        };
+  return {
+    id: automation.id,
+    title: automation.name,
+    prompt_preview: automation.description ?? "",
+    status: automationStatus(automation),
+    schedule,
+    workspace_id: workspace?.id ?? "",
+    provider: automation.target.provider,
+    next_run_at: automation.next_run_at,
+    last_run: automation.latest_outcome
+      ? {
+          id: `latest-${automation.id}`,
+          task_id: automation.id,
+          status:
+            automation.latest_outcome.status === "succeeded_no_action"
+              ? "succeeded"
+              : automation.latest_outcome.status === "skipped_overlap" ||
+                  automation.latest_outcome.status === "skipped_dependency"
+                ? "skipped"
+                : automation.latest_outcome.status === "cancelled"
+                  ? "interrupted"
+                  : automation.latest_outcome.status,
+          trigger: "scheduled",
+          scheduled_for: automation.latest_outcome.finished_at,
+          completed_at: automation.latest_outcome.finished_at,
+          workspace_id: workspace?.id ?? "",
+          preview: automation.latest_outcome.preview,
+        }
+      : null,
+    updated_at: automation.updated_at,
+  };
 }
 
 function recurringParts(detail: ScheduledTaskDetail | null) {
@@ -150,7 +263,7 @@ function TaskEditor({
   onSaved,
   onToast,
 }: {
-  state: Exclude<EditorState, null>;
+  state: Exclude<LegacyEditorState, null>;
   localSnapshot: DaemonSnapshot | null;
   hosts: HostView[];
   localApi: HostScopedApi | null;
@@ -305,27 +418,66 @@ function TaskEditor({
         };
         await api.updateScheduledTask(editing.id, patch);
       } else {
-        const created = await api.createScheduledTask({
-          title,
-          prompt,
-          workspace_id: workspaceId,
-          provider,
-          schedule,
-          isolation,
-          sandbox_mode: sandboxMode,
-          approval_policy: approvalPolicyForProvider(
-            provider,
-            permissionMode || null,
-          ),
-          permission_mode: permissionMode || null,
-          model_id: modelId || null,
-          reasoning_effort: reasoningEffort || null,
-          collaboration_mode_id: collaborationModeId || null,
-          selected_skills: availableSkills
-            .filter((skill) => selectedSkillIds.has(skill.id))
-            .map((skill) => ({ skill_id: skill.id, alias: skill.alias })),
+        if (!workspace) throw new Error("Select a project for this automation.");
+        const trigger =
+          schedule.kind === "once"
+            ? { kind: "once", run_at: schedule.run_at }
+            : {
+                kind: "cron",
+                expression: `${minute ?? 0} ${hour ?? 0} * * ${frequency === "weekly" ? [...weekdays].map((day) => RRULE_TO_CRON_DAY[day] ?? day).join(",") || "MON" : "*"}`,
+                timezone,
+              };
+        const response = await api.controlExecute({
+          operation: "automation.create",
+          arguments: {
+            name: title.trim(),
+            trigger,
+            task: { kind: "prompt", instruction: prompt },
+            target: {
+              workspace_path: workspace.path,
+              provider,
+              thread: { kind: "new_each_run" },
+              model_id: modelId || null,
+              reasoning_effort: reasoningEffort || null,
+              collaboration_mode_id: collaborationModeId || null,
+              approval_policy: approvalPolicyForProvider(
+                provider,
+                permissionMode || null,
+              ),
+              permission_mode: permissionMode || null,
+              sandbox_mode: sandboxMode,
+              isolation,
+              selected_skills: availableSkills
+                .filter((skill) => selectedSkillIds.has(skill.id))
+                .map((skill) => skill.id),
+            },
+            required_connectors: [],
+            concurrency_policy: "queue_one",
+            misfire_policy:
+              schedule.kind === "once" ? "run_once" : "skip",
+          },
         });
-        if (runAfterSave) await api.runScheduledTask(created.id);
+        if (!response.ok) {
+          throw new Error(
+            response.error?.suggested_action ??
+              response.error?.message ??
+              "FalconDeck could not create the automation.",
+          );
+        }
+        const created = response.data as Automation | undefined;
+        if (runAfterSave && created?.id) {
+          const runResponse = await api.controlExecute({
+            operation: "automation.run_now",
+            arguments: { automation_id: created.id },
+          });
+          if (!runResponse.ok) {
+            throw new Error(
+              runResponse.error?.suggested_action ??
+                runResponse.error?.message ??
+                "The automation was created but could not be run now.",
+            );
+          }
+        }
       }
       await manager.connection(hostId ?? "")?.refresh();
       onToast({
@@ -825,6 +977,7 @@ function TaskEditor({
 export function ScheduledTasksView({
   localSnapshot,
   localApi,
+  localBaseUrl,
   hosts,
   manager,
   onRefreshLocal,
@@ -834,6 +987,7 @@ export function ScheduledTasksView({
 }: {
   localSnapshot: DaemonSnapshot | null;
   localApi: HostScopedApi | null;
+  localBaseUrl: string | null;
   hosts: HostView[];
   manager: HostManager;
   onRefreshLocal: () => Promise<void>;
@@ -850,7 +1004,20 @@ export function ScheduledTasksView({
   const [selectedRuns, setSelectedRuns] = useState<ScheduledTaskRunSummary[]>(
     [],
   );
-  const [editor, setEditor] = useState<EditorState>(null);
+  const [selectedAutomation, setSelectedAutomation] =
+    useState<Automation | null>(null);
+  const [selectedAutomationRuns, setSelectedAutomationRuns] = useState<
+    AutomationRun[]
+  >([]);
+  const [editor, setEditor] = useState<LegacyEditorState>(null);
+  const [automationEditor, setAutomationEditor] =
+    useState<AutomationEditorSelection | null>(null);
+  const [automationsByHost, setAutomationsByHost] = useState<
+    Record<
+      string,
+      { automations: Automation[]; settings: AgentControlSettings | null }
+    >
+  >({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [menuKey, setMenuKey] = useState<string | null>(null);
   const detailRequest = useRef(0);
@@ -861,12 +1028,83 @@ export function ScheduledTasksView({
     setSelected(null);
     setSelectedDetail(null);
     setSelectedRuns([]);
+    setSelectedAutomation(null);
+    setSelectedAutomationRuns([]);
   };
 
   const closeEditor = () => {
     editorRequest.current += 1;
     setEditor(null);
   };
+
+  const loadAutomations = useCallback(
+    async (key: string, scopedApi: HostScopedApi) => {
+      try {
+        const [automationResponse, settingsResponse] = await Promise.all([
+          scopedApi.controlGet({ resource: "automations", limit: 100 }),
+          scopedApi
+            .controlGet({ resource: "agent_control.settings" })
+            .catch(() => null),
+        ]);
+        const automations = Array.isArray(automationResponse.data)
+          ? (automationResponse.data as Automation[]).filter(
+              (automation) =>
+                typeof automation?.id === "string" &&
+                typeof automation?.name === "string" &&
+                typeof automation?.revision === "number",
+            )
+          : [];
+        setAutomationsByHost((current) => ({
+          ...current,
+          [key]: {
+            automations,
+            settings: settingsResponse
+              ? (settingsResponse.data as AgentControlSettings)
+              : null,
+          },
+        }));
+      } catch (error) {
+        onToast({
+          variant: "danger",
+          title: "Could not load scheduled automations",
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [onToast],
+  );
+
+  useEffect(() => {
+    if (localApi) void loadAutomations("local", localApi);
+  }, [loadAutomations, localApi]);
+
+  const remoteControlRevisionKey = hosts
+    .map(
+      (host) =>
+        `${host.id}:${host.controlRevision ?? 0}:${host.status}:${Boolean(host.presence?.daemon_connected)}`,
+    )
+    .join("|");
+  useEffect(() => {
+    for (const host of hosts) {
+      if (
+        host.status !== "encrypted" ||
+        !host.presence?.daemon_connected
+      ) {
+        continue;
+      }
+      const scopedApi = manager.connection(host.id)?.scheduledApi();
+      if (scopedApi) void loadAutomations(host.id, scopedApi);
+    }
+  }, [hosts, loadAutomations, manager, remoteControlRevisionKey]);
+
+  useControlStateEvents(localBaseUrl, (_revision, domains) => {
+    if (
+      localApi &&
+      (domains.includes("automations") || domains.includes("runs"))
+    ) {
+      void loadAutomations("local", localApi);
+    }
+  });
 
   const openCreateEditor = () => {
     editorRequest.current += 1;
@@ -882,6 +1120,7 @@ export function ScheduledTasksView({
         supported: localSnapshot?.daemon.capabilities?.scheduled_tasks ?? false,
         workspaces: localSnapshot?.workspaces ?? [],
         task,
+        automation: null,
       }),
     );
     const remote = hosts.flatMap((host): TaskEntry[] =>
@@ -894,10 +1133,41 @@ export function ScheduledTasksView({
         supported: host.snapshot?.daemon.capabilities?.scheduled_tasks ?? false,
         workspaces: host.snapshot?.workspaces ?? [],
         task,
+        automation: null,
       })),
     );
-    return [...local, ...remote];
-  }, [hosts, localApi, localSnapshot]);
+    const automationEntries = Object.entries(automationsByHost).flatMap(
+      ([hostKey, state]): TaskEntry[] => {
+        const host = hostKey === "local"
+          ? null
+          : (hosts.find((candidate) => candidate.id === hostKey) ?? null);
+        const snapshot = host?.snapshot ?? localSnapshot;
+        const workspaces = snapshot?.workspaces ?? [];
+        return state.automations.map((automation) => ({
+          hostId: host?.id ?? null,
+          hostName: host?.name ?? "This Mac",
+          online: host
+            ? host.status === "encrypted" &&
+              Boolean(host.presence?.daemon_connected)
+            : Boolean(localApi),
+          // Successfully loading the record proves this daemon exposes the
+          // control API even if an older snapshot predates that capability.
+          supported: true,
+          workspaces,
+          task: automationAsScheduledTask(automation, workspaces),
+          automation,
+        }));
+      },
+    );
+    const automationKeys = new Set(
+      automationEntries.map((entry) => taskEntryKey(entry)),
+    );
+    return [
+      ...local.filter((entry) => !automationKeys.has(taskEntryKey(entry))),
+      ...remote.filter((entry) => !automationKeys.has(taskEntryKey(entry))),
+      ...automationEntries,
+    ];
+  }, [automationsByHost, hosts, localApi, localSnapshot]);
   const visible = entries.filter((entry) => {
     const workspace = entry.workspaces.find(
       (item) => item.id === entry.task.workspace_id,
@@ -933,11 +1203,6 @@ export function ScheduledTasksView({
     const selectionVersion = detailRequest.current;
     setBusyKey(taskEntryKey(entry));
     try {
-      if (action === "run") await api.runScheduledTask(entry.task.id);
-      if (action === "toggle")
-        await api.updateScheduledTask(entry.task.id, {
-          status: entry.task.status === "paused" ? "active" : "paused",
-        });
       if (action === "delete") {
         if (
           !window.confirm(
@@ -945,17 +1210,71 @@ export function ScheduledTasksView({
           )
         )
           return;
-        await api.deleteScheduledTask(entry.task.id);
-        closeDetail();
       }
-      if (entry.hostId) await manager.connection(entry.hostId)?.refresh();
-      else await onRefreshLocal();
+      if (entry.automation) {
+        const operation =
+          action === "run"
+            ? "automation.run_now"
+            : action === "delete"
+              ? "automation.delete"
+              : entry.automation.state === "paused"
+                ? "automation.resume"
+                : "automation.pause";
+        const response = await api.controlExecute({
+          operation,
+          arguments: { automation_id: entry.automation.id },
+          ...(action === "run"
+            ? {}
+            : { expected_revision: entry.automation.revision }),
+        });
+        if (!response.ok) throw new Error(controlErrorMessage(response));
+        if (action === "delete") closeDetail();
+        await loadAutomations(entry.hostId ?? "local", api);
+      } else {
+        if (action === "run") await api.runScheduledTask(entry.task.id);
+        if (action === "toggle") {
+          await api.updateScheduledTask(entry.task.id, {
+            status: entry.task.status === "paused" ? "active" : "paused",
+          });
+        }
+        if (action === "delete") {
+          await api.deleteScheduledTask(entry.task.id);
+          closeDetail();
+        }
+        if (entry.hostId) await manager.connection(entry.hostId)?.refresh();
+        else await onRefreshLocal();
+      }
       if (
         action !== "delete" &&
         selected &&
         taskEntryKey(selected) === taskEntryKey(entry) &&
         detailRequest.current === selectionVersion
       ) {
+        if (entry.automation) {
+          const [detailResponse, runsResponse] = await Promise.all([
+            api.controlGet({ resource: "automation", id: entry.automation.id }),
+            api.controlGet({
+              resource: "automation.runs",
+              id: entry.automation.id,
+              limit: 100,
+            }),
+          ]);
+          if (detailRequest.current === selectionVersion) {
+            const detail = detailResponse.data as Automation;
+            setSelected({
+              ...entry,
+              task: automationAsScheduledTask(detail, entry.workspaces),
+              automation: detail,
+            });
+            setSelectedAutomation(detail);
+            setSelectedAutomationRuns(
+              Array.isArray(runsResponse.data)
+                ? (runsResponse.data as AutomationRun[])
+                : [],
+            );
+          }
+          return;
+        }
         const [detail, runs] = await Promise.all([
           api.scheduledTask(entry.task.id),
           api.scheduledTaskRuns(entry.task.id),
@@ -984,6 +1303,19 @@ export function ScheduledTasksView({
     editorRequest.current = request;
     setBusyKey(taskEntryKey(entry));
     try {
+      if (entry.automation) {
+        const response = await api.controlGet({
+          resource: "automation",
+          id: entry.automation.id,
+        });
+        if (editorRequest.current === request) {
+          setAutomationEditor({
+            entry,
+            automation: response.data as Automation,
+          });
+        }
+        return;
+      }
       const detail = await api.scheduledTask(entry.task.id);
       if (editorRequest.current === request) {
         setEditor({ kind: "edit", entry, detail });
@@ -1006,17 +1338,42 @@ export function ScheduledTasksView({
     setSelected(entry);
     setSelectedDetail(null);
     setSelectedRuns([]);
+    setSelectedAutomation(null);
+    setSelectedAutomationRuns([]);
     if (!entry.online || !entry.supported) return;
     const api = hostApi(entry.hostId, localApi, manager);
     if (!api) return;
-    void Promise.all([
-      api.scheduledTask(entry.task.id),
-      api.scheduledTaskRuns(entry.task.id),
-    ])
-      .then(([detail, runs]) => {
+    const requestDetails = entry.automation
+      ? Promise.all([
+          api.controlGet({ resource: "automation", id: entry.automation.id }),
+          api.controlGet({
+            resource: "automation.runs",
+            id: entry.automation.id,
+            limit: 100,
+          }),
+        ])
+      : Promise.all([
+          api.scheduledTask(entry.task.id),
+          api.scheduledTaskRuns(entry.task.id),
+        ]);
+    void requestDetails
+      .then(([detailResponse, runsResponse]) => {
         if (detailRequest.current !== request) return;
-        setSelectedDetail(detail);
-        setSelectedRuns(runs);
+        if (entry.automation) {
+          setSelectedAutomation(
+            (detailResponse as Awaited<ReturnType<HostScopedApi["controlGet"]>>)
+              .data as Automation,
+          );
+          const data = (
+            runsResponse as Awaited<ReturnType<HostScopedApi["controlGet"]>>
+          ).data;
+          setSelectedAutomationRuns(
+            Array.isArray(data) ? (data as AutomationRun[]) : [],
+          );
+        } else {
+          setSelectedDetail(detailResponse as ScheduledTaskDetail);
+          setSelectedRuns(runsResponse as ScheduledTaskRunSummary[]);
+        }
       })
       .catch((error) => {
         if (detailRequest.current !== request) return;
@@ -1197,7 +1554,7 @@ export function ScheduledTasksView({
                 >
                   <h2 className="truncate font-medium">{entry.task.title}</h2>
                   <p className="mt-1 truncate text-sm text-fg-muted">
-                    {humanSchedule(entry.task)} · {nextRunLabel(entry.task)} ·{" "}
+                    {humanSchedule(entry)} · {nextRunLabel(entry)} ·{" "}
                     {workspace?.path.split("/").filter(Boolean).at(-1) ??
                       "Unknown project"}{" "}
                     · {entry.task.provider} · {entry.hostName}
@@ -1363,22 +1720,67 @@ export function ScheduledTasksView({
           <dl className="mt-6 space-y-4 text-sm">
             <div>
               <dt className="text-fg-muted">Schedule</dt>
-              <dd className="mt-1">{humanSchedule(selected.task)}</dd>
+              <dd className="mt-1">{humanSchedule(selected)}</dd>
             </div>
             <div>
               <dt className="text-fg-muted">Next run</dt>
-              <dd className="mt-1">{nextRunLabel(selected.task)}</dd>
+              <dd className="mt-1">{nextRunLabel(selected)}</dd>
             </div>
             <div>
               <dt className="text-fg-muted">Provider</dt>
               <dd className="mt-1 capitalize">
                 {selected.task.provider}
-                {selectedDetail?.model_id
-                  ? ` · ${selectedDetail.model_id}`
+                {(selectedAutomation?.target.model_id ?? selectedDetail?.model_id)
+                  ? ` · ${selectedAutomation?.target.model_id ?? selectedDetail?.model_id}`
                   : ""}
               </dd>
             </div>
-            {selectedDetail ? (
+            {selectedAutomation ? (
+              <>
+                <div>
+                  <dt className="text-fg-muted">Prompt</dt>
+                  <dd className="mt-1 whitespace-pre-wrap text-fg-secondary">
+                    {selectedAutomation.task.instruction}
+                  </dd>
+                  {selectedAutomation.task.kind === "conditional_prompt" ? (
+                    <dd className="mt-1 text-xs text-fg-muted">
+                      No-action marker: {selectedAutomation.task.no_action_marker}
+                    </dd>
+                  ) : null}
+                </div>
+                <div>
+                  <dt className="text-fg-muted">Execution</dt>
+                  <dd className="mt-1 text-fg-secondary">
+                    {selectedAutomation.target.isolation === "isolated"
+                      ? "Isolated checkout"
+                      : "Project folder"}
+                    {selectedAutomation.target.sandbox_mode
+                      ? ` · ${selectedAutomation.target.sandbox_mode}`
+                      : ""}
+                    {selectedAutomation.target.permission_mode
+                      ? ` · ${selectedAutomation.target.permission_mode}`
+                      : ""}
+                    {` · ${selectedAutomation.target.thread.kind.replaceAll("_", " ")}`}
+                  </dd>
+                </div>
+                {selectedAutomation.target.selected_skills?.length ? (
+                  <div>
+                    <dt className="text-fg-muted">Skills</dt>
+                    <dd className="mt-1 text-fg-secondary">
+                      {selectedAutomation.target.selected_skills.join(", ")}
+                    </dd>
+                  </div>
+                ) : null}
+                {selectedAutomation.required_connectors.length ? (
+                  <div>
+                    <dt className="text-fg-muted">Required connectors</dt>
+                    <dd className="mt-1 text-fg-secondary">
+                      {selectedAutomation.required_connectors.join(", ")}
+                    </dd>
+                  </div>
+                ) : null}
+              </>
+            ) : selectedDetail ? (
               <>
                 <div>
                   <dt className="text-fg-muted">Prompt</dt>
@@ -1431,16 +1833,22 @@ export function ScheduledTasksView({
               </div>
             ) : null}
           </dl>
-          {selected.task.last_run?.thread_id ? (
+          {(selectedAutomationRuns.find((run) => run.thread_id)?.thread_id ??
+            selected.task.last_run?.thread_id) ? (
             <Button
               className="mt-6 w-full"
               variant="outline"
-              onClick={() =>
+              onClick={() => {
+                const automationRun = selectedAutomationRuns.find(
+                  (run) => run.thread_id,
+                );
                 onOpenThread(
-                  selected.task.workspace_id,
-                  selected.task.last_run!.thread_id!,
-                )
-              }
+                  automationRun?.runtime_workspace_id ??
+                    selected.task.workspace_id,
+                  automationRun?.thread_id ??
+                    selected.task.last_run!.thread_id!,
+                );
+              }}
             >
               Open latest thread
             </Button>
@@ -1515,6 +1923,45 @@ export function ScheduledTasksView({
               </ol>
             </section>
           ) : null}
+          {selectedAutomationRuns.length ? (
+            <section className="mt-8">
+              <h3 className="text-sm font-medium">Recent runs</h3>
+              <ol className="mt-2 divide-y divide-border-subtle">
+                {selectedAutomationRuns.map((run) => (
+                  <li key={run.id} className="py-3 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="capitalize">
+                        {run.status.replaceAll("_", " ")}
+                      </span>
+                      <time className="text-xs text-fg-muted">
+                        {new Date(
+                          run.scheduled_for ?? run.queued_at,
+                        ).toLocaleString()}
+                      </time>
+                    </div>
+                    {run.outcome_preview ?? run.error?.message ? (
+                      <p className="mt-1 line-clamp-2 text-fg-secondary">
+                        {run.outcome_preview ?? run.error?.message}
+                      </p>
+                    ) : null}
+                    {run.thread_id && run.runtime_workspace_id ? (
+                      <button
+                        className="fd-focus mt-1 rounded text-xs text-info hover:underline"
+                        onClick={() =>
+                          onOpenThread(
+                            run.runtime_workspace_id!,
+                            run.thread_id!,
+                          )
+                        }
+                      >
+                        Open thread
+                      </button>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+            </section>
+          ) : null}
           {!selected.supported ? (
             <p className="mt-4 rounded bg-surface-2 p-3 text-sm text-warning">
               This daemon does not support scheduled tasks yet. Upgrade
@@ -1539,9 +1986,80 @@ export function ScheduledTasksView({
           onSaved={() => {
             closeEditor();
             void onRefreshLocal();
+            if (localApi) void loadAutomations("local", localApi);
+            for (const host of hosts) {
+              const scopedApi = manager.connection(host.id)?.scheduledApi();
+              if (scopedApi) void loadAutomations(host.id, scopedApi);
+            }
           }}
           onToast={onToast}
         />
+      ) : null}
+      {automationEditor ? (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-black/35"
+          role="presentation"
+          onMouseDown={() => setAutomationEditor(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Edit ${automationEditor.automation.name}`}
+            className="h-full w-full max-w-3xl overflow-y-auto border-l border-border-subtle bg-surface-1 p-6 shadow-[var(--fd-shadow-lg)]"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <AutomationEditor
+              key={`${automationEditor.automation.id}:${automationEditor.automation.revision}`}
+              state={{
+                kind: "edit",
+                id: automationEditor.automation.id,
+                revision: automationEditor.automation.revision,
+                draft: automationDraftFrom(automationEditor.automation),
+              }}
+              allowElevated={
+                automationsByHost[
+                  automationEditor.entry.hostId ?? "local"
+                ]?.settings?.allow_elevated_automations ?? false
+              }
+              onCancel={() => setAutomationEditor(null)}
+              onSubmit={async (draft, includeTrigger) => {
+                const api = hostApi(
+                  automationEditor.entry.hostId,
+                  localApi,
+                  manager,
+                );
+                if (!api) return;
+                const payload = automationDraftArguments(draft);
+                if (!includeTrigger) delete payload.trigger;
+                const response = await api.controlExecute({
+                  operation: "automation.update",
+                  arguments: {
+                    automation_id: automationEditor.automation.id,
+                    ...payload,
+                  },
+                  expected_revision: automationEditor.automation.revision,
+                });
+                if (!response.ok) {
+                  onToast({
+                    variant: "danger",
+                    title: "Could not save scheduled task",
+                    description: controlErrorMessage(response),
+                  });
+                  return;
+                }
+                setAutomationEditor(null);
+                await loadAutomations(
+                  automationEditor.entry.hostId ?? "local",
+                  api,
+                );
+                onToast({
+                  variant: "success",
+                  title: "Scheduled task updated",
+                });
+              }}
+            />
+          </section>
+        </div>
       ) : null}
     </main>
   );

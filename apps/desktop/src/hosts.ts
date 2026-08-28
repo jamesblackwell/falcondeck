@@ -20,6 +20,10 @@ import {
   DEFAULT_REMOTE_RELAY_URL,
   type ConversationItem,
   type CompactThreadPayload,
+  type ControlExecuteRequest,
+  type ControlExecuteResponse,
+  type ControlGetRequest,
+  type ControlGetResponse,
   type CreateScheduledTaskPayload,
   type DaemonSnapshot,
   type EventEnvelope,
@@ -93,6 +97,8 @@ export type HostView = {
   presence: MachinePresence | null
   snapshot: DaemonSnapshot | null
   lastError: string | null
+  /** Latest agent-control store revision observed on the host event stream. */
+  controlRevision?: number
 }
 
 export function loadStoredHosts(): StoredHost[] {
@@ -223,6 +229,8 @@ export type HostScopedApi = {
   deleteScheduledTask(taskId: string): Promise<{ ok: boolean; message?: string | null }>
   runScheduledTask(taskId: string): Promise<ScheduledTaskRunSummary>
   scheduledTaskRuns(taskId: string): Promise<ScheduledTaskRunSummary[]>
+  controlGet(request: ControlGetRequest): Promise<ControlGetResponse>
+  controlExecute(request: ControlExecuteRequest): Promise<ControlExecuteResponse>
 }
 
 export class HostConnection {
@@ -232,6 +240,7 @@ export class HostConnection {
   status: RemoteHostStatus = 'idle'
   presence: MachinePresence | null = null
   lastError: string | null = null
+  private controlRevision = 0
   private readonly detailCache = new Map<string, ThreadDetail>()
   private readonly onChange: () => void
   private readonly onPersist: () => void
@@ -326,6 +335,9 @@ export class HostConnection {
     for (const event of events) {
       realtimeAudioPlayer.handleEvent(event)
       this.snapshot = applySnapshotEvent(this.snapshot, event)
+      if (event.event.type === 'control-state-changed') {
+        this.controlRevision = event.event.change.store_revision
+      }
       if (event.workspace_id && event.thread_id) {
         const key = `${event.workspace_id}:${event.thread_id}`
         const cached = this.detailCache.get(key)
@@ -641,6 +653,8 @@ export class HostConnection {
       deleteScheduledTask: (taskId) => this.rpc('scheduled.delete', { task_id: taskId }),
       runScheduledTask: (taskId) => this.rpc('scheduled.run', { task_id: taskId }),
       scheduledTaskRuns: (taskId) => this.rpc('scheduled.runs', { task_id: taskId }),
+      controlGet: (request) => this.rpc('control.get', request),
+      controlExecute: (request) => this.rpc('control.execute', request),
     }
   }
 
@@ -658,6 +672,7 @@ export class HostConnection {
       presence: this.presence,
       snapshot: this.snapshot,
       lastError: this.lastError,
+      controlRevision: this.controlRevision,
     }
   }
 }

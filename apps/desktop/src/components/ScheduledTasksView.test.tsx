@@ -1,7 +1,10 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { DaemonSnapshot } from "@falcondeck/client-core";
+import type {
+  Automation,
+  DaemonSnapshot,
+} from "@falcondeck/client-core";
 
 import type { HostManager, HostScopedApi } from "../hosts";
 import { ScheduledTasksView } from "./ScheduledTasksView";
@@ -64,6 +67,7 @@ function setup(
   onCreateWithAgent: ReturnType<typeof vi.fn> | null = vi.fn(),
 ) {
   const runScheduledTask = vi.fn().mockResolvedValue({});
+  const createScheduledTask = vi.fn().mockResolvedValue({});
   const scheduledTask = vi.fn().mockResolvedValue({
     ...snapshot.scheduled_tasks?.[0],
     prompt: "Summarize yesterday’s changes",
@@ -72,12 +76,24 @@ function setup(
     created_at: "2026-08-13T08:00:00Z",
   });
   const scheduledTaskRuns = vi.fn().mockResolvedValue([]);
+  // Legacy-only tests do not need the asynchronous control projection. Keep
+  // it pending so those synchronous assertions do not race an unrelated
+  // effect; automation tests provide a resolved override and await it.
+  const controlGet = vi.fn().mockReturnValue(new Promise(() => {}));
+  const controlExecute = vi.fn().mockResolvedValue({
+    ok: true,
+    operation: "automation.run_now",
+    data: {},
+  });
   const localApi = {
     runScheduledTask,
+    createScheduledTask,
     scheduledTask,
     scheduledTaskRuns,
     updateScheduledTask: vi.fn().mockResolvedValue({}),
     deleteScheduledTask: vi.fn().mockResolvedValue({ ok: true }),
+    controlGet,
+    controlExecute,
     ...apiOverrides,
   } as unknown as HostScopedApi;
   const onRefreshLocal = vi.fn().mockResolvedValue(undefined);
@@ -85,6 +101,7 @@ function setup(
     <ScheduledTasksView
       localSnapshot={snapshot}
       localApi={localApi}
+      localBaseUrl="http://daemon.test"
       hosts={[]}
       manager={{ connection: () => null } as unknown as HostManager}
       onRefreshLocal={onRefreshLocal}
@@ -95,11 +112,37 @@ function setup(
   );
   return {
     runScheduledTask,
+    createScheduledTask,
     onRefreshLocal,
     scheduledTask,
+    controlGet,
+    controlExecute,
     onCreateWithAgent,
   };
 }
+
+const conversationalAutomation = {
+  id: "automation-runpod-midday",
+  revision: 3,
+  name: "Alert if ComfyUI is running at midday",
+  state: "enabled",
+  trigger: {
+    kind: "cron",
+    expression: "0 12 * * *",
+    timezone: "Europe/London",
+  },
+  target: {
+    workspace_path: "/Users/james/falcondeck",
+    provider: "codex",
+  },
+  elevated: false,
+  required_connectors: [],
+  concurrency_policy: "skip",
+  misfire_policy: "skip",
+  next_run_at: "2026-08-14T11:00:00Z",
+  updated_at: "2026-08-13T08:00:00Z",
+  resolved_schedule: "At 12:00 daily (Europe/London)",
+} as unknown as Automation;
 
 describe("ScheduledTasksView", () => {
   it("converts one-time wall clocks using the selected IANA timezone", () => {
@@ -129,6 +172,128 @@ describe("ScheduledTasksView", () => {
     });
     expect(screen.getByText("Daily briefing")).toBeInTheDocument();
     expect(screen.queryByText("Paused audit")).not.toBeInTheDocument();
+  });
+
+  it("shows conversational automations beside legacy scheduled tasks", async () => {
+    setup({
+      controlGet: vi.fn().mockResolvedValue({
+        resource: "automations",
+        data: [conversationalAutomation],
+      }),
+    });
+
+    expect(screen.getByText("Daily briefing")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Alert if ComfyUI is running at midday"),
+    ).toBeInTheDocument();
+  });
+
+  it("routes automation actions to the owning control service", async () => {
+    const controlExecute = vi.fn().mockResolvedValue({
+      ok: true,
+      operation: "automation.run_now",
+      data: {},
+    });
+    setup({
+      controlGet: vi.fn().mockResolvedValue({
+        resource: "automations",
+        data: [conversationalAutomation],
+      }),
+      controlExecute,
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Run Alert if ComfyUI is running at midday now",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(controlExecute).toHaveBeenCalledWith({
+        operation: "automation.run_now",
+        arguments: { automation_id: conversationalAutomation.id },
+      }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Pause Alert if ComfyUI is running at midday",
+      }),
+    );
+    await waitFor(() =>
+      expect(controlExecute).toHaveBeenCalledWith({
+        operation: "automation.pause",
+        arguments: { automation_id: conversationalAutomation.id },
+        expected_revision: conversationalAutomation.revision,
+      }),
+    );
+  });
+
+  it("loads conditional prompts and control-owned run history on demand", async () => {
+    const fullAutomation = {
+      ...conversationalAutomation,
+      description: "Only alert when action is needed",
+      task: {
+        kind: "conditional_prompt",
+        instruction: "Check whether the RunPod workstation is still running.",
+        no_action_marker: "FALCONDECK_NO_ACTION",
+      },
+      target: {
+        ...conversationalAutomation.target,
+        thread: { kind: "managed", thread_id: "thread-managed" },
+        permission_mode: "never",
+        sandbox_mode: "workspace-write",
+        isolation: "project_folder",
+        selected_skills: ["ntfy"],
+      },
+      created_at: "2026-08-13T08:00:00Z",
+    } as unknown as Automation;
+    const controlGet = vi.fn().mockImplementation((request) => {
+      if (request.resource === "automations") {
+        return Promise.resolve({ resource: "automations", data: [conversationalAutomation] });
+      }
+      if (request.resource === "automation") {
+        return Promise.resolve({ resource: "automation", data: fullAutomation });
+      }
+      if (request.resource === "automation.runs") {
+        return Promise.resolve({
+          resource: "automation.runs",
+          data: [
+            {
+              id: "run-control-1",
+              automation_id: fullAutomation.id,
+              automation_name: fullAutomation.name,
+              automation_revision: fullAutomation.revision,
+              status: "succeeded_no_action",
+              trigger: "scheduled",
+              queued_at: "2026-08-13T11:00:00Z",
+              finished_at: "2026-08-13T11:00:04Z",
+              runtime_workspace_id: "workspace-1",
+              thread_id: "thread-run-1",
+              outcome_preview: "FALCONDECK_NO_ACTION",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({ resource: request.resource, data: {} });
+    });
+    setup({ controlGet });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open Alert if ComfyUI is running at midday",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Check whether the RunPod workstation is still running.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("No-action marker: FALCONDECK_NO_ACTION"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("succeeded no action")).toBeInTheDocument();
   });
 
   it("runs a task on its owning daemon and refreshes the local snapshot", async () => {
@@ -173,6 +338,40 @@ describe("ScheduledTasksView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
     expect(screen.getByLabelText("Timezone")).toBeInTheDocument();
     expect(screen.getByLabelText("Checkout")).toBeInTheDocument();
+  });
+
+  it("creates manual tasks in the canonical automation store", async () => {
+    const { controlExecute, createScheduledTask } = setup();
+    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Set up manually" }));
+    fireEvent.change(screen.getByPlaceholderText("Scheduled task title"), {
+      target: { value: "Canonical daily task" },
+    });
+    fireEvent.change(
+      screen.getByPlaceholderText("Describe what the agent should do"),
+      { target: { value: "Check the canonical scheduler." } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save task" }));
+
+    await waitFor(() =>
+      expect(controlExecute).toHaveBeenCalledWith(
+        expect.objectContaining({
+          operation: "automation.create",
+          arguments: expect.objectContaining({
+            name: "Canonical daily task",
+            task: {
+              kind: "prompt",
+              instruction: "Check the canonical scheduler.",
+            },
+            target: expect.objectContaining({
+              workspace_path: "/Users/james/falcondeck",
+              provider: "codex",
+            }),
+          }),
+        }),
+      ),
+    );
+    expect(createScheduledTask).not.toHaveBeenCalled();
   });
 
   it("focuses the enabled manual option when agent creation is unavailable", () => {

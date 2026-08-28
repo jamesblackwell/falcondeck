@@ -74,7 +74,14 @@ describe("normalizeAutomationRun", () => {
       status: "succeeded_no_action",
       queued_at: "2026-08-17T07:00:01Z",
     };
-    expect(normalizeAutomationRun(run)).toEqual(run);
+    expect(normalizeAutomationRun(run)).toEqual({
+      ...run,
+      trigger: "scheduled",
+    });
+    expect(normalizeAutomationRun({ ...run, trigger: "manual" })).toEqual({
+      ...run,
+      trigger: "manual",
+    });
     expect(
       normalizeAutomationRun({ ...run, status: "exploded" }),
     ).toBeNull();

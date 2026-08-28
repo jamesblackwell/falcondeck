@@ -5757,6 +5757,7 @@ function AppInner() {
                   <ScheduledTasksView
                     localSnapshot={snapshot}
                     localApi={api as HostScopedApi | null}
+                    localBaseUrl={baseUrl}
                     hosts={remoteHosts.hosts}
                     manager={remoteHosts.manager}
                     onRefreshLocal={async () => {

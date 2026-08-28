@@ -292,7 +292,7 @@ async fn scheduled_task_routes_are_host_scoped_and_validate_workspaces() {
 }
 
 #[tokio::test]
-async fn scheduled_task_crud_survives_a_daemon_restart() {
+async fn legacy_scheduled_task_migrates_to_control_on_restart() {
     if std::process::Command::new("codex")
         .arg("--version")
         .output()
@@ -302,9 +302,10 @@ async fn scheduled_task_crud_survives_a_daemon_restart() {
     }
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
-    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+    let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
         .await
         .unwrap();
+    daemon.wait_until_restored().await.unwrap();
     let client = reqwest::Client::new();
     let workspace = client
         .post(format!("{}/api/workspaces/connect", daemon.base_url()))
@@ -375,9 +376,10 @@ async fn scheduled_task_crud_survives_a_daemon_restart() {
     assert!(runs.is_empty());
     daemon.shutdown().await.unwrap();
 
-    let daemon = spawn_embedded(test_config_with_state_path(state_path))
+    let mut daemon = spawn_embedded(test_config_with_state_path(state_path))
         .await
         .unwrap();
+    daemon.wait_until_restored().await.unwrap();
     let restored = client
         .get(format!("{}/api/scheduled-tasks", daemon.base_url()))
         .send()
@@ -386,22 +388,23 @@ async fn scheduled_task_crud_survives_a_daemon_restart() {
         .json::<Vec<falcondeck_core::ScheduledTaskSummary>>()
         .await
         .unwrap();
-    assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].title, "Paused restart-safe briefing");
-    assert_eq!(
-        restored[0].status,
-        falcondeck_core::ScheduledTaskStatus::Paused
-    );
-    let deleted = client
-        .delete(format!(
-            "{}/api/scheduled-tasks/{}",
-            daemon.base_url(),
-            created.summary.id
-        ))
+    assert!(restored.is_empty(), "the retired executor must be pruned");
+
+    let control: serde_json::Value = client
+        .post(format!("{}/api/control/get", daemon.base_url()))
+        .json(&serde_json::json!({ "resource": "automations" }))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
-    assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+    let rows = control["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], serde_json::json!(created.summary.id));
+    assert_eq!(rows[0]["name"], "Paused restart-safe briefing");
+    assert_eq!(rows[0]["state"], "paused");
+    assert_eq!(rows[0]["trigger"]["kind"], "once");
     daemon.shutdown().await.unwrap();
 }
 

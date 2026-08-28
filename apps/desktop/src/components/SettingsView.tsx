@@ -22,7 +22,6 @@ import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
-import { AutomationsView } from "./AutomationsView";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import { UsagePanel } from "./settings/UsagePanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
@@ -104,8 +103,6 @@ export function SettingsView(props: SettingsViewProps) {
             <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "agent-control" ? (
             <AgentControlPanel baseUrl={props.baseUrl} onToast={props.onToast} />
-          ) : activeSection === "automations" ? (
-            <AutomationsView baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "harnesses" ? (
             <HarnessesPanel
               baseUrl={props.baseUrl}

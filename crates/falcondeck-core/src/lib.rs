@@ -1949,7 +1949,9 @@ pub struct CompactThreadRequest {
 }
 
 /// Working directory a thread's turns run in.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadIsolation {
     /// Run in the workspace folder itself, on whatever branch is checked out.

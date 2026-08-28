@@ -8,6 +8,12 @@ use falcondeck_core::{
     ScheduledTaskSchedule, ScheduledTaskStatus, ScheduledTaskSummary, SendTurnRequest,
     StartThreadRequest, ThreadStatus, TurnInputItem, UnifiedEvent, UpdateScheduledTaskRequest,
     WorkspaceStatus, WorkspaceSummary,
+    control::{
+        Automation, AutomationConcurrencyPolicy, AutomationMisfirePolicy, AutomationOutcomeSummary,
+        AutomationRun, AutomationRunStatus, AutomationRunTrigger, AutomationState,
+        AutomationTarget, AutomationTask, AutomationThreadTarget, AutomationTrigger, ControlDomain,
+        ControlStateChanged,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -213,6 +219,254 @@ pub(super) async fn restore(app: &AppState) -> Result<(), DaemonError> {
     *app.inner.scheduled_tasks.lock().await = registry;
     persist_registry(app).await?;
     Ok(())
+}
+
+/// Moves every losslessly representable V1 task into agent-control, the
+/// canonical scheduler. Definitions keep their stable ids so a crash between
+/// the two atomic store writes is self-healing on the next startup instead of
+/// producing a duplicate definition or executor. RRULEs that cannot be
+/// represented exactly remain in the legacy registry and are still surfaced
+/// by the Scheduled dashboard compatibility projection.
+pub(super) async fn migrate_compatible(app: &AppState) -> usize {
+    let _mutation = app.inner.scheduled_mutation.lock().await;
+    let candidates = app
+        .inner
+        .scheduled_tasks
+        .lock()
+        .await
+        .tasks
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let now = Utc::now();
+    let mut migrated = Vec::new();
+    let mut imported = false;
+    for task in candidates {
+        let Some(workspace_path) = app.workspace_path(&task.detail.summary.workspace_id).await
+        else {
+            tracing::warn!(
+                task_id = %task.detail.summary.id,
+                workspace_id = %task.detail.summary.workspace_id,
+                "legacy scheduled task could not be migrated because its workspace is unknown"
+            );
+            continue;
+        };
+        let Some((automation, runs)) = legacy_automation(&task, &workspace_path, now) else {
+            tracing::info!(
+                task_id = %task.detail.summary.id,
+                "keeping non-lossless legacy scheduled task under legacy execution ownership"
+            );
+            continue;
+        };
+        match app
+            .control()
+            .import_legacy_automation(automation, runs)
+            .await
+        {
+            Ok(crate::control::LegacyImportOutcome::Imported) => {
+                imported = true;
+                migrated.push(task.detail.summary.id.clone());
+            }
+            Ok(crate::control::LegacyImportOutcome::AlreadyPresent) => {
+                migrated.push(task.detail.summary.id.clone());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    task_id = %task.detail.summary.id,
+                    error = %error.0.message,
+                    "failed to import legacy scheduled task; leaving legacy executor authoritative"
+                );
+            }
+        }
+    }
+    if migrated.is_empty() {
+        return 0;
+    }
+    {
+        let mut registry = app.inner.scheduled_tasks.lock().await;
+        for task_id in &migrated {
+            registry.tasks.remove(task_id);
+        }
+    }
+    // The control store is written first. If pruning the retired store fails,
+    // keep the migrated definitions removed from memory so this daemon cannot
+    // double-execute them; next startup deduplicates by stable id and retries
+    // this prune before the legacy scheduler starts.
+    if let Err(error) = persist_registry(app).await {
+        tracing::warn!(%error, "migrated scheduled tasks but could not prune the legacy store");
+    }
+    if imported {
+        app.emit_control_state_change(ControlStateChanged {
+            store_revision: app.control().store_revision().await,
+            domains: vec![ControlDomain::Automations, ControlDomain::Runs],
+        });
+    }
+    migrated.len()
+}
+
+fn legacy_automation(
+    task: &PersistedScheduledTask,
+    workspace_path: &str,
+    now: DateTime<Utc>,
+) -> Option<(Automation, Vec<AutomationRun>)> {
+    let detail = &task.detail;
+    let trigger = legacy_trigger(detail)?;
+    let state = match detail.summary.status {
+        ScheduledTaskStatus::Active => AutomationState::Enabled,
+        ScheduledTaskStatus::Paused => AutomationState::Paused,
+        ScheduledTaskStatus::Completed => AutomationState::Completed,
+    };
+    let runs = task
+        .runs
+        .iter()
+        .map(|run| legacy_run(detail, run, now))
+        .collect::<Vec<_>>();
+    let latest_outcome = runs.last().and_then(|run| {
+        run.finished_at.map(|finished_at| AutomationOutcomeSummary {
+            status: run.status,
+            finished_at,
+            preview: run.outcome_preview.clone(),
+        })
+    });
+    let elevated = crate::control::automations::is_elevated_mode(
+        detail.permission_mode.as_deref(),
+        detail.sandbox_mode.as_deref(),
+    );
+    let automation = Automation {
+        id: detail.summary.id.clone(),
+        revision: 1,
+        name: detail.summary.title.clone(),
+        description: None,
+        trigger,
+        task: AutomationTask::Prompt {
+            instruction: detail.prompt.clone(),
+        },
+        target: AutomationTarget {
+            workspace_path: workspace_path.to_string(),
+            provider: detail.summary.provider.clone(),
+            thread: AutomationThreadTarget::NewEachRun,
+            model_id: detail.model_id.clone(),
+            permission_mode: detail.permission_mode.clone(),
+            sandbox_mode: detail.sandbox_mode.clone(),
+            reasoning_effort: detail.reasoning_effort.clone(),
+            collaboration_mode_id: detail.collaboration_mode_id.clone(),
+            approval_policy: detail.approval_policy.clone(),
+            isolation: Some(detail.isolation),
+            selected_skills: detail
+                .selected_skills
+                .iter()
+                .map(|skill| skill.skill_id.clone())
+                .collect(),
+        },
+        state,
+        // V1 scheduled tasks coalesced one pending run and ran missed one-time
+        // tasks once while skipping missed recurring occurrences.
+        concurrency_policy: AutomationConcurrencyPolicy::QueueOne,
+        misfire_policy: if matches!(detail.summary.schedule, ScheduledTaskSchedule::Once { .. }) {
+            AutomationMisfirePolicy::RunOnce
+        } else {
+            AutomationMisfirePolicy::Skip
+        },
+        elevated,
+        required_connectors: Vec::new(),
+        created_at: detail.created_at,
+        updated_at: detail.summary.updated_at,
+        next_run_at: detail.summary.next_run_at,
+        last_run_at: runs
+            .last()
+            .and_then(|run| run.started_at.or(Some(run.queued_at))),
+        latest_outcome,
+    };
+    Some((automation, runs))
+}
+
+fn legacy_trigger(detail: &ScheduledTaskDetail) -> Option<AutomationTrigger> {
+    match &detail.summary.schedule {
+        ScheduledTaskSchedule::Once { run_at, .. } => {
+            Some(AutomationTrigger::Once { run_at: *run_at })
+        }
+        ScheduledTaskSchedule::Recurring { rrule, timezone } => {
+            let parsed = parse_rule(rrule).ok()?;
+            if parsed.interval != 1
+                || !matches!(parsed.frequency, Frequency::Daily | Frequency::Weekly)
+            {
+                return None;
+            }
+            let minute = parsed.minute.unwrap_or(0);
+            let hour = parsed.hour.unwrap_or(0);
+            let day_field = if parsed.frequency == Frequency::Weekly {
+                let weekdays = if parsed.weekdays.is_empty() {
+                    let timezone = parse_timezone(timezone).ok()?;
+                    vec![detail.created_at.with_timezone(&timezone).weekday()]
+                } else {
+                    parsed.weekdays
+                };
+                weekdays
+                    .into_iter()
+                    .map(cron_weekday)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            } else {
+                "*".to_string()
+            };
+            Some(AutomationTrigger::Cron {
+                expression: format!("{minute} {hour} * * {day_field}"),
+                timezone: timezone.clone(),
+            })
+        }
+    }
+}
+
+fn cron_weekday(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Mon => "MON",
+        Weekday::Tue => "TUE",
+        Weekday::Wed => "WED",
+        Weekday::Thu => "THU",
+        Weekday::Fri => "FRI",
+        Weekday::Sat => "SAT",
+        Weekday::Sun => "SUN",
+    }
+}
+
+fn legacy_run(
+    detail: &ScheduledTaskDetail,
+    run: &ScheduledTaskRunSummary,
+    now: DateTime<Utc>,
+) -> AutomationRun {
+    let status = match run.status {
+        ScheduledTaskRunStatus::Queued => AutomationRunStatus::Queued,
+        ScheduledTaskRunStatus::Running | ScheduledTaskRunStatus::AwaitingInput => {
+            AutomationRunStatus::Cancelled
+        }
+        ScheduledTaskRunStatus::Succeeded => AutomationRunStatus::Succeeded,
+        ScheduledTaskRunStatus::Failed => AutomationRunStatus::Failed,
+        ScheduledTaskRunStatus::Interrupted => AutomationRunStatus::Cancelled,
+        ScheduledTaskRunStatus::Skipped => AutomationRunStatus::SkippedOverlap,
+    };
+    let trigger = match run.trigger {
+        ScheduledTaskRunTrigger::Scheduled => AutomationRunTrigger::Scheduled,
+        ScheduledTaskRunTrigger::Late => AutomationRunTrigger::Late,
+        ScheduledTaskRunTrigger::Manual => AutomationRunTrigger::Manual,
+    };
+    let terminal = status.is_terminal();
+    AutomationRun {
+        id: run.id.clone(),
+        automation_id: detail.summary.id.clone(),
+        automation_name: detail.summary.title.clone(),
+        automation_revision: 1,
+        status,
+        trigger,
+        scheduled_for: Some(run.scheduled_for),
+        queued_at: run.started_at.unwrap_or(run.scheduled_for),
+        started_at: run.started_at,
+        finished_at: run.completed_at.or(terminal.then_some(now)),
+        runtime_workspace_id: Some(run.workspace_id.clone()),
+        thread_id: run.thread_id.clone(),
+        turn_id: None,
+        outcome_preview: run.preview.clone(),
+        error: None,
+    }
 }
 
 pub(super) fn start_scheduler(app: &AppState) {
@@ -2089,6 +2343,120 @@ mod tests {
         trim_runs(&mut runs);
         assert_eq!(runs.len(), RUN_HISTORY_LIMIT);
         assert_eq!(runs[0].id, "1");
+    }
+
+    #[test]
+    fn legacy_daily_task_converts_without_losing_execution_or_history() {
+        let mut task = PersistedScheduledTask {
+            detail: task_for_dependency_test(),
+            runs: vec![ScheduledTaskRunSummary {
+                id: "run-legacy".to_string(),
+                task_id: "scheduled-1".to_string(),
+                status: ScheduledTaskRunStatus::Succeeded,
+                trigger: ScheduledTaskRunTrigger::Manual,
+                scheduled_for: Utc.with_ymd_and_hms(2026, 8, 13, 9, 0, 0).unwrap(),
+                started_at: Some(Utc.with_ymd_and_hms(2026, 8, 13, 9, 0, 1).unwrap()),
+                completed_at: Some(Utc.with_ymd_and_hms(2026, 8, 13, 9, 0, 5).unwrap()),
+                workspace_id: "workspace-1".to_string(),
+                thread_id: Some("thread-legacy".to_string()),
+                preview: Some("Done".to_string()),
+            }],
+        };
+        task.detail.reasoning_effort = Some("high".to_string());
+        task.detail.collaboration_mode_id = Some("default".to_string());
+        task.detail.approval_policy = Some("never".to_string());
+        task.detail.permission_mode = Some("never".to_string());
+        task.detail.sandbox_mode = Some("workspace-write".to_string());
+
+        let (automation, runs) = legacy_automation(
+            &task,
+            "/tmp/workspace",
+            Utc.with_ymd_and_hms(2026, 8, 13, 8, 0, 0).unwrap(),
+        )
+        .expect("daily schedules migrate losslessly");
+
+        assert_eq!(automation.id, task.detail.summary.id);
+        assert_eq!(automation.task.instruction(), task.detail.prompt);
+        assert_eq!(automation.target.workspace_path, "/tmp/workspace");
+        assert_eq!(automation.target.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            automation.target.collaboration_mode_id.as_deref(),
+            Some("default")
+        );
+        assert_eq!(automation.target.approval_policy.as_deref(), Some("never"));
+        assert_eq!(automation.target.permission_mode.as_deref(), Some("never"));
+        assert_eq!(
+            automation.target.sandbox_mode.as_deref(),
+            Some("workspace-write")
+        );
+        assert_eq!(
+            automation.target.isolation,
+            Some(falcondeck_core::ThreadIsolation::ProjectFolder)
+        );
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "run-legacy");
+        assert_eq!(runs[0].trigger, AutomationRunTrigger::Manual);
+        assert_eq!(runs[0].thread_id.as_deref(), Some("thread-legacy"));
+    }
+
+    #[test]
+    fn non_lossless_legacy_interval_stays_under_legacy_execution_ownership() {
+        let mut task = PersistedScheduledTask {
+            detail: task_for_dependency_test(),
+            runs: Vec::new(),
+        };
+        task.detail.summary.schedule = ScheduledTaskSchedule::Recurring {
+            rrule: "FREQ=DAILY;INTERVAL=2;BYHOUR=9;BYMINUTE=0".to_string(),
+            timezone: "Europe/London".to_string(),
+        };
+
+        assert!(
+            legacy_automation(&task, "/tmp/workspace", Utc::now()).is_none(),
+            "an every-other-day RRULE must not be approximated as cron"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_import_is_deduplicated_by_stable_definition_and_run_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-control.json");
+        let service = crate::control::ControlService::new(path.clone());
+        service.restore().await.unwrap();
+        let task = PersistedScheduledTask {
+            detail: task_for_dependency_test(),
+            runs: vec![ScheduledTaskRunSummary {
+                id: "run-legacy".to_string(),
+                task_id: "scheduled-1".to_string(),
+                status: ScheduledTaskRunStatus::Succeeded,
+                trigger: ScheduledTaskRunTrigger::Scheduled,
+                scheduled_for: Utc.with_ymd_and_hms(2026, 8, 13, 9, 0, 0).unwrap(),
+                started_at: None,
+                completed_at: Some(Utc.with_ymd_and_hms(2026, 8, 13, 9, 0, 5).unwrap()),
+                workspace_id: "workspace-1".to_string(),
+                thread_id: Some("thread-legacy".to_string()),
+                preview: Some("Done".to_string()),
+            }],
+        };
+        let converted = legacy_automation(&task, "/tmp/workspace", Utc::now()).unwrap();
+
+        assert_eq!(
+            service
+                .import_legacy_automation(converted.0.clone(), converted.1.clone())
+                .await
+                .unwrap(),
+            crate::control::LegacyImportOutcome::Imported
+        );
+        assert_eq!(
+            service
+                .import_legacy_automation(converted.0, converted.1)
+                .await
+                .unwrap(),
+            crate::control::LegacyImportOutcome::AlreadyPresent
+        );
+
+        let persisted = crate::control::store::load(&path).await.unwrap();
+        assert_eq!(persisted.automations.len(), 1);
+        assert_eq!(persisted.runs.len(), 1);
     }
 
     #[tokio::test]
