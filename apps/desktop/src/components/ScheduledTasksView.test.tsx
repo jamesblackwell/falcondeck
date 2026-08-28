@@ -6,7 +6,7 @@ import type {
   DaemonSnapshot,
 } from "@falcondeck/client-core";
 
-import type { HostManager, HostScopedApi } from "../hosts";
+import type { HostManager, HostScopedApi, HostView } from "../hosts";
 import { ScheduledTasksView } from "./ScheduledTasksView";
 import { utcToWallTime, wallTimeToUtc } from "../scheduled-time";
 
@@ -65,6 +65,7 @@ const snapshot = {
 function setup(
   apiOverrides: Partial<HostScopedApi> = {},
   onCreateWithAgent: ReturnType<typeof vi.fn> | null = vi.fn(),
+  hosts: HostView[] = [],
 ) {
   const runScheduledTask = vi.fn().mockResolvedValue({});
   const createScheduledTask = vi.fn().mockResolvedValue({});
@@ -102,7 +103,7 @@ function setup(
       localSnapshot={snapshot}
       localApi={localApi}
       localBaseUrl="http://daemon.test"
-      hosts={[]}
+      hosts={hosts}
       manager={{ connection: () => null } as unknown as HostManager}
       onRefreshLocal={onRefreshLocal}
       onCreateWithAgent={onCreateWithAgent ?? undefined}
@@ -172,6 +173,38 @@ describe("ScheduledTasksView", () => {
     });
     expect(screen.getByText("Daily briefing")).toBeInTheDocument();
     expect(screen.queryByText("Paused audit")).not.toBeInTheDocument();
+  });
+
+  it("uses the shared compact host picker when servers are enrolled", () => {
+    setup({}, vi.fn(), [
+      {
+        id: "host-build-server",
+        name: "Build server",
+        sshTarget: "build-server",
+        sshPort: 22,
+        relayUrl: "wss://connect.falcondeck.com",
+        enabled: true,
+        paired: true,
+        needsRepair: false,
+        status: "offline",
+        presence: null,
+        snapshot: null,
+        lastError: null,
+      },
+    ]);
+
+    const hostFilter = screen.getByRole("combobox", {
+      name: "Filter scheduled tasks by host",
+    });
+    expect(hostFilter).toHaveTextContent("All hosts");
+
+    fireEvent.click(hostFilter);
+    expect(
+      screen.getByRole("option", { name: /All hosts/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: /Build server/i }),
+    ).toBeInTheDocument();
   });
 
   it("shows conversational automations beside legacy scheduled tasks", async () => {

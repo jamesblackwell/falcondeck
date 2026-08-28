@@ -11,13 +11,16 @@ import {
   ChevronDown,
   CircleAlert,
   Clock3,
+  Laptop,
   MessageCircle,
   MoreHorizontal,
+  Network,
   Pause,
   Pencil,
   Play,
   Plus,
   Search,
+  Server,
   Trash2,
   X,
 } from "lucide-react";
@@ -36,7 +39,16 @@ import type {
   WorkspaceSummary,
 } from "@falcondeck/client-core";
 import { approvalPolicyForProvider } from "@falcondeck/client-core";
-import { Button, Popover, cn } from "@falcondeck/ui";
+import {
+  Button,
+  Popover,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  cn,
+} from "@falcondeck/ui";
 
 import type { HostManager, HostScopedApi, HostView } from "../hosts";
 import { useControlStateEvents } from "../hooks/useControlStateEvents";
@@ -74,6 +86,22 @@ type AutomationEditorSelection = {
   entry: TaskEntry;
   automation: Automation;
 };
+
+function HostFilterIcon({
+  kind,
+  className = "h-4 w-4",
+}: {
+  kind: "all" | "local" | "remote";
+  className?: string;
+}) {
+  const Icon = kind === "all" ? Network : kind === "local" ? Laptop : Server;
+  return (
+    <Icon
+      aria-hidden="true"
+      className={cn("shrink-0 text-fg-muted", className)}
+    />
+  );
+}
 
 function taskEntryKey(entry: TaskEntry) {
   return `${entry.hostId ?? "local"}:${entry.task.id}`;
@@ -1465,18 +1493,20 @@ export function ScheduledTasksView({
             placeholder="Search scheduled tasks"
           />
         </label>
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+        <div className="mt-5 flex flex-wrap items-center gap-3">
           <div
-            className="flex gap-1"
+            className="inline-flex rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-0.5"
             role="group"
             aria-label="Task status filter"
           >
             {(["all", "active", "paused"] as const).map((value) => (
               <button
                 key={value}
+                aria-pressed={filter === value}
                 className={cn(
-                  "fd-focus rounded-[var(--fd-radius-md)] px-3 py-1.5 text-sm capitalize text-fg-secondary",
-                  filter === value && "bg-surface-3 text-fg-primary",
+                  "fd-focus h-8 rounded-[var(--fd-radius-md)] px-3 text-sm capitalize text-fg-secondary transition-colors duration-[var(--fd-duration-fast)] hover:text-fg-primary",
+                  filter === value &&
+                    "bg-surface-4 text-fg-primary shadow-[var(--fd-shadow-sm)]",
                 )}
                 onClick={() => setFilter(value)}
               >
@@ -1485,20 +1515,59 @@ export function ScheduledTasksView({
             ))}
           </div>
           {hosts.length ? (
-            <select
-              aria-label="Host filter"
-              className={`${inputClass} w-auto`}
-              value={hostFilter}
-              onChange={(event) => setHostFilter(event.target.value)}
-            >
-              <option value="all">All hosts</option>
-              <option value="local">This Mac</option>
-              {hosts.map((host) => (
-                <option key={host.id} value={host.id}>
-                  {host.name}
-                </option>
-              ))}
-            </select>
+            <Select value={hostFilter} onValueChange={setHostFilter}>
+              <SelectTrigger
+                aria-label="Filter scheduled tasks by host"
+                className="ml-auto h-9 min-w-44 max-w-64 bg-surface-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <HostFilterIcon
+                    kind={
+                      hostFilter === "all"
+                        ? "all"
+                        : hostFilter === "local"
+                          ? "local"
+                          : "remote"
+                    }
+                    className="h-3.5 w-3.5"
+                  />
+                  <span className="truncate">
+                    <SelectValue />
+                  </span>
+                </span>
+              </SelectTrigger>
+              <SelectContent align="end" label="Filter by host">
+                <SelectItem
+                  value="all"
+                  leading={<HostFilterIcon kind="all" />}
+                  description="Local and enrolled servers"
+                >
+                  All hosts
+                </SelectItem>
+                <SelectItem
+                  value="local"
+                  leading={<HostFilterIcon kind="local" />}
+                  description="Local daemon"
+                >
+                  This Mac
+                </SelectItem>
+                {hosts.map((host) => (
+                  <SelectItem
+                    key={host.id}
+                    value={host.id}
+                    leading={<HostFilterIcon kind="remote" />}
+                    description={
+                      host.status === "encrypted" &&
+                      host.presence?.daemon_connected
+                        ? "Connected server"
+                        : "Server offline"
+                    }
+                  >
+                    {host.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           ) : null}
         </div>
         {unsupportedHosts.length ? (
@@ -1522,7 +1591,7 @@ export function ScheduledTasksView({
             Loading scheduled tasks…
           </p>
         ) : null}
-        <div className="mt-6 divide-y divide-border-subtle">
+        <div className="mt-6 divide-y divide-border-subtle rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
           {visible.map((entry) => {
             const workspace = entry.workspaces.find(
               (item) => item.id === entry.task.workspace_id,
@@ -1531,7 +1600,7 @@ export function ScheduledTasksView({
             return (
               <article
                 key={key}
-                className="group relative flex items-start gap-3 py-4"
+                className="group relative flex items-start gap-3 px-4 py-3.5 transition-colors duration-[var(--fd-duration-fast)] first:rounded-t-[var(--fd-radius-xl)] last:rounded-b-[var(--fd-radius-xl)] hover:bg-interactive-hover focus-within:bg-interactive-hover"
               >
                 <button
                   className="fd-focus mt-1 rounded-full"
