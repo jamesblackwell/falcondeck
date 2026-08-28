@@ -176,7 +176,11 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
           ) : null}
 
           {request.kind === 'plan_approval' ? (
-            <div className="mt-3 max-h-[min(55vh,36rem)] overflow-y-auto rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1/70 p-4">
+            // The plan is a document to read, not part of the warning chrome:
+            // it gets the transcript's solid reading surface, body-size type,
+            // and an explicit text colour so no host surface (approval bar,
+            // activity card, remote web) can wash it out by inheritance.
+            <div className="mt-3 max-h-[min(60vh,42rem)] overflow-y-auto rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-5 py-4 text-[length:var(--fd-text-md)] text-fg-primary">
               {evidence.detail ? (
                 <MessageMarkdown text={evidence.detail} defer={false} interpretDirectives={false} />
               ) : (

@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { Pressable, View } from "react-native";
+import { Pressable, ScrollView, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { Check, HelpCircle, Lock } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
@@ -13,6 +13,7 @@ import {
 
 import { Button, Input, Text } from "@/components/ui";
 import { ApprovalBanner } from "./ApprovalBanner";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 type Props = {
   request: InteractiveRequest;
@@ -142,11 +143,24 @@ const PlanApprovalBanner = memo(function PlanApprovalBanner({
         ) : null}
       </View>
 
-      <View style={styles.planContent}>
-        <Text selectable variant="caption" color="secondary">
-          {request.detail || "This provider did not supply a plan to review."}
-        </Text>
-      </View>
+      {request.detail ? (
+        // The plan is a document to read: full markdown at body size on a
+        // solid surface, capped so a long plan scrolls instead of pushing
+        // the feedback field and buttons off screen.
+        <ScrollView
+          style={styles.planContent}
+          contentContainerStyle={styles.planContentInner}
+          nestedScrollEnabled
+        >
+          <MarkdownRenderer text={request.detail} interpretDirectives={false} />
+        </ScrollView>
+      ) : (
+        <View style={[styles.planContent, styles.planContentInner]}>
+          <Text selectable variant="caption" color="secondary">
+            This provider did not supply a plan to review.
+          </Text>
+        </View>
+      )}
 
       <Input
         accessibilityLabel="Requested plan changes"
@@ -496,11 +510,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   heading: { flex: 1, gap: 1 },
   planContent: {
+    maxHeight: 320,
     borderWidth: 1,
     borderColor: theme.colors.border.subtle,
     borderRadius: theme.radius.md,
     borderCurve: "continuous",
     backgroundColor: theme.colors.surface[1],
+  },
+  planContentInner: {
     padding: theme.spacing[3],
   },
   question: {
