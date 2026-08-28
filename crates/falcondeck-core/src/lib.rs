@@ -821,11 +821,31 @@ pub enum ToolHistoryMode {
     Full,
 }
 
+/// Progress through the daemon's initial persisted-state restore.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonRestorePhase {
+    /// The daemon has not finished materializing its persisted workspace and
+    /// thread summaries. Clients must not treat this snapshot as a complete
+    /// answer about interrupted sessions.
+    LoadingPersistedState,
+    /// Persisted summaries are complete while provider session stores hydrate
+    /// in the background.
+    HydratingWorkspaces,
+    /// The initial provider reconnect pass has been dispatched or completed.
+    #[default]
+    Ready,
+}
+
 /// Full daemon snapshot returned to newly connected clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonSnapshot {
     /// Metadata about the daemon process.
     pub daemon: DaemonInfo,
+    /// Startup restore boundary. Older daemons omit it; compatible clients
+    /// retain their previous workspace-status readiness heuristic.
+    #[serde(default)]
+    pub restore_phase: DaemonRestorePhase,
     /// Known connected workspaces.
     pub workspaces: Vec<WorkspaceSummary>,
     /// Known threads across all workspaces.
@@ -5247,6 +5267,7 @@ mod tests {
                 started_at: Utc::now(),
                 capabilities: DaemonCapabilities::default(),
             },
+            restore_phase: DaemonRestorePhase::Ready,
             workspaces: Vec::new(),
             threads: Vec::new(),
             interactive_requests: Vec::new(),

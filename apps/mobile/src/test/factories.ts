@@ -74,6 +74,7 @@ export function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
 export function snapshot(overrides: Partial<DaemonSnapshot> = {}): DaemonSnapshot {
   return {
     daemon: { version: '0.1.0', started_at: '2026-03-16T09:00:00Z' },
+    restore_phase: 'ready',
     workspaces: [workspace()],
     threads: [thread()],
     interactive_requests: [],

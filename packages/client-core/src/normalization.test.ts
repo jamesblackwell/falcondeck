@@ -479,6 +479,17 @@ describe("interactive request boundary normalization", () => {
     ).toEqual(["valid"]);
   });
 
+  it("normalizes daemon restore phases and preserves the legacy fallback", () => {
+    expect(
+      normalizeDaemonSnapshot({ restore_phase: "hydrating_workspaces" })
+        .restore_phase,
+    ).toBe("hydrating_workspaces");
+    expect(normalizeDaemonSnapshot({}).restore_phase).toBeUndefined();
+    expect(
+      normalizeDaemonSnapshot({ restore_phase: "made_up" }).restore_phase,
+    ).toBeUndefined();
+  });
+
   it("normalizes scheduled-task capabilities and filters malformed tasks", () => {
     const snapshot = normalizeDaemonSnapshot({
       daemon: {

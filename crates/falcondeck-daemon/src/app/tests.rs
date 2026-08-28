@@ -5,14 +5,38 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use falcondeck_core::{
-    AgentProvider, ContentLifecycle, ConversationItem, ExtensionThreadSummary, ImageInput,
-    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome,
-    InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel, SnapshotRequest,
-    ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary, ToolActivityKind,
-    ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem,
-    UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    AgentProvider, ContentLifecycle, ConversationItem, DaemonRestorePhase,
+    ExtensionThreadSummary, ImageInput, InteractiveRequest, InteractiveRequestKind,
+    InteractiveRequestOutcome, InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel,
+    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
+    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
+    TurnInputItem, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
+
+#[tokio::test]
+async fn snapshots_expose_the_local_restore_boundary() {
+    let temp = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+
+    assert_eq!(app.snapshot().await.restore_phase, DaemonRestorePhase::Ready);
+    app.begin_local_restore();
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::LoadingPersistedState
+    );
+    app.mark_persisted_state_loaded();
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::HydratingWorkspaces
+    );
+    app.finish_local_restore();
+    assert_eq!(app.snapshot().await.restore_phase, DaemonRestorePhase::Ready);
+}
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;

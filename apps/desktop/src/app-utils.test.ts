@@ -5,6 +5,7 @@ import { SHUTDOWN_INTERRUPTED_TURN_ERROR } from '@falcondeck/client-core'
 
 import {
   normalizeSendError,
+  stoppedThreadTargetsAreReady,
   stoppedThreadsToOffer,
   workspaceComposerDisabled,
   workspaceSendBlockReason,
@@ -224,37 +225,45 @@ describe('stoppedThreadsToOffer', () => {
           thread({ id: 'thread-3', is_archived: true }),
           thread({ id: 'thread-4', last_error: 'Something else failed' }),
         ],
-        workspaces: [workspace()],
-        remoteHosts: [],
+        restorePhase: 'hydrating_workspaces',
       })?.map((entry) => entry.id),
     ).toEqual(['thread-1'])
   })
 
-  it('holds off while a project is still connecting', () => {
+  it('holds off only until persisted summaries are complete', () => {
     expect(
       stoppedThreadsToOffer({
         threads: [thread()],
-        workspaces: [workspace(), workspace({ id: 'workspace-2', status: 'connecting' })],
-        remoteHosts: [],
+        restorePhase: 'loading_persisted_state',
       }),
     ).toBeNull()
+    expect(
+      stoppedThreadsToOffer({
+        threads: [thread()],
+        restorePhase: 'hydrating_workspaces',
+      }),
+    ).toHaveLength(1)
+    expect(
+      stoppedThreadsToOffer({
+        threads: [thread()],
+        restorePhase: 'ready',
+      }),
+    ).toHaveLength(1)
   })
 
-  it('holds off until a connected remote host has reported its threads', () => {
+  it('keeps the conservative workspace gate for older daemons', () => {
     expect(
       stoppedThreadsToOffer({
         threads: [thread()],
-        workspaces: [workspace()],
-        remoteHosts: [{ isConnected: true, hasSnapshot: false }],
+        restorePhase: undefined,
+        workspaces: [workspace({ status: 'connecting' })],
       }),
     ).toBeNull()
-    // A host that is not connected is never going to report; waiting on it
-    // would suppress the prompt entirely.
     expect(
       stoppedThreadsToOffer({
         threads: [thread()],
+        restorePhase: undefined,
         workspaces: [workspace()],
-        remoteHosts: [{ isConnected: false, hasSnapshot: false }],
       }),
     ).toHaveLength(1)
   })
@@ -263,10 +272,29 @@ describe('stoppedThreadsToOffer', () => {
     expect(
       stoppedThreadsToOffer({
         threads: [thread({ status: 'idle', last_error: null })],
-        workspaces: [workspace()],
-        remoteHosts: [],
+        restorePhase: 'ready',
       }),
     ).toEqual([])
+  })
+})
+
+describe('stoppedThreadTargetsAreReady', () => {
+  it('waits only for projects that own stopped sessions', () => {
+    expect(
+      stoppedThreadTargetsAreReady({
+        threads: [thread()],
+        workspaces: [
+          workspace(),
+          workspace({ id: 'unrelated', status: 'connecting' }),
+        ],
+      }),
+    ).toBe(true)
+    expect(
+      stoppedThreadTargetsAreReady({
+        threads: [thread()],
+        workspaces: [workspace({ status: 'connecting' })],
+      }),
+    ).toBe(false)
   })
 })
 

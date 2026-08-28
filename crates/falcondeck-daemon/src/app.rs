@@ -11,15 +11,15 @@ use chrono::{Duration as ChronoDuration, Utc};
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, CompactThreadRequest, ConnectWorkspaceRequest, ContentLifecycle,
-    ConversationItem, DaemonCapabilities, DaemonInfo, DaemonSnapshot, EventEnvelope,
-    ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary, FalconDeckPreferences,
-    ForkThreadRequest, HealthResponse, InteractiveRequest, InteractiveRequestKind,
-    InteractiveResponsePayload, InvokeExtensionActionRequest, OperationalCondition,
-    PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
-    SkillSummary, SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget,
-    ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
-    ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
+    ConversationItem, DaemonCapabilities, DaemonInfo, DaemonRestorePhase, DaemonSnapshot,
+    EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
+    FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
+    InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
+    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest,
+    ServiceLevel, ServiceNotice, SkillSummary, SnapshotRequest, StartReviewRequest,
+    StartThreadRequest, TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadDetail,
+    ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage,
+    UnifiedEvent, UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
     WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
     control::{AgentControlSettings, ControlGetRequest, ControlSearchRequest, ControlStateChanged},
     crypto::LocalBoxKeyPair,
@@ -202,6 +202,11 @@ impl std::ops::Deref for CachedEnvelope {
 
 struct InnerState {
     daemon: DaemonInfo,
+    /// Startup has two independent boundaries: persisted summaries become
+    /// complete quickly, while provider session stores hydrate in the
+    /// background. Clients use this phase instead of guessing from workspace
+    /// connection statuses.
+    restore_phase: StdMutex<DaemonRestorePhase>,
     /// Agent binary name or path per provider id. Providers absent from the map
     /// fall back to their id; see `AppState::provider_bin`.
     provider_bins: HashMap<AgentProvider, String>,
@@ -762,6 +767,7 @@ impl AppState {
                         scheduled_tasks: true,
                     },
                 },
+                restore_phase: StdMutex::new(DaemonRestorePhase::Ready),
                 provider_bins,
                 state_path,
                 preferences_path,
@@ -1122,22 +1128,27 @@ impl AppState {
         let mut workspaces_to_restore = Vec::new();
         for mut workspace in persisted.workspaces {
             workspace.path = normalize_workspace_path(&workspace.path);
-            let restored = self
-                .restore_workspace_placeholder(
-                    &workspace,
-                    WorkspaceStatus::Connecting,
-                    workspace.last_error.clone(),
-                )
-                .await?;
-            self.emit(
-                Some(restored.id.clone()),
-                None,
-                UnifiedEvent::Snapshot {
-                    snapshot: self.snapshot().await,
-                },
-            );
+            self.restore_workspace_placeholder(
+                &workspace,
+                WorkspaceStatus::Connecting,
+                workspace.last_error.clone(),
+            )
+            .await?;
             workspaces_to_restore.push(workspace);
         }
+
+        // This is the recovery UX boundary: every persisted thread is now in
+        // memory, including honest shutdown-interruption markers. Publish one
+        // complete snapshot instead of cloning and broadcasting the growing
+        // 1,000+ thread list once per workspace.
+        self.mark_persisted_state_loaded();
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
 
         if let Some(remote) = persisted.remote {
             let should_migrate_secure_storage = remote.secure_storage_key.is_none()
@@ -1186,18 +1197,42 @@ impl AppState {
         // remote restoration and overwrite a valid pairing with `remote: null`.
         self.restore_scheduled_tasks().await?;
         scheduled_tasks::migrate_compatible(self).await;
+        // Interrupted projects become actionable first. Unrelated harness
+        // probes must not hold the recovery dialog's Continue action behind
+        // every project the user has ever opened.
+        workspaces_to_restore.sort_by_key(|workspace| {
+            !workspace.thread_states.iter().any(|thread| {
+                persisted_turn_was_cut_off(thread.status.as_ref(), thread.last_error.as_deref())
+            })
+        });
         if !workspaces_to_restore.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {
                 for workspace in workspaces_to_restore {
                     app.restore_one_persisted_workspace(workspace).await;
                 }
+                app.finish_local_restore();
+                app.emit(
+                    None,
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: app.snapshot().await,
+                    },
+                );
                 // A restored task may be immediately due. Wait until every
                 // persisted workspace has either reconnected or settled into
                 // a visible disconnected state before dispatching it.
                 scheduled_tasks::start_scheduler(&app);
             });
         } else {
+            self.finish_local_restore();
+            self.emit(
+                None,
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: self.snapshot().await,
+                },
+            );
             scheduled_tasks::start_scheduler(self);
         }
         Ok(())
@@ -1340,7 +1375,7 @@ impl AppState {
                 latest_diff: None,
                 last_tool: None,
                 last_error: thread_last_error.or_else(|| workspace_last_error.clone()),
-                agent: ThreadAgentParams::default(),
+                agent: state.agent.clone(),
                 attention: ThreadAttention {
                     last_read_seq: state.last_read_seq,
                     last_agent_activity_seq: state.last_agent_activity_seq,
@@ -1518,6 +1553,42 @@ impl AppState {
 
     pub(crate) fn is_shutting_down(&self) -> bool {
         self.inner.shutting_down.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn begin_local_restore(&self) {
+        *self
+            .inner
+            .restore_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            DaemonRestorePhase::LoadingPersistedState;
+    }
+
+    fn mark_persisted_state_loaded(&self) {
+        let mut phase = self
+            .inner
+            .restore_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *phase == DaemonRestorePhase::LoadingPersistedState {
+            *phase = DaemonRestorePhase::HydratingWorkspaces;
+        }
+    }
+
+    pub(crate) fn finish_local_restore(&self) {
+        *self
+            .inner
+            .restore_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = DaemonRestorePhase::Ready;
+    }
+
+    fn local_restore_phase(&self) -> DaemonRestorePhase {
+        *self
+            .inner
+            .restore_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Counts local threads whose current turns have not reached a terminal state.
@@ -1919,6 +1990,7 @@ impl AppState {
 
         DaemonSnapshot {
             daemon: self.inner.daemon.clone(),
+            restore_phase: self.local_restore_phase(),
             workspaces: workspace_list,
             threads,
             interactive_requests: interactive_request_list,

@@ -187,6 +187,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         state_path,
         config.deno_bin,
     );
+    state.begin_local_restore();
     // Scheduled definitions are small, local, and must be present before the
     // listener advertises readiness. Otherwise an early snapshot or mutation
     // can observe an empty registry and the background restore can overwrite
@@ -219,6 +220,14 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         }
         if let Err(error) = restore_state.restore_local_state().await {
             tracing::warn!("failed to restore daemon local state: {error}");
+            restore_state.finish_local_restore();
+            restore_state.emit_event(
+                None,
+                None,
+                falcondeck_core::UnifiedEvent::Snapshot {
+                    snapshot: restore_state.snapshot().await,
+                },
+            );
         }
         // Warm the message-search excerpts once threads are known, so the
         // first search does not pay for the whole session-file walk.

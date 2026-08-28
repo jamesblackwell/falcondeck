@@ -121,6 +121,20 @@ describe("ResumeStoppedThreadsDialog", () => {
     expect(screen.getByRole("button", { name: "Not now" })).toBeDisabled();
   });
 
+  it("keeps dismissal available while affected projects reconnect", () => {
+    render(
+      <ResumeStoppedThreadsDialog
+        threads={[thread()]}
+        onContinueAll={() => {}}
+        onDismiss={() => {}}
+        isPreparing
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Reconnecting…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Not now" })).toBeEnabled();
+  });
+
   it("renders nothing when no session was stopped", () => {
     const { container } = render(
       <ResumeStoppedThreadsDialog

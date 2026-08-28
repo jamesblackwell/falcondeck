@@ -7,6 +7,7 @@ import {
   workspaceProviderLabel,
   type AgentProvider,
   type ConversationItem,
+  type DaemonRestorePhase,
   type InteractiveResponsePayload,
   type ThreadSummary,
   type WorkspaceSummary,
@@ -16,27 +17,47 @@ import {
  * Threads to offer in the launch-time "continue what the quit stopped"
  * prompt, or null while it is too early to ask.
  *
- * Projects show up in the snapshot before the daemon has finished hydrating
- * them, and a turn started mid-hydration races the rebuilt thread list — so
- * asking is held until every project has finished connecting. Remote hosts
- * report their threads after the local snapshot, and waiting for them keeps
- * the prompt from appearing twice with different contents.
+ * The daemon explicitly marks the point where every persisted summary has
+ * been materialized. Provider workspaces may still be hydrating then, but the
+ * interrupted-session list is complete and safe to freeze for the dialog.
  */
 export function stoppedThreadsToOffer({
   threads,
+  restorePhase,
   workspaces,
-  remoteHosts,
 }: {
   threads: readonly ThreadSummary[] | undefined
-  workspaces: readonly WorkspaceSummary[] | undefined
-  remoteHosts: readonly { hasSnapshot: boolean; isConnected: boolean }[]
+  restorePhase: DaemonRestorePhase | undefined
+  workspaces?: readonly WorkspaceSummary[]
 }): ThreadSummary[] | null {
-  if (!threads || !workspaces) return null
-  if (workspaces.some((workspace) => workspace.status === 'connecting')) return null
-  if (remoteHosts.some((host) => host.isConnected && !host.hasSnapshot)) return null
+  if (!threads || restorePhase === 'loading_persisted_state') return null
+  // Mixed-version development can briefly connect a new desktop to an older
+  // daemon. Preserve the old conservative readiness rule in that case.
+  if (
+    !restorePhase &&
+    (!workspaces ||
+      workspaces.some((workspace) => workspace.status === 'connecting'))
+  ) {
+    return null
+  }
   return threads.filter(
     (thread) => !thread.is_archived && wasTurnInterruptedByShutdown(thread),
   )
+}
+
+/** Continue is safe once only the projects owning the stopped sessions have hydrated. */
+export function stoppedThreadTargetsAreReady({
+  threads,
+  workspaces,
+}: {
+  threads: readonly ThreadSummary[]
+  workspaces: readonly WorkspaceSummary[]
+}) {
+  const statuses = new Map(workspaces.map((workspace) => [workspace.id, workspace.status]))
+  return threads.every((thread) => {
+    const status = statuses.get(thread.workspace_id)
+    return Boolean(status && status !== 'connecting')
+  })
 }
 
 export function markInteractiveRequestResolved(

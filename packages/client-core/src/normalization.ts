@@ -1483,6 +1483,12 @@ export function normalizeDaemonSnapshot(
   value: DaemonSnapshot | unknown,
 ): DaemonSnapshot {
   const snapshot = (value ?? {}) as Partial<DaemonSnapshot>;
+  const restorePhase: DaemonSnapshot["restore_phase"] =
+    snapshot.restore_phase === "loading_persisted_state" ||
+    snapshot.restore_phase === "hydrating_workspaces" ||
+    snapshot.restore_phase === "ready"
+      ? snapshot.restore_phase
+      : undefined;
   return {
     daemon: {
       version: snapshot.daemon?.version ?? "unknown",
@@ -1492,6 +1498,7 @@ export function normalizeDaemonSnapshot(
           snapshot.daemon?.capabilities?.scheduled_tasks ?? false,
       },
     },
+    ...(restorePhase ? { restore_phase: restorePhase } : {}),
     workspaces: Array.isArray(snapshot.workspaces)
       ? snapshot.workspaces.map((workspace) =>
           normalizeWorkspaceSummary(workspace),

@@ -10,17 +10,20 @@ export function ResumeStoppedThreadsDialog({
   threads,
   onContinueAll,
   onDismiss,
+  isPreparing = false,
   isContinuing = false,
 }: {
   threads: readonly ThreadSummary[];
   onContinueAll: () => void;
   onDismiss: () => void;
+  isPreparing?: boolean;
   isContinuing?: boolean;
 }) {
   const continueRef = useRef<HTMLButtonElement | null>(null);
+  const dismissRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
-    continueRef.current?.focus();
-  }, []);
+    (isPreparing ? dismissRef.current : continueRef.current)?.focus();
+  }, [isPreparing]);
 
   if (threads.length === 0) return null;
 
@@ -81,6 +84,7 @@ export function ResumeStoppedThreadsDialog({
         </ul>
         <div className="mt-5 flex justify-end gap-2">
           <Button
+            ref={dismissRef}
             type="button"
             variant="ghost"
             onClick={onDismiss}
@@ -92,9 +96,11 @@ export function ResumeStoppedThreadsDialog({
             ref={continueRef}
             type="button"
             onClick={onContinueAll}
-            disabled={isContinuing}
+            disabled={isPreparing || isContinuing}
           >
-            {isContinuing
+            {isPreparing
+              ? "Reconnecting…"
+              : isContinuing
               ? "Continuing…"
               : count === 1
                 ? "Continue"

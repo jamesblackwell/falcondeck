@@ -981,6 +981,11 @@ export type ThreadDetail = {
   is_partial: boolean;
 };
 
+export type DaemonRestorePhase =
+  | "loading_persisted_state"
+  | "hydrating_workspaces"
+  | "ready";
+
 export type DaemonSnapshot = {
   daemon: {
     version: string;
@@ -989,6 +994,8 @@ export type DaemonSnapshot = {
       scheduled_tasks?: boolean;
     };
   };
+  /** Whether persisted session summaries are complete enough for recovery UX. */
+  restore_phase?: DaemonRestorePhase;
   workspaces: WorkspaceSummary[];
   threads: ThreadSummary[];
   interactive_requests: InteractiveRequest[];

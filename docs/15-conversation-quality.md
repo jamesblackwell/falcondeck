@@ -18,6 +18,14 @@ Every supported output must:
 6. remain responsive in a 1,000-block heterogeneous thread; and
 7. be keyboard and screen-reader operable without announcing every token.
 
+On desktop startup, persisted session summaries are a distinct readiness
+boundary from provider hydration. While summaries are loading, the app blocks
+stale transcript and sidebar interaction. As soon as the daemon publishes a
+complete persisted snapshot, shutdown-interrupted sessions are offered as one
+stable batch; unrelated projects and connected remote hosts must not delay that
+offer. Continue remains unavailable only while a project that owns one of those
+sessions is reconnecting.
+
 Provider capability differences may remove an unavailable action, but must not
 silently change the meaning of content. Unsupported data renders through an
 explicit, inspectable fallback rather than disappearing.

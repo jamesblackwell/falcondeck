@@ -115,6 +115,7 @@ const demoThreads: ThreadSummary[] = [
 
 export const demoSnapshot: DaemonSnapshot = {
   daemon: { version: '0.1.0', started_at: ago(60) },
+  restore_phase: 'ready',
   workspaces: [demoWorkspace],
   threads: demoThreads,
   interactive_requests: [],

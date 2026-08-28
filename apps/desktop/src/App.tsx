@@ -123,6 +123,7 @@ import {
 import {
   markInteractiveRequestResolved,
   normalizeSendError,
+  stoppedThreadTargetsAreReady,
   stoppedThreadsToOffer,
   workspaceComposerDisabled,
   workspaceSendBlockReason,
@@ -192,6 +193,7 @@ import type { DiffPanelSelection } from "./components/DiffPanel";
 import { PanelToggles } from "./components/PanelToggles";
 import { ProjectImportOverlay } from "./components/ProjectImportOverlay";
 import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDialog";
+import { StartupRestoreOverlay } from "./components/StartupRestoreOverlay";
 import { UsageDialog } from "./components/UsageDialog";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
@@ -3506,27 +3508,21 @@ function AppInner() {
     toast,
   ]);
 
-  // Threads whose turn died with the app, offered as one batch at launch.
-  // Read from the merged snapshot so remote hosts are covered too; null
-  // while the daemon is still hydrating and the answer would be premature.
+  // Threads whose turn died with this local daemon, offered as one batch at
+  // launch. The explicit restore phase means the persisted list is complete
+  // even though provider workspaces are still hydrating. Remote daemons did
+  // not stop when this desktop app closed; their interrupted threads retain
+  // the normal in-thread recovery notice when their snapshots arrive.
   const stoppedThreadOffer = useMemo(
     () =>
       snapshot
         ? stoppedThreadsToOffer({
-            threads: viewSnapshot?.threads,
-            workspaces: viewSnapshot?.workspaces,
-            remoteHosts: remoteHosts.hosts.map((host) => ({
-              hasSnapshot: host.snapshot !== null,
-              isConnected: host.status === "encrypted",
-            })),
+            threads: snapshot.threads,
+            restorePhase: snapshot.restore_phase,
+            workspaces: snapshot.workspaces,
           })
         : null,
-    [
-      remoteHosts.hosts,
-      snapshot,
-      viewSnapshot?.threads,
-      viewSnapshot?.workspaces,
-    ],
+    [snapshot],
   );
   // The prompt is a snapshot taken once per launch: it must not grow or
   // reshuffle while the user is reading it, and it must not come back after
@@ -3538,6 +3534,17 @@ function AppInner() {
     if (stoppedThreadOffer.length === 0) return;
     setResumePromptThreads(stoppedThreadOffer);
   }, [stoppedThreadOffer]);
+
+  const areStoppedThreadTargetsReady = useMemo(
+    () =>
+      resumePromptThreads && snapshot
+        ? stoppedThreadTargetsAreReady({
+            threads: resumePromptThreads,
+            workspaces: snapshot.workspaces,
+          })
+        : false,
+    [resumePromptThreads, snapshot],
+  );
 
   const handleContinueStoppedThreads = useCallback(async () => {
     const targets = resumePromptThreads ?? [];
@@ -3551,7 +3558,13 @@ function AppInner() {
     // Sequential: a burst of parallel turns would have every agent CLI cold
     // starting at once on the machine the user just opened.
     for (const thread of targets) {
-      const client = apiFor(thread.workspace_id);
+      const liveThread =
+        snapshot?.threads.find(
+          (candidate) =>
+            candidate.workspace_id === thread.workspace_id &&
+            candidate.id === thread.id,
+        ) ?? thread;
+      const client = apiFor(liveThread.workspace_id);
       if (!client) {
         failures.push({
           title: thread.title,
@@ -3561,20 +3574,20 @@ function AppInner() {
       }
       try {
         await client.sendTurn({
-          workspace_id: thread.workspace_id,
-          thread_id: thread.id,
+          workspace_id: liveThread.workspace_id,
+          thread_id: liveThread.id,
           inputs: [],
           resume_interrupted: true,
           // The thread's own settings, not the composer's current selection.
-          provider: thread.provider,
-          model_id: thread.agent.model_id,
-          reasoning_effort: thread.agent.reasoning_effort,
-          approval_policy: thread.agent.approval_policy,
-          service_tier: thread.agent.service_tier,
-          permission_mode: thread.agent.permission_mode ?? null,
-          sandbox_mode: thread.agent.sandbox_mode ?? null,
+          provider: liveThread.provider,
+          model_id: liveThread.agent.model_id,
+          reasoning_effort: liveThread.agent.reasoning_effort,
+          approval_policy: liveThread.agent.approval_policy,
+          service_tier: liveThread.agent.service_tier,
+          permission_mode: liveThread.agent.permission_mode ?? null,
+          sandbox_mode: liveThread.agent.sandbox_mode ?? null,
         });
-        succeeded.push(thread);
+        succeeded.push(liveThread);
       } catch (error: unknown) {
         failures.push({
           title: thread.title,
@@ -3636,6 +3649,7 @@ function AppInner() {
     setSelectedThreadId,
     setSelectedWorkspaceId,
     setSnapshot,
+    snapshot,
     toast,
   ]);
 
@@ -6209,6 +6223,9 @@ function AppInner() {
           ) : undefined
         }
       />
+      {snapshot?.restore_phase === "loading_persisted_state" ? (
+        <StartupRestoreOverlay />
+      ) : null}
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
       {isOnboardingActive ? (
         <OnboardingWizard
@@ -6230,6 +6247,7 @@ function AppInner() {
             void handleContinueStoppedThreads();
           }}
           onDismiss={handleDismissStoppedThreadsPrompt}
+          isPreparing={!areStoppedThreadTargetsReady}
           isContinuing={isContinuingStoppedThreads}
         />
       ) : null}
