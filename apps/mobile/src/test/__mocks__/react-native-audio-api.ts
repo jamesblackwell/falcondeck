@@ -23,6 +23,7 @@ export const mockQueueNode = new AudioBufferQueueSourceNode()
 export class AudioContext {
   destination = {}
   resume = vi.fn(async () => undefined)
+  suspend = vi.fn(async () => undefined)
   createBufferQueueSource = vi.fn(() => mockQueueNode)
   createBufferSource = vi.fn(() => {
     const node = new AudioBufferSourceNode()

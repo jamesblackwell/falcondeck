@@ -12,6 +12,10 @@ import {
   updateSpeechSettings,
 } from '@/features/speech/speechSettings'
 import { transcriptionRetry } from '@/features/speech/openRouterTranscription'
+import {
+  speechLiveActivity,
+  type SpeechActivityActionListener,
+} from '@/features/speech/speechLiveActivity'
 import { useRelayStore } from '@/store/relay-store'
 
 import { InlineVoiceRecorder } from './InlineVoiceRecorder'
@@ -67,6 +71,7 @@ describe('InlineVoiceRecorder', () => {
 
   it('starts cloud recording without waiting for the desktop', async () => {
     updateSpeechSettings({ provider: 'openrouter' })
+    const startListening = vi.spyOn(speechLiveActivity, 'startListening')
     useRelayStore.getState()._callRpc = vi.fn(
       () => new Promise(() => {}),
     ) as unknown as typeof originalCallRpc
@@ -89,8 +94,10 @@ describe('InlineVoiceRecorder', () => {
     expect(requestRecordingPermissionsAsync).toHaveBeenCalledTimes(1)
     expect(setAudioModeAsync).toHaveBeenCalledWith({
       allowsRecording: true,
+      allowsBackgroundRecording: true,
       playsInSilentMode: true,
     })
+    expect(startListening).toHaveBeenCalledTimes(1)
     expect(
       r.root.findByProps({ accessibilityLabel: 'Stop and transcribe' }).props
         .accessibilityState,
@@ -129,6 +136,8 @@ describe('InlineVoiceRecorder', () => {
 
   it('keeps a stopped recording in the composer to edit', async () => {
     updateSpeechSettings({ provider: 'openrouter' })
+    const setActivityMode = vi.spyOn(speechLiveActivity, 'setMode')
+    const endActivity = vi.spyOn(speechLiveActivity, 'end')
     useRelayStore.getState()._callRpc = vi.fn(async (method: string) =>
       method === 'speech.status'
         ? { configured: true, storage: 'daemon_secret_store' }
@@ -155,6 +164,46 @@ describe('InlineVoiceRecorder', () => {
     })
 
     expect(onTranscript).toHaveBeenCalledWith('ship it', { submit: false })
+    expect(setActivityMode).toHaveBeenCalledWith('transcribing')
+    expect(endActivity).toHaveBeenCalled()
+  })
+
+  it('finishes an active recording from the Lock Screen control', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    let activityAction: SpeechActivityActionListener = () => {}
+    vi.spyOn(speechLiveActivity, 'subscribeAction').mockImplementation(
+      (listener) => {
+        activityAction = listener
+        return vi.fn()
+      },
+    )
+    useRelayStore.getState()._callRpc = vi.fn(async (method: string) =>
+      method === 'speech.status'
+        ? { configured: true, storage: 'daemon_secret_store' }
+        : { text: 'from the lock screen', model: 'whisper' },
+    ) as unknown as typeof originalCallRpc
+    const onTranscript = vi.fn()
+    renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={onTranscript}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      activityAction('finish-recording')
+      await vi.waitFor(() => expect(onTranscript).toHaveBeenCalled())
+    })
+
+    expect(onTranscript).toHaveBeenCalledWith('from the lock screen', {
+      submit: false,
+    })
   })
 
   it('retries an on-device recording locally without requesting microphone access', async () => {
@@ -312,5 +361,6 @@ describe('InlineVoiceRecorder', () => {
   afterEach(() => {
     transcriptionRetry.wait = originalWait
     useRelayStore.getState()._callRpc = originalCallRpc
+    vi.restoreAllMocks()
   })
 })

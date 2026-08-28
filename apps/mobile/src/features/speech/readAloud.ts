@@ -15,12 +15,17 @@ import {
 import { mediaAudioPlayer } from '@/lib/media-audio-player'
 import { useRelayStore } from '@/store/relay-store'
 
-export type ReadAloudState = 'idle' | 'loading' | 'playing' | 'error'
+import { speechLiveActivity } from './speechLiveActivity'
+
+export type ReadAloudState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 
 type Listener = () => void
 type Playback = {
   key: string
   node: AudioBufferSourceNode | null
+  paused: boolean
+  activityStarted: boolean
+  unsubscribeActivityActions: (() => void) | null
 }
 
 const SPEECH_TIMEOUT_MS = 40_000
@@ -72,9 +77,13 @@ export class NativeReadAloudPlayer {
     const playback: Playback = {
       key,
       node: null,
+      paused: false,
+      activityStarted: false,
+      unsubscribeActivityActions: null,
     }
     this.active = playback
     this.activatePlaybackSession()
+    void this.audioContext().resume().catch(() => undefined)
     this.setState(key, 'loading')
     void this.playChunks(playback, chunks)
   }
@@ -83,6 +92,7 @@ export class NativeReadAloudPlayer {
     const active = this.active
     if (!active || (key && active.key !== key)) return
     this.active = null
+    this.finishLiveActivity(active)
     this.deactivatePlaybackSession()
     try {
       active.node?.stop()
@@ -90,6 +100,28 @@ export class NativeReadAloudPlayer {
       // The source may finish while a stop gesture is being handled.
     }
     this.setState(active.key, 'idle')
+  }
+
+  async togglePause(): Promise<void> {
+    const playback = this.active
+    if (!playback?.node || !playback.activityStarted) return
+    try {
+      if (playback.paused) {
+        await this.audioContext().resume()
+        if (this.active !== playback) return
+        playback.paused = false
+        speechLiveActivity.setMode('playing')
+        this.setState(playback.key, 'playing')
+      } else {
+        await this.audioContext().suspend()
+        if (this.active !== playback) return
+        playback.paused = true
+        speechLiveActivity.setMode('paused')
+        this.setState(playback.key, 'paused')
+      }
+    } catch {
+      // An interruption can race a Lock Screen pause or resume action.
+    }
   }
 
   private async playChunks(playback: Playback, chunks: string[]): Promise<void> {
@@ -113,11 +145,13 @@ export class NativeReadAloudPlayer {
         if (this.active !== playback) return
       }
       this.active = null
+      this.finishLiveActivity(playback)
       this.deactivatePlaybackSession()
       this.setState(playback.key, 'idle')
     } catch {
       if (this.active !== playback) return
       this.active = null
+      this.finishLiveActivity(playback)
       this.deactivatePlaybackSession()
       try {
         playback.node?.stop()
@@ -139,6 +173,15 @@ export class NativeReadAloudPlayer {
         if (playback.node === node) playback.node = null
         resolve()
       }
+      if (!playback.activityStarted) {
+        playback.activityStarted = true
+        speechLiveActivity.startPlaying()
+        playback.unsubscribeActivityActions = speechLiveActivity.subscribeAction((action) => {
+          if (this.active !== playback) return
+          if (action === 'toggle-playback') void this.togglePause()
+          if (action === 'stop-playback') this.stop(playback.key)
+        })
+      }
       this.setState(playback.key, 'playing')
       node.start()
     })
@@ -152,8 +195,15 @@ export class NativeReadAloudPlayer {
 
   private audioContext(): AudioContext {
     this.context ??= new AudioContext()
-    void this.context.resume().catch(() => undefined)
     return this.context
+  }
+
+  private finishLiveActivity(playback: Playback): void {
+    playback.unsubscribeActivityActions?.()
+    playback.unsubscribeActivityActions = null
+    if (!playback.activityStarted) return
+    playback.activityStarted = false
+    speechLiveActivity.end()
   }
 
   /**

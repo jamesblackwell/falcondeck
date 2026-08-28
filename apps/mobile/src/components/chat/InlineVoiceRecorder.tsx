@@ -30,6 +30,7 @@ import {
   transcriptionProgressLabel,
   transcribeWithDesktopOpenRouterRetrying,
 } from '@/features/speech/openRouterTranscription'
+import { speechLiveActivity } from '@/features/speech/speechLiveActivity'
 import {
   triggerComposerSelectionHaptic,
   triggerComposerStopHaptic,
@@ -84,6 +85,13 @@ function volumeToLevel(value: number): number {
   return Math.min(1, Math.max(0, value / 10))
 }
 
+function deactivateRecordingAudioSession(): Promise<void> {
+  return setAudioModeAsync({
+    allowsRecording: false,
+    allowsBackgroundRecording: false,
+  })
+}
+
 /**
  * In-composer voice recording session: cancel, live waveform and duration,
  * then the same stop/send pair the composer footer shows — stop drops the
@@ -129,6 +137,7 @@ export function InlineVoiceRecorder({
   const submitOnFinishRef = useRef(false)
   const localErrorRef = useRef(false)
   const startedRef = useRef(false)
+  const liveCaptureRef = useRef(false)
   const recorder = useAudioRecorder({
     ...CLOUD_VOICE_RECORDING,
     isMeteringEnabled: true,
@@ -162,6 +171,8 @@ export function InlineVoiceRecorder({
     (text: string, completedRecordingUri?: string) => {
       const cleaned = text.trim()
       if (!cleaned) {
+        if (liveCaptureRef.current) speechLiveActivity.end()
+        liveCaptureRef.current = false
         setError(
           'No speech was detected. Your recording is safe, so you can retry.',
         )
@@ -175,6 +186,8 @@ export function InlineVoiceRecorder({
           null,
       )
       clearPendingVoiceRecording()
+      if (liveCaptureRef.current) speechLiveActivity.end()
+      liveCaptureRef.current = false
       onTranscript(cleaned, { submit: submitOnFinishRef.current })
       onClose()
     },
@@ -201,6 +214,8 @@ export function InlineVoiceRecorder({
         finishWithTranscript(result.text, uri)
       } catch (cause) {
         if (cancelledRef.current) return
+        if (liveCaptureRef.current) speechLiveActivity.end()
+        liveCaptureRef.current = false
         setError(
           cause instanceof Error
             ? cause.message
@@ -222,20 +237,26 @@ export function InlineVoiceRecorder({
         throw new Error('Microphone access is required to record speech.')
       await setAudioModeAsync({
         allowsRecording: true,
+        allowsBackgroundRecording: true,
         playsInSilentMode: true,
       })
       if (cancelledRef.current) {
-        await setAudioModeAsync({ allowsRecording: false })
+        await deactivateRecordingAudioSession()
         return
       }
       await recorder.prepareToRecordAsync()
       if (cancelledRef.current) {
-        await setAudioModeAsync({ allowsRecording: false })
+        await deactivateRecordingAudioSession()
         return
       }
       recorder.record()
+      liveCaptureRef.current = true
+      speechLiveActivity.startListening()
       setState('recording')
     } catch (cause) {
+      await deactivateRecordingAudioSession().catch(() => undefined)
+      if (liveCaptureRef.current) speechLiveActivity.end()
+      liveCaptureRef.current = false
       setError(
         cause instanceof Error ? cause.message : 'Could not start recording.',
       )
@@ -273,6 +294,7 @@ export function InlineVoiceRecorder({
     transcriptRef.current = ''
     finalizedTranscriptRef.current = ''
     localErrorRef.current = false
+    liveCaptureRef.current = !audioUri
     const directory = recordingDirectory()
     ExpoSpeechRecognitionModule.start({
       lang: settingsRef.current.language ?? undefined,
@@ -323,7 +345,10 @@ export function InlineVoiceRecorder({
     void begin(initialProvider)
   }, [begin, initialPending, initialProvider])
 
-  useSpeechRecognitionEvent('start', () => setState('recording'))
+  useSpeechRecognitionEvent('start', () => {
+    if (liveCaptureRef.current) speechLiveActivity.startListening()
+    setState('recording')
+  })
   useSpeechRecognitionEvent('result', (event) => {
     const text = event.results[0]?.transcript?.trim()
     if (!text) return
@@ -350,6 +375,8 @@ export function InlineVoiceRecorder({
   useSpeechRecognitionEvent('error', (event) => {
     if (cancelledRef.current || event.error === 'aborted') return
     localErrorRef.current = true
+    if (liveCaptureRef.current) speechLiveActivity.end()
+    liveCaptureRef.current = false
     setError(event.message || 'On-device speech recognition failed.')
     setState('failed')
   })
@@ -366,6 +393,7 @@ export function InlineVoiceRecorder({
       triggerComposerStopHaptic()
     }
     if (provider === 'on-device') {
+      if (liveCaptureRef.current) speechLiveActivity.setMode('transcribing')
       ExpoSpeechRecognitionModule.stop()
       setTranscriptionAttempt(1)
       setState('transcribing')
@@ -373,6 +401,7 @@ export function InlineVoiceRecorder({
     }
     setTranscriptionAttempt(1)
     setState('transcribing')
+    if (liveCaptureRef.current) speechLiveActivity.setMode('transcribing')
     try {
       await recorder.stop()
       if (!recorder.uri)
@@ -381,9 +410,12 @@ export function InlineVoiceRecorder({
       setRecordingUri(uri)
       setRecordingProvider('openrouter')
       setPendingVoiceRecording(uri, 'openrouter')
-      await setAudioModeAsync({ allowsRecording: false })
+      await deactivateRecordingAudioSession()
       await transcribeCloud(uri)
     } catch (cause) {
+      await deactivateRecordingAudioSession().catch(() => undefined)
+      if (liveCaptureRef.current) speechLiveActivity.end()
+      liveCaptureRef.current = false
       setError(
         cause instanceof Error ? cause.message : 'Could not finish recording.',
       )
@@ -394,6 +426,8 @@ export function InlineVoiceRecorder({
   const cancel = useCallback(() => {
     triggerComposerTapHaptic()
     cancelledRef.current = true
+    if (liveCaptureRef.current) speechLiveActivity.end()
+    liveCaptureRef.current = false
     if (
       provider === 'on-device' &&
       (state === 'recording' || state === 'starting')
@@ -407,11 +441,34 @@ export function InlineVoiceRecorder({
           setRecordingProvider('openrouter')
           setPendingVoiceRecording(uri, 'openrouter')
         }
-        return setAudioModeAsync({ allowsRecording: false })
+        return deactivateRecordingAudioSession()
       })
     }
     onClose()
   }, [onClose, provider, recorder, state])
+
+  useEffect(
+    () =>
+      speechLiveActivity.subscribeAction((action) => {
+        if (action === 'finish-recording' && state === 'recording') {
+          void stopRecording(false)
+        }
+        if (
+          action === 'cancel-recording' &&
+          (state === 'starting' || state === 'recording')
+        ) {
+          cancel()
+        }
+      }),
+    [cancel, state, stopRecording],
+  )
+
+  useEffect(
+    () => () => {
+      if (liveCaptureRef.current) speechLiveActivity.end()
+    },
+    [],
+  )
 
   const retry = useCallback(async () => {
     triggerComposerTapHaptic()

@@ -271,7 +271,7 @@ function persist(next: MobileAppearance) {
  * to Light used to leave a white nav bar above a black screen.
  */
 export function applyNativeColorScheme(mode: ThemeModeSetting) {
-  Appearance.setColorScheme(mode === 'system' ? null : mode)
+  Appearance.setColorScheme(mode === 'system' ? 'unspecified' : mode)
 }
 
 export const useAppearanceStore = create<AppearanceStore>((set, get) => ({

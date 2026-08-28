@@ -33,21 +33,15 @@ config.resolver.nodeModulesPaths = [
   path.resolve(monorepoRoot, 'node_modules'),
 ]
 
-// Block the root monorepo copies of react/react-native/react-dom.
-// These are different versions (e.g. react-native 0.81.6 at root vs 0.81.5 local)
-// and loading both causes "property is not writable" crashes.
+// npm hoists these packages to the workspace root. Resolve every import to
+// that one SDK-pinned copy, including imports originating inside hoisted Expo
+// modules, so Metro cannot create a second React or React Native runtime.
 const rootNodeModules = path.resolve(monorepoRoot, 'node_modules')
-const blockedPaths = ['react', 'react-native', 'react-dom'].map(
-  (pkg) => new RegExp(`^${rootNodeModules.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/${pkg}/`),
-)
-
-config.resolver.blockList = [
-  ...(Array.isArray(config.resolver.blockList)
-    ? config.resolver.blockList
-    : config.resolver.blockList
-      ? [config.resolver.blockList]
-      : []),
-  ...blockedPaths,
-]
+config.resolver.extraNodeModules = {
+  ...(config.resolver.extraNodeModules ?? {}),
+  react: path.resolve(rootNodeModules, 'react'),
+  'react-dom': path.resolve(rootNodeModules, 'react-dom'),
+  'react-native': path.resolve(rootNodeModules, 'react-native'),
+}
 
 module.exports = config

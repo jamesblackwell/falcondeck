@@ -6,12 +6,11 @@ export default defineConfig({
     alias: {
       '@/': path.resolve(__dirname, 'src') + '/',
       '@falcondeck/client-core': path.resolve(__dirname, '../../packages/client-core/src/index.ts'),
-      // Match Metro's single-React invariant. Hoisted Zustand otherwise loads
-      // the root desktop React while react-test-renderer uses mobile's React,
-      // producing a second dispatcher and invalid-hook-call failures.
-      'react/jsx-runtime': path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
-      'react/jsx-dev-runtime': path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js'),
-      react: path.resolve(__dirname, 'node_modules/react/index.js'),
+      // npm hoists the SDK-pinned React and react-test-renderer together, so
+      // keep every test import on that single root React instance.
+      'react/jsx-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-runtime.js'),
+      'react/jsx-dev-runtime': path.resolve(__dirname, '../../node_modules/react/jsx-dev-runtime.js'),
+      react: path.resolve(__dirname, '../../node_modules/react/index.js'),
       // Stub React Native modules that aren't available in Node
       'react-native': path.resolve(__dirname, 'src/test/__mocks__/react-native.ts'),
       'react-native-mmkv': path.resolve(__dirname, 'src/test/__mocks__/react-native-mmkv.ts'),

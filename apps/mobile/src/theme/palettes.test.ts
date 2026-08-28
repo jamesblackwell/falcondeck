@@ -115,7 +115,7 @@ describe('mobile color palettes', () => {
     expect(setColorScheme).toHaveBeenLastCalledWith('light')
     // 'system' hands control back to the phone.
     applyNativeColorScheme('system')
-    expect(setColorScheme).toHaveBeenLastCalledWith(null)
+    expect(setColorScheme).toHaveBeenLastCalledWith('unspecified')
 
     setColorScheme.mockRestore()
   })

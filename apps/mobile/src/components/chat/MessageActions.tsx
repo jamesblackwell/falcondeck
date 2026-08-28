@@ -53,7 +53,7 @@ export const MessageActions = memo(function MessageActions({
 
   const readAloudIcon = speechState === 'loading' ? (
     <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-  ) : speechState === 'playing' ? (
+  ) : speechState === 'playing' || speechState === 'paused' ? (
     <Square size={theme.iconSize.xs} color={theme.colors.fg.muted} />
   ) : speechState === 'error' ? (
     <CircleX size={theme.iconSize.xs} color={theme.colors.danger.default} />
@@ -62,7 +62,7 @@ export const MessageActions = memo(function MessageActions({
   )
   const readAloudLabel = speechState === 'loading'
     ? 'Stop preparing Read Aloud'
-    : speechState === 'playing'
+    : speechState === 'playing' || speechState === 'paused'
       ? 'Stop Read Aloud'
       : speechState === 'error'
         ? 'Read Aloud failed. Retry'

@@ -8,7 +8,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   scheme: 'falcondeck',
   orientation: 'default',
   userInterfaceStyle: 'automatic',
-  newArchEnabled: true,
   runtimeVersion: {
     policy: 'appVersion',
   },
@@ -120,6 +119,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       'expo-audio',
       {
         microphonePermission: 'Allow FalconDeck to record speech for transcription.',
+        enableBackgroundRecording: true,
+      },
+    ],
+    [
+      'expo-widgets',
+      {
+        bundleIdentifier: 'com.falcondeck.mobile.widgets',
+        groupIdentifier: 'group.com.falcondeck.mobile',
       },
     ],
     [
