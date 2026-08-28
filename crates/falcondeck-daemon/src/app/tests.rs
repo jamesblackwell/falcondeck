@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
@@ -30,6 +32,62 @@ use super::{
     },
     should_surface_tool_item, workspace_status_after_account_update,
 };
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
+    let temp = tempdir().unwrap();
+    let hanging_provider = temp.path().join("slow-codex");
+    let launch_log = temp.path().join("launches.log");
+    std::fs::write(
+        &hanging_provider,
+        format!(
+            "#!/bin/sh\nprintf 'launch\\n' >> \"{}\"\nsleep 5\n",
+            launch_log.display()
+        ),
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&hanging_provider).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hanging_provider, permissions).unwrap();
+    let workspace_path = temp.path().join("project");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([(
+            AgentProvider::CODEX,
+            hanging_provider.to_string_lossy().to_string(),
+        )]),
+        temp.path().join("state.json"),
+    );
+
+    let connect = || {
+        tokio::time::timeout(
+            TokioDuration::from_millis(500),
+            app.connect_workspace(falcondeck_core::ConnectWorkspaceRequest {
+                path: workspace_path.to_string_lossy().to_string(),
+            }),
+        )
+    };
+    let (first, second) = tokio::join!(connect(), connect());
+    let first = first
+        .expect("workspace connect should not wait for provider bootstrap")
+        .unwrap();
+    let second = second
+        .expect("concurrent connect should reuse the placeholder")
+        .unwrap();
+
+    assert_eq!(first.status, WorkspaceStatus::Connecting);
+    assert_eq!(second.id, first.id);
+    for _ in 0..20 {
+        if tokio::fs::try_exists(&launch_log).await.unwrap_or(false) {
+            break;
+        }
+        sleep(TokioDuration::from_millis(10)).await;
+    }
+    let launches = tokio::fs::read_to_string(&launch_log).await.unwrap();
+    assert_eq!(launches.lines().count(), 1);
+}
 
 #[test]
 fn extension_thread_summaries_enforce_count_title_and_byte_limits() {

@@ -100,6 +100,7 @@ pub struct AppState {
 /// Keyed `(workspace_id, provider)` startup locks for ACP agent processes.
 type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
 type CodexRuntimeGates = HashMap<String, Arc<Mutex<()>>>;
+type WorkspaceConnectGates = HashMap<String, Arc<Mutex<()>>>;
 
 struct InnerState {
     daemon: DaemonInfo,
@@ -118,6 +119,9 @@ struct InnerState {
     /// Per-workspace gates collapse a cold Codex wake and a background
     /// reconnect into one app-server process.
     codex_runtime_gates: Mutex<CodexRuntimeGates>,
+    /// Per-path gates prevent simultaneous first-time connect requests from
+    /// spawning duplicate provider bootstraps for one workspace.
+    workspace_connect_gates: Mutex<WorkspaceConnectGates>,
     /// Global cap for concurrently starting optional provider runtimes.
     runtime_lifecycle: runtime_health::RuntimeLifecycle,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
@@ -464,7 +468,7 @@ struct PersistedAppState {
     remote: Option<PersistedRemoteState>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 struct PersistedWorkspaceState {
     path: String,
     /// Workspace id reused across daemon restarts. Remote clients cache
@@ -643,6 +647,7 @@ impl AppState {
                 workspaces: Mutex::new(HashMap::new()),
                 acp_runtime_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
+                workspace_connect_gates: Mutex::new(HashMap::new()),
                 runtime_lifecycle: runtime_health::RuntimeLifecycle::default(),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
@@ -916,9 +921,12 @@ impl AppState {
         if let Some(summary) = existing {
             return Ok(summary);
         }
-        self.connect_workspace(ConnectWorkspaceRequest {
-            path: workspace_path.to_string(),
-        })
+        self.connect_workspace_internal(
+            ConnectWorkspaceRequest {
+                path: workspace_path.to_string(),
+            },
+            None,
+        )
         .await
     }
 

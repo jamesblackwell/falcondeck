@@ -22,7 +22,90 @@ pub(super) async fn connect_workspace(
     app: &AppState,
     request: ConnectWorkspaceRequest,
 ) -> Result<WorkspaceSummary, DaemonError> {
-    connect_workspace_internal(app, request, None).await
+    let requested_path = PathBuf::from(request.path.trim());
+    if request.path.trim().is_empty() {
+        return Err(DaemonError::BadRequest(
+            "workspace path is required".to_string(),
+        ));
+    }
+    let path = requested_path
+        .canonicalize()
+        .map_err(|error| DaemonError::BadRequest(format!("invalid workspace path: {error}")))?;
+    let path_string = path.to_string_lossy().to_string();
+    let mut request = request;
+    request.path = path_string.clone();
+
+    let gate = {
+        let mut gates = app.inner.workspace_connect_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(path_string.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let _gate = gate.lock().await;
+
+    // Re-adding a workspace that is already live keeps the established
+    // metadata-refresh behavior. A connect already in progress is returned as
+    // is so repeated client requests cannot launch competing bootstraps.
+    let existing = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .values()
+            .find(|workspace| workspace.summary.path == path_string)
+            .map(|workspace| workspace.summary.clone())
+    };
+    if let Some(summary) = existing {
+        if summary.status == WorkspaceStatus::Connecting {
+            return Ok(summary);
+        }
+        return connect_workspace_internal(app, request, None).await;
+    }
+
+    let persisted_workspace = app
+        .inner
+        .saved_workspaces
+        .lock()
+        .await
+        .get(&path_string)
+        .cloned()
+        .unwrap_or(PersistedWorkspaceState {
+            path: path_string.clone(),
+            id: Some(format!("workspace-{}", Uuid::new_v4().simple())),
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::CODEX),
+            ..PersistedWorkspaceState::default()
+        });
+    let summary = app
+        .restore_workspace_placeholder(&persisted_workspace, WorkspaceStatus::Connecting, None)
+        .await?;
+    app.persist_local_state().await?;
+    app.emit(
+        Some(summary.id.clone()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+
+    let app = app.clone();
+    tokio::spawn(async move {
+        if let Err(error) = app
+            .connect_workspace_internal(request, Some(&persisted_workspace))
+            .await
+        {
+            tracing::warn!(%error, path = %path_string, "failed to connect workspace");
+            let _ = app
+                .update_workspace_placeholder_status(
+                    &path_string,
+                    WorkspaceStatus::Disconnected,
+                    Some(error.to_string()),
+                )
+                .await;
+        }
+    });
+
+    Ok(summary)
 }
 
 pub(super) async fn connect_workspace_internal(
@@ -122,6 +205,21 @@ pub(super) async fn connect_workspace_internal(
             reusable_id.unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()))
         }
     };
+    // The three bootstraps are independent (separate binaries, separate
+    // session stores), and each spawns CLI probes that take seconds. Run
+    // Claude and Antigravity as tasks alongside the Codex connect so a
+    // workspace connect costs the slowest provider, not the sum of all of
+    // them. Tasks (not a join) so the fatal no-provider path below can still
+    // fail fast: abort drops the probe futures, whose `kill_on_drop` children
+    // die with them.
+    let claude_task = tokio::spawn(ClaudeRuntime::connect(
+        path_string.clone(),
+        app.provider_bin(&AgentProvider::CLAUDE),
+    ));
+    let agy_task = tokio::spawn(crate::agy::AgyRuntime::connect(
+        path_string.clone(),
+        app.provider_bin(&AgentProvider::AGY),
+    ));
     // A failure to bootstrap one provider must not brick the workspace for the
     // other: keep the workspace usable and report the broken provider through
     // its agent summary instead.
@@ -151,6 +249,8 @@ pub(super) async fn connect_workspace_internal(
                 // all, surface the connect failure as before.
                 let claude_resolved = app.resolve_provider_binary(&AgentProvider::CLAUDE);
                 if !Path::new(&claude_resolved.executable).is_file() {
+                    claude_task.abort();
+                    agy_task.abort();
                     return Err(error);
                 }
                 let message = error.to_string();
@@ -181,11 +281,9 @@ pub(super) async fn connect_workspace_internal(
         collaboration_modes: claude_collaboration_modes,
         capabilities: claude_capabilities,
         threads: claude_threads,
-    } = ClaudeRuntime::connect(
-        path_string.clone(),
-        app.provider_bin(&AgentProvider::CLAUDE),
-    )
-    .await?;
+    } = claude_task.await.map_err(|error| {
+        DaemonError::Process(format!("claude bootstrap task failed: {error}"))
+    })??;
     let crate::agy::AgyBootstrap {
         runtime: agy_runtime,
         account: agy_account,
@@ -193,8 +291,9 @@ pub(super) async fn connect_workspace_internal(
         skills: agy_native_skills,
         capabilities: agy_capabilities,
         threads: agy_threads,
-    } = crate::agy::AgyRuntime::connect(path_string.clone(), app.provider_bin(&AgentProvider::AGY))
-        .await?;
+    } = agy_task
+        .await
+        .map_err(|error| DaemonError::Process(format!("agy bootstrap task failed: {error}")))??;
     let file_backed_skills = discover_file_backed_skills(&path_string);
     let codex_provider_skills = match codex_session.as_ref() {
         Some(session) => load_codex_provider_skills(app, session)

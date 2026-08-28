@@ -12,7 +12,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use crate::agent_binary::{
@@ -36,7 +36,11 @@ use tokio::{
 const INTERRUPT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
 const EXIT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
-const PROBE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(15);
+/// Each catalog probe is a full `agy` print-mode run that normally finishes in
+/// ~3s. The timeout is also the ceiling a workspace connect can stall on one
+/// probe, so keep it tight; a timed-out probe degrades to curated models /
+/// unknown auth and the next refresh retries.
+const PROBE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(8);
 /// Maximum time a daemon shutdown gives an active Antigravity turn to finish
 /// after SIGTERM. This is a ceiling, not a required delay.
 const SHUTDOWN_GRACE: tokio::time::Duration = tokio::time::Duration::from_millis(500);
@@ -166,16 +170,12 @@ impl AgyRuntime {
 
         let executable = resolved.executable.clone();
         let hydrate_path = workspace_path.clone();
-        let (account, models, skills, threads) = tokio::join!(
-            read_auth_status(&executable),
-            list_models(&executable),
-            list_skills(&executable),
-            async {
+        let ((account, models, skills), threads) =
+            tokio::join!(cached_provider_probes(&executable), async {
                 tokio::task::spawn_blocking(move || hydrate_threads(&hydrate_path))
                     .await
                     .unwrap_or_default()
-            }
-        );
+            });
         let capabilities = default_capabilities();
 
         Ok(AgyBootstrap {
@@ -542,13 +542,83 @@ impl AgyRuntime {
     }
 
     pub async fn provider_metadata(&self) -> AgyProviderMetadata {
+        // The user just selected the provider (or logged in), so a cached
+        // catalog would defeat the refresh; probe fresh and repopulate.
+        let (account, models, skills) = refresh_provider_probes(&self.agy_bin).await;
         AgyProviderMetadata {
-            account: read_auth_status(&self.agy_bin).await,
-            models: list_models(&self.agy_bin).await,
-            skills: list_skills(&self.agy_bin).await,
+            account,
+            models,
+            skills,
             capabilities: default_capabilities(),
         }
     }
+}
+
+/// The account/model/skill probes describe the installed CLI, not any one
+/// workspace, yet each spawns an `agy` run costing seconds. One daemon-wide
+/// entry keeps every workspace connect after the first from re-paying that
+/// cost; `provider_metadata` bypasses and repopulates it so a fresh login is
+/// not stuck behind the TTL.
+const PROBE_CACHE_TTL: tokio::time::Duration = tokio::time::Duration::from_secs(300);
+
+struct ProbeCacheEntry {
+    executable: String,
+    taken_at: tokio::time::Instant,
+    account: AccountSummary,
+    models: Vec<ModelSummary>,
+    skills: Vec<SkillSummary>,
+}
+
+static PROBE_CACHE: OnceLock<Mutex<Option<ProbeCacheEntry>>> = OnceLock::new();
+
+fn probe_cache() -> &'static Mutex<Option<ProbeCacheEntry>> {
+    PROBE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+async fn cached_provider_probes(
+    executable: &str,
+) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
+    // The lock is held across the probe run so concurrent connects (every
+    // restored workspace at daemon startup) share one CLI run instead of
+    // spawning a herd.
+    let mut cache = probe_cache().lock().await;
+    if let Some(entry) = cache.as_ref()
+        && entry.executable == executable
+        && entry.taken_at.elapsed() < PROBE_CACHE_TTL
+    {
+        return (
+            entry.account.clone(),
+            entry.models.clone(),
+            entry.skills.clone(),
+        );
+    }
+    run_and_store_provider_probes(&mut cache, executable).await
+}
+
+async fn refresh_provider_probes(
+    executable: &str,
+) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
+    let mut cache = probe_cache().lock().await;
+    run_and_store_provider_probes(&mut cache, executable).await
+}
+
+async fn run_and_store_provider_probes(
+    cache: &mut Option<ProbeCacheEntry>,
+    executable: &str,
+) -> (AccountSummary, Vec<ModelSummary>, Vec<SkillSummary>) {
+    let (account, models, skills) = tokio::join!(
+        read_auth_status(executable),
+        list_models(executable),
+        list_skills(executable)
+    );
+    *cache = Some(ProbeCacheEntry {
+        executable: executable.to_string(),
+        taken_at: tokio::time::Instant::now(),
+        account: account.clone(),
+        models: models.clone(),
+        skills: skills.clone(),
+    });
+    (account, models, skills)
 }
 
 fn default_capabilities() -> AgentCapabilitySummary {
