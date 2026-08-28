@@ -280,6 +280,7 @@ describe("conversation Markdown export", () => {
     expect(markdown).not.toContain("::git-commit");
     expect(markdown).not.toContain("secret-pixels");
     expect(markdown).not.toContain("artifact-secret");
+    expect(markdown).not.toContain("## Files edited in this session");
     expect(markdown).toContain(
       "FalconDeck docs — <https://falcondeck.com/wiki/Streaming_(software)>",
     );
@@ -473,6 +474,12 @@ describe("conversation Markdown export", () => {
     expect(markdown).toContain(
       "### frontend/marketing/pages/Legal/Terms.tsx — update",
     );
+    expect(markdown).toContain("## Files edited in this session");
+    expect(markdown).toContain(
+      "- frontend/marketing/pages/Legal/Terms.tsx",
+    );
+    expect(markdown).toContain("## User");
+    expect(markdown).not.toContain("## You");
     expect(markdown).toContain("Find the terms copy");
     expect(markdown).not.toContain(created_at);
     expect(markdown).not.toContain("2026-08-19T14:48:59.313830Z");
@@ -482,6 +489,43 @@ describe("conversation Markdown export", () => {
     expect(markdown).not.toContain("Exit code: 0");
     expect(markdown).not.toContain("### Tool details");
     expect(markdown).not.toContain("process_id");
+  });
+
+  it("caps the handoff file summary at the 100 most recently edited files", () => {
+    const changes = Array.from({ length: 102 }, (_, index) => ({
+      path: `/workspace/src/file-${String(index).padStart(3, "0")}.ts`,
+      change_kind: "update",
+      diff: "",
+      move_path: null,
+    }));
+    const markdown = conversationItemsToMarkdown(
+      [
+        {
+          kind: "file_change",
+          id: "file-change-many",
+          changes,
+          status: "completed",
+          lifecycle: "succeeded",
+          created_at,
+          completed_at: created_at,
+        },
+      ],
+      { mode: "handoff", workspacePath: "/workspace" },
+    );
+    const summary = markdown.slice(
+      markdown.indexOf("## Files edited in this session"),
+      markdown.indexOf("## File changes"),
+    );
+
+    expect(summary).toContain(
+      "Showing the 100 most recently edited of 102 unique files",
+    );
+    expect(summary).not.toContain("src/file-000.ts");
+    expect(summary).not.toContain("src/file-001.ts");
+    expect(summary).toContain("src/file-002.ts");
+    expect(summary).toContain("- src/file-002.ts\n- src/file-003.ts");
+    expect(summary).toContain("src/file-101.ts");
+    expect(summary.match(/^- src\/file-/gm)).toHaveLength(100);
   });
 
   it("unwraps shell wrappers and quoted cd prefixes on handoff", () => {

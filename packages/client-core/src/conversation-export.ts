@@ -53,6 +53,9 @@ const DEFAULT_HANDOFF_STATUS = new Set([
   "Updated",
 ]);
 
+/** Keep handoff context useful without letting large refactors dominate it. */
+const MAX_HANDOFF_FILE_SUMMARY = 100;
+
 function oneLine(value: string | null | undefined, fallback: string): string {
   return value?.trim().replace(/[\r\n]+/g, " ") || fallback;
 }
@@ -195,6 +198,52 @@ function shouldIncludeToolDetails(
   return item.detail.kind !== "command_execution";
 }
 
+function handoffFileSummary(
+  items: readonly ConversationItem[],
+  ctx: MarkdownContext,
+): string | null {
+  const seen = new Set<string>();
+  const newestFirst: string[] = [];
+
+  // Prefer the files touched most recently when a long session exceeds the
+  // cap. Walking backwards also collapses repeated edits to the same path.
+  for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+    const item = items[itemIndex];
+    if (item.kind !== "file_change") continue;
+    for (
+      let changeIndex = item.changes.length - 1;
+      changeIndex >= 0;
+      changeIndex -= 1
+    ) {
+      const change = item.changes[changeIndex];
+      // Reverse path order here so reversing the completed list below keeps a
+      // move's source before its destination.
+      for (const value of [change.move_path, change.path]) {
+        const path = value ? oneLine(relativize(value, ctx), "") : "";
+        if (!path || seen.has(path)) continue;
+        seen.add(path);
+        newestFirst.push(path);
+      }
+    }
+  }
+
+  if (newestFirst.length === 0) return null;
+  const visible = newestFirst
+    .slice(0, MAX_HANDOFF_FILE_SUMMARY)
+    .reverse();
+  const note =
+    seen.size > visible.length
+      ? `_Showing the ${visible.length} most recently edited of ${seen.size} unique files._`
+      : null;
+  return [
+    "## Files edited in this session",
+    note,
+    visible.map((path) => `- ${path}`).join("\n"),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
   switch (item.kind) {
     case "user_message": {
@@ -204,7 +253,7 @@ function itemMarkdown(item: ConversationItem, ctx: MarkdownContext): string {
           `- Attachment: ${oneLine(attachment.name, `Image ${index + 1}`)}${attachment.mime_type ? ` (${oneLine(attachment.mime_type, "image")})` : ""}`,
       );
       return [
-        "## You",
+        ctx.mode === "handoff" ? "## User" : "## You",
         statusLine("Sent", item.created_at, ctx),
         body,
         ...attachments,
@@ -487,6 +536,8 @@ export function conversationItemsToMarkdown(
     ? "> Earlier authoritative history is not currently loaded and is not included in this export."
     : null;
   const preamble = [`# ${title}`, partial].filter(Boolean).join("\n\n");
+  const fileSummary =
+    mode === "handoff" ? handoffFileSummary(items, ctx) : null;
   const transcript = items
     .filter(
       (item) =>
@@ -495,5 +546,8 @@ export function conversationItemsToMarkdown(
     )
     .map((item) => itemMarkdown(item, ctx))
     .join("\n\n---\n\n");
-  return [preamble, transcript].filter(Boolean).join("\n\n").concat("\n");
+  return [preamble, fileSummary, transcript]
+    .filter(Boolean)
+    .join("\n\n")
+    .concat("\n");
 }
