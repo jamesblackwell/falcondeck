@@ -381,8 +381,9 @@ pub(super) fn apply_preferences_patch(
             // it falls back to the shipped chain instead.
             let deduped = provider_order
                 .into_iter()
+                .map(|provider| AgentProvider::new(provider.as_str().trim()))
                 .fold(Vec::new(), |mut ordered, provider| {
-                    if !provider.as_str().trim().is_empty()
+                    if !provider.as_str().is_empty()
                         && !ordered.iter().any(|existing| existing == &provider)
                     {
                         ordered.push(provider);
@@ -397,20 +398,24 @@ pub(super) fn apply_preferences_patch(
         }
         if let Some(models) = utility_models.models {
             preferences.utility_models.models =
-                models.into_iter().fold(Vec::new(), |mut choices, choice| {
-                    if !choices
-                        .iter()
-                        .any(|existing: &falcondeck_core::UtilityModelChoice| {
-                            existing.provider == choice.provider
-                        })
-                    {
-                        choices.push(falcondeck_core::UtilityModelChoice {
-                            provider: choice.provider,
-                            model_id: choice.model_id.trim().to_string(),
-                        });
-                    }
-                    choices
-                });
+                models
+                    .into_iter()
+                    .fold(Vec::new(), |mut choices, mut choice| {
+                        choice.provider = AgentProvider::new(choice.provider.as_str().trim());
+                        if !choices
+                            .iter()
+                            .any(|existing: &falcondeck_core::UtilityModelChoice| {
+                                existing.provider == choice.provider
+                            })
+                            && !choice.provider.as_str().is_empty()
+                        {
+                            choices.push(falcondeck_core::UtilityModelChoice {
+                                provider: choice.provider,
+                                model_id: choice.model_id.trim().to_string(),
+                            });
+                        }
+                        choices
+                    });
         }
     }
 }
@@ -1079,6 +1084,33 @@ mod tests {
                 .utility_models
                 .model_for(&AgentProvider::new("grok")),
             Some("grok-fast")
+        );
+    }
+
+    #[test]
+    fn utility_model_patch_normalizes_provider_ids_before_use() {
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                utility_models: Some(falcondeck_core::UtilityModelPreferencesPatch {
+                    provider_order: Some(vec![AgentProvider::new(" codex "), AgentProvider::CODEX]),
+                    models: Some(vec![falcondeck_core::UtilityModelChoice {
+                        provider: AgentProvider::new(" codex "),
+                        model_id: " gpt-5-mini ".to_string(),
+                    }]),
+                }),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+
+        assert_eq!(
+            preferences.utility_models.provider_order,
+            vec![AgentProvider::CODEX]
+        );
+        assert_eq!(
+            preferences.utility_models.model_for(&AgentProvider::CODEX),
+            Some("gpt-5-mini")
         );
     }
 

@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 21 / 100
-- Product defects: 19
+- Verified and fixed: 27 / 100
+- Product defects: 25
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -208,6 +208,60 @@ Each entry records:
 - Fix: Contain synchronous client initialization failures, reset transient host state, mark the server as needing repair, persist that state, and expose actionable error copy.
 - Verification: `npm run test --workspace apps/desktop -- --run src/hosts.test.ts` passes the malformed-credential startup regression and preserves the host as paired/repairable rather than throwing.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 022 — Carriage returns bypass the single-line composer-suggestion contract
+
+- Kind: Product defect
+- Reproduction: `cargo test -p falcondeck-core --test composer_suggestions description_rejects_every_line_break -- --exact --nocapture` failed because `"first\rsecond"` was accepted while the equivalent LF description was rejected.
+- Root cause: `ComposerSuggestionSet::validate` checked only `\n`, despite the published extension contract requiring a single-line description and CR being a line break on its own and in CRLF input.
+- Fix: Reject both CR and LF at the Rust-owned daemon protocol boundary.
+- Verification: The focused regression passes; `cargo test -p falcondeck-core -p falcondeck-daemon` also passes the complete core and daemon suites.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 023 — A provider citation ID can duplicate an already-streamed citation
+
+- Kind: Product defect
+- Reproduction: `cargo test -p falcondeck-core --test citation provider_id_enrichment_does_not_duplicate_a_synthetic_citation -- --exact --nocapture` produced two citations for the same kind and URL after the first partial event received `answer-3:citation:0` and the enriched event supplied `provider-citation-1`.
+- Root cause: Citation identity gives two real provider IDs priority, but FalconDeck assigned its synthetic stable ID before the next delta arrived. The unequal synthetic/provider IDs then prevented the legacy URL/locator identity fallback from running.
+- Fix: Recognize only FalconDeck-generated numeric citation IDs during merge and allow those entries to match a later real provider ID through the existing legacy source identity, while keeping the first client-visible ID stable.
+- Verification: All five citation integration tests pass; the full core and daemon test command passes.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 024 — A complete short DA1 terminal query at a batch boundary panics the daemon task
+
+- Kind: Product defect
+- Reproduction: Adding the short `ESC [ c` query as a complete output batch to `terminal::tests::da1_filter_strips_complete_queries` panicked at `terminal.rs:83` with `attempt to subtract with overflow`.
+- Root cause: After stripping the complete three-byte query, the trailing-partial scan also classified that full query as a prefix of itself and tried to truncate three bytes from an empty output buffer.
+- Fix: Treat a suffix as partial only when it is strictly shorter than the matching query pattern.
+- Verification: `cargo test -p falcondeck-daemon terminal::tests::da1_filter_strips_complete_queries --lib -- --exact` passes both complete DA1 spellings; the full daemon suite passes 862 unit tests, 2 intentional ignores, and every integration test.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 025 — Utility-model patches keep whitespace inside provider IDs
+
+- Kind: Product defect
+- Reproduction: `cargo test -p falcondeck-daemon app::storage::tests::utility_model_patch_normalizes_provider_ids_before_use -- --exact --nocapture` left provider order as `[" codex ", "codex"]` and made the patched model unreachable via the real `codex` provider.
+- Root cause: Persisted preference loading trims provider IDs, but the live patch path only tested a trimmed view for emptiness and stored the original value. The running daemon therefore behaved differently until restart and failed to deduplicate equivalent IDs.
+- Fix: Normalize provider IDs before filtering and deduplicating both the order and per-provider model choices.
+- Verification: The focused storage regression and the complete core/daemon test suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 026 — Prefix-related user prompts disappear from the thread search index
+
+- Kind: Product defect
+- Reproduction: `cargo test -p falcondeck-daemon app::thread_search::tests::keeps_distinct_consecutive_prompts_when_one_is_a_prefix -- --exact --nocapture` indexed only `fix login` and discarded the subsequent real prompt `fix login and logout`.
+- Root cause: Transcript deduplication treated either adjacent string being a prefix of the other as proof that Codex had recorded the same turn twice. Legitimate follow-ups commonly extend or shorten the previous request.
+- Fix: Deduplicate only exact adjacent normalized messages; distinct prefix-related prompts are retained.
+- Verification: All 11 thread-search tests and the full daemon suite pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 027 — Unicode lowercase expansion can push the search hit out of its own snippet
+
+- Kind: Product defect
+- Reproduction: `cargo test -p falcondeck-daemon app::thread_search::tests::snippet_centres_on_a_hit_after_expanding_unicode_lowercase -- --exact --nocapture` returned a 180-character snippet that omitted `needle`, even though `needle` was the matched query.
+- Root cause: Search offsets are byte positions in a lowercased string, while snippet slicing used byte boundaries from the original string. Characters such as `İ` expand when lowercased, so the offset can exceed the original byte length and fall back to the start of the message.
+- Fix: Map the lowercased byte offset back through each original character's actual lowercase encoding before selecting the character window.
+- Verification: The focused Unicode regression, all thread-search tests, and the complete core/daemon test suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
 
 ## Pending Verification
 

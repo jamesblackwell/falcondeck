@@ -1366,7 +1366,7 @@ impl ComposerSuggestionSet {
             }
             if let Some(description) = action.description.as_deref()
                 && (description.chars().count() > MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS
-                    || description.contains('\n'))
+                    || description.contains(['\n', '\r']))
             {
                 return Err(format!(
                     "composer suggestion description must be a single line of at most {MAX_COMPOSER_SUGGESTION_DESCRIPTION_CHARS} characters"
@@ -2343,6 +2343,13 @@ impl ConversationCitation {
         if let (Some(left), Some(right)) = (non_empty(&self.id), non_empty(&other.id)) {
             return left == right;
         }
+        self.shares_legacy_identity_with(other)
+    }
+
+    fn shares_legacy_identity_with(&self, other: &Self) -> bool {
+        if self.kind.trim() != other.kind.trim() {
+            return false;
+        }
         if let (Some(left), Some(right)) = (&self.locator, &other.locator) {
             return left == right;
         }
@@ -2408,6 +2415,7 @@ pub fn merge_conversation_citations(
     incoming: impl IntoIterator<Item = ConversationCitation>,
     id_prefix: &str,
 ) {
+    let generated_id_prefix = format!("{id_prefix}:citation:");
     for (index, citation) in citations.iter_mut().enumerate() {
         if citation.id.is_none() {
             citation.id = Some(format!("{id_prefix}:citation:{index}"));
@@ -2415,10 +2423,12 @@ pub fn merge_conversation_citations(
     }
 
     for mut citation in incoming {
-        if let Some(existing) = citations
-            .iter_mut()
-            .find(|existing| existing.shares_identity_with(&citation))
-        {
+        if let Some(existing) = citations.iter_mut().find(|existing| {
+            existing.shares_identity_with(&citation)
+                || (is_generated_citation_id(&existing.id, &generated_id_prefix)
+                    && !is_generated_citation_id(&citation.id, &generated_id_prefix)
+                    && existing.shares_legacy_identity_with(&citation))
+        }) {
             existing.merge_metadata_from(&citation);
             continue;
         }
@@ -2439,6 +2449,14 @@ pub fn merge_conversation_citations(
         }
         citations.push(citation);
     }
+}
+
+fn is_generated_citation_id(id: &Option<String>, prefix: &str) -> bool {
+    non_empty(id)
+        .and_then(|id| id.strip_prefix(prefix))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Normalized provider availability for a skill entry.

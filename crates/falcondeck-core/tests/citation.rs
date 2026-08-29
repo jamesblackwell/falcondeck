@@ -105,3 +105,28 @@ fn repeated_source_keeps_first_seen_order() {
     assert_eq!(citations[0].id.as_deref(), Some("answer-2:citation:0"));
     assert_eq!(citations[1].id.as_deref(), Some("answer-2:citation:1"));
 }
+
+#[test]
+fn provider_id_enrichment_does_not_duplicate_a_synthetic_citation() {
+    let citation = |id: Option<&str>, title: Option<&str>| ConversationCitation {
+        id: id.map(str::to_string),
+        kind: "web_search_result_location".to_string(),
+        url: Some("https://example.com/source".to_string()),
+        source: None,
+        title: title.map(str::to_string),
+        cited_text: None,
+        locator: None,
+    };
+    let mut citations = Vec::new();
+
+    merge_conversation_citations(&mut citations, [citation(None, None)], "answer-3");
+    merge_conversation_citations(
+        &mut citations,
+        [citation(Some("provider-citation-1"), Some("Enriched"))],
+        "answer-3",
+    );
+
+    assert_eq!(citations.len(), 1);
+    assert_eq!(citations[0].id.as_deref(), Some("answer-3:citation:0"));
+    assert_eq!(citations[0].title.as_deref(), Some("Enriched"));
+}

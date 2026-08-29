@@ -48,7 +48,7 @@ impl Da1Filter {
     fn is_partial_pattern_suffix(suffix: &[u8]) -> bool {
         DA1_QUERY_PATTERNS
             .iter()
-            .any(|pattern| pattern.starts_with(suffix))
+            .any(|pattern| suffix.len() < pattern.len() && pattern.starts_with(suffix))
     }
 
     /// Filters one output batch. Returns the bytes to forward (queries
@@ -527,6 +527,7 @@ mod tests {
     fn da1_filter_strips_complete_queries() {
         assert_filtered(b"hello", b"hello", 0);
         assert_filtered(b"\x1b[0c", b"", 1);
+        assert_filtered(b"\x1b[c", b"", 1);
         assert_filtered(b"a\x1b[cb", b"ab", 1);
         assert_filtered(b"\x1b[0c\x1b[c\x1b[0c", b"", 3);
     }

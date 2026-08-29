@@ -296,9 +296,7 @@ fn user_message_text_from_line(line: &str, previous: Option<&String>) -> Option<
     let text = user_message_text(&value)?;
     // One turn can be recorded twice (event plus response item); the copies
     // land next to each other, so comparing neighbours is enough.
-    if previous.is_some_and(|last| {
-        last == &text || last.starts_with(&text) || text.starts_with(last.as_str())
-    }) {
+    if previous.is_some_and(|last| last == &text) {
         return None;
     }
     Some(text)
@@ -516,12 +514,7 @@ fn snippet_around(text: &str, at: usize) -> String {
     if chars.len() <= SNIPPET_CHARS {
         return text.to_string();
     }
-    // `at` indexes bytes of the lowercased copy, which has the same char
-    // boundaries for every case mapping we care about here.
-    let hit_char = text
-        .char_indices()
-        .position(|(byte, _)| byte >= at)
-        .unwrap_or(0);
+    let hit_char = lowercase_byte_offset_to_char_index(text, at);
     let start = hit_char.saturating_sub(SNIPPET_CHARS / 3);
     let end = (start + SNIPPET_CHARS).min(chars.len());
     let mut snippet = String::new();
@@ -533,6 +526,18 @@ fn snippet_around(text: &str, at: usize) -> String {
         snippet.push('…');
     }
     snippet
+}
+
+fn lowercase_byte_offset_to_char_index(text: &str, offset: usize) -> usize {
+    let mut lowercase_bytes = 0;
+    for (char_index, character) in text.chars().enumerate() {
+        let next = lowercase_bytes + character.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if offset < next {
+            return char_index;
+        }
+        lowercase_bytes = next;
+    }
+    text.chars().count()
 }
 
 #[cfg(test)]
@@ -580,6 +585,20 @@ mod tests {
                 "Fix the dictation paste path".to_string(),
                 "and then ship it".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_consecutive_prompts_when_one_is_a_prefix() {
+        let transcript = [
+            claude_line("fix login"),
+            claude_line("fix login and logout"),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            user_messages(&transcript, true, false),
+            vec!["fix login".to_string(), "fix login and logout".to_string(),]
         );
     }
 
@@ -810,5 +829,14 @@ mod tests {
         assert!(snippet.contains("needle"));
         assert!(snippet.starts_with('…') && snippet.ends_with('…'));
         assert!(snippet.chars().count() <= SNIPPET_CHARS + 2);
+    }
+
+    #[test]
+    fn snippet_centres_on_a_hit_after_expanding_unicode_lowercase() {
+        let text = format!("{}{}needle", "İ".repeat(100), "x".repeat(100));
+        let at = text.to_lowercase().find("needle").expect("hit");
+        let snippet = snippet_around(&text, at);
+
+        assert!(snippet.contains("needle"), "snippet was {snippet:?}");
     }
 }
