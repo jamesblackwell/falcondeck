@@ -24,8 +24,10 @@ describe("workspace capability normalization", () => {
 
     expect(workspace.agents).toHaveLength(2);
     for (const agent of workspace.agents) {
-      expect(agent.capabilities.supports_compaction).toBe(false);
-      expect(agent.capabilities.supports_compaction_instructions).toBe(false);
+      expect(agent.capabilities).toMatchObject({
+        supports_compaction: false,
+        supports_compaction_instructions: false,
+      });
     }
   });
 });

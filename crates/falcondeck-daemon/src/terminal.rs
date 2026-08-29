@@ -713,20 +713,31 @@ mod tests {
         let (_info, mut receiver, _client) = manager.attach(&info.id, 0).expect("attach");
         wait_for_shell_prompt(&mut receiver).await;
 
-        // Emit a real DA1 query on the shell's stdout. The daemon answers it
-        // at the PTY boundary by writing `\x1b[?1;2c` into the shell's input;
-        // the tty echoes written input back caret-encoded, so observing
-        // `^[[?1;2c` proves the reply was written. The raw query itself is
-        // stripped from output by the filter and never reaches the client.
+        // Emit a real DA1 query on the shell's stdout, then read the reply as
+        // raw bytes while the command still owns the terminal. Checking the
+        // bytes avoids depending on how a particular shell or line editor
+        // renders an unsolicited escape sequence at its prompt.
         manager.handle_client_frame(
             &info.id,
             &TerminalClientFrame::TerminalInput {
                 data_base64: base64::engine::general_purpose::STANDARD
-                    .encode("echo START; printf '\\033[0c'; echo DA1-DONE\n"),
+                    .encode(concat!(
+                        "stty -echo -icanon min 1 time 0; ",
+                        "printf '\\033[0c'; ",
+                        "dd bs=1 count=7 2>/dev/null | od -An -tx1; ",
+                        "stty sane; echo DA1-DONE\n"
+                    )),
             },
         );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut seen = String::new();
+        let has_da1_reply = |output: &str| {
+            output
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .windows(7)
+                .any(|bytes| bytes == ["1b", "5b", "3f", "31", "3b", "32", "63"])
+        };
         loop {
             let remaining = deadline
                 .checked_duration_since(tokio::time::Instant::now())
@@ -734,7 +745,7 @@ mod tests {
             match tokio::time::timeout(remaining, receiver.recv()).await {
                 Ok(Some(frame)) => {
                     seen.push_str(&frame_text(&frame));
-                    if seen.contains("DA1-DONE") && seen.contains("^[[?1;2c") {
+                    if seen.contains("DA1-DONE") && has_da1_reply(&seen) {
                         break;
                     }
                 }
