@@ -21,12 +21,19 @@ status window, and paste-at-cursor behavior.
   credential store.
 - A transcript must contain at least three characters before FalconDeck treats
   it as confirmed.
-- When FalconDeck falls back to a targeted Command-V, it temporarily uses the
-  system clipboard, then restores the previous contents if no other app changed
-  them in the meantime.
-- Some controlled web composers report a successful Accessibility edit without
-  accepting it. FalconDeck bypasses that path for ChatGPT and sends its normal
-  targeted Command-V paste instead.
+- Cross-application insertion uses the destination's normal Command-V path.
+  Accessibility selected-text writes are not treated as delivery because
+  controlled web editors can report success without updating their state.
+- FalconDeck snapshots every pasteboard item and type, marks its transcript as
+  transient, waits briefly for the pasteboard server, and sends a complete
+  Command-down/V-down/V-up/Command-up sequence using the current keyboard
+  layout. It restores the prior clipboard after 1.5 seconds only while its
+  recorded pasteboard change count proves that it still owns the contents. A
+  user or clipboard manager change always wins.
+- The captured destination is checked immediately before the shortcut. If the
+  FalconDeck overlay briefly became active, the original app is reactivated;
+  if the user switched to a different app, insertion stops and the transcript
+  is offered for Copy instead of being pasted into the wrong place.
 - A completed transcript remains in the top pill for eight seconds with a Copy
   action. Explicit copy leaves the transcript on the clipboard; automatic paste
   still restores the clipboard contents it temporarily replaced.
@@ -42,7 +49,15 @@ AVFoundation, ApplicationServices, and Speech. The bridge:
 3. sends lifecycle events to the Rust shell;
 4. transcribes with `SFSpeechURLRecognitionRequest`, or hands the temporary file
    to Rust for the daemon's OpenRouter endpoint;
-5. synthesizes Command-V without taking focus from the destination app.
+5. revalidates the captured frontmost application, stages an ownership-tagged
+   transient clipboard item, and synthesizes a normally routed Command-V
+   without targeting a possibly stale process ID.
+
+FalconDeck inserts directly into its own React composer rather than routing its
+transcript back through the native paste machinery. For external apps, macOS
+does not expose an acknowledgement that an editor consumed a synthetic paste;
+the completed pill therefore retains the transcript and its Copy action for
+eight seconds even after the shortcut was dispatched.
 
 Microphone selection is independent of the macOS output route. FalconDeck uses
 an input-only `AVCaptureSession`, so starting dictation does not create a
@@ -117,10 +132,16 @@ into the desktop shell.
 1. Enable dictation with Apple Speech and grant all three macOS permissions.
 2. Hold Right Command alone, dictate into TextEdit, release, and confirm the
    text is pasted while the original clipboard returns.
-3. Use Command-C and another slow Command shortcut; confirm neither produces a
+3. Repeat in a browser editor, a terminal, and a React-controlled composer;
+   confirm each receives the text through its ordinary paste behavior.
+4. Start dictation in one app, switch to a different app while it transcribes,
+   and confirm FalconDeck offers Copy without pasting into the new app.
+5. Change the clipboard during the 1.5-second restore window and confirm
+   FalconDeck preserves the newer clipboard contents.
+6. Use Command-C and another slow Command shortcut; confirm neither produces a
    transcript.
-4. Record and press Escape; confirm no text is pasted and no retry remains.
-5. Force a transcription failure, relaunch FalconDeck, and confirm the next
+7. Record and press Escape; confirm no text is pasted and no retry remains.
+8. Force a transcription failure, relaunch FalconDeck, and confirm the next
    attempt offers Retry or Discard instead of overwriting the audio.
-6. Select OpenRouter, save a key, choose a transcription model, and repeat the
+9. Select OpenRouter, save a key, choose a transcription model, and repeat the
    TextEdit flow.

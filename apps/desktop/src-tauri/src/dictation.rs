@@ -213,9 +213,7 @@ unsafe extern "C" {
     fn fd_dictation_discard();
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
     #[cfg(test)]
-    fn fd_dictation_should_use_accessibility_paste(
-        bundle_identifier: *const std::ffi::c_char,
-    ) -> bool;
+    fn fd_dictation_test_transient_pasteboard_round_trip() -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
@@ -1296,19 +1294,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn chatgpt_bypasses_accessibility_paste_false_successes() {
-        let prefers_accessibility = |bundle_identifier: &str| {
-            let bundle_identifier =
-                std::ffi::CString::new(bundle_identifier).expect("valid bundle identifier");
-            unsafe {
-                super::fd_dictation_should_use_accessibility_paste(bundle_identifier.as_ptr())
-            }
-        };
-
-        assert!(!prefers_accessibility("com.openai.codex"));
-        assert!(!prefers_accessibility("com.openai.chat"));
-        assert!(!prefers_accessibility("com.openai.ChatGPT"));
-        assert!(prefers_accessibility("com.apple.TextEdit"));
+    fn transient_pasteboard_round_trip_preserves_items_and_detects_new_owner() {
+        assert!(unsafe { super::fd_dictation_test_transient_pasteboard_round_trip() });
     }
 
     #[test]
