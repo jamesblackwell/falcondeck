@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 11 / 100
-- Product defects: 9
+- Verified and fixed: 16 / 100
+- Product defects: 14
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -117,6 +117,51 @@ Each entry records:
 - Root cause: Each line was parsed independently after trimming whitespace, with no Markdown fence state or column-zero transport requirement.
 - Fix: Classify lines with fenced-code state, protect opening/closing/interior fence lines across all consumers, and require transport directives at column zero.
 - Verification: `npm run test --workspace packages/client-core -- --run src/agent-directive.test.ts` passes all 6 parsing, streaming, strip, copy, fence, and indentation tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 012 — Remote hosts keep a bootstrap retry timer after encryption is already available
+
+- Kind: Product defect
+- Reproduction: A `RemoteHostClient` created with a persisted data key still had a live `bootstrapRetryInterval` immediately after opening. A client that installed a key from replay kept the same interval too.
+- Root cause: `startBootstrapRecovery` always allocated the 30-second interval, and successful session bootstrap never cleared it. The callback became a permanent no-op but continued waking for the lifetime of every encrypted connection.
+- Fix: Do not start bootstrap recovery when session crypto already exists, and clear the retry interval as soon as replay installs the data key.
+- Verification: `npm run test --workspace packages/client-core -- --run src/remote-host-client.test.ts` passes both persisted-key and bootstrap-replay timer assertions.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 013 — Live remote events can be delivered concurrently and out of order
+
+- Kind: Product defect
+- Reproduction: The first encrypted realtime event entered an asynchronous `onEvents` callback and remained blocked; the second event entered the callback before the first settled.
+- Root cause: The encrypted-ephemeral chain awaited decryption but `handleEncryptedEphemeral` discarded the promise returned by `onEvents`, so the chain considered delivery complete too early.
+- Fix: Await the host event callback as part of the ephemeral delivery chain.
+- Verification: The focused remote-host test holds event 1, proves event 2 cannot start during that interval, releases event 1, and then observes delivery order `[1, 2]`.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 014 — An encrypted RPC can resolve successfully after its connection has closed
+
+- Kind: Product defect
+- Reproduction: A valid encrypted `rpc-result` was received, the socket closed while Web Crypto was decrypting it, and the caller still resolved with the stale result instead of receiving `Relay connection closed`.
+- Root cause: `resolveRpc` removed the request from `pendingRpc` before awaiting decryption. Reconnect therefore could not reject it, and no generation/session check guarded the later resolution.
+- Fix: Keep the request registered until decryption and generation validation finish; settle it only if it is still pending on the same connection and crypto state.
+- Verification: The focused test closes the exact socket after dispatching an encrypted result and now observes rejection with `Relay connection closed`.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 015 — Replay received after a quick remote-host restart can remain stranded forever
+
+- Kind: Product defect
+- Reproduction: Event 1 was waiting in the host's asynchronous apply callback when the client stopped and restarted. Event 2 arrived on the new socket, but after event 1 settled the callback sequence remained `[1]`; event 2 was never flushed.
+- Root cause: The new flush returned while the old generation owned the global `flushInProgress` flag. The old flush's `finally` released the flag but only restarted pending work when its own generation was still current. It could also persist its stale cursor after the awaited callback.
+- Fix: Recheck generation immediately after asynchronous event application, and when any old flush releases the flag, start pending work for the currently running generation.
+- Verification: The focused restart regression now observes ordered callbacks `[1, 2]` without requiring a third relay update to kick the queue.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 016 — A stopped desktop host can be resurrected by an old snapshot response
+
+- Kind: Product defect
+- Reproduction: `HostConnection.refresh()` was left pending, `stop()` cleared the host state, and then the old snapshot RPC resolved; `connection.snapshot` became non-null again.
+- Root cause: Snapshot completion had no lifecycle/client identity check and unconditionally applied results and toggled barrier state after asynchronous RPC completion.
+- Fix: Version the host lifecycle and apply refresh success, failure, and barrier cleanup only when both the generation and client instance remain current.
+- Verification: `npm run test --workspace apps/desktop -- --run src/hosts.test.ts` passes the deferred-RPC stop regression and existing extension refresh tests.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
 
 ## Pending Verification

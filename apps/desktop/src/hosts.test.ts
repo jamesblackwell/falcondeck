@@ -182,4 +182,40 @@ describe("HostConnection extension actions", () => {
     );
     expect(onChange).toHaveBeenCalled();
   });
+
+  it("does not restore a stale snapshot after the host is stopped", async () => {
+    const remoteSnapshot = snapshot(
+      "remote-workspace",
+      "falcondeck.thread-tags",
+      "remote-thread",
+    );
+    let resolveSnapshot!: (value: DaemonSnapshot) => void;
+    const snapshotResponse = new Promise<DaemonSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+    const connection = new HostConnection(
+      {
+        id: "remote-host",
+        name: "Remote",
+        sshTarget: null,
+        sshPort: null,
+        relayUrl: "https://connect.example.test",
+        enabled: true,
+        session: null,
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+    Reflect.set(connection, "client", {
+      rpc: vi.fn(() => snapshotResponse),
+      stop: vi.fn(),
+    });
+
+    const refresh = connection.refresh();
+    connection.stop();
+    resolveSnapshot(remoteSnapshot);
+    await refresh;
+
+    expect(connection.snapshot).toBeNull();
+  });
 });

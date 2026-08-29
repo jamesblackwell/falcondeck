@@ -246,6 +246,7 @@ export class HostConnection {
   private readonly onPersist: () => void
   private snapshotRequestInFlight = false
   private snapshotRefreshPromise: Promise<void> | null = null
+  private lifecycleGeneration = 0
   private pendingSnapshotEvents: Array<{
     events: EventEnvelope[]
     resolve: () => void
@@ -313,6 +314,7 @@ export class HostConnection {
   }
 
   stop() {
+    this.lifecycleGeneration += 1
     this.client?.stop()
     this.client = null
     this.status = 'idle'
@@ -364,11 +366,15 @@ export class HostConnection {
     if (this.snapshotRefreshPromise) return this.snapshotRefreshPromise
     const client = this.client
     if (!client) return Promise.resolve()
+    const generation = this.lifecycleGeneration
+    const isCurrent = () =>
+      generation === this.lifecycleGeneration && client === this.client
 
     this.snapshotRequestInFlight = true
     const refresh = (async () => {
       try {
         const raw = await client.rpc('snapshot.current', {})
+        if (!isCurrent()) return
         this.snapshot = normalizeDaemonSnapshot(raw)
         this.onChange()
         const pending = this.pendingSnapshotEvents.splice(0)
@@ -377,6 +383,7 @@ export class HostConnection {
           entry.resolve()
         }
       } catch (error) {
+        if (!isCurrent()) return
         const reason = error instanceof Error ? error : new Error('Failed to load host snapshot')
         this.lastError = reason.message
         this.onChange()
@@ -385,7 +392,7 @@ export class HostConnection {
         }
         throw reason
       } finally {
-        this.snapshotRequestInFlight = false
+        if (isCurrent()) this.snapshotRequestInFlight = false
       }
     })()
     this.snapshotRefreshPromise = refresh

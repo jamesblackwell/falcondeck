@@ -520,6 +520,7 @@ export class RemoteHostClient {
   // arrives as a durable session-bootstrap update through the normal replay
   // path.
   private startBootstrapRecovery() {
+    if (this.sessionCrypto) return
     const request = () => {
       if (this.sessionCrypto) return
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return
@@ -628,7 +629,7 @@ export class RemoteHostClient {
       crypto !== this.sessionCrypto
     ) return
     const liveEvents = events.filter(isLiveRealtimeEvent)
-    if (liveEvents.length > 0) this.callbacks.onEvents?.(liveEvents)
+    if (liveEvents.length > 0) await this.callbacks.onEvents?.(liveEvents)
   }
 
   private async resolveRpc(
@@ -640,23 +641,39 @@ export class RemoteHostClient {
   ) {
     const pending = this.pendingRpc.get(requestId)
     if (!pending) return
-    this.pendingRpc.delete(requestId)
-    clearTimeout(pending.timeout)
+    const generation = this.generation
+    const crypto = this.sessionCrypto
+    const settle = (callback: () => void) => {
+      if (this.pendingRpc.get(requestId) !== pending) return
+      this.pendingRpc.delete(requestId)
+      clearTimeout(pending.timeout)
+      callback()
+    }
     try {
-      const crypto = this.sessionCrypto
       if (!crypto) throw new Error('Encrypted relay session is not ready')
       if (ok) {
-        pending.resolve(result ? await decryptJson(crypto.dataKey, result) : null)
+        const value = result ? await decryptJson(crypto.dataKey, result) : null
+        if (generation !== this.generation || crypto !== this.sessionCrypto) {
+          settle(() => pending.reject(new Error('Remote connection changed during the request')))
+          return
+        }
+        settle(() => pending.resolve(value))
         return
       }
       if (!errorEnvelope) {
-        pending.reject(new Error(relayRpcFailureMessage(failure, pending.method)))
+        settle(() => pending.reject(new Error(relayRpcFailureMessage(failure, pending.method))))
         return
       }
       const decrypted = await decryptJson<unknown>(crypto.dataKey, errorEnvelope)
-      pending.reject(new Error(encryptedRpcErrorMessage(decrypted)))
+      if (generation !== this.generation || crypto !== this.sessionCrypto) {
+        settle(() => pending.reject(new Error('Remote connection changed during the request')))
+        return
+      }
+      settle(() => pending.reject(new Error(encryptedRpcErrorMessage(decrypted))))
     } catch (error) {
-      pending.reject(error instanceof Error ? error : new Error('Remote action failed'))
+      settle(() => {
+        pending.reject(error instanceof Error ? error : new Error('Remote action failed'))
+      })
     }
   }
 
@@ -721,6 +738,10 @@ export class RemoteHostClient {
                 expectedClientIdentityPublicKey,
               })
               this.sessionCrypto = bootstrapSessionCrypto(this.keyPair, update.body.material)
+              if (this.bootstrapRetryInterval !== null) {
+                clearInterval(this.bootstrapRetryInterval)
+                this.bootstrapRetryInterval = null
+              }
               this.setStatus('encrypted')
               if (this.snapshotRecoveryRequired && !this.snapshotRecoveryPromise) {
                 this.requestSnapshotRecovery()
@@ -849,6 +870,7 @@ export class RemoteHostClient {
             this.scheduleReconnect()
             return
           }
+          if (flushGeneration !== this.generation || !this.running) return
         }
         if (cursorChanged) {
           this.cursor = nextCursor
@@ -878,7 +900,7 @@ export class RemoteHostClient {
       }
     } finally {
       this.flushInProgress = false
-      if (flushGeneration === this.generation && this.running && this.pendingUpdates.length > 0) {
+      if (this.running && this.pendingUpdates.length > 0) {
         void this.flushUpdates()
       }
     }

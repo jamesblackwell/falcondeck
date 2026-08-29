@@ -18,6 +18,7 @@ import {
   buildPairingPublicKeyBundle,
   bytesToBase64,
   deriveIdentityKeyPair,
+  encryptJson,
   generateBoxKeyPair,
   identityPublicKeyToBase64,
   publicKeyToBase64,
@@ -25,7 +26,10 @@ import {
   secretKeyToBase64,
 } from './crypto'
 import { RemoteHostClient } from './remote-host-client'
-import { REMOTE_SESSION_STORAGE_VERSION, type PersistedRemoteSession } from './remote-session'
+import {
+  REMOTE_SESSION_STORAGE_VERSION,
+  type PersistedRemoteSession,
+} from './remote-session'
 import type { MachinePresence, SessionKeyMaterial } from './types'
 
 class TestWebSocket {
@@ -102,6 +106,52 @@ function sendServerMessage(socket: TestWebSocket, message: unknown) {
   socket.onmessage?.({ data: JSON.stringify(message) })
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
+async function encryptedRealtimeEvent(dataKey: Uint8Array, seq: number) {
+  return encryptJson(dataKey, {
+    kind: 'daemon-event',
+    event: {
+      seq,
+      emitted_at: `2026-08-21T07:00:0${seq}Z`,
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: {
+        type: 'realtime-item-added',
+        item: {
+          id: `realtime-${seq}`,
+          item_type: 'voice',
+          title: `Realtime ${seq}`,
+          summary: null,
+          payload: null,
+          created_at: `2026-08-21T07:00:0${seq}Z`,
+        },
+      },
+    },
+  })
+}
+
+async function encryptedDurableEvent(dataKey: Uint8Array, seq: number) {
+  return encryptJson(dataKey, {
+    kind: 'daemon-event',
+    event: {
+      seq,
+      emitted_at: `2026-08-21T07:00:0${seq}Z`,
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: { type: 'stop', reason: null },
+    },
+  })
+}
+
 describe('RemoteHostClient relay replay', () => {
   it('persists the cursor advanced by a bootstrap-only replay batch', async () => {
     const session = persistedSession()
@@ -142,6 +192,7 @@ describe('RemoteHostClient relay replay', () => {
     })
 
     await vi.waitFor(() => expect(client.currentSession.lastReceivedSeq).toBe(12))
+    expect(Reflect.get(client, 'bootstrapRetryInterval')).toBeNull()
     expect(onSessionChanged).toHaveBeenLastCalledWith(
       expect.objectContaining({ dataKey: expect.any(String), lastReceivedSeq: 12 }),
     )
@@ -183,5 +234,126 @@ describe('RemoteHostClient relay replay', () => {
     await vi.waitFor(() => expect(client.currentSession.lastReceivedSeq).toBe(6))
     expect(client.presence).toEqual(online)
     expect(presenceChanges.filter((presence) => presence !== null)).toEqual([online])
+  })
+
+  it('does not allocate a bootstrap retry timer when the data key is already persisted', async () => {
+    const { client } = await startClient(
+      persistedSession(bytesToBase64(new Uint8Array(32).fill(7))),
+    )
+
+    expect(Reflect.get(client, 'bootstrapRetryInterval')).toBeNull()
+  })
+
+  it('waits for one live event callback before delivering the next event', async () => {
+    const dataKey = new Uint8Array(32).fill(7)
+    const firstApply = deferred()
+    const secondApplyStarted = deferred()
+    const applied: number[] = []
+    const { socket } = await startClient(
+      persistedSession(bytesToBase64(dataKey)),
+      {
+        onEvents: async (events) => {
+          applied.push(events[0]?.seq ?? -1)
+          if (events[0]?.seq === 1) await firstApply.promise
+          if (events[0]?.seq === 2) secondApplyStarted.resolve()
+        },
+      },
+    )
+
+    sendServerMessage(socket, {
+      type: 'ephemeral',
+      body: {
+        kind: 'encrypted-daemon-event',
+        envelope: await encryptedRealtimeEvent(dataKey, 1),
+      },
+    })
+    await vi.waitFor(() => expect(applied).toEqual([1]))
+    sendServerMessage(socket, {
+      type: 'ephemeral',
+      body: {
+        kind: 'encrypted-daemon-event',
+        envelope: await encryptedRealtimeEvent(dataKey, 2),
+      },
+    })
+
+    const deliveredWhileFirstWasBlocked = await Promise.race([
+      secondApplyStarted.promise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 200)),
+    ])
+    expect(deliveredWhileFirstWasBlocked).toBe(false)
+    firstApply.resolve()
+    await vi.waitFor(() => expect(applied).toEqual([1, 2]))
+  })
+
+  it('rejects an encrypted RPC result when its connection closes during decryption', async () => {
+    const dataKey = new Uint8Array(32).fill(7)
+    const { client, socket } = await startClient(
+      persistedSession(bytesToBase64(dataKey)),
+    )
+    const result = client.rpc<{ source: string }>('thread.detail', {})
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledTimes(2))
+    const request = JSON.parse(String(socket.send.mock.calls[1]?.[0])) as {
+      request_id: string
+    }
+
+    sendServerMessage(socket, {
+      type: 'rpc-result',
+      request_id: request.request_id,
+      ok: true,
+      result: await encryptJson(dataKey, { source: 'closed-connection' }),
+      error: null,
+    })
+    socket.onclose?.()
+
+    await expect(result).rejects.toThrow('Relay connection closed')
+  })
+
+  it('flushes replay received after a restart while the old event callback settles', async () => {
+    const dataKey = new Uint8Array(32).fill(7)
+    const firstApply = deferred()
+    const applied: number[] = []
+    const { client, socket: firstSocket } = await startClient(
+      persistedSession(bytesToBase64(dataKey)),
+      {
+        onEvents: async (events) => {
+          applied.push(events[0]?.seq ?? -1)
+          if (events[0]?.seq === 1) await firstApply.promise
+        },
+      },
+    )
+
+    sendServerMessage(firstSocket, {
+      type: 'sync',
+      next_seq: 2,
+      history_truncated: false,
+      updates: [{
+        id: 'event-1',
+        seq: 1,
+        created_at: '2026-08-21T07:00:01Z',
+        body: { t: 'encrypted', envelope: await encryptedDurableEvent(dataKey, 1) },
+      }],
+    })
+    await vi.waitFor(() => expect(applied).toEqual([1]))
+
+    client.stop()
+    client.start()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(2))
+    const secondSocket = TestWebSocket.instances[1]!
+    secondSocket.readyState = TestWebSocket.OPEN
+    secondSocket.onopen?.()
+    sendServerMessage(secondSocket, {
+      type: 'sync',
+      next_seq: 3,
+      history_truncated: false,
+      updates: [{
+        id: 'event-2',
+        seq: 2,
+        created_at: '2026-08-21T07:00:02Z',
+        body: { t: 'encrypted', envelope: await encryptedDurableEvent(dataKey, 2) },
+      }],
+    })
+
+    firstApply.resolve()
+    await vi.waitFor(() => expect(applied).toEqual([1, 2]))
   })
 })
