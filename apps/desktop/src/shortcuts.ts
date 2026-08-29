@@ -314,6 +314,10 @@ export function shortcutTitle(label: string, commandId: ShortcutCommandId, setti
 }
 
 export function isEditableTarget(target: EventTarget | null) {
-  const element = target instanceof HTMLElement ? target : null
-  return Boolean(element?.closest('input, textarea, select, [contenteditable="true"]'))
+  const element = target instanceof Element ? target : null
+  if (!element) return false
+  if (element.closest('input, textarea, select')) return true
+  const contentEditable = element.closest('[contenteditable]')
+  return Boolean(contentEditable) &&
+    contentEditable?.getAttribute('contenteditable')?.toLowerCase() !== 'false'
 }

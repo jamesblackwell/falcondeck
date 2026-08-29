@@ -233,9 +233,17 @@ export function splitPreferencesUpdate(payload: UpdatePreferencesPayload): {
   }
 
   const { thinking_display: thinkingDisplay, ...rest } = conversation
-  const hasDaemonFields = Object.values(rest).some((value) => value !== undefined)
+  const hasDaemonConversationFields = Object.values(rest).some(
+    (value) => value !== undefined,
+  )
+  const daemonPayload: UpdatePreferencesPayload = { ...payload }
+  if (hasDaemonConversationFields) daemonPayload.conversation = rest
+  else delete daemonPayload.conversation
+  const hasDaemonFields = Object.values(daemonPayload).some(
+    (value) => value !== undefined,
+  )
   return {
-    daemonPayload: hasDaemonFields ? { ...payload, conversation: rest } : null,
+    daemonPayload: hasDaemonFields ? daemonPayload : null,
     thinkingDisplay,
   }
 }

@@ -479,7 +479,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadHandle(
         await parseJson<ThreadHandle>(
           await fetch(
-            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -519,7 +519,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadDetail(
         await parseJson<ThreadDetail>(
           await fetch(
-            `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}${suffix}`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}${suffix}`,
           ),
         ),
       );
@@ -528,7 +528,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadHandle(
         await parseJson<ThreadHandle>(
           await fetch(
-            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}`,
             {
               method: "PATCH",
               headers: { "content-type": "application/json" },
@@ -541,7 +541,7 @@ export function createDaemonApiClient(baseUrl: string) {
     async suggestThreadTitle(workspaceId: string, threadId: string) {
       return parseJson<SuggestThreadTitleResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/suggest-title`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/suggest-title`,
           { method: "POST" },
         ),
       );
@@ -549,7 +549,7 @@ export function createDaemonApiClient(baseUrl: string) {
     async collaborationModes(workspaceId: string) {
       return parseJson<CollaborationModeSummary[]>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/collaboration-modes`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/collaboration-modes`,
         ),
       );
     },
@@ -588,7 +588,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/archive`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/archive`,
             {
               method: "POST",
             },
@@ -600,7 +600,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/unarchive`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/unarchive`,
             {
               method: "POST",
             },
@@ -611,7 +611,7 @@ export function createDaemonApiClient(baseUrl: string) {
     async sendTurn(payload: SendTurnPayload) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(
-          `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/turns`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/turns`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -700,7 +700,7 @@ export function createDaemonApiClient(baseUrl: string) {
     async startReview(payload: StartReviewPayload) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(
-          `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/review`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/review`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -713,7 +713,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/goal`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/goal`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -727,7 +727,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/goal`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/goal`,
             {
               method: "DELETE",
             },
@@ -739,7 +739,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/read`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/read`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -753,7 +753,7 @@ export function createDaemonApiClient(baseUrl: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
           await fetch(
-            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/unread`,
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/unread`,
             {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -769,7 +769,7 @@ export function createDaemonApiClient(baseUrl: string) {
     ) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/interactive-requests/${requestId}/respond`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/interactive-requests/${encodeURIComponent(requestId)}/respond`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -786,7 +786,7 @@ export function createDaemonApiClient(baseUrl: string) {
       const params = query.toString() ? `?${query.toString()}` : "";
       return parseJson<GitStatusResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/git/status${params}`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/git/status${params}`,
         ),
       );
     },
@@ -794,12 +794,12 @@ export function createDaemonApiClient(baseUrl: string) {
     // are fixed at creation, so the picker only exists for new threads.
     async gitBranches(workspaceId: string) {
       return parseJson<GitBranchesResponse>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/branches`),
+        await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/git/branches`),
       );
     },
     async gitCheckout(workspaceId: string, branch: string, create = false) {
       return parseJson<GitBranchesResponse>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/checkout`, {
+        await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/git/checkout`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ branch, create }),
@@ -819,7 +819,7 @@ export function createDaemonApiClient(baseUrl: string) {
       const params = query.toString() ? `?${query.toString()}` : "";
       return parseJson<GitDiffResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/git/diff${params}`,
         ),
       );
     },
@@ -831,7 +831,7 @@ export function createDaemonApiClient(baseUrl: string) {
       message?: string | null,
     ) {
       return parseJson<GitCommitResponse>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/commit`, {
+        await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/git/commit`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ thread_id: threadId, message }),
@@ -847,7 +847,7 @@ export function createDaemonApiClient(baseUrl: string) {
     ) {
       return parseJson<ShipThreadResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/ship`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/ship`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -861,7 +861,7 @@ export function createDaemonApiClient(baseUrl: string) {
       if (threadId) query.set("thread_id", threadId);
       const params = query.toString() ? `?${query.toString()}` : "";
       return parseJson<WorkspaceFilesResponse>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/files${params}`),
+        await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/files${params}`),
       );
     },
     async workspaceFile(
@@ -873,7 +873,7 @@ export function createDaemonApiClient(baseUrl: string) {
       if (threadId) query.set("thread_id", threadId);
       return parseJson<WorkspaceFileResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/files/content?${query.toString()}`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/files/content?${query.toString()}`,
         ),
       );
     },
@@ -887,7 +887,7 @@ export function createDaemonApiClient(baseUrl: string) {
       if (threadId) query.set("thread_id", threadId);
       return parseJson<WorkspaceFileResponse>(
         await fetch(
-          `${baseUrl}/api/workspaces/${workspaceId}/files/content?${query.toString()}`,
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/files/content?${query.toString()}`,
           {
             method: "PUT",
             headers: { "content-type": "application/json" },

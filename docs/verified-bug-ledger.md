@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 16 / 100
-- Product defects: 14
+- Verified and fixed: 21 / 100
+- Product defects: 19
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -163,6 +163,51 @@ Each entry records:
 - Fix: Version the host lifecycle and apply refresh success, failure, and barrier cleanup only when both the generation and client instance remain current.
 - Verification: `npm run test --workspace apps/desktop -- --run src/hosts.test.ts` passes the deferred-RPC stop regression and existing extension refresh tests.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 017 — A combined thinking-display update can discard every daemon-owned preference
+
+- Kind: Product defect
+- Reproduction: Splitting `{ notifications: { enabled: false }, conversation: { thinking_display: "preview" } }` returned `daemonPayload: null`, so the notification change was never sent.
+- Root cause: `splitPreferencesUpdate` decided whether a daemon payload existed by inspecting only the remaining conversation fields after extracting the device-local field. It ignored top-level notifications, utility-model, ordering, and color updates.
+- Fix: Build the daemon payload from every top-level field, replace or remove only its conversation member, and decide whether it is empty afterward.
+- Verification: `npm run test --workspace apps/desktop -- --run src/preferences.test.ts` passes the exact mixed-update regression.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 018 — A removed default agent remains selected for new threads
+
+- Kind: Product defect
+- Reproduction: A workspace advertising only Claude but retaining `default_provider: "removed-agent"` returned `removed-agent` from `defaultProvider`.
+- Root cause: The helper trusted any nonblank stored default without checking the workspace's current agent catalog. Removing or renaming an ACP agent therefore left the new-thread composer pointed at an unavailable provider.
+- Fix: Honor the declared default when no catalog exists or it is still advertised; otherwise fall back to the first live workspace agent.
+- Verification: `npm run test --workspace packages/client-core -- --run src/collaboration.test.ts` passes the removed-agent regression and existing open-provider behavior.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 019 — Empty-value contenteditable editors trigger global typing shortcuts
+
+- Kind: Product defect
+- Reproduction: A child of `<div contenteditable>` (the HTML empty-attribute spelling) returned `false` from `isEditableTarget`. Typing the bare `?` shortcut there could open the shortcut panel instead of inserting text.
+- Root cause: The selector recognized only the literal attribute value `contenteditable="true"`, although empty and `plaintext-only` values also enable editing.
+- Fix: Detect the nearest contenteditable host by attribute presence, excluding only an explicit `false`, while preserving native input/textarea/select handling.
+- Verification: `npm run test --workspace apps/desktop -- --run src/shortcuts.test.ts` passes enabled-empty, explicit-false, and non-editor assertions.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 020 — Daemon API route identifiers are interpolated without path encoding
+
+- Kind: Product defect
+- Reproduction: Sending a turn for workspace `workspace/with space` and thread `thread?#fragment` requested `/workspaces/workspace/with space/threads/thread?#fragment/turns`, changing both route segmentation and URL query/fragment semantics.
+- Root cause: Older and newer client methods were inconsistent: some used `encodeURIComponent` for each identifier while thread, goal, git, file, and interactive-request routes interpolated raw IDs.
+- Fix: Encode every workspace, thread, and request identifier as an individual URL path segment across the daemon client.
+- Verification: `npm run test --workspace packages/client-core -- --run src/daemon-client.test.ts` passes the special-character route assertion and all existing endpoint-shape tests; a source scan finds no remaining raw identifier interpolation in these routes.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 021 — Malformed stored remote-host credentials can crash desktop startup
+
+- Kind: Product defect
+- Reproduction: Starting a `HostConnection` from an otherwise valid persisted host whose secret key contained invalid Base64 threw `InvalidCharacterError` synchronously.
+- Root cause: Local storage is an untrusted recovery boundary, but `HostConnection.start` constructed and started `RemoteHostClient` without catching key restoration or URL setup failures.
+- Fix: Contain synchronous client initialization failures, reset transient host state, mark the server as needing repair, persist that state, and expose actionable error copy.
+- Verification: `npm run test --workspace apps/desktop -- --run src/hosts.test.ts` passes the malformed-credential startup regression and preserves the host as paired/repairable rather than throwing.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
 
 ## Pending Verification
 

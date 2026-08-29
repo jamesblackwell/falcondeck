@@ -218,4 +218,43 @@ describe("HostConnection extension actions", () => {
 
     expect(connection.snapshot).toBeNull();
   });
+
+  it("surfaces malformed stored credentials as a repair state instead of crashing", () => {
+    const onPersist = vi.fn();
+    const connection = new HostConnection(
+      {
+        id: "remote-host",
+        name: "Remote",
+        sshTarget: null,
+        sshPort: null,
+        relayUrl: "https://connect.example.test",
+        enabled: true,
+        session: {
+          version: 2,
+          relayUrl: "https://connect.example.test",
+          pairingCode: "",
+          pairingId: "pairing-1",
+          sessionId: "session-1",
+          deviceId: "device-1",
+          clientToken: "client-token",
+          clientSecretKey: "not-a-valid-secret-key",
+          daemonPublicKey: null,
+          daemonIdentityPublicKey: null,
+          dataKey: null,
+          lastReceivedSeq: 0,
+        },
+      },
+      vi.fn(),
+      onPersist,
+    );
+
+    expect(() => connection.start()).not.toThrow();
+    expect(connection.view()).toMatchObject({
+      paired: true,
+      needsRepair: true,
+      status: "idle",
+      lastError: expect.any(String),
+    });
+    expect(onPersist).toHaveBeenCalled();
+  });
 });

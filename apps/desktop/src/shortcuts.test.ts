@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   bindingsFor,
   commandForEvent,
+  isEditableTarget,
   normalizeShortcut,
   resetAllShortcuts,
   setShortcutBindings,
@@ -103,5 +104,20 @@ describe('keyboard shortcuts', () => {
     expect(shortcutValidation('K', 'global')).toMatch(/need Command/)
     expect(shortcutValidation('Mod+K', 'global')).toBeNull()
     expect(shortcutValidation('Enter', 'composer')).toBeNull()
+  })
+
+  it('recognizes every enabled contenteditable spelling as an editable target', () => {
+    const editor = document.createElement('div')
+    editor.setAttribute('contenteditable', '')
+    const child = document.createElement('span')
+    editor.append(child)
+    document.body.append(editor)
+
+    expect(isEditableTarget(child)).toBe(true)
+    editor.setAttribute('contenteditable', 'false')
+    expect(isEditableTarget(child)).toBe(false)
+    expect(isEditableTarget(document.body)).toBe(false)
+
+    editor.remove()
   })
 })

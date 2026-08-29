@@ -265,52 +265,66 @@ export class HostConnection {
 
   start() {
     if (this.client || !this.host.enabled || !this.host.session) return
-    const client = new RemoteHostClient(this.host.session, {
-      onStatusChange: (status) => {
-        this.status = status
-        if (status === 'encrypted') {
-          this.lastError = null
-          if (isDaemonRpcReady(this.presence)) {
+    let client: RemoteHostClient | null = null
+    try {
+      client = new RemoteHostClient(this.host.session, {
+        onStatusChange: (status) => {
+          this.status = status
+          if (status === 'encrypted') {
+            this.lastError = null
+            if (isDaemonRpcReady(this.presence)) {
+              void this.refreshSnapshot().catch(() => {})
+            }
+          }
+          this.onChange()
+        },
+        onPresence: (presence) => {
+          const becameReady =
+            !isDaemonRpcReady(this.presence) && isDaemonRpcReady(presence)
+          this.presence = presence
+          if (becameReady && this.status === 'encrypted' && !this.snapshot) {
             void this.refreshSnapshot().catch(() => {})
           }
-        }
-        this.onChange()
-      },
-      onPresence: (presence) => {
-        const becameReady = !isDaemonRpcReady(this.presence) && isDaemonRpcReady(presence)
-        this.presence = presence
-        if (becameReady && this.status === 'encrypted' && !this.snapshot) {
-          void this.refreshSnapshot().catch(() => {})
-        }
-        this.onChange()
-      },
-      onEvents: (events) => this.applyEventsWithSnapshotBarrier(events),
-      onHistoryTruncated: async () => {
-        this.snapshot = null
-        this.detailCache.clear()
-        this.onChange()
-        await this.refreshSnapshot()
-      },
-      onSessionChanged: (session) => {
-        this.host.session = session
-        this.onPersist()
-      },
-      onError: (message) => {
-        this.lastError = message
-        this.onChange()
-      },
-      onInvalidSession: (message) => {
-        this.lastError = message
-        this.host.needsRepair = true
-        this.client = null
-        this.status = 'idle'
-        this.snapshot = null
-        this.onPersist()
-        this.onChange()
-      },
-    })
-    this.client = client
-    client.start()
+          this.onChange()
+        },
+        onEvents: (events) => this.applyEventsWithSnapshotBarrier(events),
+        onHistoryTruncated: async () => {
+          this.snapshot = null
+          this.detailCache.clear()
+          this.onChange()
+          await this.refreshSnapshot()
+        },
+        onSessionChanged: (session) => {
+          this.host.session = session
+          this.onPersist()
+        },
+        onError: (message) => {
+          this.lastError = message
+          this.onChange()
+        },
+        onInvalidSession: (message) => {
+          this.lastError = message
+          this.host.needsRepair = true
+          this.client = null
+          this.status = 'idle'
+          this.snapshot = null
+          this.onPersist()
+          this.onChange()
+        },
+      })
+      this.client = client
+      client.start()
+    } catch {
+      client?.stop()
+      this.client = null
+      this.status = 'idle'
+      this.presence = null
+      this.snapshot = null
+      this.host.needsRepair = true
+      this.lastError = 'Stored server credentials are invalid. Repair this server to reconnect.'
+      this.onPersist()
+      this.onChange()
+    }
   }
 
   stop() {

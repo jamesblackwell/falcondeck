@@ -139,6 +139,26 @@ describe("createDaemonApiClient sendTurn", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ steer: true });
   });
 
+  it("encodes workspace and thread ids as individual route segments", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createDaemonApiClient("http://daemon.test").sendTurn({
+      workspace_id: "workspace/with space",
+      thread_id: "thread?#fragment",
+      inputs: [{ type: "text", text: "hello" }],
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/workspace%2Fwith%20space/threads/thread%3F%23fragment/turns",
+    );
+  });
+
   it("sends compaction through the thread control endpoint", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

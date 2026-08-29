@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   approvalPolicyForProvider,
+  defaultProvider,
   imageAttachmentSendBlockReason,
   NO_AGENT_CAPABILITIES,
   threadAgentCapabilities,
@@ -13,6 +14,17 @@ describe('permission defaults', () => {
     expect(approvalPolicyForProvider('codex', null)).toBe('never')
     expect(approvalPolicyForProvider('codex', 'default')).toBe('on-request')
     expect(approvalPolicyForProvider('codex', 'never')).toBe('never')
+  })
+})
+
+describe('workspace provider defaults', () => {
+  it('falls back to an advertised provider when the saved default was removed', () => {
+    expect(
+      defaultProvider({
+        default_provider: 'removed-agent',
+        agents: [{ provider: 'claude' }],
+      } as any),
+    ).toBe('claude')
   })
 })
 

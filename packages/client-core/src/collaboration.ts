@@ -41,9 +41,16 @@ export type ProviderOption = {
 export function defaultProvider(
   workspace: WorkspaceSummary | null | undefined,
 ): AgentProvider {
-  const declared =
-    workspace?.default_provider ?? workspace?.agents[0]?.provider;
-  return declared && declared.length > 0 ? declared : FALLBACK_PROVIDER;
+  const declared = workspace?.default_provider;
+  const agents = workspace?.agents ?? [];
+  if (
+    declared &&
+    declared.length > 0 &&
+    (agents.length === 0 || agents.some((agent) => agent.provider === declared))
+  ) {
+    return declared;
+  }
+  return agents[0]?.provider || FALLBACK_PROVIDER;
 }
 
 export function providerForThread(
