@@ -58,6 +58,12 @@ describe('decodeFileUrl', () => {
     expect(decodeFileUrl('file://evil.example/Users/foo')).toBeNull()
   })
 
+  it('treats localhost names case-insensitively', () => {
+    expect(decodeFileUrl('file://LOCALHOST/Users/James/clip.mp4')).toBe(
+      '/Users/James/clip.mp4',
+    )
+  })
+
   it('strips the extra slash on Windows drive URLs', () => {
     expect(decodeFileUrl('file:///C:/Users/James/clip.mp4')).toBe(
       'C:/Users/James/clip.mp4',

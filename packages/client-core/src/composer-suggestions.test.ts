@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { deriveComposerSuggestions } from './composer-suggestions'
+import {
+  deriveComposerSuggestions,
+  MAX_COMPOSER_SUGGESTION_PROMPT_CHARS,
+} from './composer-suggestions'
 import type { ExtensionSnapshot, ExtensionSummary, ThreadStatus } from './types'
 
 const EXTENSION_ID = 'falcondeck.follow-up-suggestions'
@@ -138,6 +141,26 @@ describe('deriveComposerSuggestions', () => {
     )
     expect(offer?.primary.label).toHaveLength(30)
     expect(offer?.primary.label.endsWith('…')).toBe(true)
+  })
+
+  it('truncates prompts by Unicode characters without splitting an emoji', () => {
+    const prefix = 'a'.repeat(MAX_COMPOSER_SUGGESTION_PROMPT_CHARS - 1)
+    const offer = derive(
+      snapshot({
+        actions: [
+          {
+            id: 'unicode',
+            label: 'Keep emoji intact',
+            prompt: `${prefix}😀ignored`,
+          },
+        ],
+      }),
+    )
+
+    expect(offer?.primary.prompt).toBe(`${prefix}😀`)
+    expect(Array.from(offer?.primary.prompt ?? '')).toHaveLength(
+      MAX_COMPOSER_SUGGESTION_PROMPT_CHARS,
+    )
   })
 
   it('collapses a multi-line description onto one line', () => {

@@ -61,6 +61,17 @@ describe('interactive request queue', () => {
       'request-z',
     ])
   })
+
+  it('keeps identical provider request ids from different workspaces', () => {
+    const first = pendingRequest('provider-request-1', '2026-08-09T12:00:01Z')
+    const second = {
+      ...pendingRequest('provider-request-1', '2026-08-09T12:00:02Z'),
+      workspace_id: 'workspace-2',
+      thread_id: 'thread-2',
+    }
+
+    expect(orderedInteractiveRequestQueue([second, first])).toHaveLength(2)
+  })
 })
 
 describe('mcp elicitation identity', () => {

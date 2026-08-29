@@ -110,6 +110,19 @@ describe("thread status events", () => {
     expect(snapshot.threads[0]?.status).toBe("idle");
   });
 
+  it("keeps a settled thread settled when a stale waiting update ties on time", () => {
+    let snapshot = snapshotWith(settled);
+    snapshot = apply(
+      snapshot,
+      thread({
+        status: "waiting_for_input",
+        updated_at: settled.updated_at,
+      }),
+    );
+
+    expect(snapshot.threads[0]?.status).toBe("idle");
+  });
+
   it("lets an answered approval resume a waiting thread without a new timestamp", () => {
     const waiting = thread({
       status: "waiting_for_input",

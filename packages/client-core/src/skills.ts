@@ -146,12 +146,20 @@ export function activeSlashQuery(value: string, caretIndex: number): ActiveSlash
   if (start > 0 && !/\s/.test(value[start - 1] ?? '')) return null
 
   const token = value.slice(start, caretIndex)
-  if (token.length === 0 || /\s/.test(token) || token.slice(1).includes('/')) return null
+  if (!/^\/[A-Za-z0-9_-]*$/.test(token)) return null
+
+  let rangeEnd = caretIndex
+  while (rangeEnd < value.length && /[A-Za-z0-9_-]/.test(value[rangeEnd] ?? '')) {
+    rangeEnd += 1
+  }
+  // A slash later in the same non-whitespace token makes this a path, not a
+  // command mention. Punctuation is a valid token delimiter and stays put.
+  if (value[rangeEnd] === '/') return null
 
   const rest = token.slice(1)
   return {
     query: rest.length === 0 ? '' : canonicalSkillAlias(token).slice(1),
     rangeStart: start,
-    rangeEnd: caretIndex,
+    rangeEnd,
   }
 }

@@ -90,6 +90,15 @@ describe('activeSlashQuery', () => {
   it('canonicalizes a typed skill prefix', () => {
     expect(activeSlashQuery('/Lin', 4)?.query).toBe('lin')
   })
+
+  it('replaces the whole slash token when the caret is in its middle', () => {
+    expect(activeSlashQuery('/linting now', 4)).toEqual({
+      query: 'lin',
+      rangeStart: 0,
+      rangeEnd: 8,
+    })
+    expect(activeSlashQuery('/api/provider', 4)).toBeNull()
+  })
 })
 
 describe('filterSlashSkills', () => {

@@ -68,7 +68,7 @@ export function imageNeedsPrepare(file: File, maxBytes: number): boolean {
   if (file.size > maxBytes) return true;
   if (file.size > IMAGE_PREPARE_SOFT_BYTES) return true;
   const type = (file.type ?? "").trim().toLowerCase();
-  return type.length > 0 && !PROVIDER_SAFE_IMAGE_TYPES.has(type);
+  return !PROVIDER_SAFE_IMAGE_TYPES.has(type);
 }
 
 /**
@@ -104,8 +104,15 @@ export async function prepareImageFile(
     const prepared = await rasterizeToJpeg(file, cap);
     if (prepared.size <= cap) {
       // Re-encoding an already-tight JPEG can grow it. Keep the original when
-      // it still fits the wire cap.
-      if (prepared.size >= file.size && file.size <= cap) return file;
+      // it still fits the wire cap and already has a provider-safe media type.
+      const sourceType = (file.type ?? "").trim().toLowerCase();
+      if (
+        PROVIDER_SAFE_IMAGE_TYPES.has(sourceType) &&
+        prepared.size >= file.size &&
+        file.size <= cap
+      ) {
+        return file;
+      }
       return prepared;
     }
   } catch {

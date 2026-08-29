@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   filesToImageInputs,
@@ -22,6 +22,10 @@ function image(name: string, bytes: number): ImageInput {
 }
 
 describe('image attachment budgets', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('measures base64 data URLs without decoding another byte buffer', () => {
     expect(imageInputByteSize(image('small.png', 12))).toBe(12)
   })
@@ -60,6 +64,53 @@ describe('image attachment budgets', () => {
     await expect(filesToImageInputs(files)).rejects.toThrow(
       'huge.png is too large to prepare. Source images must be 32 MB or smaller.',
     )
+  })
+
+  it('prepares a known image extension when the browser omits its MIME type', async () => {
+    const close = vi.fn()
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => ({
+      width: 16,
+      height: 16,
+      close,
+    })))
+    vi.stubGlobal('document', {
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          imageSmoothingEnabled: false,
+          imageSmoothingQuality: 'low',
+          fillStyle: '',
+          fillRect: vi.fn(),
+          drawImage: vi.fn(),
+        }),
+        toBlob: (callback: (blob: Blob) => void) => {
+          callback(new Blob(['jpeg'], { type: 'image/jpeg' }))
+        },
+      }),
+    })
+    vi.stubGlobal('FileReader', class {
+      error = null
+      result: string | null = null
+      onerror: (() => void) | null = null
+      onload: (() => void) | null = null
+
+      readAsDataURL(file: File) {
+        this.result = `data:${file.type};base64,anBlZw==`
+        this.onload?.()
+      }
+    })
+
+    const [image] = await filesToImageInputs([
+      new File(['raw'], 'photo.png'),
+    ])
+
+    expect(image).toMatchObject({
+      name: 'photo.jpg',
+      mime_type: 'image/jpeg',
+      url: 'data:image/jpeg;base64,anBlZw==',
+    })
+    expect(close).toHaveBeenCalled()
   })
 
   it('rejects an oversized aggregate before relay encryption', () => {

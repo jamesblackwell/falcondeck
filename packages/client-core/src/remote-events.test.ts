@@ -177,6 +177,26 @@ describe('encryptedPayloadIsSoleSnapshotEvent', () => {
     ).toBe(false)
   })
 
+  it('does not mistake snapshot-shaped provider payloads for a snapshot event', () => {
+    expect(
+      encryptedPayloadIsSoleSnapshotEvent(
+        JSON.stringify({
+          kind: 'daemon-event',
+          event: {
+            seq: 1,
+            event: {
+              type: 'conversation-item-added',
+              item: {
+                kind: 'unsupported',
+                payload: { type: 'snapshot' },
+              },
+            },
+          },
+        }),
+      ),
+    ).toBe(false)
+  })
+
   it('ignores unrelated payloads', () => {
     expect(
       encryptedPayloadIsSoleSnapshotEvent(

@@ -111,6 +111,12 @@ describe("imageNeedsPrepare", () => {
 
     const heic = new File(["abc"], "photo.heic", { type: "image/heic" });
     expect(imageNeedsPrepare(heic, MAX_IMAGE_ATTACHMENT_BYTES)).toBe(true);
+
+    // Browsers may leave File.type empty when the OS has no MIME mapping.
+    // The attachment must be rasterized into a provider-safe format rather
+    // than sent with an unusable empty media type.
+    const untypedPng = new File(["abc"], "photo.png");
+    expect(imageNeedsPrepare(untypedPng, MAX_IMAGE_ATTACHMENT_BYTES)).toBe(true);
   });
 });
 

@@ -64,7 +64,12 @@ export function orderedInteractiveRequestQueue(
   requests: readonly InteractiveRequest[],
 ): InteractiveRequest[] {
   const latestById = new Map<string, InteractiveRequest>();
-  for (const request of requests) latestById.set(request.request_id, request);
+  for (const request of requests) {
+    latestById.set(
+      JSON.stringify([request.workspace_id, request.request_id]),
+      request,
+    );
+  }
 
   return [...latestById.values()].sort((left, right) => {
     const leftTime = Date.parse(left.created_at);

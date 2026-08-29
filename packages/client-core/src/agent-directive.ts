@@ -35,9 +35,47 @@ function parseDirectiveAttributes(raw: string) {
 }
 
 export function parseAgentDirectiveLine(line: string): AgentDirective | null {
-  const match = DIRECTIVE_LINE_RE.exec(line.trim())
+  const candidate = line.trimEnd()
+  // Transport directives start at column zero. Indented Markdown examples
+  // are content rather than actions.
+  if (candidate !== candidate.trimStart()) return null
+  const match = DIRECTIVE_LINE_RE.exec(candidate)
   if (!match) return null
   return { name: match[1], ...parseDirectiveAttributes(match[2]) }
+}
+
+type AgentMessageLine = {
+  directive: AgentDirective | null
+  protectedByFence: boolean
+}
+
+function classifyAgentMessageLines(lines: string[]): AgentMessageLine[] {
+  let fence: { marker: '`' | '~'; length: number } | null = null
+  return lines.map((line) => {
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    if (fence) {
+      if (
+        fenceMatch &&
+        fenceMatch[1][0] === fence.marker &&
+        fenceMatch[1].length >= fence.length &&
+        fenceMatch[2].trim().length === 0
+      ) {
+        fence = null
+      }
+      return { directive: null, protectedByFence: true }
+    }
+    if (fenceMatch) {
+      fence = {
+        marker: fenceMatch[1][0] as '`' | '~',
+        length: fenceMatch[1].length,
+      }
+      return { directive: null, protectedByFence: true }
+    }
+    return {
+      directive: parseAgentDirectiveLine(line),
+      protectedByFence: false,
+    }
+  })
 }
 
 export function splitAgentMessageSegments(
@@ -55,9 +93,10 @@ export function splitAgentMessageSegments(
     buffer = []
   }
   const lines = text.split('\n')
+  const classified = classifyAgentMessageLines(lines)
 
   lines.forEach((line, index) => {
-    const directive = parseAgentDirectiveLine(line)
+    const { directive, protectedByFence } = classified[index]
     if (directive) {
       flush()
       segments.push({ kind: 'directive', ...directive })
@@ -65,6 +104,7 @@ export function splitAgentMessageSegments(
     }
     if (
       suppressTrailingIncompleteDirective &&
+      !protectedByFence &&
       index === lines.length - 1 &&
       INCOMPLETE_DIRECTIVE_RE.test(line.trim())
     ) return
@@ -76,9 +116,10 @@ export function splitAgentMessageSegments(
 
 export function stripAgentDirectiveLines(text: string): string {
   if (!text.includes('::')) return text
-  return text
-    .split('\n')
-    .filter((line) => !parseAgentDirectiveLine(line))
+  const lines = text.split('\n')
+  const classified = classifyAgentMessageLines(lines)
+  return lines
+    .filter((_, index) => !classified[index].directive)
     .join('\n')
 }
 
@@ -92,10 +133,11 @@ export function agentDirectiveLabel(name: string) {
 export function agentMarkdownCopyText(text: string, streaming = false) {
   if (!text.includes('::')) return text
   const lines = text.split('\n')
+  const classified = classifyAgentMessageLines(lines)
   const copied: string[] = []
 
   lines.forEach((line, index) => {
-    const directive = parseAgentDirectiveLine(line)
+    const { directive, protectedByFence } = classified[index]
     if (directive) {
       const detail = [
         ...directive.attrs.map(([key, value]) => `${key}: ${value}`),
@@ -108,6 +150,7 @@ export function agentMarkdownCopyText(text: string, streaming = false) {
     }
     if (
       streaming &&
+      !protectedByFence &&
       index === lines.length - 1 &&
       INCOMPLETE_DIRECTIVE_RE.test(line.trim())
     ) return

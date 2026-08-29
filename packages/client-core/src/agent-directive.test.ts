@@ -60,4 +60,20 @@ describe('agent directives', () => {
       'Before\n::not-finished{state',
     )
   })
+
+  it('preserves directive-shaped examples inside Markdown code blocks', () => {
+    const fenced = [
+      '```text',
+      '::git-push{branch=example}',
+      '```',
+    ].join('\n')
+    const indented = '    ::git-push{branch=example}'
+
+    expect(splitAgentMessageSegments(fenced)).toEqual([
+      { kind: 'markdown', text: fenced },
+    ])
+    expect(stripAgentDirectiveLines(fenced)).toBe(fenced)
+    expect(agentMarkdownCopyText(fenced)).toBe(fenced)
+    expect(parseAgentDirectiveLine(indented)).toBeNull()
+  })
 })

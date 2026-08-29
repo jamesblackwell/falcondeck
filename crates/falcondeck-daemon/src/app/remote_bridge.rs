@@ -18,6 +18,7 @@ use falcondeck_core::{
     },
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     sync::{broadcast, mpsc, oneshot},
@@ -2335,12 +2336,21 @@ pub(super) fn encrypt_remote_daemon_event(
     data_key: &[u8; 32],
     event: &EventEnvelope,
 ) -> Result<EncryptedEnvelope, String> {
+    #[derive(Serialize)]
+    struct RemoteDaemonEventEnvelope<'a> {
+        // Keep the discriminator before `event`: clients can identify and
+        // skip a replayed full snapshot without parsing its multi-megabyte
+        // payload while an authoritative snapshot RPC is already in flight.
+        kind: &'static str,
+        event: &'a EventEnvelope,
+    }
+
     encrypt_json(
         data_key,
-        &json!({
-            "kind": "daemon-event",
-            "event": event,
-        }),
+        &RemoteDaemonEventEnvelope {
+            kind: "daemon-event",
+            event,
+        },
     )
     .map_err(|error| format!("failed to encrypt relay update: {error}"))
 }
@@ -2405,6 +2415,7 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use falcondeck_core::crypto::decrypt_bytes;
 
     #[test]
     fn notification_titles_are_trimmed_sanitized_and_bounded() {
@@ -2442,6 +2453,25 @@ mod tests {
         assert_eq!(
             payload.get("kind").and_then(Value::as_str),
             Some("daemon-event")
+        );
+    }
+
+    #[test]
+    fn durable_event_prefix_identifies_the_envelope_before_the_event_payload() {
+        let event = EventEnvelope {
+            seq: 10,
+            emitted_at: Utc::now(),
+            workspace_id: Some("workspace-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            event: UnifiedEvent::Stop { reason: None },
+        };
+        let envelope = encrypt_remote_daemon_event(&[6; 32], &event).expect("encrypted event");
+        let plaintext = decrypt_bytes(&[6; 32], &envelope).expect("decrypt event");
+
+        assert!(
+            plaintext.starts_with(br#"{"kind":"daemon-event","event":"#),
+            "the client must identify the envelope before reading a potentially huge event: {}",
+            String::from_utf8_lossy(&plaintext),
         );
     }
 

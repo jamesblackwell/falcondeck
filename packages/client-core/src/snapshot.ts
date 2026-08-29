@@ -53,6 +53,7 @@ export function threadForSelection(
  * authoritatively; clients use them to fail before allocating relay payloads. */
 export const MAX_IMAGE_ATTACHMENT_BYTES = 10_000_000;
 export const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 15_000_000;
+const IMAGE_FILENAME_EXTENSION = /\.(?:avif|gif|heic|heif|jpe?g|png|webp)$/i;
 
 function base64PayloadByteSize(value: string): number | null {
   const comma = value.indexOf(",");
@@ -321,8 +322,8 @@ function isStaleThreadSummary(
   // preserving the thread's recency.
   return (
     nextAt === currentAt &&
-    next.status === "running" &&
-    TERMINAL_THREAD_STATUSES.has(current.status)
+    TERMINAL_THREAD_STATUSES.has(current.status) &&
+    !TERMINAL_THREAD_STATUSES.has(next.status)
   );
 }
 
@@ -682,7 +683,13 @@ export async function filesToImageInputs(
 ): Promise<ImageInput[]> {
   if (!files) return [];
   const selected = Array.from(files);
-  const unsupported = selected.find((file) => !file.type?.startsWith("image/"));
+  const unsupported = selected.find((file) => {
+    const type = file.type?.trim().toLowerCase() ?? "";
+    return (
+      !type.startsWith("image/") &&
+      !(type === "" && IMAGE_FILENAME_EXTENSION.test(file.name))
+    );
+  });
   if (unsupported) {
     throw new Error(
       `Only image attachments are supported. ${unsupported.name || "That file"} was not attached.`,

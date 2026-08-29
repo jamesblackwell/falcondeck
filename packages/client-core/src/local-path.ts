@@ -69,7 +69,12 @@ export function decodeFileUrl(value: string): string | null {
     const slash = rest.indexOf('/')
     if (slash === -1) return null
     const host = rest.slice(0, slash)
-    if (host && host !== 'localhost' && host !== '127.0.0.1') return null
+    const normalizedHost = host.toLowerCase()
+    if (
+      normalizedHost &&
+      normalizedHost !== 'localhost' &&
+      normalizedHost !== '127.0.0.1'
+    ) return null
     pathPart = rest.slice(slash)
   }
   try {

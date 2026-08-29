@@ -45,6 +45,10 @@ function truncate(value: string, limit: number): string {
   return characters.length > limit ? `${characters.slice(0, limit - 1).join('')}…` : value
 }
 
+function truncateWithoutMarker(value: string, limit: number): string {
+  return Array.from(value).slice(0, limit).join('')
+}
+
 /**
  * Re-applies the daemon's bounds on the client. The daemon already rejects
  * malformed sets, so this is defence against an older or misbehaving peer
@@ -55,7 +59,10 @@ function normalizeSuggestion(action: ComposerSuggestion): ComposerSuggestion {
   return {
     id: action.id.trim(),
     label: truncate(action.label.trim(), MAX_COMPOSER_SUGGESTION_LABEL_CHARS),
-    prompt: action.prompt.trim().slice(0, MAX_COMPOSER_SUGGESTION_PROMPT_CHARS),
+    prompt: truncateWithoutMarker(
+      action.prompt.trim(),
+      MAX_COMPOSER_SUGGESTION_PROMPT_CHARS,
+    ),
     ...(description
       ? {
           description: truncate(

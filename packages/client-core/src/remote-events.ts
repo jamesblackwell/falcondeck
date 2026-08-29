@@ -113,19 +113,20 @@ export function shouldIgnoreReplaySnapshotEvent(
 export function encryptedPayloadIsSoleSnapshotEvent(plaintext: string) {
   if (!plaintext) return false
   const prefix = plaintext.length > 2048 ? plaintext.slice(0, 2048) : plaintext
-  const hasSnapshotType =
-    prefix.includes('"type":"snapshot"') || prefix.includes('"type": "snapshot"')
-  if (!hasSnapshotType) return false
-  if (
-    prefix.includes('"kind":"daemon-events"') ||
-    prefix.includes('"kind": "daemon-events"')
-  ) {
-    return false
-  }
-  return (
-    prefix.includes('"kind":"daemon-event"') ||
-    prefix.includes('"kind": "daemon-event"')
+  const envelope = /^\s*\{\s*"kind"\s*:\s*"daemon-event"\s*,\s*"event"\s*:\s*\{/.exec(
+    prefix,
   )
+  if (!envelope) return false
+
+  // EventEnvelope's first nested `event` property is the UnifiedEvent
+  // payload. Read only its leading tagged-union discriminator; provider-owned
+  // JSON deeper in a conversation item may also contain `type: "snapshot"`.
+  const eventPayload = /"event"\s*:\s*\{/.exec(prefix.slice(envelope[0].length))
+  if (!eventPayload) return false
+  const discriminator = prefix.slice(
+    envelope[0].length + eventPayload.index + eventPayload[0].length,
+  )
+  return /^\s*"type"\s*:\s*"snapshot"(?:\s*[,}])/.test(discriminator)
 }
 
 /**
