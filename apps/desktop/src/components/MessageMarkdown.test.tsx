@@ -12,6 +12,7 @@ vi.mock("mermaid", () => ({
 }));
 
 import {
+  FileDiffProvider,
   LocalPathProvider,
   MessageMarkdown,
   WebLinkProvider,
@@ -585,6 +586,50 @@ describe("local file paths", () => {
 
     fireEvent.click(screen.getByRole("link", { name: "Open /Users/James/clip.mp4" }));
     expect(onLocalPath).toHaveBeenCalledWith("open", "/Users/James/clip.mp4");
+  });
+
+  it("opens an agent-linked workspace file in the file browser", () => {
+    const onOpenFile = vi.fn();
+    const onLocalPath = vi.fn();
+    const filePath = "bootstrap/studio-ui/init.py";
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile}>
+        <LocalPathProvider onLocalPath={onLocalPath}>
+          <MessageMarkdown
+            text={`Open [${filePath}](file:///workspace/${filePath})`}
+            defer={false}
+          />
+        </LocalPathProvider>
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(screen.getByText(filePath));
+
+    expect(onOpenFile).toHaveBeenCalledWith(filePath, "files");
+    expect(onLocalPath).not.toHaveBeenCalled();
+  });
+
+  it("keeps a genuine absolute file link on the local path handler", () => {
+    const onOpenFile = vi.fn();
+    const onLocalPath = vi.fn();
+    const localPath = "/Users/James/clip.mp4";
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile}>
+        <LocalPathProvider onLocalPath={onLocalPath}>
+          <MessageMarkdown
+            text={`[Open ${localPath}](file://${localPath})`}
+            defer={false}
+          />
+        </LocalPathProvider>
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(
+      screen.getByRole("link", { name: `Open ${localPath}` }),
+    );
+
+    expect(onLocalPath).toHaveBeenCalledWith("open", localPath);
+    expect(onOpenFile).not.toHaveBeenCalled();
   });
 });
 

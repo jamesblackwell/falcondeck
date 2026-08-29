@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   decodeFileUrl,
   parseLocalFilePath,
+  parseWorkspaceFilePath,
   splitLocalPathSegments,
 } from './local-path'
 
@@ -61,6 +62,30 @@ describe('decodeFileUrl', () => {
     expect(decodeFileUrl('file:///C:/Users/James/clip.mp4')).toBe(
       'C:/Users/James/clip.mp4',
     )
+  })
+})
+
+describe('parseWorkspaceFilePath', () => {
+  it('normalizes safe workspace-relative file links', () => {
+    expect(parseWorkspaceFilePath('bootstrap/studio-ui/init.py')).toBe(
+      'bootstrap/studio-ui/init.py',
+    )
+    expect(parseWorkspaceFilePath('./src/My%20File.tsx#L42')).toBe(
+      'src/My File.tsx',
+    )
+    expect(parseWorkspaceFilePath('src/App.tsx:518:9')).toBe('src/App.tsx')
+    expect(parseWorkspaceFilePath('README.md:12')).toBe('README.md')
+  })
+
+  it('rejects absolute paths, URLs, and paths that escape the workspace', () => {
+    expect(parseWorkspaceFilePath('/Users/James/project/src/App.tsx')).toBeNull()
+    expect(parseWorkspaceFilePath('file:///workspace/src/App.tsx')).toBeNull()
+    expect(parseWorkspaceFilePath('https://example.com/file.ts')).toBeNull()
+    expect(parseWorkspaceFilePath('#installation')).toBeNull()
+    expect(parseWorkspaceFilePath('%2FUsers%2FJames%2Ffile.ts')).toBeNull()
+    expect(parseWorkspaceFilePath('src/file.ts%00')).toBeNull()
+    expect(parseWorkspaceFilePath('../outside.ts')).toBeNull()
+    expect(parseWorkspaceFilePath('src/../../outside.ts')).toBeNull()
   })
 })
 

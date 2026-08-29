@@ -110,6 +110,62 @@ export function parseLocalFilePath(raw: string | null | undefined): string | nul
   return isLocalFilePath(decoded) ? decoded : null
 }
 
+/**
+ * A file path relative to a workspace root, suitable for the workspace file
+ * API. Markdown file links commonly include a leading `./`, percent-encoding,
+ * or a source location suffix; none of those belong in the daemon request.
+ */
+export function parseWorkspaceFilePath(
+  raw: string | null | undefined,
+): string | null {
+  if (!raw) return null
+  let candidate = raw.trim()
+  if (!candidate || candidate.length > MAX_LOCAL_PATH_LENGTH) return null
+  if (
+    candidate.includes('://') ||
+    /^(?:data|file|javascript|mailto|tel):/i.test(candidate)
+  ) {
+    return null
+  }
+
+  try {
+    candidate = decodeURIComponent(candidate)
+  } catch {
+    return null
+  }
+
+  candidate = candidate
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/#L\d+(?:-L?\d+)?$/i, '')
+    .replace(/:\d+(?::\d+)?$/, '')
+
+  if (
+    hasControlChars(candidate) ||
+    candidate.startsWith('/') ||
+    candidate.startsWith('~/') ||
+    /^[A-Za-z]:\//.test(candidate)
+  ) {
+    return null
+  }
+
+  const components = candidate.split('/')
+  if (
+    components.length === 0 ||
+    components.some(
+      (component) =>
+        !component ||
+        component === '.' ||
+        component === '..' ||
+        component.includes('?') ||
+        component.includes('#'),
+    )
+  ) {
+    return null
+  }
+  return components.join('/')
+}
+
 /** Splits plain text into ordinary runs and absolute local filesystem paths. */
 export function splitLocalPathSegments(text: string): LocalPathSegment[] {
   const segments: LocalPathSegment[] = []

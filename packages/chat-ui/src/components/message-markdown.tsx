@@ -17,6 +17,7 @@ import {
   fenceLanguageFromClassName,
   isMermaidLanguage,
   parseLocalFilePath,
+  parseWorkspaceFilePath,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitLocalPathSegments,
@@ -26,6 +27,7 @@ import {
 
 import { cn } from "@falcondeck/ui";
 
+import { WorkspaceFileLink } from "../lib/file-diff-context";
 import { LocalPathLink } from "../lib/local-path-context";
 import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
@@ -135,6 +137,37 @@ function markdownNodeText(children: React.ReactNode): string {
   }
   if (Array.isArray(children)) return children.map(markdownNodeText).join("");
   return "";
+}
+
+function workspaceFilePathFromMarkdownLink(
+  href: string | undefined,
+  children: React.ReactNode,
+) {
+  const hrefPath = parseWorkspaceFilePath(href);
+  if (hrefPath) return hrefPath;
+
+  // Agents sometimes make the target an absolute path from their own runtime
+  // while displaying the portable workspace-relative path. Prefer that label
+  // so the host can open the file through the workspace API.
+  const label = markdownNodeText(children).trim();
+  if (
+    !label.includes("/") &&
+    !label.includes("\\") &&
+    !/\.[^./\\]+(?::\d+(?::\d+)?)?$/.test(label)
+  ) {
+    return null;
+  }
+  const labelPath = parseWorkspaceFilePath(label);
+  if (!labelPath) return null;
+
+  const localPath = parseLocalFilePath(href ?? "");
+  if (!localPath) return labelPath;
+
+  const normalizedLocalPath = localPath
+    .replace(/\\/g, "/")
+    .replace(/#L\d+(?:-L?\d+)?$/i, "")
+    .replace(/:\d+(?::\d+)?$/, "");
+  return normalizedLocalPath.endsWith(`/${labelPath}`) ? labelPath : null;
 }
 
 function MarkdownLocalPath({ children }: { children?: React.ReactNode }) {
@@ -446,6 +479,17 @@ const markdownComponents = {
         <WebLinkAnchor href={safeHref} className={linkClassName}>
           {children}
         </WebLinkAnchor>
+      );
+    }
+    const workspaceFilePath = workspaceFilePathFromMarkdownLink(href, children);
+    if (workspaceFilePath) {
+      return (
+        <WorkspaceFileLink
+          filePath={workspaceFilePath}
+          className="[overflow-wrap:anywhere]"
+        >
+          {children}
+        </WorkspaceFileLink>
       );
     }
     const localPath = parseLocalFilePath(href ?? "");

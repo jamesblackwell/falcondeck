@@ -3,7 +3,7 @@ import { createContext, useContext, useMemo } from 'react'
 import { cn } from '@falcondeck/ui'
 
 /* ================================================================
-   Opening a file's diff from the transcript.
+   Opening a file in the host's side panel from the transcript.
 
    The transcript is many components deep and each layer is memoized,
    so threading a callback down as a prop would defeat that. Context
@@ -13,7 +13,7 @@ import { cn } from '@falcondeck/ui'
    paths render as inert text.
    ================================================================ */
 
-export type OpenFileDiff = (filePath: string) => void
+export type OpenFileDiff = (filePath: string, view?: 'changes' | 'files') => void
 
 const FileDiffContext = createContext<OpenFileDiff | null>(null)
 
@@ -71,6 +71,42 @@ export function FileDiffLink({
       )}
     >
       {text}
+    </button>
+  )
+}
+
+/** A workspace-relative path that opens the editable file browser preview. */
+export function WorkspaceFileLink({
+  filePath,
+  children,
+  className,
+}: {
+  filePath: string
+  children?: React.ReactNode
+  className?: string
+}) {
+  const openFile = useOpenFileDiff()
+  const label = children ?? filePath
+
+  if (!openFile) {
+    return <span className={className}>{label}</span>
+  }
+
+  return (
+    <button
+      type="button"
+      title={`Open ${filePath} in the file browser`}
+      onClick={(event) => {
+        event.stopPropagation()
+        openFile(filePath, 'files')
+      }}
+      className={cn(
+        'fd-focus rounded-[var(--fd-radius-sm)] underline decoration-dotted decoration-fg-faint underline-offset-2',
+        'transition-colors hover:text-accent hover:decoration-accent',
+        className,
+      )}
+    >
+      {label}
     </button>
   )
 }

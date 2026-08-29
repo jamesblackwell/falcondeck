@@ -1134,16 +1134,15 @@ function AppInner() {
     selectedWorkspaceId ?? "",
   );
 
-  // A file named in the transcript opens in the changes rail. There is no
-  // per-item diff endpoint, so this shows the file's *current* working-tree
-  // diff, which is the same view the rail's own file list gives.
+  // Transcript file links share the right rail: structured file changes open
+  // their current diff, while Markdown workspace links open the file browser.
   const handleOpenFileDiff = useCallback(
-    (filePath: string) => {
+    (filePath: string, view: "changes" | "files" = "changes") => {
       if (!selectedWorkspaceId) return;
       setDiffSelection({
         workspaceId: selectedWorkspaceId,
         filePath,
-        view: "changes",
+        view,
       });
       showRail();
     },
