@@ -1,4 +1,12 @@
-import { memo, useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import {
   Check,
@@ -243,6 +251,7 @@ function ProjectMenu({
   const [remoteHostId, setRemoteHostId] = useState<string | null>(null)
   const [remotePath, setRemotePath] = useState('')
   const [remoteError, setRemoteError] = useState<string | null>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (openRequestKey > 0 && !disabled) setOpen(true)
@@ -270,6 +279,31 @@ function ProjectMenu({
     [projectWorkspaces, query, searchable, workspaceHosts],
   )
 
+  useEffect(() => {
+    if (!open) return
+
+    if (panel === 'list') {
+      const initialTarget = searchable
+        ? contentRef.current?.querySelector<HTMLInputElement>(
+            '[role="searchbox"][aria-label="Search projects"]',
+          )
+        : contentRef.current?.querySelector<HTMLButtonElement>(
+            '[data-project-workspace][aria-checked="true"]',
+          ) ??
+          contentRef.current?.querySelector<HTMLButtonElement>(
+            '[data-project-menu-item]:not(:disabled)',
+          )
+      initialTarget?.focus()
+      return
+    }
+
+    if (panel === 'pick-host') {
+      contentRef.current
+        ?.querySelector<HTMLButtonElement>('[data-project-host]:not(:disabled)')
+        ?.focus()
+    }
+  }, [open, panel, searchable])
+
   const resetAddFlow = () => {
     setPanel('list')
     setRemoteHostId(null)
@@ -283,6 +317,52 @@ function ProjectMenu({
       setQuery('')
       resetAddFlow()
     }
+  }
+
+  const handleMenuKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+
+    if (event.key === 'Enter' && event.currentTarget instanceof HTMLInputElement) {
+      const firstVisibleProject = contentRef.current?.querySelector<HTMLButtonElement>(
+        '[data-project-workspace]:not(:disabled)',
+      )
+      if (!firstVisibleProject) return
+      event.preventDefault()
+      firstVisibleProject.click()
+      return
+    }
+
+    if (
+      event.key !== 'ArrowDown' &&
+      event.key !== 'ArrowUp' &&
+      event.key !== 'Home' &&
+      event.key !== 'End'
+    ) {
+      return
+    }
+
+    const items = Array.from(
+      contentRef.current?.querySelectorAll<HTMLButtonElement>(
+        '[data-project-menu-item]:not(:disabled)',
+      ) ?? [],
+    )
+    if (items.length === 0) return
+
+    event.preventDefault()
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement)
+    const nextIndex =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? items.length - 1
+          : event.key === 'ArrowDown'
+            ? currentIndex < 0
+              ? 0
+              : (currentIndex + 1) % items.length
+            : currentIndex < 0
+              ? items.length - 1
+              : (currentIndex - 1 + items.length) % items.length
+    items[nextIndex]?.focus()
   }
 
   const startRemoteAdd = () => {
@@ -341,8 +421,10 @@ function ProjectMenu({
       </Tooltip>
       <Popover.Portal>
         <Popover.Content
+          ref={contentRef}
           align="start"
           sideOffset={6}
+          onKeyDown={handleMenuKeyDown}
           className="z-50 w-80 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
           {panel === 'list' ? (
@@ -357,6 +439,7 @@ function ProjectMenu({
                   label="Search projects"
                   resultCount={visibleWorkspaces.length}
                   autoFocus
+                  onKeyDown={handleMenuKeyDown}
                 />
               ) : null}
               <div role="menu" className="max-h-64 overflow-y-auto">
@@ -373,6 +456,8 @@ function ProjectMenu({
                       role="menuitemradio"
                       aria-checked={selected}
                       aria-label={accessibleName}
+                      data-project-menu-item
+                      data-project-workspace
                       onClick={() => {
                         onSelectWorkspace(workspace.id)
                         setOpen(false)
@@ -421,6 +506,7 @@ function ProjectMenu({
                       type="button"
                       role="menuitem"
                       disabled={isAddingProject}
+                      data-project-menu-item
                       onClick={startRemoteAdd}
                       className={MENU_ITEM_CLASS}
                     >
@@ -437,6 +523,7 @@ function ProjectMenu({
                       type="button"
                       role="menuitem"
                       disabled={isAddingProject}
+                      data-project-menu-item
                       onClick={() => {
                         void onAddLocalProject()
                         setOpen(false)
@@ -455,6 +542,7 @@ function ProjectMenu({
                     <button
                       type="button"
                       role="menuitem"
+                      data-project-menu-item
                       onClick={() => {
                         void onNewChat()
                         setOpen(false)
@@ -478,6 +566,7 @@ function ProjectMenu({
                 </p>
                 <button
                   type="button"
+                  data-project-menu-item
                   className="text-[length:var(--fd-text-xs)] text-fg-muted hover:text-fg-primary"
                   onClick={resetAddFlow}
                 >
@@ -490,6 +579,8 @@ function ProjectMenu({
                     key={host.id}
                     type="button"
                     role="menuitem"
+                    data-project-menu-item
+                    data-project-host
                     onClick={() => {
                       setRemoteHostId(host.id)
                       setPanel('remote-path')
@@ -516,6 +607,7 @@ function ProjectMenu({
                 </p>
                 <button
                   type="button"
+                  data-project-menu-item
                   className="text-[length:var(--fd-text-xs)] text-fg-muted hover:text-fg-primary"
                   onClick={() => {
                     if (connectedRemoteHosts.length > 1) {

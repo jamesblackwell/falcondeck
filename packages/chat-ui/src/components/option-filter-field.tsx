@@ -1,4 +1,4 @@
-import { useId, type KeyboardEvent } from 'react'
+import { useId, type KeyboardEvent, type KeyboardEventHandler } from 'react'
 import { Search, X } from 'lucide-react'
 
 export function OptionFilterField({
@@ -7,15 +7,18 @@ export function OptionFilterField({
   label,
   resultCount,
   autoFocus = false,
+  onKeyDown,
 }: {
   value: string
   onChange: (value: string) => void
   label: string
   resultCount: number
   autoFocus?: boolean
+  onKeyDown?: KeyboardEventHandler<HTMLInputElement>
 }) {
   const statusId = useId()
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    onKeyDown?.(event)
     // Keep printable keys out of Radix menu typeahead. Escape still bubbles so
     // the containing popover closes exactly like an unfiltered menu.
     if (event.key !== 'Escape') event.stopPropagation()

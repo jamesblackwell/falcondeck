@@ -66,6 +66,62 @@ describe('ComposerContextBar', () => {
     expect(screen.getByRole('menuitemradio', { name: 'lucidpic' })).toBeInTheDocument()
   })
 
+  it('selects a filtered project with the keyboard', () => {
+    const onSelectWorkspace = vi.fn()
+    const workspaces = Array.from({ length: 9 }, (_, index) =>
+      workspace(`ws-${index}`, `/Users/dev/project-${index}`),
+    )
+    const { rerender } = render(
+      <ComposerContextBar
+        {...baseProps}
+        workspaces={workspaces}
+        selectedWorkspace={workspaces[0] ?? null}
+        onSelectWorkspace={onSelectWorkspace}
+        projectMenuRequestKey={0}
+      />,
+    )
+
+    rerender(
+      <ComposerContextBar
+        {...baseProps}
+        workspaces={workspaces}
+        selectedWorkspace={workspaces[0] ?? null}
+        onSelectWorkspace={onSelectWorkspace}
+        projectMenuRequestKey={1}
+      />,
+    )
+
+    const search = screen.getByRole('searchbox', { name: 'Search projects' })
+    fireEvent.change(search, { target: { value: 'project-8' } })
+    const project = screen.getByRole('menuitemradio', { name: 'project-8' })
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    expect(project).toHaveFocus()
+
+    search.focus()
+    fireEvent.keyDown(search, { key: 'Enter' })
+
+    expect(onSelectWorkspace).toHaveBeenCalledWith('ws-8')
+    expect(screen.queryByRole('searchbox', { name: 'Search projects' })).not.toBeInTheDocument()
+  })
+
+  it('moves through project picker options with arrow, Home, and End keys', () => {
+    const onNewChat = vi.fn()
+    render(<ComposerContextBar {...baseProps} onNewChat={onNewChat} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    const falcondeck = screen.getByRole('menuitemradio', { name: 'falcondeck' })
+    const lucidpic = screen.getByRole('menuitemradio', { name: 'lucidpic' })
+    const noProject = screen.getByRole('menuitem', { name: 'Don’t work in a project' })
+
+    expect(falcondeck).toHaveFocus()
+    fireEvent.keyDown(falcondeck, { key: 'ArrowDown' })
+    expect(lucidpic).toHaveFocus()
+    fireEvent.keyDown(lucidpic, { key: 'End' })
+    expect(noProject).toHaveFocus()
+    fireEvent.keyDown(noProject, { key: 'Home' })
+    expect(falcondeck).toHaveFocus()
+  })
+
   it('labels remote projects with the host name and a host location chip', () => {
     render(
       <ComposerContextBar
