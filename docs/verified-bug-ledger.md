@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 27 / 100
-- Product defects: 25
+- Verified and fixed: 33 / 100
+- Product defects: 31
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -262,6 +262,60 @@ Each entry records:
 - Fix: Map the lowercased byte offset back through each original character's actual lowercase encoding before selecting the character window.
 - Verification: The focused Unicode regression, all thread-search tests, and the complete core/daemon test suites pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.82.
+
+### 028 — Expired idempotency records replay indefinitely while control is idle
+
+- Kind: Product defect
+- Reproduction: `control::tests::expired_idempotency_record_does_not_replay_while_the_service_is_idle` backdated a live successful create record beyond the documented 24-hour TTL; a different create using that key still returned `idempotency_conflict`.
+- Root cause: TTL compaction ran only during restore or a later mutation. The replay lookup itself ignored `created_at`, so an idle service could keep an expired key active for an unbounded time.
+- Fix: Apply the same 24-hour age condition during idempotency lookup; the following successful mutation removes the stale record through normal compaction.
+- Verification: All 29 control-service tests, 868 daemon unit tests with 2 intentional ignores, and the control API/MCP/scheduler integration suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 029 — Concurrent identical idempotent creates can both execute
+
+- Kind: Product defect
+- Reproduction: `control::tests::concurrent_idempotent_creates_execute_only_once` launched two identical creates together; both succeeded with different automation IDs and two definitions were stored.
+- Root cause: Replay lookup, operation mutation, audit persistence, and idempotency-record persistence were separate critical sections. Both calls could observe a missing record before the first published it.
+- Fix: Serialize keyed control executions across lookup, side effect, and record publication; non-idempotent operations remain independent.
+- Verification: The concurrent regression now returns the same automation ID to both callers and stores one definition; the complete daemon and control integration suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 030 — HTTP and remote callers bypass the idempotency-key size contract
+
+- Kind: Product defect
+- Reproduction: `control::tests::execute_rejects_idempotency_keys_outside_the_public_bounds` showed that both a five-character key and a 129-character key executed successfully.
+- Root cause: The MCP tool schema advertised and enforced 8–128 characters, but `ControlService::execute` trusted every other caller and persisted arbitrary key sizes. Repeated large keys could also push the control store beyond its own load limit.
+- Fix: Enforce the published Unicode-character bound in the authoritative service before lookup or mutation.
+- Verification: The focused boundary test and all daemon/control integration suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 031 — Garbage suffixes are accepted as named cron fields
+
+- Kind: Product defect
+- Reproduction: `control::automations::tests::rejects_garbage_suffixes_on_named_cron_values` showed that `monkey` parsed as Monday and `marching` parsed as March.
+- Root cause: Named values used `starts_with` against three-letter abbreviations, so every arbitrary token beginning with a valid abbreviation became a valid schedule.
+- Fix: Accept only the exact standard abbreviation or exact full month/weekday name.
+- Verification: All 15 automation-schedule tests pass, including abbreviations, full names, invalid suffixes, DST, and DOM/DOW behavior; the broader daemon/control suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 032 — A large cron step panics on integer overflow
+
+- Kind: Product defect
+- Reproduction: `control::automations::tests::oversized_cron_steps_do_not_overflow` parsed `1/4294967295` and panicked at `automations.rs:125` with `attempt to add with overflow`.
+- Root cause: The cron value expansion loop used unchecked `u32` addition even though the step is user-controlled and may be any nonzero `u32`.
+- Fix: Stop expansion when the next step cannot be represented; the sparse schedule correctly retains its starting value.
+- Verification: The focused maximum-step regression, all automation tests, the daemon library suite, and all three control integration binaries pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 033 — Oversized interval values can hang schedule calculation forever
+
+- Kind: Product defect
+- Reproduction: `control::automations::tests::interval_larger_than_i64_does_not_wrap_to_a_one_second_schedule` with `every_seconds: u64::MAX` did not complete; the test process had to be terminated after the scheduler loop continued indefinitely.
+- Root cause: The interval was cast from `u64::MAX` to `i64`, becoming `-1`. Each loop iteration then moved the candidate farther into the past instead of advancing beyond `after`.
+- Fix: Perform interval arithmetic in `i128`, convert the final timestamp only after it is proven representable, and return `invalid_schedule` when the next occurrence is outside the supported time range.
+- Verification: The formerly hung regression now returns immediately with an error; all schedule, daemon library, and control integration tests pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
 
 ## Pending Verification
 

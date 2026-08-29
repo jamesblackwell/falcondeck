@@ -296,6 +296,7 @@ pub struct ControlService {
     path: PathBuf,
     state: Mutex<store::PersistedControlState>,
     mutation: Mutex<()>,
+    idempotent_execution: Mutex<()>,
     /// `Some(reason)` while the persisted store is unusable; the service
     /// rejects requests with `storage_unavailable` until it is restored.
     storage_error: StdMutex<Option<String>>,
@@ -314,6 +315,7 @@ impl ControlService {
             path,
             state: Mutex::new(store::PersistedControlState::default()),
             mutation: Mutex::new(()),
+            idempotent_execution: Mutex::new(()),
             storage_error: StdMutex::new(None),
             scheduler_notify: Notify::new(),
             scheduler_started: AtomicBool::new(false),
@@ -557,16 +559,43 @@ impl ControlService {
             return (error.into_envelope(&request.operation), None);
         }
 
+        if let Some(key) = request.idempotency_key.as_deref() {
+            let chars = key.chars().count();
+            if !(8..=128).contains(&chars) {
+                return (
+                    ControlError::field(
+                        "idempotency_key",
+                        "idempotency_key must be 8-128 characters",
+                    )
+                    .into_envelope(&request.operation),
+                    None,
+                );
+            }
+        }
+
+        // Keep lookup, side effect and record publication in one critical
+        // section so simultaneous retries cannot both observe a miss.
+        let _idempotency_guard = if request.idempotency_key.is_some() {
+            Some(self.idempotent_execution.lock().await)
+        } else {
+            None
+        };
+
         // Idempotency replay: scoped to origin + provider + operation + key.
         if let Some(key) = request.idempotency_key.as_deref() {
             let scope = idempotency_scope(context, &request.operation);
             let arguments_hash = arguments_hash(&request.arguments);
+            let now = Utc::now();
             let replay = {
                 let state = self.state.lock().await;
                 state
                     .idempotency_records
                     .iter()
-                    .find(|record| record.key == key && record.scope == scope)
+                    .find(|record| {
+                        record.key == key
+                            && record.scope == scope
+                            && now.signed_duration_since(record.created_at) < store::IDEMPOTENCY_TTL
+                    })
                     .cloned()
             };
             if let Some(record) = replay {
@@ -1490,6 +1519,24 @@ impl ControlService {
     /// Marks the scheduler as started; returns false when it already runs.
     pub fn mark_scheduler_started(&self) -> bool {
         !self.scheduler_started.swap(true, Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn backdate_idempotency_record_for_test(
+        &self,
+        key: &str,
+        created_at: DateTime<Utc>,
+    ) {
+        if let Some(record) = self
+            .state
+            .lock()
+            .await
+            .idempotency_records
+            .iter_mut()
+            .find(|record| record.key == key)
+        {
+            record.created_at = created_at;
+        }
     }
 
     async fn mutate<F, T>(&self, mutation: F) -> Result<(T, Vec<ControlDomain>), ControlError>

@@ -56,14 +56,11 @@ struct CronField {
     unrestricted: bool,
 }
 
-fn parse_names(segment: &str, names: &[&str], offset: u32) -> Option<u32> {
+fn parse_names(segment: &str, names: &[(&str, &str)], offset: u32) -> Option<u32> {
     let normalized = segment.to_ascii_lowercase();
-    if normalized.len() < 3 {
-        return None;
-    }
     names
         .iter()
-        .position(|name| normalized.starts_with(name))
+        .position(|(short, full)| normalized == *short || normalized == *full)
         .map(|index| index as u32 + offset)
 }
 
@@ -72,7 +69,7 @@ fn parse_field(
     raw: &str,
     min: u32,
     max: u32,
-    names: &[&str],
+    names: &[(&str, &str)],
     name_offset: u32,
 ) -> Result<CronField, String> {
     let mut values = BTreeSet::new();
@@ -122,7 +119,10 @@ fn parse_field(
         let mut value = start;
         while value <= end {
             values.insert(value);
-            value += step;
+            let Some(next) = value.checked_add(step) else {
+                break;
+            };
+            value = next;
         }
     }
     if values.is_empty() {
@@ -134,17 +134,36 @@ fn parse_field(
     })
 }
 
-fn parse_value(segment: &str, names: &[&str], name_offset: u32) -> Option<u32> {
+fn parse_value(segment: &str, names: &[(&str, &str)], name_offset: u32) -> Option<u32> {
     if let Ok(value) = segment.parse::<u32>() {
         return Some(value);
     }
     parse_names(segment, names, name_offset)
 }
 
-const MONTH_NAMES: [&str; 12] = [
-    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+const MONTH_NAMES: [(&str, &str); 12] = [
+    ("jan", "january"),
+    ("feb", "february"),
+    ("mar", "march"),
+    ("apr", "april"),
+    ("may", "may"),
+    ("jun", "june"),
+    ("jul", "july"),
+    ("aug", "august"),
+    ("sep", "september"),
+    ("oct", "october"),
+    ("nov", "november"),
+    ("dec", "december"),
 ];
-const DAY_NAMES: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const DAY_NAMES: [(&str, &str); 7] = [
+    ("sun", "sunday"),
+    ("mon", "monday"),
+    ("tue", "tuesday"),
+    ("wed", "wednesday"),
+    ("thu", "thursday"),
+    ("fri", "friday"),
+    ("sat", "saturday"),
+];
 
 impl CronSpec {
     /// Parses a five-field cron expression. Six-field expressions (with
@@ -319,14 +338,17 @@ pub fn next_occurrence(
                     Some("trigger.every_seconds"),
                 ));
             }
-            let anchor = anchor_at.timestamp();
-            let every = *every_seconds as i64;
-            let mut step = (after.timestamp() - anchor).div_euclid(every) + 1;
-            let mut at = anchor + step * every;
-            while at <= after.timestamp() {
-                step += 1;
-                at = anchor + step * every;
-            }
+            let anchor = i128::from(anchor_at.timestamp());
+            let after = i128::from(after.timestamp());
+            let every = i128::from(*every_seconds);
+            let step = (after - anchor).div_euclid(every) + 1;
+            let at = anchor + step * every;
+            let at = i64::try_from(at).map_err(|_| {
+                ControlError::invalid_schedule(
+                    "the interval's next occurrence is outside the supported time range",
+                    Some("trigger.every_seconds"),
+                )
+            })?;
             Ok(Some(NextOccurrence {
                 at: DateTime::from_timestamp(at, 0)
                     .ok_or_else(|| ControlError::internal("interval arithmetic overflowed"))?,
@@ -644,6 +666,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_garbage_suffixes_on_named_cron_values() {
+        assert!(CronSpec::parse("0 8 * * monkey").is_err());
+        assert!(CronSpec::parse("0 8 * marching *").is_err());
+        assert!(CronSpec::parse("30 9 * january-june,december monday-friday").is_ok());
+    }
+
+    #[test]
+    fn oversized_cron_steps_do_not_overflow() {
+        let spec = CronSpec::parse("1/4294967295 * * * *").expect("valid sparse step");
+        assert_eq!(spec.minutes, BTreeSet::from([1]));
+    }
+
+    #[test]
     fn weekday_cron_in_london_resolves_to_utc() {
         let spec = cron("0 8 * * 1-5");
         let tz: Tz = "Europe/London".parse().unwrap();
@@ -739,6 +774,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn interval_larger_than_i64_does_not_wrap_to_a_one_second_schedule() {
+        let after = utc("2026-08-16T00:00:00Z");
+        let trigger = AutomationTrigger::Interval {
+            every_seconds: u64::MAX,
+            anchor_at: after,
+        };
+
+        assert!(next_occurrence(&trigger, after).is_err());
     }
 
     #[test]

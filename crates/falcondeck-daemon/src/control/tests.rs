@@ -689,6 +689,109 @@ async fn idempotency_scopes_include_the_provider() {
 }
 
 #[tokio::test]
+async fn expired_idempotency_record_does_not_replay_while_the_service_is_idle() {
+    let (_dir, service) = service().await;
+    let key = "expired-create-key";
+    let request = |name: &str| ControlExecuteRequest {
+        operation: registry::ops::AUTOMATION_CREATE.to_string(),
+        arguments: serde_json::from_value(json!({
+            "name": name,
+            "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "i" },
+            "target": { "workspace_path": "/tmp", "provider": "codex", "thread": {"kind": "managed"} },
+        }))
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: Some(key.to_string()),
+    };
+
+    let (first, _) = service
+        .execute(request("First"), &desktop(), &ControlDeps::none())
+        .await;
+    assert!(first.ok);
+    service
+        .backdate_idempotency_record_for_test(
+            key,
+            Utc::now() - store::IDEMPOTENCY_TTL - Duration::seconds(1),
+        )
+        .await;
+
+    let (after_expiry, _) = service
+        .execute(request("Second"), &desktop(), &ControlDeps::none())
+        .await;
+    assert!(after_expiry.ok, "{:?}", after_expiry.error);
+    let automations = service
+        .get(
+            ControlGetRequest {
+                resource: "automations".into(),
+                ..Default::default()
+            },
+            &desktop(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(automations.data.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn concurrent_idempotent_creates_execute_only_once() {
+    let (_dir, service) = service().await;
+    let request = ControlExecuteRequest {
+        operation: registry::ops::AUTOMATION_CREATE.to_string(),
+        arguments: serde_json::from_value(json!({
+            "name": "Concurrent create",
+            "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "i" },
+            "target": { "workspace_path": "/tmp", "provider": "codex", "thread": {"kind": "managed"} },
+        }))
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: Some("concurrent-create-key".to_string()),
+    };
+
+    let left_context = desktop();
+    let right_context = desktop();
+    let left_deps = ControlDeps::none();
+    let right_deps = ControlDeps::none();
+    let (left, right) = tokio::join!(
+        service.execute(request.clone(), &left_context, &left_deps),
+        service.execute(request, &right_context, &right_deps),
+    );
+    assert!(left.0.ok && right.0.ok);
+    assert_eq!(left.0.data.as_ref().unwrap()["id"], right.0.data.as_ref().unwrap()["id"]);
+    let automations = service
+        .get(
+            ControlGetRequest {
+                resource: "automations".into(),
+                ..Default::default()
+            },
+            &desktop(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(automations.data.as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn execute_rejects_idempotency_keys_outside_the_public_bounds() {
+    for key in ["short".to_string(), "x".repeat(129)] {
+        let (_dir, service) = service().await;
+        let mut request = execute_request(
+            registry::ops::AUTOMATION_CREATE,
+            create_arguments(),
+            None,
+        );
+        request.idempotency_key = Some(key);
+
+        let (response, _) = service
+            .execute(request, &desktop(), &ControlDeps::none())
+            .await;
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "invalid_arguments");
+    }
+}
+
+#[tokio::test]
 async fn mcp_origin_is_enforced_against_current_settings() {
     let (_dir, service) = service().await;
 
