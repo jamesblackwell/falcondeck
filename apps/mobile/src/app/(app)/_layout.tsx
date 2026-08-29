@@ -1,145 +1,26 @@
-import { useCallback, useMemo } from "react";
-import { Alert } from "react-native";
+import { useCallback } from "react";
+import { View } from "react-native";
 import { Drawer } from "expo-router/drawer";
-import { Redirect, usePathname, useRouter, type Href } from "expo-router";
-import { DrawerActions } from "@react-navigation/native";
+import { Redirect } from "expo-router";
 import type { DrawerContentComponentProps } from "@react-navigation/drawer";
 
-import { useUnistyles } from "react-native-unistyles";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
-import {
-  buildProjectGroups,
-  deriveExtensionSidebarFilters,
-  deriveThreadTags,
-  type WorkspaceSummary,
-} from "@falcondeck/client-core";
-
-import { useRelayStore, useSessionStore } from "@/store";
-import { SidebarView } from "@/components/navigation";
-import { triggerThreadSelectionHaptic } from "@/lib/haptics";
+import { useRelayStore } from "@/store";
+import { SidebarDrawerContent } from "@/components/navigation";
+import { PerfOverlay } from "@/components/debug/PerfOverlay";
 
 export default function AppLayout() {
-  const router = useRouter();
-  const pathname = usePathname();
   const { theme } = useUnistyles();
-  const settingsOpen =
-    pathname === "/settings" || pathname.startsWith("/settings/");
-  const automationsOpen =
-    pathname === "/automations" || pathname.startsWith("/automations/");
   const sessionId = useRelayStore((s) => s.sessionId);
-  const snapshot = useSessionStore((s) => s.snapshot);
-  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
-  const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
-  const groups = useMemo(
-    () =>
-      buildProjectGroups(
-        snapshot?.workspaces ?? [],
-        snapshot?.threads ?? [],
-        snapshot?.preferences.workspace_order,
-      ),
-    [
-      snapshot?.preferences.workspace_order,
-      snapshot?.threads,
-      snapshot?.workspaces,
-    ],
-  );
-  const threadTags = useMemo(
-    () => deriveThreadTags(snapshot?.extensions),
-    [snapshot?.extensions],
-  );
-  const extensionSidebarFilters = useMemo(
-    () => deriveExtensionSidebarFilters(snapshot?.extensions),
-    [snapshot?.extensions],
-  );
 
-  const handleSelectThread = useCallback(
-    (wId: string, tId: string) => {
-      if (selectedWorkspaceId !== wId || selectedThreadId !== tId) {
-        triggerThreadSelectionHaptic();
-      }
-      useSessionStore.getState().selectThread(wId, tId);
-      router.navigate("/(app)");
-    },
-    [router, selectedThreadId, selectedWorkspaceId],
-  );
-
-  const handleNewThread = useCallback(
-    (wId: string) => {
-      // The composer seed effect reacts to this selection change and applies
-      // the workspace's remembered provider/model/effort/modes, so nothing is
-      // inherited from the previously viewed thread.
-      if (selectedWorkspaceId !== wId || selectedThreadId !== null) {
-        triggerThreadSelectionHaptic();
-      }
-      useSessionStore.getState().selectNewThread(wId);
-      router.navigate("/(app)");
-    },
-    [router, selectedThreadId, selectedWorkspaceId],
-  );
-
-  const handleNewChat = useCallback(async () => {
-    try {
-      const workspace = await useRelayStore
-        .getState()
-        ._callRpc<WorkspaceSummary>("chat.create", { create: true });
-      useSessionStore.getState().selectNewThread(workspace.id);
-      router.navigate("/(app)");
-    } catch (error) {
-      Alert.alert(
-        "Couldn't create chat",
-        error instanceof Error ? error.message : "The desktop could not create the chat folder.",
-      );
-    }
-  }, [router]);
-
-  const handleOpenSettings = useCallback(() => {
-    router.navigate("/(app)/settings");
-  }, [router]);
-
-  const handleOpenAutomations = useCallback(() => {
-    router.navigate("/(app)/automations" as Href);
-  }, [router]);
-
-  // The drawer covers the whole screen, so there is no scrim left to tap:
-  // closing it has to come from a control inside the sidebar.
+  // All sidebar state lives inside SidebarDrawerContent so that snapshot
+  // updates never re-render this layout (and with it the Drawer navigator).
   const renderDrawerContent = useCallback(
     ({ navigation }: DrawerContentComponentProps) => (
-      <SidebarView
-        groups={groups}
-        selectedWorkspaceId={selectedWorkspaceId}
-        selectedThreadId={selectedThreadId}
-        onSelectThread={handleSelectThread}
-        onNewThread={handleNewThread}
-        onNewChat={handleNewChat}
-        onOpenSettings={handleOpenSettings}
-        settingsOpen={settingsOpen}
-        onOpenAutomations={handleOpenAutomations}
-        automationsOpen={automationsOpen}
-        onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
-        threadTagsById={threadTags.byThreadId}
-        threadTagOptions={threadTags.tags}
-        extensionSnapshot={snapshot?.extensions}
-        extensionSidebarFilters={extensionSidebarFilters}
-        workspaceColors={snapshot?.preferences.workspace_colors}
-      />
+      <SidebarDrawerContent navigation={navigation} />
     ),
-    [
-      extensionSidebarFilters,
-      snapshot?.preferences.workspace_colors,
-      snapshot?.extensions,
-      groups,
-      handleSelectThread,
-      handleNewThread,
-      handleNewChat,
-      handleOpenSettings,
-      handleOpenAutomations,
-      settingsOpen,
-      automationsOpen,
-      selectedThreadId,
-      selectedWorkspaceId,
-      threadTags.byThreadId,
-      threadTags.tags,
-    ],
+    [],
   );
 
   if (!sessionId) {
@@ -147,27 +28,36 @@ export default function AppLayout() {
   }
 
   return (
-    <Drawer
-      screenOptions={{
-        headerShown: false,
-        // Keep the native drawer gesture available on iOS and give users a
-        // forgiving edge target for opening the sidebar.
-        swipeEnabled: true,
-        swipeEdgeWidth: 120,
-        swipeMinDistance: 24,
-        // Full-width sidebar: thread titles are long and the 300pt panel
-        // truncated most of them. 'front' keeps the conversation in place
-        // underneath instead of shoving it entirely off-screen.
-        drawerType: "front",
-        drawerStyle: {
-          backgroundColor: theme.colors.surface[1],
-          width: "100%",
-        },
-        sceneStyle: {
-          backgroundColor: theme.colors.surface[0],
-        },
-      }}
-      drawerContent={renderDrawerContent}
-    />
+    <View style={styles.root}>
+      <Drawer
+        screenOptions={{
+          headerShown: false,
+          // Keep the native drawer gesture available on iOS and give users a
+          // forgiving edge target for opening the sidebar.
+          swipeEnabled: true,
+          swipeEdgeWidth: 120,
+          swipeMinDistance: 24,
+          // Full-width sidebar: thread titles are long and the 300pt panel
+          // truncated most of them. 'front' keeps the conversation in place
+          // underneath instead of shoving it entirely off-screen.
+          drawerType: "front",
+          drawerStyle: {
+            backgroundColor: theme.colors.surface[1],
+            width: "100%",
+          },
+          sceneStyle: {
+            backgroundColor: theme.colors.surface[0],
+          },
+        }}
+        drawerContent={renderDrawerContent}
+      />
+      <PerfOverlay />
+    </View>
   );
 }
+
+const styles = StyleSheet.create(() => ({
+  root: {
+    flex: 1,
+  },
+}));

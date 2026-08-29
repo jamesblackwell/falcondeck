@@ -1,6 +1,6 @@
 import { ScrollView } from 'react-native'
 import { useRouter, type Href } from 'expo-router'
-import { Bell, Info, MessageSquareText, Mic, MonitorCog, Palette } from 'lucide-react-native'
+import { Bell, Gauge, Info, MessageSquareText, Mic, MonitorCog, Palette } from 'lucide-react-native'
 import { useUnistyles } from 'react-native-unistyles'
 
 import { isDaemonRpcReady, normalizePreferences } from '@falcondeck/client-core'
@@ -97,6 +97,12 @@ export default function SettingsScreen() {
       </SettingsSection>
 
       <SettingsSection>
+        <SettingsRow
+          label="Developer"
+          detail="CPU and memory diagnostics"
+          icon={<Gauge size={theme.iconSize.sm} color={theme.colors.success.default} />}
+          onPress={() => router.push('/(app)/settings/developer' as Href)}
+        />
         <SettingsRow
           label="About FalconDeck"
           detail="Version and build"

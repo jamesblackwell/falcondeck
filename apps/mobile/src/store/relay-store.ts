@@ -177,6 +177,9 @@ let _pairingId: string | null = null
 let _trustedDaemonPublicKey: string | null = null
 let _trustedDaemonIdentityPublicKey: string | null = null
 let _rpcRequestCounter = 0
+// Keychain writes are expensive (and _persistSession runs on every cursor
+// checkpoint), so the data key is only re-written when its value changes.
+let _persistedDataKeyB64: string | null = null
 
 type PendingRpc = {
   method: string
@@ -700,6 +703,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _getSessionCrypto: () => _sessionCrypto,
   _setSessionCrypto: (crypto) => {
     _sessionCrypto = crypto
+    // New (or cleared) key material must reach the Keychain on the next
+    // persist even if it happens to re-derive to a previously seen value.
+    _persistedDataKeyB64 = null
     if (crypto) {
       endConnectionAction('bootstrap')
       endConnectionAction('session-key')
@@ -734,7 +740,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       lastReceivedSeq: _lastReceivedSeq,
     } satisfies PersistedRelay)
     if (_sessionCrypto) {
-      void persistDataKey(bytesToBase64(_sessionCrypto.dataKey))
+      const dataKeyB64 = bytesToBase64(_sessionCrypto.dataKey)
+      if (dataKeyB64 !== _persistedDataKeyB64) {
+        _persistedDataKeyB64 = dataKeyB64
+        void persistDataKey(dataKeyB64)
+      }
     }
   },
 

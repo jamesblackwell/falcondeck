@@ -45,6 +45,15 @@ export function persistCachedModels(
   const current = loadCache()
   const key = catalogKey(workspaceId, provider)
   if (current.entries[key] === models) return
+  // The caller's list identity churns with every snapshot update even when
+  // the catalog itself is unchanged; compare content before paying for a
+  // full-cache MMKV write.
+  const serialized = JSON.stringify(models)
+  const existing = current.entries[key]
+  if (existing && JSON.stringify(existing) === serialized) {
+    current.entries[key] = models
+    return
+  }
   current.entries[key] = models
   setJson(MODEL_CATALOG_CACHE_KEY, current)
 }

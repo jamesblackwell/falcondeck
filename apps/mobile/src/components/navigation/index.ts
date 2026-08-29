@@ -1,4 +1,5 @@
 export { SidebarView } from './SidebarView'
+export { SidebarDrawerContent } from './SidebarDrawerContent'
 export { ConnectionHeader } from './ConnectionHeader'
 export { ThreadOptionsSheet } from './ThreadOptionsSheet'
 export { ExtensionFilterSheet } from './ExtensionFilterSheet'

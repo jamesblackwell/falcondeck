@@ -82,6 +82,11 @@ export class NativeRealtimeAudioPlayer {
       }
       this.threads.delete(id)
     }
+    if (this.threads.size === 0 && this.context) {
+      // Suspend the CoreAudio render graph while idle; a resumed context
+      // otherwise keeps the audio unit spinning for the rest of the session.
+      void this.context.suspend().catch(() => undefined)
+    }
   }
 
   private createState(): PlaybackState {

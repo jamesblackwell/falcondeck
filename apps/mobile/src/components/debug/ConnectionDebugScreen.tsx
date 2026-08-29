@@ -3,13 +3,20 @@
  *
  * A calm, closable full-screen connection view. The first layer explains that
  * FalconDeck is recovering normally; detailed transport history is opt-in.
+ *
+ * Split into a shell and a body: the shell only watches sync status to run the
+ * auto-show timer, while everything expensive — the connection-log
+ * subscription, the shared clock, the modal tree — mounts only while the
+ * screen is actually visible. The previous single-component version subscribed
+ * to every log append and ticked a 100ms clock whenever the session was busy,
+ * which kept the JS thread hot for as long as the desktop was offline.
  */
 import { memo, useEffect, useRef, useState } from 'react'
 import { Modal, Pressable, ScrollView, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { shouldAutoShowConnectionDebug } from '@/lib/session-status'
+import { shouldAutoShowConnectionDebug, type SessionSyncStatus } from '@/lib/session-status'
 import { useConnectionLogStore, useRelayStore } from '@/store'
 import {
   connectionActionDurationMs,
@@ -47,74 +54,78 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function LogLine({
-  entry,
-  now,
-}: {
-  entry: ConnectionLogEntry
-  now: number
-}) {
-  const { theme } = useUnistyles()
-  const color: Record<ConnectionLogLevel, string> = {
-    info: theme.colors.fg.secondary,
-    success: theme.colors.success.default,
-    warn: theme.colors.warning.default,
-    error: theme.colors.danger.default,
-  }
-  const inFlight = isConnectionActionInFlight(entry)
-  const durationMs = connectionActionDurationMs(entry, now)
-  return (
-    <View style={styles.logLine}>
-      <Text variant="mono" size="2xs" color="faint">
-        {formatClock(entry.at)}
-      </Text>
-      <View style={styles.logBody}>
-        <View style={styles.logHeadline}>
-          <Text
-            variant="mono"
-            size="2xs"
-            style={[styles.logMessage, { color: color[entry.level] }]}
-          >
-            {entry.message}
-            {entry.count && entry.count > 1 ? ` ×${entry.count}` : ''}
-          </Text>
-          {durationMs != null ? (
+const LogLine = memo(
+  function LogLine({
+    entry,
+    now,
+  }: {
+    entry: ConnectionLogEntry
+    now: number
+  }) {
+    const { theme } = useUnistyles()
+    const color: Record<ConnectionLogLevel, string> = {
+      info: theme.colors.fg.secondary,
+      success: theme.colors.success.default,
+      warn: theme.colors.warning.default,
+      error: theme.colors.danger.default,
+    }
+    const inFlight = isConnectionActionInFlight(entry)
+    const durationMs = connectionActionDurationMs(entry, now)
+    return (
+      <View style={styles.logLine}>
+        <Text variant="mono" size="2xs" color="faint">
+          {formatClock(entry.at)}
+        </Text>
+        <View style={styles.logBody}>
+          <View style={styles.logHeadline}>
             <Text
               variant="mono"
               size="2xs"
-              color={inFlight ? 'info' : 'faint'}
-              style={styles.logDuration}
+              style={[styles.logMessage, { color: color[entry.level] }]}
             >
-              {formatConnectionDurationMs(durationMs)}
+              {entry.message}
+              {entry.count && entry.count > 1 ? ` ×${entry.count}` : ''}
+            </Text>
+            {durationMs != null ? (
+              <Text
+                variant="mono"
+                size="2xs"
+                color={inFlight ? 'info' : 'faint'}
+                style={styles.logDuration}
+              >
+                {formatConnectionDurationMs(durationMs)}
+              </Text>
+            ) : null}
+          </View>
+          {entry.detail ? (
+            <Text variant="mono" size="2xs" color="muted">
+              {entry.detail}
             </Text>
           ) : null}
         </View>
-        {entry.detail ? (
-          <Text variant="mono" size="2xs" color="muted">
-            {entry.detail}
-          </Text>
-        ) : null}
       </View>
-    </View>
-  )
-}
+    )
+  },
+  // Only rows whose visible duration label actually changed re-render on a
+  // clock tick — settled rows have a fixed duration and skip every tick.
+  (prev, next) => {
+    if (prev.entry !== next.entry) return false
+    const prevDuration = connectionActionDurationMs(prev.entry, prev.now)
+    const nextDuration = connectionActionDurationMs(next.entry, next.now)
+    if (prevDuration === null || nextDuration === null) {
+      return prevDuration === nextDuration
+    }
+    return (
+      formatConnectionDurationMs(prevDuration) ===
+      formatConnectionDurationMs(nextDuration)
+    )
+  },
+)
 
 export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
-  const { theme } = useUnistyles()
-  const insets = useSafeAreaInsets()
   const visible = useConnectionLogStore((s) => s.visible)
-  const entries = useConnectionLogStore((s) => s.entries)
-  const hide = useConnectionLogStore((s) => s.hide)
   const show = useConnectionLogStore((s) => s.show)
   const status = useSessionSyncStatus()
-  const hasInFlight = entries.some(isConnectionActionInFlight)
-
-  const connectionStatus = useRelayStore((s) => s.connectionStatus)
-  const isEncrypted = useRelayStore((s) => s.isEncrypted)
-  const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
-  const machinePresence = useRelayStore((s) => s.machinePresence)
-  const error = useRelayStore((s) => s.error)
-  const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
 
   // A normal cellular handoff should stay invisible. If it lasts, put a calm
   // connection screen in front of a disabled composer instead of exposing a
@@ -139,29 +150,44 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
     return () => clearTimeout(timer)
   }, [autoShowDebug, show])
 
+  if (!visible) return null
+  return <ConnectionDebugBody status={status} />
+})
+
+function ConnectionDebugBody({ status }: { status: SessionSyncStatus }) {
+  const { theme } = useUnistyles()
+  const insets = useSafeAreaInsets()
+  const entries = useConnectionLogStore((s) => s.entries)
+  const hide = useConnectionLogStore((s) => s.hide)
+  const hasInFlight = entries.some(isConnectionActionInFlight)
+
+  const connectionStatus = useRelayStore((s) => s.connectionStatus)
+  const isEncrypted = useRelayStore((s) => s.isEncrypted)
+  const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
+  const machinePresence = useRelayStore((s) => s.machinePresence)
+  const error = useRelayStore((s) => s.error)
+  const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
+
   const [showDetails, setShowDetails] = useState(false)
-  useEffect(() => {
-    if (!visible) setShowDetails(false)
-  }, [visible])
 
   // One shared clock so elapsed/retry countdowns tick without per-row timers.
-  // In-flight rows want tenths of a second; idle only needs the retry countdown.
+  // Sub-second resolution is only worth paying for while the log is open with
+  // an action actually in flight; the summary layer reads fine at 1s.
   const [now, setNow] = useState(() => Date.now())
-  const liveClock = hasInFlight || status.isBusy
+  const fastClock = showDetails && hasInFlight
   useEffect(() => {
-    if (!visible) return
     setNow(Date.now())
-    const timer = setInterval(() => setNow(Date.now()), liveClock ? 100 : 1_000)
+    const timer = setInterval(() => setNow(Date.now()), fastClock ? 250 : 1_000)
     return () => clearInterval(timer)
-  }, [visible, liveClock])
+  }, [fastClock])
 
   const logRef = useRef<ScrollView>(null)
   const lastEntryId = entries.length ? entries[entries.length - 1].id : null
   useEffect(() => {
-    if (visible && lastEntryId !== null) {
+    if (lastEntryId !== null) {
       logRef.current?.scrollToEnd({ animated: false })
     }
-  }, [visible, lastEntryId])
+  }, [lastEntryId])
 
   const elapsedLabel =
     status.syncStartedAt === null
@@ -177,7 +203,7 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
 
   return (
     <Modal
-      visible={visible}
+      visible
       transparent
       animationType="fade"
       statusBarTranslucent
@@ -351,7 +377,7 @@ export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
       </View>
     </Modal>
   )
-})
+}
 
 const styles = StyleSheet.create((theme) => ({
   backdrop: {

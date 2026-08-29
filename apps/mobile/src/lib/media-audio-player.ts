@@ -82,6 +82,9 @@ export class NativeMediaAudioPlayer {
           if (this.active === playback) {
             this.active = null
             this.setState(key, 'idle')
+            if (this.context) {
+              void this.context.suspend().catch(() => undefined)
+            }
           }
         }
         this.setState(key, 'playing')
@@ -112,6 +115,11 @@ export class NativeMediaAudioPlayer {
       // A finite native source can race its own ended callback.
     }
     this.setState(active.key, 'idle')
+    if (this.context) {
+      // Suspend the CoreAudio render graph while idle; a resumed context
+      // otherwise keeps the audio unit spinning for the rest of the session.
+      void this.context.suspend().catch(() => undefined)
+    }
   }
 
   private setState(key: string, state: MediaAudioState): void {

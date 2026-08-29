@@ -49,6 +49,39 @@ export {
   shouldIgnoreReplaySnapshotEvent,
 }
 
+// During a live stream the flush loop checkpoints its cursor after nearly
+// every rAF batch; writing the full session cache plus the relay session
+// record that often is the single heaviest recurring cost on the JS thread.
+// Cursor persistence is only a crash-recovery acknowledgement, so coalescing
+// writes to once per second (with a trailing write) merely means a restart
+// replays up to one extra second of updates.
+const RELAY_CHECKPOINT_THROTTLE_MS = 1_000
+let lastRelayCheckpointAt = 0
+let trailingRelayCheckpointTimer: ReturnType<typeof setTimeout> | null = null
+
+function writeRelayCheckpoint(): void {
+  lastRelayCheckpointAt = Date.now()
+  persistSessionCacheNow()
+  useRelayStore.getState()._persistSession()
+}
+
+function persistRelayCheckpointThrottled(): void {
+  const elapsed = Date.now() - lastRelayCheckpointAt
+  if (elapsed >= RELAY_CHECKPOINT_THROTTLE_MS) {
+    if (trailingRelayCheckpointTimer) {
+      clearTimeout(trailingRelayCheckpointTimer)
+      trailingRelayCheckpointTimer = null
+    }
+    writeRelayCheckpoint()
+    return
+  }
+  if (trailingRelayCheckpointTimer) return
+  trailingRelayCheckpointTimer = setTimeout(() => {
+    trailingRelayCheckpointTimer = null
+    writeRelayCheckpoint()
+  }, RELAY_CHECKPOINT_THROTTLE_MS - elapsed)
+}
+
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
 const RELAY_PING_INTERVAL_MS = 15_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
@@ -678,8 +711,7 @@ export function useRelayConnection() {
             parkedUpdateCount: pendingEncrypted.current.length,
           })
         ) {
-          persistSessionCacheNow()
-          relay._persistSession()
+          persistRelayCheckpointThrottled()
         }
 
         if (
@@ -711,8 +743,7 @@ export function useRelayConnection() {
         pendingTruncationNextSeq.current = null
         const relay = useRelayStore.getState()
         relay._setLastReceivedSeq(truncationCursor)
-        persistSessionCacheNow()
-        relay._persistSession()
+        persistRelayCheckpointThrottled()
       }
     } finally {
       relayFlushInProgress.current = false
