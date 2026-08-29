@@ -122,13 +122,23 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         enableBackgroundRecording: true,
       },
     ],
-    [
-      'expo-widgets',
-      {
-        bundleIdentifier: 'com.falcondeck.mobile.widgets',
-        groupIdentifier: 'group.com.falcondeck.mobile',
-      },
-    ],
+    // TEMPORARILY DISABLED (2026-08-29): the ExpoWidgetsTarget extension needs
+    // its own provisioning profile, and generating one requires an interactive
+    // Apple login (the stored session has expired and non-interactive EAS
+    // builds refuse to create it — Apple even reported the account as locked
+    // when a login was attempted). No shipped build has included the widgets
+    // target yet, so this only defers speech Live Activities. To restore: run
+    // `npx eas-cli credentials -p ios` interactively once (or unlock the Apple
+    // account at iforgot.apple.com if needed), then re-enable this plugin.
+    // The expo-widgets pod stays autolinked, so speechLiveActivity.ios.tsx
+    // still loads; its start/update calls are try/caught and simply no-op.
+    // [
+    //   'expo-widgets',
+    //   {
+    //     bundleIdentifier: 'com.falcondeck.mobile.widgets',
+    //     groupIdentifier: 'group.com.falcondeck.mobile',
+    //   },
+    // ],
     [
       'expo-speech-recognition',
       {
