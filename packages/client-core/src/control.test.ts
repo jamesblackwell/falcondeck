@@ -46,8 +46,42 @@ describe("normalizeAutomation", () => {
     expect(normalizeAutomation(automation)).toEqual(automation);
   });
 
+  it("accepts a daemon list-projection row (no task, thread or timestamps)", () => {
+    // Mirrors DEFAULT_AUTOMATION_LIST_FIELDS in the daemon's control store.
+    const listRow = {
+      id: "automation-9fc78b39",
+      revision: 3,
+      name: "Weekday inbox review",
+      state: "enabled",
+      trigger: {
+        kind: "cron",
+        expression: "0 8 * * 1-5",
+        timezone: "Europe/London",
+      },
+      target: {
+        provider: "codex",
+        workspace_path: "/Users/james/Code/quizgecko",
+      },
+      elevated: false,
+      required_connectors: [],
+      concurrency_policy: "skip",
+      misfire_policy: "skip",
+      next_run_at: "2026-08-30T07:00:00Z",
+      last_run_at: "2026-08-29T07:00:00Z",
+      latest_outcome: {
+        status: "succeeded",
+        finished_at: "2026-08-29T07:00:31Z",
+        preview: "Done.",
+      },
+      resolved_schedule: 'cron "0 8 * * 1-5" (Europe/London)',
+    };
+    expect(normalizeAutomation(listRow)).toEqual(listRow);
+  });
+
   it.each([
     ["unknown state", { ...automation, state: "bogus" }],
+    ["malformed task when present", { ...automation, task: { kind: "prompt" } }],
+    ["malformed updated_at when present", { ...automation, updated_at: 42 }],
     ["missing name", { ...automation, name: undefined }],
     [
       "malformed trigger",

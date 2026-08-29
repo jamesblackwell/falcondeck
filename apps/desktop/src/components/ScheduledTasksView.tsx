@@ -265,7 +265,7 @@ function automationAsScheduledTask(
           preview: automation.latest_outcome.preview,
         }
       : null,
-    updated_at: automation.updated_at,
+    updated_at: automation.updated_at ?? automation.last_run_at ?? "",
   };
 }
 
@@ -1806,17 +1806,19 @@ export function ScheduledTasksView({
             </div>
             {selectedAutomation ? (
               <>
-                <div>
-                  <dt className="text-fg-muted">Prompt</dt>
-                  <dd className="mt-1 whitespace-pre-wrap text-fg-secondary">
-                    {selectedAutomation.task.instruction}
-                  </dd>
-                  {selectedAutomation.task.kind === "conditional_prompt" ? (
-                    <dd className="mt-1 text-xs text-fg-muted">
-                      No-action marker: {selectedAutomation.task.no_action_marker}
+                {selectedAutomation.task ? (
+                  <div>
+                    <dt className="text-fg-muted">Prompt</dt>
+                    <dd className="mt-1 whitespace-pre-wrap text-fg-secondary">
+                      {selectedAutomation.task.instruction}
                     </dd>
-                  ) : null}
-                </div>
+                    {selectedAutomation.task.kind === "conditional_prompt" ? (
+                      <dd className="mt-1 text-xs text-fg-muted">
+                        No-action marker: {selectedAutomation.task.no_action_marker}
+                      </dd>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div>
                   <dt className="text-fg-muted">Execution</dt>
                   <dd className="mt-1 text-fg-secondary">
@@ -1829,7 +1831,9 @@ export function ScheduledTasksView({
                     {selectedAutomation.target.permission_mode
                       ? ` · ${selectedAutomation.target.permission_mode}`
                       : ""}
-                    {` · ${selectedAutomation.target.thread.kind.replaceAll("_", " ")}`}
+                    {selectedAutomation.target.thread
+                      ? ` · ${selectedAutomation.target.thread.kind.replaceAll("_", " ")}`
+                      : ""}
                   </dd>
                 </div>
                 {selectedAutomation.target.selected_skills?.length ? (

@@ -51,7 +51,8 @@ export type AutomationThreadTarget =
 export type AutomationTarget = {
   workspace_path: string;
   provider: string;
-  thread: AutomationThreadTarget;
+  /** Omitted from automation list rows; present on single reads. */
+  thread?: AutomationThreadTarget;
   model_id?: string | null;
   permission_mode?: string | null;
   sandbox_mode?: string | null;
@@ -80,21 +81,27 @@ export type AutomationOutcomeSummary = {
   preview?: string | null;
 };
 
+/**
+ * A single automation. List responses return a summary projection that
+ * omits `task`, `target.thread`, `created_at` and `updated_at`
+ * (`DEFAULT_AUTOMATION_LIST_FIELDS` in the daemon); those fields are only
+ * guaranteed on single-automation reads and mutation responses.
+ */
 export type Automation = {
   id: string;
   revision: number;
   name: string;
   description?: string | null;
   trigger: AutomationTrigger;
-  task: AutomationTask;
+  task?: AutomationTask;
   target: AutomationTarget;
   state: AutomationState;
   concurrency_policy: AutomationConcurrencyPolicy;
   misfire_policy: AutomationMisfirePolicy;
   elevated: boolean;
   required_connectors: string[];
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
   next_run_at?: string | null;
   last_run_at?: string | null;
   latest_outcome?: AutomationOutcomeSummary | null;
@@ -375,12 +382,21 @@ export function normalizeAutomation(value: unknown): Automation | null {
     typeof automation.state !== "string" ||
     !AUTOMATION_STATES.has(automation.state) ||
     normalizeAutomationTrigger(automation.trigger) === null ||
-    normalizeAutomationTask(automation.task) === null ||
     !isRecord(automation.target) ||
     typeof automation.target.workspace_path !== "string" ||
-    typeof automation.target.provider !== "string" ||
-    !isRecord(automation.target.thread) ||
-    typeof automation.updated_at !== "string"
+    typeof automation.target.provider !== "string"
+  ) {
+    return null;
+  }
+  // List rows are a summary projection: task, target.thread and the
+  // timestamps are only present on single reads. Validate them when present.
+  if (
+    (automation.task !== undefined &&
+      normalizeAutomationTask(automation.task) === null) ||
+    (automation.target.thread !== undefined &&
+      !isRecord(automation.target.thread)) ||
+    (automation.updated_at !== undefined &&
+      typeof automation.updated_at !== "string")
   ) {
     return null;
   }

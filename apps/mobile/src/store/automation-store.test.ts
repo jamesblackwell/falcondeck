@@ -86,6 +86,39 @@ describe('automation store', () => {
     expect(loadAutomationCache('session-1')?.automations).toEqual([automation])
   })
 
+  it('keeps daemon list-projection rows, which omit task, thread and timestamps', async () => {
+    // Regression: the daemon's automation list projects out task,
+    // target.thread and the timestamps; the strict normalizer used to drop
+    // every row, so the app showed "No automations" against a live daemon.
+    const listRow: Automation = {
+      id: 'automation-1',
+      revision: 4,
+      name: 'Inbox review',
+      state: 'enabled',
+      trigger: { kind: 'cron', expression: '0 8 * * 1-5', timezone: 'Europe/London' },
+      target: { workspace_path: '/tmp/project', provider: 'codex' },
+      elevated: false,
+      required_connectors: [],
+      concurrency_policy: 'skip',
+      misfire_policy: 'skip',
+      next_run_at: '2026-08-24T08:00:00Z',
+      last_run_at: '2026-08-23T08:00:00Z',
+      latest_outcome: { status: 'succeeded', finished_at: '2026-08-23T08:00:31Z', preview: 'Done.' },
+      resolved_schedule: 'cron "0 8 * * 1-5" (Europe/London)',
+    }
+    const rpc = vi.fn(async (_method: string, params: Record<string, unknown>) =>
+      params.resource === 'automations'
+        ? controlGet('automations', [listRow])
+        : controlGet('agent_control.settings', settings),
+    )
+    useRelayStore.setState({ _callRpc: rpc as never })
+    useAutomationStore.getState().hydrate('session-1')
+
+    await useAutomationStore.getState().refresh()
+
+    expect(useAutomationStore.getState().automations).toEqual([listRow])
+  })
+
   it('surfaces structured revision conflicts from mutations', async () => {
     const rpc = vi.fn().mockResolvedValue({
       ok: false,

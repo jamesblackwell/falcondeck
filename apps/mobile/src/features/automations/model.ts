@@ -64,7 +64,10 @@ export function emptyAutomationDraft(
 }
 
 export function automationDraftFromDefinition(automation: Automation): AutomationDraft {
-  const thread = automation.target.thread
+  // Drafts are built from single-automation reads, which always carry the
+  // task and thread; list rows omit them, so fall back to editor defaults.
+  const task = automation.task ?? { kind: 'prompt' as const, instruction: '' }
+  const thread = automation.target.thread ?? { kind: 'managed' as const }
   return {
     name: automation.name,
     description: automation.description ?? '',
@@ -74,10 +77,9 @@ export function automationDraftFromDefinition(automation: Automation): Automatio
     everySeconds:
       automation.trigger.kind === 'interval' ? String(automation.trigger.every_seconds) : '3600',
     runAt: automation.trigger.kind === 'once' ? automation.trigger.run_at : '',
-    instruction: automation.task.instruction,
-    conditional: automation.task.kind === 'conditional_prompt',
-    noActionMarker:
-      automation.task.kind === 'conditional_prompt' ? automation.task.no_action_marker : '',
+    instruction: task.instruction,
+    conditional: task.kind === 'conditional_prompt',
+    noActionMarker: task.kind === 'conditional_prompt' ? task.no_action_marker : '',
     workspacePath: automation.target.workspace_path,
     provider: automation.target.provider,
     threadKind: thread.kind,
