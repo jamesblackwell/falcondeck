@@ -13,14 +13,22 @@ import {
   boundRetainedThreadItems,
   canPostNotifications,
   canWarmStartFromSnapshotCache,
+  clearPersistedRemoteSession,
+  clearPersistedRemoteSnapshot,
+  clearPendingActionIds,
   clearPairingParamsFromUrl,
   connectionBadgeState,
   createSnapshotCacheScheduler,
   deriveConnectionHelpState,
+  deviceLabelForUserAgent,
+  forgetPendingActionAfterError,
+  loadPendingActionIds,
   loadPersistedRemoteSnapshot,
   loadNotificationPreference,
   loadPersistedRemoteSession,
   loadPersistedSelection,
+  MAX_PERSISTED_PENDING_ACTIONS,
+  persistPendingActionIds,
   persistNotificationPreference,
   persistRemoteSession,
   persistRemoteSnapshot,
@@ -53,11 +61,15 @@ describe('remote session secret persistence', () => {
       dataKey,
     })
 
-    const durable = window.localStorage.getItem('falcondeck.remote.session.v1') ?? ''
+    const durable = window.localStorage.getItem('falcondeck.remote.session.v1:session-1') ?? ''
+    expect(durable).not.toBe('')
     expect(durable).not.toContain(clientSecretKey)
     expect(durable).not.toContain(dataKey)
     expect(durable).not.toContain('PAIR-CODE')
-    expect(loadPersistedRemoteSession()).toMatchObject({ clientSecretKey, dataKey })
+    expect(loadPersistedRemoteSession()).toMatchObject({
+      clientSecretKey,
+      dataKey,
+    })
   })
 
   it('does not resume durable metadata after tab secrets are gone', () => {
@@ -72,10 +84,10 @@ describe('remote session secret persistence', () => {
     window.sessionStorage.clear()
 
     expect(loadPersistedRemoteSession()).toBeNull()
-    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).not.toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-1')).not.toBeNull()
   })
 
-  it('never combines another tab session metadata with stale cryptographic keys', () => {
+  it('uses the metadata matching this tab instead of another tab session', () => {
     persistRemoteSession({
       version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: 'https://connect.example.com',
@@ -96,9 +108,11 @@ describe('remote session secret persistence', () => {
     })
     window.sessionStorage.setItem('falcondeck.remote.session-secrets.v1', staleSecrets!)
 
-    expect(loadPersistedRemoteSession()).toBeNull()
-    expect(window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')).toBeNull()
-    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).toContain('session-2')
+    expect(loadPersistedRemoteSession()).toMatchObject({
+      sessionId: 'session-1',
+      clientToken: 'client-token-1',
+    })
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-2')).toContain('session-2')
   })
 
   it('discards corrupt tab secrets without erasing shared durable metadata', () => {
@@ -114,7 +128,65 @@ describe('remote session secret persistence', () => {
 
     expect(loadPersistedRemoteSession()).toBeNull()
     expect(window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')).toBeNull()
-    expect(window.localStorage.getItem('falcondeck.remote.session.v1')).toContain('session-1')
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-1')).toContain('session-1')
+  })
+
+  it('lets two tabs resume different sessions without overwriting each other', () => {
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-1',
+      clientToken: 'client-token-1',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    const firstTabSecrets = window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')
+
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-2',
+      clientToken: 'client-token-2',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    const secondTabSecrets = window.sessionStorage.getItem('falcondeck.remote.session-secrets.v1')
+
+    window.sessionStorage.setItem('falcondeck.remote.session-secrets.v1', firstTabSecrets!)
+    expect(loadPersistedRemoteSession()).toMatchObject({
+      sessionId: 'session-1',
+      clientToken: 'client-token-1',
+    })
+
+    window.sessionStorage.setItem('falcondeck.remote.session-secrets.v1', secondTabSecrets!)
+    expect(loadPersistedRemoteSession()).toMatchObject({
+      sessionId: 'session-2',
+      clientToken: 'client-token-2',
+    })
+  })
+
+  it('clears only the session owned by the resetting tab', () => {
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-1',
+      clientToken: 'client-token-1',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+    persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://connect.example.com',
+      pairingCode: '',
+      sessionId: 'session-2',
+      clientToken: 'client-token-2',
+      clientSecretKey: secretKeyToBase64(generateBoxKeyPair()),
+    })
+
+    clearPersistedRemoteSession('session-1')
+
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-2')).not.toBeNull()
   })
 })
 
@@ -144,10 +216,7 @@ describe('shouldApplyReplayPresence', () => {
   })
 })
 
-function snapshotWith(
-  workspaceIds: string[],
-  threads: Array<{ id: string; workspace_id: string }>,
-): DaemonSnapshot {
+function snapshotWith(workspaceIds: string[], threads: Array<{ id: string; workspace_id: string }>): DaemonSnapshot {
   return {
     workspaces: workspaceIds.map((id) => ({ id })),
     threads,
@@ -177,7 +246,12 @@ describe('resolveRestoredSelection', () => {
   )
 
   it('restores a selection that still exists', () => {
-    expect(resolveRestoredSelection(snapshot, { workspaceId: 'ws-1', threadId: 't-1' })).toEqual({
+    expect(
+      resolveRestoredSelection(snapshot, {
+        workspaceId: 'ws-1',
+        threadId: 't-1',
+      }),
+    ).toEqual({
       workspaceId: 'ws-1',
       threadId: 't-1',
     })
@@ -185,19 +259,32 @@ describe('resolveRestoredSelection', () => {
 
   it('keeps the workspace but drops a thread that is gone', () => {
     expect(
-      resolveRestoredSelection(snapshot, { workspaceId: 'ws-1', threadId: 'deleted' }),
+      resolveRestoredSelection(snapshot, {
+        workspaceId: 'ws-1',
+        threadId: 'deleted',
+      }),
     ).toEqual({ workspaceId: 'ws-1', threadId: null })
   })
 
   it('drops a thread that moved to another workspace', () => {
-    expect(resolveRestoredSelection(snapshot, { workspaceId: 'ws-1', threadId: 't-2' })).toEqual({
+    expect(
+      resolveRestoredSelection(snapshot, {
+        workspaceId: 'ws-1',
+        threadId: 't-2',
+      }),
+    ).toEqual({
       workspaceId: 'ws-1',
       threadId: null,
     })
   })
 
   it('gives up when the workspace is gone so the snapshot default wins', () => {
-    expect(resolveRestoredSelection(snapshot, { workspaceId: 'gone', threadId: 't-1' })).toBeNull()
+    expect(
+      resolveRestoredSelection(snapshot, {
+        workspaceId: 'gone',
+        threadId: 't-1',
+      }),
+    ).toBeNull()
   })
 
   it('gives up before a snapshot has arrived', () => {
@@ -207,19 +294,36 @@ describe('resolveRestoredSelection', () => {
 
 describe('selection persistence', () => {
   it('round-trips a selection', () => {
-    persistSelection({ workspaceId: 'ws-1', threadId: 't-1' })
-    expect(loadPersistedSelection()).toEqual({ workspaceId: 'ws-1', threadId: 't-1' })
+    persistSelection('session-1', { workspaceId: 'ws-1', threadId: 't-1' })
+    expect(loadPersistedSelection('session-1')).toEqual({
+      workspaceId: 'ws-1',
+      threadId: 't-1',
+    })
   })
 
   it('clears the stored selection when passed null', () => {
-    persistSelection({ workspaceId: 'ws-1', threadId: 't-1' })
-    persistSelection(null)
-    expect(loadPersistedSelection()).toBeNull()
+    persistSelection('session-1', { workspaceId: 'ws-1', threadId: 't-1' })
+    persistSelection('session-1', null)
+    expect(loadPersistedSelection('session-1')).toBeNull()
   })
 
   it('ignores malformed stored values', () => {
-    window.localStorage.setItem('falcondeck.remote.selection.v1', '{not json')
-    expect(loadPersistedSelection()).toBeNull()
+    window.localStorage.setItem('falcondeck.remote.selection.v1:session-1', '{not json')
+    expect(loadPersistedSelection('session-1')).toBeNull()
+  })
+
+  it('keeps selections isolated between paired sessions', () => {
+    persistSelection('session-1', { workspaceId: 'ws-1', threadId: 't-1' })
+    persistSelection('session-2', { workspaceId: 'ws-2', threadId: 't-2' })
+
+    expect(loadPersistedSelection('session-1')).toEqual({
+      workspaceId: 'ws-1',
+      threadId: 't-1',
+    })
+    expect(loadPersistedSelection('session-2')).toEqual({
+      workspaceId: 'ws-2',
+      threadId: 't-2',
+    })
   })
 })
 
@@ -238,17 +342,48 @@ describe('remote snapshot cache', () => {
     })
   })
 
-  it('does not hydrate a cache belonging to another session', () => {
+  it('does not delete a cache belonging to another session', () => {
     persistRemoteSnapshot('session-1', snapshot, 42)
 
     expect(loadPersistedRemoteSnapshot('session-2')).toBeNull()
-    expect(window.localStorage.getItem('falcondeck.remote.snapshot.v1')).toBeNull()
+    expect(loadPersistedRemoteSnapshot('session-1')?.lastReceivedSeq).toBe(42)
+  })
+
+  it('keeps independent warm caches for two paired sessions', () => {
+    persistRemoteSnapshot('session-1', snapshot, 42)
+    persistRemoteSnapshot('session-2', snapshot, 84)
+
+    expect(loadPersistedRemoteSnapshot('session-1')?.lastReceivedSeq).toBe(42)
+    expect(loadPersistedRemoteSnapshot('session-2')?.lastReceivedSeq).toBe(84)
+  })
+
+  it('clears only the requested session cache', () => {
+    persistRemoteSnapshot('session-1', snapshot, 42)
+    persistRemoteSnapshot('session-2', snapshot, 84)
+
+    clearPersistedRemoteSnapshot('session-1')
+
+    expect(loadPersistedRemoteSnapshot('session-1')).toBeNull()
+    expect(loadPersistedRemoteSnapshot('session-2')?.lastReceivedSeq).toBe(84)
+  })
+
+  it('does not clear other tabs when a fresh pairing has no previous session', () => {
+    persistRemoteSnapshot('session-1', snapshot, 42)
+
+    clearPersistedRemoteSnapshot(null)
+
+    expect(loadPersistedRemoteSnapshot('session-1')?.lastReceivedSeq).toBe(42)
   })
 
   it('removes malformed or old cache entries safely', () => {
     window.localStorage.setItem(
       'falcondeck.remote.snapshot.v1',
-      JSON.stringify({ version: 0, sessionId: 'session-1', snapshot, lastReceivedSeq: 42 }),
+      JSON.stringify({
+        version: 0,
+        sessionId: 'session-1',
+        snapshot,
+        lastReceivedSeq: 42,
+      }),
     )
     expect(loadPersistedRemoteSnapshot('session-1')).toBeNull()
     expect(window.localStorage.getItem('falcondeck.remote.snapshot.v1')).toBeNull()
@@ -389,21 +524,15 @@ describe('createSnapshotCacheScheduler', () => {
 
 describe('boundRetainedThreadItems', () => {
   const item = (id: string) => ({ id }) as ConversationItem
-  const cache = (...threadIds: string[]) =>
-    Object.fromEntries(threadIds.map((id) => [id, [item(`${id}-item`)]]))
+  const cache = (...threadIds: string[]) => Object.fromEntries(threadIds.map((id) => [id, [item(`${id}-item`)]]))
   const thread = (id: string, updated_at: string) => ({ id, updated_at })
 
   it('drops caches for threads that left the snapshot and keeps identity otherwise', () => {
     const current = cache('t-1', 't-2')
-    const threads = [
-      thread('t-1', '2026-08-12T12:00:00Z'),
-      thread('t-2', '2026-08-12T11:00:00Z'),
-    ]
+    const threads = [thread('t-1', '2026-08-12T12:00:00Z'), thread('t-2', '2026-08-12T11:00:00Z')]
 
     expect(boundRetainedThreadItems(current, threads, null)).toBe(current)
-    expect(
-      boundRetainedThreadItems(current, [threads[0]!], null),
-    ).toEqual(cache('t-1'))
+    expect(boundRetainedThreadItems(current, [threads[0]!], null)).toEqual(cache('t-1'))
   })
 
   it('evicts the least recently updated threads beyond the cap', () => {
@@ -415,9 +544,7 @@ describe('boundRetainedThreadItems', () => {
       thread('t-3', '2026-08-12T10:00:00Z'),
     ]
 
-    expect(
-      Object.keys(boundRetainedThreadItems(current, threads, null, 2)),
-    ).toEqual(['t-3', 't-2'])
+    expect(Object.keys(boundRetainedThreadItems(current, threads, null, 2))).toEqual(['t-3', 't-2'])
   })
 
   it('never evicts the selected thread even when it is the stalest', () => {
@@ -428,18 +555,11 @@ describe('boundRetainedThreadItems', () => {
       thread('t-3', '2026-08-12T10:00:00Z'),
     ]
 
-    expect(
-      Object.keys(boundRetainedThreadItems(current, threads, 't-1', 2)).sort(),
-    ).toEqual(['t-1', 't-3'])
+    expect(Object.keys(boundRetainedThreadItems(current, threads, 't-1', 2)).sort()).toEqual(['t-1', 't-3'])
   })
 
   it('rehydrates evicted threads from scratch: a missing cache stays empty-safe', () => {
-    const pruned = boundRetainedThreadItems(
-      cache('t-9'),
-      [thread('t-other', '2026-08-12T10:00:00Z')],
-      null,
-      32,
-    )
+    const pruned = boundRetainedThreadItems(cache('t-9'), [thread('t-other', '2026-08-12T10:00:00Z')], null, 32)
 
     expect(pruned).toEqual({})
     // The streaming applier treats an empty base as "no cached items", which
@@ -532,17 +652,76 @@ describe('resumePendingActions', () => {
   })
 })
 
+describe('pending action persistence', () => {
+  it('keeps durable action recovery isolated between sessions', () => {
+    persistPendingActionIds('session-1', ['action-1'])
+    persistPendingActionIds('session-2', ['action-2'])
+
+    expect(loadPendingActionIds('session-1')).toEqual(['action-1'])
+    expect(loadPendingActionIds('session-2')).toEqual(['action-2'])
+  })
+
+  it('deduplicates, rejects blank ids, and bounds corrupt persisted input', () => {
+    const actionIds = [
+      '',
+      '   ',
+      'action-1',
+      'action-1',
+      ...Array.from({ length: MAX_PERSISTED_PENDING_ACTIONS + 20 }, (_, index) => `action-${index + 2}`),
+    ]
+    window.localStorage.setItem('falcondeck.remote.pending-actions.v1:session-1', JSON.stringify(actionIds))
+
+    const loaded = loadPendingActionIds('session-1')
+    expect(loaded).toHaveLength(MAX_PERSISTED_PENDING_ACTIONS)
+    expect(loaded.every((actionId) => actionId.trim() === actionId && actionId.length > 0)).toBe(true)
+    expect(new Set(loaded).size).toBe(loaded.length)
+  })
+
+  it('does not clear other tabs when a fresh pairing has no previous session', () => {
+    persistPendingActionIds('session-1', ['action-1'])
+
+    clearPendingActionIds(null)
+
+    expect(loadPendingActionIds('session-1')).toEqual(['action-1'])
+  })
+
+  it('retains transient poll failures but forgets terminal outcomes', () => {
+    const forget = vi.fn()
+
+    expect(forgetPendingActionAfterError('action-1', new Error('Failed with status 503'), forget)).toBe(false)
+    expect(forget).not.toHaveBeenCalled()
+
+    expect(forgetPendingActionAfterError('action-1', new Error('Queued action not found'), forget)).toBe(true)
+    expect(forget).toHaveBeenCalledWith('action-1')
+  })
+})
+
+describe('deviceLabelForUserAgent', () => {
+  it.each([
+    [
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/128.0.0.0 Mobile/15E148 Safari/604.1',
+      'Chrome on iPhone',
+    ],
+    [
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 FxiOS/129.0 Mobile/15E148 Safari/605.1.15',
+      'Firefox on iPhone',
+    ],
+    [
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 EdgiOS/128.0 Mobile/15E148 Safari/605.1.15',
+      'Edge on iPhone',
+    ],
+  ])('labels iOS browsers accurately', (userAgent, expected) => {
+    expect(deviceLabelForUserAgent(userAgent)).toBe(expected)
+  })
+})
+
 describe('urlWithoutPairingParams', () => {
   it('strips a spent pairing code and relay override', () => {
-    expect(urlWithoutPairingParams('https://app.falcondeck.com/?code=ABCD&relay=https://r')).toBe(
-      '/',
-    )
+    expect(urlWithoutPairingParams('https://app.falcondeck.com/?code=ABCD&relay=https://r')).toBe('/')
   })
 
   it('keeps unrelated query parameters', () => {
-    expect(urlWithoutPairingParams('https://app.falcondeck.com/x?code=ABCD&debug=1')).toBe(
-      '/x?debug=1',
-    )
+    expect(urlWithoutPairingParams('https://app.falcondeck.com/x?code=ABCD&debug=1')).toBe('/x?debug=1')
   })
 
   it('leaves a URL without pairing parameters untouched', () => {
@@ -615,7 +794,10 @@ describe('deriveConnectionHelpState', () => {
   })
 
   it('keeps the offline banner up across the reconnect backoff', () => {
-    const dropped = deriveConnectionHelpState({ ...base, connectionStatus: 'disconnected' })
+    const dropped = deriveConnectionHelpState({
+      ...base,
+      connectionStatus: 'disconnected',
+    })
     const retrying = deriveConnectionHelpState({
       ...base,
       connectionStatus: 'connecting',
@@ -670,27 +852,19 @@ describe('connectionBadgeState', () => {
   })
 
   it('distinguishes a healthy session from an absent daemon', () => {
-    expect(connectionBadgeState('connected as client (encrypted)', true, true).label).toBe(
-      'Connected',
-    )
-    expect(connectionBadgeState('connected as client (encrypted)', false, true).label).toBe(
-      'Desktop retrying',
-    )
+    expect(connectionBadgeState('connected as client (encrypted)', true, true).label).toBe('Connected')
+    expect(connectionBadgeState('connected as client (encrypted)', false, true).label).toBe('Desktop retrying')
   })
 
   it('does not report healthy while snapshot RPC is re-registering', () => {
-    expect(
-      connectionBadgeState('connected as client (encrypted)', true, true, false),
-    ).toEqual({
+    expect(connectionBadgeState('connected as client (encrypted)', true, true, false)).toEqual({
       variant: 'warning',
       label: 'Sync repairing',
     })
   })
 
   it('does not report the desktop offline before presence arrives', () => {
-    expect(
-      connectionBadgeState('connected as client (encrypted)', false, true, false, false),
-    ).toEqual({
+    expect(connectionBadgeState('connected as client (encrypted)', false, true, false, false)).toEqual({
       variant: 'warning',
       label: 'Checking desktop',
     })

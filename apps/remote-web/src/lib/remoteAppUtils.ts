@@ -34,6 +34,30 @@ export const SNAPSHOT_STORAGE_KEY = 'falcondeck.remote.snapshot.v1'
 
 const REMOTE_SNAPSHOT_CACHE_VERSION = 1
 
+function sessionStorageKey(baseKey: string, sessionId: string) {
+  return `${baseKey}:${encodeURIComponent(sessionId)}`
+}
+
+function removeStorageKeysWithPrefix(storage: Storage, baseKey: string) {
+  const prefix = `${baseKey}:`
+  const keys: string[] = []
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index)
+    if (key === baseKey || key?.startsWith(prefix)) keys.push(key)
+  }
+  for (const key of keys) storage.removeItem(key)
+}
+
+function storedSessionId(raw: string | null) {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as { sessionId?: unknown } | null
+    return typeof parsed?.sessionId === 'string' ? parsed.sessionId : null
+  } catch {
+    return null
+  }
+}
+
 type PersistedRemoteSnapshot = {
   version: number
   sessionId: string
@@ -59,10 +83,7 @@ export function bufferSnapshotRaceEvent(
   return false
 }
 
-export function clearSnapshotRaceBuffer(
-  buffer: EventEnvelope[],
-  seenSeqs: Set<number>,
-) {
+export function clearSnapshotRaceBuffer(buffer: EventEnvelope[], seenSeqs: Set<number>) {
   buffer.length = 0
   seenSeqs.clear()
 }
@@ -79,20 +100,13 @@ export const AWAITED_ACTION_TIMEOUT_MS = 45_000
  * desktop remains unreachable. The bound keeps recovery responsive after a
  * long outage without creating an unbounded request loop.
  */
-export function snapshotRetryDelayMs(
-  attempt: number,
-  baseDelayMs = 1_000,
-  maxDelayMs = 15_000,
-) {
+export function snapshotRetryDelayMs(attempt: number, baseDelayMs = 1_000, maxDelayMs = 15_000) {
   const normalizedAttempt = Math.max(0, Math.floor(attempt))
   return Math.min(baseDelayMs * 2 ** normalizedAttempt, maxDelayMs)
 }
 
 /** A sync presence is newer than every replay update below next_seq. */
-export function shouldApplyReplayPresence(
-  updateSeq: number,
-  syncedPresenceFloor: number | null,
-) {
+export function shouldApplyReplayPresence(updateSeq: number, syncedPresenceFloor: number | null) {
   return syncedPresenceFloor === null || updateSeq >= syncedPresenceFloor
 }
 
@@ -103,14 +117,13 @@ export type ConnectionHelpState = {
   steps: string[]
 }
 
-export function getDeviceLabel(): string {
-  const ua = navigator.userAgent
+export function deviceLabelForUserAgent(ua: string): string {
   let browser = 'Browser'
-  if (ua.includes('Firefox/')) browser = 'Firefox'
-  else if (ua.includes('Edg/')) browser = 'Edge'
+  if (ua.includes('Firefox/') || ua.includes('FxiOS/')) browser = 'Firefox'
+  else if (ua.includes('Edg/') || ua.includes('EdgiOS/')) browser = 'Edge'
   else if (ua.includes('OPR/') || ua.includes('Opera')) browser = 'Opera'
-  else if (ua.includes('Chrome/') && !ua.includes('Edg/')) browser = 'Chrome'
-  else if (ua.includes('Safari/') && !ua.includes('Chrome/')) browser = 'Safari'
+  else if (ua.includes('Chrome/') || ua.includes('CriOS/')) browser = 'Chrome'
+  else if (ua.includes('Safari/')) browser = 'Safari'
 
   let os = ''
   if (ua.includes('iPhone')) os = 'iPhone'
@@ -121,6 +134,10 @@ export function getDeviceLabel(): string {
   else if (ua.includes('Linux')) os = 'Linux'
 
   return os ? `${browser} on ${os}` : browser
+}
+
+export function getDeviceLabel(): string {
+  return deviceLabelForUserAgent(navigator.userAgent)
 }
 
 export function parseDaemonEvent(payload: unknown): EventEnvelope | null {
@@ -199,15 +216,10 @@ export function connectionBadgeState(
   }
 }
 
-export function applyDaemonEventsToSnapshot(
-  current: DaemonSnapshot | null,
-  events: EventEnvelope[],
-) {
+export function applyDaemonEventsToSnapshot(current: DaemonSnapshot | null, events: EventEnvelope[]) {
   let next = current
   for (const event of events) {
-    next =
-      applySnapshotEvent(next, event) ??
-      (event.event.type === 'snapshot' ? event.event.snapshot : next)
+    next = applySnapshotEvent(next, event) ?? (event.event.type === 'snapshot' ? event.event.snapshot : next)
   }
   return next
 }
@@ -264,20 +276,13 @@ export function boundRetainedThreadItems(
   }
 
   if (retained.length <= maxThreads) {
-    return retained.length === Object.keys(current).length
-      ? current
-      : Object.fromEntries(retained)
+    return retained.length === Object.keys(current).length ? current : Object.fromEntries(retained)
   }
 
   // Evict by snapshot recency: threads the daemon touched last are the ones
   // most likely to be revisited soonest.
-  const updatedAtById = new Map(
-    threads.map((thread) => [thread.id, thread.updated_at]),
-  )
-  const keptSelected =
-    keepThreadId !== null
-      ? retained.filter(([id]) => id === keepThreadId)
-      : []
+  const updatedAtById = new Map(threads.map((thread) => [thread.id, thread.updated_at]))
+  const keptSelected = keepThreadId !== null ? retained.filter(([id]) => id === keepThreadId) : []
   const evictable = retained.filter(([id]) => id !== keepThreadId)
   const keptCount = Math.max(0, maxThreads - keptSelected.length)
   evictable.sort((left, right) => {
@@ -341,41 +346,44 @@ export function markInteractiveRequestResolved(
 ): ConversationItem[] {
   const resolution = interactiveResolutionFromResponse(response)
   return items.map((item) =>
-    item.kind === 'interactive_request' && item.id === requestId
-      ? { ...item, resolved: true, resolution }
-      : item,
+    item.kind === 'interactive_request' && item.id === requestId ? { ...item, resolved: true, resolution } : item,
   )
 }
 
 export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as PersistedRemoteSession
-    if (!parsed || typeof parsed !== 'object') return null
-    if (parsed.version !== REMOTE_SESSION_STORAGE_VERSION) {
-      window.localStorage.removeItem(STORAGE_KEY)
-      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
-      return null
+    const legacyRaw = window.localStorage.getItem(STORAGE_KEY)
+    let legacySession = null as PersistedRemoteSession | null
+    if (legacyRaw) {
+      try {
+        legacySession = JSON.parse(legacyRaw) as PersistedRemoteSession
+      } catch {
+        window.localStorage.removeItem(STORAGE_KEY)
+      }
+      if (
+        !legacySession ||
+        typeof legacySession !== 'object' ||
+        legacySession.version !== REMOTE_SESSION_STORAGE_VERSION
+      ) {
+        window.localStorage.removeItem(STORAGE_KEY)
+        window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+        return null
+      }
     }
     let secretsRaw = window.sessionStorage.getItem(SESSION_SECRETS_STORAGE_KEY)
-    if (!secretsRaw && typeof parsed.clientSecretKey === 'string' && parsed.clientSecretKey) {
+    if (!secretsRaw && typeof legacySession?.clientSecretKey === 'string' && legacySession.clientSecretKey) {
       // Migrate legacy localStorage secrets into tab-scoped storage without
       // forcing an already-open client to pair again.
       secretsRaw = JSON.stringify({
-        sessionId: parsed.sessionId,
-        clientSecretKey: parsed.clientSecretKey,
-        dataKey: typeof parsed.dataKey === 'string' ? parsed.dataKey : null,
+        sessionId: legacySession.sessionId,
+        clientSecretKey: legacySession.clientSecretKey,
+        dataKey: typeof legacySession.dataKey === 'string' ? legacySession.dataKey : null,
       })
       window.sessionStorage.setItem(SESSION_SECRETS_STORAGE_KEY, secretsRaw)
-      const metadata: Partial<PersistedRemoteSession> = { ...parsed }
-      delete metadata.clientSecretKey
-      delete metadata.dataKey
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(metadata))
     }
     if (!secretsRaw) {
-      // Metadata may belong to another open tab. This tab cannot resume it,
-      // but must not erase shared state that the owning tab can still use.
+      // Session-bound metadata belongs to the tab holding its secrets. A new
+      // tab cannot resume it and must not erase another tab's durable state.
       return null
     }
     let secrets: {
@@ -393,12 +401,42 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
       return null
     }
     if (
-      secrets.sessionId !== parsed.sessionId ||
+      typeof secrets.sessionId !== 'string' ||
+      !secrets.sessionId ||
       typeof secrets.clientSecretKey !== 'string' ||
       !secrets.clientSecretKey
     ) {
       window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
       return null
+    }
+
+    const scopedKey = sessionStorageKey(STORAGE_KEY, secrets.sessionId)
+    const scopedRaw = window.localStorage.getItem(scopedKey)
+    const raw = scopedRaw ?? legacyRaw
+    if (!raw) {
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return null
+    }
+    const parsed = JSON.parse(raw) as PersistedRemoteSession
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.version !== REMOTE_SESSION_STORAGE_VERSION ||
+      parsed.sessionId !== secrets.sessionId
+    ) {
+      if (scopedRaw) window.localStorage.removeItem(scopedKey)
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return null
+    }
+
+    if (!scopedRaw) {
+      const metadata: Partial<PersistedRemoteSession> = { ...parsed }
+      delete metadata.clientSecretKey
+      delete metadata.dataKey
+      window.localStorage.setItem(scopedKey, JSON.stringify(metadata))
+      if (storedSessionId(legacyRaw) === parsed.sessionId) {
+        window.localStorage.removeItem(STORAGE_KEY)
+      }
     }
     return {
       ...parsed,
@@ -406,7 +444,6 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
       dataKey: typeof secrets.dataKey === 'string' ? secrets.dataKey : null,
     }
   } catch {
-    window.localStorage.removeItem(STORAGE_KEY)
     window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
     return null
   }
@@ -415,26 +452,66 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
 export function persistRemoteSession(value: PersistedRemoteSession | null) {
   try {
     if (!value) {
-      window.localStorage.removeItem(STORAGE_KEY)
-      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      clearPersistedRemoteSession()
       return
     }
 
     const { clientSecretKey, dataKey, ...metadata } = value
     window.sessionStorage.setItem(
       SESSION_SECRETS_STORAGE_KEY,
-      JSON.stringify({ sessionId: value.sessionId, clientSecretKey, dataKey: dataKey ?? null }),
+      JSON.stringify({
+        sessionId: value.sessionId,
+        clientSecretKey,
+        dataKey: dataKey ?? null,
+      }),
     )
     window.localStorage.setItem(
-      STORAGE_KEY,
+      sessionStorageKey(STORAGE_KEY, value.sessionId),
       JSON.stringify({
         ...metadata,
         pairingCode: '',
         version: REMOTE_SESSION_STORAGE_VERSION,
       }),
     )
+    const legacyRaw = window.localStorage.getItem(STORAGE_KEY)
+    if (storedSessionId(legacyRaw) === value.sessionId) {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
   } catch {
     // Ignore local persistence failures and keep the live session running.
+  }
+}
+
+export function clearPersistedRemoteSession(sessionId?: string | null) {
+  try {
+    if (sessionId === undefined) {
+      removeStorageKeysWithPrefix(window.localStorage, STORAGE_KEY)
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return
+    }
+
+    if (sessionId === null) {
+      const secretsRaw = window.sessionStorage.getItem(SESSION_SECRETS_STORAGE_KEY)
+      const ownedSessionId = storedSessionId(secretsRaw)
+      if (!ownedSessionId) {
+        window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+        return
+      }
+      sessionId = ownedSessionId
+    }
+
+    window.localStorage.removeItem(sessionStorageKey(STORAGE_KEY, sessionId))
+    const legacyRaw = window.localStorage.getItem(STORAGE_KEY)
+    if (storedSessionId(legacyRaw) === sessionId) {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
+
+    const secretsRaw = window.sessionStorage.getItem(SESSION_SECRETS_STORAGE_KEY)
+    if (!secretsRaw || storedSessionId(secretsRaw) === sessionId) {
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+    }
+  } catch {
+    // Ignore storage cleanup failures; the live state is reset separately.
   }
 }
 
@@ -449,11 +526,17 @@ export function loadPersistedRemoteSnapshot(
   if (!sessionId) return null
 
   try {
-    const raw = window.localStorage.getItem(SNAPSHOT_STORAGE_KEY)
+    const scopedKey = sessionStorageKey(SNAPSHOT_STORAGE_KEY, sessionId)
+    const scopedRaw = window.localStorage.getItem(scopedKey)
+    const legacyRaw = window.localStorage.getItem(SNAPSHOT_STORAGE_KEY)
+    const raw = scopedRaw ?? legacyRaw
     if (!raw) return null
 
     const parsed = JSON.parse(raw) as Partial<PersistedRemoteSnapshot> | null
     const lastReceivedSeq = parsed?.lastReceivedSeq
+    // A legacy global cache may belong to another open tab. It is valid data,
+    // just not this tab's data, so leave it for its owner to migrate.
+    if (!scopedRaw && parsed?.sessionId !== sessionId) return null
     if (
       !parsed ||
       typeof parsed !== 'object' ||
@@ -465,8 +548,13 @@ export function loadPersistedRemoteSnapshot(
       !Number.isSafeInteger(lastReceivedSeq) ||
       lastReceivedSeq < 0
     ) {
-      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+      window.localStorage.removeItem(scopedRaw ? scopedKey : SNAPSHOT_STORAGE_KEY)
       return null
+    }
+
+    if (!scopedRaw) {
+      window.localStorage.setItem(scopedKey, raw)
+      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
     }
 
     return {
@@ -475,7 +563,11 @@ export function loadPersistedRemoteSnapshot(
     }
   } catch {
     try {
-      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+      window.localStorage.removeItem(sessionStorageKey(SNAPSHOT_STORAGE_KEY, sessionId))
+      const legacyRaw = window.localStorage.getItem(SNAPSHOT_STORAGE_KEY)
+      if (!legacyRaw || storedSessionId(legacyRaw) === null) {
+        window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+      }
     } catch {
       // Ignore storage cleanup failures and start without a warm snapshot.
     }
@@ -483,16 +575,12 @@ export function loadPersistedRemoteSnapshot(
   }
 }
 
-export function persistRemoteSnapshot(
-  sessionId: string,
-  snapshot: DaemonSnapshot,
-  lastReceivedSeq: number,
-) {
+export function persistRemoteSnapshot(sessionId: string, snapshot: DaemonSnapshot, lastReceivedSeq: number) {
   if (!sessionId || !Number.isSafeInteger(lastReceivedSeq) || lastReceivedSeq < 0) return
 
   try {
     window.localStorage.setItem(
-      SNAPSHOT_STORAGE_KEY,
+      sessionStorageKey(SNAPSHOT_STORAGE_KEY, sessionId),
       JSON.stringify({
         version: REMOTE_SNAPSHOT_CACHE_VERSION,
         sessionId,
@@ -568,22 +656,23 @@ export function createSnapshotCacheScheduler(
 
 export function clearPersistedRemoteSnapshot(sessionId?: string | null) {
   try {
-    if (!sessionId) {
-      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+    if (sessionId === undefined) {
+      removeStorageKeysWithPrefix(window.localStorage, SNAPSHOT_STORAGE_KEY)
       return
     }
+    if (sessionId === null) return
 
-    const cached = loadPersistedRemoteSnapshot(sessionId)
-    if (cached) window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+    window.localStorage.removeItem(sessionStorageKey(SNAPSHOT_STORAGE_KEY, sessionId))
+    const legacyRaw = window.localStorage.getItem(SNAPSHOT_STORAGE_KEY)
+    if (storedSessionId(legacyRaw) === sessionId) {
+      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+    }
   } catch {
     // Ignore storage cleanup failures.
   }
 }
 
-export function canWarmStartFromSnapshotCache(
-  cachedLastReceivedSeq: number,
-  persistedLastReceivedSeq: number,
-) {
+export function canWarmStartFromSnapshotCache(cachedLastReceivedSeq: number, persistedLastReceivedSeq: number) {
   return cachedLastReceivedSeq >= persistedLastReceivedSeq
 }
 
@@ -618,24 +707,62 @@ export function loadOrCreateClientKeyPair() {
   return generated
 }
 
-export function loadPendingActionIds() {
+export const MAX_PERSISTED_PENDING_ACTIONS = 256
+const MAX_PENDING_ACTION_ID_LENGTH = 128
+
+function normalizePendingActionIds(values: unknown) {
+  if (!Array.isArray(values)) return []
+  const newestFirst: string[] = []
+  const seen = new Set<string>()
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index]
+    if (
+      typeof value !== 'string' ||
+      !value ||
+      value.length > MAX_PENDING_ACTION_ID_LENGTH ||
+      value.trim() !== value ||
+      seen.has(value)
+    ) {
+      continue
+    }
+    seen.add(value)
+    newestFirst.push(value)
+    if (newestFirst.length >= MAX_PERSISTED_PENDING_ACTIONS) break
+  }
+  return newestFirst.reverse()
+}
+
+export function loadPendingActionIds(sessionId: string | null) {
+  if (!sessionId) return []
   try {
-    const raw = window.localStorage.getItem(PENDING_ACTIONS_KEY)
+    const scopedKey = sessionStorageKey(PENDING_ACTIONS_KEY, sessionId)
+    const scopedRaw = window.localStorage.getItem(scopedKey)
+    const legacyRaw = window.localStorage.getItem(PENDING_ACTIONS_KEY)
+    const raw = scopedRaw ?? legacyRaw
     if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+    const actionIds = normalizePendingActionIds(JSON.parse(raw))
+    if (!scopedRaw) {
+      if (actionIds.length > 0) {
+        window.localStorage.setItem(scopedKey, JSON.stringify(actionIds))
+      }
+      window.localStorage.removeItem(PENDING_ACTIONS_KEY)
+    }
+    return actionIds
   } catch {
     return []
   }
 }
 
-export function persistPendingActionIds(actionIds: string[]) {
+export function persistPendingActionIds(sessionId: string | null, actionIds: string[]) {
+  if (!sessionId) return
   try {
-    if (actionIds.length === 0) {
-      window.localStorage.removeItem(PENDING_ACTIONS_KEY)
+    const scopedKey = sessionStorageKey(PENDING_ACTIONS_KEY, sessionId)
+    const normalized = normalizePendingActionIds(actionIds)
+    if (normalized.length === 0) {
+      window.localStorage.removeItem(scopedKey)
       return
     }
-    window.localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(actionIds))
+    window.localStorage.setItem(scopedKey, JSON.stringify(normalized))
   } catch {
     // Ignore local persistence failures.
   }
@@ -656,7 +783,7 @@ export function clearStoredRemoteState() {
     THREAD_SORT_STORAGE_KEY,
   ]) {
     try {
-      window.localStorage.removeItem(key)
+      removeStorageKeysWithPrefix(window.localStorage, key)
     } catch {
       // Ignore storage failures; the reload still gives a fresh page.
     }
@@ -670,9 +797,14 @@ export function clearStoredRemoteState() {
   }
 }
 
-export function clearPendingActionIds() {
+export function clearPendingActionIds(sessionId?: string | null) {
   try {
-    window.localStorage.removeItem(PENDING_ACTIONS_KEY)
+    if (sessionId === undefined) {
+      removeStorageKeysWithPrefix(window.localStorage, PENDING_ACTIONS_KEY)
+      return
+    }
+    if (sessionId === null) return
+    window.localStorage.removeItem(sessionStorageKey(PENDING_ACTIONS_KEY, sessionId))
   } catch {
     // Ignore local persistence failures.
   }
@@ -683,6 +815,12 @@ export function shouldDiscardPendingAction(error: unknown) {
   return /failed with status 401|failed with status 404|queued action not found|invalid session token/i.test(
     error.message,
   )
+}
+
+export function forgetPendingActionAfterError(actionId: string, error: unknown, forget: (actionId: string) => void) {
+  if (!shouldDiscardPendingAction(error)) return false
+  forget(actionId)
+  return true
 }
 
 export function isAbortError(error: unknown) {
@@ -735,7 +873,7 @@ export function resumePendingActions({
       .then(() => forget(actionId))
       .catch((error) => {
         if (isAbortError(error)) return
-        if (shouldDiscardPendingAction(error)) forget(actionId)
+        forgetPendingActionAfterError(actionId, error, forget)
       })
       .finally(() => {
         const activeController = controllers.get(actionId)
@@ -795,30 +933,41 @@ export type RemoteSelection = {
   threadId: string | null
 }
 
-export function loadPersistedSelection(): RemoteSelection | null {
+export function loadPersistedSelection(sessionId: string | null): RemoteSelection | null {
+  if (!sessionId) return null
   try {
-    const raw = window.localStorage.getItem(SELECTION_STORAGE_KEY)
+    const scopedKey = sessionStorageKey(SELECTION_STORAGE_KEY, sessionId)
+    const scopedRaw = window.localStorage.getItem(scopedKey)
+    const legacyRaw = window.localStorage.getItem(SELECTION_STORAGE_KEY)
+    const raw = scopedRaw ?? legacyRaw
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<RemoteSelection> | null
     if (!parsed || typeof parsed !== 'object') return null
     const workspaceId = typeof parsed.workspaceId === 'string' ? parsed.workspaceId : null
     if (!workspaceId) return null
-    return {
+    const selection = {
       workspaceId,
       threadId: typeof parsed.threadId === 'string' ? parsed.threadId : null,
     }
+    if (!scopedRaw) {
+      window.localStorage.setItem(scopedKey, JSON.stringify(selection))
+      window.localStorage.removeItem(SELECTION_STORAGE_KEY)
+    }
+    return selection
   } catch {
     return null
   }
 }
 
-export function persistSelection(selection: RemoteSelection | null) {
+export function persistSelection(sessionId: string | null, selection: RemoteSelection | null) {
+  if (!sessionId) return
   try {
+    const scopedKey = sessionStorageKey(SELECTION_STORAGE_KEY, sessionId)
     if (!selection?.workspaceId) {
-      window.localStorage.removeItem(SELECTION_STORAGE_KEY)
+      window.localStorage.removeItem(scopedKey)
       return
     }
-    window.localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify(selection))
+    window.localStorage.setItem(scopedKey, JSON.stringify(selection))
   } catch {
     // Ignore local persistence failures.
   }
@@ -982,8 +1131,11 @@ export function isExpiredPairingError(message: string | null) {
  * message that merely mentions these words must never wipe local key material.
  */
 export function isInvalidSavedSessionError(message: string | null) {
-  return !!message && /^(invalid session token|session not found|trusted device is revoked or missing|trusted device is revoked|trusted device not found)$/i.test(
-    message.trim(),
+  return (
+    !!message &&
+    /^(invalid session token|session not found|trusted device is revoked or missing|trusted device is revoked|trusted device not found)$/i.test(
+      message.trim(),
+    )
   )
 }
 

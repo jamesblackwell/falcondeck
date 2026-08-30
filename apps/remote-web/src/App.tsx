@@ -203,6 +203,7 @@ import {
   canWarmStartFromSnapshotCache,
   canPostNotifications,
   clearPairingParamsFromUrl,
+  clearPersistedRemoteSession,
   clearPersistedRemoteSnapshot,
   clearPendingActionIds,
   CLIENT_KEYPAIR_STORAGE_KEY,
@@ -212,6 +213,7 @@ import {
   createSnapshotCacheScheduler,
   deriveConnectionHelpState,
   encryptedRpcErrorMessage,
+  forgetPendingActionAfterError,
   getDeviceLabel,
   isAbortError,
   isInvalidSavedSessionError,
@@ -281,15 +283,17 @@ const NO_CONVERSATION_ITEMS: ConversationItem[] = [];
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000;
 
-function rememberPendingAction(actionId: string) {
-  const ids = new Set(loadPendingActionIds());
+function rememberPendingAction(sessionId: string, actionId: string) {
+  const ids = new Set(loadPendingActionIds(sessionId));
   ids.add(actionId);
-  persistPendingActionIds([...ids]);
+  persistPendingActionIds(sessionId, [...ids]);
 }
 
-function forgetPendingAction(actionId: string) {
-  const ids = loadPendingActionIds().filter((value) => value !== actionId);
-  persistPendingActionIds(ids);
+function forgetPendingAction(sessionId: string, actionId: string) {
+  const ids = loadPendingActionIds(sessionId).filter(
+    (value) => value !== actionId,
+  );
+  persistPendingActionIds(sessionId, ids);
 }
 
 function lastAgentItemId(items: ConversationItem[]) {
@@ -304,20 +308,22 @@ export default function App() {
   return (
     <ToastProvider>
       <TooltipProvider>
-      <div className="flex h-[100dvh] flex-col overflow-hidden bg-surface-0">
-        <aside
-          aria-label="Alpha notice"
-          className="shrink-0 border-b border-warning/25 bg-warning-muted px-3 py-1 text-center text-[length:var(--fd-text-xs)] text-warning"
-        >
-          <span className="font-semibold uppercase tracking-[0.12em]">Alpha</span>
-          <span aria-hidden="true"> · </span>
-          FalconDeck Remote is largely untested. We recommend the iOS or Mac app
-          for primary use.
-        </aside>
-        <div className="min-h-0 flex-1">
-          <RemoteApp />
+        <div className="flex h-[100dvh] flex-col overflow-hidden bg-surface-0">
+          <aside
+            aria-label="Alpha notice"
+            className="shrink-0 border-b border-warning/25 bg-warning-muted px-3 py-1 text-center text-[length:var(--fd-text-xs)] text-warning"
+          >
+            <span className="font-semibold uppercase tracking-[0.12em]">
+              Alpha
+            </span>
+            <span aria-hidden="true"> · </span>
+            FalconDeck Remote is largely untested. We recommend the iOS or Mac
+            app for primary use.
+          </aside>
+          <div className="min-h-0 flex-1">
+            <RemoteApp />
+          </div>
         </div>
-      </div>
       </TooltipProvider>
     </ToastProvider>
   );
@@ -345,13 +351,14 @@ function RemoteApp() {
   // durable relay state, so the persisted relay cursor remains authoritative
   // for replay and prevents skipped conversation/action updates.
   const initialReplayCursor = persistedSession?.lastReceivedSeq ?? 0;
-  const [relayUrl, setRelayUrl] = useState(() =>
-    tryNormalizeRelayUrl(
-      params.get("relay") ??
-        persistedSession?.relayUrl ??
-        import.meta.env.VITE_FALCONDECK_RELAY_URL ??
-        DEFAULT_REMOTE_RELAY_URL,
-    ) ?? DEFAULT_REMOTE_RELAY_URL,
+  const [relayUrl, setRelayUrl] = useState(
+    () =>
+      tryNormalizeRelayUrl(
+        params.get("relay") ??
+          persistedSession?.relayUrl ??
+          import.meta.env.VITE_FALCONDECK_RELAY_URL ??
+          DEFAULT_REMOTE_RELAY_URL,
+      ) ?? DEFAULT_REMOTE_RELAY_URL,
   );
   const [pairingCode, setPairingCode] = useState(
     params.get("code") ?? persistedSession?.pairingCode ?? "",
@@ -773,8 +780,9 @@ function RemoteApp() {
   // Created once; the write closure reads refs, so the scheduler survives
   // every render without re-arming its timer.
   if (snapshotCacheSchedulerRef.current === null) {
-    snapshotCacheSchedulerRef.current =
-      createSnapshotCacheScheduler(writePendingSnapshotCache);
+    snapshotCacheSchedulerRef.current = createSnapshotCacheScheduler(
+      writePendingSnapshotCache,
+    );
   }
   const snapshotCacheScheduler = snapshotCacheSchedulerRef.current;
 
@@ -817,10 +825,10 @@ function RemoteApp() {
     pendingSessionPersistRef.current = null;
     pendingRelayUpdatesRef.current = [];
     lastReceivedSeqRef.current = 0;
-    persistRemoteSession(null);
-    persistSelection(null);
+    clearPersistedRemoteSession(sessionId);
+    persistSelection(sessionId, null);
     restoredSelectionRef.current = false;
-    clearPendingActionIds();
+    clearPendingActionIds(sessionId);
     window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
     window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
     setPairingId(null);
@@ -835,7 +843,12 @@ function RemoteApp() {
     setSelectedWorkspaceId(null);
     setSelectedThreadId(null);
     setError(null);
-  }, [abortPendingActionPolls, cancelRelayFlush, snapshotCacheScheduler, sessionId]);
+  }, [
+    abortPendingActionPolls,
+    cancelRelayFlush,
+    snapshotCacheScheduler,
+    sessionId,
+  ]);
 
   const persistCurrentSession = useCallback(
     (overrides?: Partial<PersistedRemoteSession>) => {
@@ -965,7 +978,7 @@ function RemoteApp() {
           };
         }
       } catch {
-        persistRemoteSession(null);
+        clearPersistedRemoteSession(initialPersistedSession.sessionId);
       }
     } else {
       clientKeyPairRef.current = loadOrCreateClientKeyPair();
@@ -1049,12 +1062,12 @@ function RemoteApp() {
   useEffect(() => {
     if (!sessionId || !clientToken || !isEncrypted) return;
     return resumePendingActions({
-      actionIds: loadPendingActionIds(),
+      actionIds: loadPendingActionIds(sessionId),
       clientToken,
       sessionId,
       pendingPolls: pendingActionPollsRef.current,
       poll: pollQueuedAction,
-      forget: forgetPendingAction,
+      forget: (actionId) => forgetPendingAction(sessionId, actionId),
     });
   }, [clientToken, isEncrypted, pollQueuedAction, sessionId]);
 
@@ -1124,7 +1137,7 @@ function RemoteApp() {
       restoredSelectionRef.current = true;
       const restored = resolveRestoredSelection(
         snapshot,
-        loadPersistedSelection(),
+        loadPersistedSelection(sessionId),
       );
       if (restored) {
         setSelectedWorkspaceId(restored.workspaceId);
@@ -1147,17 +1160,17 @@ function RemoteApp() {
     if (nextSelection.threadId !== selectedThreadId) {
       setSelectedThreadId(nextSelection.threadId);
     }
-  }, [snapshot, selectedThreadId, selectedWorkspaceId]);
+  }, [sessionId, snapshot, selectedThreadId, selectedWorkspaceId]);
 
   // Survives a browser reload; the daemon has no idea which thread this
   // particular browser was looking at.
   useEffect(() => {
     if (!selectedWorkspaceId) return;
-    persistSelection({
+    persistSelection(sessionId, {
       workspaceId: selectedWorkspaceId,
       threadId: selectedThreadId,
     });
-  }, [selectedThreadId, selectedWorkspaceId]);
+  }, [selectedThreadId, selectedWorkspaceId, sessionId]);
 
   useEffect(() => {
     desktopOnlineRef.current = desktopOnline;
@@ -2208,7 +2221,9 @@ function RemoteApp() {
         socket.readyState !== WebSocket.OPEN ||
         sessionCryptoRef.current !== sc
       ) {
-        throw new Error("Remote connection closed before the request could be sent");
+        throw new Error(
+          "Remote connection closed before the request could be sent",
+        );
       }
       return new Promise<T>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
@@ -2242,16 +2257,23 @@ function RemoteApp() {
     [],
   );
   const readAloud = useReadAloud(
-    useCallback(async (text: string) => {
-      const response = await callRpc<{
-        audio_base64: string;
-        mime_type: string;
-      }>("speech.synthesize", { text });
-      return speechSynthesisBlob(response);
-    }, [callRpc]),
+    useCallback(
+      async (text: string) => {
+        const response = await callRpc<{
+          audio_base64: string;
+          mime_type: string;
+        }>("speech.synthesize", { text });
+        return speechSynthesisBlob(response);
+      },
+      [callRpc],
+    ),
     useCallback(
       (error: Error) =>
-        toast({ variant: "danger", title: "Read Aloud failed", description: error.message }),
+        toast({
+          variant: "danger",
+          title: "Read Aloud failed",
+          description: error.message,
+        }),
       [toast],
     ),
   );
@@ -2502,10 +2524,8 @@ function RemoteApp() {
     const keyPair = clientKeyPairRef.current ?? generateBoxKeyPair();
     const relayBase = normalizeRelayUrl(relayUrl);
     setRelayUrl(relayBase);
-    const {
-      pairingCode: normalizedPairingCode,
-      authoritySecret,
-    } = decodeSecurePairingCode(pairingCode);
+    const { pairingCode: normalizedPairingCode, authoritySecret } =
+      decodeSecurePairingCode(pairingCode);
 
     // Claims are challenge-bound: fetch a single-use challenge and prove
     // possession of the identity secret key by signing it.
@@ -2615,11 +2635,13 @@ function RemoteApp() {
     cancelRelayFlush();
     snapshotCacheScheduler.cancel();
     pendingSnapshotCacheRef.current = null;
-    clearPersistedRemoteSnapshot();
+    clearPersistedRemoteSnapshot(sessionId);
+    clearPersistedRemoteSession(sessionId);
+    persistSelection(sessionId, null);
     trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key;
     trustedDaemonIdentityPublicKeyRef.current =
       claim.daemon_bundle.identity_public_key;
-    clearPendingActionIds();
+    clearPendingActionIds(sessionId);
     setPairingId(claim.pairing_id);
     setSessionId(claim.session_id);
     setDeviceId(claim.device_id);
@@ -2670,7 +2692,11 @@ function RemoteApp() {
           workspace_id: workspaceId,
           thread_id: threadId,
         }),
-      shipThread: (workspaceId: string, threadId: string, mode: ShipThreadMode) =>
+      shipThread: (
+        workspaceId: string,
+        threadId: string,
+        mode: ShipThreadMode,
+      ) =>
         callRpc<ShipThreadResponse>("thread.ship", {
           workspace_id: workspaceId,
           thread_id: threadId,
@@ -2735,11 +2761,7 @@ function RemoteApp() {
   );
 
   const handleCreateThreadStage = useCallback(
-    async (
-      _workspaceId: string,
-      thread: ThreadSummary,
-      label: string,
-    ) => {
+    async (_workspaceId: string, thread: ThreadSummary, label: string) => {
       await callRpc("extensions.action.invoke", {
         extensionId: THREAD_TAGS_EXTENSION_ID,
         actionId: THREAD_TAGS_ACTION_ID,
@@ -2822,7 +2844,7 @@ function RemoteApp() {
         );
       }
       const action = (await response.json()) as QueuedRemoteAction;
-      rememberPendingAction(action.action_id);
+      rememberPendingAction(sessionId, action.action_id);
       if (options?.awaitCompletion === false) {
         const controller = new AbortController();
         pendingActionPollsRef.current.add(controller);
@@ -2832,11 +2854,18 @@ function RemoteApp() {
           clientTokenOverride: clientToken,
           sessionIdOverride: sessionId,
         })
-          .then(() => forgetPendingAction(action.action_id))
+          .then(() => forgetPendingAction(sessionId, action.action_id))
           .catch((queuedError) => {
             if (isAbortError(queuedError)) return;
-            forgetPendingAction(action.action_id);
-            reportError(queuedError, "Remote action failed");
+            if (
+              forgetPendingActionAfterError(
+                action.action_id,
+                queuedError,
+                (actionId) => forgetPendingAction(sessionId, actionId),
+              )
+            ) {
+              reportError(queuedError, "Remote action failed");
+            }
           })
           .finally(() => {
             pendingActionPollsRef.current.delete(controller);
@@ -2847,14 +2876,17 @@ function RemoteApp() {
         const result = await pollQueuedAction<T>(action.action_id, {
           timeoutMs: AWAITED_ACTION_TIMEOUT_MS,
         });
-        forgetPendingAction(action.action_id);
+        forgetPendingAction(sessionId, action.action_id);
         return result;
       } catch (queuedError) {
         // A timeout is not an outcome: leave the id tracked so the resume
         // effect picks the action back up on the next encrypted connection.
-        if (!(queuedError instanceof AwaitedActionTimeoutError)) {
-          forgetPendingAction(action.action_id);
-        }
+        if (!(queuedError instanceof AwaitedActionTimeoutError))
+          forgetPendingActionAfterError(
+            action.action_id,
+            queuedError,
+            (actionId) => forgetPendingAction(sessionId, actionId),
+          );
         throw queuedError;
       }
     },
@@ -2919,9 +2951,10 @@ function RemoteApp() {
    * suggestion. It carries no attachments and leaves the composer's own draft
    * where it was, so choosing a suggestion never eats work in progress.
    */
-  async function handleSubmit(
-    override?: { text: string; resumeInterrupted?: boolean },
-  ) {
+  async function handleSubmit(override?: {
+    text: string;
+    resumeInterrupted?: boolean;
+  }) {
     if ((attachmentPreparationCountsRef.current[conversationKey] ?? 0) > 0) {
       setError("Wait for image preparation to finish before sending.");
       return;
@@ -4049,7 +4082,10 @@ function RemoteApp() {
     }
   }
 
-  async function handleSuggestThreadTitle(workspaceId: string, threadId: string) {
+  async function handleSuggestThreadTitle(
+    workspaceId: string,
+    threadId: string,
+  ) {
     try {
       const result = await callRpc<{ title?: unknown }>("thread.suggestTitle", {
         workspace_id: workspaceId,
@@ -5129,7 +5165,8 @@ function RemoteApp() {
                     )
                   }
                 />
-                {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
+                {selectedThread &&
+                wasTurnInterruptedByShutdown(selectedThread) ? (
                   <InterruptedTurnNotice
                     onContinue={handleContinueInterruptedTurn}
                     onDismiss={handleDismissInterruptedTurn}

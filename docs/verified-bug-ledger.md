@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 46 / 100
-- Product defects: 44
+- Verified and fixed: 53 / 100
+- Product defects: 51
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -433,6 +433,69 @@ Each entry records:
 - Fix: Share the 40 MiB transport constant with the API and give the peer queue one additional MiB for relay-added update metadata and envelope fields.
 - Verification: The focused 33 MiB queue regression, the aggregate replay regression, the full relay suites, Clippy with warnings denied, and targeted rustfmt checks all pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 047 — One remote-web tab overwrites another tab's resumable session
+
+- Kind: Product defect
+- Reproduction: `remote session secret persistence > lets two tabs resume different sessions without overwriting each other` persisted two valid sessions, restored the first tab's secrets, and received `null` because the second tab had replaced the one global metadata record.
+- Root cause: Cryptographic secrets were intentionally tab-scoped, but the matching session metadata still occupied one shared `localStorage` key. Any live cursor write from either tab replaced the other tab's session ID and token.
+- Fix: Store metadata under a session-scoped key selected by the tab's secret record, migrate the prior global format, and clear only the session owned by the resetting tab.
+- Verification: `npm test --workspace falcondeck-remote-web -- --run src/lib/remoteAppUtils.test.ts` passes two-session resume and targeted-clear regressions; the full 105-test remote-web suite, typecheck, and lint pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 048 — Loading or clearing one session deletes another tab's warm snapshot
+
+- Kind: Product defect
+- Reproduction: `remote snapshot cache > does not delete a cache belonging to another session` persisted session 1's cache, attempted to load session 2, and found that the mismatch path had removed session 1's valid cache. Persisting session 2 also replaced session 1 outright.
+- Root cause: Every session shared one snapshot key, and the loader classified a well-formed foreign-session record as corrupt instead of merely unrelated.
+- Fix: Scope snapshot keys by session, migrate a matching legacy cache, preserve mismatched legacy data, and make both reset and fresh-pairing cleanup ownership-aware.
+- Verification: The remote snapshot-cache tests pass mismatch preservation, two independent caches, targeted clearing, and null-session clearing without affecting another tab; all remote-web checks pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 049 — Pending durable actions from different remote sessions erase each other
+
+- Kind: Product defect
+- Reproduction: `pending action persistence > keeps durable action recovery isolated between sessions` stored `action-1` for session 1 and `action-2` for session 2; the prior global array could retain only the second write, so session 1 lost recovery of its accepted action.
+- Root cause: Durable action IDs had no session ownership in browser storage, while resume polling always used the current session's credentials. Another tab could overwrite the array or poll and discard IDs it did not own.
+- Fix: Persist and clear pending-action IDs under encoded session-scoped keys and thread the owning session through remember, forget, resume, reset, and pairing paths.
+- Verification: The focused isolation and fresh-pairing regressions pass, as do the complete remote-web suite, typecheck, and lint.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 050 — Remote thread selection leaks across independently paired sessions
+
+- Kind: Product defect
+- Reproduction: `selection persistence > keeps selections isolated between paired sessions` wrote distinct workspace/thread selections for two sessions; the original single key returned only the last session's selection.
+- Root cause: Selection persistence was global even though the workspace and thread identifiers belong to one daemon session. Parallel tabs therefore rewrote one another's reload destination.
+- Fix: Scope selection reads, writes, migration, and reset cleanup to the active session ID.
+- Verification: Selection round-trip, clearing, malformed-input, and two-session isolation tests pass with all remote-web checks.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 051 — A transient action-poll failure permanently forgets accepted work
+
+- Kind: Product defect
+- Reproduction: The fire-and-forget and awaited branches in `submitQueuedAction` unconditionally called `forgetPendingAction` for a poll rejection such as HTTP 503, even though `resumePendingActions` correctly retained the same transient failure. `pending action persistence > retains transient poll failures but forgets terminal outcomes` captures the required decision.
+- Root cause: Initial polling and reload recovery used contradictory terminal-error rules. A brief relay/network failure after durable acceptance removed the only browser pointer to the eventual result.
+- Fix: Centralize terminal classification and forget only 401/404/not-found/invalid-token outcomes; retain timeouts, aborts, 5xx responses, and network failures for reconnect recovery.
+- Verification: The focused terminal/transient regression and existing resume tests pass; all 105 remote-web tests pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 052 — Corrupt pending-action storage can launch an unbounded polling storm
+
+- Kind: Product defect
+- Reproduction: `pending action persistence > deduplicates, rejects blank ids, and bounds corrupt persisted input` placed blanks, duplicates, and more than the allowed number of IDs directly into storage. The old loader returned every string, which the resume effect converted into one fetch loop and `AbortController` per unique value.
+- Root cause: Browser storage is an untrusted recovery boundary, but the loader performed only an array/string type check and imposed no content, length, duplication, or count bound.
+- Fix: Reject blank/padded/oversized IDs, deduplicate them, and retain at most the newest 256 recoverable actions on both read and write.
+- Verification: The raw corrupt-storage regression returns 256 valid unique IDs, and the full remote-web suite, typecheck, and lint pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 053 — Chrome, Firefox, and Edge on iOS are labeled as Safari
+
+- Kind: Product defect
+- Reproduction: `deviceLabelForUserAgent > labels iOS browsers accurately` supplied real-form `CriOS`, `FxiOS`, and `EdgiOS` user-agent tokens; the original detector missed all three and fell through to `Safari on iPhone`.
+- Root cause: Browser detection recognized only desktop tokens (`Chrome/`, `Firefox/`, and `Edg/`) while every iOS browser user agent also contains Safari's WebKit token.
+- Fix: Recognize the three iOS-specific browser tokens before the Safari fallback and extract the pure user-agent classifier for deterministic tests.
+- Verification: All three iOS browser cases and the complete remote-web suite pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
 
 ## Pending Verification
 
