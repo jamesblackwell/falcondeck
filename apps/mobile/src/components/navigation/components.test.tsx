@@ -148,7 +148,9 @@ describe("SidebarView component", () => {
     const text = textOf(r);
     expect(text.indexOf("Automations")).toBeGreaterThan(-1);
     expect(text.indexOf("Automations")).toBeLessThan(text.indexOf("PROJECTS"));
-    expect(text.indexOf("PROJECTS")).toBeLessThan(text.indexOf("Settings"));
+    // The not-connected banner also tells the user to pair from Settings.
+    // Compare against the footer label, which is the final occurrence.
+    expect(text.indexOf("PROJECTS")).toBeLessThan(text.lastIndexOf("Settings"));
     automations.props.onPress();
     expect(onOpenAutomations).toHaveBeenCalledTimes(1);
   });
@@ -318,7 +320,7 @@ describe("SidebarView component", () => {
       renderComponent(<SidebarView {...base} groups={groups} />).toJSON(),
     ).toBeTruthy();
   });
-  it("stays quiet during the first-sync grace period instead of claiming there are no projects", () => {
+  it("immediately names the first sync instead of claiming there are no projects", () => {
     useRelayStore.setState({
       connectionStatus: "encrypted",
       isEncrypted: true,
@@ -334,7 +336,7 @@ describe("SidebarView component", () => {
 
     const text = textOf(renderComponent(<SidebarView {...base} />));
 
-    expect(text).not.toContain("Syncing your projects…");
+    expect(text).toContain("Syncing your projects…");
     expect(text).not.toContain("Loading your projects");
     expect(text).not.toContain("No projects");
   });
@@ -363,7 +365,7 @@ describe("SidebarView component", () => {
     expect(text).toContain("alpha");
     expect(text).toContain("Keep me");
     expect(text).not.toContain("No projects");
-    expect(text).not.toContain("Syncing your projects…");
+    expect(text).toContain("Syncing your projects…");
   });
   it("filters threads with a synchronized custom stage", () => {
     const groups: ProjectGroup[] = [

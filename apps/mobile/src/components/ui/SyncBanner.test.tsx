@@ -1,6 +1,6 @@
 import React from 'react'
 import { act } from 'react-test-renderer'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { resolveSessionSyncStatus } from '@/lib/session-status'
 import { cleanup, renderComponent, textOf } from '../../test/render'
@@ -26,156 +26,84 @@ describe('SyncBanner', () => {
     expect(r.toJSON()).toBeNull()
   })
 
-  it('only names what the app is waiting for when the first sync takes seven seconds', () => {
-    vi.useFakeTimers()
-    try {
-      const r = renderComponent(
-        <SyncBanner
-          status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })}
-        />,
-      )
+  it('immediately names the first project sync', () => {
+    const r = renderComponent(
+      <SyncBanner
+        status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })}
+      />,
+    )
 
-      expect(r.toJSON()).toBeNull()
-      act(() => {
-        vi.advanceTimersByTime(6_999)
-      })
-      expect(r.toJSON()).toBeNull()
-
-      act(() => {
-        vi.advanceTimersByTime(1)
-      })
-      const text = textOf(r)
-      expect(text).toContain('Syncing your projects…')
-      expect(text).toContain('out of date')
-      cleanup()
-    } finally {
-      vi.useRealTimers()
-    }
+    const text = textOf(r)
+    expect(text).toContain('Syncing your projects…')
+    expect(text).toContain('out of date')
   })
 
-  it('rides out a short reconnect in silence, then names it', () => {
-    vi.useFakeTimers()
-    try {
-      const connecting = resolveSessionSyncStatus({
-        ...base,
-        connectionStatus: 'connecting',
-        isEncrypted: false,
-      })
-      const r = renderComponent(<SyncBanner status={connecting} />)
+  it('immediately names a relay reconnect', () => {
+    const connecting = resolveSessionSyncStatus({
+      ...base,
+      connectionStatus: 'connecting',
+      isEncrypted: false,
+    })
+    const r = renderComponent(<SyncBanner status={connecting} />)
 
-      expect(r.toJSON()).toBeNull()
-      act(() => {
-        vi.advanceTimersByTime(5_999)
-      })
-      expect(r.toJSON()).toBeNull()
-
-      act(() => {
-        vi.advanceTimersByTime(1)
-      })
-      const text = textOf(r)
-      expect(text).toContain('Reconnecting to relay…')
-      expect(text).not.toContain('your Mac')
-      expect(text).not.toContain('Mac')
-      cleanup()
-    } finally {
-      vi.useRealTimers()
-    }
+    const text = textOf(r)
+    expect(text).toContain('Reconnecting to relay…')
+    expect(text).not.toContain('your Mac')
+    expect(text).not.toContain('Mac')
   })
 
-  it('rides out an offline flap in silence, then names it', () => {
-    vi.useFakeTimers()
-    try {
-      const offline = resolveSessionSyncStatus({
-        ...base,
-        daemonConnected: false,
-      })
-      const r = renderComponent(<SyncBanner status={offline} />)
+  it('immediately names an offline desktop', () => {
+    const offline = resolveSessionSyncStatus({
+      ...base,
+      daemonConnected: false,
+    })
+    const r = renderComponent(<SyncBanner status={offline} />)
 
-      // The relay reports desktop offline for a few seconds whenever its
-      // stale daemon socket is discovered mid-reconnect; stay quiet until
-      // the outage outlives a routine flap.
-      expect(r.toJSON()).toBeNull()
-      act(() => {
-        vi.advanceTimersByTime(5_999)
-      })
-      expect(r.toJSON()).toBeNull()
-
-      act(() => {
-        vi.advanceTimersByTime(1)
-      })
-      expect(textOf(r)).toContain('Waiting for desktop…')
-      cleanup()
-    } finally {
-      vi.useRealTimers()
-    }
+    expect(textOf(r)).toContain('Waiting for desktop…')
   })
 
-  it('keeps one clock across connecting and securing so a stall still surfaces', () => {
-    vi.useFakeTimers()
-    try {
-      const r = renderComponent(
+  it('updates immediately as the connection moves from relay to encryption', () => {
+    const r = renderComponent(
+      <SyncBanner
+        status={resolveSessionSyncStatus({
+          ...base,
+          connectionStatus: 'connecting',
+          isEncrypted: false,
+        })}
+      />,
+    )
+
+    act(() => {
+      r.update(
         <SyncBanner
           status={resolveSessionSyncStatus({
             ...base,
-            connectionStatus: 'connecting',
+            connectionStatus: 'connected',
             isEncrypted: false,
           })}
         />,
       )
-      act(() => {
-        vi.advanceTimersByTime(4_000)
-      })
+    })
 
-      act(() => {
-        r.update(
-          <SyncBanner
-            status={resolveSessionSyncStatus({
-              ...base,
-              connectionStatus: 'connected',
-              isEncrypted: false,
-            })}
-          />,
-        )
-      })
-      expect(r.toJSON()).toBeNull()
-
-      act(() => {
-        vi.advanceTimersByTime(2_000)
-      })
-      expect(textOf(r)).toContain('Securing session…')
-      cleanup()
-    } finally {
-      vi.useRealTimers()
-    }
+    expect(textOf(r)).toContain('Securing session…')
   })
 
-  it('keeps the recovery grace across offline and RPC repair states', () => {
-    vi.useFakeTimers()
-    try {
-      const r = renderComponent(
-        <SyncBanner status={resolveSessionSyncStatus({ ...base, daemonConnected: false })} />,
+  it('updates immediately as recovery moves into RPC repair', () => {
+    const r = renderComponent(
+      <SyncBanner
+        status={resolveSessionSyncStatus({ ...base, daemonConnected: false })}
+      />,
+    )
+
+    act(() => {
+      r.update(
+        <SyncBanner
+          status={resolveSessionSyncStatus({ ...base, daemonRpcReady: false })}
+        />,
       )
-      act(() => {
-        vi.advanceTimersByTime(4_000)
-      })
+    })
 
-      act(() => {
-        r.update(
-          <SyncBanner
-            status={resolveSessionSyncStatus({ ...base, daemonRpcReady: false })}
-          />,
-        )
-      })
-      expect(r.toJSON()).toBeNull()
-
-      act(() => {
-        vi.advanceTimersByTime(2_000)
-      })
-      expect(textOf(r)).toContain('Repairing sync…')
-      cleanup()
-    } finally {
-      vi.useRealTimers()
-    }
+    expect(textOf(r)).toContain('Repairing sync…')
   })
 
   it('announces itself politely to VoiceOver', () => {

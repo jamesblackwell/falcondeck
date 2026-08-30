@@ -12,73 +12,16 @@ interface SyncBannerProps {
   status: SessionSyncStatus
 }
 
-const SYNC_GRACE_PERIOD_MS = 7_000
-/**
- * An ordinary launch reconnects the socket and exchanges the key in well under
- * a second. Announcing the wait immediately makes every cold open flash a
- * banner it then retracts, so hold the whole pre-encryption phase back and only
- * speak up once the wait is long enough to be worth explaining.
- */
-const CONNECT_GRACE_PERIOD_MS = 6_000
-
 /**
  * The launch/reconnect wait, made visible. Until the relay is secured and the
  * first snapshot lands, taps on "New thread" produce a screen that cannot send
- * anything yet — silence that reads as a frozen app. This says what is
- * happening and disappears the moment the session is usable.
+ * anything yet. Show what is happening immediately, then disappear the moment
+ * the session is usable.
  */
 export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) {
   if (!status.isBusy) return null
-
-  if (status.stage === 'syncing') {
-    return <DelayedSyncBanner status={status} />
-  }
-
-  if (
-    status.stage === 'connecting' ||
-    status.stage === 'securing' ||
-    status.stage === 'offline' ||
-    status.stage === 'repairing'
-  ) {
-    // One clock covers the ordinary reconnect path. Relay and daemon state can
-    // move through several labels during a single flap; remounting the timer at
-    // every transition either hid a real outage too long or flashed warnings.
-    return <DeferredBanner key="recovery" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
-  }
-
   return <SyncBannerContent status={status} />
 })
-
-function DeferredBanner({ status, delayMs }: SyncBannerProps & { delayMs: number }) {
-  const [isVisible, setIsVisible] = useState(false)
-
-  useEffect(() => {
-    const timer = setTimeout(() => setIsVisible(true), delayMs)
-    return () => clearTimeout(timer)
-  }, [delayMs])
-
-  return isVisible ? <SyncBannerContent status={status} /> : null
-}
-
-function DelayedSyncBanner({ status }: SyncBannerProps) {
-  const [isVisible, setIsVisible] = useState(false)
-
-  useEffect(() => {
-    const elapsed =
-      status.syncStartedAt === null ? 0 : Math.max(0, Date.now() - status.syncStartedAt)
-    const remaining = Math.max(0, SYNC_GRACE_PERIOD_MS - elapsed)
-
-    if (remaining === 0) {
-      setIsVisible(true)
-      return
-    }
-
-    const timer = setTimeout(() => setIsVisible(true), remaining)
-    return () => clearTimeout(timer)
-  }, [status.syncStartedAt])
-
-  return isVisible ? <SyncBannerContent status={status} /> : null
-}
 
 function SyncBannerContent({ status }: SyncBannerProps) {
   const { theme } = useUnistyles()
