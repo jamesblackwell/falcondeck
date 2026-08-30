@@ -1,5 +1,6 @@
 import React from 'react'
 import * as Clipboard from 'expo-clipboard'
+import * as Haptics from 'expo-haptics'
 import { AccessibilityInfo } from 'react-native'
 import { act } from 'react-test-renderer'
 import { describe, it, expect, vi, afterEach } from 'vitest'
@@ -219,6 +220,29 @@ describe('ChatInput component', () => {
     expect(
       r.root.findByProps({ accessibilityLabel: 'Send message' }),
     ).toBeDefined()
+  })
+
+  it('acknowledges a mic touch before the completed press starts recording', () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    const haptic = vi.spyOn(Haptics, 'impactAsync')
+    try {
+      const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
+      const mic = r.root.findByProps({
+        accessibilityLabel: 'Record voice message',
+      })
+
+      act(() => mic.props.onPressIn())
+
+      expect(haptic).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Light)
+      expect(r.root.findAllByType(InlineVoiceRecorder)).toHaveLength(0)
+
+      act(() => mic.props.onPress())
+
+      expect(haptic).toHaveBeenCalledTimes(1)
+      expect(r.root.findByType(InlineVoiceRecorder)).toBeDefined()
+    } finally {
+      resetSpeechSettings()
+    }
   })
 
   it('splices a transcript into the draft instead of replacing it', () => {

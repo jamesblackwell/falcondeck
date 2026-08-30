@@ -15,6 +15,7 @@ import {
   setPendingVoiceRecording,
   updateSpeechSettings,
 } from '@/features/speech/speechSettings'
+import { invalidateMicrophonePermissionCache } from '@/features/speech/microphonePermission'
 import { transcriptionRetry } from '@/features/speech/openRouterTranscription'
 import {
   speechLiveActivity,
@@ -30,6 +31,7 @@ describe('InlineVoiceRecorder', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks()
+    invalidateMicrophonePermissionCache()
     resetSpeechSettings()
     clearPendingVoiceRecording()
     transcriptionRetry.wait = vi.fn(async () => {})
@@ -110,21 +112,12 @@ describe('InlineVoiceRecorder', () => {
 
   it('surfaces an on-device permission failure instead of leaving startup pending', async () => {
     updateSpeechSettings({ provider: 'on-device' })
-    const requestPermission = vi.mocked(
-      ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync,
-    )
-    type SpeechPermission = Awaited<ReturnType<typeof requestPermission>>
-    const grantedPermission = {
-      status: 'granted',
-      expires: 'never',
-      granted: true,
-      canAskAgain: true,
-    } as SpeechPermission
+    const requestPermission = vi.mocked(requestRecordingPermissionsAsync)
     let rejectPermission!: (error: Error) => void
-    const pendingPermission = new Promise<SpeechPermission>((_resolve, reject) => {
+    const pendingPermission = new Promise<{ granted: boolean }>((_resolve, reject) => {
       rejectPermission = reject
     })
-    requestPermission.mockReturnValue(pendingPermission)
+    requestPermission.mockReturnValue(pendingPermission as never)
 
     const r = renderComponent(
       <InlineVoiceRecorder
@@ -142,7 +135,7 @@ describe('InlineVoiceRecorder', () => {
       })
       expect(textOf(r)).toContain('Speech permission service failed')
     } finally {
-      requestPermission.mockResolvedValue(grantedPermission)
+      requestPermission.mockResolvedValue({ granted: true } as never)
     }
   })
 
@@ -377,7 +370,7 @@ describe('InlineVoiceRecorder', () => {
     })
 
     expect(
-      ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync,
+      requestRecordingPermissionsAsync,
     ).not.toHaveBeenCalled()
     expect(ExpoSpeechRecognitionModule.start).toHaveBeenCalledWith(
       expect.objectContaining({

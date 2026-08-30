@@ -30,6 +30,9 @@ const recorder = {
 export const requestRecordingPermissionsAsync = vi.fn(async () => ({
   granted: true,
 }))
+export const getRecordingPermissionsAsync = vi.fn(async () => ({
+  granted: true,
+}))
 export const setAudioModeAsync = vi.fn(async () => {})
 export const useAudioRecorder = vi.fn(() => recorder)
 

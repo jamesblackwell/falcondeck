@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
 import { Directory, File, Paths } from 'expo-file-system'
 import {
-  requestRecordingPermissionsAsync,
   setAudioModeAsync,
   useAudioRecorder,
   useAudioRecorderState,
@@ -25,6 +24,7 @@ import {
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
 import { CLOUD_VOICE_RECORDING } from '@/features/speech/cloudVoiceRecording'
+import { ensureMicrophonePermission } from '@/features/speech/microphonePermission'
 import {
   getDesktopSpeechStatus,
   transcriptionProgressLabel,
@@ -233,9 +233,9 @@ export function InlineVoiceRecorder({
     setState('starting')
     setError(null)
     try {
-      const permission = await requestRecordingPermissionsAsync()
+      const permissionGranted = await ensureMicrophonePermission()
       if (cancelledRef.current) return
-      if (!permission.granted)
+      if (!permissionGranted)
         throw new Error('Microphone access is required to record speech.')
       await setAudioModeAsync({
         allowsRecording: true,
@@ -279,10 +279,9 @@ export function InlineVoiceRecorder({
         )
       }
       if (!audioUri) {
-        const permission =
-          await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync()
+        const permissionGranted = await ensureMicrophonePermission()
         if (cancelledRef.current) return
-        if (!permission.granted) {
+        if (!permissionGranted) {
           throw new Error(
             'Microphone access is required to use on-device speech recognition.',
           )

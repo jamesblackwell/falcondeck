@@ -40,6 +40,7 @@ import {
   getSpeechSettings,
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
+import { warmMicrophonePermission } from '@/features/speech/microphonePermission'
 import { triggerComposerSelectionHaptic } from '@/lib/haptics'
 
 import { AttachmentPreviewList } from './AttachmentPreviewList'
@@ -214,6 +215,10 @@ export const ChatInput = memo(function ChatInput({
   // draft instead of being the thing an empty composer does instead of Send.
   const showStop = Boolean(onStop) && isRunning && !hasContent
 
+  useEffect(() => {
+    void warmMicrophonePermission()
+  }, [])
+
   const slashOpen = slashQuery !== null
   useEffect(() => {
     if (!slashOpen) return
@@ -336,8 +341,11 @@ export const ChatInput = memo(function ChatInput({
     [onChangeText, value.length],
   )
 
-  const handleMicPress = useCallback(() => {
+  const handleMicPressIn = useCallback(() => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+  }, [])
+
+  const handleMicPress = useCallback(() => {
     // The input is only hidden while recording, not unmounted, so an open
     // keyboard would stay up over the waveform until the transcript lands.
     inputRef.current?.blur()
@@ -725,6 +733,7 @@ export const ChatInput = memo(function ChatInput({
                 styles.sendButton,
                 disabled ? styles.micButtonDisabled : null,
               ]}
+              onPressIn={handleMicPressIn}
               onPress={handleMicPress}
               disabled={Boolean(disabled)}
               accessibilityRole="button"

@@ -43,6 +43,22 @@ afterEach(() => {
 })
 
 describe('SidebarDrawerContent', () => {
+  it('closes the drawer after selecting a conversation', () => {
+    const dispatch = vi.fn()
+    renderComponent(
+      <SidebarDrawerContent navigation={{ dispatch } as never} />,
+    )
+
+    act(() => {
+      mocks.sidebarProps?.onSelectThread('workspace-1', 'thread-1')
+    })
+
+    expect(useSessionStore.getState().selectedWorkspaceId).toBe('workspace-1')
+    expect(useSessionStore.getState().selectedThreadId).toBe('thread-1')
+    expect(mocks.navigate).toHaveBeenCalledWith('/(app)')
+    expect(dispatch).toHaveBeenCalledWith({ type: 'CLOSE_DRAWER' })
+  })
+
   it('closes the drawer after starting a new conversation', () => {
     const dispatch = vi.fn()
     renderComponent(
