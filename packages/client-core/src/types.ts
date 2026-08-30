@@ -110,6 +110,8 @@ export type ProviderUsageOverview = {
   cursor?: ProviderUsage;
   /** Older daemons omit this field; treat missing as not installed. */
   agy?: ProviderUsage;
+  /** Older daemons omit this field; treat missing as not installed. */
+  zai?: ProviderUsage;
 };
 
 export type AgentCapabilitySummary = {

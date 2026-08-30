@@ -45,6 +45,7 @@ function overviewWith(overrides: Partial<ProviderUsageOverview>): ProviderUsageO
     grok: { status: 'not_installed' },
     cursor: { status: 'not_installed' },
     agy: { status: 'not_installed' },
+    zai: { status: 'not_installed' },
     ...overrides,
   }
 }
@@ -226,6 +227,53 @@ describe('UsagePanel', () => {
 
     expect(await screen.findByText('Codex')).toBeInTheDocument()
     expect(screen.queryByText('Cursor')).toBeNull()
+  })
+
+  it('renders Z.AI coding-plan usage when a key is present', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            zai: {
+              status: 'ok',
+              account_email: null,
+              plan_label: 'Max',
+              windows: [
+                {
+                  label: '5-hour limit',
+                  used_percent: 1,
+                  resets_at: '2099-08-30T12:00:00.000Z',
+                },
+                {
+                  label: 'Monthly MCP limit',
+                  used_percent: 1,
+                  resets_at: '2099-10-19T12:00:00.000Z',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Z.AI')).toBeInTheDocument()
+    expect(screen.getByText('Max')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: '5-hour limit' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Monthly MCP limit' })).toBeInTheDocument()
+  })
+
+  it('hides Z.AI when an older daemon omits the field', async () => {
+    const payload = overviewWith({})
+    delete payload.zai
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)))
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    expect(screen.queryByText('Z.AI')).toBeNull()
   })
 
   it('hides providers that are not installed', async () => {

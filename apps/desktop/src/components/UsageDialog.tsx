@@ -62,8 +62,8 @@ export function UsageDialog({
                 Usage
               </h2>
               <p className="mt-0.5 text-[length:var(--fd-text-xs)] text-fg-muted sm:text-[length:var(--fd-text-sm)]">
-                How much of your Codex, Claude Code, Antigravity, Grok, and Cursor subscriptions
-                you&apos;ve used on this Mac.
+                How much of your Codex, Claude Code, Antigravity, Grok, Cursor, and Z.AI
+                subscriptions you&apos;ve used on this Mac.
               </p>
             </div>
           </div>

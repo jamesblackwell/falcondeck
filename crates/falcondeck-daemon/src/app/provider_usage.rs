@@ -7,10 +7,13 @@
 //! queries the CLI-proxy billing endpoint with the token from
 //! `~/.grok/auth.json`, Cursor Agent queries the dashboard Connect-RPC usage
 //! endpoints with the token from the CLI's keychain entry (macOS) or
-//! `~/.cursor/auth.json`, and Antigravity queries Cloud Code quota endpoints
-//! with the token from `~/.gemini/oauth_creds.json`. Tokens are used as-is — the daemon never refreshes
-//! another tool's credentials, because rotating a refresh token out from under
-//! the owning CLI breaks its next run.
+//! `~/.cursor/auth.json`, Antigravity queries Cloud Code quota endpoints
+//! with the token from `~/.gemini/oauth_creds.json`, and Z.AI coding-plan
+//! usage is read from `GET /api/monitor/usage/quota/limit` with the API key
+//! OpenCode stores under `zai-coding-plan` (or `ZAI_CODING_PLAN_API_KEY`).
+//! Tokens are used as-is — the daemon never refreshes another tool's
+//! credentials, because rotating a refresh token out from under the owning
+//! CLI breaks its next run.
 //!
 //! Tests swap the live transport for fixtures, which leaves the real HTTP and
 //! credential helpers unreachable in that build.
@@ -70,6 +73,10 @@ const AGY_SUMMARY_URL: &str =
 const AGY_USER_AGENT: &str = "Antigravity/0.0.0";
 /// `ideType` must be a protocol enum. `ANTIGRAVITY` is not one.
 const AGY_LOAD_BODY: &str = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
+
+const ZAI_USAGE_PATH: &str = "/api/monitor/usage/quota/limit";
+const ZAI_HOST: &str = "https://api.z.ai";
+const ZHIPU_HOST: &str = "https://open.bigmodel.cn";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1689,20 +1696,366 @@ async fn fetch_agy_usage() -> ProviderUsage {
 }
 
 // ---------------------------------------------------------------------------
+// Z.AI GLM coding-plan usage
+// ---------------------------------------------------------------------------
+
+/// Provider ids OpenCode stores in `auth.json`, preferred coding-plan first.
+const ZAI_AUTH_PROVIDER_IDS: &[&str] =
+    &["zai-coding-plan", "zhipuai-coding-plan", "zai", "zhipuai"];
+
+const ZAI_ENV_KEYS: &[(&str, &'static str)] = &[
+    ("ZAI_CODING_PLAN_API_KEY", ZAI_HOST),
+    ("ZHIPUAI_CODING_PLAN_API_KEY", ZHIPU_HOST),
+    ("ZAI_API_KEY", ZAI_HOST),
+    ("ZHIPU_API_KEY", ZHIPU_HOST),
+];
+
+struct ZaiCredentials {
+    api_key: String,
+    host: &'static str,
+}
+
+fn zai_host_for(provider_id: &str) -> &'static str {
+    match provider_id {
+        "zhipuai-coding-plan" | "zhipuai" => ZHIPU_HOST,
+        _ => ZAI_HOST,
+    }
+}
+
+fn zai_quota_url(host: &str) -> String {
+    format!("{host}{ZAI_USAGE_PATH}")
+}
+
+fn zai_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        // OpenCode uses the XDG data dir even on macOS (`~/.local/share`).
+        paths.push(
+            home.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("auth.json"),
+        );
+        paths.push(
+            home.join("Library")
+                .join("Application Support")
+                .join("opencode")
+                .join("auth.json"),
+        );
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        paths.push(PathBuf::from(xdg).join("opencode").join("auth.json"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        paths.push(PathBuf::from(appdata).join("opencode").join("auth.json"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        paths.push(PathBuf::from(local).join("opencode").join("auth.json"));
+    }
+    paths
+}
+
+fn zai_entry(provider_id: &str, value: &Value) -> Option<ZaiCredentials> {
+    match value.get("type").and_then(Value::as_str) {
+        Some(kind) if !kind.eq_ignore_ascii_case("api") => return None,
+        _ => {}
+    }
+    Some(ZaiCredentials {
+        api_key: non_empty_string(value.get("key"))?,
+        host: zai_host_for(provider_id),
+    })
+}
+
+fn parse_zai_auth(raw: &str) -> Option<ZaiCredentials> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let object = value.as_object()?;
+    for id in ZAI_AUTH_PROVIDER_IDS {
+        if let Some(entry) = object.get(*id)
+            && let Some(credentials) = zai_entry(id, entry)
+        {
+            return Some(credentials);
+        }
+    }
+    None
+}
+
+fn zai_credentials_from_env_map(get: impl Fn(&str) -> Option<String>) -> Option<ZaiCredentials> {
+    for (name, host) in ZAI_ENV_KEYS {
+        if let Some(api_key) = get(name).filter(|value| !value.is_empty()) {
+            return Some(ZaiCredentials { api_key, host });
+        }
+    }
+    None
+}
+
+fn zai_credentials_from_env() -> Option<ZaiCredentials> {
+    zai_credentials_from_env_map(|name| std::env::var(name).ok())
+}
+
+fn zai_headers(api_key: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("authorization", format!("Bearer {api_key}")),
+        ("accept", "application/json".to_string()),
+    ]
+}
+
+fn zai_plan_label(level: Option<&str>) -> Option<String> {
+    let level = level?.trim();
+    if level.is_empty() {
+        return None;
+    }
+    let known = match level.to_ascii_lowercase().as_str() {
+        "lite" => "Lite",
+        "pro" => "Pro",
+        "max" => "Max",
+        _ => return Some(capitalize(level)),
+    };
+    Some(known.to_string())
+}
+
+fn zai_limit_label(limit: &Value) -> Option<&'static str> {
+    let kind = json_field(limit, "type", "type")?.as_str()?;
+    let unit = json_u64(json_field(limit, "unit", "unit"));
+    let number = json_u64(json_field(limit, "number", "number"));
+    match kind {
+        "TOKENS_LIMIT" | "CREDIT_LIMIT" => match (unit, number) {
+            (Some(3), Some(5)) | (None, None) => Some("5-hour limit"),
+            (Some(6), Some(1)) | (Some(7), _) => Some("Weekly limit"),
+            _ => None,
+        },
+        "TIME_LIMIT" => Some("Monthly MCP limit"),
+        _ => None,
+    }
+}
+
+fn zai_used_percent(limit: &Value) -> Option<u32> {
+    if let Some(percent) = json_field(limit, "percentage", "percentage")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
+        .filter(|value| value.is_finite())
+    {
+        return Some(clamp_percent(percent));
+    }
+    let usage = json_u64(json_field(limit, "usage", "usage")).filter(|value| *value > 0)?;
+    let current = json_u64(json_field(limit, "currentValue", "current_value"))?;
+    Some(clamp_percent((current as f64 / usage as f64) * 100.0))
+}
+
+fn zai_payload(raw: &Value) -> &Value {
+    raw.get("data")
+        .filter(|value| value.is_object())
+        .unwrap_or(raw)
+}
+
+fn zai_legacy_window(
+    payload: &Value,
+    camel: &str,
+    snake: &str,
+    label: &'static str,
+    reset_camel: &str,
+    reset_snake: &str,
+) -> Option<ProviderUsageWindow> {
+    let percent = json_field(payload, camel, snake).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    })?;
+    if !percent.is_finite() {
+        return None;
+    }
+    Some(ProviderUsageWindow {
+        label: label.to_string(),
+        used_percent: clamp_percent(percent),
+        resets_at: epoch_millis_to_iso(json_field(payload, reset_camel, reset_snake)),
+        cost: None,
+    })
+}
+
+fn normalize_zai_limits(payload: &Value) -> Vec<ProviderUsageWindow> {
+    if let Some(limits) = json_field(payload, "limits", "limits").and_then(Value::as_array) {
+        let mut best: HashMap<&'static str, ProviderUsageWindow> = HashMap::new();
+        for limit in limits {
+            let Some(label) = zai_limit_label(limit) else {
+                continue;
+            };
+            let Some(used_percent) = zai_used_percent(limit) else {
+                continue;
+            };
+            let candidate = ProviderUsageWindow {
+                label: label.to_string(),
+                used_percent,
+                resets_at: epoch_millis_to_iso(json_field(
+                    limit,
+                    "nextResetTime",
+                    "next_reset_time",
+                )),
+                cost: None,
+            };
+            match best.get(label) {
+                Some(existing) if existing.used_percent >= used_percent => {}
+                _ => {
+                    best.insert(label, candidate);
+                }
+            }
+        }
+        let mut windows: Vec<_> = best.into_values().collect();
+        windows.sort_by_key(|window| match window.label.as_str() {
+            "5-hour limit" => 0,
+            "Weekly limit" => 1,
+            _ => 2,
+        });
+        return windows;
+    }
+
+    [
+        zai_legacy_window(
+            payload,
+            "fiveHourPercent",
+            "five_hour_percent",
+            "5-hour limit",
+            "fiveHourResetTime",
+            "five_hour_reset_time",
+        ),
+        zai_legacy_window(
+            payload,
+            "weeklyPercent",
+            "weekly_percent",
+            "Weekly limit",
+            "weeklyResetTime",
+            "weekly_reset_time",
+        ),
+        zai_legacy_window(
+            payload,
+            "monthlyMCPUsage",
+            "monthly_mcp_usage",
+            "Monthly MCP limit",
+            "monthlyMcpResetTime",
+            "monthly_mcp_reset_time",
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn normalize_zai_usage(raw: &Value) -> ProviderUsage {
+    if let Some(code) = json_u64(raw.get("code"))
+        && code != 200
+    {
+        return ProviderUsage::Error {
+            message: non_empty_string(raw.get("msg"))
+                .unwrap_or_else(|| format!("Z.AI usage request failed (code {code}).")),
+            plan_label: None,
+            account_email: None,
+        };
+    }
+    let payload = zai_payload(raw);
+    let plan_label = zai_plan_label(
+        non_empty_string(payload.get("level"))
+            .or_else(|| non_empty_string(raw.get("level")))
+            .as_deref(),
+    );
+    ProviderUsage::Ok {
+        account_email: None,
+        plan_label,
+        windows: normalize_zai_limits(payload),
+    }
+}
+
+#[cfg(not(test))]
+async fn read_zai_auth_raw() -> Option<String> {
+    for path in zai_auth_paths() {
+        let Ok(raw) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        let trimmed = raw.trim().to_string();
+        if parse_zai_auth(&trimmed).is_some() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+async fn read_zai_auth_raw() -> Option<String> {
+    test_zai_auth_file().lock().unwrap().clone()
+}
+
+#[cfg(not(test))]
+async fn read_zai_credentials() -> Option<ZaiCredentials> {
+    if let Some(raw) = read_zai_auth_raw().await
+        && let Some(credentials) = parse_zai_auth(&raw)
+    {
+        return Some(credentials);
+    }
+    zai_credentials_from_env()
+}
+
+#[cfg(test)]
+async fn read_zai_credentials() -> Option<ZaiCredentials> {
+    parse_zai_auth(&read_zai_auth_raw().await?)
+}
+
+async fn fetch_zai_usage() -> ProviderUsage {
+    let Some(credentials) = read_zai_credentials().await else {
+        return ProviderUsage::Unauthenticated;
+    };
+    let url = zai_quota_url(credentials.host);
+    let Ok(response) = fetch_usage_json(&url, &zai_headers(&credentials.api_key)).await else {
+        return ProviderUsage::Error {
+            message: "Z.AI usage request failed.".to_string(),
+            plan_label: None,
+            account_email: None,
+        };
+    };
+    match response.status {
+        // API keys do not expire the way OAuth tokens do; a 401 is a bad key.
+        401 => ProviderUsage::Error {
+            message: "Z.AI coding-plan API key was rejected. Check the key in OpenCode, then reload usage.".to_string(),
+            plan_label: None,
+            account_email: None,
+        },
+        429 => ProviderUsage::Error {
+            message: "Z.AI usage is rate limited right now. Try again shortly.".to_string(),
+            plan_label: None,
+            account_email: None,
+        },
+        status if !(200..300).contains(&status) => ProviderUsage::Error {
+            message: format!("Z.AI usage request failed (HTTP {status})."),
+            plan_label: None,
+            account_email: None,
+        },
+        _ => match response.body {
+            Some(body) => normalize_zai_usage(&body),
+            None => ProviderUsage::Error {
+                message: "Z.AI usage response was malformed.".to_string(),
+                plan_label: None,
+                account_email: None,
+            },
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 impl AppState {
     /// Reads live usage snapshots for the local Codex, Claude Code, Grok,
-    /// Cursor, and Antigravity subscriptions. Each provider resolves
-    /// independently so one failing never blanks the others.
+    /// Cursor, Antigravity, and Z.AI coding-plan subscriptions. Each provider
+    /// resolves independently so one failing never blanks the others.
     pub async fn provider_usage_overview(&self) -> ProviderUsageOverview {
-        let (codex, claude_code, grok, cursor, agy) = tokio::join!(
+        let (codex, claude_code, grok, cursor, agy, zai) = tokio::join!(
             self.codex_usage(),
             self.claude_code_usage(),
             self.grok_usage(),
             self.cursor_usage(),
-            self.agy_usage()
+            self.agy_usage(),
+            self.zai_usage()
         );
         ProviderUsageOverview {
             codex,
@@ -1710,6 +2063,7 @@ impl AppState {
             grok,
             cursor,
             agy,
+            zai,
         }
     }
 
@@ -1759,6 +2113,20 @@ impl AppState {
             return ProviderUsage::NotInstalled;
         }
         fetch_agy_usage().await
+    }
+
+    async fn zai_usage(&self) -> ProviderUsage {
+        // A coding-plan key is enough even when OpenCode is missing. Hide the
+        // card only when there is no key *and* OpenCode is not installed.
+        if read_zai_credentials().await.is_none()
+            && !crate::agent_binary::agent_binary_available_cached(
+                "opencode",
+                &self.provider_bin(&AgentProvider::OPENCODE),
+            )
+        {
+            return ProviderUsage::NotInstalled;
+        }
+        fetch_zai_usage().await
     }
 }
 
@@ -1815,6 +2183,12 @@ fn test_agy_account_email() -> &'static StdMutex<Option<String>> {
     FILE.get_or_init(|| StdMutex::new(None))
 }
 
+#[cfg(test)]
+fn test_zai_auth_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
 /// Serializes tests that mutate the process-global fixtures.
 #[cfg(test)]
 async fn usage_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
@@ -1862,6 +2236,7 @@ mod tests {
         *test_cursor_auth_file().lock().unwrap() = None;
         *test_agy_oauth_file().lock().unwrap() = None;
         *test_agy_account_email().lock().unwrap() = None;
+        *test_zai_auth_file().lock().unwrap() = None;
     }
 
     fn fake_codex_jwt(account_id: &str, email: Option<&str>, fedramp: bool) -> String {
@@ -3010,6 +3385,296 @@ mod tests {
                 assert_eq!(windows.len(), 1);
                 assert_eq!(windows[0].label, "5-hour limit");
                 assert_eq!(windows[0].used_percent, 50);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    fn zai_auth_json(provider_id: &str, key: &str) -> String {
+        json!({ provider_id: { "type": "api", "key": key } }).to_string()
+    }
+
+    #[test]
+    fn parse_zai_auth_prefers_coding_plan_over_generic() {
+        let raw = json!({
+            "zai": { "type": "api", "key": "generic-key" },
+            "zai-coding-plan": { "type": "api", "key": "plan-key" },
+        })
+        .to_string();
+        let credentials = parse_zai_auth(&raw).expect("coding-plan key");
+        assert_eq!(credentials.api_key, "plan-key");
+        assert_eq!(credentials.host, ZAI_HOST);
+    }
+
+    #[test]
+    fn parse_zai_auth_routes_zhipu_to_bigmodel() {
+        let credentials =
+            parse_zai_auth(&zai_auth_json("zhipuai-coding-plan", "zhipu-key")).expect("zhipu key");
+        assert_eq!(credentials.host, ZHIPU_HOST);
+        assert_eq!(credentials.api_key, "zhipu-key");
+    }
+
+    #[test]
+    fn parse_zai_auth_ignores_oauth_entries() {
+        let raw = json!({
+            "zai-coding-plan": { "type": "oauth", "refresh": "x", "access": "y" }
+        })
+        .to_string();
+        assert!(parse_zai_auth(&raw).is_none());
+    }
+
+    #[test]
+    fn zai_env_prefers_coding_plan_key() {
+        let credentials = zai_credentials_from_env_map(|name| match name {
+            "ZAI_API_KEY" => Some("generic".to_string()),
+            "ZAI_CODING_PLAN_API_KEY" => Some("plan".to_string()),
+            _ => None,
+        })
+        .expect("env key");
+        assert_eq!(credentials.api_key, "plan");
+        assert_eq!(credentials.host, ZAI_HOST);
+    }
+
+    #[test]
+    fn zai_plan_labels_map_known_tiers() {
+        assert_eq!(zai_plan_label(Some("max")), Some("Max".to_string()));
+        assert_eq!(zai_plan_label(Some("PRO")), Some("Pro".to_string()));
+        assert_eq!(zai_plan_label(Some("lite")), Some("Lite".to_string()));
+        assert_eq!(zai_plan_label(Some("team")), Some("Team".to_string()));
+        assert_eq!(zai_plan_label(None), None);
+    }
+
+    #[test]
+    fn normalize_zai_usage_maps_live_max_payload() {
+        let raw = json!({
+            "code": 200,
+            "msg": "Operation successful",
+            "success": true,
+            "data": {
+                "level": "max",
+                "limits": [
+                    {
+                        "type": "TIME_LIMIT",
+                        "unit": 5,
+                        "number": 1,
+                        "usage": 4000,
+                        "currentValue": 6,
+                        "remaining": 3994,
+                        "percentage": 1,
+                        "nextResetTime": 1_790_009_362_997_i64
+                    },
+                    {
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "percentage": 1,
+                        "nextResetTime": 1_788_078_815_019_i64
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            normalize_zai_usage(&raw),
+            ProviderUsage::Ok {
+                account_email: None,
+                plan_label: Some("Max".to_string()),
+                windows: vec![
+                    ProviderUsageWindow {
+                        label: "5-hour limit".to_string(),
+                        used_percent: 1,
+                        resets_at: epoch_millis_to_iso(Some(&json!(1_788_078_815_019_i64))),
+                        cost: None,
+                    },
+                    ProviderUsageWindow {
+                        label: "Monthly MCP limit".to_string(),
+                        used_percent: 1,
+                        resets_at: epoch_millis_to_iso(Some(&json!(1_790_009_362_997_i64))),
+                        cost: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_zai_usage_maps_weekly_and_skips_unknown_token_units() {
+        let raw = json!({
+            "limits": [
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 3,
+                    "number": 5,
+                    "percentage": 12
+                },
+                {
+                    "type": "CREDIT_LIMIT",
+                    "unit": 6,
+                    "number": 1,
+                    "percentage": 40
+                },
+                {
+                    "type": "TOKENS_LIMIT",
+                    "unit": 1,
+                    "number": 1,
+                    "percentage": 99
+                },
+                {
+                    "type": "TIME_LIMIT",
+                    "percentage": 8
+                }
+            ],
+            "level": "pro"
+        });
+        match normalize_zai_usage(&raw) {
+            ProviderUsage::Ok {
+                plan_label,
+                windows,
+                ..
+            } => {
+                assert_eq!(plan_label.as_deref(), Some("Pro"));
+                assert_eq!(windows.len(), 3);
+                assert_eq!(windows[0].label, "5-hour limit");
+                assert_eq!(windows[0].used_percent, 12);
+                assert_eq!(windows[1].label, "Weekly limit");
+                assert_eq!(windows[1].used_percent, 40);
+                assert_eq!(windows[2].label, "Monthly MCP limit");
+                assert_eq!(windows[2].used_percent, 8);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_zai_usage_falls_back_to_legacy_percents() {
+        let raw = json!({
+            "fiveHourPercent": 22.4,
+            "weeklyPercent": 10,
+            "monthlyMCPUsage": 3,
+            "level": "lite"
+        });
+        match normalize_zai_usage(&raw) {
+            ProviderUsage::Ok {
+                plan_label,
+                windows,
+                ..
+            } => {
+                assert_eq!(plan_label.as_deref(), Some("Lite"));
+                assert_eq!(
+                    windows
+                        .iter()
+                        .map(|window| (window.label.as_str(), window.used_percent))
+                        .collect::<Vec<_>>(),
+                    vec![
+                        ("5-hour limit", 22),
+                        ("Weekly limit", 10),
+                        ("Monthly MCP limit", 3),
+                    ]
+                );
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_zai_usage_reports_api_error_code() {
+        match normalize_zai_usage(&json!({ "code": 401, "msg": "Invalid API key" })) {
+            ProviderUsage::Error { message, .. } => {
+                assert_eq!(message, "Invalid API key");
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zai_usage_reports_unauthenticated_without_credentials() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        assert_eq!(fetch_zai_usage().await, ProviderUsage::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn zai_usage_reports_error_not_expired_on_401() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_zai_auth_file().lock().unwrap() = Some(zai_auth_json("zai-coding-plan", "zai-key"));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(zai_quota_url(ZAI_HOST), error_response(401));
+        match fetch_zai_usage().await {
+            ProviderUsage::Error { message, .. } => {
+                assert!(message.contains("rejected"), "{message}");
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn zai_usage_normalizes_a_successful_response() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_zai_auth_file().lock().unwrap() = Some(zai_auth_json("zai-coding-plan", "zai-key"));
+        test_http_fixtures().lock().unwrap().insert(
+            zai_quota_url(ZAI_HOST),
+            ok_response(json!({
+                "code": 200,
+                "data": {
+                    "level": "max",
+                    "limits": [
+                        {
+                            "type": "TOKENS_LIMIT",
+                            "unit": 3,
+                            "number": 5,
+                            "percentage": 4,
+                            "nextResetTime": 1_788_078_815_019_i64
+                        }
+                    ]
+                }
+            })),
+        );
+        assert_eq!(
+            fetch_zai_usage().await,
+            ProviderUsage::Ok {
+                account_email: None,
+                plan_label: Some("Max".to_string()),
+                windows: vec![ProviderUsageWindow {
+                    label: "5-hour limit".to_string(),
+                    used_percent: 4,
+                    resets_at: epoch_millis_to_iso(Some(&json!(1_788_078_815_019_i64))),
+                    cost: None,
+                }],
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn zai_usage_hits_zhipu_host_for_zhipu_keys() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_zai_auth_file().lock().unwrap() =
+            Some(zai_auth_json("zhipuai-coding-plan", "zhipu-key"));
+        test_http_fixtures().lock().unwrap().insert(
+            zai_quota_url(ZHIPU_HOST),
+            ok_response(json!({
+                "data": {
+                    "level": "pro",
+                    "limits": [{
+                        "type": "TOKENS_LIMIT",
+                        "unit": 3,
+                        "number": 5,
+                        "percentage": 9
+                    }]
+                }
+            })),
+        );
+        match fetch_zai_usage().await {
+            ProviderUsage::Ok {
+                plan_label,
+                windows,
+                ..
+            } => {
+                assert_eq!(plan_label.as_deref(), Some("Pro"));
+                assert_eq!(windows[0].used_percent, 9);
             }
             other => panic!("expected ok variant, got {other:?}"),
         }

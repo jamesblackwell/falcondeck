@@ -3471,6 +3471,12 @@ pub struct ProviderUsageOverview {
     /// `not_installed`.
     #[serde(default)]
     pub agy: ProviderUsage,
+    /// Z.AI GLM coding-plan usage (API key from OpenCode `zai-coding-plan`).
+    ///
+    /// Older daemons omit this field; clients treat the default as
+    /// `not_installed`.
+    #[serde(default)]
+    pub zai: ProviderUsage,
 }
 
 /// Summary of a single thread within a workspace.

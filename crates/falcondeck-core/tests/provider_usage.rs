@@ -90,7 +90,8 @@ fn provider_usage_overview_round_trips() {
         "claude_code": { "status": "unauthenticated" },
         "grok": { "status": "not_installed" },
         "cursor": { "status": "not_installed" },
-        "agy": { "status": "not_installed" }
+        "agy": { "status": "not_installed" },
+        "zai": { "status": "not_installed" }
     });
 
     let overview: ProviderUsageOverview =
@@ -113,6 +114,7 @@ fn provider_usage_overview_defaults_missing_grok() {
     assert_eq!(overview.grok, ProviderUsage::NotInstalled);
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
+    assert_eq!(overview.zai, ProviderUsage::NotInstalled);
 }
 
 #[test]
@@ -126,4 +128,5 @@ fn provider_usage_overview_defaults_missing_cursor() {
 
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
+    assert_eq!(overview.zai, ProviderUsage::NotInstalled);
 }

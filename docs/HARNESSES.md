@@ -69,10 +69,10 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
-subscription usage snapshots for Codex, Claude Code, Grok, Cursor, and
-Antigravity, surfaced in Settings → Usage. Types live in `falcondeck-core`
-(`ProviderUsageOverview`) and `client-core`; the daemon implementation is
-`crates/falcondeck-daemon/src/app/provider_usage.rs`.
+subscription usage snapshots for Codex, Claude Code, Grok, Cursor,
+Antigravity, and Z.AI coding plan, surfaced in Settings → Usage. Types live
+in `falcondeck-core` (`ProviderUsageOverview`) and `client-core`; the daemon
+implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 - Codex reads `~/.codex/auth.json` (`CODEX_HOME` respected) and calls the
   ChatGPT usage endpoint with the CLI's own token. Windows are labeled from
@@ -101,10 +101,19 @@ Antigravity, surfaced in Settings → Usage. Types live in `falcondeck-core`
   Bucket `window` values (`5h` / `weekly`) collapse to the most-used 5-hour
   and weekly rows. Expired tokens report `expired` — same no-refresh rule.
   Older daemons omit `agy`.
-- OpenCode and Pi are not on this panel: OpenCode is a multiplexer over
-  other providers' tokens (Claude/Codex already appear as themselves; this
-  machine's OpenCode Go key has no Go subscription), and Pi is API-key /
-  BYOK with no subscription windows.
+- Z.AI coding plan reads the API key OpenCode stores in
+  `~/.local/share/opencode/auth.json` (`zai-coding-plan` preferred over
+  `zhipuai-coding-plan` / `zai` / `zhipuai`; also
+  `Library/Application Support/opencode` and `ZAI_CODING_PLAN_API_KEY`) and
+  GETs `/api/monitor/usage/quota/limit` on `api.z.ai` or `open.bigmodel.cn`.
+  `TOKENS_LIMIT` / `CREDIT_LIMIT` rows with unit 3 / number 5 are the 5-hour
+  window, unit 6 / number 1 (or unit 7) the weekly window, and `TIME_LIMIT`
+  the monthly MCP tool budget. A rejected key reports `error`, not
+  `expired` — API keys do not rotate like OAuth. Older daemons omit `zai`.
+- OpenCode and Pi are not on this panel as themselves: OpenCode is a
+  multiplexer over other providers' tokens (Claude/Codex already appear as
+  themselves; Z.AI coding-plan keys stored by OpenCode appear as Z.AI), and
+  Pi is API-key / BYOK with no subscription windows.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the
   others. Errors still carry the locally-known plan and account.

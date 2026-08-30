@@ -79,6 +79,14 @@ const PROVIDERS: ProviderConfig[] = [
     signInHint: 'Run `cursor-agent login` to sign in and see your usage.',
     expiredHint: 'Your Cursor session expired. Run `cursor-agent login`, then reload usage.',
   },
+  {
+    key: 'zai',
+    providerId: 'zai',
+    name: 'Z.AI',
+    signInHint: 'Add a Z.AI coding-plan API key with `opencode auth login`, then reload usage.',
+    expiredHint:
+      'Your Z.AI coding-plan API key was rejected. Add a new key with `opencode auth login`, then reload usage.',
+  },
 ]
 
 function barColorClass(usedPercent: number): string {
@@ -243,7 +251,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
       {!hideHeader ? (
         <SettingsPageHeader
           title="Usage"
-          description="How much of your Codex, Claude Code, Antigravity, Grok, and Cursor subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
+          description="How much of your Codex, Claude Code, Antigravity, Grok, Cursor, and Z.AI subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
         />
       ) : null}
 
@@ -285,8 +293,8 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
           ) : visibleProviders.length === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
               <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-                No supported harnesses detected yet. Install Codex, Claude Code, Antigravity, Grok,
-                or Cursor to see subscription usage.
+                No supported subscriptions detected yet. Install Codex, Claude Code, Antigravity,
+                Grok, or Cursor, or add a Z.AI coding-plan key, to see usage.
               </p>
             </div>
           ) : (
