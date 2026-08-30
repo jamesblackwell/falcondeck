@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ScrollView } from 'react-native'
 
 import { normalizePreferences, type UpdateNotificationPreferences } from '@falcondeck/client-core'
@@ -14,12 +14,17 @@ export default function NotificationSettingsScreen() {
   const current = preferences.notifications
   const [masterEnabled, setMasterEnabled] = useState(current.enabled && isPushEnabled())
   const [isUpdating, setIsUpdating] = useState(false)
+  const updatingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
 
-  useEffect(() => setMasterEnabled(current.enabled), [current.enabled])
+  useEffect(
+    () => setMasterEnabled(current.enabled && isPushEnabled()),
+    [current.enabled],
+  )
 
   const update = useCallback(async (notifications: UpdateNotificationPreferences) => {
-    if (isUpdating) return
+    if (updatingRef.current) return
+    updatingRef.current = true
     setIsUpdating(true)
     setError(null)
     try {
@@ -41,12 +46,13 @@ export default function NotificationSettingsScreen() {
         }
       }
     } catch (reason) {
-      setMasterEnabled(current.enabled)
+      setMasterEnabled(current.enabled && isPushEnabled())
       setError(reason instanceof Error ? reason.message : 'Failed to update notifications')
     } finally {
+      updatingRef.current = false
       setIsUpdating(false)
     }
-  }, [current.enabled, isUpdating, setPreferences])
+  }, [current.enabled, setPreferences])
 
   return (
     <ScrollView

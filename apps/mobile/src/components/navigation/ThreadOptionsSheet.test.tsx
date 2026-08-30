@@ -124,4 +124,32 @@ describe('ThreadOptionsSheet', () => {
 
     act(() => resolveRpc({}))
   })
+
+  it('coalesces repeated pin taps while the first mutation is pending', async () => {
+    let resolveRpc!: (value: unknown) => void
+    const pending = new Promise((resolve) => {
+      resolveRpc = resolve
+    })
+    const rpc = vi.fn().mockReturnValue(pending)
+    useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
+    const renderer = renderComponent(
+      <ThreadOptionsSheet
+        workspaceId="workspace-1"
+        thread={thread({ id: 'thread-1', workspace_id: 'workspace-1' })}
+        onClose={vi.fn()}
+      />,
+    )
+    const pin = renderer.root.findByProps({ accessibilityLabel: 'Pin thread' })
+
+    act(() => {
+      pin.props.onPress()
+      pin.props.onPress()
+    })
+
+    expect(rpc).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      resolveRpc({})
+      await pending
+    })
+  })
 })

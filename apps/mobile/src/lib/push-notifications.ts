@@ -343,6 +343,9 @@ export async function processInitialNotificationResponse(
       await clearLastResponse()
     }
   } catch (error) {
+    // The native lookup did not establish whether a launch response exists;
+    // allow a later startup pass to retry instead of latching the failure.
+    initialResponseProcessed = false
     console.warn('Failed to process launch notification', error)
   }
 }

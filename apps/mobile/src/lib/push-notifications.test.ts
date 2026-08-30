@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 import type { DaemonSnapshot } from '@falcondeck/client-core'
 import { Platform } from 'react-native'
+import * as Notifications from 'expo-notifications'
 import { __setIsDevice } from 'expo-device'
 import {
   __emitResponse,
@@ -516,6 +517,22 @@ describe('push-notifications', () => {
 
       await processInitialNotificationResponse()
       expect(selectThread).not.toHaveBeenCalled()
+    })
+
+    it('retries cold-start response lookup after a transient native failure', async () => {
+      const response = tapResponse({ workspaceId: 'w1', threadId: 't1' })
+      const lookup = vi
+        .spyOn(Notifications, 'getLastNotificationResponseAsync')
+        .mockRejectedValueOnce(new Error('notification service unavailable'))
+        .mockResolvedValueOnce(response as never)
+      const selectThread = vi.fn()
+      useSessionStore.setState({ selectThread })
+
+      await processInitialNotificationResponse()
+      await processInitialNotificationResponse()
+
+      expect(lookup).toHaveBeenCalledTimes(2)
+      expect(selectThread).toHaveBeenCalledWith('w1', 't1')
     })
   })
 })

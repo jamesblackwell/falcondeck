@@ -61,4 +61,14 @@ describe('NativeMediaAudioPlayer', () => {
 
     await vi.waitFor(() => expect(player.getSnapshot('broken')).toBe('error'))
   })
+
+  it('turns malformed inline audio into an error instead of throwing from toggle', async () => {
+    const player = new NativeMediaAudioPlayer()
+
+    expect(() => {
+      player.toggle('broken-inline', 'data:audio/wav;base64,a')
+    }).not.toThrow()
+
+    await vi.waitFor(() => expect(player.getSnapshot('broken-inline')).toBe('error'))
+  })
 })

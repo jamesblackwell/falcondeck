@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { AlertTriangle } from "lucide-react-native";
@@ -39,6 +39,9 @@ export const ApprovalBanner = memo(function ApprovalBanner({
 }: ApprovalBannerProps) {
   const { theme } = useUnistyles();
   const [isResponding, setIsResponding] = useState(false);
+  const respondingRef = useRef<symbol | null>(null);
+  const requestIdRef = useRef(approval.request_id);
+  requestIdRef.current = approval.request_id;
   const [submitError, setSubmitError] = useState<string | null>(null);
   const detail = useMemo(() => approvalDetail(approval), [approval]);
   const elicitation = isMcpElicitationRequest(approval);
@@ -47,58 +50,87 @@ export const ApprovalBanner = memo(function ApprovalBanner({
     signInUrl ?? "",
   );
 
+  useEffect(() => {
+    respondingRef.current = null;
+    setIsResponding(false);
+    setSubmitError(null);
+  }, [approval.request_id]);
+
   /* v8 ignore start — Pressable callbacks with haptics, tested via E2E */
   const handleAllow = useCallback(async () => {
-    if (isResponding || !onAllow) return;
+    if (respondingRef.current || !onAllow) return;
+    const token = Symbol("approval-allow");
+    const requestId = approval.request_id;
+    respondingRef.current = token;
     setIsResponding(true);
     setSubmitError(null);
     try {
-      if (signInUrl) void openSignInUrl();
       await onAllow(approval.request_id);
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Approval action failed",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsResponding(false);
+      if (respondingRef.current === token) {
+        respondingRef.current = null;
+        if (requestIdRef.current === requestId) setIsResponding(false);
+      }
     }
-  }, [approval.request_id, isResponding, onAllow, openSignInUrl, signInUrl]);
+  }, [approval.request_id, onAllow]);
 
   const handleDeny = useCallback(async () => {
-    if (isResponding || !onDeny) return;
+    if (respondingRef.current || !onDeny) return;
+    const token = Symbol("approval-deny");
+    const requestId = approval.request_id;
+    respondingRef.current = token;
     setIsResponding(true);
     setSubmitError(null);
     try {
       await onDeny(approval.request_id);
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     } catch (error) {
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Approval action failed",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsResponding(false);
+      if (respondingRef.current === token) {
+        respondingRef.current = null;
+        if (requestIdRef.current === requestId) setIsResponding(false);
+      }
     }
-  }, [approval.request_id, isResponding, onDeny]);
+  }, [approval.request_id, onDeny]);
 
   const handleAlways = useCallback(async () => {
-    if (isResponding || !onAlways) return;
+    if (respondingRef.current || !onAlways) return;
+    const token = Symbol("approval-always");
+    const requestId = approval.request_id;
+    respondingRef.current = token;
     setIsResponding(true);
     setSubmitError(null);
     try {
       await onAlways(approval.request_id);
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
+      if (respondingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Approval action failed",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsResponding(false);
+      if (respondingRef.current === token) {
+        respondingRef.current = null;
+        if (requestIdRef.current === requestId) setIsResponding(false);
+      }
     }
-  }, [approval.request_id, isResponding, onAlways]);
+  }, [approval.request_id, onAlways]);
   /* v8 ignore stop */
 
   return (

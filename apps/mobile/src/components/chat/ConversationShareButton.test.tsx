@@ -1,6 +1,7 @@
 import React from "react";
 import { act } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Sharing from "expo-sharing";
 
 import {
   fileSystemEvents,
@@ -83,6 +84,36 @@ describe("ConversationShareButton", () => {
     expect(button.props.accessibilityState).toEqual({
       busy: false,
       disabled: false,
+    });
+  });
+
+  it("coalesces repeated share taps while the native sheet is pending", async () => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const share = vi.spyOn(Sharing, "shareAsync").mockReturnValue(pending);
+    const renderer = renderComponent(
+      <ConversationShareButton items={items} title="Release audit" partial={false} />,
+    );
+    const button = renderer.root.findByProps({
+      accessibilityLabel: "Share conversation as Markdown",
+    });
+
+    act(() => {
+      button.props.onPress();
+      button.props.onPress();
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(share).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolve();
+      await pending;
     });
   });
 });

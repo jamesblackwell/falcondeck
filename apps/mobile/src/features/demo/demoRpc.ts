@@ -110,6 +110,14 @@ function cancelDemoReply(threadId: string) {
   pendingReplies.delete(threadId)
 }
 
+/** Disconnecting demo mode must retire timers before its local snapshot is reset. */
+export function cancelAllDemoReplies() {
+  for (const timer of pendingReplies.values()) {
+    clearTimeout(timer)
+  }
+  pendingReplies.clear()
+}
+
 function markedThread(threadId: string, unread: boolean): ThreadSummary {
   return patchThread(threadId, {
     attention: { ...makeAttention(0), unread, level: unread ? 'unread' : 'none' },

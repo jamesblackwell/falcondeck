@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import { Pressable } from "react-native";
 import { Share2 } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -25,8 +25,10 @@ export const ConversationShareButton = memo(function ConversationShareButton({
 }) {
   const { theme } = useUnistyles();
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const share = useCallback(async () => {
-    if (busy || items.length === 0) return;
+    if (busyRef.current || items.length === 0) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       const markdown = conversationItemsToMarkdown(items, { title, partial });
@@ -44,9 +46,10 @@ export const ConversationShareButton = memo(function ConversationShareButton({
           : "Could not share this conversation.",
       );
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  }, [busy, items, onError, partial, title]);
+  }, [items, onError, partial, title]);
 
   const label = partial
     ? "Share loaded conversation as Markdown. Earlier messages are not loaded."

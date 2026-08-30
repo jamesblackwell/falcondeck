@@ -5,6 +5,10 @@ export class AudioBufferQueueSourceNode {
   connect = vi.fn()
   start = vi.fn()
   stop = vi.fn()
+  onBufferEnded: ((event: {
+    bufferId: string
+    isLastBufferInQueue: boolean
+  }) => void) | null = null
 }
 
 export class AudioBufferSourceNode {

@@ -100,6 +100,36 @@ describe('GoalSheet with no goal', () => {
     expect(textOf(r)).toContain('an objective is required to set a goal')
     expect(onClose).not.toHaveBeenCalled()
   })
+
+  it('coalesces repeated set-goal taps while the first update is pending', async () => {
+    let resolve!: () => void
+    const pending = new Promise<void>((done) => {
+      resolve = done
+    })
+    const onSetGoal = vi.fn(() => pending)
+    const r = renderComponent(
+      <GoalSheet goal={null} provider="codex" {...sheetDefaults} onSetGoal={onSetGoal} />,
+    )
+    act(() => {
+      inputLabelled(r, 'Objective').props.onChangeText('Ship the release')
+    })
+    const submit = buttonLabelled(r, 'Set goal')
+
+    act(() => {
+      submit.props.onPress()
+      submit.props.onPress()
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onSetGoal).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      resolve()
+      await pending
+    })
+  })
 })
 
 describe('GoalSheet with a goal', () => {

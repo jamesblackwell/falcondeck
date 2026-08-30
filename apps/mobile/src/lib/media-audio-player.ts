@@ -70,7 +70,11 @@ export class NativeMediaAudioPlayer {
     this.active = playback
     this.setState(key, 'loading')
 
-    void this.decode(url)
+    // Decomposing an inline data URL can throw before decodeAudioData returns
+    // its promise. Start on a promise boundary so every malformed tool result
+    // reaches the same retryable error state instead of escaping the tap.
+    void Promise.resolve()
+      .then(() => this.decode(url))
       .then((buffer) => {
         if (this.active !== playback || playback.generation !== generation) return
         const context = this.audioContext()

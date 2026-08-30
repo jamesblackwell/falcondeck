@@ -80,6 +80,24 @@ describe('imageInputs', () => {
     ])
   })
 
+  it('infers a safe image MIME type when the picker returns a blank value', () => {
+    expect(
+      imagePickerAssetsToImageInputs([
+        {
+          uri: 'file:///tmp/diagram.png',
+          fileName: 'diagram.png',
+          mimeType: '',
+          base64: 'abc123',
+        } as any,
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        mime_type: 'image/png',
+        url: 'data:image/png;base64,abc123',
+      }),
+    ])
+  })
+
   it('throws when photo permissions are denied', async () => {
     vi.mocked(requestMediaLibraryPermissionsAsync).mockResolvedValue({
       granted: false,

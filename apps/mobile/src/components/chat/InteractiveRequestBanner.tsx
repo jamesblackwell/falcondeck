@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { Check, HelpCircle, Lock } from "lucide-react-native";
@@ -84,15 +84,23 @@ const PlanApprovalBanner = memo(function PlanApprovalBanner({
   const { theme } = useUnistyles();
   const [feedback, setFeedback] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef<symbol | null>(null);
+  const requestIdRef = useRef(request.request_id);
+  requestIdRef.current = request.request_id;
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
     setFeedback("");
     setSubmitError(null);
+    submittingRef.current = null;
+    setIsSubmitting(false);
   }, [request.request_id]);
 
   async function submit(outcome: "approved" | "cancelled" | "abandoned") {
-    if (isSubmitting) return;
+    if (submittingRef.current) return;
+    const token = Symbol("plan-response");
+    const requestId = request.request_id;
+    submittingRef.current = token;
     setIsSubmitting(true);
     setSubmitError(null);
     try {
@@ -101,18 +109,23 @@ const PlanApprovalBanner = memo(function PlanApprovalBanner({
         outcome,
         feedback: outcome === "cancelled" ? feedback.trim() : undefined,
       });
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(
         outcome === "abandoned"
           ? Haptics.NotificationFeedbackType.Warning
           : Haptics.NotificationFeedbackType.Success,
       );
     } catch (error) {
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Failed to send your response",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsSubmitting(false);
+      if (submittingRef.current === token) {
+        submittingRef.current = null;
+        if (requestIdRef.current === requestId) setIsSubmitting(false);
+      }
     }
   }
 
@@ -221,6 +234,9 @@ const QuestionBanner = memo(function QuestionBanner({
   );
   const [questionIndex, setQuestionIndex] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef<symbol | null>(null);
+  const requestIdRef = useRef(request.request_id);
+  requestIdRef.current = request.request_id;
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -228,6 +244,8 @@ const QuestionBanner = memo(function QuestionBanner({
     setCustomAnswers({});
     setQuestionIndex(0);
     setSubmitError(null);
+    submittingRef.current = null;
+    setIsSubmitting(false);
   }, [request.request_id]);
 
   useEffect(() => {
@@ -257,36 +275,52 @@ const QuestionBanner = memo(function QuestionBanner({
   );
 
   async function submit() {
-    if (!allAnswered || isSubmitting) return;
+    if (!allAnswered || submittingRef.current) return;
+    const token = Symbol("question-response");
+    const requestId = request.request_id;
+    submittingRef.current = token;
     setIsSubmitting(true);
     setSubmitError(null);
     try {
       await onRespond({ kind: "question", answers });
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Failed to send your response",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsSubmitting(false);
+      if (submittingRef.current === token) {
+        submittingRef.current = null;
+        if (requestIdRef.current === requestId) setIsSubmitting(false);
+      }
     }
   }
 
   async function declineElicitation() {
-    if (isSubmitting) return;
+    if (submittingRef.current) return;
+    const token = Symbol("elicitation-decline");
+    const requestId = request.request_id;
+    submittingRef.current = token;
     setIsSubmitting(true);
     setSubmitError(null);
     try {
       await onRespond({ kind: "approval", decision: "deny" });
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     } catch (error) {
+      if (submittingRef.current !== token || requestIdRef.current !== requestId) return;
       setSubmitError(
         error instanceof Error ? error.message : "Failed to send your response",
       );
       void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
-      setIsSubmitting(false);
+      if (submittingRef.current === token) {
+        submittingRef.current = null;
+        if (requestIdRef.current === requestId) setIsSubmitting(false);
+      }
     }
   }
 

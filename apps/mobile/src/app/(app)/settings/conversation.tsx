@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { ScrollView } from 'react-native'
 
 import {
@@ -31,10 +31,12 @@ export default function ConversationSettingsScreen() {
   const preferences = normalizePreferences(useSessionStore((state) => state.snapshot?.preferences))
   const setPreferences = useSessionStore((state) => state.setPreferences)
   const [isUpdating, setIsUpdating] = useState(false)
+  const updatingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
 
   const update = useCallback(async (conversation: UpdateConversationPreferences) => {
-    if (isUpdating) return
+    if (updatingRef.current) return
+    updatingRef.current = true
     setIsUpdating(true)
     setError(null)
     try {
@@ -43,9 +45,10 @@ export default function ConversationSettingsScreen() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Failed to update conversation settings')
     } finally {
+      updatingRef.current = false
       setIsUpdating(false)
     }
-  }, [isUpdating, setPreferences])
+  }, [setPreferences])
 
   const current = preferences.conversation
   return (

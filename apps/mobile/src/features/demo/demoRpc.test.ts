@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useSessionStore } from '@/store/session-store'
+import { useRelayStore } from '@/store/relay-store'
 
 import { demoSnapshot, demoThreadItems, DEMO_SESSION_ID } from './demoData'
 import { DEMO_UNAVAILABLE_MESSAGE, handleDemoRpc, isDemoSession } from './demoRpc'
@@ -75,6 +76,16 @@ describe('demo rpc', () => {
 
     expect(useSessionStore.getState().threadItems[THREAD_ID]).toHaveLength(before)
     expect(threadById(THREAD_ID)?.status).toBe('idle')
+  })
+
+  it('cancels a pending reply when the demo session disconnects', async () => {
+    await handleDemoRpc('turn.start', { thread_id: THREAD_ID, inputs: [] })
+    useRelayStore.setState({ sessionId: DEMO_SESSION_ID })
+
+    await useRelayStore.getState().disconnect()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(useSessionStore.getState().snapshot).toBeNull()
   })
 
   it('creates a thread in the demo workspace', async () => {

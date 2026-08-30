@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
 import { Archive, ChevronRight, Pencil, Pin, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -41,26 +41,39 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   const [pendingAction, setPendingAction] = useState<
     'rename' | 'suggest' | 'pin' | 'pin-in-project' | 'unread' | null
   >(null)
+  const pendingActionRef = useRef<typeof pendingAction>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const handleTogglePin = useCallback(async () => {
-    void Haptics.selectionAsync()
-    setPendingAction('pin')
+  const beginAction = useCallback((action: Exclude<typeof pendingAction, null>) => {
+    if (pendingActionRef.current) return false
+    pendingActionRef.current = action
+    setPendingAction(action)
     setActionError(null)
+    return true
+  }, [])
+
+  const finishAction = useCallback((action: Exclude<typeof pendingAction, null>) => {
+    if (pendingActionRef.current !== action) return
+    pendingActionRef.current = null
+    setPendingAction(null)
+  }, [])
+
+  const handleTogglePin = useCallback(async () => {
+    if (!beginAction('pin')) return
+    void Haptics.selectionAsync()
     try {
       await setThreadPinned(workspaceId, thread.id, !thread.is_pinned)
       onClose()
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Failed to update pin')
     } finally {
-      setPendingAction(null)
+      finishAction('pin')
     }
-  }, [onClose, setThreadPinned, thread.id, thread.is_pinned, workspaceId])
+  }, [beginAction, finishAction, onClose, setThreadPinned, thread.id, thread.is_pinned, workspaceId])
 
   const handleTogglePinInProject = useCallback(async () => {
+    if (!beginAction('pin-in-project')) return
     void Haptics.selectionAsync()
-    setPendingAction('pin-in-project')
-    setActionError(null)
     try {
       await setThreadPinnedInProject(
         workspaceId,
@@ -71,9 +84,11 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Failed to update pin')
     } finally {
-      setPendingAction(null)
+      finishAction('pin-in-project')
     }
   }, [
+    beginAction,
+    finishAction,
     onClose,
     setThreadPinnedInProject,
     thread.id,
@@ -88,9 +103,8 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
     !thread.attention.unread && thread.attention.last_agent_activity_seq > 0
 
   const handleMarkUnread = useCallback(async () => {
+    if (!beginAction('unread')) return
     void Haptics.selectionAsync()
-    setPendingAction('unread')
-    setActionError(null)
     try {
       await markThreadUnread(
         workspaceId,
@@ -103,9 +117,11 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
         error instanceof Error ? error.message : 'Failed to mark as unread',
       )
     } finally {
-      setPendingAction(null)
+      finishAction('unread')
     }
   }, [
+    beginAction,
+    finishAction,
     markThreadUnread,
     onClose,
     thread.attention.last_agent_activity_seq,
@@ -126,22 +142,20 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
       return
     }
 
-    setPendingAction('rename')
-    setActionError(null)
+    if (!beginAction('rename')) return
     try {
       await renameThread(workspaceId, thread.id, nextTitle)
       onClose()
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Failed to rename thread')
     } finally {
-      setPendingAction(null)
+      finishAction('rename')
     }
-  }, [onClose, renameThread, renameValue, thread.id, workspaceId])
+  }, [beginAction, finishAction, onClose, renameThread, renameValue, thread.id, workspaceId])
 
   const handleSuggestTitle = useCallback(async () => {
+    if (!beginAction('suggest')) return
     void Haptics.selectionAsync()
-    setPendingAction('suggest')
-    setActionError(null)
     try {
       const title = await suggestThreadTitle(workspaceId, thread.id)
       setRenameValue(title)
@@ -150,9 +164,9 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
         error instanceof Error ? error.message : "Couldn't generate a title",
       )
     } finally {
-      setPendingAction(null)
+      finishAction('suggest')
     }
-  }, [suggestThreadTitle, thread.id, workspaceId])
+  }, [beginAction, finishAction, suggestThreadTitle, thread.id, workspaceId])
 
   const startRename = useCallback(() => {
     void Haptics.selectionAsync()
@@ -223,7 +237,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             accessibilityRole="button"
             accessibilityLabel={thread.is_pinned ? 'Unpin thread' : 'Pin thread'}
             onPress={() => void handleTogglePin()}
-            disabled={pendingAction === 'pin' || pendingAction === 'pin-in-project'}
+            disabled={pendingAction !== null}
           >
             <View style={styles.itemLabel}>
               <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
@@ -240,7 +254,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
                 thread.is_pinned_in_project ? 'Unpin from project' : 'Pin in project'
               }
               onPress={() => void handleTogglePinInProject()}
-              disabled={pendingAction === 'pin' || pendingAction === 'pin-in-project'}
+              disabled={pendingAction !== null}
             >
               <View style={styles.itemLabel}>
                 <Pin size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
@@ -270,7 +284,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               accessibilityRole="button"
               accessibilityLabel="Mark thread as unread"
               onPress={() => void handleMarkUnread()}
-              disabled={pendingAction === 'unread'}
+              disabled={pendingAction !== null}
             >
               <View style={styles.itemLabel}>
                 <View style={styles.unreadDot} />

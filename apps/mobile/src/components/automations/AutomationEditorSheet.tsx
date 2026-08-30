@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { ScrollView, Switch, TextInput, View, useWindowDimensions } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -44,6 +44,7 @@ export const AutomationEditorSheet = memo(function AutomationEditorSheet({
   const [scheduleDirty, setScheduleDirty] = useState(false)
   const [validation, setValidation] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const busyRef = useRef(false)
 
   const error = useMemo(() => automationDraftError(draft), [draft])
   const elevated = useMemo(() => automationDraftIsElevated(draft), [draft])
@@ -65,11 +66,13 @@ export const AutomationEditorSheet = memo(function AutomationEditorSheet({
   }, [])
 
   const submit = useCallback(async () => {
+    if (busyRef.current) return
     const currentError = automationDraftError(draft)
     if (currentError) {
       setValidation(currentError)
       return
     }
+    busyRef.current = true
     setValidation(null)
     setIsBusy(true)
     try {
@@ -87,6 +90,7 @@ export const AutomationEditorSheet = memo(function AutomationEditorSheet({
     } catch (submitError) {
       setValidation(submitError instanceof Error ? submitError.message : String(submitError))
     } finally {
+      busyRef.current = false
       setIsBusy(false)
     }
   }, [draft, onSubmit, scheduleDirty, target])

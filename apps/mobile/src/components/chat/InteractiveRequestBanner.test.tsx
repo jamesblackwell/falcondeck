@@ -2,6 +2,7 @@ import React from "react";
 import { act } from "react-test-renderer";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Haptics from "expo-haptics";
+import { Linking } from "react-native";
 
 import type { InteractiveRequest } from "@falcondeck/client-core";
 
@@ -95,6 +96,37 @@ describe("InteractiveRequestBanner", () => {
       kind: "plan_approval",
       outcome: "approved",
       feedback: undefined,
+    });
+  });
+
+  it("coalesces repeated plan approval taps while the response is pending", async () => {
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => {
+      resolve = done;
+    });
+    const onRespond = vi.fn(() => pending);
+    const renderer = renderComponent(
+      <InteractiveRequestBanner
+        request={request({
+          kind: "plan_approval",
+          title: "Review implementation plan",
+          detail: "Implement the daemon bridge.",
+          questions: [],
+        })}
+        onRespond={onRespond}
+      />,
+    );
+    const approve = pressableWithText(renderer, "Approve and implement")!;
+
+    act(() => {
+      approve.props.onPress();
+      approve.props.onPress();
+    });
+
+    expect(onRespond).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolve();
+      await pending;
     });
   });
 
@@ -409,6 +441,30 @@ describe("InteractiveRequestBanner", () => {
       kind: "approval",
       decision: "allow",
     });
+  });
+
+  it("does not reopen an MCP sign-in URL when the user taps Continue", async () => {
+    const openUrl = vi.spyOn(Linking, "openURL").mockResolvedValue(undefined);
+    const renderer = renderComponent(
+      <InteractiveRequestBanner
+        request={request({
+          method: "mcpServer/elicitation/request",
+          kind: "approval",
+          approval_decisions: ["allow", "deny"],
+          title: "Sign in to cloudflare",
+          path: "https://dash.cloudflare.com/oauth/authorize?client_id=abc",
+          questions: [],
+        })}
+        onRespond={vi.fn(async () => undefined)}
+      />,
+    );
+
+    await act(async () => {
+      pressableWithText(renderer, "Continue")?.props.onPress();
+      await Promise.resolve();
+    });
+
+    expect(openUrl).not.toHaveBeenCalled();
   });
 
   it("lets form elicitation be declined", async () => {

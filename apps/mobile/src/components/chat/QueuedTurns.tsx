@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Image } from 'expo-image'
@@ -196,17 +196,24 @@ export const QueuedTurns = memo(function QueuedTurns({
   getAttachmentPreview,
 }: QueuedTurnsProps) {
   const [openId, setOpenId] = useState<string | null>(null)
-  const [pendingId, setPendingId] = useState<string | null>(null)
+  const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set())
+  const pendingIdsRef = useRef(new Set<string>())
 
   const open = queuedTurns.find((queued) => queued.id === openId) ?? null
 
-  const trackAction = useCallback((queuedId: string, action: Promise<void>) => {
-    setPendingId(queuedId)
+  const trackAction = useCallback((queuedId: string, action: () => Promise<void>) => {
+    if (pendingIdsRef.current.has(queuedId)) return
+    pendingIdsRef.current.add(queuedId)
+    setPendingIds(new Set(pendingIdsRef.current))
     // A failed action leaves the message queued daemon-side, so the row
     // stays put either way; the error surfaces through the relay banner.
-    void action.catch(() => {}).finally(() => {
-      setPendingId((current) => (current === queuedId ? null : current))
-    })
+    void Promise.resolve()
+      .then(action)
+      .catch(() => {})
+      .finally(() => {
+        pendingIdsRef.current.delete(queuedId)
+        setPendingIds(new Set(pendingIdsRef.current))
+      })
   }, [])
 
   const runAction = useCallback(
@@ -225,7 +232,7 @@ export const QueuedTurns = memo(function QueuedTurns({
               onPress: (text?: string) => {
                 const next = text?.trim()
                 if (!next) return
-                trackAction(queued.id, onEdit(queued.id, next))
+                trackAction(queued.id, () => onEdit(queued.id, next))
               },
             },
           ],
@@ -234,7 +241,12 @@ export const QueuedTurns = memo(function QueuedTurns({
         )
         return
       }
-      trackAction(queued.id, value === 'steer' ? onSteer(queued.id) : onRemove(queued.id))
+      trackAction(
+        queued.id,
+        value === 'steer'
+          ? () => onSteer(queued.id)
+          : () => onRemove(queued.id),
+      )
     },
     [onEdit, onRemove, onSteer, trackAction],
   )
@@ -249,12 +261,12 @@ export const QueuedTurns = memo(function QueuedTurns({
             key={queued.id}
             queued={queued}
             canSteer={canSteer}
-            isPending={pendingId === queued.id}
+            isPending={pendingIds.has(queued.id)}
             isFirst={index === 0}
             getAttachmentPreview={getAttachmentPreview}
             onOpenActions={() => setOpenId(queued.id)}
-            onSteer={() => trackAction(queued.id, onSteer(queued.id))}
-            onRemove={() => trackAction(queued.id, onRemove(queued.id))}
+            onSteer={() => trackAction(queued.id, () => onSteer(queued.id))}
+            onRemove={() => trackAction(queued.id, () => onRemove(queued.id))}
           />
         ))}
       </View>

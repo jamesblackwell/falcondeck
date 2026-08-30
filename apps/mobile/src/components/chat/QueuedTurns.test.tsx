@@ -219,6 +219,39 @@ describe('QueuedTurns', () => {
     expect(onRemove).toHaveBeenCalledWith('queued-1')
   })
 
+  it('coalesces repeated remove taps while the first mutation is pending', async () => {
+    let resolve!: () => void
+    const pending = new Promise<void>((done) => {
+      resolve = done
+    })
+    const onRemove = vi.fn(() => pending)
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued()]}
+        canSteer
+        onRemove={onRemove}
+        onSteer={noop}
+        onEdit={noop}
+      />,
+    )
+
+    act(() => {
+      const label = 'Remove queued message: Also update the changelog'
+      pressButton(r, label)
+      pressButton(r, label)
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onRemove).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      resolve()
+      await pending
+    })
+  })
+
   it('disables the row steer button rather than hiding it', () => {
     const r = renderComponent(
       <QueuedTurns

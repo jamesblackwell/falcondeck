@@ -10,19 +10,41 @@ function imageInputId(index: number) {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${index}`
 }
 
+const SAFE_PICKER_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+])
+
+function pickerImageMimeType(asset: ImagePicker.ImagePickerAsset): string {
+  const reported = asset.mimeType?.trim().toLowerCase()
+  if (reported && SAFE_PICKER_MIME_TYPES.has(reported)) {
+    return reported === 'image/jpg' ? 'image/jpeg' : reported
+  }
+
+  const path = asset.fileName?.trim() || asset.uri
+  const extension = path.split(/[?#]/, 1)[0]?.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase()
+  if (extension === 'png') return 'image/png'
+  if (extension === 'gif') return 'image/gif'
+  if (extension === 'webp') return 'image/webp'
+  return 'image/jpeg'
+}
+
 export function imagePickerAssetsToImageInputs(
   assets: ImagePicker.ImagePickerAsset[],
 ): ImageInput[] {
   return assets.flatMap((asset, index) => {
     if (!asset.base64) return []
 
-    const mimeType = asset.mimeType ?? 'image/jpeg'
+    const mimeType = pickerImageMimeType(asset)
     const fallbackName = asset.uri?.split('/').pop()?.trim() || null
 
     return [{
       type: 'image',
       id: imageInputId(index),
-      name: asset.fileName ?? fallbackName,
+      name: asset.fileName?.trim() || fallbackName,
       mime_type: mimeType,
       url: `data:${mimeType};base64,${asset.base64}`,
       // The picker URI only exists on this device; the daemon materializes

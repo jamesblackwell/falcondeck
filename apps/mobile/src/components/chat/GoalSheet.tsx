@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useRef, useState } from 'react'
 import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Pause, Play, Square } from 'lucide-react-native'
@@ -40,14 +40,18 @@ export const GoalSheet = memo(function GoalSheet({
   const [objective, setObjective] = useState('')
   const [budget, setBudget] = useState('')
   const [isPending, setIsPending] = useState(false)
+  const pendingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const elapsed = useGoalElapsedLabel(goal?.started_at ?? null)
 
   const run = useCallback(
-    (action: Promise<void>) => {
+    (action: () => Promise<void>) => {
+      if (pendingRef.current) return
+      pendingRef.current = true
       setIsPending(true)
       setError(null)
-      void action
+      void Promise.resolve()
+        .then(action)
         .then(() => {
           onClose()
         })
@@ -55,6 +59,7 @@ export const GoalSheet = memo(function GoalSheet({
           setError(e instanceof Error ? e.message : 'Goal update failed')
         })
         .finally(() => {
+          pendingRef.current = false
           setIsPending(false)
         })
     },
@@ -100,7 +105,7 @@ export const GoalSheet = memo(function GoalSheet({
                   )
                 }
                 onPress={() =>
-                  run(onSetGoalStatus(goal.status === 'paused' ? 'active' : 'paused'))
+                  run(() => onSetGoalStatus(goal.status === 'paused' ? 'active' : 'paused'))
                 }
               />
             ) : null}
@@ -109,7 +114,7 @@ export const GoalSheet = memo(function GoalSheet({
               label="Stop goal"
               disabled={isPending}
               icon={<Square size={theme.iconSize.sm} color={theme.colors.danger.default} />}
-              onPress={() => run(onClearGoal())}
+              onPress={() => run(onClearGoal)}
             />
           </View>
         </View>
@@ -145,7 +150,7 @@ export const GoalSheet = memo(function GoalSheet({
             label={isPending ? 'Setting…' : 'Set goal'}
             disabled={!canSubmit}
             loading={isPending}
-            onPress={() => run(onSetGoal(objective.trim(), parseTokenBudget(budget)))}
+            onPress={() => run(() => onSetGoal(objective.trim(), parseTokenBudget(budget)))}
           />
         </View>
       )}

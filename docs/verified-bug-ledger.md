@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 84 / 100
-- Product defects: 81
+- Verified and fixed: 100 / 100
+- Product defects: 97
 - Test-infrastructure defects: 3
 
 ## Verification Standard
@@ -776,6 +776,150 @@ Each entry records:
 - Verification: The session-1 response yields session 2's current skill rather than the stale skill; the complete mobile suite passes all 962 tests.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
 
+### 085 — Demo replies fire after disconnect and throw against the reset store
+
+- Kind: Product defect
+- Reproduction: A demo RPC test scheduled a canned reply, disconnected the demo session, and advanced its timer; the timer rejected with “That needs a paired desktop” after the session snapshot had been reset.
+- Root cause: Demo reply timers were module-owned and disconnect cleared session state without cancelling them.
+- Fix: Add a full demo-reply cancellation boundary and invoke it before resetting a demo session.
+- Verification: Advancing timers after disconnect is inert and the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 086 — Blank mobile picker MIME values create invalid image data URLs
+
+- Kind: Product defect
+- Reproduction: A picker asset named `diagram.png` with `mimeType: ""` produced `mime_type: ""` and `data:;base64,abc123`.
+- Root cause: Nullish fallback treated a blank MIME string as authoritative even though Expo can return blank metadata.
+- Fix: Allow only provider-safe reported image MIME types, otherwise infer from a safe filename/URI extension and fall back to JPEG.
+- Verification: The asset now produces `image/png` metadata and `data:image/png;base64,...`; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 087 — Malformed inline audio throws synchronously from the mobile tap handler
+
+- Kind: Product defect
+- Reproduction: Calling media playback with `data:audio/wav;base64,a` threw `InvalidCharacterError` directly from `toggle()` instead of entering its documented retryable error state.
+- Root cause: Inline base64 decoding ran synchronously before the promise chain and its catch boundary existed.
+- Fix: Start decode work on a promise boundary so URL parsing, base64 decoding, and native decoding share one failure path.
+- Verification: `toggle()` no longer throws and the player transitions to `error`; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 088 — Realtime audio loses ownership before the native queue drains
+
+- Kind: Product defect
+- Reproduction: After a non-interrupted realtime end, two microtasks removed the playback state; starting a replacement session could no longer stop the still-playing native queue.
+- Root cause: The player equated completion of its decode/enqueue promise chain with completion of native audio output.
+- Fix: Retain the queue until `onBufferEnded` reports its final buffer, coordinate that signal with the enqueue chain and server end, then stop and release the queue before suspending the idle audio context.
+- Verification: A replacement session remains able to stop the prior queue, and a final native buffer event releases naturally drained playback; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 089 — One native notification lookup failure permanently loses a cold-start tap
+
+- Kind: Product defect
+- Reproduction: `getLastNotificationResponseAsync()` rejected once and returned a valid response on the next call; the second processing attempt never queried native state or selected the destination.
+- Root cause: The one-shot processed flag was latched before the fallible native lookup and never reset on failure.
+- Fix: Release the latch in the failure path so startup can retry, while the existing persisted notification identifier still prevents duplicate navigation after partial success.
+- Verification: The second attempt queries native state and selects the expected thread; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 090 — Rapid queued-message taps send duplicate mutations
+
+- Kind: Product defect
+- Reproduction: Two immediate Remove taps invoked the queued-turn mutation callback twice before React painted the row as disabled.
+- Root cause: The action promise was created before the component recorded pending state, and a single state-held pending ID could not synchronously exclude repeated work.
+- Fix: Guard each queued ID in a ref before creating its action promise and mirror a pending-ID set into UI state.
+- Verification: Two immediate taps invoke exactly one mutation while distinct rows can still progress independently; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 091 — Rapid thread-option taps send duplicate updates
+
+- Kind: Product defect
+- Reproduction: Two immediate Pin taps issued two `thread.update` RPCs while the first response was pending.
+- Root cause: Thread options relied on an asynchronous `pendingAction` render and none of its handlers synchronously claimed action ownership.
+- Fix: Add a ref-backed action lock shared by pin, project pin, unread, rename, and title suggestion handlers, and disable all menu mutations while it is held.
+- Verification: The repeated Pin interaction issues one RPC; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 092 — Rapid goal-sheet taps create duplicate goal mutations
+
+- Kind: Product defect
+- Reproduction: Two immediate Set goal taps invoked `onSetGoal` twice before the loading render.
+- Root cause: The mutation promise was eagerly created before `run()` set pending state, and pending state itself was not synchronous within the tap frame.
+- Fix: Pass a thunk into a ref-guarded runner, claim the lock before constructing the promise, and use it for set, pause/resume, and clear.
+- Verification: The double tap invokes one goal mutation; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 093 — Interactive request controls can submit the same answer twice
+
+- Kind: Product defect
+- Reproduction: Two immediate “Approve and implement” taps called the plan-response callback twice while its first promise was pending.
+- Root cause: Approval, plan, question, and elicitation controls used render-delayed booleans as their only exclusion mechanism.
+- Fix: Claim token/ref locks synchronously and bind completion feedback to the request ID and token that owns it, preventing both duplicates and stale feedback on replacement requests.
+- Verification: Repeated approval taps produce one response and all 15 interactive-banner regressions pass within the 978-test suite.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 094 — MCP Continue reopens the sign-in URL while approving
+
+- Kind: Product defect
+- Reproduction: Tapping Continue on a URL elicitation called `Linking.openURL` even though the banner already exposes a separate sign-in link and instructs the user to return before continuing.
+- Root cause: The allow handler coupled authorization completion to another browser launch.
+- Fix: Keep URL opening on the explicit link only; Continue now sends the allow response without navigating away again.
+- Verification: Continue performs no URL handoff and still emits the approval response; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 095 — Rapid conversation-share taps open two native share sheets
+
+- Kind: Product defect
+- Reproduction: Replaying the corrected regression against the pre-fix component called `shareAsync` twice for two taps in the same render frame.
+- Root cause: The handler consulted only render-delayed `busy` state before preparing its temporary Markdown file and native handoff.
+- Fix: Claim a ref-backed share lock before any async preparation and release it in `finally`.
+- Verification: The red-before replay observed two native calls; the fixed regression observes one and the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 096 — Rapid artifact-share taps open two native share sheets
+
+- Kind: Product defect
+- Reproduction: Replaying the corrected artifact regression against the pre-fix component called `shareAsync` twice while the first native sheet was pending.
+- Root cause: Artifact sharing also used render-delayed `busy` state as its only guard.
+- Fix: Add a synchronous ref lock around artifact preparation and native sharing.
+- Verification: The red-before replay observed two native calls; the fixed regression observes one and the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 097 — Rapid conversation-setting taps send duplicate preference RPCs
+
+- Kind: Product defect
+- Reproduction: Two immediate taps on Expanded sent two `preferences.update` RPCs while the first was unresolved.
+- Root cause: The screen checked a closure-captured React state boolean that stayed false until the next render.
+- Fix: Claim a synchronous update ref before sending and keep React state as the presentation layer.
+- Verification: Repeated taps issue one RPC; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 098 — Rapid notification-setting taps send duplicate preference RPCs
+
+- Kind: Product defect
+- Reproduction: Two immediate push-toggle events sent two `preferences.update` RPCs before the switch disabled.
+- Root cause: The notification screen independently used the same render-delayed state exclusion pattern.
+- Fix: Add a synchronous update ref around notification preference mutations.
+- Verification: Repeated toggle events issue one RPC; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 099 — Device-disabled push notifications render as enabled
+
+- Kind: Product defect
+- Reproduction: With daemon notifications enabled and the phone's persisted push preference disabled, the switch initialized off and then its effect changed it to on.
+- Root cause: Synchronization after mount copied only the daemon preference, discarding the device-local delivery gate used by registration logic.
+- Fix: Derive the displayed master switch from both daemon enablement and `isPushEnabled()` on synchronization and rollback.
+- Verification: The switch remains off for the device-disabled state; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 100 — Rapid automation-editor taps create duplicate definitions
+
+- Kind: Product defect
+- Reproduction: Two immediate Create automation taps called `onSubmit` twice with the same valid draft while the first mutation was pending.
+- Root cause: The editor displayed `isBusy` but did not synchronously check or claim action ownership before invoking its callback.
+- Fix: Add a ref-backed submission lock set before the mutation and released in `finally`.
+- Verification: The repeated create interaction invokes one submission; the complete mobile suite passes all 979 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
 ## Pending Verification
 
-None yet.
+Goal reached: 100 verified fixes. Continue this ledger if a new target is established.

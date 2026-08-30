@@ -11,6 +11,10 @@ const { mockQueueNode } = AudioApi as typeof AudioApi & {
     enqueueBuffer: ReturnType<typeof vi.fn>
     start: ReturnType<typeof vi.fn>
     stop: ReturnType<typeof vi.fn>
+    onBufferEnded: ((event: {
+      bufferId: string
+      isLastBufferInQueue: boolean
+    }) => void) | null
   }
 }
 
@@ -35,7 +39,10 @@ function envelope(
 }
 
 describe('NativeRealtimeAudioPlayer', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockQueueNode.onBufferEnded = null
+  })
 
   it('decodes chunks in order and starts one native queue', async () => {
     const player = new NativeRealtimeAudioPlayer()
@@ -59,6 +66,47 @@ describe('NativeRealtimeAudioPlayer', () => {
       interrupted: true,
     }))
 
+    expect(mockQueueNode.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps ending playback stoppable until the native queue drains', async () => {
+    const player = new NativeRealtimeAudioPlayer()
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-1' }))
+    player.handleEvent(envelope({ type: 'realtime-audio-delta', audio: chunk }))
+    await vi.waitFor(() => expect(mockQueueNode.start).toHaveBeenCalledTimes(1))
+
+    player.handleEvent(envelope({
+      type: 'realtime-audio-ended',
+      reason: null,
+      interrupted: false,
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-2' }))
+
+    expect(mockQueueNode.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases naturally drained playback on the final native buffer event', async () => {
+    const player = new NativeRealtimeAudioPlayer()
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-1' }))
+    player.handleEvent(envelope({ type: 'realtime-audio-delta', audio: chunk }))
+    await vi.waitFor(() => expect(mockQueueNode.start).toHaveBeenCalledTimes(1))
+
+    player.handleEvent(envelope({
+      type: 'realtime-audio-ended',
+      reason: null,
+      interrupted: false,
+    }))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(mockQueueNode.onBufferEnded).toBeTypeOf('function')
+    mockQueueNode.onBufferEnded?.({ bufferId: '1', isLastBufferInQueue: true })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mockQueueNode.stop).toHaveBeenCalledTimes(1)
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-2' }))
     expect(mockQueueNode.stop).toHaveBeenCalledTimes(1)
   })
 })

@@ -48,7 +48,11 @@ import {
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
-import { handleDemoRpc, isDemoSession } from '@/features/demo/demoRpc'
+import {
+  cancelAllDemoReplies,
+  handleDemoRpc,
+  isDemoSession,
+} from '@/features/demo/demoRpc'
 import { RELAY_TRANSPORT_ERRORS } from '@/lib/connection-copy'
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken } from '@/lib/push-notifications'
@@ -578,6 +582,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     // hold the client token the call needs. Fire-and-forget — clearPushToken
     // never throws, and unpairing must not block on the network.
     const { relayUrl, sessionId, deviceId } = get()
+    if (isDemoSession(sessionId)) {
+      cancelAllDemoReplies()
+    }
     if (sessionId && deviceId && _clientToken) {
       void clearPushToken(relayUrl, sessionId, deviceId, _clientToken)
       void removeOwnTrustedDevice(relayUrl, sessionId, deviceId, _clientToken)

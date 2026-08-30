@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useRef, useState } from "react";
 import { Pressable, View } from "react-native";
 import { Share2 } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
@@ -21,9 +21,11 @@ export const ArtifactShareButton = memo(function ArtifactShareButton({
 }) {
   const { theme } = useUnistyles();
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const share = useCallback(async () => {
-    if (busy) return;
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -41,9 +43,10 @@ export const ArtifactShareButton = memo(function ArtifactShareButton({
           : "Could not share this artifact.",
       );
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
-  }, [busy, byteSize, dataUrl, filename, mimeType, text]);
+  }, [byteSize, dataUrl, filename, mimeType, text]);
 
   return (
     <View style={styles.action}>
