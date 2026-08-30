@@ -11,7 +11,7 @@
  */
 import { memo, useCallback, useMemo, type ReactElement } from "react";
 import { Alert } from "react-native";
-import { usePathname, useRouter, type Href } from "expo-router";
+import { usePathname, useRouter } from "expo-router";
 import { DrawerActions } from "@react-navigation/native";
 import {
   useDrawerStatus,
@@ -36,9 +36,10 @@ export function SidebarDrawerContent({
   const pathname = usePathname();
   const isOpen = useDrawerStatus() === "open";
   const settingsOpen =
-    pathname === "/settings" || pathname.startsWith("/settings/");
-  const automationsOpen =
-    pathname === "/automations" || pathname.startsWith("/automations/");
+    pathname === "/settings" ||
+    pathname.startsWith("/settings/") ||
+    pathname === "/automations" ||
+    pathname.startsWith("/automations/");
   const snapshot = useSessionStore((s) => s.snapshot);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
@@ -119,11 +120,6 @@ export function SidebarDrawerContent({
     handleClose();
   }, [handleClose, router]);
 
-  const handleOpenAutomations = useCallback(() => {
-    router.navigate("/(app)/automations" as Href);
-    handleClose();
-  }, [handleClose, router]);
-
   return (
     <SidebarFreeze isOpen={isOpen}>
       <SidebarView
@@ -135,8 +131,6 @@ export function SidebarDrawerContent({
       onNewChat={handleNewChat}
       onOpenSettings={handleOpenSettings}
       settingsOpen={settingsOpen}
-      onOpenAutomations={handleOpenAutomations}
-      automationsOpen={automationsOpen}
       onClose={handleClose}
       threadTagsById={threadTags.byThreadId}
       threadTagOptions={threadTags.tags}

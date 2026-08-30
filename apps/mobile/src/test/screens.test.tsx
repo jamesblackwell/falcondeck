@@ -265,10 +265,13 @@ describe('mobile app screens', () => {
     useRelayStore.setState({ connectionStatus: 'encrypted', isEncrypted: true })
     const renderer = renderComponent(<SettingsScreen />)
     expect(textOf(renderer)).toContain('Connections')
+    expect(textOf(renderer)).toContain('Automations')
     expect(textOf(renderer)).toContain('Appearance')
     expect(textOf(renderer)).toContain('Conversation')
     expect(textOf(renderer)).toContain('Notifications')
     expect(textOf(renderer)).toContain('About FalconDeck')
+    renderer.root.findByProps({ accessibilityLabel: 'Automations' }).props.onPress()
+    expect(routerMock.push).toHaveBeenCalledWith('/(app)/automations')
   })
 
   it('renders connection details', () => {

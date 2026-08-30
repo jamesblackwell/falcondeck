@@ -1,6 +1,15 @@
 import { ScrollView } from 'react-native'
 import { useRouter, type Href } from 'expo-router'
-import { Bell, Gauge, Info, MessageSquareText, Mic, MonitorCog, Palette } from 'lucide-react-native'
+import {
+  Bell,
+  CalendarClock,
+  Gauge,
+  Info,
+  MessageSquareText,
+  Mic,
+  MonitorCog,
+  Palette,
+} from 'lucide-react-native'
 import { useUnistyles } from 'react-native-unistyles'
 
 import { isDaemonRpcReady, normalizePreferences } from '@falcondeck/client-core'
@@ -64,6 +73,17 @@ export default function SettingsScreen() {
           )}
           icon={<MonitorCog size={theme.iconSize.sm} color={theme.colors.info.default} />}
           onPress={() => router.push('/(app)/settings/connections')}
+        />
+        <SettingsRow
+          label="Automations"
+          detail="Scheduled agent tasks"
+          icon={
+            <CalendarClock
+              size={theme.iconSize.sm}
+              color={theme.colors.accent.default}
+            />
+          }
+          onPress={() => router.push('/(app)/automations' as Href)}
         />
       </SettingsSection>
 

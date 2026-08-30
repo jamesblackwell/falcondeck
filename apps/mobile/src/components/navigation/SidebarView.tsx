@@ -3,7 +3,6 @@ import {
   useCallback,
   useMemo,
   useState,
-  type ComponentType,
   type ReactNode,
 } from "react";
 import { Pressable, View } from "react-native";
@@ -13,7 +12,6 @@ import Animated from "react-native-reanimated";
 import { FlashList } from "@shopify/flash-list";
 import {
   ArrowUpDown,
-  CalendarClock,
   ChevronDown,
   FolderClosed,
   FolderOpen,
@@ -80,8 +78,6 @@ interface SidebarViewProps {
   onNewChat?: () => Promise<void> | void;
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
-  onOpenAutomations?: () => void;
-  automationsOpen?: boolean;
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void;
   threadTagsById?: Record<string, ThreadTag[]>;
@@ -148,48 +144,7 @@ const CollapsibleRow = memo(function CollapsibleRow({
   );
 });
 
-type SidebarNavIcon = ComponentType<{ size?: number; color?: string }>;
-
-const SidebarNavRow = memo(function SidebarNavRow({
-  icon: Icon,
-  label,
-  selected = false,
-  onPress,
-  accessibilityHint,
-}: {
-  icon: SidebarNavIcon;
-  label: string;
-  selected?: boolean;
-  onPress: () => void;
-  accessibilityHint?: string;
-}) {
-  const { theme } = useUnistyles();
-  const color = selected ? theme.colors.fg.primary : theme.colors.fg.secondary;
-
-  return (
-    <Pressable
-      style={({ pressed }) => [
-        styles.navRow,
-        selected ? styles.navRowSelected : undefined,
-        pressed ? styles.navRowPressed : undefined,
-      ]}
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityHint={accessibilityHint}
-      accessibilityState={{ selected }}
-    >
-      <Icon size={theme.iconSize.sm} color={color} />
-      <Text
-        variant="label"
-        color={selected ? "primary" : "secondary"}
-        weight="medium"
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
-});
+const FLOATING_ACTION_HEIGHT = 60;
 
 export const SidebarView = memo(function SidebarView({
   groups,
@@ -200,8 +155,6 @@ export const SidebarView = memo(function SidebarView({
   onNewChat,
   onOpenSettings,
   settingsOpen = false,
-  onOpenAutomations,
-  automationsOpen = false,
   onClose,
   threadTagsById,
   threadTagOptions = [],
@@ -359,18 +312,20 @@ export const SidebarView = memo(function SidebarView({
     setSortOpen(false);
   }, []);
 
-  // The drawer runs to the bottom of the screen, so the last thread would sit
-  // under the home indicator without this. Top nav already supplies the gap
-  // above Projects, matching the Mac sidebar's nav-then-list spacing.
-  const hasTopNav = Boolean(
-    onNewChat || newThreadWorkspaceId || onOpenAutomations,
-  );
+  const canStartNew = Boolean(onNewChat || newThreadWorkspaceId);
+  const hasFloatingDock = canStartNew || Boolean(onOpenSettings);
+  // The controls float over the list like the native ChatGPT drawer, so reserve
+  // their painted height, the safe area, and one quiet row of breathing room.
   const listContentStyle = useMemo(
     () => ({
-      paddingTop: hasTopNav ? 0 : theme.spacing[3],
-      paddingBottom: theme.spacing[3] + insets.bottom,
+      paddingTop: theme.spacing[3],
+      paddingBottom: hasFloatingDock
+        ? FLOATING_ACTION_HEIGHT +
+          Math.max(insets.bottom, theme.spacing[3]) +
+          theme.spacing[4]
+        : theme.spacing[3] + insets.bottom,
     }),
-    [hasTopNav, insets.bottom, theme.spacing],
+    [hasFloatingDock, insets.bottom, theme.spacing],
   );
 
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
@@ -697,47 +652,6 @@ export const SidebarView = memo(function SidebarView({
 
       <SyncBanner status={syncStatus} />
 
-      {onNewChat || newThreadWorkspaceId || onOpenAutomations ? (
-        <View style={styles.topNav}>
-          {onNewChat || newThreadWorkspaceId ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.newThreadRow,
-                pressed ? styles.newThreadRowPressed : undefined,
-              ]}
-              onPress={() => {
-                if (onNewChat) void onNewChat();
-                else if (newThreadWorkspaceId) onNewThread(newThreadWorkspaceId);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel={onNewChat ? "New chat" : "New thread"}
-              accessibilityHint={
-                onNewChat
-                  ? "Starts a conversation outside a project"
-                  : "Starts a conversation in the open project"
-              }
-            >
-              <View style={styles.newThreadIcon}>
-                <Plus size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-              </View>
-              <Text variant="label" color="primary" weight="semibold">
-                {onNewChat ? "New chat" : "New thread"}
-              </Text>
-            </Pressable>
-          ) : null}
-
-          {onOpenAutomations ? (
-            <SidebarNavRow
-              icon={CalendarClock}
-              label="Automations"
-              selected={automationsOpen}
-              onPress={onOpenAutomations}
-              accessibilityHint="Opens scheduled agent automations"
-            />
-          ) : null}
-        </View>
-      ) : null}
-
       <View style={styles.list}>
         {rows.length === 0 ? (
           // Cached rows render above. With nothing on disk yet, stay quiet
@@ -774,20 +688,66 @@ export const SidebarView = memo(function SidebarView({
         )}
       </View>
 
-      {onOpenSettings ? (
+      {hasFloatingDock ? (
         <View
           style={[
-            styles.footer,
-            { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) },
+            styles.floatingDock,
+            { bottom: Math.max(insets.bottom, theme.spacing[3]) },
           ]}
+          pointerEvents="box-none"
         >
-          <SidebarNavRow
-            icon={Settings}
-            label="Settings"
-            selected={settingsOpen}
-            onPress={onOpenSettings}
-            accessibilityHint="Opens mobile settings"
-          />
+          {canStartNew ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.floatingNewButton,
+                pressed ? styles.floatingNewButtonPressed : undefined,
+              ]}
+              onPress={() => {
+                if (onNewChat) void onNewChat();
+                else if (newThreadWorkspaceId) onNewThread(newThreadWorkspaceId);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={onNewChat ? "New chat" : "New thread"}
+              accessibilityHint={
+                onNewChat
+                  ? "Starts a conversation outside a project"
+                  : "Starts a conversation in the open project"
+              }
+            >
+              <SquarePen
+                size={theme.iconSize.lg}
+                color={theme.colors.surface[0]}
+              />
+              <Text
+                variant="label"
+                size="md"
+                weight="semibold"
+                style={styles.floatingNewLabel}
+              >
+                New
+              </Text>
+            </Pressable>
+          ) : null}
+
+          {onOpenSettings ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.floatingSettingsButton,
+                settingsOpen ? styles.floatingSettingsButtonSelected : undefined,
+                pressed ? styles.floatingSettingsButtonPressed : undefined,
+              ]}
+              onPress={onOpenSettings}
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+              accessibilityHint="Opens mobile settings and automations"
+              accessibilityState={{ selected: settingsOpen }}
+            >
+              <Settings
+                size={theme.iconSize.lg}
+                color={theme.colors.fg.primary}
+              />
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 
@@ -853,47 +813,55 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
   },
   closeButtonPressed: { backgroundColor: theme.colors.surface[2] },
-  footer: {
-    paddingTop: theme.spacing[2],
-    borderTopWidth: 1,
-    borderTopColor: theme.colors.border.subtle,
-    backgroundColor: theme.colors.surface[1],
-  },
-  topNav: {
-    paddingBottom: theme.spacing[4],
-  },
-  navRow: {
-    minHeight: theme.minTouchTarget,
+  floatingDock: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    height: FLOATING_ACTION_HEIGHT,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
-    marginHorizontal: theme.spacing[3],
-    paddingHorizontal: theme.spacing[3],
-    borderRadius: theme.radius.md,
-    borderCurve: "continuous",
+    justifyContent: "center",
+    paddingHorizontal: theme.spacing[4],
   },
-  navRowSelected: { backgroundColor: theme.colors.surface[3] },
-  navRowPressed: { backgroundColor: theme.colors.surface[3] },
-  newThreadRow: {
-    minHeight: theme.minTouchTarget,
+  floatingNewButton: {
+    height: FLOATING_ACTION_HEIGHT,
+    minWidth: 152,
     flexDirection: "row",
     alignItems: "center",
-    gap: theme.spacing[2],
-    marginHorizontal: theme.spacing[3],
-    marginTop: theme.spacing[1],
-    paddingLeft: theme.spacing[1.5],
-    paddingRight: theme.spacing[3],
-    borderRadius: theme.radius.md,
+    justifyContent: "center",
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[6],
+    borderRadius: theme.radius.full,
     borderCurve: "continuous",
+    backgroundColor: theme.colors.fg.primary,
+    ...theme.shadow.lg,
   },
-  newThreadRowPressed: { backgroundColor: theme.colors.surface[3] },
-  newThreadIcon: {
-    width: 32,
-    height: 32,
+  floatingNewButtonPressed: {
+    opacity: 0.82,
+    transform: [{ scale: 0.98 }],
+  },
+  floatingNewLabel: { color: theme.colors.surface[0] },
+  floatingSettingsButton: {
+    position: "absolute",
+    right: theme.spacing[4],
+    width: FLOATING_ACTION_HEIGHT,
+    height: FLOATING_ACTION_HEIGHT,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: theme.radius.full,
+    borderCurve: "continuous",
     backgroundColor: theme.colors.surface[2],
+    borderWidth: 1,
+    borderColor: theme.colors.border.emphasis,
+    ...theme.shadow.lg,
+  },
+  floatingSettingsButtonSelected: {
+    backgroundColor: theme.colors.surface[4],
+    borderColor: theme.colors.border.strong,
+  },
+  floatingSettingsButtonPressed: {
+    backgroundColor: theme.colors.surface[3],
+    transform: [{ scale: 0.96 }],
   },
   workspaceHeader: {
     flexDirection: "row",

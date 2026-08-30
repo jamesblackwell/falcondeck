@@ -114,7 +114,7 @@ describe("SidebarView component", () => {
     const r = renderComponent(<SidebarView {...base} />);
     expect(textOf(r)).toContain("No projects");
   });
-  it("renders a persistent settings footer action", () => {
+  it("renders Settings as a floating icon action", () => {
     const onOpenSettings = vi.fn();
     const r = renderComponent(
       <SidebarView {...base} onOpenSettings={onOpenSettings} />,
@@ -122,12 +122,14 @@ describe("SidebarView component", () => {
     const settings = r.root.find(
       (node) => node.props.accessibilityLabel === "Settings",
     );
-    expect(textOf(r)).toContain("Settings");
+    expect(
+      settings.findAll((node) => node.props.children === "Settings"),
+    ).toHaveLength(0);
+    expect(settings.props.accessibilityState).toEqual({ selected: false });
     settings.props.onPress();
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
-  it("opens automations from first-class navigation above projects", () => {
-    const onOpenAutomations = vi.fn();
+  it("keeps Automations out of the thread drawer", () => {
     const groups: ProjectGroup[] = [
       {
         workspace: workspace({ id: "w1", path: "/tmp/proj" }),
@@ -138,36 +140,29 @@ describe("SidebarView component", () => {
       <SidebarView
         {...base}
         groups={groups}
-        onOpenAutomations={onOpenAutomations}
         onOpenSettings={vi.fn()}
       />,
     );
-    const automations = r.root.find(
-      (node) => node.props.accessibilityLabel === "Automations",
-    );
-    const text = textOf(r);
-    expect(text.indexOf("Automations")).toBeGreaterThan(-1);
-    expect(text.indexOf("Automations")).toBeLessThan(text.indexOf("PROJECTS"));
-    // The not-connected banner also tells the user to pair from Settings.
-    // Compare against the footer label, which is the final occurrence.
-    expect(text.indexOf("PROJECTS")).toBeLessThan(text.lastIndexOf("Settings"));
-    automations.props.onPress();
-    expect(onOpenAutomations).toHaveBeenCalledTimes(1);
+    expect(
+      r.root.findAll(
+        (node) => node.props.accessibilityLabel === "Automations",
+      ),
+    ).toHaveLength(0);
   });
-  it("marks Automations as the current page when that view is open", () => {
+  it("marks the floating Settings action as selected", () => {
     const r = renderComponent(
       <SidebarView
         {...base}
-        onOpenAutomations={vi.fn()}
-        automationsOpen
+        onOpenSettings={vi.fn()}
+        settingsOpen
       />,
     );
     expect(
-      r.root.find((node) => node.props.accessibilityLabel === "Automations")
+      r.root.find((node) => node.props.accessibilityLabel === "Settings")
         .props.accessibilityState,
     ).toEqual({ selected: true });
   });
-  it("starts a thread from a row above the project list", () => {
+  it("starts a thread from the floating New action", () => {
     const onNewThread = vi.fn();
     const groups: ProjectGroup[] = [
       {
@@ -191,6 +186,8 @@ describe("SidebarView component", () => {
     const newThread = r.root.find(
       (node) => node.props.accessibilityLabel === "New thread",
     );
+    expect(textOf(r)).toContain("New");
+    expect(textOf(r)).not.toContain("New thread");
     newThread.props.onPress();
     expect(onNewThread).toHaveBeenCalledWith("w2");
   });
