@@ -117,6 +117,11 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the
   others. Errors still carry the locally-known plan and account.
+- The daemon caches the whole snapshot for 5 minutes (45 seconds if any
+  provider returned `error`) and coalesces in-flight fetches. Cache hits
+  keep `refreshed_at` from the live fetch. Pass `refresh=true` on
+  `GET /api/provider-usage` or RPC `providers.usage` (the Usage panel Reload
+  button) to re-query dashboards. Older daemons omit `refreshed_at`.
 - Local machine only: usage reads the daemon host's credential stores, so
   the endpoint ignores SSH-host scoping.
 

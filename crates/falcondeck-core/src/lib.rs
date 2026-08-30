@@ -3477,6 +3477,18 @@ pub struct ProviderUsageOverview {
     /// `not_installed`.
     #[serde(default)]
     pub zai: ProviderUsage,
+    /// When the daemon last fetched live dashboards for this snapshot.
+    /// Cache hits keep the original timestamp. Older daemons omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<String>,
+}
+
+/// Query/RPC flags for `GET /api/provider-usage` and `providers.usage`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProviderUsageRequest {
+    /// When true, skip the daemon cache and re-query provider dashboards.
+    pub refresh: bool,
 }
 
 /// Summary of a single thread within a workspace.

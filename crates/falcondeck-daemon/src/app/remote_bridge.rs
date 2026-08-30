@@ -1100,8 +1100,14 @@ impl AppState {
                 }
                 "harnesses.read" => serde_json::to_value(self.harnesses_overview().await)
                     .map_err(|error| format!("failed to serialize harnesses: {error}")),
-                "providers.usage" => serde_json::to_value(self.provider_usage_overview().await)
-                    .map_err(|error| format!("failed to serialize provider usage: {error}")),
+                "providers.usage" => {
+                    let refresh = params
+                        .get("refresh")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    serde_json::to_value(self.provider_usage_overview(refresh).await)
+                        .map_err(|error| format!("failed to serialize provider usage: {error}"))
+                }
                 "harnesses.refresh" => {
                     let request = serde_json::from_value::<falcondeck_core::HarnessRefreshRequest>(
                         params.clone(),

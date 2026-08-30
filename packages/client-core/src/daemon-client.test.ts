@@ -41,6 +41,13 @@ describe("createDaemonApiClient sendTurn", () => {
       "http://daemon.test/api/provider-usage",
     );
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBeUndefined();
+
+    await createDaemonApiClient("http://daemon.test").providerUsage({
+      refresh: true,
+    });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://daemon.test/api/provider-usage?refresh=true",
+    );
   });
 
   it("lists workspace skills for the selected provider", async () => {

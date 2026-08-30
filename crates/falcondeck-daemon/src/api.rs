@@ -1006,8 +1006,9 @@ async fn read_harnesses(
 
 async fn read_provider_usage(
     State(state): State<AppState>,
+    Query(request): Query<falcondeck_core::ProviderUsageRequest>,
 ) -> Result<Json<falcondeck_core::ProviderUsageOverview>, DaemonError> {
-    Ok(Json(state.provider_usage_overview().await))
+    Ok(Json(state.provider_usage_overview(request.refresh).await))
 }
 
 async fn refresh_harnesses(

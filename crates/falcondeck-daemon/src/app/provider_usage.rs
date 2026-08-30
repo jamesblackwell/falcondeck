@@ -15,6 +15,10 @@
 //! credentials, because rotating a refresh token out from under the owning
 //! CLI breaks its next run.
 //!
+//! Live dashboard calls are cached on the daemon for five minutes (45 seconds
+//! if any provider returned `error`). Concurrent callers share one in-flight
+//! fetch. Pass `refresh=true` to bypass the cache.
+//!
 //! Tests swap the live transport for fixtures, which leaves the real HTTP and
 //! credential helpers unreachable in that build.
 #![cfg_attr(test, allow(dead_code))]
@@ -23,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Mutex as StdMutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -38,6 +42,10 @@ use super::AppState;
 
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Fresh snapshots skip the provider dashboards for this long.
+const USAGE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+/// Rate-limits and network errors recover faster than plan windows change.
+const USAGE_ERROR_CACHE_TTL: Duration = Duration::from_secs(45);
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CHATGPT_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
@@ -261,12 +269,9 @@ async fn fetch_usage_request(
         })
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(USAGE_FETCH_TIMEOUT)
-        .build()
-        .map_err(|error| format!("failed to create usage client: {error}"))?;
+    let client = usage_http_client()?;
     let mut response = send(
-        &client,
+        client,
         url,
         headers,
         cloudflare_cookie_header().as_deref(),
@@ -278,7 +283,7 @@ async fn fetch_usage_request(
         // with it.
         store_cloudflare_cookies(&response.cf_cookies);
         response = send(
-            &client,
+            client,
             url,
             headers,
             cloudflare_cookie_header().as_deref(),
@@ -287,6 +292,19 @@ async fn fetch_usage_request(
         .await?;
     }
     Ok(response)
+}
+
+#[cfg(not(test))]
+fn usage_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(USAGE_FETCH_TIMEOUT)
+        .build()
+        .map_err(|error| format!("failed to create usage client: {error}"))?;
+    Ok(CLIENT.get_or_init(|| client))
 }
 
 #[cfg(test)]
@@ -2044,11 +2062,62 @@ async fn fetch_zai_usage() -> ProviderUsage {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+fn usage_cache_ttl(overview: &ProviderUsageOverview) -> Duration {
+    let any_error = [
+        &overview.codex,
+        &overview.claude_code,
+        &overview.grok,
+        &overview.cursor,
+        &overview.agy,
+        &overview.zai,
+    ]
+    .iter()
+    .any(|usage| matches!(usage, ProviderUsage::Error { .. }));
+    if any_error {
+        USAGE_ERROR_CACHE_TTL
+    } else {
+        USAGE_CACHE_TTL
+    }
+}
+
+fn cached_usage_snapshot(
+    cache: &Option<(Instant, ProviderUsageOverview)>,
+    now: Instant,
+) -> Option<ProviderUsageOverview> {
+    let (fetched_at, overview) = cache.as_ref()?;
+    (now.saturating_duration_since(*fetched_at) < usage_cache_ttl(overview))
+        .then(|| overview.clone())
+}
+
 impl AppState {
-    /// Reads live usage snapshots for the local Codex, Claude Code, Grok,
-    /// Cursor, Antigravity, and Z.AI coding-plan subscriptions. Each provider
+    /// Reads usage snapshots for the local Codex, Claude Code, Grok, Cursor,
+    /// Antigravity, and Z.AI coding-plan subscriptions. Serves the daemon
+    /// cache when it is still fresh unless `refresh` is set. Each provider
     /// resolves independently so one failing never blanks the others.
-    pub async fn provider_usage_overview(&self) -> ProviderUsageOverview {
+    pub async fn provider_usage_overview(&self, refresh: bool) -> ProviderUsageOverview {
+        let now = Instant::now();
+        if !refresh {
+            let cache = self.inner.usage_cache.lock().unwrap();
+            if let Some(overview) = cached_usage_snapshot(&cache, now) {
+                return overview;
+            }
+        }
+
+        let _fetch = self.inner.usage_fetch.lock().await;
+        let now = Instant::now();
+        if !refresh {
+            let cache = self.inner.usage_cache.lock().unwrap();
+            if let Some(overview) = cached_usage_snapshot(&cache, now) {
+                return overview;
+            }
+        }
+
+        let overview = self.fetch_provider_usage_overview().await;
+        *self.inner.usage_cache.lock().unwrap() = Some((Instant::now(), overview.clone()));
+        overview
+    }
+
+    async fn fetch_provider_usage_overview(&self) -> ProviderUsageOverview {
         let (codex, claude_code, grok, cursor, agy, zai) = tokio::join!(
             self.codex_usage(),
             self.claude_code_usage(),
@@ -2064,6 +2133,7 @@ impl AppState {
             cursor,
             agy,
             zai,
+            refreshed_at: Some(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
         }
     }
 
@@ -3678,5 +3748,72 @@ mod tests {
             }
             other => panic!("expected ok variant, got {other:?}"),
         }
+    }
+
+    fn sample_overview(codex: ProviderUsage) -> ProviderUsageOverview {
+        ProviderUsageOverview {
+            codex,
+            claude_code: ProviderUsage::NotInstalled,
+            grok: ProviderUsage::NotInstalled,
+            cursor: ProviderUsage::NotInstalled,
+            agy: ProviderUsage::NotInstalled,
+            zai: ProviderUsage::NotInstalled,
+            refreshed_at: Some("2026-08-30T12:00:00.000Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn usage_cache_ttl_is_shorter_when_any_provider_errored() {
+        assert_eq!(
+            usage_cache_ttl(&sample_overview(ProviderUsage::Unauthenticated)),
+            USAGE_CACHE_TTL
+        );
+        assert_eq!(
+            usage_cache_ttl(&sample_overview(ProviderUsage::Error {
+                message: "rate limited".to_string(),
+                plan_label: None,
+                account_email: None,
+            })),
+            USAGE_ERROR_CACHE_TTL
+        );
+    }
+
+    #[test]
+    fn cached_usage_snapshot_hits_within_ttl_and_misses_after() {
+        let fetched = Instant::now();
+        let overview = sample_overview(ProviderUsage::Unauthenticated);
+        let cache = Some((fetched, overview.clone()));
+
+        assert_eq!(
+            cached_usage_snapshot(&cache, fetched + Duration::from_secs(60)),
+            Some(overview)
+        );
+        assert_eq!(
+            cached_usage_snapshot(&cache, fetched + USAGE_CACHE_TTL + Duration::from_secs(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn cached_usage_snapshot_expires_errors_sooner() {
+        let fetched = Instant::now();
+        let overview = sample_overview(ProviderUsage::Error {
+            message: "rate limited".to_string(),
+            plan_label: None,
+            account_email: None,
+        });
+        let cache = Some((fetched, overview.clone()));
+
+        assert_eq!(
+            cached_usage_snapshot(&cache, fetched + Duration::from_secs(10)),
+            Some(overview)
+        );
+        assert_eq!(
+            cached_usage_snapshot(
+                &cache,
+                fetched + USAGE_ERROR_CACHE_TTL + Duration::from_secs(1)
+            ),
+            None
+        );
     }
 }

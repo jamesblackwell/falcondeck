@@ -382,9 +382,25 @@ describe('UsagePanel', () => {
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(2)
     })
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1:4317/api/provider-usage')
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://127.0.0.1:4317/api/provider-usage?refresh=true',
+    )
     expect(
       await screen.findByText('No usage limits reported for this plan.'),
     ).toBeInTheDocument()
+  })
+
+  it('shows when the snapshot was last refreshed', async () => {
+    const refreshedAt = new Date(Date.now() - 3 * 60_000).toISOString()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(overviewWith({ refreshed_at: refreshedAt }))),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText(/Last refreshed 3 minutes ago/)).toBeInTheDocument()
   })
 
   it('shows an inline retry when the initial load fails', async () => {

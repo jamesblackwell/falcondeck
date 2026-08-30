@@ -23,6 +23,7 @@ import type {
 import { RefreshCw } from 'lucide-react'
 
 import { falconDeckHttpError } from '../../connection-copy'
+import { formatRelative } from './settings-utils'
 
 export type UsagePanelProps = {
   baseUrl: string | null
@@ -129,6 +130,19 @@ function usageWindowValue(window: ProviderUsageWindow): string {
   return `$${used.toFixed(2)} / $${limit % 1 === 0 ? limit.toFixed(0) : limit.toFixed(2)}`
 }
 
+function usageIdentity(usage: ProviderUsage | undefined): {
+  planLabel: string | null
+  accountEmail: string | null
+} {
+  if (usage?.status === 'ok' || usage?.status === 'error') {
+    return {
+      planLabel: usage.plan_label ?? null,
+      accountEmail: usage.account_email ?? null,
+    }
+  }
+  return { planLabel: null, accountEmail: null }
+}
+
 function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
   const reset = formatReset(window.resets_at)
   return (
@@ -214,7 +228,11 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
       if (!baseUrl) return
       if (mode === 'refresh') setIsLoading(true)
       try {
-        const response = await fetch(`${baseUrl}/api/provider-usage`)
+        const url =
+          mode === 'refresh'
+            ? `${baseUrl}/api/provider-usage?refresh=true`
+            : `${baseUrl}/api/provider-usage`
+        const response = await fetch(url)
         if (!response.ok) throw new Error(falconDeckHttpError(response.status))
         setOverview((await response.json()) as ProviderUsageOverview)
         setLoadError(null)
@@ -261,6 +279,12 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
             <CardTitle>Subscription limits</CardTitle>
             <CardDescription>
               Session windows roll over every few hours; weekly limits reset with your plan.
+              {overview?.refreshed_at ? (
+                <>
+                  {' '}
+                  Last refreshed {formatRelative(overview.refreshed_at)}.
+                </>
+              ) : null}
             </CardDescription>
           </div>
           <Button
@@ -302,14 +326,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
               const usage = overview[config.key]
               // Error payloads still carry the locally-known plan and account,
               // so an outage does not blank which subscription this is.
-              const planLabel =
-                usage?.status === 'ok' || usage?.status === 'error'
-                  ? (usage.plan_label ?? null)
-                  : null
-              const accountEmail =
-                usage?.status === 'ok' || usage?.status === 'error'
-                  ? (usage.account_email ?? null)
-                  : null
+              const { planLabel, accountEmail } = usageIdentity(usage)
               return (
                 <div
                   key={config.key}

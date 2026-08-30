@@ -210,9 +210,10 @@ export function createDaemonApiClient(baseUrl: string) {
         await fetch(`${baseUrl}/api/speech/openrouter-key`),
       );
     },
-    async providerUsage() {
+    async providerUsage(options?: { refresh?: boolean }) {
+      const query = options?.refresh ? "?refresh=true" : "";
       return parseJson<ProviderUsageOverview>(
-        await fetch(`${baseUrl}/api/provider-usage`),
+        await fetch(`${baseUrl}/api/provider-usage${query}`),
       );
     },
     async saveSpeechCredential(apiKey: string) {

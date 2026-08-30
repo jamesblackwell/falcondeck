@@ -296,6 +296,12 @@ struct InnerState {
     /// target), with the probe time for TTL checks.
     harness_cache:
         StdMutex<HashMap<String, (std::time::Instant, falcondeck_core::HarnessesOverview)>>,
+    /// GET /api/provider-usage snapshot. Fresh for 5 minutes (45s if any
+    /// provider errored). Reload passes `refresh=true` and bypasses this.
+    usage_cache: StdMutex<Option<(std::time::Instant, falcondeck_core::ProviderUsageOverview)>>,
+    /// Serializes live usage fetches so a Settings open and a Reload cannot
+    /// stampede the provider dashboards.
+    usage_fetch: Mutex<()>,
     /// Harness install/upgrade jobs keyed by job id. In-memory only, like
     /// provisioning jobs.
     harness_jobs: Mutex<HashMap<String, falcondeck_core::HarnessUpgradeJob>>,
@@ -822,6 +828,8 @@ impl AppState {
                 remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator::default(),
                 provision_jobs: Mutex::new(HashMap::new()),
                 harness_cache: StdMutex::new(HashMap::new()),
+                usage_cache: StdMutex::new(None),
+                usage_fetch: Mutex::new(()),
                 harness_jobs: Mutex::new(HashMap::new()),
                 control: crate::control::ControlService::new(control_store),
                 shutting_down: AtomicBool::new(false),

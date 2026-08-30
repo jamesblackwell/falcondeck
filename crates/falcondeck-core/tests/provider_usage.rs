@@ -115,6 +115,7 @@ fn provider_usage_overview_defaults_missing_grok() {
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
     assert_eq!(overview.zai, ProviderUsage::NotInstalled);
+    assert_eq!(overview.refreshed_at, None);
 }
 
 #[test]
@@ -129,4 +130,5 @@ fn provider_usage_overview_defaults_missing_cursor() {
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
     assert_eq!(overview.agy, ProviderUsage::NotInstalled);
     assert_eq!(overview.zai, ProviderUsage::NotInstalled);
+    assert_eq!(overview.refreshed_at, None);
 }

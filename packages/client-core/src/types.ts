@@ -112,6 +112,17 @@ export type ProviderUsageOverview = {
   agy?: ProviderUsage;
   /** Older daemons omit this field; treat missing as not installed. */
   zai?: ProviderUsage;
+  /**
+   * When the daemon last fetched live dashboards for this snapshot.
+   * Cache hits keep the original timestamp. Older daemons omit this.
+   */
+  refreshed_at?: string | null;
+};
+
+/** Query/RPC flags for `GET /api/provider-usage` and `providers.usage`. */
+export type ProviderUsageRequest = {
+  /** When true, skip the daemon cache and re-query provider dashboards. */
+  refresh?: boolean;
 };
 
 export type AgentCapabilitySummary = {
