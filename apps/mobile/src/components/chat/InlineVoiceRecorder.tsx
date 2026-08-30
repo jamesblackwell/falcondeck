@@ -136,6 +136,7 @@ export function InlineVoiceRecorder({
   // (and, on device, via a module event), so the intent has to outlive the tap.
   const submitOnFinishRef = useRef(false)
   const localErrorRef = useRef(false)
+  const finishingRef = useRef(false)
   const startedRef = useRef(false)
   const liveCaptureRef = useRef(false)
   const recorder = useAudioRecorder({
@@ -171,6 +172,7 @@ export function InlineVoiceRecorder({
     (text: string, completedRecordingUri?: string) => {
       const cleaned = text.trim()
       if (!cleaned) {
+        finishingRef.current = false
         if (liveCaptureRef.current) speechLiveActivity.end()
         liveCaptureRef.current = false
         setError(
@@ -267,64 +269,73 @@ export function InlineVoiceRecorder({
   const startOnDevice = useCallback(async (audioUri?: string) => {
     setState('starting')
     setError(null)
-    if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
-      setError('Speech recognition is unavailable on this device.')
-      setState('failed')
-      return
-    }
-    if (!ExpoSpeechRecognitionModule.supportsOnDeviceRecognition()) {
-      setError(
-        'This device does not currently have on-device speech recognition available.',
-      )
-      setState('failed')
-      return
-    }
-    if (!audioUri) {
-      const permission =
-        await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync()
-      if (cancelledRef.current) return
-      if (!permission.granted) {
-        setError(
-          'Microphone access is required to use on-device speech recognition.',
-        )
-        setState('failed')
-        return
+    try {
+      if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
+        throw new Error('Speech recognition is unavailable on this device.')
       }
-    }
-    transcriptRef.current = ''
-    finalizedTranscriptRef.current = ''
-    localErrorRef.current = false
-    liveCaptureRef.current = !audioUri
-    const directory = recordingDirectory()
-    ExpoSpeechRecognitionModule.start({
-      lang: settingsRef.current.language ?? undefined,
-      interimResults: true,
-      continuous: true,
-      requiresOnDeviceRecognition: true,
-      addsPunctuation: true,
-      volumeChangeEventOptions: { enabled: true, intervalMillis: 150 },
-      audioSource: audioUri
-        ? {
-            uri: audioUri,
-            audioChannels: 1,
-            sampleRate: 16_000,
-          }
-        : undefined,
-      recordingOptions:
-        !audioUri && ExpoSpeechRecognitionModule.supportsRecording()
+      if (!ExpoSpeechRecognitionModule.supportsOnDeviceRecognition()) {
+        throw new Error(
+          'This device does not currently have on-device speech recognition available.',
+        )
+      }
+      if (!audioUri) {
+        const permission =
+          await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync()
+        if (cancelledRef.current) return
+        if (!permission.granted) {
+          throw new Error(
+            'Microphone access is required to use on-device speech recognition.',
+          )
+        }
+      }
+      transcriptRef.current = ''
+      finalizedTranscriptRef.current = ''
+      localErrorRef.current = false
+      liveCaptureRef.current = !audioUri
+      const directory = recordingDirectory()
+      ExpoSpeechRecognitionModule.start({
+        lang: settingsRef.current.language ?? undefined,
+        interimResults: true,
+        continuous: true,
+        requiresOnDeviceRecognition: true,
+        addsPunctuation: true,
+        volumeChangeEventOptions: { enabled: true, intervalMillis: 150 },
+        audioSource: audioUri
           ? {
-              persist: true,
-              outputDirectory: directory.uri,
-              outputFileName: `voice-${Date.now()}.wav`,
-              outputSampleRate: 16_000,
-              outputEncoding: 'pcmFormatInt16',
+              uri: audioUri,
+              audioChannels: 1,
+              sampleRate: 16_000,
             }
           : undefined,
-    })
+        recordingOptions:
+          !audioUri && ExpoSpeechRecognitionModule.supportsRecording()
+            ? {
+                persist: true,
+                outputDirectory: directory.uri,
+                outputFileName: `voice-${Date.now()}.wav`,
+                outputSampleRate: 16_000,
+                outputEncoding: 'pcmFormatInt16',
+              }
+            : undefined,
+      })
+    } catch (cause) {
+      if (cancelledRef.current) return
+      finishingRef.current = false
+      if (liveCaptureRef.current) speechLiveActivity.end()
+      liveCaptureRef.current = false
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : 'Could not start on-device speech recognition.',
+      )
+      setState('failed')
+    }
   }, [])
 
   const begin = useCallback(
     async (nextProvider: SpeechProvider) => {
+      finishingRef.current = false
+      submitOnFinishRef.current = false
       setProvider(nextProvider)
       settingsRef.current = updateSpeechSettings({ provider: nextProvider })
       if (nextProvider === 'openrouter') {
@@ -375,6 +386,7 @@ export function InlineVoiceRecorder({
   useSpeechRecognitionEvent('error', (event) => {
     if (cancelledRef.current || event.error === 'aborted') return
     localErrorRef.current = true
+    finishingRef.current = false
     if (liveCaptureRef.current) speechLiveActivity.end()
     liveCaptureRef.current = false
     setError(event.message || 'On-device speech recognition failed.')
@@ -386,6 +398,8 @@ export function InlineVoiceRecorder({
   })
 
   const stopRecording = useCallback(async (submit: boolean) => {
+    if (finishingRef.current) return
+    finishingRef.current = true
     submitOnFinishRef.current = submit
     if (submit) {
       triggerComposerTapHaptic()
@@ -413,6 +427,7 @@ export function InlineVoiceRecorder({
       await deactivateRecordingAudioSession()
       await transcribeCloud(uri)
     } catch (cause) {
+      finishingRef.current = false
       await deactivateRecordingAudioSession().catch(() => undefined)
       if (liveCaptureRef.current) speechLiveActivity.end()
       liveCaptureRef.current = false
@@ -434,15 +449,20 @@ export function InlineVoiceRecorder({
     ) {
       ExpoSpeechRecognitionModule.abort()
     } else if (provider === 'openrouter' && recorder.isRecording) {
-      void recorder.stop().then(() => {
-        if (recorder.uri) {
-          const uri = moveCloudRecording(recorder.uri)
-          setRecordingUri(uri)
-          setRecordingProvider('openrouter')
-          setPendingVoiceRecording(uri, 'openrouter')
+      void (async () => {
+        try {
+          await recorder.stop()
+          if (recorder.uri) {
+            const uri = moveCloudRecording(recorder.uri)
+            setPendingVoiceRecording(uri, 'openrouter')
+          }
+        } catch {
+          // Cancellation still closes immediately; a native stop failure must
+          // not become an unhandled rejection.
+        } finally {
+          await deactivateRecordingAudioSession().catch(() => undefined)
         }
-        return deactivateRecordingAudioSession()
-      })
+      })()
     }
     onClose()
   }, [onClose, provider, recorder, state])
@@ -472,6 +492,7 @@ export function InlineVoiceRecorder({
 
   const retry = useCallback(async () => {
     triggerComposerTapHaptic()
+    finishingRef.current = false
     submitOnFinishRef.current = false
     if (recordingUri) {
       if (recordingProvider === 'on-device') {

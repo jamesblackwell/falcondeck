@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 58 / 100
-- Product defects: 55
+- Verified and fixed: 71 / 100
+- Product defects: 68
 - Test-infrastructure defects: 3
 
 ## Verification Standard
@@ -541,6 +541,123 @@ Each entry records:
 - Fix: Write the tab-scoped copy first, delete the legacy copy only after success, contain storage failures while retaining the in-memory key, and route restore, claim, generation, and reset through the safe helpers.
 - Verification: The blocked-storage regression preserves and restores the exact original key; all remote-web tests, typecheck, and lint pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
+
+### 059 — Pairing adopts credentials that failed to reach secure storage
+
+- Kind: Product defect
+- Reproduction: A relay-store regression made the native keychain reject a client-token write; the original claim path still entered `connecting` with the new session instead of remaining disconnected.
+- Root cause: The secure-storage helpers logged native write failures and resolved successfully, so pairing could not distinguish durable credential storage from a failed write.
+- Fix: Re-throw secure-storage failures after logging them, and reset the relay store's data-key persistence memo when an asynchronous checkpoint fails so it remains retryable.
+- Verification: The focused relay-store regression leaves both connection status and session unset; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 060 — Malformed version-matching mobile cache reaches session hydration
+
+- Kind: Product defect
+- Reproduction: A cache regression stored the current schema version with `snapshot.history.items: null`; the original loader returned the malformed object, which session hydration would later treat as an array.
+- Root cause: Cache loading checked only the top-level schema version and trusted every nested collection and selection field.
+- Fix: Validate the snapshot collections, recent IDs, selections, and each thread-history record before returning a cached session; discard invalid entries.
+- Verification: The malformed cache is removed and returns `null`; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 061 — Retired WebSockets can mutate a replacement mobile session
+
+- Kind: Product defect
+- Reproduction: The relay integration test rotated from session 1 to session 2, then delivered a message through session 1's old socket; the original handler wrote session 1 presence into the live store.
+- Root cause: The socket message callback remained callable after cleanup and did not verify that its captured session was still current.
+- Fix: Reject messages when the effect is stale or its captured session ID no longer matches the store's active session.
+- Verification: The delayed old-socket message leaves the replacement session's presence unchanged; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 062 — Delayed pushes from an old pairing can change the current selection
+
+- Kind: Product defect
+- Reproduction: A push-notification regression paired session 2, then delivered a session-1 notification containing a thread and workspace; the original handler accepted it and rewrote selection state.
+- Root cause: Push handling validated the notification shape but ignored its optional session identity.
+- Fix: When a notification carries `sessionId`, require it to equal the currently persisted relay session before applying navigation state.
+- Verification: The stale notification returns `false` and does not update selection; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 063 — Automation refresh deduplication crosses mobile sessions
+
+- Kind: Product defect
+- Reproduction: An automation-store test started a list refresh in session 1, rotated to session 2, and refreshed again; the original global in-flight promise suppressed the second RPC and could later install session 1 data.
+- Root cause: Refresh deduplication and response writes were not scoped to the relay session that issued the request.
+- Fix: Associate the in-flight refresh with its session ID, allow a new session to start its own request, and commit loading, data, and error state only while that session remains active.
+- Verification: Rotation issues two list RPCs and only session 2's response reaches the store; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 064 — Old-session automation detail responses enter the new session
+
+- Kind: Product defect
+- Reproduction: An automation detail read began in session 1, session 2 was adopted, and the old response resolved; the original store inserted the returned automation into session 2.
+- Root cause: The detail read committed its response without comparing the current session to the request's captured session.
+- Fix: Capture the relay session ID at request time and skip the store mutation after a rotation.
+- Verification: The old read resolves to the caller but leaves the current store unchanged; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 065 — Old-session automation run history enters the new session
+
+- Kind: Product defect
+- Reproduction: A run-history load begun in session 1 resolved after session 2 was adopted; the original code stored the old run under the active automation.
+- Root cause: Run-history response writes lacked a request-session ownership check.
+- Fix: Apply returned run history only if the initiating relay session is still active.
+- Verification: The delayed session-1 response leaves session 2's run list empty; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 066 — Old-session automation mutations overwrite current automation state
+
+- Kind: Product defect
+- Reproduction: An automation mutation was sent in session 1 and resolved after switching to session 2; the original store inserted the returned paused automation into the new session.
+- Root cause: Mutation responses were unconditionally merged into the shared automation collection.
+- Fix: Capture request-session ownership for automation mutations and suppress the state merge after a session change.
+- Verification: The stale mutation response does not alter session 2's collection; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 067 — Corrupt cached automation run values violate the store contract
+
+- Kind: Product defect
+- Reproduction: Hydration loaded a cache whose `runsByAutomation` value was a string; the original store exposed the string where consumers call array operations such as `.map`.
+- Root cause: The cache boundary defaulted a missing top-level map but never validated individual map values.
+- Fix: Normalize cached run history to a record containing only array-valued entries.
+- Verification: The corrupt value hydrates as an empty run array and all automation-store regressions pass within the 948-test mobile suite.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 068 — Rapid repeated suggestion taps submit duplicate mobile turns
+
+- Kind: Product defect
+- Reproduction: A session-actions test invoked the same suggestion twice before React could paint its disabled state; the original code sent two `turn.start` RPCs.
+- Root cause: The handler relied on asynchronous component state for exclusion and did not synchronously consult the pending-submission store.
+- Fix: Check the request's submission key in the store before performing suggestion, override, compact, or regular turn work.
+- Verification: Two immediate invocations produce exactly one RPC; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 069 — Native speech-start failures escape and leave the recorder starting
+
+- Kind: Product defect
+- Reproduction: The voice-recorder test rejected native speech permission; the original component emitted an unhandled rejection and continued to render the starting timer instead of an error.
+- Root cause: The on-device start sequence awaited permission and native startup without a failure boundary.
+- Fix: Catch the full native speech-start sequence, clear starting/finishing state, and surface the error in the recorder UI.
+- Verification: The controlled native rejection is handled and renders the failure message without an unhandled promise; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 070 — Double stop taps transcribe the same mobile recording twice
+
+- Kind: Product defect
+- Reproduction: A voice-recorder test pressed stop twice before the first asynchronous recorder stop completed; the original code invoked native stop and transcription twice.
+- Root cause: The visible finishing state did not synchronously guard the event handler between taps.
+- Fix: Add an immediate ref-based finishing guard and reset it only when the stop fails or no speech is available for a retry.
+- Verification: Two immediate stop events call the recorder stop exactly once; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 071 — Failed recorder cancellation leaks a rejection and active audio session
+
+- Kind: Product defect
+- Reproduction: A cancellation regression made the native recorder stop reject; the original fire-and-forget chain produced an unhandled rejection and never deactivated the audio session.
+- Root cause: Cancellation attached only a success continuation, leaving both rejection handling and cleanup dependent on a successful stop.
+- Fix: Use an async guarded cancellation path with error containment and unconditional audio-session deactivation in `finally`.
+- Verification: The rejected stop is contained and audio deactivation still runs; the complete mobile suite passes all 948 tests.
+- Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
 
 ## Pending Verification
 

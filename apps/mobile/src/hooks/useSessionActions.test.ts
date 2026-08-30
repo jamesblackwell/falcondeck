@@ -202,6 +202,42 @@ describe("submitTurn guards", () => {
     expect(ui.draft.trim()).toBe("Hello world");
   });
 
+  it("coalesces repeated suggestion taps while the first turn is pending", async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("w1", "t1");
+    const pendingRpc = createDeferred<unknown>();
+    const rpc = vi.fn().mockReturnValue(pendingRpc.promise);
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      const first = harness.getActions().submitTurn({ text: "Run the suggestion" });
+      const second = harness.getActions().submitTurn({ text: "Run the suggestion" });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(rpc).toHaveBeenCalledTimes(1);
+      pendingRpc.resolve({ ok: true });
+      await act(async () => {
+        await Promise.all([first, second]);
+      });
+    } finally {
+      harness.unmount();
+    }
+  });
+
   it("routes /compact as a thread control without starting a model turn", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(

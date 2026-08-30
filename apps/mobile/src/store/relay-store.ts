@@ -743,7 +743,13 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       const dataKeyB64 = bytesToBase64(_sessionCrypto.dataKey)
       if (dataKeyB64 !== _persistedDataKeyB64) {
         _persistedDataKeyB64 = dataKeyB64
-        void persistDataKey(dataKeyB64)
+        void persistDataKey(dataKeyB64).catch(() => {
+          // Allow a later checkpoint to retry after a transient Keychain
+          // failure. The storage helper already logged the native error.
+          if (_persistedDataKeyB64 === dataKeyB64) {
+            _persistedDataKeyB64 = null
+          }
+        })
       }
     }
   },

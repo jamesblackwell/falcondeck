@@ -183,6 +183,10 @@ export function useSessionActions() {
     const submittedDraft = override?.text ?? ui.draft;
     const submittedAttachments = override ? [] : ui.attachments;
     const submittedKey = ui.conversationKey;
+    // React may deliver a second tap before the disabled composer has painted.
+    // Zustand updates synchronously, so this closes that window for typed
+    // turns, suggestions, resumptions, and /compact alike.
+    if (ui.pendingSubmissions[submittedKey]) return;
     if (
       !workspace ||
       (!override?.resumeInterrupted &&

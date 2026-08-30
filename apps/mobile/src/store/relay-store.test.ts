@@ -11,6 +11,7 @@ import {
   isConnectionActionInFlight,
   useConnectionLogStore,
 } from './connection-log-store'
+import * as SecureStore from 'expo-secure-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
@@ -281,6 +282,36 @@ describe('relay-store', () => {
       expect(state.sessionId).toBe('session-abc')
       expect(state.deviceId).toBe('device-xyz')
       expect(state.isConnected).toBe(false)
+    })
+
+    it('does not adopt relay credentials that the keychain failed to persist', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode(securePairingCode('KEYCHAIN-FAILURE'))
+      globalThis.fetch = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-keychain',
+        device_id: 'device-keychain',
+        client_token: 'token-keychain',
+        daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
+      })
+      vi.spyOn(SecureStore, 'setItemAsync').mockRejectedValueOnce(
+        new Error('Keychain is unavailable'),
+      )
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+      try {
+        await claimPairing()
+
+        expect(useRelayStore.getState()).toMatchObject({
+          sessionId: null,
+          deviceId: null,
+          connectionStatus: 'not_connected',
+          error: 'Keychain is unavailable',
+        })
+      } finally {
+        warning.mockRestore()
+      }
     })
 
     it('clears stale encrypted state when claiming a fresh pairing', async () => {

@@ -17,7 +17,7 @@ import {
 } from 'expo-notifications'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
-import { getJson } from '@/storage/mmkv'
+import { getJson, setJson } from '@/storage/mmkv'
 import { useSessionStore } from '@/store/session-store'
 import {
   __resetInitialNotificationResponseForTests,
@@ -348,6 +348,19 @@ describe('push-notifications', () => {
 
       expect(handleNotificationTapData({ workspaceId: 'w1', threadId: 't1', kind: 'approval' })).toBe(true)
       expect(selectThread).toHaveBeenCalledWith('w1', 't1')
+    })
+
+    it('ignores a delayed notification from a previously paired session', () => {
+      const selectThread = vi.fn()
+      useSessionStore.setState({ selectThread })
+      setJson('relay.session', { sessionId: 'current-session' })
+
+      expect(handleNotificationTapData({
+        sessionId: 'previous-session',
+        workspaceId: 'w1',
+        threadId: 't1',
+      })).toBe(false)
+      expect(selectThread).not.toHaveBeenCalled()
     })
 
     it('resolves the workspace from the snapshot when only threadId is present', () => {

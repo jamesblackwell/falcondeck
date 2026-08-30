@@ -74,6 +74,19 @@ function readRows<T>(response: ControlGetResponse, normalize: (value: unknown) =
     : []
 }
 
+function normalizeCachedRuns(value: unknown): Record<string, AutomationRun[]> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([automationId, rows]) => {
+      if (!Array.isArray(rows)) return []
+      return [[
+        automationId,
+        rows.map(normalizeAutomationRun).filter((row): row is AutomationRun => row !== null),
+      ]]
+    }),
+  )
+}
+
 function persist(state: AutomationState) {
   if (!state.sessionId) return
   persistAutomationCache({
@@ -85,7 +98,7 @@ function persist(state: AutomationState) {
   })
 }
 
-let refreshInFlight: Promise<void> | null = null
+let refreshInFlight: { sessionId: string | null; promise: Promise<void> } | null = null
 
 export const useAutomationStore = create<AutomationStore>((set, get) => ({
   ...initialState,
@@ -99,13 +112,14 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       hydrated: true,
       automations: cached?.automations.map(normalizeAutomation).filter((row): row is Automation => !!row) ?? [],
       settings: cached?.settings ? normalizeAgentControlSettings(cached.settings) : null,
-      runsByAutomation: cached?.runsByAutomation ?? {},
+      runsByAutomation: normalizeCachedRuns(cached?.runsByAutomation),
       lastSyncedAt: cached?.savedAt ?? null,
     })
   },
 
   refresh: async (options) => {
-    if (refreshInFlight) return refreshInFlight
+    const sessionId = get().sessionId
+    if (refreshInFlight?.sessionId === sessionId) return refreshInFlight.promise
     const run = async () => {
       const hasCachedRows = get().automations.length > 0
       set({
@@ -124,6 +138,7 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
             resource: 'agent_control.settings',
           }, { requestIdPrefix: 'mobile-control-settings' }).catch(() => null),
         ])
+        if (get().sessionId !== sessionId) return
         const automations = readRows(automationResponse, normalizeAutomation)
         const settings = settingsResponse
           ? normalizeAgentControlSettings(settingsResponse.data)
@@ -136,24 +151,31 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
         set({ automations, settings, runsByAutomation, lastSyncedAt, error: null })
         persist(get())
       } catch (error) {
-        set({ error: errorMessage(error) })
+        if (get().sessionId === sessionId) {
+          set({ error: errorMessage(error) })
+        }
         throw error
       } finally {
-        set({ isLoading: false, isRefreshing: false })
+        if (get().sessionId === sessionId) {
+          set({ isLoading: false, isRefreshing: false })
+        }
       }
     }
-    refreshInFlight = run().finally(() => {
-      refreshInFlight = null
+    const tracked = run().finally(() => {
+      if (refreshInFlight?.promise === tracked) refreshInFlight = null
     })
-    return refreshInFlight
+    refreshInFlight = { sessionId, promise: tracked }
+    return tracked
   },
 
   read: async (automationId) => {
+    const sessionId = get().sessionId
     const response = await useRelayStore.getState()._callRpc<ControlGetResponse>(
       'control.get',
       { resource: 'automation', id: automationId },
       { requestIdPrefix: 'mobile-automation-detail' },
     )
+    if (get().sessionId !== sessionId) return null
     const automation = normalizeAutomation(response.data)
     if (automation) {
       set((state) => ({
@@ -167,12 +189,14 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
   },
 
   loadRuns: async (automationId) => {
+    const sessionId = get().sessionId
     try {
       const response = await useRelayStore.getState()._callRpc<ControlGetResponse>(
         'control.get',
         { resource: 'automation.runs', id: automationId, limit: 50 },
         { requestIdPrefix: 'mobile-automation-runs' },
       )
+      if (get().sessionId !== sessionId) return []
       const runs = readRows(response, normalizeAutomationRun)
       set((state) => ({
         runsByAutomation: { ...state.runsByAutomation, [automationId]: runs },
@@ -180,12 +204,14 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       persist(get())
       return runs
     } catch (error) {
+      if (get().sessionId !== sessionId) return []
       if (get().runsByAutomation[automationId]) return get().runsByAutomation[automationId]!
       throw error
     }
   },
 
   execute: async (request) => {
+    const sessionId = get().sessionId
     const rpcRequest: ControlExecuteRequest = {
       ...request,
       // The relay deduplicates by RPC request id. The daemon key also covers
@@ -205,6 +231,7 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
         detail,
       )
     }
+    if (get().sessionId !== sessionId) return response.data
     const returnedAutomation = normalizeAutomation(response.data)
     const returnedRun = normalizeAutomationRun(response.data)
     set((state) => ({

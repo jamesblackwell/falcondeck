@@ -1,6 +1,10 @@
 import { act } from 'react-test-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { requestRecordingPermissionsAsync, setAudioModeAsync } from 'expo-audio'
+import {
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+} from 'expo-audio'
 import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition'
 
 import { renderComponent, textOf } from '@/test/render'
@@ -102,6 +106,154 @@ describe('InlineVoiceRecorder', () => {
       r.root.findByProps({ accessibilityLabel: 'Stop and transcribe' }).props
         .accessibilityState,
     ).toEqual({ disabled: false })
+  })
+
+  it('surfaces an on-device permission failure instead of leaving startup pending', async () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    const requestPermission = vi.mocked(
+      ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync,
+    )
+    type SpeechPermission = Awaited<ReturnType<typeof requestPermission>>
+    const grantedPermission = {
+      status: 'granted',
+      expires: 'never',
+      granted: true,
+      canAskAgain: true,
+    } as SpeechPermission
+    let rejectPermission!: (error: Error) => void
+    const pendingPermission = new Promise<SpeechPermission>((_resolve, reject) => {
+      rejectPermission = reject
+    })
+    requestPermission.mockReturnValue(pendingPermission)
+
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="on-device"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    try {
+      await act(async () => {
+        expect(requestPermission).toHaveBeenCalledOnce()
+        rejectPermission(new Error('Speech permission service failed'))
+        await pendingPermission.catch(() => undefined)
+      })
+      expect(textOf(r)).toContain('Speech permission service failed')
+    } finally {
+      requestPermission.mockResolvedValue(grantedPermission)
+    }
+  })
+
+  it('stops and transcribes only once when the stop control is tapped twice', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    useRelayStore.getState()._callRpc = vi.fn(async () => ({
+      text: 'only once',
+      model: 'whisper',
+    })) as unknown as typeof originalCallRpc
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const recorder = vi.mocked(useAudioRecorder).mock.results.at(-1)?.value
+    const stop = vi.mocked(recorder.stop)
+    const control = r.root.findByProps({ accessibilityLabel: 'Stop and transcribe' })
+
+    await act(async () => {
+      const first = control.props.onPress()
+      const second = control.props.onPress()
+      await Promise.all([first, second])
+    })
+
+    expect(stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('can stop a fresh recording after discarding a failed transcription', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    useRelayStore.getState()._callRpc = vi.fn(async (method: string) => {
+      if (method === 'speech.status') {
+        return { configured: true, storage: 'daemon_secret_store' }
+      }
+      throw new Error('OpenRouter is not configured')
+    }) as unknown as typeof originalCallRpc
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const recorder = vi.mocked(useAudioRecorder).mock.results.at(-1)?.value
+    const stop = vi.mocked(recorder.stop)
+
+    await act(async () => {
+      await r.root
+        .findByProps({ accessibilityLabel: 'Stop and transcribe' })
+        .props.onPress()
+    })
+    expect(textOf(r)).toContain('OpenRouter is not configured')
+
+    await act(async () => {
+      r.root
+        .findByProps({
+          accessibilityLabel: 'Discard recording and record again',
+        })
+        .props.onPress()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await r.root
+        .findByProps({ accessibilityLabel: 'Stop and transcribe' })
+        .props.onPress()
+    })
+
+    expect(stop).toHaveBeenCalledTimes(2)
+  })
+
+  it('deactivates recording audio even when cancellation cannot stop the recorder', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const recorder = vi.mocked(useAudioRecorder).mock.results.at(-1)?.value
+    vi.mocked(recorder.stop).mockRejectedValueOnce(new Error('Recorder stop failed'))
+
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Cancel voice input' }).props.onPress()
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(setAudioModeAsync).toHaveBeenCalledWith({
+      allowsRecording: false,
+      allowsBackgroundRecording: false,
+    })
   })
 
   it('marks the arrow control as a send and the square as an edit', async () => {

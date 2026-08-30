@@ -224,7 +224,11 @@ export async function clearPushToken(
  */
 export function handleNotificationTapData(data: unknown): boolean {
   if (typeof data !== 'object' || data === null) return false
-  const { workspaceId, threadId } = data as PushNotificationData
+  const { sessionId, workspaceId, threadId } = data as PushNotificationData
+  if (typeof sessionId === 'string') {
+    const activeSessionId = getJson<{ sessionId?: unknown }>('relay.session')?.sessionId
+    if (activeSessionId !== sessionId) return false
+  }
   const session = useSessionStore.getState()
 
   if (typeof workspaceId === 'string' && typeof threadId === 'string') {

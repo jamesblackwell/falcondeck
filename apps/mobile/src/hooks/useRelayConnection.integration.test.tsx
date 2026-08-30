@@ -249,6 +249,21 @@ describe('useRelayConnection session rotation', () => {
         headers: { authorization: 'Bearer token-2' },
       }),
     )
+
+    act(() => {
+      oldSocket.onmessage?.({
+        data: JSON.stringify({
+          type: 'presence',
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
+    })
+    expect(useRelayStore.getState().machinePresence).toBeNull()
   })
 
   it('ignores an old session ticket that resolves after the session rotates', async () => {

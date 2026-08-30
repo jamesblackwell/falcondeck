@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { __resetAllStores } from 'react-native-mmkv'
 
-import type { AgentControlSettings, Automation, ControlGetResponse } from '@falcondeck/client-core'
+import type {
+  AgentControlSettings,
+  Automation,
+  AutomationRun,
+  ControlGetResponse,
+} from '@falcondeck/client-core'
 
 import { loadAutomationCache, persistAutomationCache } from '@/storage/automation-cache'
 
@@ -38,6 +43,24 @@ const automation: Automation = {
   next_run_at: '2026-08-24T08:00:00Z',
 }
 
+const automationRun: AutomationRun = {
+  id: 'run-1',
+  automation_id: automation.id,
+  automation_name: automation.name,
+  automation_revision: automation.revision,
+  status: 'succeeded',
+  trigger: 'manual',
+  queued_at: '2026-08-23T10:00:00Z',
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve
+  })
+  return { promise, resolve }
+}
+
 function controlGet(resource: string, data: unknown): ControlGetResponse {
   return { resource, data, next_cursor: null }
 }
@@ -66,6 +89,101 @@ describe('automation store', () => {
     })
 
     useAutomationStore.getState().hydrate('session-2')
+    expect(useAutomationStore.getState().automations).toEqual([])
+  })
+
+  it('sanitizes a corrupt cached run map before exposing it to store actions', () => {
+    persistAutomationCache({
+      sessionId: 'session-1',
+      automations: [automation],
+      settings,
+      runsByAutomation: {
+        [automation.id]: 'not-a-run-list',
+      } as unknown as Record<string, AutomationRun[]>,
+      savedAt: '2026-08-23T10:00:00Z',
+    })
+
+    useAutomationStore.getState().hydrate('session-1')
+
+    expect(useAutomationStore.getState().runsByAutomation).toEqual({})
+  })
+
+  it('starts a new refresh after session rotation and ignores the old response', async () => {
+    const first = deferred<ControlGetResponse>()
+    const second = deferred<ControlGetResponse>()
+    let listRequest = 0
+    const rpc = vi.fn((_method: string, params: Record<string, unknown>) => {
+      if (params.resource === 'agent_control.settings') {
+        return Promise.resolve(controlGet('agent_control.settings', settings))
+      }
+      listRequest += 1
+      return listRequest === 1 ? first.promise : second.promise
+    })
+    useRelayStore.setState({ _callRpc: rpc as never })
+    useAutomationStore.getState().hydrate('session-1')
+    const oldRefresh = useAutomationStore.getState().refresh()
+
+    useAutomationStore.getState().hydrate('session-2')
+    const newRefresh = useAutomationStore.getState().refresh()
+    await Promise.resolve()
+    first.resolve(controlGet('automations', [automation]))
+    second.resolve(controlGet('automations', []))
+    await Promise.all([oldRefresh, newRefresh])
+
+    expect(listRequest).toBe(2)
+    expect(useAutomationStore.getState()).toMatchObject({
+      sessionId: 'session-2',
+      automations: [],
+    })
+  })
+
+  it('does not insert an automation read from an earlier session', async () => {
+    const response = deferred<ControlGetResponse>()
+    useRelayStore.setState({
+      _callRpc: vi.fn().mockReturnValue(response.promise) as never,
+    })
+    useAutomationStore.getState().hydrate('session-1')
+    const read = useAutomationStore.getState().read(automation.id)
+
+    useAutomationStore.getState().hydrate('session-2')
+    response.resolve(controlGet('automation', automation))
+
+    await expect(read).resolves.toBeNull()
+    expect(useAutomationStore.getState().automations).toEqual([])
+  })
+
+  it('does not insert run history loaded for an earlier session', async () => {
+    const response = deferred<ControlGetResponse>()
+    useRelayStore.setState({
+      _callRpc: vi.fn().mockReturnValue(response.promise) as never,
+    })
+    useAutomationStore.getState().hydrate('session-1')
+    const load = useAutomationStore.getState().loadRuns(automation.id)
+
+    useAutomationStore.getState().hydrate('session-2')
+    response.resolve(controlGet('automation.runs', [automationRun]))
+
+    await expect(load).resolves.toEqual([])
+    expect(useAutomationStore.getState().runsByAutomation).toEqual({})
+  })
+
+  it('does not apply a mutation response from an earlier session', async () => {
+    const response = deferred<{ ok: true; operation: string; data: Automation }>()
+    useRelayStore.setState({
+      _callRpc: vi.fn().mockReturnValue(response.promise) as never,
+    })
+    useAutomationStore.getState().hydrate('session-1')
+    const execution = useAutomationStore.getState().execute({
+      operation: 'automation.pause',
+      arguments: { automation_id: automation.id },
+      expected_revision: automation.revision,
+    })
+
+    useAutomationStore.getState().hydrate('session-2')
+    const paused = { ...automation, state: 'paused' as const, revision: 5 }
+    response.resolve({ ok: true, operation: 'automation.pause', data: paused })
+
+    await execution
     expect(useAutomationStore.getState().automations).toEqual([])
   })
 

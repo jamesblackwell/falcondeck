@@ -1069,6 +1069,7 @@ export function useRelayConnection() {
         }
 
         socket.onmessage = (msg) => {
+          if (!isCurrent || useRelayStore.getState().sessionId !== sessionId) return
           let payload: RelayServerMessage
           try {
             payload = JSON.parse(msg.data) as RelayServerMessage

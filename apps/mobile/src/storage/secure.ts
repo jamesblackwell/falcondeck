@@ -14,6 +14,7 @@ export async function persistClientSecretKey(base64: string): Promise<void> {
     await SecureStore.setItemAsync(KEY_CLIENT_SECRET, base64, STORE_OPTIONS)
   } catch (e) {
     console.warn('[SecureStore] persistClientSecretKey failed', e)
+    throw e
   }
 }
 
@@ -31,6 +32,7 @@ export async function persistDataKey(base64: string): Promise<void> {
     await SecureStore.setItemAsync(KEY_DATA_KEY, base64, STORE_OPTIONS)
   } catch (e) {
     console.warn('[SecureStore] persistDataKey failed', e)
+    throw e
   }
 }
 
@@ -48,6 +50,7 @@ export async function persistClientToken(token: string): Promise<void> {
     await SecureStore.setItemAsync(KEY_CLIENT_TOKEN, token, STORE_OPTIONS)
   } catch (e) {
     console.warn('[SecureStore] persistClientToken failed', e)
+    throw e
   }
 }
 
@@ -65,6 +68,7 @@ export async function clearDataKey(): Promise<void> {
     await SecureStore.deleteItemAsync(KEY_DATA_KEY, STORE_OPTIONS)
   } catch (e) {
     console.warn('[SecureStore] clearDataKey failed', e)
+    throw e
   }
 }
 
