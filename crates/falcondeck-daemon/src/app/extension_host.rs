@@ -5,7 +5,10 @@ use std::{
     sync::Arc,
 };
 
-use falcondeck_core::{ExtensionThreadSummary, ExtensionViewScope};
+use falcondeck_core::{
+    ExtensionThreadSummary, ExtensionViewScope,
+    orchestration::{ExtensionOrchestrationEffect, ExtensionRunSummary},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -87,6 +90,8 @@ struct HostActionRequest<'a> {
     storage: &'a BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +110,8 @@ struct HostToolRequest<'a> {
     storage: &'a BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -153,6 +160,13 @@ pub(super) enum ExtensionEvent {
         #[serde(rename = "requestId")]
         request_id: String,
     },
+    #[serde(rename = "orchestration.updated")]
+    OrchestrationUpdated {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "runId")]
+        run_id: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -166,6 +180,8 @@ struct HostEventRequest<'a> {
     storage: &'a BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +195,8 @@ struct HostActionResponse {
     storage: BTreeMap<String, Value>,
     #[serde(default)]
     published_views: Vec<PublishedExtensionView>,
+    #[serde(default)]
+    orchestration_effects: Vec<ExtensionOrchestrationEffect>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -216,6 +234,7 @@ pub(super) struct ExtensionHostActionResult {
     pub(super) result: Value,
     pub(super) storage: BTreeMap<String, Value>,
     pub(super) published_views: Vec<PublishedExtensionView>,
+    pub(super) orchestration_effects: Vec<ExtensionOrchestrationEffect>,
 }
 
 impl ExtensionHost {
@@ -267,6 +286,7 @@ impl ExtensionHost {
         input: &Value,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
+        orchestration_runs: Option<&[ExtensionRunSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         self.prepare(package).await?;
         let request_id = self.take_request_id();
@@ -280,6 +300,7 @@ impl ExtensionHost {
             input,
             storage,
             thread_summaries,
+            orchestration_runs,
         };
         let response = self
             .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "action")
@@ -288,6 +309,7 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
+            orchestration_effects: response.orchestration_effects,
         })
     }
 
@@ -303,6 +325,7 @@ impl ExtensionHost {
         workspace_id: Option<&str>,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
+        orchestration_runs: Option<&[ExtensionRunSummary]>,
     ) -> Result<ExtensionHostActionResult, ExtensionToolError> {
         self.prepare(package)
             .await
@@ -319,6 +342,7 @@ impl ExtensionHost {
             workspace_id,
             storage,
             thread_summaries,
+            orchestration_runs,
         };
         let response = self
             .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "tool")
@@ -327,6 +351,7 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
+            orchestration_effects: response.orchestration_effects,
         })
     }
 
@@ -336,6 +361,7 @@ impl ExtensionHost {
         event: &ExtensionEvent,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
+        orchestration_runs: Option<&[ExtensionRunSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         if serde_json::to_vec(event)?.len() > MAX_EXTENSION_EVENT_BYTES {
             return Err(DaemonError::BadRequest(format!(
@@ -352,6 +378,7 @@ impl ExtensionHost {
             event,
             storage,
             thread_summaries,
+            orchestration_runs,
         };
         let response = self
             .send_request(&request, request_id, HOST_EVENT_TIMEOUT, "event")
@@ -360,6 +387,7 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
+            orchestration_effects: response.orchestration_effects,
         })
     }
 
@@ -553,7 +581,13 @@ fn extension_host_script(state_dir: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcondeck_core::{InvokeExtensionActionRequest, ThreadStatus};
+    use falcondeck_core::{
+        InvokeExtensionActionRequest, ThreadStatus,
+        orchestration::{
+            ExtensionOrchestrationEffect, ExtensionRunGate, ExtensionRunSummary,
+            MAX_AUTOMATIC_TURNS,
+        },
+    };
 
     #[test]
     fn host_pool_reuses_one_host_per_extension_and_isolates_others() {
@@ -601,6 +635,7 @@ mod tests {
                 Some("workspace-1"),
                 &BTreeMap::new(),
                 None,
+                None,
             )
             .await
             .expect("a bounded offer set should publish");
@@ -635,6 +670,7 @@ mod tests {
                 None,
                 &published.storage,
                 None,
+                None,
             )
             .await
             .expect_err("an over-long label must be refused");
@@ -644,6 +680,116 @@ mod tests {
         // Staleness is the daemon's rule, not the extension's, so this
         // package stores nothing between calls.
         assert!(published.storage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn official_missions_uses_only_the_public_run_facet() {
+        let deno = resolve_agent_binary("deno", "deno").executable;
+        if Command::new(deno).arg("--version").output().await.is_err() {
+            return;
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let package = ExtensionPackage {
+            id: "falcondeck.missions".to_string(),
+            entrypoint: root.join("extensions/official/missions/server.ts"),
+        };
+        let state_path = std::env::temp_dir().join("falcondeck-missions-host-test/state.json");
+        let mut registry = super::super::extensions::ExtensionRegistry::new(&state_path);
+        registry
+            .restore()
+            .await
+            .expect("runtime support assets should restore");
+        let mut host = ExtensionHost::new(&state_path, "deno".to_string());
+        let now = chrono::Utc::now();
+        let runs = [ExtensionRunSummary {
+            id: "run-1".to_string(),
+            owner_extension_id: "falcondeck.missions".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            coordinator_thread_id: "thread-1".to_string(),
+            title: "Mission test".to_string(),
+            objective: "Prove the public extension contract".to_string(),
+            gate: ExtensionRunGate::Open,
+            outcome: None,
+            pause_reason: None,
+            checkpoint: serde_json::json!({
+                "schemaVersion": 1,
+                "objective": "Prove the public extension contract",
+                "acceptanceCriteria": ["A checkpoint is emitted"],
+                "disposition": "planning",
+                "summary": "",
+                "evidence": [],
+                "limitations": [],
+                "updatedAt": now,
+            }),
+            policy_revision: 3,
+            journal_sequence: 2,
+            approval_generation: 1,
+            automatic_turns_started: 1,
+            max_automatic_turns: MAX_AUTOMATIC_TURNS,
+            created_at: now,
+            updated_at: now,
+            deadline_at: now + chrono::Duration::minutes(30),
+            last_progress_fingerprint: None,
+            pending_continuation: None,
+            completion_proposed: false,
+            operations: Vec::new(),
+        }];
+        let threads = [ExtensionThreadSummary {
+            id: "thread-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            title: "Mission test".to_string(),
+            provider: falcondeck_core::AgentProvider::CLAUDE,
+            status: ThreadStatus::Running,
+            updated_at: now,
+            pending_approval_count: 0,
+            pending_question_count: 0,
+        }];
+
+        let refreshed = host
+            .invoke(
+                &package,
+                "refresh-missions",
+                None,
+                &serde_json::json!({}),
+                &BTreeMap::new(),
+                Some(&threads),
+                Some(&runs),
+            )
+            .await
+            .expect("Missions panel should render through the public host");
+        assert_eq!(refreshed.published_views[0].view_id, "missions-panel");
+        assert!(refreshed.orchestration_effects.is_empty());
+
+        let checkpointed = host
+            .invoke_tool(
+                &package,
+                "mission-checkpoint",
+                &serde_json::json!({
+                    "disposition": "continue_self",
+                    "summary": "Recorded a durable checkpoint",
+                    "nextAction": "Run the focused test",
+                    "progressFingerprint": "checkpoint-v1",
+                    "evidence": [],
+                    "limitations": []
+                }),
+                Some("thread-1"),
+                Some("workspace-1"),
+                &refreshed.storage,
+                Some(&threads),
+                Some(&runs),
+            )
+            .await
+            .expect("coordinator checkpoint should return one broker effect");
+        assert!(matches!(
+            checkpointed.orchestration_effects.as_slice(),
+            [ExtensionOrchestrationEffect::RequestContinuation {
+                run_id,
+                expected_policy_revision: 3,
+                progress_fingerprint,
+                ..
+            }] if run_id == "run-1" && progress_fingerprint == "checkpoint-v1"
+        ));
+        host.stop().await;
     }
 
     #[tokio::test]
@@ -682,6 +828,7 @@ mod tests {
                 &serde_json::json!({ "operation": "read" }),
                 &legacy_storage,
                 None,
+                None,
             )
             .await
             .expect("legacy colour labels should be dropped");
@@ -706,6 +853,7 @@ mod tests {
                     "stageId": "in_progress"
                 }),
                 &migrated.storage,
+                None,
                 None,
             )
             .await
@@ -782,13 +930,14 @@ export default defineExtension({
             id: "thread-1".to_string(),
             workspace_id: "workspace-1".to_string(),
             title: "Needs review".to_string(),
+            provider: falcondeck_core::AgentProvider::CLAUDE,
             status: ThreadStatus::WaitingForInput,
             updated_at: chrono::Utc::now(),
             pending_approval_count: 1,
             pending_question_count: 0,
         }];
         let denied = match host
-            .dispatch_event(&package, &event, &BTreeMap::new(), None)
+            .dispatch_event(&package, &event, &BTreeMap::new(), None, None)
             .await
         {
             Ok(_) => panic!("thread reads must be denied without a grant projection"),
@@ -800,7 +949,7 @@ export default defineExtension({
                 .contains("threads:read permission is not granted")
         );
         let result = host
-            .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries))
+            .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries), None)
             .await
             .expect("event should run");
         host.stop().await;
@@ -887,7 +1036,15 @@ export default defineExtension({
         };
         let mut host = ExtensionHost::new(&state_path, "deno".to_string());
         let result = host
-            .invoke(&package, "run", None, &Value::Null, &BTreeMap::new(), None)
+            .invoke(
+                &package,
+                "run",
+                None,
+                &Value::Null,
+                &BTreeMap::new(),
+                None,
+                None,
+            )
             .await
             .expect("console diagnostics must stay off protocol stdout");
         host.stop().await;

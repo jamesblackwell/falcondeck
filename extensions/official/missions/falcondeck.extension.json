@@ -1,0 +1,124 @@
+{
+  "$schema": "../../../schemas/extension-manifest.schema.json",
+  "id": "falcondeck.missions",
+  "name": "Missions",
+  "version": "0.1.0",
+  "engines": {
+    "falcondeck": "^0.1"
+  },
+  "entrypoint": "server.ts",
+  "contributes": {
+    "panelActions": [
+      { "id": "refresh-missions", "title": "Refresh missions" },
+      { "id": "start-draft", "title": "Start mission draft" },
+      { "id": "adopt-task", "title": "Start mission from task" },
+      { "id": "pause-run", "title": "Pause mission" },
+      { "id": "resume-run", "title": "Resume mission" },
+      { "id": "extend-run", "title": "Extend mission deadline" },
+      { "id": "accept-completion", "title": "Accept mission completion" },
+      { "id": "close-incomplete", "title": "Close mission incomplete" }
+    ],
+    "panels": [
+      {
+        "id": "missions",
+        "title": "Missions",
+        "view": "missions-panel",
+        "icon": "activity",
+        "ui": {
+          "version": 1,
+          "root": {
+            "type": "stack",
+            "gap": "large",
+            "children": [
+              { "type": "text", "text": "Missions", "style": "heading" },
+              {
+                "type": "text",
+                "text": "Bounded, durable coordination attached to an ordinary task.",
+                "tone": "muted"
+              },
+              { "type": "divider" },
+              {
+                "type": "state",
+                "state": "empty",
+                "title": "Load the Missions panel",
+                "description": "Grant Threads, Agent tools, and Manage owned tasks in Settings, then load the panel. Missions is disabled by default."
+              },
+              {
+                "type": "button",
+                "label": "Load missions",
+                "action": { "actionId": "refresh-missions", "input": {} },
+                "variant": "primary"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "agentTools": [
+      {
+        "id": "draft-mission",
+        "title": "Draft a FalconDeck mission",
+        "description": "Create a bounded mission draft for this exact task. A human must review and start it from the Missions panel before any automatic work begins.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["objective"],
+          "properties": {
+            "title": { "type": "string", "maxLength": 120 },
+            "objective": { "type": "string", "maxLength": 12000 },
+            "acceptanceCriteria": {
+              "type": "array",
+              "maxItems": 12,
+              "items": { "type": "string", "maxLength": 500 }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "mission-status",
+        "title": "Read this task's mission",
+        "description": "Read the bounded Mission state owned by this exact coordinator task, including its remaining automatic-turn allowance and deadline.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "mission-checkpoint",
+        "title": "Checkpoint a FalconDeck mission",
+        "description": "Persist meaningful Mission progress, request one bounded continuation, pause for human input, or propose evidence-backed completion for human acceptance.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["disposition", "summary"],
+          "properties": {
+            "disposition": {
+              "type": "string",
+              "enum": ["continue_self", "needs_human", "proposing_completion"]
+            },
+            "summary": { "type": "string", "maxLength": 4000 },
+            "nextAction": { "type": "string", "maxLength": 2000 },
+            "progressFingerprint": { "type": "string", "maxLength": 256 },
+            "evidence": {
+              "type": "array",
+              "maxItems": 20,
+              "items": { "type": "string", "maxLength": 1000 }
+            },
+            "limitations": {
+              "type": "array",
+              "maxItems": 12,
+              "items": { "type": "string", "maxLength": 1000 }
+            },
+            "humanQuestion": { "type": "string", "maxLength": 1000 }
+          },
+          "additionalProperties": false
+        }
+      }
+    ]
+  },
+  "permissions": [
+    "threads:read",
+    "agent-tools:register",
+    "orchestration:manage-owned-tasks"
+  ]
+}

@@ -906,6 +906,7 @@ impl AppState {
         &self,
         workspace_id: String,
         thread_id: String,
+        turn_id: String,
         turn_generation: u64,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
@@ -1695,6 +1696,22 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
+        self.emit(
+            Some(workspace_id.clone()),
+            Some(thread_id.clone()),
+            UnifiedEvent::TurnEnd {
+                turn_id,
+                status: if was_interrupted {
+                    "interrupted"
+                } else if final_error.is_some() {
+                    "failed"
+                } else {
+                    "completed"
+                }
+                .to_string(),
+                error: final_error.clone(),
+            },
+        );
         self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         // A user-requested interrupt is not attention-worthy; a finished or
         // failed turn is. The relay only pushes to disconnected devices.

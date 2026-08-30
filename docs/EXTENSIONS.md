@@ -58,12 +58,16 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   composer in desktop, remote web, and mobile;
 - the bundled, enabled-by-default Follow-up suggestions extension, granted by
   catalog policy on first discovery;
+- the public `orchestration` run/effect facet, denied-by-default
+  `orchestration:manage-owned-tasks` grant, durable daemon journal, and bundled
+  disabled-by-default Missions v1 reference;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
 third-party trusted-frontend building or loading,
-permissions beyond summary-only `threads:read` and `agent-tools:register`,
+permissions beyond summary-only `threads:read`, `agent-tools:register`, and
+`orchestration:manage-owned-tasks`,
 direct shell execution from an extension tool, trusted extension frontends for
 third parties, persistent suggestion dismissals, Ask User Question, more than
 one visible suggestion pill, the remaining declarative form
@@ -211,6 +215,9 @@ Initial policy:
   `agent-tools:register` grant is applied once, on first discovery; afterwards
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
+- `falcondeck.missions`: bundled and disabled by default. All three requested
+  permissions remain denied until the user grants them; open runs pause if the
+  extension or orchestration grant is disabled.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
@@ -246,11 +253,13 @@ semantic version, supported extension API range, backend entrypoint, declared
 contributions, and a permissions array. `frontend` is optional and currently
 accepted only as a build input for bundled official packages. The v0.1
 validator accepts at most 16
-unique permissions and currently recognizes `threads:read` and
-`agent-tools:register`; unknown or duplicate permissions are rejected rather
+unique permissions and currently recognizes `threads:read`,
+`agent-tools:register`, and `orchestration:manage-owned-tasks`; unknown or duplicate permissions are rejected rather
 than run without enforcement.
 
-Two contribution kinds have no client-rendered declarative UI of their own:
+`panelActions`, `agentTools`, and `composerSuggestions` have no standalone
+client-rendered declarative UI of their own. Panel actions are referenced by a
+panel document; the other two bind agent tools and host-owned composer UI:
 
 ```json
 {
@@ -301,9 +310,9 @@ export default defineExtension({
 ```
 
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
-`storage`, `views`, `actions`, identifier-only `events`, and the
-permission-gated `threads` summary reader. The remaining rows are planned
-capabilities:
+`storage`, `views`, `actions`, identifier-only `events`, the permission-gated
+`threads` summary reader, agent `tools`, `composer`, and the bounded owner-only
+`orchestration` reducer. The remaining rows are planned capabilities:
 
 | Facet       | Purpose                                                     |
 | ----------- | ----------------------------------------------------------- |
@@ -316,6 +325,7 @@ capabilities:
 | `threads`   | List summary-only threads with a `threads:read` grant       |
 | `tools`     | Handle agent tool calls with an `agent-tools:register` grant |
 | `composer`  | Publish or clear a thread's bounded next-action offers      |
+| `orchestration` | Read owned bounded runs and return one durable effect   |
 | `commands`  | Planned: slash or command-palette commands                  |
 
 Later facets may add schedules, notifications, turn control, workspace files,
@@ -328,17 +338,19 @@ their storage/view effects commit atomically through the same daemon boundary
 as actions.
 
 The event union contains `thread.updated`, `turn.start`, `turn.ended`,
-`attention.opened`, and `attention.resolved`. Payloads contain only stable
-workspace, thread, turn, and request identifiers. Status, title, preview,
-prompt, transcript, and resolution fields are deliberately absent. An
-extension that needs thread metadata requests it separately through the
-declared, granted, and enforced summary-read facet.
+`attention.opened`, `attention.resolved`, and owner-targeted
+`orchestration.updated`. Payloads contain only stable workspace, thread, turn,
+request, and owned-run identifiers. Status, title, preview, prompt, transcript,
+and resolution fields are deliberately absent. An extension that needs thread
+or run metadata requests it separately through the declared, granted, and
+enforced projection facet. Lifecycle delivery is bounded and lossy; events are
+refresh hints, never a durable journal.
 
 `context.threads.list()` fails closed unless the manifest declares
 `threads:read` and the user has granted it. The returned projection is capped
 at 1,000 most-recently-updated entries and 2 MiB, and contains only thread id,
-workspace id, a title truncated to 256 characters, status, updated timestamp,
-and pending approval/question counts. Message previews, prompts, transcripts,
+workspace id, a title truncated to 256 characters, owning provider, status,
+updated timestamp, and pending approval/question counts. Message previews, prompts, transcripts,
 turn content, agent configuration, and filesystem paths never cross this v1
 boundary.
 
@@ -354,9 +366,12 @@ context.tools.register("suggest-follow-ups", async ({ input, threadId }) => {
 });
 ```
 
-Registration fails closed without the `agent-tools:register` grant. Context is
-supplied by the daemon from the harness spawn, never chosen by the agent, so a
-tool call cannot be aimed at another conversation. A handler that raises is an
+Registration fails closed without the `agent-tools:register` grant. Ordinary
+tool context is projected from the harness spawn. Sensitive orchestration
+effects additionally require an opaque daemon-issued bridge capability bound
+to an exact task; request-body identifiers do not authorize them. Missions v1
+therefore supports Claude only, because current Codex and OpenCode bridges are
+workspace-wide rather than task-bound. A handler that raises is an
 ordinary rejection — the message goes back to the calling agent as a tool error
 and the extension keeps its healthy status, because models routinely pass
 arguments an extension declines. Only a host that dies, times out, or breaks
@@ -566,7 +581,9 @@ The daemon owns this lifecycle:
 5. Activate the package and collect its action registrations and event subscriptions.
 6. Route a declared action, agent tool call, or identifier-only event with
    bounded input and a private-state copy.
-7. Validate and atomically persist the returned storage and view projections.
+7. Validate storage/views and any single owner-only orchestration effect. The
+   orchestration checkpoint and operation intent commit atomically before an
+   asynchronous provider side effect.
 8. Publish status and view changes through the unified event stream.
 9. Dispose the process on disable, shutdown, timeout, or protocol failure.
 
@@ -628,6 +645,30 @@ when the bridge lists tools and again when the daemon routes a call, so:
 
 The bridge is only injected into a spawn when at least one enabled extension
 currently publishes a granted tool, so a user with none pays for no subprocess.
+
+Thread and workspace fields passed to a tool handler are transport context, not
+model arguments. Sensitive facets still fail closed unless that connector has
+an exact task binding. Claude's per-turn connector supplies one. The current
+Codex and OpenCode workspace-wide connectors do not, so Missions v1 rejects
+them rather than trusting a model-supplied task id.
+
+The third explicit capability is `orchestration:manage-owned-tasks`. It exposes
+only runs whose `ownerExtensionId` matches the callback's extension. A callback
+may return at most one typed effect. The daemon validates actor class, owner,
+task binding, compare-and-swap revision, checkpoint/prompt bounds, deadline,
+and admission count before committing it. The effect commits the opaque
+extension checkpoint and durable operation intent before provider dispatch;
+extension code never waits for a harness.
+
+V1 supports one existing Claude coordinator task, an initial 30-minute lease,
+at most four automatic turns, and one unresolved continuation. Background
+dispatch uses an explicit safer execution profile and does not change current
+task selection or the workspace default provider. Repeated progress
+fingerprints, provider ambiguity, task errors, permission revocation, and
+extension disable pause the run. Restart never blindly resends accepted work.
+The owner may propose completion, but only a human panel action can accept it.
+The bundled `falcondeck.missions` package is the reference consumer and is
+disabled with all grants denied by default. Worker tasks remain outside v1.
 
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
 official extensions stay within baseline capabilities unless the catalog grants
@@ -873,6 +914,15 @@ private queue, optionally resolves ids to granted summary titles, and publishes
 its panel through declarative UI v1. Before the grant it still renders an
 identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
+
+Progress (2026-08-30): the neutral orchestration facet, `panelActions`
+contribution point, durable run/operation store, safe background turn path,
+fake-host support, and bundled Missions v1 reference are implemented. Desktop
+and remote web render Missions through the existing shared extension-panel and
+action routes; mobile retains the generic unsupported-panel fallback. Exact-task
+tool identity deliberately limits the first release to Claude. Multi-task
+worker pools, Codex/OpenCode dynamic task binding, automatic completion, and
+native harness delegation are not implemented.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;

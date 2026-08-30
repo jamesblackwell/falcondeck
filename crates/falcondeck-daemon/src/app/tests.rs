@@ -157,6 +157,7 @@ fn extension_thread_summaries_enforce_count_title_and_byte_limits() {
         id,
         workspace_id: "workspace-1".to_string(),
         title: "t".repeat(300),
+        provider: AgentProvider::CODEX,
         status: ThreadStatus::Idle,
         updated_at: Utc::now() + Duration::seconds(index as i64),
         pending_approval_count: 0,
@@ -2423,6 +2424,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
             arguments: json!({ "title": "Billing webhook" }),
             thread_id: Some(thread_id.clone()),
             workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+            bridge_capability: None,
         })
         .await
         .expect("builtin rename should apply");
@@ -2431,6 +2433,50 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
 
     let handle = app.thread_summary(&workspace_id, &thread_id).await.unwrap();
     assert_eq!(handle.title, "Billing webhook");
+}
+
+#[tokio::test]
+async fn extension_bridge_capability_is_opaque_task_bound_and_expires() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("state.json"),
+    );
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "valid-capability".to_string(),
+        super::ExtensionBridgeCapability {
+            workspace_path: "/tmp/project".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            expires_at: Utc::now() + Duration::minutes(5),
+        },
+    );
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "expired-capability".to_string(),
+        super::ExtensionBridgeCapability {
+            workspace_path: "/tmp/other".to_string(),
+            thread_id: Some("thread-2".to_string()),
+            expires_at: Utc::now() - Duration::minutes(1),
+        },
+    );
+
+    assert!(app.extension_bridge_context(None).await.is_none());
+    assert!(
+        app.extension_bridge_context(Some("invented-capability"))
+            .await
+            .is_none()
+    );
+    assert!(
+        app.extension_bridge_context(Some("expired-capability"))
+            .await
+            .is_none()
+    );
+    let context = app
+        .extension_bridge_context(Some("valid-capability"))
+        .await
+        .expect("daemon-issued capability should resolve");
+    assert_eq!(context.workspace_path, "/tmp/project");
+    assert_eq!(context.thread_id.as_deref(), Some("thread-1"));
 }
 
 #[test]

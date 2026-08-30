@@ -46,7 +46,13 @@ pub(super) const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub(super) const THREADS_READ_PERMISSION: &str = "threads:read";
 /// Lets an extension publish manifest-declared tools to agent harnesses.
 pub(super) const AGENT_TOOLS_PERMISSION: &str = "agent-tools:register";
-const SUPPORTED_PERMISSIONS: &[&str] = &[THREADS_READ_PERMISSION, AGENT_TOOLS_PERMISSION];
+/// Lets an extension own bounded daemon-dispatched runs in adopted tasks.
+pub(super) const ORCHESTRATION_PERMISSION: &str = "orchestration:manage-owned-tasks";
+const SUPPORTED_PERMISSIONS: &[&str] = &[
+    THREADS_READ_PERMISSION,
+    AGENT_TOOLS_PERMISSION,
+    ORCHESTRATION_PERMISSION,
+];
 /// Clients qualify MCP tools as `{server}__{name}`. A `__` inside `name`
 /// makes that qualifier ambiguous, and Grok skips the tool. After sanitizing
 /// `.`/`-` to `_`, neither half contains `-`, so a hyphen is unambiguous.
@@ -253,6 +259,17 @@ impl ExtensionRegistry {
                     self.root.join("official/mini-zen/server.ts"),
                     include_str!("../../../../extensions/official/mini-zen/server.ts"),
                 ),
+                (
+                    self.root
+                        .join("official/missions/falcondeck.extension.json"),
+                    include_str!(
+                        "../../../../extensions/official/missions/falcondeck.extension.json"
+                    ),
+                ),
+                (
+                    self.root.join("official/missions/server.ts"),
+                    include_str!("../../../../extensions/official/missions/server.ts"),
+                ),
             ]);
             // Scratch pad shipped as its own package directory; nothing reads
             // it once the catalog points at Notes, so clear it out.
@@ -440,6 +457,7 @@ impl ExtensionRegistry {
             .contributes
             .thread_menu_actions
             .iter()
+            .chain(summary.contributes.panel_actions.iter())
             .any(|action| action.id == action_id)
         {
             return Err(DaemonError::NotFound(
@@ -1056,6 +1074,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         ));
     }
     let contribution_count = manifest.contributes.thread_menu_actions.len()
+        + manifest.contributes.panel_actions.len()
         + manifest.contributes.thread_decorations.len()
         + manifest.contributes.sidebar_filters.len()
         + manifest.contributes.panels.len()
@@ -1068,6 +1087,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     }
     let mut ids = HashSet::new();
     validate_unique_actions(&manifest.contributes.thread_menu_actions, &mut ids)?;
+    validate_unique_actions(&manifest.contributes.panel_actions, &mut ids)?;
     validate_unique_views(&manifest.contributes.thread_decorations, &mut ids)?;
     validate_unique_views(&manifest.contributes.sidebar_filters, &mut ids)?;
     validate_unique_views(&manifest.contributes.panels, &mut ids)?;
@@ -1117,6 +1137,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         .contributes
         .thread_menu_actions
         .iter()
+        .chain(manifest.contributes.panel_actions.iter())
         .map(|action| action.id.as_str())
         .collect::<HashSet<_>>();
     let declared_views = manifest
@@ -1172,7 +1193,7 @@ fn validate_manifest_contribution_shape(manifest: &Value) -> Result<(), DaemonEr
     })?;
     for (surface, values) in contributes {
         let allowed = match surface.as_str() {
-            "threadMenuActions" => &["id", "title"][..],
+            "threadMenuActions" | "panelActions" => &["id", "title"][..],
             "threadDecorations" => &["id", "view", "ui"][..],
             "sidebarFilters" => &["id", "title", "view", "ui"][..],
             "panels" => &["id", "title", "view", "ui", "icon"][..],

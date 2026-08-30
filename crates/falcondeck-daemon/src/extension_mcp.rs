@@ -30,6 +30,8 @@ pub const ENV_DAEMON_URL: &str = "FALCONDECK_DAEMON_URL";
 pub const ENV_EXTENSION_WORKSPACE: &str = "FALCONDECK_EXTENSION_WORKSPACE";
 /// Thread context supplied by the daemon at spawn, when known.
 pub const ENV_EXTENSION_THREAD: &str = "FALCONDECK_EXTENSION_THREAD";
+/// Opaque task-bound authority supplied by the daemon at connector spawn.
+pub const ENV_EXTENSION_CAPABILITY: &str = "FALCONDECK_EXTENSION_CAPABILITY";
 
 /// Spawn-time context for one agent session.
 #[derive(Debug, Clone)]
@@ -37,6 +39,7 @@ struct BridgeContext {
     daemon_url: String,
     workspace_path: Option<String>,
     thread_id: Option<String>,
+    bridge_capability: Option<String>,
 }
 
 // Keep the bridge coupled to the daemon's small HTTP wire shape, not its
@@ -65,6 +68,7 @@ impl BridgeContext {
                 .unwrap_or_else(|| "http://127.0.0.1:4123".to_string()),
             workspace_path: non_empty(ENV_EXTENSION_WORKSPACE),
             thread_id: non_empty(ENV_EXTENSION_THREAD),
+            bridge_capability: non_empty(ENV_EXTENSION_CAPABILITY),
         }
     }
 }
@@ -275,6 +279,7 @@ async fn handle_tool_call(
         // Context is daemon-supplied, never agent-supplied.
         "thread_id": context.thread_id,
         "workspace_path": context.workspace_path,
+        "bridge_capability": context.bridge_capability,
     });
     let url = format!("{}/api/extensions/tools/invoke", context.daemon_url);
     let response = match client.post(&url).json(&body).send().await {
@@ -334,6 +339,7 @@ mod tests {
             daemon_url: daemon_url.to_string(),
             workspace_path: Some("/repo".to_string()),
             thread_id: Some("thread-1".to_string()),
+            bridge_capability: Some("capability-1".to_string()),
         }
     }
 

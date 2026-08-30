@@ -9,6 +9,8 @@
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
+/// Durable, extension-owned orchestration run contracts.
+pub mod orchestration;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
 
@@ -1177,6 +1179,8 @@ pub struct ExtensionThreadSummary {
     pub workspace_id: String,
     /// User-visible thread title.
     pub title: String,
+    /// Harness/provider that owns the task.
+    pub provider: AgentProvider,
     /// Current thread lifecycle state.
     pub status: ThreadStatus,
     /// Last summary update time.
@@ -1207,6 +1211,9 @@ pub struct ExtensionContributions {
     /// Actions shown in a thread context menu.
     #[serde(default)]
     pub thread_menu_actions: Vec<ExtensionActionContribution>,
+    /// Actions referenced only from an extension's trusted panel UI.
+    #[serde(default)]
+    pub panel_actions: Vec<ExtensionActionContribution>,
     /// Decorations rendered on thread rows.
     #[serde(default)]
     pub thread_decorations: Vec<ExtensionViewContribution>,
@@ -1281,6 +1288,10 @@ pub struct InvokeExtensionToolRequest {
     /// Workspace path the calling agent runs in, when known.
     #[serde(default)]
     pub workspace_path: Option<String>,
+    /// Opaque daemon-issued bridge capability binding sensitive calls to the
+    /// provider task that received the connector. Never model-authored.
+    #[serde(default)]
+    pub bridge_capability: Option<String>,
 }
 
 /// Result of one agent tool invocation.

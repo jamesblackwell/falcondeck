@@ -1,5 +1,7 @@
 use chrono::{TimeZone, Utc};
-use falcondeck_core::{ExtensionThreadSummary, ThreadStatus, UpdateExtensionPermissionRequest};
+use falcondeck_core::{
+    AgentProvider, ExtensionThreadSummary, ThreadStatus, UpdateExtensionPermissionRequest,
+};
 
 #[test]
 fn extension_thread_summaries_use_the_reduced_camel_case_wire_shape() {
@@ -7,6 +9,7 @@ fn extension_thread_summaries_use_the_reduced_camel_case_wire_shape() {
         id: "thread-1".to_string(),
         workspace_id: "workspace-1".to_string(),
         title: "Review the release".to_string(),
+        provider: AgentProvider::CLAUDE,
         status: ThreadStatus::WaitingForInput,
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 13, 8, 0, 0)
@@ -23,6 +26,7 @@ fn extension_thread_summaries_use_the_reduced_camel_case_wire_shape() {
             "id": "thread-1",
             "workspaceId": "workspace-1",
             "title": "Review the release",
+            "provider": "claude",
             "status": "waiting_for_input",
             "updatedAt": "2026-08-13T08:00:00Z",
             "pendingApprovalCount": 1,

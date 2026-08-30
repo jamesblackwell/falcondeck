@@ -131,6 +131,11 @@ export type ExtensionEvent =
       workspaceId: string;
       threadId?: string;
       requestId: string;
+    }
+  | {
+      type: "orchestration.updated";
+      workspaceId: string;
+      runId: string;
     };
 
 export type ExtensionEventType = ExtensionEvent["type"];
@@ -147,11 +152,126 @@ export type ExtensionThreadSummary = {
   id: string;
   workspaceId: string;
   title: string;
+  provider: string;
   status: ExtensionThreadStatus;
   updatedAt: string;
   pendingApprovalCount: number;
   pendingQuestionCount: number;
 };
+
+export type ExtensionRunGate = "open" | "paused" | "closed";
+export type ExtensionRunOutcome =
+  | "completed"
+  | "closed_incomplete"
+  | "expired"
+  | "cancelled";
+export type ExtensionOperationStatus =
+  | "queued"
+  | "dispatching"
+  | "acknowledged"
+  | "settled"
+  | "outcome_unknown"
+  | "rejected"
+  | "cancelled";
+
+/** Owner-only durable run projection. Provider transcripts are never exposed. */
+export type ExtensionRunSummary = {
+  id: string;
+  ownerExtensionId: string;
+  workspaceId: string;
+  coordinatorThreadId: string;
+  title: string;
+  objective: string;
+  gate: ExtensionRunGate;
+  outcome?: ExtensionRunOutcome;
+  pauseReason?: string;
+  checkpoint: unknown;
+  policyRevision: number;
+  journalSequence: number;
+  approvalGeneration: number;
+  automaticTurnsStarted: number;
+  maxAutomaticTurns: number;
+  createdAt: string;
+  updatedAt: string;
+  deadlineAt: string;
+  lastProgressFingerprint?: string;
+  pendingContinuation?: {
+    operationId: string;
+    prompt: string;
+    progressFingerprint: string;
+    requestedAt: string;
+  };
+  completionProposed: boolean;
+  operations: Array<{
+    id: string;
+    prompt: string;
+    status: ExtensionOperationStatus;
+    createdAt: string;
+    updatedAt: string;
+    providerTurnId?: string;
+    sourceTurnIdBeforeDispatch?: string;
+    message?: string;
+  }>;
+};
+
+export type ExtensionRunCommand =
+  | "pause"
+  | "resume"
+  | "extend"
+  | "accept_completion"
+  | "close_incomplete";
+
+/**
+ * One short, durable orchestration reduction. The daemon validates ownership,
+ * actor type, CAS revision, limits and task identity before committing it.
+ */
+export type ExtensionOrchestrationEffect =
+  | {
+      type: "create_run";
+      runId: string;
+      workspaceId: string;
+      coordinatorThreadId: string;
+      title: string;
+      objective: string;
+      checkpoint: unknown;
+      initialPrompt?: string;
+    }
+  | {
+      type: "update_checkpoint";
+      runId: string;
+      expectedPolicyRevision: number;
+      checkpoint: unknown;
+    }
+  | {
+      type: "request_continuation";
+      runId: string;
+      expectedPolicyRevision: number;
+      operationId: string;
+      checkpoint: unknown;
+      progressFingerprint: string;
+      prompt: string;
+    }
+  | {
+      type: "propose_completion";
+      runId: string;
+      expectedPolicyRevision: number;
+      checkpoint: unknown;
+    }
+  | {
+      type: "pause_for_human";
+      runId: string;
+      expectedPolicyRevision: number;
+      checkpoint: unknown;
+      reason: string;
+    }
+  | {
+      type: "human_command";
+      runId: string;
+      expectedPolicyRevision: number;
+      command: ExtensionRunCommand;
+      resumePrompt?: string;
+      operationId?: string;
+    };
 
 /** Bounds the daemon enforces on every published suggestion set. */
 export const MIN_COMPOSER_SUGGESTIONS = 1;
@@ -294,6 +414,12 @@ export type ExtensionContext = {
   threads: {
     /** Lists daemon-reduced summaries when `threads:read` is granted. */
     list(): Promise<ExtensionThreadSummary[]>;
+  };
+  orchestration: {
+    /** Lists only runs owned by this extension when its grant is active. */
+    list(): Promise<ExtensionRunSummary[]>;
+    /** Queues one effect for the daemon to validate after this callback. */
+    apply(effect: ExtensionOrchestrationEffect): Promise<void>;
   };
   log: {
     info(message: string, fields?: Record<string, unknown>): void;

@@ -1653,6 +1653,7 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
         : [];
     const knownKinds = new Set([
       "threadMenuActions",
+      "panelActions",
       "threadDecorations",
       "sidebarFilters",
       "panels",
@@ -1696,6 +1697,17 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
     );
     return {
       threadMenuActions: actions,
+      panelActions: Array.isArray(contributions.panelActions)
+        ? contributions.panelActions.flatMap((candidate) => {
+            if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+              return [];
+            const action = candidate as Record<string, unknown>;
+            const id = normalizeId(action.id);
+            return id && typeof action.title === "string"
+              ? [{ id, title: action.title }]
+              : [];
+          })
+        : [],
       threadDecorations: normalizeViews(contributions.threadDecorations),
       sidebarFilters: normalizeViews(contributions.sidebarFilters),
       panels: normalizeViews(contributions.panels),

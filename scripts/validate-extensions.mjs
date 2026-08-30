@@ -20,6 +20,7 @@ const allowedTopLevelKeys = new Set([
 ]);
 const contributionShapes = {
   threadMenuActions: { title: true, view: false, ui: false },
+  panelActions: { title: true, view: false, ui: false },
   threadDecorations: { title: false, view: true, ui: true },
   sidebarFilters: { title: true, view: true, ui: true },
   panels: { title: true, view: true, ui: true, icon: true },
@@ -40,6 +41,7 @@ const panelIcons = new Set([
 const supportedPermissions = new Set([
   "threads:read",
   "agent-tools:register",
+  "orchestration:manage-owned-tasks",
 ]);
 const AGENT_TOOLS_PERMISSION = "agent-tools:register";
 const uiTones = new Set([
@@ -484,7 +486,9 @@ if (manifest) {
         );
       } else {
         ids.add(id);
-        if (key === "threadMenuActions") declaredActions.add(id);
+        if (key === "threadMenuActions" || key === "panelActions") {
+          declaredActions.add(id);
+        }
       }
       const titleLimit = shape.tool ? 60 : 80;
       if (

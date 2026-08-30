@@ -15,6 +15,7 @@ describe("official Mini Zen extension", () => {
           id: "thread-1",
           workspaceId: "workspace-1",
           title: "Review the release",
+          provider: "claude",
           status: "waiting_for_input",
           updatedAt: "2026-08-13T08:00:00Z",
           pendingApprovalCount: 1,

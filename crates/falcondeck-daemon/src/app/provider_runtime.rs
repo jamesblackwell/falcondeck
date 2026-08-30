@@ -451,6 +451,23 @@ impl ProviderRuntime {
                     thread.native_session_id = Some(spawn.session_id.clone());
                 })
                 .await?;
+                // Claude's stream-json protocol does not publish the app-server
+                // style turn id Codex provides. Mint a daemon receipt for this
+                // exact spawned generation so background orchestration can
+                // correlate its admitted intent with a terminal event instead
+                // of treating a later Idle snapshot as proof.
+                let turn_id = format!("claude-turn-{}", Uuid::new_v4().simple());
+                app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                    thread.latest_turn_id = Some(turn_id.clone());
+                })
+                .await?;
+                app.emit(
+                    Some(spec.workspace_id.to_string()),
+                    Some(spec.thread_id.to_string()),
+                    falcondeck_core::UnifiedEvent::TurnStart {
+                        turn_id: turn_id.clone(),
+                    },
+                );
                 if spawn.stdout.is_some() || spawn.stderr.is_some() {
                     let app = app.clone();
                     let workspace_id = spec.workspace_id.to_string();
@@ -459,6 +476,7 @@ impl ProviderRuntime {
                         app.monitor_claude_turn(
                             workspace_id,
                             thread_id,
+                            turn_id,
                             spawn.generation,
                             spawn.stdout,
                             spawn.stderr,

@@ -18,6 +18,10 @@
       "defaultGrantedPermissions": [
         "agent-tools:register"
       ]
+    },
+    {
+      "path": "official/missions",
+      "defaultEnabled": false
     }
   ]
 }

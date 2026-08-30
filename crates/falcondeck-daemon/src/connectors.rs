@@ -175,6 +175,8 @@ pub struct BuiltinExtensionsSpec {
     pub workspace_path: String,
     /// Thread the agent turn runs in, when known.
     pub thread_id: Option<String>,
+    /// Opaque daemon-issued capability for this provider connector.
+    pub bridge_capability: String,
 }
 
 /// Builds the in-memory FalconDeck extensions MCP server for one spawn.
@@ -190,6 +192,10 @@ pub fn builtin_extensions_server(
         (
             crate::extension_mcp::ENV_EXTENSION_WORKSPACE.to_string(),
             spec.workspace_path.clone(),
+        ),
+        (
+            crate::extension_mcp::ENV_EXTENSION_CAPABILITY.to_string(),
+            spec.bridge_capability.clone(),
         ),
     ]);
     if let Some(thread_id) = &spec.thread_id {
@@ -1064,6 +1070,7 @@ mod tests {
             daemon_url: "http://127.0.0.1:4123".to_string(),
             workspace_path: "/Users/james/Code/quizgecko".to_string(),
             thread_id: thread_id.map(str::to_string),
+            bridge_capability: "capability-1".to_string(),
         }
     }
 
@@ -1087,6 +1094,11 @@ mod tests {
         assert_eq!(
             env.get(crate::extension_mcp::ENV_EXTENSION_THREAD).unwrap(),
             "thread-7"
+        );
+        assert_eq!(
+            env.get(crate::extension_mcp::ENV_EXTENSION_CAPABILITY)
+                .unwrap(),
+            "capability-1"
         );
     }
 

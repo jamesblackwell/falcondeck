@@ -1220,6 +1220,8 @@ export type ExtensionAgentToolContribution = {
 
 export type ExtensionContributions = {
   threadMenuActions: ExtensionActionContribution[];
+  /** Actions referenced only from a host-rendered extension panel. */
+  panelActions?: ExtensionActionContribution[];
   threadDecorations: ExtensionViewContribution[];
   sidebarFilters: ExtensionViewContribution[];
   /** Named full-main-area surfaces. Optional while normalizing older snapshots. */

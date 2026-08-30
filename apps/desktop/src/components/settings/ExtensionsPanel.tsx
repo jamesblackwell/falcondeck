@@ -16,7 +16,7 @@ function permissionPresentation(permission: string) {
     return {
       title: "Read thread summaries",
       description:
-        "Allows titles, status, timestamps, and pending-request counts. Messages and transcripts stay private.",
+        "Allows titles, providers, status, timestamps, and pending-request counts. Messages and transcripts stay private.",
     };
   }
   if (permission === "agent-tools:register") {
@@ -24,6 +24,13 @@ function permissionPresentation(permission: string) {
       title: "Offer tools to agents",
       description:
         "Publishes this extension's declared tools to agents running in FalconDeck. Revoking removes them from the next agent session and fails any call in the meantime.",
+    };
+  }
+  if (permission === "orchestration:manage-owned-tasks") {
+    return {
+      title: "Manage bounded agent tasks",
+      description:
+        "Lets this extension own durable, time- and turn-limited runs in tasks you explicitly adopt. Revoking pauses open runs immediately.",
     };
   }
   return { title: permission, description: "Requested extension capability." };

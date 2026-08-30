@@ -2417,7 +2417,23 @@ pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, false).await
+    send_turn_with_startup_mode(app, request, false, true).await
+}
+
+/// Starts a daemon-owned background turn without stealing the user's current
+/// task selection or changing the workspace's default provider.
+pub(super) async fn send_background_turn(
+    app: &AppState,
+    request: SendTurnRequest,
+) -> Result<CommandResponse, DaemonError> {
+    send_turn_with_startup_mode(app, request, true, false).await
+}
+
+const BACKGROUND_ADMISSION_CONFLICT: &str =
+    "background turn lost admission because the task is no longer idle";
+
+pub(super) fn is_background_admission_conflict(error: &DaemonError) -> bool {
+    matches!(error, DaemonError::BadRequest(message) if message == BACKGROUND_ADMISSION_CONFLICT)
 }
 
 /// Verifies and attaches the exact provider session before an interrupted
@@ -2491,13 +2507,14 @@ async fn send_turn_waiting_for_provider_start(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
-    send_turn_with_startup_mode(app, request, true).await
+    send_turn_with_startup_mode(app, request, true, true).await
 }
 
 async fn send_turn_with_startup_mode(
     app: &AppState,
     request: SendTurnRequest,
     wait_for_startup: bool,
+    foreground: bool,
 ) -> Result<CommandResponse, DaemonError> {
     if app.is_shutting_down() {
         return Err(DaemonError::BadRequest(
@@ -2533,25 +2550,25 @@ async fn send_turn_with_startup_mode(
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
 
-    // Whatever this send turns into — a steer, a queued turn, or a fresh
-    // dispatch — the user has moved past whatever an extension offered for
-    // the last turn. Retire those offers before anything else happens.
-    app.retire_composer_suggestions(&request.thread_id).await;
+    if foreground {
+        // Whatever this send turns into — a steer, a queued turn, or a fresh
+        // dispatch — the user has moved past whatever an extension offered for
+        // the last turn. Retire those offers before anything else happens.
+        app.retire_composer_suggestions(&request.thread_id).await;
 
-    // A caller that asked to steer gets the message injected into the running
-    // turn where the harness supports it; everything else falls through to the
-    // queue below.
-    if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
-        return Ok(steered);
-    }
+        // A caller that asked to steer gets the message injected into the running
+        // turn where the harness supports it; everything else falls through to the
+        // queue below.
+        if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
+            return Ok(steered);
+        }
 
-    // A busy thread queues the send instead of dispatching it. Steering is a
-    // per-harness capability, but "hold this until the agent finishes, then
-    // send" works for every backend — and replaces the old mid-turn behavior
-    // (Claude: silently killing the in-flight turn; ACP: an undefined
-    // concurrent prompt).
-    if let Some(queued) = try_enqueue_turn(app, &request, &inputs).await? {
-        return Ok(queued);
+        // A busy task queues a human-authored send. Broker-owned sends use the
+        // atomic idle check below and are rejected instead: silently queueing an
+        // automatic continuation behind newer human input would reverse intent.
+        if let Some(queued) = try_enqueue_turn(app, &request, &inputs).await? {
+            return Ok(queued);
+        }
     }
 
     let skill_catalog = refresh_workspace_skill_catalog(app, &request.workspace_id).await?;
@@ -2581,6 +2598,11 @@ async fn send_turn_with_startup_mode(
                     "that session is no longer on this project; FalconDeck will not start a blank one to resume it".to_string(),
                 )
             })?
+        } else if !foreground {
+            workspace
+                .threads
+                .get_mut(&request.thread_id)
+                .ok_or_else(|| DaemonError::NotFound("coordinator task not found".to_string()))?
         } else {
             workspace
                 .threads
@@ -2614,6 +2636,17 @@ async fn send_turn_with_startup_mode(
                     })
                 })
         };
+        // This check shares the same workspace lock as ordinary human sends,
+        // making admission a single winner. A broker send never steers or
+        // queues when the human got there first.
+        if !foreground
+            && (managed.summary.status != ThreadStatus::Idle
+                || !managed.summary.queued_turns.is_empty())
+        {
+            return Err(DaemonError::BadRequest(
+                BACKGROUND_ADMISSION_CONFLICT.to_string(),
+            ));
+        }
         let permission_mode = request
             .permission_mode
             .clone()
@@ -2677,8 +2710,10 @@ async fn send_turn_with_startup_mode(
             managed.summary.title = title;
         }
         managed.summary.updated_at = now;
-        workspace.summary.current_thread_id = Some(managed.summary.id.clone());
-        workspace.summary.default_provider = provider.clone();
+        if foreground {
+            workspace.summary.current_thread_id = Some(managed.summary.id.clone());
+            workspace.summary.default_provider = provider.clone();
+        }
         workspace.summary.updated_at = now;
         let previous_turn_id = managed.summary.latest_turn_id.clone();
         (

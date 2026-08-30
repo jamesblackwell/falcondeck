@@ -30,6 +30,12 @@ without the `agent-tools:register` grant. Pass `declaredTools` and
 `declaredSuggestionViews` from the fixture manifest so undeclared tools and
 out-of-bounds composer suggestions fail here rather than at the daemon.
 
+Pass `orchestrationRuns` plus the
+`orchestration:manage-owned-tasks` grant to exercise owner-only run reads and
+inspect the single returned `orchestrationEffects` reduction. The fake host
+mirrors denial, revocation, JSON isolation, and the one-effect-per-callback
+limit; lifecycle events may not return orchestration effects.
+
 `publishedViewSnapshot` exposes the latest successfully committed projection
 per view and scope. The fake boundary also enforces the daemon's per-view,
 retained-view-state, publication-count, action-input, storage, scope, and host

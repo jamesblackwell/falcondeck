@@ -52,6 +52,7 @@ describe("extension snapshot normalization", () => {
       last_error: null,
       contributes: {
         threadMenuActions: [],
+        panelActions: [],
         threadDecorations: [],
         sidebarFilters: [],
         panels: [],

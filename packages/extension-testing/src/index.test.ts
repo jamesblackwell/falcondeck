@@ -39,6 +39,7 @@ describe("ExtensionTestHost", () => {
       result: { count: 5 },
       storage: { count: 5 },
       publishedViews: [{ viewId: "counter", value: { count: 5 } }],
+      orchestrationEffects: [],
     });
   });
 
@@ -247,6 +248,7 @@ describe("ExtensionTestHost", () => {
       id: "thread-1",
       workspaceId: "workspace-1",
       title: "Needs review",
+      provider: "claude",
       status: "waiting_for_input" as const,
       updatedAt: "2026-08-13T08:00:00Z",
       pendingApprovalCount: 1,
@@ -275,6 +277,7 @@ describe("ExtensionTestHost", () => {
           id: "thread-1",
           workspaceId: "workspace-1",
           title: "Needs review",
+          provider: "claude",
           status: "waiting_for_input",
           updatedAt: "2026-08-13T08:00:00Z",
           pendingApprovalCount: 1,
@@ -288,6 +291,7 @@ describe("ExtensionTestHost", () => {
         id: `thread-${index}`,
         workspaceId: "workspace-1",
         title: "x".repeat(300),
+        provider: "claude",
         status: "idle" as const,
         updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
         pendingApprovalCount: 0,

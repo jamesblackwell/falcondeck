@@ -91,6 +91,7 @@ mod harness_user_text;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
+mod orchestration;
 mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
@@ -200,6 +201,13 @@ impl std::ops::Deref for CachedEnvelope {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ExtensionBridgeCapability {
+    workspace_path: String,
+    thread_id: Option<String>,
+    expires_at: chrono::DateTime<Utc>,
+}
+
 struct InnerState {
     daemon: DaemonInfo,
     /// Startup has two independent boundaries: persisted summaries become
@@ -213,6 +221,7 @@ struct InnerState {
     state_path: PathBuf,
     preferences_path: PathBuf,
     scheduled_tasks_path: PathBuf,
+    orchestration_path: PathBuf,
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<Arc<CachedEnvelope>>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
@@ -276,10 +285,19 @@ struct InnerState {
     scheduled_scheduler_started: AtomicBool,
     /// Global cap for unattended scheduled executions.
     scheduled_run_slots: Semaphore,
+    /// Durable, extension-owned bounded execution runs.
+    orchestration_runs: Mutex<orchestration::OrchestrationRegistry>,
+    /// Serializes orchestration checkpoint, journal, and admission mutations.
+    orchestration_mutation: Mutex<()>,
+    /// Prevents restore from replacing live extension-run mutations.
+    orchestration_restored: OnceCell<()>,
     /// Installed extension catalog, private state, and synchronized projections.
     extensions: Mutex<extensions::ExtensionRegistry>,
     /// Lazily started Deno sidecars, isolated and serialized per extension.
     extension_hosts: Mutex<extension_host::ExtensionHostPool>,
+    /// Short-lived bearer capabilities binding extension MCP bridges to the
+    /// daemon-selected task context supplied at provider spawn.
+    extension_bridge_capabilities: Mutex<HashMap<String, ExtensionBridgeCapability>>,
     /// Bounded, independent lifecycle-event queue for each enabled extension.
     extension_event_queues: extension_events::ExtensionEventQueues,
     /// Cached OpenRouter speech credential from the daemon secret store.
@@ -761,6 +779,7 @@ impl AppState {
         let (broadcaster, _) = broadcast::channel::<Arc<CachedEnvelope>>(512);
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
+        let orchestration_path = orchestration::orchestration_path(&state_path);
         let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
@@ -778,6 +797,7 @@ impl AppState {
                 state_path,
                 preferences_path,
                 scheduled_tasks_path,
+                orchestration_path,
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
@@ -807,8 +827,12 @@ impl AppState {
                 scheduled_notify: Notify::new(),
                 scheduled_scheduler_started: AtomicBool::new(false),
                 scheduled_run_slots: Semaphore::new(scheduled_tasks::MAX_CONCURRENT_RUNS),
+                orchestration_runs: Mutex::new(orchestration::OrchestrationRegistry::default()),
+                orchestration_mutation: Mutex::new(()),
+                orchestration_restored: OnceCell::new(),
                 extensions: Mutex::new(extension_registry),
                 extension_hosts: Mutex::new(extension_hosts),
+                extension_bridge_capabilities: Mutex::new(HashMap::new()),
                 extension_event_queues: StdMutex::new(HashMap::new()),
                 speech_credentials: speech::SpeechCredentialCache::default(),
                 remote: Mutex::new(RemoteBridgeState {
@@ -987,10 +1011,24 @@ impl AppState {
         if self.inner.extensions.lock().await.agent_tools().is_empty() {
             return None;
         }
+        let bridge_capability = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        let mut capabilities = self.inner.extension_bridge_capabilities.lock().await;
+        capabilities.retain(|_, capability| capability.expires_at > now);
+        capabilities.insert(
+            bridge_capability.clone(),
+            ExtensionBridgeCapability {
+                workspace_path: workspace_path.to_string(),
+                thread_id: thread_id.map(str::to_string),
+                expires_at: now + chrono::Duration::hours(12),
+            },
+        );
+        drop(capabilities);
         Some(crate::connectors::BuiltinExtensionsSpec {
             daemon_url: self.local_base_url()?,
             workspace_path: workspace_path.to_string(),
             thread_id: thread_id.map(str::to_string),
+            bridge_capability,
         })
     }
 
@@ -1204,6 +1242,7 @@ impl AppState {
         // reconnects can persist state; starting them first could race with
         // remote restoration and overwrite a valid pairing with `remote: null`.
         self.restore_scheduled_tasks().await?;
+        self.restore_orchestration().await?;
         scheduled_tasks::migrate_compatible(self).await;
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
@@ -1314,6 +1353,14 @@ impl AppState {
         self.inner
             .scheduled_tasks_restored
             .get_or_try_init(|| async { scheduled_tasks::restore(self).await })
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn restore_orchestration(&self) -> Result<(), DaemonError> {
+        self.inner
+            .orchestration_restored
+            .get_or_try_init(|| async { orchestration::restore(self).await })
             .await
             .map(|_| ())
     }
@@ -2025,6 +2072,7 @@ impl AppState {
                 id: thread.summary.id.clone(),
                 workspace_id: thread.summary.workspace_id.clone(),
                 title: thread.summary.title.clone(),
+                provider: thread.summary.provider.clone(),
                 status: thread.summary.status.clone(),
                 updated_at: thread.summary.updated_at,
                 pending_approval_count: thread.summary.attention.pending_approval_count,
@@ -2066,6 +2114,8 @@ impl AppState {
         drop(host);
         if !enabled {
             self.inner.extension_hosts.lock().await.remove(extension_id);
+            orchestration::pause_owned_runs(self, extension_id, "Owner extension was disabled")
+                .await?;
         }
         self.sync_extension_event_workers().await;
         let (catalog, retained_views) = {
@@ -2135,6 +2185,14 @@ impl AppState {
             (updated, revoked_views)
         };
         let catalog = self.inner.extensions.lock().await.snapshot().catalog;
+        if !granted && permission == extensions::ORCHESTRATION_PERMISSION {
+            orchestration::pause_owned_runs(
+                self,
+                extension_id,
+                "Orchestration permission was revoked",
+            )
+            .await?;
+        }
         self.emit(
             None,
             None,
@@ -2181,16 +2239,22 @@ impl AppState {
         // updates from one stale snapshot and overwrite each other.
         let host = self.inner.extension_hosts.lock().await.host(extension_id);
         let mut host = host.lock().await;
-        let (package, storage, can_read_threads) = {
+        let (package, storage, can_read_threads, can_orchestrate) = {
             let registry = self.inner.extensions.lock().await;
             (
                 registry.package(extension_id, action_id)?,
                 registry.storage(extension_id),
                 registry.has_grant(extension_id, extensions::THREADS_READ_PERMISSION),
+                registry.has_grant(extension_id, extensions::ORCHESTRATION_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
             Some(self.extension_thread_summaries().await)
+        } else {
+            None
+        };
+        let orchestration_runs = if can_orchestrate {
+            Some(orchestration::owned_runs(self, extension_id).await)
         } else {
             None
         };
@@ -2202,6 +2266,7 @@ impl AppState {
                 &request.input,
                 &storage,
                 thread_summaries.as_deref(),
+                orchestration_runs.as_deref(),
             )
             .await;
         let host_result = match host_result {
@@ -2223,6 +2288,15 @@ impl AppState {
                 return Err(error);
             }
         };
+        let orchestration_effects = host_result.orchestration_effects;
+        if !orchestration_effects.is_empty()
+            && (host_result.storage != storage || !host_result.published_views.is_empty())
+        {
+            return Err(DaemonError::BadRequest(
+                "an orchestration callback cannot also mutate extension storage or views; render from orchestration.updated"
+                    .to_string(),
+            ));
+        }
         let updated_views = self
             .inner
             .extensions
@@ -2234,6 +2308,17 @@ impl AppState {
                 host_result.published_views,
             )
             .await?;
+        // Extension state/view validation commits before a durable external
+        // effect is admitted. Missions callbacks that return an effect do not
+        // also mutate extension state; the owner-targeted update event renders
+        // the authoritative run after this succeeds.
+        orchestration::apply_effects(
+            self,
+            extension_id,
+            orchestration_effects,
+            orchestration::EffectActor::Human,
+        )
+        .await?;
         drop(host);
         self.emit_extension_view_updates(&updated_views);
         Ok(ExtensionActionResponse {
@@ -2277,27 +2362,45 @@ impl AppState {
             .lock()
             .await
             .tool_package(&request.name)?;
-        // Harnesses report a thread id and a filesystem path; extensions only
-        // ever see stable identifiers, so resolve one here.
+        // Ordinary tools retain the legacy spawn projection. Sensitive run
+        // access is derived only from the opaque capability created by the
+        // daemon at provider spawn, never from these request-body fields.
+        let trusted_bridge = self
+            .extension_bridge_context(request.bridge_capability.as_deref())
+            .await;
+        let effective_thread_id = trusted_bridge
+            .as_ref()
+            .and_then(|context| context.thread_id.as_deref())
+            .or(request.thread_id.as_deref());
+        let effective_workspace_path = trusted_bridge
+            .as_ref()
+            .map(|context| context.workspace_path.as_str())
+            .or(request.workspace_path.as_deref());
         let workspace_id = self
-            .extension_call_workspace_id(
-                request.thread_id.as_deref(),
-                request.workspace_path.as_deref(),
-            )
+            .extension_call_workspace_id(effective_thread_id, effective_workspace_path)
             .await;
         let host = self.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let (storage, can_read_threads) = {
+        let (storage, can_read_threads, can_orchestrate) = {
             let registry = self.inner.extensions.lock().await;
             // Re-check under the host gate: disable cannot interleave here.
             registry.tool_package(&request.name)?;
             (
                 registry.storage(&package.id),
                 registry.has_grant(&package.id, extensions::THREADS_READ_PERMISSION),
+                registry.has_grant(&package.id, extensions::ORCHESTRATION_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
             Some(self.extension_thread_summaries().await)
+        } else {
+            None
+        };
+        let trusted_thread_id = trusted_bridge
+            .as_ref()
+            .and_then(|context| context.thread_id.as_deref());
+        let orchestration_runs = if can_orchestrate && trusted_thread_id.is_some() {
+            Some(orchestration::owned_runs(self, &package.id).await)
         } else {
             None
         };
@@ -2306,10 +2409,11 @@ impl AppState {
                 &package,
                 &tool_id,
                 &request.arguments,
-                request.thread_id.as_deref(),
+                effective_thread_id,
                 workspace_id.as_deref(),
                 &storage,
                 thread_summaries.as_deref(),
+                orchestration_runs.as_deref(),
             )
             .await;
         let host_result = match host_result {
@@ -2338,6 +2442,15 @@ impl AppState {
                 return Err(error);
             }
         };
+        let orchestration_effects = host_result.orchestration_effects;
+        if !orchestration_effects.is_empty()
+            && (host_result.storage != storage || !host_result.published_views.is_empty())
+        {
+            return Err(DaemonError::BadRequest(
+                "an orchestration callback cannot also mutate extension storage or views; render from orchestration.updated"
+                    .to_string(),
+            ));
+        }
         let updated_views = self
             .inner
             .extensions
@@ -2349,6 +2462,16 @@ impl AppState {
                 host_result.published_views,
             )
             .await?;
+        orchestration::apply_effects(
+            self,
+            &package.id,
+            orchestration_effects,
+            orchestration::EffectActor::AgentTool {
+                workspace_id: workspace_id.as_deref(),
+                thread_id: trusted_thread_id,
+            },
+        )
+        .await?;
         drop(host);
         self.emit_extension_view_updates(&updated_views);
         Ok(falcondeck_core::ExtensionToolResponse {
@@ -2465,6 +2588,20 @@ impl AppState {
             .values()
             .find(|workspace| workspace.summary.path == canonical)
             .map(|workspace| workspace.summary.id.clone())
+    }
+
+    async fn extension_bridge_context(
+        &self,
+        token: Option<&str>,
+    ) -> Option<ExtensionBridgeCapability> {
+        let token = token?.trim();
+        if token.is_empty() {
+            return None;
+        }
+        let now = Utc::now();
+        let mut capabilities = self.inner.extension_bridge_capabilities.lock().await;
+        capabilities.retain(|_, capability| capability.expires_at > now);
+        capabilities.get(token).cloned()
     }
 
     /// Broadcasts changed projections so every connected client re-renders.
