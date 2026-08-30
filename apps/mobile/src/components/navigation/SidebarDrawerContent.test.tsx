@@ -93,4 +93,31 @@ describe('SidebarDrawerContent', () => {
     expect(mocks.navigate).toHaveBeenCalledWith('/(app)')
     expect(dispatch).toHaveBeenCalledWith({ type: 'CLOSE_DRAWER' })
   })
+
+  it('responds immediately while standalone chat creation is pending', async () => {
+    let resolveRpc!: (workspace: { id: string }) => void
+    const rpc = new Promise<{ id: string }>((resolve) => {
+      resolveRpc = resolve
+    })
+    vi.spyOn(useRelayStore.getState(), '_callRpc').mockReturnValue(rpc as never)
+    const dispatch = vi.fn()
+    renderComponent(
+      <SidebarDrawerContent navigation={{ dispatch } as never} />,
+    )
+
+    let pending!: Promise<void>
+    act(() => {
+      pending = mocks.sidebarProps?.onNewChat() as Promise<void>
+    })
+
+    expect(dispatch).toHaveBeenCalledWith({ type: 'CLOSE_DRAWER' })
+    expect(mocks.navigate).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveRpc({ id: 'chat-workspace' })
+      await pending
+    })
+
+    expect(mocks.navigate).toHaveBeenCalledWith('/(app)')
+  })
 })

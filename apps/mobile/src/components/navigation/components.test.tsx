@@ -188,6 +188,11 @@ describe("SidebarView component", () => {
     );
     expect(textOf(r)).toContain("New");
     expect(textOf(r)).not.toContain("New thread");
+    expect(newThread.props.style({ pressed: false })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ position: "absolute", left: 16 }),
+      ]),
+    );
     newThread.props.onPress();
     expect(onNewThread).toHaveBeenCalledWith("w2");
   });

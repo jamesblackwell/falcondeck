@@ -844,6 +844,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
   },
   floatingNewButton: {
+    position: "absolute",
+    left: theme.spacing[4],
     height: FLOATING_ACTION_HEIGHT,
     minWidth: 152,
     flexDirection: "row",

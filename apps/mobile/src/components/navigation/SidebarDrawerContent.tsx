@@ -100,13 +100,17 @@ export function SidebarDrawerContent({
   );
 
   const handleNewChat = useCallback(async () => {
+    // Chat creation is an RPC, so acknowledge the tap and dismiss the drawer
+    // before waiting for the desktop. Otherwise a slow connection leaves the
+    // fully opaque drawer unchanged and makes this control appear inert.
+    triggerThreadSelectionHaptic();
+    handleClose();
     try {
       const workspace = await useRelayStore
         .getState()
         ._callRpc<WorkspaceSummary>("chat.create", { create: true });
       useSessionStore.getState().selectNewThread(workspace.id);
       router.navigate("/(app)");
-      handleClose();
     } catch (error) {
       Alert.alert(
         "Couldn't create chat",
