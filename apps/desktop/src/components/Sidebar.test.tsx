@@ -1314,6 +1314,13 @@ describe("DesktopSidebar", () => {
     // The archive and timestamp occupy the same grid cell. Keep the action
     // above the timestamp so real pointer clicks reach the visible button.
     expect(archiveButton).toHaveClass("z-10");
+    const timestamp = archiveButton.parentElement?.firstElementChild;
+    // Visibility changes immediately while opacity animates, preventing the
+    // timestamp from showing through the archive glyph during the reveal.
+    expect(timestamp).toHaveClass(
+      "group-hover:invisible",
+      "group-focus-within/actions:invisible",
+    );
     fireEvent.click(archiveButton);
 
     expect(onArchiveThread).not.toHaveBeenCalled();

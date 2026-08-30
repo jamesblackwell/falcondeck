@@ -246,8 +246,9 @@ export const ThreadItem = memo(
             ) : null}
             {/*
               The timestamp and the archive action share one grid cell and
-              crossfade, so hovering swaps them in place instead of reflowing
-              the row.
+              swap in place instead of reflowing the row. Hide the outgoing
+              label immediately so it cannot show through the archive glyph
+              while that action fades in.
             */}
             <span className="group/actions grid shrink-0 grid-cols-1 items-center justify-items-end">
               {wasInterrupted ? (
@@ -256,7 +257,7 @@ export const ThreadItem = memo(
                   className={cn(
                     'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
                     onArchive &&
-                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   Stopped
@@ -267,7 +268,7 @@ export const ThreadItem = memo(
                   className={cn(
                     'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
                     onArchive &&
-                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   {attention.badgeLabel}
@@ -277,7 +278,7 @@ export const ThreadItem = memo(
                   className={cn(
                     'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
                     onArchive &&
-                      'group-hover:opacity-0 group-focus-within/actions:opacity-0',
+                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   {timeString}
