@@ -1479,7 +1479,16 @@ async fn terminal_socket(
                 match message {
                     Message::Text(text) => {
                         if let Ok(frame) = serde_json::from_str::<TerminalClientFrame>(&text) {
-                            state.terminals().handle_client_frame(&terminal_id, &frame);
+                            if matches!(frame, TerminalClientFrame::TerminalPing) {
+                                let Ok(text) = serde_json::to_string(&TerminalServerFrame::TerminalPong) else {
+                                    continue;
+                                };
+                                if socket.send(Message::Text(text.into())).await.is_err() {
+                                    break;
+                                }
+                            } else {
+                                state.terminals().handle_client_frame(&terminal_id, &frame);
+                            }
                         }
                     }
                     Message::Close(_) => break,

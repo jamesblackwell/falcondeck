@@ -48,6 +48,37 @@ async fn next_frame(
     }
 }
 
+async fn next_protocol_frame(
+    socket: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+) -> TerminalServerFrame {
+    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("timed out waiting for terminal websocket frame")
+        .expect("terminal websocket closed")
+        .expect("websocket error");
+    let Message::Text(text) = message else {
+        panic!("expected a text protocol frame");
+    };
+    serde_json::from_str(&text).expect("valid frame")
+}
+
+async fn wait_for_pong(
+    socket: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        let frame = tokio::time::timeout(remaining, next_protocol_frame(socket))
+            .await
+            .expect("timed out waiting for terminal pong");
+        if matches!(frame, TerminalServerFrame::TerminalPong) {
+            return;
+        }
+    }
+}
+
 fn frame_text(frame: &TerminalServerFrame) -> String {
     use base64::Engine as _;
     match frame {
@@ -130,6 +161,20 @@ async fn terminal_http_and_websocket_round_trip() {
     ))
     .await
     .unwrap();
+    assert!(matches!(
+        next_protocol_frame(&mut socket).await,
+        TerminalServerFrame::TerminalAttached { .. }
+    ));
+
+    socket
+        .send(Message::Text(
+            serde_json::to_string(&TerminalClientFrame::TerminalPing)
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_pong(&mut socket).await;
 
     let marker = "falcondeck-terminal-http-marker";
     let input = TerminalClientFrame::TerminalInput {

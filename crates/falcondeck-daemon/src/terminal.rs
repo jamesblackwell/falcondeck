@@ -23,8 +23,15 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 /// once the total exceeds this; the sequence numbers stay monotonic so
 /// clients can always detect the loss.
 const SCROLLBACK_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Chunk-count ceiling prevents tiny PTY reads from retaining millions of
+/// allocation headers while remaining under the byte ceiling.
+const SCROLLBACK_MAX_CHUNKS: usize = 256;
 /// Largest single output chunk before it is split into multiple sequences.
 const MAX_CHUNK_BYTES: usize = 64 * 1024;
+/// Backpressure between the blocking PTY reader and the async output pump.
+const RAW_OUTPUT_QUEUE_CAPACITY: usize = 64;
+/// Per-client backlog. Reconnect uses scrollback if a socket cannot keep up.
+const CLIENT_OUTPUT_QUEUE_CAPACITY: usize = SCROLLBACK_MAX_CHUNKS + 16;
 /// How long a close waits after SIGHUP before SIGKILL.
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound on DA1 replies per output batch so a hostile program cannot
@@ -87,6 +94,10 @@ impl Da1Filter {
 
         (output, replies)
     }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
 }
 
 struct Scrollback {
@@ -113,7 +124,9 @@ impl Scrollback {
             self.bytes += piece.len();
             committed.push((seq, piece.to_vec()));
         }
-        while self.bytes > max_bytes && self.chunks.len() > 1 {
+        while (self.bytes > max_bytes || self.chunks.len() > SCROLLBACK_MAX_CHUNKS)
+            && self.chunks.len() > 1
+        {
             let (_, removed) = self.chunks.pop_front().expect("chunks is non-empty");
             self.bytes -= removed.len();
         }
@@ -129,7 +142,7 @@ struct TerminalSession {
     /// `portable-pty` makes the child a session leader.
     pid: Mutex<Option<u32>>,
     scrollback: Mutex<Scrollback>,
-    clients: Mutex<Vec<(u64, tokio::sync::mpsc::UnboundedSender<TerminalServerFrame>)>>,
+    clients: Mutex<Vec<(u64, tokio::sync::mpsc::Sender<TerminalServerFrame>)>>,
     scrollback_max_bytes: usize,
 }
 
@@ -152,7 +165,7 @@ impl TerminalSession {
 
     fn broadcast(&self, frame: TerminalServerFrame) {
         let mut clients = self.clients.lock().expect("clients lock");
-        clients.retain(|(_, client)| client.send(frame.clone()).is_ok());
+        clients.retain(|(_, client)| client.try_send(frame.clone()).is_ok());
     }
 
     /// Appends filtered output to the scrollback and fans it out to clients.
@@ -294,22 +307,29 @@ impl TerminalManager {
             .expect("sessions lock")
             .insert(info.id.clone(), session.clone());
 
-        self.spawn_output_pump(session.clone(), reader);
-        self.spawn_exit_watch(session, child);
+        let output_done = self.spawn_output_pump(session.clone(), reader);
+        self.spawn_exit_watch(session, child, output_done);
         Ok(info)
     }
 
-    fn spawn_output_pump(&self, session: Arc<TerminalSession>, mut reader: Box<dyn Read + Send>) {
-        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-        // Blocking PTY reads need an OS thread; the unbounded channel hands
-        // batches to a tokio task that coalesces bursts before fan-out.
+    fn spawn_output_pump(
+        &self,
+        session: Arc<TerminalSession>,
+        mut reader: Box<dyn Read + Send>,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (raw_tx, mut raw_rx) =
+            tokio::sync::mpsc::channel::<Vec<u8>>(RAW_OUTPUT_QUEUE_CAPACITY);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+        // Blocking PTY reads need an OS thread; the bounded channel hands
+        // batches to a tokio task that coalesces bursts before fan-out and
+        // backpressures a producer that outruns the runtime.
         std::thread::spawn(move || {
             let mut buffer = [0u8; 8192];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
-                        if raw_tx.send(buffer[..read].to_vec()).is_err() {
+                        if raw_tx.blocking_send(buffer[..read].to_vec()).is_err() {
                             break;
                         }
                     }
@@ -335,17 +355,29 @@ impl TerminalManager {
                     session.commit_output(&output);
                 }
             }
+            let trailing = filter.finish();
+            if !trailing.is_empty() {
+                session.commit_output(&trailing);
+            }
+            let _ = done_tx.send(());
         });
+        done_rx
     }
 
     fn spawn_exit_watch(
         &self,
         session: Arc<TerminalSession>,
         mut child: Box<dyn portable_pty::Child + Send + Sync>,
+        output_done: std::sync::mpsc::Receiver<()>,
     ) {
         let manager_sessions = self.sessions.clone();
         std::thread::spawn(move || {
             let exit_code = child.wait().ok().map(|status| status.exit_code() as i32);
+            session.pid.lock().expect("pid lock").take();
+            // The reader reaches EOF after the child exits. Let the async
+            // pump commit every queued byte before announcing the exit and
+            // clearing client channels.
+            let _ = output_done.recv();
             manager_sessions
                 .lock()
                 .expect("sessions lock")
@@ -355,8 +387,8 @@ impl TerminalManager {
         });
     }
 
-    /// Attaches a client: registers a frame channel, then sends the current
-    /// session snapshot and any retained replay at or after `since_seq`.
+    /// Attaches a client: atomically queues the current session snapshot and
+    /// retained replay, then registers the channel for live output.
     /// Returns the client id the WebSocket loop must pass to `detach`.
     pub fn attach(
         &self,
@@ -364,27 +396,39 @@ impl TerminalManager {
         since_seq: u64,
     ) -> Option<(
         TerminalSessionInfo,
-        tokio::sync::mpsc::UnboundedReceiver<TerminalServerFrame>,
+        tokio::sync::mpsc::Receiver<TerminalServerFrame>,
+        u64,
+    )> {
+        self.attach_inner(id, since_seq, |_| {})
+    }
+
+    fn attach_inner(
+        &self,
+        id: &str,
+        since_seq: u64,
+        interleave: impl FnOnce(&Arc<TerminalSession>),
+    ) -> Option<(
+        TerminalSessionInfo,
+        tokio::sync::mpsc::Receiver<TerminalServerFrame>,
         u64,
     )> {
         let session = self.get(id)?;
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (info, next_seq, replay) = {
-            let scrollback = session.scrollback.lock().expect("scrollback lock");
-            let replay: Vec<(u64, Vec<u8>)> = scrollback
-                .chunks
-                .iter()
-                .filter(|(seq, _)| *seq >= since_seq)
-                .map(|(seq, bytes)| (*seq, bytes.clone()))
-                .collect();
-            (session.info.clone(), scrollback.next_seq, replay)
-        };
-        let _ = tx.send(TerminalServerFrame::TerminalAttached {
+        let (tx, rx) = tokio::sync::mpsc::channel(CLIENT_OUTPUT_QUEUE_CAPACITY);
+        let scrollback = session.scrollback.lock().expect("scrollback lock");
+        let info = session.info.clone();
+        let next_seq = scrollback.next_seq;
+        let replay: Vec<(u64, Vec<u8>)> = scrollback
+            .chunks
+            .iter()
+            .filter(|(seq, _)| *seq >= since_seq)
+            .map(|(seq, bytes)| (*seq, bytes.clone()))
+            .collect();
+        let _ = tx.try_send(TerminalServerFrame::TerminalAttached {
             session: info.clone(),
             next_seq,
         });
         for (seq, bytes) in replay {
-            let _ = tx.send(TerminalServerFrame::TerminalReplay {
+            let _ = tx.try_send(TerminalServerFrame::TerminalReplay {
                 chunk: TerminalChunk {
                     seq,
                     data_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -399,6 +443,8 @@ impl TerminalManager {
             .lock()
             .expect("clients lock")
             .push((client_id, tx));
+        drop(scrollback);
+        interleave(&session);
         Some((info, rx, client_id))
     }
 
@@ -580,6 +626,56 @@ mod tests {
         assert_eq!(committed[1].1.len(), 1);
     }
 
+    #[test]
+    fn scrollback_bounds_tiny_chunk_overhead_as_well_as_bytes() {
+        let mut scrollback = Scrollback::new();
+        for _ in 0..=SCROLLBACK_MAX_CHUNKS {
+            scrollback.append(b"x", usize::MAX);
+        }
+
+        assert_eq!(scrollback.chunks.len(), SCROLLBACK_MAX_CHUNKS);
+        assert_eq!(scrollback.chunks.front().map(|(seq, _)| *seq), Some(1));
+        assert_eq!(scrollback.next_seq, SCROLLBACK_MAX_CHUNKS as u64 + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attach_cannot_lose_output_between_replay_and_live_registration() {
+        let manager = TerminalManager::default();
+        let (_dir, cwd) = workspace_dir();
+        let info = manager.open("ws-test", &cwd, 80, 24).expect("open");
+        let marker = b"output-during-attach";
+
+        let (_info, mut receiver, _client) = manager
+            .attach_inner(&info.id, 0, |session| session.commit_output(marker))
+            .expect("attach");
+
+        let frames = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            frames.iter().any(|frame| frame_text(frame).contains("output-during-attach")),
+            "output committed during attach was neither replayed nor delivered live"
+        );
+        manager.close(&info.id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_terminal_client_cannot_build_an_unbounded_output_queue() {
+        let manager = TerminalManager::default();
+        let (_dir, cwd) = workspace_dir();
+        let info = manager.open("ws-test", &cwd, 80, 24).expect("open");
+        let session = manager.get(&info.id).expect("session");
+        let (_info, _stalled_receiver, _client) = manager.attach(&info.id, 0).expect("attach");
+
+        for index in 0..1_000 {
+            session.commit_output(format!("frame-{index}").as_bytes());
+        }
+
+        assert!(
+            session.clients.lock().expect("clients lock").is_empty(),
+            "a client that cannot drain output must be disconnected before its queue grows forever"
+        );
+        manager.close(&info.id);
+    }
+
     // Live PTY coverage: spawns real shells, so these stay on /bin/sh and
     // tolerate interleaved prompt output by substring-matching markers.
 
@@ -597,7 +693,7 @@ mod tests {
     }
 
     async fn collect_until(
-        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<TerminalServerFrame>,
+        receiver: &mut tokio::sync::mpsc::Receiver<TerminalServerFrame>,
         timeout: Duration,
         mut predicate: impl FnMut(&TerminalServerFrame) -> bool,
     ) -> TerminalServerFrame {
@@ -620,7 +716,7 @@ mod tests {
     /// earlier get discarded: bash flushes type-ahead input when it finally
     /// prompts, so every PTY test must wait this out before writing.
     async fn wait_for_shell_prompt(
-        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<TerminalServerFrame>,
+        receiver: &mut tokio::sync::mpsc::Receiver<TerminalServerFrame>,
     ) {
         collect_until(receiver, Duration::from_secs(30), |frame| {
             frame_text(frame).contains('$')
@@ -783,5 +879,64 @@ mod tests {
         }
         assert!(manager.get(&info.id).is_none(), "session was removed");
         assert!(!manager.close(&info.id), "second close reports missing");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn natural_exit_clears_the_pid_before_delayed_cleanup() {
+        let manager = test_manager();
+        let (_dir, cwd) = workspace_dir();
+        let info = manager.open("ws-test", &cwd, 80, 24).expect("open");
+        let session = manager.get(&info.id).expect("session");
+        let (_info, mut receiver, _client) = manager.attach(&info.id, 0).expect("attach");
+        wait_for_shell_prompt(&mut receiver).await;
+
+        manager.handle_client_frame(
+            &info.id,
+            &TerminalClientFrame::TerminalInput {
+                data_base64: base64::engine::general_purpose::STANDARD.encode("exit\n"),
+            },
+        );
+        collect_until(&mut receiver, Duration::from_secs(30), |frame| {
+            matches!(frame, TerminalServerFrame::TerminalExited { .. })
+        })
+        .await;
+
+        assert!(
+            session.pid.lock().expect("pid lock").is_none(),
+            "a reaped process must not remain eligible for delayed SIGKILL"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exit_flushes_the_last_partial_escape_before_the_exit_frame() {
+        let manager = test_manager();
+        let (_dir, cwd) = workspace_dir();
+        let info = manager.open("ws-test", &cwd, 80, 24).expect("open");
+        let (_info, mut receiver, _client) = manager.attach(&info.id, 0).expect("attach");
+        wait_for_shell_prompt(&mut receiver).await;
+
+        manager.handle_client_frame(
+            &info.id,
+            &TerminalClientFrame::TerminalInput {
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode("stty -echo; exec /usr/bin/printf 'FINAL-BYTES\\033'\n"),
+            },
+        );
+        let mut output = String::new();
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+                .await
+                .expect("timed out waiting for terminal exit")
+                .expect("terminal channel closed");
+            output.push_str(&frame_text(&frame));
+            if matches!(frame, TerminalServerFrame::TerminalExited { .. }) {
+                break;
+            }
+        }
+
+        assert!(
+            output.contains("FINAL-BYTES\x1b"),
+            "trailing PTY bytes were lost before exit: {output:?}"
+        );
     }
 }

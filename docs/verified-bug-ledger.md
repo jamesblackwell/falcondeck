@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 33 / 100
-- Product defects: 31
+- Verified and fixed: 38 / 100
+- Product defects: 36
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -316,6 +316,51 @@ Each entry records:
 - Fix: Perform interval arithmetic in `i128`, convert the final timestamp only after it is proven representable, and return `invalid_schedule` when the next occurrence is outside the supported time range.
 - Verification: The formerly hung regression now returns immediately with an error; all schedule, daemon library, and control integration tests pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 034 — Terminal protocol pings never receive a pong
+
+- Kind: Product defect
+- Reproduction: The terminal WebSocket integration test sent `terminal_ping` after attachment and timed out after five seconds waiting for the documented `terminal_pong` response.
+- Root cause: `TerminalManager::handle_client_frame` explicitly discarded `TerminalPing`, and the WebSocket loop had no connection-scoped reply path.
+- Fix: Reply with `TerminalPong` directly on the requesting WebSocket while continuing to route input and resize frames through the session manager.
+- Verification: `cargo test -p falcondeck-daemon --test terminal_api` passes the attach, ping/pong, input/output, close, exit, and removal round trip.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 035 — Output committed during terminal attachment can be lost permanently
+
+- Kind: Product defect
+- Reproduction: `terminal::tests::attach_cannot_lose_output_between_replay_and_live_registration` committed a chunk after replay was captured but before the client sender was registered; the receiver got neither replay nor live output.
+- Root cause: `attach` released the scrollback lock before adding the client to the live sender list, leaving an explicit handoff gap.
+- Fix: Hold the scrollback lock through snapshot/replay enqueue and live-client registration, then release it before output can resume.
+- Verification: The deterministic interleaving regression and all 14 terminal unit tests pass; the full daemon library passes 873 tests with 2 intentional ignores.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 036 — Natural terminal exit leaves a stale PID armed for delayed SIGKILL
+
+- Kind: Product defect
+- Reproduction: `terminal::tests::natural_exit_clears_the_pid_before_delayed_cleanup` retained the session object after a normal shell exit and found its reaped process ID still present after `TerminalExited`.
+- Root cause: Only the delayed force-kill path consumed `session.pid`; the child wait/reap path removed the session without clearing it. A quickly reused process-group ID could therefore receive the later SIGKILL.
+- Fix: Consume the PID immediately after `child.wait()` returns, before any output-drain wait or exit broadcast.
+- Verification: The focused natural-exit regression, all terminal tests, and the daemon library suite pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 037 — Terminal EOF can drop the final partial escape sequence
+
+- Kind: Product defect
+- Reproduction: A real PTY command disabled echo, replaced the shell with `/usr/bin/printf`, and ended its only output with `FINAL-BYTES ESC`; `terminal::tests::exit_flushes_the_last_partial_escape_before_the_exit_frame` received `FINAL-BYTES` but not the final escape before `TerminalExited`.
+- Root cause: The DA1 filter correctly withheld a possible partial query between batches, but discarded that pending suffix when the raw reader reached EOF. The independent exit watcher could also clear client channels before the async output pump finished draining.
+- Fix: Flush the filter's pending bytes at EOF and make the exit watcher wait for the output pump's completion signal before broadcasting exit and clearing clients.
+- Verification: The focused real-PTY regression now observes the exact trailing escape before the exit frame; all terminal and daemon tests pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 038 — A stalled terminal socket can grow unbounded daemon queues
+
+- Kind: Product defect
+- Reproduction: `terminal::tests::a_stalled_terminal_client_cannot_build_an_unbounded_output_queue` attached a receiver without draining it, committed 1,000 frames, and found the client still registered with every frame queued.
+- Root cause: Both the blocking-reader-to-async-pump channel and every per-client channel were unbounded. Scrollback bytes were capped, but slow clients or a starved runtime could continue accumulating separate output copies indefinitely; tiny chunks also evaded any scrollback allocation-count bound.
+- Fix: Add bounded raw and client channels with PTY backpressure/slow-client disconnect, cap retained scrollback by both bytes and chunk count, and leave reconnect to recover from bounded replay.
+- Verification: The stalled-client regression, a new tiny-chunk retention bound test, all 14 terminal unit tests, the complete daemon library, and the terminal WebSocket integration test pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
 
 ## Pending Verification
 
