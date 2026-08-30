@@ -220,6 +220,27 @@ describe('relay-store', () => {
       expect(useRelayStore.getState().connectionStatus).toBe('not_connected')
     })
 
+    it('coalesces rapid repeated pairing attempts', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode(securePairingCode('DOUBLE-TAP'))
+      const fetchMock = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-one',
+        device_id: 'device-one',
+        client_token: 'token-one',
+        daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
+      })
+      globalThis.fetch = fetchMock
+
+      await Promise.all([claimPairing(), claimPairing()])
+
+      // One challenge and one claim, not two independent claim flows racing
+      // to overwrite the phone's credentials.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(useRelayStore.getState().sessionId).toBe('session-one')
+    })
+
     it('sets error on network failure', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test')

@@ -33,6 +33,8 @@ const DEFAULT_SETTINGS: SpeechSettings = {
   language: null,
 }
 
+let memorySettings: SpeechSettings | null = null
+
 function normalizeSpeechSettings(
   stored: Partial<SpeechSettings>,
 ): SpeechSettings {
@@ -53,6 +55,7 @@ function normalizeSpeechSettings(
 }
 
 export function getSpeechSettings(): SpeechSettings {
+  if (memorySettings) return memorySettings
   const stored = getJson<Partial<SpeechSettings>>(SPEECH_SETTINGS_KEY)
   if (stored) return normalizeSpeechSettings(stored)
   const legacy = getJson<Partial<SpeechSettings>>(LEGACY_SPEECH_SETTINGS_KEY)
@@ -66,12 +69,19 @@ export function getSpeechSettings(): SpeechSettings {
 export function updateSpeechSettings(
   patch: Partial<SpeechSettings>,
 ): SpeechSettings {
-  const next = { ...getSpeechSettings(), ...patch }
-  setJson(SPEECH_SETTINGS_KEY, next)
+  const next = normalizeSpeechSettings({ ...getSpeechSettings(), ...patch })
+  memorySettings = next
+  try {
+    setJson(SPEECH_SETTINGS_KEY, next)
+  } catch {
+    // The settings screen and active recorder still share the in-memory
+    // choice; another update can persist it when MMKV recovers.
+  }
   return next
 }
 
 export function resetSpeechSettings(): void {
+  memorySettings = null
   removeKey(SPEECH_SETTINGS_KEY)
   removeKey(LEGACY_SPEECH_SETTINGS_KEY)
 }

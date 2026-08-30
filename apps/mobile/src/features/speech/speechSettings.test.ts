@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { setJson } from '@/storage/mmkv'
+import { setJson, storage } from '@/storage/mmkv'
 
 import {
   clearPendingVoiceRecording,
@@ -80,5 +80,17 @@ describe('speech settings', () => {
 
     updateSpeechSettings({ provider: 'openrouter' })
     expect(getPendingVoiceRecording()?.provider).toBe('on-device')
+  })
+
+  it('keeps a speech choice active when device storage rejects the write', () => {
+    const set = vi.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('MMKV is unavailable')
+    })
+    try {
+      expect(() => updateSpeechSettings({ provider: 'on-device' })).not.toThrow()
+      expect(getSpeechSettings().provider).toBe('on-device')
+    } finally {
+      set.mockRestore()
+    }
   })
 })

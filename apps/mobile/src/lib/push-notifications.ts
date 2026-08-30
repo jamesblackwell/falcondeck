@@ -46,7 +46,8 @@ export type NotificationDestinationHandler = () => void
  * devices get alerts without any setup.
  */
 export function isPushEnabled(): boolean {
-  return getJson<boolean>(PUSH_ENABLED_KEY) ?? true
+  const stored = getJson<unknown>(PUSH_ENABLED_KEY)
+  return typeof stored === 'boolean' ? stored : true
 }
 
 /** Persist the push-notification preference. */
@@ -232,6 +233,8 @@ export function handleNotificationTapData(data: unknown): boolean {
   const session = useSessionStore.getState()
 
   if (typeof workspaceId === 'string' && typeof threadId === 'string') {
+    const owner = session.snapshot?.threads.find((thread) => thread.id === threadId)
+    if (session.snapshot && owner?.workspace_id !== workspaceId) return false
     session.selectThread(workspaceId, threadId)
     return true
   }
@@ -245,6 +248,12 @@ export function handleNotificationTapData(data: unknown): boolean {
     return false
   }
   if (typeof workspaceId === 'string') {
+    if (
+      session.snapshot &&
+      !session.snapshot.workspaces.some((workspace) => workspace.id === workspaceId)
+    ) {
+      return false
+    }
     session.selectWorkspace(workspaceId)
     return true
   }

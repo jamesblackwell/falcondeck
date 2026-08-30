@@ -261,7 +261,12 @@ type AppearanceStore = MobileAppearance & {
 }
 
 function persist(next: MobileAppearance) {
-  setJson(STORAGE_KEY, next)
+  try {
+    setJson(STORAGE_KEY, next)
+  } catch {
+    // Keep the live theme usable when device storage is temporarily
+    // unavailable. A later preference change can persist it again.
+  }
 }
 
 /**

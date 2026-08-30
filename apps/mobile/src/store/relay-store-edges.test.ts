@@ -130,6 +130,50 @@ describe('relay-store edge cases', () => {
       expect(state.isConnected).toBe(false)
     })
 
+    it('rejects a version-matching relay record with missing identity fields', async () => {
+      const kp = generateBoxKeyPair()
+      setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
+        relayUrl: 'https://relay.test',
+        pairingCode: '',
+        pairingId: 'pairing-1',
+        // sessionId is missing despite the current schema version.
+        deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
+        lastReceivedSeq: 0,
+      })
+      await persistClientSecretKey(secretKeyToBase64(kp))
+      await persistClientToken('token-abc')
+
+      expect(await useRelayStore.getState().restoreSession()).toBe(false)
+      expect(getJson('relay.session')).toBeNull()
+      expect(useRelayStore.getState().sessionId).toBeNull()
+    })
+
+    it('ignores a restored data key with the wrong byte length', async () => {
+      const kp = generateBoxKeyPair()
+      setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
+        relayUrl: 'https://relay.test',
+        pairingCode: '',
+        pairingId: 'pairing-1',
+        sessionId: 'session-1',
+        deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
+        lastReceivedSeq: 0,
+      })
+      await persistClientSecretKey(secretKeyToBase64(kp))
+      await persistClientToken('token-abc')
+      await persistDataKey(bytesToBase64(new Uint8Array([1, 2, 3])))
+
+      expect(await useRelayStore.getState().restoreSession()).toBe(true)
+      // Key recovery can now request a fresh bootstrap instead of trying to
+      // decrypt every relay update with an unusable three-byte key.
+      expect(useRelayStore.getState()._getSessionCrypto()).toBeNull()
+    })
+
     it('returns false when secret key is corrupt (catch branch)', async () => {
       setJson('relay.session', {
         version: REMOTE_SESSION_STORAGE_VERSION,

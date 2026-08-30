@@ -468,6 +468,7 @@ export function useSessionActions() {
       options?: { older?: boolean },
     ) => {
       const relay = useRelayStore.getState();
+      const relaySessionId = relay.sessionId;
       const session = useSessionStore.getState();
       // The demo workspace has no daemon to page against: its transcripts are
       // whatever is already cached locally, and there is never anything older.
@@ -522,6 +523,7 @@ export function useSessionActions() {
 
         const activeSession = useSessionStore.getState();
         const isStale =
+          useRelayStore.getState().sessionId !== relaySessionId ||
           (!options?.older &&
             requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
@@ -545,6 +547,7 @@ export function useSessionActions() {
       } catch (e) {
         const activeSession = useSessionStore.getState();
         const isStale =
+          useRelayStore.getState().sessionId !== relaySessionId ||
           (!options?.older &&
             requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
@@ -590,7 +593,9 @@ export function useSessionActions() {
    */
   const prefetchRecentThreadDetails = useCallback(async () => {
     const relay = useRelayStore.getState();
+    const relaySessionId = relay.sessionId;
     if (isDemoSession(relay.sessionId)) return;
+    if (!relaySessionId) return;
     if (!relay._getSessionCrypto()) return;
     const session = useSessionStore.getState();
     if (!session.snapshot) return;
@@ -608,11 +613,13 @@ export function useSessionActions() {
     await new Promise((resolve) =>
       setTimeout(resolve, RECENT_THREAD_PREFETCH_INITIAL_DELAY_MS),
     );
+    if (useRelayStore.getState().sessionId !== relaySessionId) return;
 
     for (const thread of candidates) {
       // Yield to any foreground load: prefetch must never queue ahead of the
       // thread the user just opened, on the wire or on the daemon.
       await waitForForegroundDetailLoads();
+      if (useRelayStore.getState().sessionId !== relaySessionId) return;
       // Re-check each iteration: a foreground load, cache write, or thread
       // selection may have populated (or taken over) this thread meanwhile.
       const current = useSessionStore.getState();
@@ -631,6 +638,7 @@ export function useSessionActions() {
             { requestIdPrefix: "mobile-prefetch" },
           ),
         );
+        if (useRelayStore.getState().sessionId !== relaySessionId) return;
         useSessionStore.getState().setThreadDetail(detail, {
           mergeMode: "refresh",
         });
@@ -883,6 +891,7 @@ export function useSessionActions() {
 
   const loadWorkspaceSkills = useCallback(async (provider: AgentProvider) => {
     const relay = useRelayStore.getState();
+    const relaySessionId = relay.sessionId;
     const session = useSessionStore.getState();
     const workspace = session.snapshot?.workspaces.find(
       (entry) => entry.id === session.selectedWorkspaceId,
@@ -898,6 +907,17 @@ export function useSessionActions() {
         { requestIdPrefix: "mobile-skills" },
       );
       const skills = normalizeSkillSummaries(payload.skills);
+      if (
+        useRelayStore.getState().sessionId !== relaySessionId ||
+        useSessionStore.getState().selectedWorkspaceId !== workspace.id
+      ) {
+        const currentWorkspace = useSessionStore
+          .getState()
+          .snapshot?.workspaces.find(
+            (entry) => entry.id === useSessionStore.getState().selectedWorkspaceId,
+          );
+        return normalizeSkillSummaries(currentWorkspace?.skills);
+      }
       liveSkillsRef.current = {
         workspaceId: workspace.id,
         provider,

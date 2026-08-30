@@ -16,13 +16,64 @@ type ModelCatalogCache = {
 
 let cache: ModelCatalogCache | null = null
 
+function isModelSummary(value: unknown): value is ModelSummary {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const model = value as Record<string, unknown>
+  return (
+    typeof model.id === 'string' &&
+    typeof model.label === 'string' &&
+    typeof model.is_default === 'boolean' &&
+    (model.default_reasoning_effort === null ||
+      typeof model.default_reasoning_effort === 'string') &&
+    Array.isArray(model.supported_reasoning_efforts) &&
+    model.supported_reasoning_efforts.every(
+      (effort) =>
+        typeof effort === 'object' &&
+        effort !== null &&
+        typeof (effort as { reasoning_effort?: unknown }).reasoning_effort ===
+          'string',
+    ) &&
+    (model.service_tiers === undefined ||
+      (Array.isArray(model.service_tiers) &&
+        model.service_tiers.every(
+          (tier) =>
+            typeof tier === 'object' &&
+            tier !== null &&
+            typeof (tier as { id?: unknown }).id === 'string' &&
+            typeof (tier as { name?: unknown }).name === 'string' &&
+            typeof (tier as { description?: unknown }).description === 'string',
+        )))
+  )
+}
+
+function normalizeStoredCache(value: unknown): ModelCatalogCache {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { version: MODEL_CATALOG_CACHE_VERSION, entries: {} }
+  }
+  const stored = value as Record<string, unknown>
+  if (
+    stored.version !== MODEL_CATALOG_CACHE_VERSION ||
+    typeof stored.entries !== 'object' ||
+    stored.entries === null ||
+    Array.isArray(stored.entries)
+  ) {
+    return { version: MODEL_CATALOG_CACHE_VERSION, entries: {} }
+  }
+  const entries = Object.fromEntries(
+    Object.entries(stored.entries).flatMap(([key, models]) =>
+      Array.isArray(models) && models.every(isModelSummary)
+        ? [[key, models]]
+        : [],
+    ),
+  )
+  return { version: MODEL_CATALOG_CACHE_VERSION, entries }
+}
+
 function loadCache(): ModelCatalogCache {
   if (cache) return cache
-  const stored = getJson<ModelCatalogCache>(MODEL_CATALOG_CACHE_KEY)
-  cache =
-    stored && stored.version === MODEL_CATALOG_CACHE_VERSION
-      ? stored
-      : { version: MODEL_CATALOG_CACHE_VERSION, entries: {} }
+  cache = normalizeStoredCache(getJson<unknown>(MODEL_CATALOG_CACHE_KEY))
   return cache
 }
 

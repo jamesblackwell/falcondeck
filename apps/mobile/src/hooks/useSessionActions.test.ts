@@ -1354,6 +1354,48 @@ describe("loadThreadDetail", () => {
     expect(useSessionStore.getState().threadItems["thread-1"]).toBeUndefined();
   });
 
+  it("ignores a detail response from a replaced relay session", async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
+    const deferred = createDeferred<ReturnType<typeof threadDetail>>();
+    useRelayStore.setState({
+      sessionId: "session-1",
+      _callRpc: vi.fn().mockReturnValue(deferred.promise) as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        const pending = harness
+          .getActions()
+          .loadThreadDetail("workspace-1", "thread-1");
+        // A newly paired daemon can legitimately reuse the same local
+        // workspace/thread identifiers. Session ownership must still win.
+        useRelayStore.setState({ sessionId: "session-2" });
+        deferred.resolve(
+          threadDetail({
+            items: [assistantMessage("old-session-item", "stale")],
+          }),
+        );
+        await pending;
+      });
+    } finally {
+      harness.unmount();
+    }
+
+    expect(useSessionStore.getState().threadItems["thread-1"]).toBeUndefined();
+  });
+
   it("discards an older page when a refresh changes its requested boundary", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
@@ -1413,6 +1455,99 @@ describe("loadThreadDetail", () => {
         .getState()
         .threadItems["thread-1"]?.map((item) => item.id),
     ).toEqual(["fresh-boundary"]);
+  });
+});
+
+describe("session-owned background loads", () => {
+  beforeEach(resetAll);
+
+  it("does not start a delayed prefetch after the relay session changes", async () => {
+    vi.useFakeTimers();
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+          threads: [
+            thread({ id: "t1", workspace_id: "w1" }),
+            thread({ id: "t2", workspace_id: "w1" }),
+          ],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("w1", "t1");
+    const rpc = vi.fn().mockResolvedValue(
+      threadDetail({
+        thread: thread({ id: "t2", workspace_id: "w1" }),
+        items: [assistantMessage("stale-prefetch", "old session")],
+      }),
+    );
+    useRelayStore.setState({
+      sessionId: "session-1",
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+    } as Partial<RelayStoreState>);
+    useRelayStore.getState()._setSessionCrypto({
+      dataKey: new Uint8Array(32),
+      material: null,
+    });
+    const harness = mountSessionActions();
+
+    try {
+      const pending = harness.getActions().prefetchRecentThreadDetails();
+      useRelayStore.setState({ sessionId: "session-2" });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+
+      expect(rpc).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().threadItems.t2).toBeUndefined();
+    } finally {
+      harness.unmount();
+      useRelayStore.getState()._setSessionCrypto(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not publish a skill catalog returned by an old relay session", async () => {
+    const currentSkill = {
+      id: "current-skill",
+      label: "Current",
+      alias: "/current",
+      availability: "codex" as const,
+      providers: ["codex" as const],
+      source_kind: "project_file" as const,
+    };
+    const staleSkill = {
+      ...currentSkill,
+      id: "stale-skill",
+      label: "Stale",
+      alias: "/stale",
+    };
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: "w1", skills: [currentSkill] })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectWorkspace("w1");
+    const deferred = createDeferred<{ skills: (typeof staleSkill)[] }>();
+    useRelayStore.setState({
+      sessionId: "session-1",
+      _callRpc: vi.fn().mockReturnValue(deferred.promise) as RelayStoreState["_callRpc"],
+    } as Partial<RelayStoreState>);
+    const harness = mountSessionActions();
+
+    try {
+      let result: unknown;
+      await act(async () => {
+        const pending = harness.getActions().loadWorkspaceSkills("codex");
+        useRelayStore.setState({ sessionId: "session-2" });
+        deferred.resolve({ skills: [staleSkill] });
+        result = await pending;
+      });
+      expect(result).toEqual([expect.objectContaining(currentSkill)]);
+    } finally {
+      harness.unmount();
+    }
   });
 });
 

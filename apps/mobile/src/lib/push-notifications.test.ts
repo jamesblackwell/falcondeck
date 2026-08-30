@@ -246,6 +246,11 @@ describe('push-notifications', () => {
       expect(isPushEnabled()).toBe(true)
     })
 
+    it('uses the safe default for a corrupt non-boolean preference', () => {
+      setJson('push.enabled', 'false')
+      expect(isPushEnabled()).toBe(true)
+    })
+
     it('registerPushToken is a no-op while push is disabled', async () => {
       const fetchMock = mockFetchOk()
       setPushEnabled(false)
@@ -361,6 +366,24 @@ describe('push-notifications', () => {
         threadId: 't1',
       })).toBe(false)
       expect(selectThread).not.toHaveBeenCalled()
+    })
+
+    it('rejects stale or mismatched destinations from the active session', () => {
+      const selectThread = vi.fn()
+      const selectWorkspace = vi.fn()
+      useSessionStore.setState({
+        selectThread,
+        selectWorkspace,
+        snapshot: {
+          workspaces: [{ id: 'w1' }],
+          threads: [{ id: 't1', workspace_id: 'w1' }],
+        } as unknown as DaemonSnapshot,
+      })
+
+      expect(handleNotificationTapData({ workspaceId: 'w2', threadId: 't1' })).toBe(false)
+      expect(handleNotificationTapData({ workspaceId: 'w-missing' })).toBe(false)
+      expect(selectThread).not.toHaveBeenCalled()
+      expect(selectWorkspace).not.toHaveBeenCalled()
     })
 
     it('resolves the workspace from the snapshot when only threadId is present', () => {

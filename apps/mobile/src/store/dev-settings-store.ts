@@ -19,7 +19,8 @@ type DevSettingsState = PersistedDevSettings & {
 const stored = getJson<PersistedDevSettings>(DEV_SETTINGS_KEY)
 
 export const useDevSettingsStore = create<DevSettingsState>((set, get) => ({
-  showPerfOverlay: stored?.showPerfOverlay ?? false,
+  showPerfOverlay:
+    typeof stored?.showPerfOverlay === 'boolean' ? stored.showPerfOverlay : false,
   setShowPerfOverlay: (value) => {
     set({ showPerfOverlay: value })
     setJson(DEV_SETTINGS_KEY, { showPerfOverlay: get().showPerfOverlay })

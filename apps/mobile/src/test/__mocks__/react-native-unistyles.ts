@@ -42,3 +42,9 @@ export const StyleSheet = {
 export function useUnistyles() {
   return { theme: stubTheme, rt: {} }
 }
+
+export const UnistylesRuntime = {
+  setAdaptiveThemes: () => {},
+  setTheme: () => {},
+  updateTheme: () => {},
+}

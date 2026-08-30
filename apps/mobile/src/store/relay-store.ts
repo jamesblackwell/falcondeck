@@ -95,6 +95,32 @@ interface PersistedRelay {
   lastReceivedSeq: number
 }
 
+const SESSION_DATA_KEY_BYTES = 32
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function isPersistedRelay(value: unknown): value is PersistedRelay {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false
+  }
+  const record = value as Record<string, unknown>
+  return (
+    record.version === REMOTE_SESSION_STORAGE_VERSION &&
+    isNonEmptyString(record.relayUrl) &&
+    typeof record.pairingCode === 'string' &&
+    isNonEmptyString(record.pairingId) &&
+    isNonEmptyString(record.sessionId) &&
+    isNonEmptyString(record.deviceId) &&
+    isNonEmptyString(record.daemonPublicKey) &&
+    isNonEmptyString(record.daemonIdentityPublicKey) &&
+    typeof record.lastReceivedSeq === 'number' &&
+    Number.isSafeInteger(record.lastReceivedSeq) &&
+    record.lastReceivedSeq >= 0
+  )
+}
+
 export interface RelayState {
   relayUrl: string
   pairingCode: string
@@ -261,7 +287,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   setPairingCode: (code) => set({ pairingCode: normalizePairingCodeInput(code) }),
 
   claimPairing: async () => {
-    const { relayUrl, pairingCode } = get()
+    const { relayUrl, pairingCode, connectionStatus } = get()
+    if (connectionStatus === 'claiming') return
     if (!relayUrl.trim() || !pairingCode.trim()) return
 
     beginConnectionAction('pairing', 'info', 'Claiming pairing with the relay…')
@@ -427,9 +454,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
 
   restoreSession: async () => {
-    const persisted = getJson<PersistedRelay>('relay.session')
-    if (!persisted) return false
-    if (persisted.version !== REMOTE_SESSION_STORAGE_VERSION) {
+    const stored = getJson<unknown>('relay.session')
+    if (stored === null) return false
+    if (!isPersistedRelay(stored)) {
       _socket = null
       _sessionCrypto = null
       _clientKeyPair = null
@@ -452,6 +479,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       await clearSecureSession()
       return false
     }
+    const persisted = stored
 
     const [secretKey, dataKey, clientToken] = await Promise.all([
       loadClientSecretKey(),
@@ -492,9 +520,15 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       _trustedDaemonPublicKey = persisted.daemonPublicKey
       _trustedDaemonIdentityPublicKey = persisted.daemonIdentityPublicKey
 
-      _sessionCrypto = dataKey
-        ? { dataKey: base64ToBytes(dataKey), material: null }
-        : null
+      const restoredDataKey = dataKey ? base64ToBytes(dataKey) : null
+      _sessionCrypto =
+        restoredDataKey?.length === SESSION_DATA_KEY_BYTES
+          ? { dataKey: restoredDataKey, material: null }
+          : null
+      _persistedDataKeyB64 = _sessionCrypto ? dataKey : null
+      if (dataKey && !_sessionCrypto) {
+        await clearDataKey().catch(() => undefined)
+      }
 
       set({
         relayUrl,

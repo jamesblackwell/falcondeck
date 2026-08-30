@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 71 / 100
-- Product defects: 68
+- Verified and fixed: 84 / 100
+- Product defects: 81
 - Test-infrastructure defects: 3
 
 ## Verification Standard
@@ -658,6 +658,123 @@ Each entry records:
 - Fix: Use an async guarded cancellation path with error containment and unconditional audio-session deactivation in `finally`.
 - Verification: The rejected stop is contained and audio deactivation still runs; the complete mobile suite passes all 948 tests.
 - Autoreview: The initial pass found the new voice finishing guard could remain latched after a failed transcription; the failure was reproduced, fixed, and covered by a regression test. The required rerun was clean with no accepted/actionable findings; overall patch assessment 0.78.
+
+### 072 — Rapid pairing taps race two credential-claim flows
+
+- Kind: Product defect
+- Reproduction: A relay-store regression invoked `claimPairing()` twice in the same tick and observed four HTTP calls: two challenges and two claims.
+- Root cause: The store set `connectionStatus` to `claiming` synchronously but never checked that state before starting another claim.
+- Fix: Return immediately when a pairing claim is already in progress.
+- Verification: Two immediate calls now issue exactly one challenge and one claim; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 073 — Version-matching relay records can omit required session identity
+
+- Kind: Product defect
+- Reproduction: A current-version MMKV record omitted `sessionId` while valid secure keys were present; `restoreSession()` returned `true` and adopted an unusable connecting state.
+- Root cause: Restore checked only the schema version and trusted every required string and cursor field.
+- Fix: Structurally validate the persisted relay URL, pairing/session/device identities, daemon keys, and non-negative safe cursor before loading secure material.
+- Verification: The malformed record is rejected, removed, and leaves the store signed out; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 074 — Wrong-sized restored data keys block mobile key recovery
+
+- Kind: Product defect
+- Reproduction: Secure storage returned a decoded three-byte data key; restore marked session crypto available instead of leaving it recoverable through a fresh bootstrap.
+- Root cause: The restored data key was decoded but never checked against the protocol's 32-byte key size.
+- Fix: Install only exactly 32-byte data keys, clear an invalid saved value best-effort, and keep the valid pairing in key-recovery mode.
+- Verification: Restore succeeds with the trusted identity but exposes no session crypto for the invalid key; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 075 — Corrupt model-catalog cache crashes or violates picker contracts
+
+- Kind: Product defect
+- Reproduction: One regression loaded `entries: null` and hit `Cannot read properties of null`; another returned a string catalog where picker code calls array operations.
+- Root cause: The cache accepted any current-version `entries` value and returned individual entries without validating their model, reasoning-effort, or service-tier shape.
+- Fix: Normalize storage into a safe entries record and retain only structurally valid model arrays.
+- Verification: Both malformed shapes return an empty catalog without throwing; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 076 — Null cached automations can crash the automation list
+
+- Kind: Product defect
+- Reproduction: `loadAutomationCache()` accepted `automations: [null]`; list rows then dereference fields such as `automation.name`, `automation.target.provider`, and `automation.trigger.kind`.
+- Root cause: The boundary checked only that `automations` was an array and that `runsByAutomation` had JavaScript type `object`.
+- Fix: Validate cached automation, target, trigger, run, settings, and timestamp containers before hydration.
+- Verification: The null-entry cache is rejected and all automation regressions pass within the 962-test mobile suite.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 077 — Non-boolean developer cache values enable the performance overlay
+
+- Kind: Product defect
+- Reproduction: Persisting `{ showPerfOverlay: "false" }` hydrated the store with the truthy string instead of the boolean `false`.
+- Root cause: Initialization used nullish fallback rather than a runtime boolean check at the untyped JSON boundary.
+- Fix: Accept the stored overlay flag only when it is a boolean.
+- Verification: The corrupt string now falls back to `false`; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 078 — MMKV write failures abort live appearance changes
+
+- Kind: Product defect
+- Reproduction: A palette regression made `storage.set` throw; `setThemeMode('dark')` propagated the exception before updating the Zustand theme state.
+- Root cause: Appearance persistence was treated as infallible even though the app's other device-local settings explicitly tolerate unavailable storage.
+- Fix: Contain the persistence failure while keeping the normalized live theme authoritative.
+- Verification: The action no longer throws and the in-memory mode becomes dark; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 079 — MMKV write failures discard the active speech choice
+
+- Kind: Product defect
+- Reproduction: A speech-settings regression made `storage.set` throw; selecting on-device transcription propagated the exception and did not remain visible to the recorder.
+- Root cause: Speech settings had no in-memory authoritative copy and wrote storage before returning the new choice to the screen.
+- Fix: Normalize and retain the new choice in memory, then persist it best-effort; reset clears both layers.
+- Verification: The update remains readable as on-device without throwing when MMKV rejects the write; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 080 — Corrupt push preference values escape the boolean API
+
+- Kind: Product defect
+- Reproduction: JSON containing the string `"false"` made `isPushEnabled()` return that string despite its boolean contract.
+- Root cause: The generic JSON cast supplied compile-time typing without runtime validation.
+- Fix: Accept only stored booleans and use the documented enabled default for every other shape.
+- Verification: The corrupt string returns boolean `true`; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 081 — Stale or mismatched notification destinations corrupt selection
+
+- Kind: Product defect
+- Reproduction: With snapshot thread `t1` owned by `w1`, a notification carrying `w2/t1` returned `true` and selected the impossible pair; an unknown workspace-only payload was also accepted.
+- Root cause: Payload routing trusted paired workspace/thread strings without reconciling them against the hydrated active-session snapshot.
+- Fix: When a snapshot is available, require thread ownership to match and workspace-only destinations to exist; retain pre-snapshot routing for legitimate cold starts.
+- Verification: Both invalid destinations are rejected without calling selection actions; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 082 — Old-session thread details overwrite a replacement mobile session
+
+- Kind: Product defect
+- Reproduction: A tail request started in session 1, the relay rotated to session 2 with the same local IDs, and the delayed response inserted `old-session-item` into session 2.
+- Root cause: Detail staleness checked request version and workspace/thread selection but not relay-session ownership.
+- Fix: Capture the initiating relay session and reject both success and failure handling after it changes.
+- Verification: The delayed old-session response leaves the replacement thread cache empty; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 083 — Delayed prefetch jobs send old thread IDs through a new session
+
+- Kind: Product defect
+- Reproduction: A prefetch captured session-1 candidates, waited its one-second startup delay, then session 2 was adopted; the original job still sent `thread.detail` for session 1's `t2` through the current relay function.
+- Root cause: Background prefetch captured candidate state but never captured or rechecked the owning relay session across its waits and RPC.
+- Fix: Require the initiating session before the delay, before every candidate, and after every response.
+- Verification: Rotating during the delay sends no RPC and inserts no stale detail; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
+
+### 084 — Old-session skill responses replace the active composer catalog
+
+- Kind: Product defect
+- Reproduction: A `workspace.skills` request began in session 1, session 2 was adopted, and the delayed response returned the stale skill list to the persistent composer hook.
+- Root cause: The live skill catalog was updated without checking relay-session or selected-workspace ownership.
+- Fix: On ownership change, discard the response and return the active workspace's normalized snapshot skills instead.
+- Verification: The session-1 response yields session 2's current skill rather than the stale skill; the complete mobile suite passes all 962 tests.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.80.
 
 ## Pending Verification
 

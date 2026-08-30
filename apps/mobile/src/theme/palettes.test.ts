@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 import { Appearance } from 'react-native'
 import { describe, expect, it, vi } from 'vitest'
 
+import { storage } from '@/storage/mmkv'
+
 import {
   applyNativeColorScheme,
   COLOR_THEME_COLORS,
@@ -11,6 +13,7 @@ import {
   LIGHT_COLOR_THEME_OPTIONS,
   colorThemeSwatchColors,
   normalizeAppearance,
+  useAppearanceStore,
   type ColorThemeOption,
 } from './appearance'
 import { darkColors } from './tokens'
@@ -126,5 +129,18 @@ describe('mobile color palettes', () => {
       lightColorTheme: 'tokyo-night-light',
       darkColorTheme: 'tokyo-night',
     })
+  })
+
+  it('keeps theme changes usable when device storage rejects a write', () => {
+    const set = vi.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('MMKV is unavailable')
+    })
+    try {
+      expect(() => useAppearanceStore.getState().setThemeMode('dark')).not.toThrow()
+      expect(useAppearanceStore.getState().themeMode).toBe('dark')
+    } finally {
+      set.mockRestore()
+      useAppearanceStore.setState(normalizeAppearance(null))
+    }
   })
 })
