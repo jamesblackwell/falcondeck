@@ -1250,21 +1250,27 @@ export default function HomeScreen() {
           accessibilityRole="button"
           accessibilityLabel={
             workspace?.kind === "casual"
-              ? "Casual chat"
-              : `Project: ${getWorkspaceTitle(workspace?.path)}`
+              ? `Casual chat${selectedThread ? `: ${selectedThread.title || "New thread"}` : ""}`
+              : `Project: ${getWorkspaceTitle(workspace?.path)}${selectedThread ? `. Thread: ${selectedThread.title || "New thread"}` : ""}`
           }
           accessibilityHint="Opens the project and thread list"
         >
           <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
-          <Text
-            variant="label"
-            color="primary"
-            weight="semibold"
-            numberOfLines={1}
-            style={styles.headerTitle}
-          >
-            {workspace?.kind === "casual" ? "Chat" : getWorkspaceTitle(workspace?.path)}
-          </Text>
+          <View style={styles.headerLabels}>
+            <Text
+              variant="label"
+              color="primary"
+              weight="semibold"
+              numberOfLines={1}
+            >
+              {workspace?.kind === "casual" ? "Chat" : getWorkspaceTitle(workspace?.path)}
+            </Text>
+            {selectedThread ? (
+              <Text variant="caption" color="muted" numberOfLines={1}>
+                {selectedThread.title || "New thread"}
+              </Text>
+            ) : null}
+          </View>
         </Pressable>
         <View style={styles.headerRight}>
           {selectedThread ? (
@@ -1612,8 +1618,9 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
     marginRight: theme.spacing[3],
   },
-  headerTitle: {
+  headerLabels: {
     flex: 1,
+    minWidth: 0,
   },
   headerRight: {
     flexDirection: "row",
