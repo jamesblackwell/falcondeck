@@ -64,8 +64,12 @@ const CURSOR_KEYCHAIN_ACCOUNT: &str = "cursor-user";
 const CURSOR_CONNECT_PROTOCOL_VERSION: &str = "1";
 
 const AGY_LOAD_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
-const AGY_MODELS_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
-const AGY_LOAD_BODY: &str = r#"{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
+const AGY_SUMMARY_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+/// Cloud Code 403s consumer quota calls unless the UA contains `Antigravity/`.
+const AGY_USER_AGENT: &str = "Antigravity/0.0.0";
+/// `ideType` must be a protocol enum. `ANTIGRAVITY` is not one.
+const AGY_LOAD_BODY: &str = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -536,7 +540,8 @@ fn normalize_codex_usage(raw: &Value, account_email: Option<String>) -> Provider
         None | Some(Value::Null) => {}
         Some(Value::Array(extras)) => {
             for extra in extras {
-                let Some(rate_limit) = extra.get("rate_limit") else {
+                let Some(rate_limit) = extra.get("rate_limit").filter(|value| !value.is_null())
+                else {
                     continue;
                 };
                 let mut extra_windows = Vec::new();
@@ -1508,7 +1513,7 @@ fn agy_headers(access_token: &str) -> Vec<(&'static str, String)> {
         ("authorization", format!("Bearer {access_token}")),
         ("accept", "application/json".to_string()),
         ("content-type", "application/json".to_string()),
-        ("user-agent", "antigravity".to_string()),
+        ("user-agent", AGY_USER_AGENT.to_string()),
     ]
 }
 
@@ -1522,25 +1527,12 @@ fn agy_plan_label(raw: &Value) -> Option<String> {
         })
 }
 
-fn agy_project_id(raw: &Value) -> Option<String> {
-    match json_field(raw, "cloudaicompanionProject", "cloudaicompanion_project")? {
-        Value::String(text) if !text.is_empty() => Some(text.clone()),
-        Value::Object(object) => non_empty_string(object.get("id")),
+fn agy_bucket_label(window: Option<&str>) -> Option<&'static str> {
+    match window? {
+        "5h" | "5H" | "FIVE_HOUR" | "five_hour" | "FIVE_HOUR_WINDOW" => Some("5-hour limit"),
+        "weekly" | "WEEK" | "WEEKLY" | "seven_day" | "SEVEN_DAY" => Some("Weekly limit"),
+        "monthly" | "MONTH" | "MONTHLY" => Some("Monthly limit"),
         _ => None,
-    }
-}
-
-fn agy_window_kind(resets_at: Option<&str>) -> &'static str {
-    let Some(reset) = resets_at.and_then(|raw| DateTime::parse_from_rfc3339(raw).ok()) else {
-        return "5-hour limit";
-    };
-    let hours = (reset.with_timezone(&Utc) - Utc::now()).num_hours();
-    if hours <= 8 {
-        "5-hour limit"
-    } else if hours <= 240 {
-        "Weekly limit"
-    } else {
-        "Monthly limit"
     }
 }
 
@@ -1552,34 +1544,46 @@ fn agy_remaining_fraction(quota: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn normalize_agy_models(raw: &Value) -> Vec<ProviderUsageWindow> {
-    let Some(models) = json_field(raw, "models", "models").and_then(Value::as_object) else {
+fn normalize_agy_summary(raw: &Value) -> Vec<ProviderUsageWindow> {
+    let Some(groups) = json_field(raw, "groups", "groups").and_then(Value::as_array) else {
         return Vec::new();
     };
-    let mut best: HashMap<&str, ProviderUsageWindow> = HashMap::new();
-    for (model_id, model) in models {
-        let Some(quota) = json_field(model, "quotaInfo", "quota_info") else {
+    let mut best: HashMap<&'static str, ProviderUsageWindow> = HashMap::new();
+    for group in groups {
+        let Some(buckets) = json_field(group, "buckets", "buckets").and_then(Value::as_array)
+        else {
             continue;
         };
-        let Some(remaining) = agy_remaining_fraction(quota) else {
-            continue;
-        };
-        let resets_at = json_field(quota, "resetTime", "reset_time")
-            .and_then(Value::as_str)
-            .and_then(|raw| normalize_iso_timestamp(Some(raw)));
-        let label = agy_window_kind(resets_at.as_deref());
-        let used_percent = clamp_percent((1.0 - remaining) * 100.0);
-        let candidate = ProviderUsageWindow {
-            label: label.to_string(),
-            used_percent,
-            resets_at,
-            cost: None,
-        };
-        match best.get(label) {
-            Some(existing) if existing.used_percent >= used_percent => {}
-            _ => {
-                let _ = model_id;
-                best.insert(label, candidate);
+        for bucket in buckets {
+            if bucket
+                .get("disabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(label) =
+                agy_bucket_label(json_field(bucket, "window", "window").and_then(Value::as_str))
+            else {
+                continue;
+            };
+            let Some(remaining) = agy_remaining_fraction(bucket) else {
+                continue;
+            };
+            let used_percent = clamp_percent((1.0 - remaining) * 100.0);
+            let candidate = ProviderUsageWindow {
+                label: label.to_string(),
+                used_percent,
+                resets_at: json_field(bucket, "resetTime", "reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(|raw| normalize_iso_timestamp(Some(raw))),
+                cost: None,
+            };
+            match best.get(label) {
+                Some(existing) if existing.used_percent >= used_percent => {}
+                _ => {
+                    best.insert(label, candidate);
+                }
             }
         }
     }
@@ -1593,14 +1597,14 @@ fn normalize_agy_models(raw: &Value) -> Vec<ProviderUsageWindow> {
 }
 
 fn normalize_agy_usage(
-    models: &Value,
+    summary: &Value,
     account_email: Option<String>,
     plan_label: Option<String>,
 ) -> ProviderUsage {
     ProviderUsage::Ok {
         account_email,
         plan_label,
-        windows: normalize_agy_models(models),
+        windows: normalize_agy_summary(summary),
     }
 }
 
@@ -1644,51 +1648,24 @@ async fn fetch_agy_usage() -> ProviderUsage {
 
     let headers = agy_headers(&credentials.access_token);
     let known_email = credentials.account_email.clone();
-    let load = post_usage_json_body(AGY_LOAD_URL, &headers, AGY_LOAD_BODY).await;
-    let Ok(load_response) = load else {
-        return ProviderUsage::Error {
-            message: "Antigravity usage request failed.".to_string(),
-            plan_label: None,
-            account_email: known_email,
-        };
-    };
-    match load_response.status {
-        401 => return ProviderUsage::Expired,
-        429 => {
-            return ProviderUsage::Error {
-                message: "Antigravity usage is rate limited right now. Try again shortly."
-                    .to_string(),
-                plan_label: None,
-                account_email: known_email,
-            };
-        }
-        status if !(200..300).contains(&status) => {
-            return ProviderUsage::Error {
-                message: format!("Antigravity usage request failed (HTTP {status})."),
-                plan_label: None,
-                account_email: known_email,
-            };
-        }
-        _ => {}
-    }
-    let load_body = load_response.body.clone();
-    let plan_label = load_body.as_ref().and_then(agy_plan_label);
-    let project = load_body.as_ref().and_then(agy_project_id);
-    let models_body = match project {
-        Some(project) => {
-            let payload = serde_json::json!({ "project": project }).to_string();
-            post_usage_json_body(AGY_MODELS_URL, &headers, &payload).await
-        }
-        None => post_usage_json(AGY_MODELS_URL, &headers).await,
-    };
-    let Ok(models_response) = models_body else {
+    let (load, summary) = tokio::join!(
+        post_usage_json_body(AGY_LOAD_URL, &headers, AGY_LOAD_BODY),
+        post_usage_json_body(AGY_SUMMARY_URL, &headers, "{}"),
+    );
+    let plan_label = load
+        .ok()
+        .and_then(|response| response.body)
+        .as_ref()
+        .and_then(agy_plan_label);
+
+    let Ok(summary_response) = summary else {
         return ProviderUsage::Error {
             message: "Antigravity usage request failed.".to_string(),
             plan_label,
             account_email: known_email,
         };
     };
-    match models_response.status {
+    match summary_response.status {
         401 => ProviderUsage::Expired,
         429 => ProviderUsage::Error {
             message: "Antigravity usage is rate limited right now. Try again shortly.".to_string(),
@@ -1700,7 +1677,7 @@ async fn fetch_agy_usage() -> ProviderUsage {
             plan_label,
             account_email: known_email,
         },
-        _ => match models_response.body {
+        _ => match summary_response.body {
             Some(body) => normalize_agy_usage(&body, known_email, plan_label),
             None => ProviderUsage::Error {
                 message: "Antigravity usage response was malformed.".to_string(),
@@ -2921,42 +2898,61 @@ mod tests {
     }
 
     #[test]
-    fn normalize_agy_models_keeps_the_most_used_five_hour_and_weekly() {
-        let five_hour =
-            (Utc::now() + chrono::Duration::hours(4)).to_rfc3339_opts(SecondsFormat::Millis, true);
-        let weekly =
-            (Utc::now() + chrono::Duration::days(3)).to_rfc3339_opts(SecondsFormat::Millis, true);
+    fn normalize_agy_summary_keeps_the_most_used_five_hour_and_weekly() {
         let raw = json!({
-            "models": {
-                "gemini-3-flash": {
-                    "displayName": "Gemini 3 Flash",
-                    "quotaInfo": {
-                        "remainingFraction": 0.2,
-                        "resetTime": five_hour,
-                    }
-                },
-                "gemini-3-pro": {
-                    "displayName": "Gemini 3 Pro",
-                    "quotaInfo": {
-                        "remainingFraction": 0.9,
-                        "resetTime": five_hour,
-                    }
-                },
-                "claude-sonnet": {
-                    "displayName": "Claude Sonnet",
-                    "quotaInfo": {
-                        "remainingFraction": 0.4,
-                        "resetTime": weekly,
-                    }
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.2,
+                            "resetTime": "2026-08-30T12:00:00Z"
+                        },
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.9,
+                            "resetTime": "2026-08-30T12:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.4,
+                            "resetTime": "2026-09-05T12:00:00Z"
+                        }
+                    ]
                 }
-            }
+            ]
         });
-        let windows = normalize_agy_models(&raw);
+        let windows = normalize_agy_summary(&raw);
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour limit");
         assert_eq!(windows[0].used_percent, 80);
         assert_eq!(windows[1].label, "Weekly limit");
         assert_eq!(windows[1].used_percent, 60);
+    }
+
+    #[test]
+    fn normalize_codex_usage_skips_null_additional_rate_limits() {
+        let raw = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 12,
+                    "limit_window_seconds": 604_800,
+                }
+            },
+            "additional_rate_limits": [
+                { "limit_name": "unused", "rate_limit": null },
+                {}
+            ]
+        });
+        match normalize_codex_usage(&raw, None) {
+            ProviderUsage::Ok { windows, .. } => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "Weekly limit");
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2980,8 +2976,6 @@ mod tests {
         clear_fixtures();
         *test_agy_oauth_file().lock().unwrap() = Some(future_agy_oauth());
         *test_agy_account_email().lock().unwrap() = Some("james@example.com".to_string());
-        let five_hour =
-            (Utc::now() + chrono::Duration::hours(5)).to_rfc3339_opts(SecondsFormat::Millis, true);
         test_http_fixtures().lock().unwrap().insert(
             AGY_LOAD_URL.to_string(),
             ok_response(json!({
@@ -2990,16 +2984,19 @@ mod tests {
             })),
         );
         test_http_fixtures().lock().unwrap().insert(
-            AGY_MODELS_URL.to_string(),
+            AGY_SUMMARY_URL.to_string(),
             ok_response(json!({
-                "models": {
-                    "gemini-3-flash": {
-                        "quotaInfo": {
-                            "remainingFraction": 0.5,
-                            "resetTime": five_hour
-                        }
+                "groups": [
+                    {
+                        "buckets": [
+                            {
+                                "window": "5h",
+                                "remainingFraction": 0.5,
+                                "resetTime": "2026-08-30T12:00:00Z"
+                            }
+                        ]
                     }
-                }
+                ]
             })),
         );
         match fetch_agy_usage().await {

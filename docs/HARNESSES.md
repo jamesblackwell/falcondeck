@@ -97,9 +97,10 @@ Antigravity, surfaced in Settings → Usage. Types live in `falcondeck-core`
   the `cursor` field; clients treat that as `not_installed`.
 - Antigravity reads `~/.gemini/oauth_creds.json` (and the active email from
   `google_accounts.json`) and POSTs Cloud Code `loadCodeAssist` plus
-  `fetchAvailableModels`. Per-model remaining fractions collapse to the
-  most-used 5-hour and weekly windows. Expired tokens report `expired` —
-  same no-refresh rule. Older daemons omit `agy`.
+  `retrieveUserQuotaSummary` with a User-Agent that includes `Antigravity/`.
+  Bucket `window` values (`5h` / `weekly`) collapse to the most-used 5-hour
+  and weekly rows. Expired tokens report `expired` — same no-refresh rule.
+  Older daemons omit `agy`.
 - OpenCode and Pi are not on this panel: OpenCode is a multiplexer over
   other providers' tokens (Claude/Codex already appear as themselves; this
   machine's OpenCode Go key has no Go subscription), and Pi is API-key /

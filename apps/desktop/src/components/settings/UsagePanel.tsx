@@ -174,8 +174,8 @@ function UsageBody({
       }
       return (
         <div className="space-y-3">
-          {usage.windows.map((window) => (
-            <UsageWindowRow key={window.label} window={window} />
+          {usage.windows.map((window, index) => (
+            <UsageWindowRow key={`${window.label}-${index}`} window={window} />
           ))}
         </div>
       )
