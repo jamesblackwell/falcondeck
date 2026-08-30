@@ -5,9 +5,10 @@
 //! Code queries the Anthropic OAuth usage endpoint with the token from the
 //! CLI's keychain entry (macOS) or `~/.claude/.credentials.json`, Grok Build
 //! queries the CLI-proxy billing endpoint with the token from
-//! `~/.grok/auth.json`, and Cursor Agent queries the dashboard Connect-RPC
-//! usage endpoints with the token from the CLI's keychain entry (macOS) or
-//! `~/.cursor/auth.json`. Tokens are used as-is — the daemon never refreshes
+//! `~/.grok/auth.json`, Cursor Agent queries the dashboard Connect-RPC usage
+//! endpoints with the token from the CLI's keychain entry (macOS) or
+//! `~/.cursor/auth.json`, and Antigravity queries Cloud Code quota endpoints
+//! with the token from `~/.gemini/oauth_creds.json`. Tokens are used as-is — the daemon never refreshes
 //! another tool's credentials, because rotating a refresh token out from under
 //! the owning CLI breaks its next run.
 //!
@@ -38,6 +39,7 @@ const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CHATGPT_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 const CHATGPT_PROFILE_CLAIM_PATH: &str = "https://api.openai.com/profile";
+const FIVE_HOUR_WINDOW_SECONDS: i64 = 18_000;
 const WEEKLY_WINDOW_SECONDS: i64 = 604_800;
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -60,6 +62,10 @@ const CURSOR_ME_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService
 const CURSOR_KEYCHAIN_SERVICE: &str = "cursor-access-token";
 const CURSOR_KEYCHAIN_ACCOUNT: &str = "cursor-user";
 const CURSOR_CONNECT_PROTOCOL_VERSION: &str = "1";
+
+const AGY_LOAD_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const AGY_MODELS_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+const AGY_LOAD_BODY: &str = r#"{"metadata":{"ideType":"ANTIGRAVITY","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -170,7 +176,7 @@ async fn fetch_usage_json(
     url: &str,
     headers: &[(&'static str, String)],
 ) -> Result<UsageHttpResponse, String> {
-    fetch_usage_request(url, headers, false).await
+    fetch_usage_request(url, headers, None).await
 }
 
 /// Same as [`fetch_usage_json`], but POST with an empty JSON object. Cursor's
@@ -180,26 +186,34 @@ async fn post_usage_json(
     url: &str,
     headers: &[(&'static str, String)],
 ) -> Result<UsageHttpResponse, String> {
-    fetch_usage_request(url, headers, true).await
+    post_usage_json_body(url, headers, "{}").await
+}
+
+#[cfg(not(test))]
+async fn post_usage_json_body(
+    url: &str,
+    headers: &[(&'static str, String)],
+    body: &str,
+) -> Result<UsageHttpResponse, String> {
+    fetch_usage_request(url, headers, Some(body)).await
 }
 
 #[cfg(not(test))]
 async fn fetch_usage_request(
     url: &str,
     headers: &[(&'static str, String)],
-    post: bool,
+    body: Option<&str>,
 ) -> Result<UsageHttpResponse, String> {
     async fn send(
         client: &reqwest::Client,
         url: &str,
         headers: &[(&'static str, String)],
         cookie: Option<&str>,
-        post: bool,
+        body: Option<&str>,
     ) -> Result<UsageHttpResponse, String> {
-        let mut request = if post {
-            client.post(url).body("{}")
-        } else {
-            client.get(url)
+        let mut request = match body {
+            Some(body) => client.post(url).body(body.to_string()),
+            None => client.get(url),
         };
         for (name, value) in headers {
             request = request.header(*name, value.clone());
@@ -245,7 +259,7 @@ async fn fetch_usage_request(
         url,
         headers,
         cloudflare_cookie_header().as_deref(),
-        post,
+        body,
     )
     .await?;
     if response.status == 403 && response.cloudflare_challenge {
@@ -257,7 +271,7 @@ async fn fetch_usage_request(
             url,
             headers,
             cloudflare_cookie_header().as_deref(),
-            post,
+            body,
         )
         .await?;
     }
@@ -281,6 +295,15 @@ async fn fetch_usage_json(
 async fn post_usage_json(
     url: &str,
     headers: &[(&'static str, String)],
+) -> Result<UsageHttpResponse, String> {
+    fetch_usage_json(url, headers).await
+}
+
+#[cfg(test)]
+async fn post_usage_json_body(
+    url: &str,
+    headers: &[(&'static str, String)],
+    _body: &str,
 ) -> Result<UsageHttpResponse, String> {
     fetch_usage_json(url, headers).await
 }
@@ -445,10 +468,10 @@ fn codex_window(window: &Value, fallback_label: &str) -> Result<Option<ProviderU
         Some(value) if !value.is_null() => value.as_i64(),
         _ => None,
     };
-    let label = if limit_window_seconds == Some(WEEKLY_WINDOW_SECONDS) {
-        "Weekly limit"
-    } else {
-        fallback_label
+    let label = match limit_window_seconds {
+        Some(FIVE_HOUR_WINDOW_SECONDS) => "5-hour limit",
+        Some(WEEKLY_WINDOW_SECONDS) => "Weekly limit",
+        _ => fallback_label,
     };
     Ok(Some(ProviderUsageWindow {
         label: label.to_string(),
@@ -456,6 +479,33 @@ fn codex_window(window: &Value, fallback_label: &str) -> Result<Option<ProviderU
         resets_at: epoch_seconds_to_iso(reset_at),
         cost: None,
     }))
+}
+
+fn push_codex_rate_limit_windows(
+    rate_limit: &Value,
+    windows: &mut Vec<ProviderUsageWindow>,
+) -> Result<(), ()> {
+    let Some(entries) = rate_limit.as_object() else {
+        return Err(());
+    };
+    for (key, fallback_label) in [
+        ("primary_window", "Current session"),
+        ("secondary_window", "Weekly limit"),
+    ] {
+        match entries.get(key) {
+            None | Some(Value::Null) => {}
+            Some(window) => match codex_window(window, fallback_label) {
+                Ok(Some(window)) => windows.push(window),
+                Ok(None) => {}
+                Err(()) => return Err(()),
+            },
+        }
+    }
+    Ok(())
+}
+
+fn codex_has_label(windows: &[ProviderUsageWindow], label: &str) -> bool {
+    windows.iter().any(|window| window.label == label)
 }
 
 fn normalize_codex_usage(raw: &Value, account_email: Option<String>) -> ProviderUsage {
@@ -475,23 +525,41 @@ fn normalize_codex_usage(raw: &Value, account_email: Option<String>) -> Provider
     match raw.get("rate_limit") {
         None | Some(Value::Null) => {}
         Some(rate_limit) => {
-            let Some(entries) = rate_limit.as_object() else {
+            if push_codex_rate_limit_windows(rate_limit, &mut windows).is_err() {
                 return malformed();
-            };
-            for (key, fallback_label) in [
-                ("primary_window", "Current session"),
-                ("secondary_window", "Weekly limit"),
-            ] {
-                match entries.get(key) {
-                    None | Some(Value::Null) => {}
-                    Some(window) => match codex_window(window, fallback_label) {
-                        Ok(Some(window)) => windows.push(window),
-                        Ok(None) => {}
-                        Err(()) => return malformed(),
-                    },
+            }
+        }
+    }
+    // Codex Pro currently reports the rolling 5-hour window on named extra
+    // meters (e.g. Spark) while the top-level rate_limit is weekly-only.
+    match raw.get("additional_rate_limits") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(extras)) => {
+            for extra in extras {
+                let Some(rate_limit) = extra.get("rate_limit") else {
+                    continue;
+                };
+                let mut extra_windows = Vec::new();
+                if push_codex_rate_limit_windows(rate_limit, &mut extra_windows).is_err() {
+                    return malformed();
+                }
+                for window in extra_windows {
+                    let is_five_hour =
+                        window.label == "5-hour limit" || window.label == "Current session";
+                    if is_five_hour
+                        && (codex_has_label(&windows, "5-hour limit")
+                            || codex_has_label(&windows, "Current session"))
+                    {
+                        continue;
+                    }
+                    if window.label == "Weekly limit" && codex_has_label(&windows, "Weekly limit") {
+                        continue;
+                    }
+                    windows.push(window);
                 }
             }
         }
+        Some(_) => return malformed(),
     }
     ProviderUsage::Ok {
         account_email,
@@ -1390,25 +1458,281 @@ async fn fetch_cursor_usage() -> ProviderUsage {
 }
 
 // ---------------------------------------------------------------------------
+// Antigravity (`agy`) usage
+// ---------------------------------------------------------------------------
+
+struct AgyCredentials {
+    access_token: String,
+    account_email: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+fn agy_oauth_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".gemini")
+            .join("oauth_creds.json"),
+    )
+}
+
+fn agy_accounts_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".gemini")
+            .join("google_accounts.json"),
+    )
+}
+
+fn parse_agy_oauth(raw: &str) -> Option<AgyCredentials> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    let access_token = non_empty_string(json_field(&value, "access_token", "accessToken"))?;
+    let expires_at = json_u64(json_field(&value, "expiry_date", "expiryDate")).and_then(|millis| {
+        i64::try_from(millis)
+            .ok()
+            .and_then(DateTime::<Utc>::from_timestamp_millis)
+    });
+    Some(AgyCredentials {
+        access_token,
+        account_email: None,
+        expires_at,
+    })
+}
+
+fn parse_agy_account_email(raw: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    non_empty_string(value.get("active"))
+}
+
+fn agy_headers(access_token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("authorization", format!("Bearer {access_token}")),
+        ("accept", "application/json".to_string()),
+        ("content-type", "application/json".to_string()),
+        ("user-agent", "antigravity".to_string()),
+    ]
+}
+
+fn agy_plan_label(raw: &Value) -> Option<String> {
+    json_field(raw, "currentTier", "current_tier")
+        .and_then(|tier| non_empty_string(json_field(tier, "name", "name")))
+        .or_else(|| {
+            json_field(raw, "planInfo", "plan_info")
+                .and_then(|plan| non_empty_string(json_field(plan, "planType", "plan_type")))
+                .map(|plan| capitalize(&plan.to_ascii_lowercase()))
+        })
+}
+
+fn agy_project_id(raw: &Value) -> Option<String> {
+    match json_field(raw, "cloudaicompanionProject", "cloudaicompanion_project")? {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Object(object) => non_empty_string(object.get("id")),
+        _ => None,
+    }
+}
+
+fn agy_window_kind(resets_at: Option<&str>) -> &'static str {
+    let Some(reset) = resets_at.and_then(|raw| DateTime::parse_from_rfc3339(raw).ok()) else {
+        return "5-hour limit";
+    };
+    let hours = (reset.with_timezone(&Utc) - Utc::now()).num_hours();
+    if hours <= 8 {
+        "5-hour limit"
+    } else if hours <= 240 {
+        "Weekly limit"
+    } else {
+        "Monthly limit"
+    }
+}
+
+fn agy_remaining_fraction(quota: &Value) -> Option<f64> {
+    let remaining = json_field(quota, "remainingFraction", "remaining_fraction")?;
+    remaining
+        .as_f64()
+        .or_else(|| remaining.as_str().and_then(|text| text.parse().ok()))
+        .filter(|value| value.is_finite())
+}
+
+fn normalize_agy_models(raw: &Value) -> Vec<ProviderUsageWindow> {
+    let Some(models) = json_field(raw, "models", "models").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut best: HashMap<&str, ProviderUsageWindow> = HashMap::new();
+    for (model_id, model) in models {
+        let Some(quota) = json_field(model, "quotaInfo", "quota_info") else {
+            continue;
+        };
+        let Some(remaining) = agy_remaining_fraction(quota) else {
+            continue;
+        };
+        let resets_at = json_field(quota, "resetTime", "reset_time")
+            .and_then(Value::as_str)
+            .and_then(|raw| normalize_iso_timestamp(Some(raw)));
+        let label = agy_window_kind(resets_at.as_deref());
+        let used_percent = clamp_percent((1.0 - remaining) * 100.0);
+        let candidate = ProviderUsageWindow {
+            label: label.to_string(),
+            used_percent,
+            resets_at,
+            cost: None,
+        };
+        match best.get(label) {
+            Some(existing) if existing.used_percent >= used_percent => {}
+            _ => {
+                let _ = model_id;
+                best.insert(label, candidate);
+            }
+        }
+    }
+    let mut windows: Vec<_> = best.into_values().collect();
+    windows.sort_by_key(|window| match window.label.as_str() {
+        "5-hour limit" => 0,
+        "Weekly limit" => 1,
+        _ => 2,
+    });
+    windows
+}
+
+fn normalize_agy_usage(
+    models: &Value,
+    account_email: Option<String>,
+    plan_label: Option<String>,
+) -> ProviderUsage {
+    ProviderUsage::Ok {
+        account_email,
+        plan_label,
+        windows: normalize_agy_models(models),
+    }
+}
+
+#[cfg(not(test))]
+async fn read_agy_oauth_raw() -> Option<String> {
+    let raw = fs::read_to_string(agy_oauth_path()?).await.ok()?;
+    let trimmed = raw.trim().to_string();
+    parse_agy_oauth(&trimmed).is_some().then_some(trimmed)
+}
+
+#[cfg(test)]
+async fn read_agy_oauth_raw() -> Option<String> {
+    test_agy_oauth_file().lock().unwrap().clone()
+}
+
+#[cfg(not(test))]
+async fn read_agy_account_email() -> Option<String> {
+    let raw = fs::read_to_string(agy_accounts_path()?).await.ok()?;
+    parse_agy_account_email(raw.trim())
+}
+
+#[cfg(test)]
+async fn read_agy_account_email() -> Option<String> {
+    test_agy_account_email().lock().unwrap().clone()
+}
+
+async fn fetch_agy_usage() -> ProviderUsage {
+    let Some(raw) = read_agy_oauth_raw().await else {
+        return ProviderUsage::Unauthenticated;
+    };
+    let Some(mut credentials) = parse_agy_oauth(&raw) else {
+        return ProviderUsage::Unauthenticated;
+    };
+    credentials.account_email = read_agy_account_email().await;
+    if credentials
+        .expires_at
+        .is_some_and(|expires_at| Utc::now() >= expires_at)
+    {
+        return ProviderUsage::Expired;
+    }
+
+    let headers = agy_headers(&credentials.access_token);
+    let known_email = credentials.account_email.clone();
+    let load = post_usage_json_body(AGY_LOAD_URL, &headers, AGY_LOAD_BODY).await;
+    let Ok(load_response) = load else {
+        return ProviderUsage::Error {
+            message: "Antigravity usage request failed.".to_string(),
+            plan_label: None,
+            account_email: known_email,
+        };
+    };
+    match load_response.status {
+        401 => return ProviderUsage::Expired,
+        429 => {
+            return ProviderUsage::Error {
+                message: "Antigravity usage is rate limited right now. Try again shortly."
+                    .to_string(),
+                plan_label: None,
+                account_email: known_email,
+            };
+        }
+        status if !(200..300).contains(&status) => {
+            return ProviderUsage::Error {
+                message: format!("Antigravity usage request failed (HTTP {status})."),
+                plan_label: None,
+                account_email: known_email,
+            };
+        }
+        _ => {}
+    }
+    let load_body = load_response.body.clone();
+    let plan_label = load_body.as_ref().and_then(agy_plan_label);
+    let project = load_body.as_ref().and_then(agy_project_id);
+    let models_body = match project {
+        Some(project) => {
+            let payload = serde_json::json!({ "project": project }).to_string();
+            post_usage_json_body(AGY_MODELS_URL, &headers, &payload).await
+        }
+        None => post_usage_json(AGY_MODELS_URL, &headers).await,
+    };
+    let Ok(models_response) = models_body else {
+        return ProviderUsage::Error {
+            message: "Antigravity usage request failed.".to_string(),
+            plan_label,
+            account_email: known_email,
+        };
+    };
+    match models_response.status {
+        401 => ProviderUsage::Expired,
+        429 => ProviderUsage::Error {
+            message: "Antigravity usage is rate limited right now. Try again shortly.".to_string(),
+            plan_label,
+            account_email: known_email,
+        },
+        status if !(200..300).contains(&status) => ProviderUsage::Error {
+            message: format!("Antigravity usage request failed (HTTP {status})."),
+            plan_label,
+            account_email: known_email,
+        },
+        _ => match models_response.body {
+            Some(body) => normalize_agy_usage(&body, known_email, plan_label),
+            None => ProviderUsage::Error {
+                message: "Antigravity usage response was malformed.".to_string(),
+                plan_label,
+                account_email: known_email,
+            },
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    /// Reads live usage snapshots for the local Codex, Claude Code, Grok, and
-    /// Cursor subscriptions. Each provider resolves independently so one
-    /// failing never blanks the others.
+    /// Reads live usage snapshots for the local Codex, Claude Code, Grok,
+    /// Cursor, and Antigravity subscriptions. Each provider resolves
+    /// independently so one failing never blanks the others.
     pub async fn provider_usage_overview(&self) -> ProviderUsageOverview {
-        let (codex, claude_code, grok, cursor) = tokio::join!(
+        let (codex, claude_code, grok, cursor, agy) = tokio::join!(
             self.codex_usage(),
             self.claude_code_usage(),
             self.grok_usage(),
-            self.cursor_usage()
+            self.cursor_usage(),
+            self.agy_usage()
         );
         ProviderUsageOverview {
             codex,
             claude_code,
             grok,
             cursor,
+            agy,
         }
     }
 
@@ -1449,6 +1773,16 @@ impl AppState {
         }
         fetch_cursor_usage().await
     }
+
+    async fn agy_usage(&self) -> ProviderUsage {
+        if !crate::agent_binary::agent_binary_available_cached(
+            "agy",
+            &self.provider_bin(&AgentProvider::AGY),
+        ) {
+            return ProviderUsage::NotInstalled;
+        }
+        fetch_agy_usage().await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1488,6 +1822,18 @@ fn test_grok_auth_file() -> &'static StdMutex<Option<String>> {
 
 #[cfg(test)]
 fn test_cursor_auth_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn test_agy_oauth_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn test_agy_account_email() -> &'static StdMutex<Option<String>> {
     static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
     FILE.get_or_init(|| StdMutex::new(None))
 }
@@ -1537,6 +1883,8 @@ mod tests {
         *test_claude_account_file().lock().unwrap() = None;
         *test_grok_auth_file().lock().unwrap() = None;
         *test_cursor_auth_file().lock().unwrap() = None;
+        *test_agy_oauth_file().lock().unwrap() = None;
+        *test_agy_account_email().lock().unwrap() = None;
     }
 
     fn fake_codex_jwt(account_id: &str, email: Option<&str>, fedramp: bool) -> String {
@@ -1676,7 +2024,7 @@ mod tests {
                 plan_label: Some("Pro".to_string()),
                 windows: vec![
                     ProviderUsageWindow {
-                        label: "Current session".to_string(),
+                        label: "5-hour limit".to_string(),
                         used_percent: 12,
                         resets_at: epoch_seconds_to_iso(Some(primary_reset)),
                         cost: None,
@@ -1685,6 +2033,61 @@ mod tests {
                         label: "Weekly limit".to_string(),
                         used_percent: 18,
                         resets_at: epoch_seconds_to_iso(Some(secondary_reset)),
+                        cost: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_codex_usage_reads_additional_five_hour_windows() {
+        let weekly_reset = 1_788_646_179_i64;
+        let five_hour_reset = 1_788_090_266_i64;
+        let raw = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 12,
+                    "reset_at": weekly_reset,
+                    "limit_window_seconds": 604_800,
+                },
+                "secondary_window": null,
+            },
+            "additional_rate_limits": [
+                {
+                    "limit_name": "GPT-5.3-Codex-Spark",
+                    "rate_limit": {
+                        "primary_window": {
+                            "used_percent": 4,
+                            "reset_at": five_hour_reset,
+                            "limit_window_seconds": 18_000,
+                        },
+                        "secondary_window": {
+                            "used_percent": 0,
+                            "limit_window_seconds": 604_800,
+                        },
+                    }
+                }
+            ],
+        });
+
+        assert_eq!(
+            normalize_codex_usage(&raw, None),
+            ProviderUsage::Ok {
+                account_email: None,
+                plan_label: Some("Pro".to_string()),
+                windows: vec![
+                    ProviderUsageWindow {
+                        label: "Weekly limit".to_string(),
+                        used_percent: 12,
+                        resets_at: epoch_seconds_to_iso(Some(weekly_reset)),
+                        cost: None,
+                    },
+                    ProviderUsageWindow {
+                        label: "5-hour limit".to_string(),
+                        used_percent: 4,
+                        resets_at: epoch_seconds_to_iso(Some(five_hour_reset)),
                         cost: None,
                     },
                 ],
@@ -2499,5 +2902,119 @@ mod tests {
                 }],
             }
         );
+    }
+
+    fn future_agy_oauth() -> String {
+        json!({
+            "access_token": "agy-token",
+            "expiry_date": (Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+        })
+        .to_string()
+    }
+
+    fn past_agy_oauth() -> String {
+        json!({
+            "access_token": "agy-token",
+            "expiry_date": (Utc::now() - chrono::Duration::hours(1)).timestamp_millis(),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn normalize_agy_models_keeps_the_most_used_five_hour_and_weekly() {
+        let five_hour =
+            (Utc::now() + chrono::Duration::hours(4)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let weekly =
+            (Utc::now() + chrono::Duration::days(3)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        let raw = json!({
+            "models": {
+                "gemini-3-flash": {
+                    "displayName": "Gemini 3 Flash",
+                    "quotaInfo": {
+                        "remainingFraction": 0.2,
+                        "resetTime": five_hour,
+                    }
+                },
+                "gemini-3-pro": {
+                    "displayName": "Gemini 3 Pro",
+                    "quotaInfo": {
+                        "remainingFraction": 0.9,
+                        "resetTime": five_hour,
+                    }
+                },
+                "claude-sonnet": {
+                    "displayName": "Claude Sonnet",
+                    "quotaInfo": {
+                        "remainingFraction": 0.4,
+                        "resetTime": weekly,
+                    }
+                }
+            }
+        });
+        let windows = normalize_agy_models(&raw);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "5-hour limit");
+        assert_eq!(windows[0].used_percent, 80);
+        assert_eq!(windows[1].label, "Weekly limit");
+        assert_eq!(windows[1].used_percent, 60);
+    }
+
+    #[tokio::test]
+    async fn agy_usage_reports_unauthenticated_without_credentials() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        assert_eq!(fetch_agy_usage().await, ProviderUsage::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn agy_usage_reports_expired_for_stale_tokens() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_agy_oauth_file().lock().unwrap() = Some(past_agy_oauth());
+        assert_eq!(fetch_agy_usage().await, ProviderUsage::Expired);
+    }
+
+    #[tokio::test]
+    async fn agy_usage_normalizes_a_successful_response() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_agy_oauth_file().lock().unwrap() = Some(future_agy_oauth());
+        *test_agy_account_email().lock().unwrap() = Some("james@example.com".to_string());
+        let five_hour =
+            (Utc::now() + chrono::Duration::hours(5)).to_rfc3339_opts(SecondsFormat::Millis, true);
+        test_http_fixtures().lock().unwrap().insert(
+            AGY_LOAD_URL.to_string(),
+            ok_response(json!({
+                "currentTier": { "name": "Google AI Pro" },
+                "cloudaicompanionProject": "projects/demo"
+            })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            AGY_MODELS_URL.to_string(),
+            ok_response(json!({
+                "models": {
+                    "gemini-3-flash": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.5,
+                            "resetTime": five_hour
+                        }
+                    }
+                }
+            })),
+        );
+        match fetch_agy_usage().await {
+            ProviderUsage::Ok {
+                account_email,
+                plan_label,
+                windows,
+            } => {
+                assert_eq!(account_email.as_deref(), Some("james@example.com"));
+                assert_eq!(plan_label.as_deref(), Some("Google AI Pro"));
+                assert_eq!(windows.len(), 1);
+                assert_eq!(windows[0].label, "5-hour limit");
+                assert_eq!(windows[0].used_percent, 50);
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
     }
 }

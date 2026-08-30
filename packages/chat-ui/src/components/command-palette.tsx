@@ -725,8 +725,9 @@ export const CommandPalette = memo(function CommandPalette({
         shortcut: shortcutHints.usage,
         search: normalizeSearchFields({
           primary: 'Subscription usage & limits',
-          secondary: 'Codex, Claude Code, Grok, Cursor',
-          keywords: 'usage limits subscription quota rate plan session tokens reset cursor',
+          secondary: 'Codex, Claude Code, Antigravity, Grok, Cursor',
+          keywords:
+            'usage limits subscription quota rate plan session tokens reset cursor antigravity agy',
         }),
         run: onOpenUsage,
       })

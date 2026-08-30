@@ -89,7 +89,8 @@ fn provider_usage_overview_round_trips() {
         },
         "claude_code": { "status": "unauthenticated" },
         "grok": { "status": "not_installed" },
-        "cursor": { "status": "not_installed" }
+        "cursor": { "status": "not_installed" },
+        "agy": { "status": "not_installed" }
     });
 
     let overview: ProviderUsageOverview =
@@ -111,6 +112,7 @@ fn provider_usage_overview_defaults_missing_grok() {
 
     assert_eq!(overview.grok, ProviderUsage::NotInstalled);
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
+    assert_eq!(overview.agy, ProviderUsage::NotInstalled);
 }
 
 #[test]
@@ -123,4 +125,5 @@ fn provider_usage_overview_defaults_missing_cursor() {
     .expect("overview");
 
     assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
+    assert_eq!(overview.agy, ProviderUsage::NotInstalled);
 }

@@ -3465,6 +3465,12 @@ pub struct ProviderUsageOverview {
     /// `not_installed` so a missing Cursor snapshot never blanks the others.
     #[serde(default)]
     pub cursor: ProviderUsage,
+    /// Antigravity (`agy`) Google AI subscription usage.
+    ///
+    /// Older daemons omit this field; clients treat the default as
+    /// `not_installed`.
+    #[serde(default)]
+    pub agy: ProviderUsage,
 }
 
 /// Summary of a single thread within a workspace.

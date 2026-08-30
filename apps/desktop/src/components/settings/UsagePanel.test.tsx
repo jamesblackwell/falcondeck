@@ -44,6 +44,7 @@ function overviewWith(overrides: Partial<ProviderUsageOverview>): ProviderUsageO
     },
     grok: { status: 'not_installed' },
     cursor: { status: 'not_installed' },
+    agy: { status: 'not_installed' },
     ...overrides,
   }
 }
@@ -71,6 +72,42 @@ describe('UsagePanel', () => {
     expect(screen.getAllByText('41% used').length).toBe(1)
     expect(screen.getAllByRole('progressbar', { name: 'Current session' }).length).toBe(2)
     expect(screen.getByRole('progressbar', { name: 'Weekly limit' })).toBeInTheDocument()
+  })
+
+  it('renders Codex five-hour and weekly windows', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            claude_code: { status: 'not_installed' },
+            codex: {
+              status: 'ok',
+              account_email: 'dev@example.com',
+              plan_label: 'Pro',
+              windows: [
+                {
+                  label: 'Weekly limit',
+                  used_percent: 12,
+                  resets_at: null,
+                },
+                {
+                  label: '5-hour limit',
+                  used_percent: 4,
+                  resets_at: '2099-08-30T12:00:00.000Z',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByRole('progressbar', { name: '5-hour limit' })).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Weekly limit' })).toBeInTheDocument()
+    expect(screen.getByText('4% used')).toBeInTheDocument()
   })
 
   it('renders Grok weekly usage when the harness is installed', async () => {
@@ -148,6 +185,36 @@ describe('UsagePanel', () => {
     expect(screen.getByText('Ultra')).toBeInTheDocument()
     expect(screen.getByText('$381.68 / $400')).toBeInTheDocument()
     expect(screen.getByRole('progressbar', { name: 'Monthly limit' })).toBeInTheDocument()
+  })
+
+  it('renders Antigravity when the harness is installed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            agy: {
+              status: 'ok',
+              account_email: 'james@example.com',
+              plan_label: 'Google AI Pro',
+              windows: [
+                {
+                  label: '5-hour limit',
+                  used_percent: 22,
+                  resets_at: '2099-08-30T12:00:00.000Z',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Antigravity')).toBeInTheDocument()
+    expect(screen.getByText('Google AI Pro')).toBeInTheDocument()
+    expect(screen.getByText('22% used')).toBeInTheDocument()
   })
 
   it('hides Cursor when an older daemon omits the field', async () => {

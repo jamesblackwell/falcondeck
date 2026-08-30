@@ -108,6 +108,8 @@ export type ProviderUsageOverview = {
   grok?: ProviderUsage;
   /** Older daemons omit this field; treat missing as not installed. */
   cursor?: ProviderUsage;
+  /** Older daemons omit this field; treat missing as not installed. */
+  agy?: ProviderUsage;
 };
 
 export type AgentCapabilitySummary = {

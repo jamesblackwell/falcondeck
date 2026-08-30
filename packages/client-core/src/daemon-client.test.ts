@@ -23,6 +23,7 @@ describe("createDaemonApiClient sendTurn", () => {
       claude_code: { status: "unauthenticated" },
       grok: { status: "not_installed" },
       cursor: { status: "not_installed" },
+      agy: { status: "not_installed" },
     };
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

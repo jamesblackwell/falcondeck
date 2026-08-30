@@ -69,14 +69,17 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
-subscription usage snapshots for Codex, Claude Code, Grok, and Cursor,
-surfaced in Settings → Usage. Types live in `falcondeck-core`
+subscription usage snapshots for Codex, Claude Code, Grok, Cursor, and
+Antigravity, surfaced in Settings → Usage. Types live in `falcondeck-core`
 (`ProviderUsageOverview`) and `client-core`; the daemon implementation is
 `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 - Codex reads `~/.codex/auth.json` (`CODEX_HOME` respected) and calls the
-  ChatGPT usage endpoint with the CLI's own token. API-key logins report
-  "no subscription usage limits" instead of numbers.
+  ChatGPT usage endpoint with the CLI's own token. Windows are labeled from
+  `limit_window_seconds` (`5-hour limit` at 18 000s, `Weekly limit` at a
+  week). When the top-level meter is weekly-only, the daemon also reads
+  `additional_rate_limits` so a reintroduced 5-hour window still appears.
+  API-key logins report "no subscription usage limits" instead of numbers.
 - Claude Code reads the CLI's keychain entry (macOS) or
   `~/.claude/.credentials.json` and calls the Anthropic OAuth usage
   endpoint. Expired tokens report `expired` — the daemon never refreshes
@@ -92,6 +95,15 @@ surfaced in Settings → Usage. Types live in `falcondeck-core`
   (`GetCurrentPeriodUsage`, `GetPlanInfo`, `GetMe`) with the CLI token.
   Expired tokens report `expired` — same no-refresh rule. Older daemons omit
   the `cursor` field; clients treat that as `not_installed`.
+- Antigravity reads `~/.gemini/oauth_creds.json` (and the active email from
+  `google_accounts.json`) and POSTs Cloud Code `loadCodeAssist` plus
+  `fetchAvailableModels`. Per-model remaining fractions collapse to the
+  most-used 5-hour and weekly windows. Expired tokens report `expired` —
+  same no-refresh rule. Older daemons omit `agy`.
+- OpenCode and Pi are not on this panel: OpenCode is a multiplexer over
+  other providers' tokens (Claude/Codex already appear as themselves; this
+  machine's OpenCode Go key has no Go subscription), and Pi is API-key /
+  BYOK with no subscription windows.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the
   others. Errors still carry the locally-known plan and account.
