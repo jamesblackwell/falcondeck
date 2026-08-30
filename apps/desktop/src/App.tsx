@@ -6134,11 +6134,12 @@ function AppInner() {
                   isSending ||
                   isPreparingSelectedHandoff ||
                   preparingAttachmentCount > 0,
-                sendDisabledReason:
-                  attachmentSendBlockReason ??
-                  (isPreparingSelectedHandoff
-                    ? "Wait for the handoff turn to start"
-                    : (sendBlockReason ?? undefined)),
+                sendDisabledReason: selectedWorkspace
+                  ? (attachmentSendBlockReason ??
+                    (isPreparingSelectedHandoff
+                      ? "Wait for the handoff turn to start"
+                      : (sendBlockReason ?? undefined)))
+                  : undefined,
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.
