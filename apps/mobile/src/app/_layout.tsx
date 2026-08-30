@@ -18,6 +18,7 @@ import {
 } from '@/lib/push-notifications'
 import { clearMobileSessionCache, loadMobileSessionCache } from '@/storage/mobile-session-cache'
 import { useRelayStore, useSessionStore } from '@/store'
+import { OtaUpdateBanner } from '@/features/updates/OtaUpdateBanner'
 
 SplashScreen.preventAutoHideAsync()
 
@@ -136,6 +137,7 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <StatusBar style={rt.themeName === 'light' ? 'dark' : 'light'} />
         <Slot />
+        <OtaUpdateBanner />
       </SafeAreaProvider>
     </GestureHandlerRootView>
   )
