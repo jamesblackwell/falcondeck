@@ -14,8 +14,10 @@ status window, and paste-at-cursor behavior.
   so ordinary modifier shortcuts continue to work. Toggle mode starts and stops
   on modifier-only presses.
 - Escape cancels an active recording.
-- The non-focusable overlay follows the pointer's current display and sits at
-  the top of its work area, away from the FalconDeck composer.
+- The overlay is a native non-activating panel. It follows the pointer's current
+  display and sits at the top of its work area; its Copy, Retry, Discard, and
+  Undo controls work without raising FalconDeck or stealing the destination's
+  focus.
 - Apple Speech is the zero-key default and uses the user's current macOS
   language. OpenRouter is optional and uses the existing daemon speech API and
   credential store.
@@ -145,3 +147,5 @@ into the desktop shell.
    attempt offers Retry or Discard instead of overwriting the audio.
 9. Select OpenRouter, save a key, choose a transcription model, and repeat the
    TextEdit flow.
+10. Click Copy on a completed pill while another app is frontmost; confirm the
+    transcript reaches the clipboard without FalconDeck coming to the front.

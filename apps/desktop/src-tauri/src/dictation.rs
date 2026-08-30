@@ -211,7 +211,10 @@ unsafe extern "C" {
     fn fd_dictation_cancel();
     fn fd_dictation_retry();
     fn fd_dictation_discard();
+    fn fd_dictation_make_overlay_nonactivating(window: *mut std::ffi::c_void) -> bool;
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
+    #[cfg(test)]
+    fn fd_dictation_test_overlay_panel_contract() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_transient_pasteboard_round_trip() -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
@@ -228,7 +231,7 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
     if app.get_webview_window(DICTATION_WINDOW_LABEL).is_some() {
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
+    let window = tauri::WebviewWindowBuilder::new(
         app,
         DICTATION_WINDOW_LABEL,
         tauri::WebviewUrl::App("dictation-window.html".into()),
@@ -248,12 +251,24 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
     .focusable(false)
     .visible(false)
     .build()
-    .map(|window| {
-        // Start click-through; event state changes arm the pill only when it
-        // has a Copy, Retry, Discard, or Undo control.
-        let _ = window.set_ignore_cursor_events(true);
-    })
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let native_window = window.ns_window().map_err(|error| error.to_string())?;
+        // A non-focusable NSWindow still activates its owning application on a
+        // mouse-down. The overlay has real controls in its terminal states, so
+        // make it a native non-activating panel before any state enables clicks.
+        if !unsafe { fd_dictation_make_overlay_nonactivating(native_window) } {
+            return Err("could not make the dictation overlay non-activating".to_string());
+        }
+    }
+
+    // Start click-through; event state changes arm the pill only when it has a
+    // Copy, Retry, Discard, or Undo control.
+    window
+        .set_ignore_cursor_events(true)
+        .map_err(|error| error.to_string())
 }
 
 fn shortcut_code(shortcut: DictationShortcut) -> i32 {
@@ -1290,6 +1305,12 @@ mod tests {
         assert!(devices
             .iter()
             .all(|device| { !device.id.is_empty() && !device.name.is_empty() }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn overlay_panel_does_not_activate_falcondeck() {
+        assert!(unsafe { super::fd_dictation_test_overlay_panel_contract() });
     }
 
     #[cfg(target_os = "macos")]
