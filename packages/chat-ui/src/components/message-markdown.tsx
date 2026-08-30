@@ -144,7 +144,7 @@ function workspaceFilePathFromMarkdownLink(
   children: React.ReactNode,
 ) {
   const hrefPath = parseWorkspaceFilePath(href);
-  if (hrefPath) return hrefPath;
+  if (hrefPath) return { filePath: hrefPath, localPath: null };
 
   // Agents sometimes make the target an absolute path from their own runtime
   // while displaying the portable workspace-relative path. Prefer that label
@@ -161,13 +161,15 @@ function workspaceFilePathFromMarkdownLink(
   if (!labelPath) return null;
 
   const localPath = parseLocalFilePath(href ?? "");
-  if (!localPath) return labelPath;
+  if (!localPath) return { filePath: labelPath, localPath: null };
 
   const normalizedLocalPath = localPath
     .replace(/\\/g, "/")
     .replace(/#L\d+(?:-L?\d+)?$/i, "")
     .replace(/:\d+(?::\d+)?$/, "");
-  return normalizedLocalPath.endsWith(`/${labelPath}`) ? labelPath : null;
+  return normalizedLocalPath.endsWith(`/${labelPath}`)
+    ? { filePath: labelPath, localPath }
+    : null;
 }
 
 function MarkdownLocalPath({ children }: { children?: React.ReactNode }) {
@@ -485,7 +487,8 @@ const markdownComponents = {
     if (workspaceFilePath) {
       return (
         <WorkspaceFileLink
-          filePath={workspaceFilePath}
+          filePath={workspaceFilePath.filePath}
+          localPath={workspaceFilePath.localPath}
           className="[overflow-wrap:anywhere]"
         >
           {children}

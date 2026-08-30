@@ -609,6 +609,27 @@ describe("local file paths", () => {
     expect(onLocalPath).not.toHaveBeenCalled();
   });
 
+  it("offers local file actions for an absolute agent-linked workspace file", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const localPath = "/Users/James/project/src/App.tsx";
+    render(
+      <FileDiffProvider onOpenFile={vi.fn()}>
+        <LocalPathProvider onLocalPath={vi.fn()}>
+          <MessageMarkdown
+            text={`Open [src/App.tsx](${localPath})`}
+            defer={false}
+          />
+        </LocalPathProvider>
+      </FileDiffProvider>,
+    );
+
+    fireEvent.contextMenu(screen.getByText("src/App.tsx"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy Path" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(localPath));
+  });
+
   it("keeps a genuine absolute file link on the local path handler", () => {
     const onOpenFile = vi.fn();
     const onLocalPath = vi.fn();

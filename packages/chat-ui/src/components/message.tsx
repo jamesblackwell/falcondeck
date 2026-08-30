@@ -232,14 +232,14 @@ const COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX = 160;
 /** Copy/read-aloud chrome stays visible on touch. A fine pointer hides it
     until this item is hovered or focused. Tailwind's `group-hover` variant
     is wrapped in `(hover: hover)`, which some desktop WebViews report as
-    false even with a mouse, so reveal uses `group-[:hover]` instead. */
+    false even with a mouse, so reveal uses `group-[:hover]` instead. Keep the
+    complete class names literal so Tailwind includes them in the build. */
 function hoverRevealActions(group: "message" | "review") {
-  return [
-    "transition-opacity",
-    "[@media(pointer:fine)]:opacity-0",
-    `group-[:hover]/${group}:opacity-100`,
-    `group-focus-within/${group}:opacity-100`,
-  ].join(" ");
+  const reveal =
+    group === "message"
+      ? "group-[:hover]/message:opacity-100 group-focus-within/message:opacity-100"
+      : "group-[:hover]/review:opacity-100 group-focus-within/review:opacity-100";
+  return `transition-opacity [@media(pointer:fine)]:opacity-0 ${reveal}`;
 }
 
 function UserMessage({

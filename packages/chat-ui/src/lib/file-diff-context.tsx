@@ -2,6 +2,8 @@ import { createContext, useContext, useMemo } from 'react'
 
 import { cn } from '@falcondeck/ui'
 
+import { useLocalPathHandler } from './local-path-context'
+
 /* ================================================================
    Opening a file in the host's side panel from the transcript.
 
@@ -78,14 +80,19 @@ export function FileDiffLink({
 /** A workspace-relative path that opens the editable file browser preview. */
 export function WorkspaceFileLink({
   filePath,
+  localPath,
   children,
   className,
 }: {
   filePath: string
+  /** Absolute target retained from Markdown so desktop right-click actions
+      can operate on the real file while left click stays in the file rail. */
+  localPath?: string | null
   children?: React.ReactNode
   className?: string
 }) {
   const openFile = useOpenFileDiff()
+  const localPathHandler = useLocalPathHandler()
   const label = children ?? filePath
 
   if (!openFile) {
@@ -100,6 +107,18 @@ export function WorkspaceFileLink({
         event.stopPropagation()
         openFile(filePath, 'files')
       }}
+      onContextMenu={
+        localPath && localPathHandler
+          ? (event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              localPathHandler.openMenu(localPath, {
+                x: event.clientX,
+                y: event.clientY,
+              })
+            }
+          : undefined
+      }
       className={cn(
         'fd-focus rounded-[var(--fd-radius-sm)] underline decoration-dotted decoration-fg-faint underline-offset-2',
         'transition-colors hover:text-accent hover:decoration-accent',
