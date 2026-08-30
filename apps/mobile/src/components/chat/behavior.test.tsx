@@ -25,6 +25,16 @@ vi.mock("react-native-reanimated", () => ({
   withRepeat: (value: any) => value,
   withSequence: (...values: any[]) => values[0],
   withDelay: (_delay: any, value: any) => value,
+  interpolate: (value: number, input: number[], output: number[]) => {
+    const upperIndex = input.findIndex((point) => point >= value);
+    if (upperIndex <= 0) return output[0];
+    if (upperIndex === -1) return output[output.length - 1];
+
+    const lowerIndex = upperIndex - 1;
+    const position =
+      (value - input[lowerIndex]) / (input[upperIndex] - input[lowerIndex]);
+    return output[lowerIndex] + position * (output[upperIndex] - output[lowerIndex]);
+  },
   cancelAnimation: () => {},
   Easing: {
     out: (fn: any) => fn,

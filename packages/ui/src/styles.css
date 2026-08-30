@@ -1644,15 +1644,42 @@ body {
   animation: fd-menu-pop-out var(--fd-duration-fast) var(--fd-ease-default) forwards;
 }
 
-@keyframes fd-diamond-pulse {
+/* Two quick beats, then one restrained turn. Only opacity and transform move,
+   keeping the loading marker on the compositor even during busy streams. */
+@keyframes fd-diamond-activity {
   0%,
+  19%,
+  38%,
+  86%,
   100% {
     opacity: 0.55;
-    transform: scale(0.82);
+  }
+  0%,
+  19%,
+  38% {
+    transform: scale(0.82) rotate(0deg);
+  }
+  10%,
+  29%,
+  47% {
+    opacity: 1;
+    transform: scale(1) rotate(0deg);
   }
   50% {
     opacity: 1;
-    transform: scale(1);
+    transform: scale(1) rotate(12deg);
+  }
+  74% {
+    opacity: 1;
+    transform: scale(1) rotate(348deg);
+  }
+  77% {
+    opacity: 1;
+    transform: scale(1) rotate(360deg);
+  }
+  86%,
+  100% {
+    transform: scale(0.82) rotate(360deg);
   }
 }
 
@@ -1836,7 +1863,7 @@ body {
   --animate-collapse-fast: fd-collapse var(--fd-duration-normal) var(--fd-ease-default);
   --animate-toast-in: fd-toast-in 250ms var(--fd-ease-default);
   --animate-toast-out: fd-toast-out 200ms var(--fd-ease-default) forwards;
-  --animate-diamond-pulse: fd-diamond-pulse 1.6s var(--fd-ease-default) infinite;
+  --animate-diamond-activity: fd-diamond-activity 2.4s linear infinite;
 }
 
 /* Respect the OS accessibility preference across Tailwind utilities, Radix

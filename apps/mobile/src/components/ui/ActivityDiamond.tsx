@@ -1,6 +1,8 @@
 import { memo, useEffect, useMemo } from 'react'
 import Animated, {
   cancelAnimation,
+  Easing,
+  interpolate,
   useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
@@ -14,31 +16,41 @@ interface ActivityDiamondProps {
   color: string
 }
 
-/** A small pulsing diamond for live agent work. */
+const CYCLE_DURATION_MS = 2400
+const STATIC_PROGRESS = 0.47
+const KEYFRAMES = [0, 0.1, 0.19, 0.29, 0.38, 0.47, 0.5, 0.74, 0.77, 0.86, 1]
+const OPACITY = [0.55, 1, 0.55, 1, 0.55, 1, 1, 1, 1, 0.55, 0.55]
+const SCALE = [0.82, 1, 0.82, 1, 0.82, 1, 1, 1, 1, 0.82, 0.82]
+const ROTATION = [0, 0, 0, 0, 0, 0, 12, 348, 360, 360, 360]
+
+/** A small double-pulse-and-turn diamond for live agent work. */
 export const ActivityDiamond = memo(function ActivityDiamond({
   size = 14,
   color,
 }: ActivityDiamondProps) {
-  const pulse = useSharedValue(0)
   const reducedMotion = useReducedMotion()
+  const progress = useSharedValue(reducedMotion ? STATIC_PROGRESS : 0)
 
   useEffect(() => {
-    cancelAnimation(pulse)
-    pulse.set(
+    cancelAnimation(progress)
+    progress.set(
       reducedMotion
-        ? 1
-        : withRepeat(withTiming(1, { duration: 800 }), -1, true),
+        ? STATIC_PROGRESS
+        : withRepeat(
+            withTiming(1, { duration: CYCLE_DURATION_MS, easing: Easing.linear }),
+            -1,
+          ),
     )
-    return () => cancelAnimation(pulse)
-  }, [pulse, reducedMotion])
+    return () => cancelAnimation(progress)
+  }, [progress, reducedMotion])
 
   const animatedStyle = useAnimatedStyle(() => {
-    const value = pulse.get()
+    const value = progress.get()
     return {
-      opacity: 0.55 + value * 0.45,
+      opacity: interpolate(value, KEYFRAMES, OPACITY),
       transform: [
-        { rotate: '45deg' },
-        { scale: 0.82 + value * 0.18 },
+        { rotate: `${45 + interpolate(value, KEYFRAMES, ROTATION)}deg` },
+        { scale: interpolate(value, KEYFRAMES, SCALE) },
       ],
     }
   })

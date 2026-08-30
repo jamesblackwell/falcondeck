@@ -28,7 +28,7 @@ export function ActivityDiamond({ size = 'sm', tone = 'accent', className }: Act
     <span
       aria-hidden="true"
       className={cn(
-        'inline-flex shrink-0 items-center justify-center animate-diamond-pulse',
+        'inline-flex shrink-0 items-center justify-center animate-diamond-activity',
         BOX[size],
         className,
       )}

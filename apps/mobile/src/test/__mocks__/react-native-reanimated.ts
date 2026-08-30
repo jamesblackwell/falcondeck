@@ -30,6 +30,15 @@ export function withTiming(val: any) { return val }
 export function withRepeat(val: any) { return val }
 export function withSequence(...vals: any[]) { return vals[0] }
 export function withDelay(_delay: any, val: any) { return val }
+export function interpolate(value: number, input: number[], output: number[]) {
+  const upperIndex = input.findIndex((point) => point >= value)
+  if (upperIndex <= 0) return output[0]
+  if (upperIndex === -1) return output[output.length - 1]
+
+  const lowerIndex = upperIndex - 1
+  const position = (value - input[lowerIndex]) / (input[upperIndex] - input[lowerIndex])
+  return output[lowerIndex] + position * (output[upperIndex] - output[lowerIndex])
+}
 export const Easing = {
   out: (fn: any) => fn,
   cubic: (t: any) => t,
