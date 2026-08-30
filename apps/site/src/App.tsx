@@ -102,8 +102,10 @@ function TermsOfUse() {
 }
 
 /** The key badges in the hero are real: `d` downloads, `s` opens the source. */
-function useKeyShortcuts() {
+function useKeyShortcuts(enabled: boolean) {
   useEffect(() => {
+    if (!enabled) return
+
     function onKeyDown(event: KeyboardEvent) {
       if (event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return
       const target = event.target as HTMLElement | null
@@ -116,7 +118,7 @@ function useKeyShortcuts() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [enabled])
 }
 
 function KeyBadge({ children, variant }: { children: string; variant?: 'ghost' }) {
@@ -326,8 +328,9 @@ function PhoneMock() {
 }
 
 export default function App() {
-  useKeyShortcuts()
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  const isLegalPage = path === PRIVACY_URL || path === TERMS_URL
+  useKeyShortcuts(!isLegalPage)
   if (path === PRIVACY_URL) return <LegalPage page="privacy" />
   if (path === TERMS_URL) return <LegalPage page="terms" />
 

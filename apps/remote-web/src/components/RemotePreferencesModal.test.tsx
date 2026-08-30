@@ -101,6 +101,23 @@ describe('RemotePreferencesModal', () => {
     expect(onNotificationPreferenceChange).not.toHaveBeenCalled()
   })
 
+  it('contains a notification API that throws synchronously', async () => {
+    vi.stubGlobal('Notification', {
+      permission: 'default',
+      requestPermission: vi.fn(() => {
+        throw new Error('notifications unavailable')
+      }),
+    })
+    const { onNotificationPreferenceChange } = renderModal()
+
+    fireEvent.click(screen.getByRole('button', { name: notificationToggleName }))
+
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(/permission was not granted/i),
+    )
+    expect(onNotificationPreferenceChange).not.toHaveBeenCalled()
+  })
+
   it('explains a hard browser block instead of re-prompting', async () => {
     const requestPermission = vi.fn()
     vi.stubGlobal('Notification', { permission: 'denied', requestPermission })

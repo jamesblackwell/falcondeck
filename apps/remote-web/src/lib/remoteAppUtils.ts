@@ -117,7 +117,10 @@ export type ConnectionHelpState = {
   steps: string[]
 }
 
-export function deviceLabelForUserAgent(ua: string): string {
+export function deviceLabelForUserAgent(
+  ua: string,
+  hints: { platform?: string; maxTouchPoints?: number } = {},
+): string {
   let browser = 'Browser'
   if (ua.includes('Firefox/') || ua.includes('FxiOS/')) browser = 'Firefox'
   else if (ua.includes('Edg/') || ua.includes('EdgiOS/')) browser = 'Edge'
@@ -127,7 +130,11 @@ export function deviceLabelForUserAgent(ua: string): string {
 
   let os = ''
   if (ua.includes('iPhone')) os = 'iPhone'
-  else if (ua.includes('iPad')) os = 'iPad'
+  else if (
+    ua.includes('iPad') ||
+    (hints.platform === 'MacIntel' && (hints.maxTouchPoints ?? 0) > 1)
+  )
+    os = 'iPad'
   else if (ua.includes('Android')) os = 'Android'
   else if (ua.includes('Mac OS')) os = 'macOS'
   else if (ua.includes('Windows')) os = 'Windows'
@@ -137,7 +144,10 @@ export function deviceLabelForUserAgent(ua: string): string {
 }
 
 export function getDeviceLabel(): string {
-  return deviceLabelForUserAgent(navigator.userAgent)
+  return deviceLabelForUserAgent(navigator.userAgent, {
+    platform: navigator.platform,
+    maxTouchPoints: navigator.maxTouchPoints,
+  })
 }
 
 export function parseDaemonEvent(payload: unknown): EventEnvelope | null {
@@ -676,6 +686,36 @@ export function canWarmStartFromSnapshotCache(cachedLastReceivedSeq: number, per
   return cachedLastReceivedSeq >= persistedLastReceivedSeq
 }
 
+export function persistClientKeyPairSecret(secretKey: string) {
+  try {
+    // Land the tab-scoped copy before deleting the legacy durable copy. If
+    // sessionStorage is blocked, the current tab can still use the restored
+    // in-memory key and a later reload retains the only recoverable copy.
+    window.sessionStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKey)
+  } catch {
+    return false
+  }
+  try {
+    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+  } catch {
+    // The tab-scoped copy is authoritative; stale legacy cleanup is optional.
+  }
+  return true
+}
+
+export function clearClientKeyPairSecret() {
+  try {
+    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+  } catch {
+    // Storage access can be blocked independently per backing store.
+  }
+  try {
+    window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+  } catch {
+    // The in-memory connection reset still remains authoritative.
+  }
+}
+
 export function loadOrCreateClientKeyPair() {
   try {
     let stored = window.sessionStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
@@ -683,27 +723,17 @@ export function loadOrCreateClientKeyPair() {
       // One-time migration from releases that persisted the box secret in
       // localStorage. It becomes tab-scoped as soon as this version runs.
       stored = window.localStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
-      window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
-      if (stored) window.sessionStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, stored)
+      if (stored) persistClientKeyPairSecret(stored)
     }
     if (stored) {
       return restoreBoxKeyPair(stored)
     }
   } catch {
-    try {
-      window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
-      window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
-    } catch {
-      // Ignore storage cleanup failures.
-    }
+    clearClientKeyPairSecret()
   }
 
   const generated = generateBoxKeyPair()
-  try {
-    window.sessionStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(generated))
-  } catch {
-    // Ignore storage failures and keep the in-memory keypair.
-  }
+  persistClientKeyPairSecret(secretKeyToBase64(generated))
   return generated
 }
 

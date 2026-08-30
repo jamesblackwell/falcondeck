@@ -4,9 +4,9 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 53 / 100
-- Product defects: 51
-- Test-infrastructure defects: 2
+- Verified and fixed: 58 / 100
+- Product defects: 55
+- Test-infrastructure defects: 3
 
 ## Verification Standard
 
@@ -496,6 +496,51 @@ Each entry records:
 - Fix: Recognize the three iOS-specific browser tokens before the Safari fallback and extract the pure user-agent classifier for deterministic tests.
 - Verification: All three iOS browser cases and the complete remote-web suite pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.85.
+
+### 054 — An empty extension catalog schedules a redundant asynchronous render
+
+- Kind: Test infrastructure
+- Reproduction: The complete remote-web suite passed but printed React `act(...)` warnings in five App tests. `Promise.allSettled([])` in `useExtensionApps` resolved on a later microtask and replaced an already-empty registration map with another empty map after each test's synchronous render.
+- Root cause: The extension host took the asynchronous loader path even when no enabled extension had a frontend loader, creating a real no-op browser render outside the test boundary.
+- Fix: Short-circuit the empty-candidate case, preserve the current empty map by identity, and still clear a previously populated map when the catalog becomes empty.
+- Verification: `app-host.test.tsx` proves an empty catalog renders exactly once; all 4 extension-SDK tests and all 108 remote-web tests pass with no `act(...)` warnings.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
+
+### 055 — Homepage keyboard shortcuts unexpectedly navigate legal pages
+
+- Kind: Product defect
+- Reproduction: Browser QA opened `http://127.0.0.1:4175/privacy`, pressed bare `d`, and observed navigation to `https://github.com/jamesblackwell/falcondeck/releases`, even though the privacy page contains no shortcut badge or download interaction.
+- Root cause: `App` installed the homepage's global `d`/`s` listener before routing to the Privacy or Terms component, so the legal pages inherited invisible navigation shortcuts.
+- Fix: Compute the route before installing the hook and enable the shortcuts only on pages that render the homepage shortcut affordances.
+- Verification: In-app browser QA confirms `d` leaves `/privacy` unchanged while `s` on `/` still navigates to the source repository; the site production build passes.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
+
+### 056 — iPadOS desktop-mode Safari is shown as macOS
+
+- Kind: Product defect
+- Reproduction: `deviceLabelForUserAgent > recognizes iPadOS when Safari requests the desktop site` passed the standard Macintosh-form iPadOS user agent with `platform: MacIntel` and five touch points; the device label was `Safari on macOS`.
+- Root cause: Modern iPadOS can request a desktop user agent without the `iPad` token. The classifier inspected only the user-agent string and therefore could not distinguish it from a Mac.
+- Fix: Include the platform and touch-point hints from `navigator` and apply the established `MacIntel` plus multi-touch iPadOS distinction before the macOS fallback.
+- Verification: The focused regression returns `Safari on iPad`; all 74 remote-app utility tests and the 108-test remote-web suite pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
+
+### 057 — A synchronous Notification API exception escapes the preferences UI
+
+- Kind: Product defect
+- Reproduction: `RemotePreferencesModal > contains a notification API that throws synchronously` stubbed `Notification.requestPermission` to throw. The original click produced an unhandled rejection and never rendered the permission notice.
+- Root cause: Calling `Notification.requestPermission().catch(...)` handled a rejected returned promise but not an exception thrown while evaluating the API call itself.
+- Fix: Wrap both invocation and awaiting in `try/catch`, map either failure form to a denied result, and leave notification preference disabled with actionable status copy.
+- Verification: All 11 preferences-modal tests and the complete warning-free remote-web suite pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
+
+### 058 — Key-pair migration deletes its only copy before tab storage succeeds
+
+- Kind: Product defect
+- Reproduction: `client key-pair persistence > keeps a valid legacy key when tab storage is temporarily unavailable` stored a valid legacy key, made `sessionStorage.setItem` throw `SecurityError`, and observed a newly generated key with the legacy copy deleted.
+- Root cause: Migration removed the durable legacy entry before attempting the tab-scoped write; its broad catch then treated the storage exception like corrupt cryptographic material. The successful pairing path also performed an uncaught direct tab-storage write before adopting the claimed session.
+- Fix: Write the tab-scoped copy first, delete the legacy copy only after success, contain storage failures while retaining the in-memory key, and route restore, claim, generation, and reset through the safe helpers.
+- Verification: The blocked-storage regression preserves and restores the exact original key; all remote-web tests, typecheck, and lint pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.90.
 
 ## Pending Verification
 

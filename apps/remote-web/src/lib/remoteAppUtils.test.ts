@@ -25,6 +25,7 @@ import {
   loadPendingActionIds,
   loadPersistedRemoteSnapshot,
   loadNotificationPreference,
+  loadOrCreateClientKeyPair,
   loadPersistedRemoteSession,
   loadPersistedSelection,
   MAX_PERSISTED_PENDING_ACTIONS,
@@ -187,6 +188,26 @@ describe('remote session secret persistence', () => {
 
     expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-1')).toBeNull()
     expect(window.localStorage.getItem('falcondeck.remote.session.v1:session-2')).not.toBeNull()
+  })
+})
+
+describe('client key-pair persistence', () => {
+  it('keeps a valid legacy key when tab storage is temporarily unavailable', () => {
+    const keyPair = generateBoxKeyPair()
+    const secret = secretKeyToBase64(keyPair)
+    window.localStorage.setItem('falcondeck.remote.client-keypair.v1', secret)
+    const originalSetItem = Storage.prototype.setItem
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (key, value) {
+      if (this === window.sessionStorage) {
+        throw new DOMException('storage blocked', 'SecurityError')
+      }
+      return originalSetItem.call(this, key, value)
+    })
+
+    const restored = loadOrCreateClientKeyPair()
+
+    expect(secretKeyToBase64(restored)).toBe(secret)
+    expect(window.localStorage.getItem('falcondeck.remote.client-keypair.v1')).toBe(secret)
   })
 })
 
@@ -712,6 +733,18 @@ describe('deviceLabelForUserAgent', () => {
     ],
   ])('labels iOS browsers accurately', (userAgent, expected) => {
     expect(deviceLabelForUserAgent(userAgent)).toBe(expected)
+  })
+
+  it('recognizes iPadOS when Safari requests the desktop site', () => {
+    const userAgent =
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1'
+
+    expect(
+      deviceLabelForUserAgent(userAgent, {
+        platform: 'MacIntel',
+        maxTouchPoints: 5,
+      }),
+    ).toBe('Safari on iPad')
   })
 })
 

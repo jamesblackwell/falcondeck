@@ -202,11 +202,11 @@ import {
   clearSnapshotRaceBuffer,
   canWarmStartFromSnapshotCache,
   canPostNotifications,
+  clearClientKeyPairSecret,
   clearPairingParamsFromUrl,
   clearPersistedRemoteSession,
   clearPersistedRemoteSnapshot,
   clearPendingActionIds,
-  CLIENT_KEYPAIR_STORAGE_KEY,
   collectConversationItemUpdates,
   connectionBadgeState,
   boundRetainedThreadItems,
@@ -227,6 +227,7 @@ import {
   markInteractiveRequestResolved,
   maskIdentifier,
   parseDaemonEvents,
+  persistClientKeyPairSecret,
   persistNotificationPreference,
   persistPendingActionIds,
   persistRemoteSession,
@@ -829,8 +830,7 @@ function RemoteApp() {
     persistSelection(sessionId, null);
     restoredSelectionRef.current = false;
     clearPendingActionIds(sessionId);
-    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
-    window.sessionStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
+    clearClientKeyPairSecret();
     setPairingId(null);
     setSessionId(null);
     setDeviceId(null);
@@ -967,10 +967,7 @@ function RemoteApp() {
         clientKeyPairRef.current = restoreBoxKeyPair(
           initialPersistedSession.clientSecretKey,
         );
-        window.sessionStorage.setItem(
-          CLIENT_KEYPAIR_STORAGE_KEY,
-          initialPersistedSession.clientSecretKey,
-        );
+        persistClientKeyPairSecret(initialPersistedSession.clientSecretKey);
         if (initialPersistedSession.dataKey) {
           sessionCryptoRef.current = {
             dataKey: base64ToBytes(initialPersistedSession.dataKey),
@@ -2618,11 +2615,7 @@ function RemoteApp() {
       return;
     }
     clientKeyPairRef.current = keyPair;
-    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY);
-    window.sessionStorage.setItem(
-      CLIENT_KEYPAIR_STORAGE_KEY,
-      secretKeyToBase64(keyPair),
-    );
+    persistClientKeyPairSecret(secretKeyToBase64(keyPair));
     sessionCryptoRef.current = null;
     pendingEncryptedUpdatesRef.current = [];
     evictedWhileParkedRef.current = false;

@@ -33,6 +33,17 @@ export function useExtensionApps(
       const load = loaders[extensionId];
       return load ? [{ extensionId, load }] : [];
     });
+    if (candidates.length === 0) {
+      // Promise.allSettled([]) still resolves on a microtask. Updating an
+      // already-empty map there buys nothing, causes an extra browser render,
+      // and lets the state update escape the render's act() boundary in tests.
+      setRegistrations((current) =>
+        current.size === 0 ? current : new Map(),
+      );
+      return () => {
+        active = false;
+      };
+    }
     void Promise.allSettled(
       candidates.map(async ({ extensionId, load }) => {
         const module = await load();

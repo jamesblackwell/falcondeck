@@ -148,7 +148,12 @@ function RemotePreferencesDialog({
       return
     }
     if (Notification.permission !== 'granted') {
-      const result = await Notification.requestPermission().catch(() => 'denied' as const)
+      let result: NotificationPermission
+      try {
+        result = await Notification.requestPermission()
+      } catch {
+        result = 'denied'
+      }
       if (result !== 'granted') {
         setNotificationNotice('Notification permission was not granted.')
         return
