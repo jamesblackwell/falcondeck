@@ -88,7 +88,8 @@ fn provider_usage_overview_round_trips() {
             "windows": []
         },
         "claude_code": { "status": "unauthenticated" },
-        "grok": { "status": "not_installed" }
+        "grok": { "status": "not_installed" },
+        "cursor": { "status": "not_installed" }
     });
 
     let overview: ProviderUsageOverview =
@@ -109,4 +110,17 @@ fn provider_usage_overview_defaults_missing_grok() {
     .expect("overview");
 
     assert_eq!(overview.grok, ProviderUsage::NotInstalled);
+    assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
+}
+
+#[test]
+fn provider_usage_overview_defaults_missing_cursor() {
+    let overview: ProviderUsageOverview = serde_json::from_value(json!({
+        "codex": { "status": "unauthenticated" },
+        "claude_code": { "status": "not_installed" },
+        "grok": { "status": "unauthenticated" }
+    }))
+    .expect("overview");
+
+    assert_eq!(overview.cursor, ProviderUsage::NotInstalled);
 }

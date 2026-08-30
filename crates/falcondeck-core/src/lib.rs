@@ -3459,6 +3459,12 @@ pub struct ProviderUsageOverview {
     /// `not_installed` so a missing Grok snapshot never blanks Codex/Claude.
     #[serde(default)]
     pub grok: ProviderUsage,
+    /// Cursor Agent CLI subscription usage.
+    ///
+    /// Older daemons omit this field; clients treat the default as
+    /// `not_installed` so a missing Cursor snapshot never blanks the others.
+    #[serde(default)]
+    pub cursor: ProviderUsage,
 }
 
 /// Summary of a single thread within a workspace.

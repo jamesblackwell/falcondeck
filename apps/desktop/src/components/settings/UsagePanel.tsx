@@ -65,6 +65,13 @@ const PROVIDERS: ProviderConfig[] = [
     signInHint: 'Run `grok login` to sign in and see your usage.',
     expiredHint: 'Your Grok session expired. Run `grok login`, then reload usage.',
   },
+  {
+    key: 'cursor',
+    providerId: 'cursor',
+    name: 'Cursor',
+    signInHint: 'Run `cursor-agent login` to sign in and see your usage.',
+    expiredHint: 'Your Cursor session expired. Run `cursor-agent login`, then reload usage.',
+  },
 ]
 
 function barColorClass(usedPercent: number): string {
@@ -229,7 +236,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
       {!hideHeader ? (
         <SettingsPageHeader
           title="Usage"
-          description="How much of your Codex, Claude Code, and Grok subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
+          description="How much of your Codex, Claude Code, Grok, and Cursor subscriptions you&apos;ve used on this Mac. Credentials stay with each CLI — FalconDeck only reads the numbers."
         />
       ) : null}
 
@@ -271,8 +278,8 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
           ) : visibleProviders.length === 0 ? (
             <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
               <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-                No supported harnesses detected yet. Install Codex, Claude Code, or Grok to see
-                subscription usage.
+                No supported harnesses detected yet. Install Codex, Claude Code, Grok, or Cursor
+                to see subscription usage.
               </p>
             </div>
           ) : (

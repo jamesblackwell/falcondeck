@@ -3,9 +3,11 @@
 //! Reads the same read-only dashboards the harness CLIs expose: Codex queries
 //! the ChatGPT usage endpoint with the token from `~/.codex/auth.json`, Claude
 //! Code queries the Anthropic OAuth usage endpoint with the token from the
-//! CLI's keychain entry (macOS) or `~/.claude/.credentials.json`, and Grok
-//! Build queries the CLI-proxy billing endpoint with the token from
-//! `~/.grok/auth.json`. Tokens are used as-is — the daemon never refreshes
+//! CLI's keychain entry (macOS) or `~/.claude/.credentials.json`, Grok Build
+//! queries the CLI-proxy billing endpoint with the token from
+//! `~/.grok/auth.json`, and Cursor Agent queries the dashboard Connect-RPC
+//! usage endpoints with the token from the CLI's keychain entry (macOS) or
+//! `~/.cursor/auth.json`. Tokens are used as-is — the daemon never refreshes
 //! another tool's credentials, because rotating a refresh token out from under
 //! the owning CLI breaks its next run.
 //!
@@ -21,7 +23,9 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
-use falcondeck_core::{AgentProvider, ProviderUsage, ProviderUsageOverview, ProviderUsageWindow};
+use falcondeck_core::{
+    AgentProvider, ProviderUsage, ProviderUsageCost, ProviderUsageOverview, ProviderUsageWindow,
+};
 use serde_json::Value;
 #[cfg(not(test))]
 use tokio::fs;
@@ -48,6 +52,14 @@ const CLAUDE_USER_AGENT: &str = "claude-code/2.1.0";
 const GROK_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const GROK_SETTINGS_URL: &str = "https://cli-chat-proxy.grok.com/v1/settings";
 const GROK_TOKEN_AUTH_HEADER: &str = "xai-grok-cli";
+
+const CURSOR_USAGE_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+const CURSOR_PLAN_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo";
+const CURSOR_ME_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetMe";
+const CURSOR_KEYCHAIN_SERVICE: &str = "cursor-access-token";
+const CURSOR_KEYCHAIN_ACCOUNT: &str = "cursor-user";
+const CURSOR_CONNECT_PROTOCOL_VERSION: &str = "1";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -158,13 +170,37 @@ async fn fetch_usage_json(
     url: &str,
     headers: &[(&'static str, String)],
 ) -> Result<UsageHttpResponse, String> {
+    fetch_usage_request(url, headers, false).await
+}
+
+/// Same as [`fetch_usage_json`], but POST with an empty JSON object. Cursor's
+/// dashboard Connect-RPC methods reject GET.
+#[cfg(not(test))]
+async fn post_usage_json(
+    url: &str,
+    headers: &[(&'static str, String)],
+) -> Result<UsageHttpResponse, String> {
+    fetch_usage_request(url, headers, true).await
+}
+
+#[cfg(not(test))]
+async fn fetch_usage_request(
+    url: &str,
+    headers: &[(&'static str, String)],
+    post: bool,
+) -> Result<UsageHttpResponse, String> {
     async fn send(
         client: &reqwest::Client,
         url: &str,
         headers: &[(&'static str, String)],
         cookie: Option<&str>,
+        post: bool,
     ) -> Result<UsageHttpResponse, String> {
-        let mut request = client.get(url);
+        let mut request = if post {
+            client.post(url).body("{}")
+        } else {
+            client.get(url)
+        };
         for (name, value) in headers {
             request = request.header(*name, value.clone());
         }
@@ -204,12 +240,26 @@ async fn fetch_usage_json(
         .timeout(USAGE_FETCH_TIMEOUT)
         .build()
         .map_err(|error| format!("failed to create usage client: {error}"))?;
-    let mut response = send(&client, url, headers, cloudflare_cookie_header().as_deref()).await?;
+    let mut response = send(
+        &client,
+        url,
+        headers,
+        cloudflare_cookie_header().as_deref(),
+        post,
+    )
+    .await?;
     if response.status == 403 && response.cloudflare_challenge {
         // Cloudflare may have handed us a fresh clearance cookie; retry once
         // with it.
         store_cloudflare_cookies(&response.cf_cookies);
-        response = send(&client, url, headers, cloudflare_cookie_header().as_deref()).await?;
+        response = send(
+            &client,
+            url,
+            headers,
+            cloudflare_cookie_header().as_deref(),
+            post,
+        )
+        .await?;
     }
     Ok(response)
 }
@@ -225,6 +275,14 @@ async fn fetch_usage_json(
         Some(Err(message)) => Err(message.clone()),
         None => Err(format!("no usage fixture registered for {url}")),
     }
+}
+
+#[cfg(test)]
+async fn post_usage_json(
+    url: &str,
+    headers: &[(&'static str, String)],
+) -> Result<UsageHttpResponse, String> {
+    fetch_usage_json(url, headers).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1064,23 +1122,293 @@ async fn read_grok_auth_raw() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor Agent CLI usage
+// ---------------------------------------------------------------------------
+
+fn cursor_auth_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        paths.push(home.join(".cursor").join("auth.json"));
+        paths.push(home.join(".config").join("cursor").join("auth.json"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        paths.push(PathBuf::from(xdg).join("cursor").join("auth.json"));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let appdata = PathBuf::from(appdata);
+        paths.push(appdata.join("Cursor").join("auth.json"));
+        paths.push(appdata.join("cursor").join("auth.json"));
+    }
+    paths
+}
+
+/// Accepts either a raw access token (keychain) or the CLI's `auth.json`.
+fn parse_cursor_access_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('{') {
+        let value: Value = serde_json::from_str(trimmed).ok()?;
+        return non_empty_string(json_field(&value, "accessToken", "access_token"));
+    }
+    (!trimmed.chars().any(char::is_whitespace)).then(|| trimmed.to_string())
+}
+
+fn cursor_token_expired(token: &str) -> bool {
+    decode_jwt_payload(token)
+        .and_then(|payload| payload.get("exp").and_then(Value::as_i64))
+        .is_some_and(|expires_at| Utc::now().timestamp() >= expires_at)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cursor_keychain_lookups() -> Vec<Vec<String>> {
+    vec![
+        vec![
+            KEYCHAIN_FIND_COMMAND.to_string(),
+            "-s".to_string(),
+            CURSOR_KEYCHAIN_SERVICE.to_string(),
+            "-a".to_string(),
+            CURSOR_KEYCHAIN_ACCOUNT.to_string(),
+            "-w".to_string(),
+        ],
+        vec![
+            KEYCHAIN_FIND_COMMAND.to_string(),
+            "-s".to_string(),
+            CURSOR_KEYCHAIN_SERVICE.to_string(),
+            "-w".to_string(),
+        ],
+    ]
+}
+
+#[cfg(target_os = "macos")]
+async fn read_cursor_keychain_token() -> Option<String> {
+    for args in cursor_keychain_lookups() {
+        let Ok(output) = tokio::time::timeout(
+            KEYCHAIN_TIMEOUT,
+            tokio::process::Command::new("security")
+                .args(&args)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        else {
+            continue;
+        };
+        let Ok(output) = output else {
+            continue;
+        };
+        let trimmed = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if parse_cursor_access_token(&trimmed).is_some() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn read_cursor_keychain_token() -> Option<String> {
+    None
+}
+
+#[cfg(not(test))]
+async fn read_cursor_access_token() -> Option<String> {
+    if let Some(raw) = read_cursor_keychain_token().await {
+        return parse_cursor_access_token(&raw);
+    }
+    for path in cursor_auth_paths() {
+        let Ok(raw) = fs::read_to_string(&path).await else {
+            continue;
+        };
+        if let Some(token) = parse_cursor_access_token(&raw) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+async fn read_cursor_access_token() -> Option<String> {
+    let raw = test_cursor_auth_file().lock().unwrap().clone()?;
+    parse_cursor_access_token(&raw)
+}
+
+fn cursor_headers(access_token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("authorization", format!("Bearer {access_token}")),
+        ("accept", "application/json".to_string()),
+        ("content-type", "application/json".to_string()),
+        (
+            "connect-protocol-version",
+            CURSOR_CONNECT_PROTOCOL_VERSION.to_string(),
+        ),
+        ("user-agent", "falcondeck-daemon".to_string()),
+    ]
+}
+
+fn cursor_plan_from_info(raw: &Value) -> Option<String> {
+    json_field(raw, "planInfo", "plan_info")
+        .and_then(|plan| non_empty_string(json_field(plan, "planName", "plan_name")))
+}
+
+fn cursor_email_from_me(raw: &Value) -> Option<String> {
+    non_empty_string(raw.get("email"))
+}
+
+fn json_u64(value: Option<&Value>) -> Option<u64> {
+    let value = value?;
+    if let Some(number) = value.as_u64() {
+        return Some(number);
+    }
+    if let Some(number) = value.as_i64() {
+        return u64::try_from(number).ok();
+    }
+    if let Some(number) = value.as_f64() {
+        if number.is_finite() && number >= 0.0 {
+            return Some(number.round() as u64);
+        }
+        return None;
+    }
+    value.as_str()?.parse().ok()
+}
+
+fn epoch_millis_to_iso(value: Option<&Value>) -> Option<String> {
+    let millis = match value? {
+        Value::String(text) => text.parse::<i64>().ok()?,
+        Value::Number(number) => number.as_i64()?,
+        _ => return None,
+    };
+    DateTime::<Utc>::from_timestamp_millis(millis)
+        .map(|datetime| datetime.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn normalize_cursor_usage(
+    raw: &Value,
+    account_email: Option<String>,
+    plan_label: Option<String>,
+) -> ProviderUsage {
+    if !raw.is_object() {
+        return ProviderUsage::Error {
+            message: "Cursor usage response was malformed.".to_string(),
+            plan_label,
+            account_email,
+        };
+    }
+    let mut windows = Vec::new();
+    if let Some(plan_usage) = json_field(raw, "planUsage", "plan_usage") {
+        let used_cents = json_u64(json_field(plan_usage, "totalSpend", "total_spend"));
+        let limit_cents = json_u64(json_field(plan_usage, "limit", "limit"));
+        let used_percent = match (used_cents, limit_cents) {
+            (Some(used), Some(limit)) if limit > 0 => Some((used as f64) / (limit as f64) * 100.0),
+            _ => json_field(plan_usage, "totalPercentUsed", "total_percent_used")
+                .and_then(Value::as_f64),
+        };
+        if let Some(percent) = used_percent {
+            let cost = match (used_cents, limit_cents) {
+                (Some(used_usd_cents), Some(limit_usd_cents)) if limit_usd_cents > 0 => {
+                    Some(ProviderUsageCost {
+                        used_usd_cents,
+                        limit_usd_cents,
+                    })
+                }
+                _ => None,
+            };
+            windows.push(ProviderUsageWindow {
+                label: "Monthly limit".to_string(),
+                used_percent: clamp_percent(percent),
+                resets_at: epoch_millis_to_iso(json_field(
+                    raw,
+                    "billingCycleEnd",
+                    "billing_cycle_end",
+                )),
+                cost,
+            });
+        }
+    }
+    ProviderUsage::Ok {
+        account_email,
+        plan_label,
+        windows,
+    }
+}
+
+async fn fetch_cursor_usage() -> ProviderUsage {
+    let Some(access_token) = read_cursor_access_token().await else {
+        return ProviderUsage::Unauthenticated;
+    };
+    if cursor_token_expired(&access_token) {
+        return ProviderUsage::Expired;
+    }
+
+    let headers = cursor_headers(&access_token);
+    let (usage, plan, me) = tokio::join!(
+        post_usage_json(CURSOR_USAGE_URL, &headers),
+        post_usage_json(CURSOR_PLAN_URL, &headers),
+        post_usage_json(CURSOR_ME_URL, &headers),
+    );
+    let plan_label = plan
+        .ok()
+        .and_then(|response| response.body)
+        .as_ref()
+        .and_then(cursor_plan_from_info);
+    let account_email = me
+        .ok()
+        .and_then(|response| response.body)
+        .as_ref()
+        .and_then(cursor_email_from_me);
+
+    let Ok(response) = usage else {
+        return ProviderUsage::Error {
+            message: "Cursor usage request failed.".to_string(),
+            plan_label,
+            account_email,
+        };
+    };
+    match response.status {
+        401 => ProviderUsage::Expired,
+        429 => ProviderUsage::Error {
+            message: "Cursor usage is rate limited right now. Try again shortly.".to_string(),
+            plan_label,
+            account_email,
+        },
+        status if !(200..300).contains(&status) => ProviderUsage::Error {
+            message: format!("Cursor usage request failed (HTTP {status})."),
+            plan_label,
+            account_email,
+        },
+        _ => match response.body {
+            Some(body) => normalize_cursor_usage(&body, account_email, plan_label),
+            None => ProviderUsage::Error {
+                message: "Cursor usage response was malformed.".to_string(),
+                plan_label,
+                account_email,
+            },
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    /// Reads live usage snapshots for the local Codex, Claude Code, and Grok
-    /// subscriptions. Each provider resolves independently so one failing
-    /// never blanks the others.
+    /// Reads live usage snapshots for the local Codex, Claude Code, Grok, and
+    /// Cursor subscriptions. Each provider resolves independently so one
+    /// failing never blanks the others.
     pub async fn provider_usage_overview(&self) -> ProviderUsageOverview {
-        let (codex, claude_code, grok) = tokio::join!(
+        let (codex, claude_code, grok, cursor) = tokio::join!(
             self.codex_usage(),
             self.claude_code_usage(),
-            self.grok_usage()
+            self.grok_usage(),
+            self.cursor_usage()
         );
         ProviderUsageOverview {
             codex,
             claude_code,
             grok,
+            cursor,
         }
     }
 
@@ -1112,6 +1440,14 @@ impl AppState {
             return ProviderUsage::NotInstalled;
         }
         fetch_grok_usage().await
+    }
+
+    async fn cursor_usage(&self) -> ProviderUsage {
+        // Cursor's CLI is `cursor-agent`, not `cursor` (that's the IDE).
+        if !crate::agent_binary::agent_binary_available_cached("cursor-agent", "cursor-agent") {
+            return ProviderUsage::NotInstalled;
+        }
+        fetch_cursor_usage().await
     }
 }
 
@@ -1146,6 +1482,12 @@ fn test_claude_account_file() -> &'static StdMutex<Option<String>> {
 
 #[cfg(test)]
 fn test_grok_auth_file() -> &'static StdMutex<Option<String>> {
+    static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
+    FILE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+fn test_cursor_auth_file() -> &'static StdMutex<Option<String>> {
     static FILE: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
     FILE.get_or_init(|| StdMutex::new(None))
 }
@@ -1194,6 +1536,7 @@ mod tests {
         *test_claude_credentials_file().lock().unwrap() = None;
         *test_claude_account_file().lock().unwrap() = None;
         *test_grok_auth_file().lock().unwrap() = None;
+        *test_cursor_auth_file().lock().unwrap() = None;
     }
 
     fn fake_codex_jwt(account_id: &str, email: Option<&str>, fedramp: bool) -> String {
@@ -1935,6 +2278,224 @@ mod tests {
                     used_percent: 12,
                     resets_at: Some("2026-08-23T11:52:18.000Z".to_string()),
                     cost: None,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn cursor_keychain_lookups_lead_with_the_security_subcommand() {
+        let lookups = cursor_keychain_lookups();
+        assert!(
+            lookups
+                .iter()
+                .all(|args| args.first().map(String::as_str) == Some("find-generic-password")),
+            "{lookups:?}"
+        );
+        assert_eq!(
+            lookups,
+            vec![
+                vec![
+                    "find-generic-password",
+                    "-s",
+                    CURSOR_KEYCHAIN_SERVICE,
+                    "-a",
+                    CURSOR_KEYCHAIN_ACCOUNT,
+                    "-w"
+                ],
+                vec!["find-generic-password", "-s", CURSOR_KEYCHAIN_SERVICE, "-w"],
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cursor_access_token_accepts_raw_and_auth_json() {
+        assert_eq!(
+            parse_cursor_access_token("  eyJraw.token  ").as_deref(),
+            Some("eyJraw.token")
+        );
+        assert_eq!(
+            parse_cursor_access_token(r#"{"accessToken":"eyJfromjson","refreshToken":"x"}"#)
+                .as_deref(),
+            Some("eyJfromjson")
+        );
+        assert_eq!(
+            parse_cursor_access_token(r#"{"access_token":"snake"}"#).as_deref(),
+            Some("snake")
+        );
+        assert!(parse_cursor_access_token(r#"{"apiKey":"crsr_only"}"#).is_none());
+        assert!(parse_cursor_access_token("two words").is_none());
+        assert!(parse_cursor_access_token("").is_none());
+    }
+
+    #[test]
+    fn cursor_token_expired_reads_jwt_exp() {
+        let future = fake_codex_jwt("acct", None, false);
+        assert!(!cursor_token_expired(&future));
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1}"#);
+        assert!(cursor_token_expired(&format!("{header}.{payload}.sig")));
+        assert!(!cursor_token_expired("not-a-jwt"));
+    }
+
+    #[test]
+    fn normalize_cursor_usage_maps_spend_ratio_cost_and_reset() {
+        let raw = json!({
+            "billingCycleEnd": "1789802081000",
+            "planUsage": {
+                "totalSpend": 38168,
+                "limit": 40000,
+                "totalPercentUsed": 10.9,
+            }
+        });
+        assert_eq!(
+            normalize_cursor_usage(
+                &raw,
+                Some("james@example.com".to_string()),
+                Some("Ultra".to_string()),
+            ),
+            ProviderUsage::Ok {
+                account_email: Some("james@example.com".to_string()),
+                plan_label: Some("Ultra".to_string()),
+                windows: vec![ProviderUsageWindow {
+                    label: "Monthly limit".to_string(),
+                    used_percent: 95,
+                    resets_at: epoch_millis_to_iso(Some(&json!("1789802081000"))),
+                    cost: Some(ProviderUsageCost {
+                        used_usd_cents: 38168,
+                        limit_usd_cents: 40000,
+                    }),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_cursor_usage_falls_back_to_reported_percent() {
+        let raw = json!({
+            "billing_cycle_end": 1_789_802_081_000_i64,
+            "plan_usage": {
+                "total_percent_used": 12.4
+            }
+        });
+        match normalize_cursor_usage(&raw, None, None) {
+            ProviderUsage::Ok { windows, .. } => {
+                assert_eq!(windows[0].used_percent, 12);
+                assert_eq!(windows[0].cost, None);
+                assert_eq!(
+                    windows[0].resets_at,
+                    epoch_millis_to_iso(Some(&json!(1_789_802_081_000_i64)))
+                );
+            }
+            other => panic!("expected ok variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_reports_unauthenticated_without_credentials() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        assert_eq!(fetch_cursor_usage().await, ProviderUsage::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_reports_expired_for_stale_jwt() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1}"#);
+        *test_cursor_auth_file().lock().unwrap() = Some(format!("{header}.{payload}.sig"));
+        assert_eq!(fetch_cursor_usage().await, ProviderUsage::Expired);
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_reports_expired_on_401() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_cursor_auth_file().lock().unwrap() = Some("cursor-token".to_string());
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(CURSOR_USAGE_URL.to_string(), error_response(401));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(CURSOR_PLAN_URL.to_string(), error_response(401));
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(CURSOR_ME_URL.to_string(), error_response(401));
+        assert_eq!(fetch_cursor_usage().await, ProviderUsage::Expired);
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_keeps_known_plan_on_http_errors() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_cursor_auth_file().lock().unwrap() = Some("cursor-token".to_string());
+        test_http_fixtures().lock().unwrap().insert(
+            CURSOR_PLAN_URL.to_string(),
+            ok_response(json!({ "planInfo": { "planName": "Ultra" } })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            CURSOR_ME_URL.to_string(),
+            ok_response(json!({ "email": "james@example.com" })),
+        );
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(CURSOR_USAGE_URL.to_string(), error_response(503));
+        match fetch_cursor_usage().await {
+            ProviderUsage::Error {
+                message,
+                plan_label,
+                account_email,
+            } => {
+                assert!(message.contains("HTTP 503"));
+                assert_eq!(plan_label.as_deref(), Some("Ultra"));
+                assert_eq!(account_email.as_deref(), Some("james@example.com"));
+            }
+            other => panic!("expected error variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_usage_normalizes_a_successful_response() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_cursor_auth_file().lock().unwrap() = Some("cursor-token".to_string());
+        test_http_fixtures().lock().unwrap().insert(
+            CURSOR_USAGE_URL.to_string(),
+            ok_response(json!({
+                "billingCycleEnd": "1789802081000",
+                "planUsage": {
+                    "totalSpend": 1520,
+                    "limit": 40000,
+                    "totalPercentUsed": 3.8
+                }
+            })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            CURSOR_PLAN_URL.to_string(),
+            ok_response(json!({ "planInfo": { "planName": "Ultra" } })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            CURSOR_ME_URL.to_string(),
+            ok_response(json!({ "email": "james@example.com" })),
+        );
+        assert_eq!(
+            fetch_cursor_usage().await,
+            ProviderUsage::Ok {
+                account_email: Some("james@example.com".to_string()),
+                plan_label: Some("Ultra".to_string()),
+                windows: vec![ProviderUsageWindow {
+                    label: "Monthly limit".to_string(),
+                    used_percent: 4,
+                    resets_at: epoch_millis_to_iso(Some(&json!("1789802081000"))),
+                    cost: Some(ProviderUsageCost {
+                        used_usd_cents: 1520,
+                        limit_usd_cents: 40000,
+                    }),
                 }],
             }
         );

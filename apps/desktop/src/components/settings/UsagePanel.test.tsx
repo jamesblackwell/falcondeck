@@ -43,6 +43,7 @@ function overviewWith(overrides: Partial<ProviderUsageOverview>): ProviderUsageO
       ],
     },
     grok: { status: 'not_installed' },
+    cursor: { status: 'not_installed' },
     ...overrides,
   }
 }
@@ -112,6 +113,52 @@ describe('UsagePanel', () => {
 
     expect(await screen.findByText('Codex')).toBeInTheDocument()
     expect(screen.queryByText('Grok')).toBeNull()
+  })
+
+  it('renders Cursor monthly spend when the harness is installed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            cursor: {
+              status: 'ok',
+              account_email: 'james@example.com',
+              plan_label: 'Ultra',
+              windows: [
+                {
+                  label: 'Monthly limit',
+                  used_percent: 95,
+                  resets_at: '2099-09-19T07:14:41.000Z',
+                  cost: {
+                    used_usd_cents: 38168,
+                    limit_usd_cents: 40000,
+                  },
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Cursor')).toBeInTheDocument()
+    expect(screen.getByText('Ultra')).toBeInTheDocument()
+    expect(screen.getByText('$381.68 / $400')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Monthly limit' })).toBeInTheDocument()
+  })
+
+  it('hides Cursor when an older daemon omits the field', async () => {
+    const payload = overviewWith({})
+    delete payload.cursor
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)))
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    expect(screen.queryByText('Cursor')).toBeNull()
   })
 
   it('hides providers that are not installed', async () => {

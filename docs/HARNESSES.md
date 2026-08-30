@@ -69,9 +69,9 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
-subscription usage snapshots for Codex, Claude Code, and Grok, surfaced in
-Settings → Usage. Types live in `falcondeck-core` (`ProviderUsageOverview`)
-and `client-core`; the daemon implementation is
+subscription usage snapshots for Codex, Claude Code, Grok, and Cursor,
+surfaced in Settings → Usage. Types live in `falcondeck-core`
+(`ProviderUsageOverview`) and `client-core`; the daemon implementation is
 `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 - Codex reads `~/.codex/auth.json` (`CODEX_HOME` respected) and calls the
@@ -86,6 +86,12 @@ and `client-core`; the daemon implementation is
   CLI-proxy billing endpoint (`/v1/billing?format=credits`) plus `/v1/settings`
   for the plan badge. Expired tokens report `expired` — same no-refresh rule.
   Older daemons omit the `grok` field; clients treat that as `not_installed`.
+- Cursor reads the CLI's keychain entry (`cursor-access-token` on macOS) or
+  `~/.cursor/auth.json` / `~/.config/cursor/auth.json` and POSTs the same
+  dashboard Connect-RPC methods `cursor-agent about` uses
+  (`GetCurrentPeriodUsage`, `GetPlanInfo`, `GetMe`) with the CLI token.
+  Expired tokens report `expired` — same no-refresh rule. Older daemons omit
+  the `cursor` field; clients treat that as `not_installed`.
 - Each provider resolves independently (`ok` / `not_installed` /
   `unauthenticated` / `expired` / `error`), so one failing never blanks the
   others. Errors still carry the locally-known plan and account.

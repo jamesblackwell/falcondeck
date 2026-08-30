@@ -106,6 +106,8 @@ export type ProviderUsageOverview = {
   claude_code: ProviderUsage;
   /** Older daemons omit this field; treat missing as not installed. */
   grok?: ProviderUsage;
+  /** Older daemons omit this field; treat missing as not installed. */
+  cursor?: ProviderUsage;
 };
 
 export type AgentCapabilitySummary = {
