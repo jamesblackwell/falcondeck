@@ -192,6 +192,34 @@ describe("SidebarView component", () => {
     expect(onNewThread).toHaveBeenCalledWith("w2");
   });
 
+  it("retargets a new conversation when another project row is pressed", () => {
+    const onNewThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [],
+      },
+      {
+        workspace: workspace({ id: "w2", path: "/tmp/other" }),
+        threads: [],
+      },
+    ];
+    const r = renderComponent(
+      <SidebarView
+        {...base}
+        groups={groups}
+        selectedWorkspaceId="w1"
+        onNewThread={onNewThread}
+      />,
+    );
+
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: "other" }).props.onPress();
+    });
+
+    expect(onNewThread).toHaveBeenCalledWith("w2");
+  });
+
   it("aims the new-thread row at the first project before anything is open", () => {
     const onNewThread = vi.fn();
     const groups: ProjectGroup[] = [

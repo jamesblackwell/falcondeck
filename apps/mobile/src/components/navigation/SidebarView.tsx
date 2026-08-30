@@ -516,19 +516,38 @@ export const SidebarView = memo(function SidebarView({
           theme.colors.cat,
           workspaceColors?.[item.workspaceId],
         );
+        const isNewConversationProject =
+          selectedThreadId === null && item.workspaceId === selectedWorkspaceId;
+        const shouldRetargetNewConversation =
+          selectedThreadId === null && !isNewConversationProject;
         // Two sibling controls, not a button inside a button: nesting them made
         // VoiceOver read the row as one element and swallowed "new thread".
         return (
           <View style={styles.workspaceHeader}>
             <Pressable
               style={styles.workspaceLeft}
-              onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
+              onPress={() => {
+                if (shouldRetargetNewConversation) {
+                  onNewThread(item.workspaceId);
+                } else {
+                  toggleWorkspaceCollapse(item.workspaceId);
+                }
+              }}
               accessibilityRole="button"
               accessibilityLabel={item.workspaceName}
               accessibilityHint={
-                item.isOpen ? "Collapses this project" : "Expands this project"
+                shouldRetargetNewConversation
+                  ? "Moves the new conversation to this project"
+                  : item.isOpen
+                    ? "Collapses this project"
+                    : "Expands this project"
               }
-              accessibilityState={{ expanded: item.isOpen }}
+              accessibilityState={{
+                expanded: item.isOpen,
+                ...(selectedThreadId === null
+                  ? { selected: isNewConversationProject }
+                  : {}),
+              }}
             >
               {item.isOpen ? (
                 <FolderOpen
@@ -613,6 +632,7 @@ export const SidebarView = memo(function SidebarView({
       onSelectThread,
       openThreadOptions,
       selectedThreadId,
+      selectedWorkspaceId,
       theme.colors.cat,
       theme.colors.fg.muted,
       theme.iconSize.xs,
