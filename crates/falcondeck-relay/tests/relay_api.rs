@@ -5,7 +5,7 @@ use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     IdentityVariant, PairingAuthority, PairingChallengeRequest, PairingChallengeResponse,
     PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
-    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
+    RelayPeerRole, RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
     RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
     SubmitQueuedActionRequest, TrustedDevicesResponse,
     crypto::{
@@ -1836,6 +1836,166 @@ async fn queued_actions_are_not_redispatched_while_the_daemon_is_still_connected
         unexpected.is_err(),
         "first queued action was redispatched unexpectedly"
     );
+}
+
+#[tokio::test]
+async fn idempotent_action_retry_does_not_append_a_duplicate_status_update() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+    let action_url = format!(
+        "{}/v1/sessions/{}/actions",
+        server.http_base, claim.session_id
+    );
+    let request = SubmitQueuedActionRequest {
+        idempotency_key: "retry-without-replay-noise".to_string(),
+        action_type: "thread.start".to_string(),
+        payload: test_envelope("same-payload"),
+    };
+
+    let first = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &action_url,
+        &request,
+        Some(&claim.client_token),
+    )
+    .await;
+    let retried = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &action_url,
+        &request,
+        Some(&claim.client_token),
+    )
+    .await;
+    assert_eq!(retried.action_id, first.action_id);
+
+    let history = server
+        .state
+        .session_updates(&claim.session_id, &claim.client_token, 0, None)
+        .await
+        .unwrap();
+    let matching_updates = history
+        .updates
+        .iter()
+        .filter(|update| {
+            matches!(
+                &update.body,
+                RelayUpdateBody::ActionStatus { action } if action.action_id == first.action_id
+            )
+        })
+        .count();
+    assert_eq!(matching_updates, 1);
+}
+
+#[tokio::test]
+async fn daemon_cannot_report_relay_owned_action_states() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "invalid-daemon-transition".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("invalid-daemon-transition"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let _ = recv_until_action_requested(&mut daemon_ws).await;
+
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::ActionUpdate {
+            action_id: action.action_id,
+            status: falcondeck_core::QueuedRemoteActionStatus::Queued,
+            error: None,
+            result: None,
+        },
+    )
+    .await;
+
+    let response = recv_server_message(&mut daemon_ws).await;
+    assert!(matches!(
+        response,
+        RelayServerMessage::Error { message }
+            if message.contains("daemon may only report executing, completed, or failed")
+    ));
+}
+
+#[tokio::test]
+async fn unregistered_peers_cannot_keep_using_their_authenticated_role() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let (daemon_peer_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    let (client_peer_id, _client_rx, _) = server
+        .state
+        .register_peer(
+            &claim.session_id,
+            RelayPeerRole::Client,
+            Some(claim.device_id.clone()),
+        )
+        .await
+        .unwrap();
+    server
+        .state
+        .unregister_peer(&claim.session_id, &client_peer_id)
+        .await;
+
+    let client_result = server
+        .state
+        .handle_message(
+            &claim.session_id,
+            &client_peer_id,
+            RelayPeerRole::Client,
+            RelayClientMessage::RpcCall {
+                request_id: "stale-client-rpc".to_string(),
+                method: "snapshot.current".to_string(),
+                params: test_envelope("stale-client-rpc"),
+            },
+        )
+        .await;
+    assert!(client_result.is_err());
+
+    server
+        .state
+        .unregister_peer(&claim.session_id, &daemon_peer_id)
+        .await;
+    let daemon_result = server
+        .state
+        .handle_message(
+            &claim.session_id,
+            &daemon_peer_id,
+            RelayPeerRole::Daemon,
+            RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope("stale-daemon-update"),
+                },
+            },
+        )
+        .await;
+    assert!(daemon_result.is_err());
 }
 
 #[tokio::test]

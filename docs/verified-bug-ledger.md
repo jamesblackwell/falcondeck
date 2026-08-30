@@ -4,8 +4,8 @@ This ledger supports the long-running goal to find and fix 100 verified FalconDe
 
 ## Progress
 
-- Verified and fixed: 38 / 100
-- Product defects: 36
+- Verified and fixed: 46 / 100
+- Product defects: 44
 - Test-infrastructure defects: 2
 
 ## Verification Standard
@@ -361,6 +361,78 @@ Each entry records:
 - Fix: Add bounded raw and client channels with PTY backpressure/slow-client disconnect, cap retained scrollback by both bytes and chunk count, and leave reconnect to recover from bounded replay.
 - Verification: The stalled-client regression, a new tiny-chunk retention bound test, all 14 terminal unit tests, the complete daemon library, and the terminal WebSocket integration test pass.
 - Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.78.
+
+### 039 — Lowercase Bearer authentication schemes are rejected
+
+- Kind: Product defect
+- Reproduction: `api::tests::bearer_auth_scheme_is_case_insensitive` supplied the valid HTTP authorization value `bearer client-token`; `auth_token` returned `missing bearer token`.
+- Root cause: The parser used a case-sensitive `strip_prefix("Bearer ")` even though HTTP authentication schemes are case-insensitive.
+- Fix: Split the scheme from its credentials and compare the scheme with `eq_ignore_ascii_case` while retaining the nonblank-token check.
+- Verification: The focused authentication regression and the full relay unit/API suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 040 — A byte-heavy replay disconnects after enqueueing only a prefix
+
+- Kind: Product defect
+- Reproduction: `app::tests::byte_heavy_replay_uses_snapshot_recovery_before_peer_queue_overflow` built 100 retained 450 KiB encrypted updates. The relay produced a replay batch larger than its peer queue budget instead of a recovery marker.
+- Root cause: `send_sync_to_peer` enqueues every replay chunk from inside the socket's inbound handler, but that same socket cannot drain its outbound receiver until the handler returns. Per-chunk queue admission therefore failed partway through a large-but-count-valid replay and repeated on every reconnect.
+- Fix: Measure the serialized replay batch before enqueueing it and emit one `history_truncated` snapshot-recovery marker when the batch cannot fit atomically in the peer byte budget.
+- Verification: The focused 45 MiB aggregate replay regression and the full relay unit/API suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 041 — A future replay cursor can suppress all later updates indefinitely
+
+- Kind: Product defect
+- Reproduction: `app::tests::future_replay_cursor_requires_snapshot_recovery` gave a session with `next_seq = 7` the cursors `7` and `u64::MAX`; both were reported as intact even though the highest valid acknowledgement was 6.
+- Root cause: Truncation detection considered only server-pruned prefixes and never detected a client cursor at or beyond the next sequence. Such a client would keep requesting updates after a point the server had never reached.
+- Fix: Treat `after_seq >= next_seq` as an invalid replay base that requires authoritative snapshot recovery, while preserving `next_seq - 1` as the valid caught-up cursor.
+- Verification: The focused future-cursor boundary regression and the full relay unit/API suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 042 — Blank thread titles produce blank push-notification titles
+
+- Kind: Product defect
+- Reproduction: `app::tests::push_notifications_fall_back_for_blank_titles_and_trim_display_copy` passed a whitespace-only title and received `"   "` instead of the `FalconDeck` fallback; padded real titles were also displayed with their padding.
+- Root cause: Push copy used any present `thread_title` verbatim without trimming or checking whether it contained displayable text.
+- Fix: Trim optional titles, discard blank results, and then apply the product-name fallback.
+- Verification: Both blank and padded title cases pass with the complete relay unit/API suites.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 043 — Retrying an idempotent action appends duplicate durable status updates
+
+- Kind: Product defect
+- Reproduction: `idempotent_action_retry_does_not_append_a_duplicate_status_update` submitted the same device/key/type/payload twice. The action ID was correctly reused, but replay contained two identical status updates.
+- Root cause: `submit_action` deduplicated the action record but unconditionally appended and persisted another `ActionStatus` update afterward, so request retries still mutated the replay stream and sequence counter.
+- Fix: Append and persist the queued status only when the action record is newly created; retries may still run the no-op pending-dispatch pass so an earlier interrupted request can recover.
+- Verification: The focused API regression observes one action and one status update; the full relay suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 044 — Daemons can report relay-owned action states and trigger duplicate dispatch
+
+- Kind: Product defect
+- Reproduction: `daemon_cannot_report_relay_owned_action_states` sent `ActionUpdate { status: queued }` for an owned dispatched action. The relay accepted it and immediately issued another `ActionRequested` delivery.
+- Root cause: The action-update handler accepted every enum value even though `Queued` and `Dispatched` are relay-owned delivery states; daemon implementations only own `Executing`, `Completed`, and `Failed`.
+- Fix: Reject daemon updates to either relay-owned state before mutating or redispatching the action.
+- Verification: The focused WebSocket regression now receives a structured error rather than a duplicate action request; the complete relay suites pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 045 — Removed WebSocket peers retain their authenticated authority
+
+- Kind: Product defect
+- Reproduction: `unregistered_peers_cannot_keep_using_their_authenticated_role` unregistered a client and then successfully initiated an RPC with its old peer ID; an unregistered daemon could likewise append a durable encrypted update.
+- Root cause: `handle_message` trusted the role captured when the socket was created but never proved that the peer was still registered or that its trusted-device record was still active. Revocation and buffered inbound frames could therefore cross after peer removal.
+- Fix: Give each peer a message/removal mutex, re-check membership, role, and active device state after acquiring it, and make unregister wait for already-authorized handling to finish before returning.
+- Verification: The focused state-level regression rejects both stale-client RPC and stale-daemon update paths; all relay unit/API tests pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
+
+### 046 — The relay accepts WebSocket frames that its peer queue cannot forward
+
+- Kind: Product defect
+- Reproduction: `app::tests::peer_queue_accepts_a_websocket_legal_single_message` constructed a 33 MiB server message, below the relay's documented 40 MiB WebSocket limit; the 32 MiB peer queue rejected it immediately.
+- Root cause: Inbound frame admission and outbound per-peer byte admission used conflicting limits, making valid large encrypted image/RPC payloads disconnect their recipient.
+- Fix: Share the 40 MiB transport constant with the API and give the peer queue one additional MiB for relay-added update metadata and envelope fields.
+- Verification: The focused 33 MiB queue regression, the aggregate replay regression, the full relay suites, Clippy with warnings denied, and targeted rustfmt checks all pass.
+- Autoreview: `.agents/skills/autoreview/scripts/autoreview --mode local` — clean, no accepted/actionable findings; overall patch assessment 0.72.
 
 ## Pending Verification
 

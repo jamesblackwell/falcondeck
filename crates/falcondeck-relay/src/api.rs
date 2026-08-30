@@ -20,7 +20,7 @@ use falcondeck_core::{
 };
 
 use crate::{
-    app::{AppState, SessionAuth},
+    app::{AppState, RELAY_WS_MAX_MESSAGE_BYTES, SessionAuth},
     error::RelayError,
 };
 
@@ -240,7 +240,7 @@ async fn issue_ws_ticket(
 /// generous headroom. A maximum-size image turn is base64-encoded once as
 /// JSON image data and again after encryption, so it can legitimately exceed
 /// 24 MiB even though the decoded attachment budget is only 15 MB.
-const WS_MAX_MESSAGE_BYTES: usize = 40 << 20;
+const WS_MAX_MESSAGE_BYTES: usize = RELAY_WS_MAX_MESSAGE_BYTES;
 
 async fn updates_ws(
     ws: WebSocketUpgrade,
@@ -487,7 +487,8 @@ async fn send_raw_error(mut socket: WebSocket, message: String) -> Result<(), ax
 fn auth_token(headers: &HeaderMap) -> Result<String, RelayError> {
     if let Some(header) = headers.get(axum::http::header::AUTHORIZATION)
         && let Ok(value) = header.to_str()
-        && let Some(token) = value.strip_prefix("Bearer ")
+        && let Some((scheme, token)) = value.split_once(' ')
+        && scheme.eq_ignore_ascii_case("Bearer")
     {
         let trimmed = token.trim();
         if !trimmed.is_empty() {
@@ -558,5 +559,16 @@ mod tests {
         let headers = axum::http::HeaderMap::new();
         let error = auth_token(&headers).unwrap_err();
         assert_eq!(error.to_string(), "missing bearer token");
+    }
+
+    #[test]
+    fn bearer_auth_scheme_is_case_insensitive() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("bearer client-token"),
+        );
+
+        assert_eq!(auth_token(&headers).unwrap(), "client-token");
     }
 }

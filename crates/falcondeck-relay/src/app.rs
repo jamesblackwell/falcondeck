@@ -30,11 +30,17 @@ use uuid::Uuid;
 use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
+/// Maximum inbound websocket message size shared with the HTTP upgrade
+/// configuration. Keep queue admission aligned so a frame the relay accepts
+/// can also be forwarded.
+pub(crate) const RELAY_WS_MAX_MESSAGE_BYTES: usize = 40 << 20;
 /// A count-bounded channel alone can retain gigabytes when each encrypted
 /// frame is near the websocket limit. Every peer also receives this aggregate
 /// byte budget; permits are released only after the socket writer consumes or
-/// drops the queued message.
-const PEER_QUEUE_MAX_BYTES: usize = 32 << 20;
+/// drops the queued message. The extra MiB covers the relay's update id,
+/// sequence, timestamp, and server-envelope fields around a maximum-size
+/// accepted client body.
+const PEER_QUEUE_MAX_BYTES: usize = RELAY_WS_MAX_MESSAGE_BYTES + (1 << 20);
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 /// Keep replay responses small enough that a slow client can process a
 /// reconnect incrementally. A single unusually large encrypted update is
@@ -134,7 +140,7 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
         }];
     }
 
-    chunks
+    let messages = chunks
         .into_iter()
         .map(|updates| RelayServerMessage::Sync {
             updates,
@@ -142,7 +148,28 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
             history_truncated: false,
             presence: response.presence.clone(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // The websocket task cannot drain its own outbound queue until this
+    // whole Sync handler returns. If the replay batch itself exceeds that
+    // queue's byte budget, per-message enqueueing disconnects the peer after
+    // only a prefix and every reconnect repeats the same failure. Recover
+    // from the daemon snapshot before enqueueing any partial replay instead.
+    let replay_wire_bytes = messages.iter().fold(0usize, |total, message| {
+        total.saturating_add(
+            serde_json::to_vec(message)
+                .map(|bytes| bytes.len())
+                .unwrap_or(PEER_QUEUE_MAX_BYTES),
+        )
+    });
+    if replay_wire_bytes >= PEER_QUEUE_MAX_BYTES {
+        return vec![RelayServerMessage::Sync {
+            updates: Vec::new(),
+            next_seq: response.next_seq,
+            history_truncated: true,
+            presence: response.presence,
+        }];
+    }
+    messages
 }
 
 /// Wire-size estimate for chunking decisions without a serde pass per
@@ -618,6 +645,10 @@ struct PeerHandle {
     role: RelayPeerRole,
     device_id: Option<String>,
     tx: PeerQueue,
+    /// Serializes message handling with peer removal. A handler that wins
+    /// this lock completes before revocation/unregister returns; a handler
+    /// that loses re-checks membership after removal and is rejected.
+    operation_lock: Arc<Mutex<()>>,
 }
 
 pub struct BudgetedRelayMessage {
@@ -1673,6 +1704,7 @@ impl AppState {
                 role: role.clone(),
                 device_id,
                 tx,
+                operation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             },
         );
         if matches!(role, RelayPeerRole::Daemon) {
@@ -1698,6 +1730,18 @@ impl AppState {
     }
 
     pub async fn unregister_peer(&self, session_id: &str, peer_id: &str) {
+        let operation_lock = {
+            let store = self.inner.store.lock().await;
+            store
+                .live_sessions
+                .get(session_id)
+                .and_then(|live| live.peers.get(peer_id))
+                .map(|peer| Arc::clone(&peer.operation_lock))
+        };
+        let _operation_guard = match operation_lock.as_ref() {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let mut deferred = Vec::new();
         let mut requeued_actions = Vec::new();
         let mut requeued_records = Vec::new();
@@ -1865,6 +1909,56 @@ impl AppState {
         role: RelayPeerRole,
         message: RelayClientMessage,
     ) -> Result<(), RelayError> {
+        let operation_lock = {
+            let store = self.inner.store.lock().await;
+            store
+                .live_sessions
+                .get(session_id)
+                .and_then(|live| live.peers.get(peer_id))
+                .filter(|peer| peer.role == role)
+                .map(|peer| Arc::clone(&peer.operation_lock))
+                .ok_or_else(|| {
+                    RelayError::Unauthorized(
+                        "relay peer is disconnected or its role does not match".to_string(),
+                    )
+                })?
+        };
+        let _operation_guard = operation_lock.lock().await;
+        {
+            let mut store = self.inner.store.lock().await;
+            let peer = store
+                .live_sessions
+                .get(session_id)
+                .and_then(|live| live.peers.get(peer_id))
+                .filter(|peer| peer.role == role)
+                .ok_or_else(|| {
+                    RelayError::Unauthorized(
+                        "relay peer is disconnected or its role does not match".to_string(),
+                    )
+                })?;
+            if matches!(role, RelayPeerRole::Client) {
+                let device_id = peer.device_id.clone().ok_or_else(|| {
+                    RelayError::Unauthorized("trusted device is missing".to_string())
+                })?;
+                let device_active =
+                    store
+                        .data
+                        .sessions
+                        .get_mut(session_id)
+                        .is_some_and(|session| {
+                            session.migrate_legacy_device_fields();
+                            session
+                                .devices
+                                .get(&device_id)
+                                .is_some_and(|device| device.revoked_at.is_none())
+                        });
+                if !device_active {
+                    return Err(RelayError::Unauthorized(
+                        "trusted device is revoked or missing".to_string(),
+                    ));
+                }
+            }
+        }
         match message {
             RelayClientMessage::Ping => {
                 let current_device_id = {
@@ -1974,6 +2068,15 @@ impl AppState {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
                         "only daemon peers may update queued actions".to_string(),
+                    ));
+                }
+                if matches!(
+                    status,
+                    QueuedRemoteActionStatus::Queued | QueuedRemoteActionStatus::Dispatched
+                ) {
+                    return Err(RelayError::BadRequest(
+                        "daemon may only report executing, completed, or failed action states"
+                            .to_string(),
                     ));
                 }
                 validate_bounded_text("action_id", &action_id, 128, false)?;
@@ -2497,9 +2600,9 @@ impl AppState {
         let device_id = auth
             .device_id
             .ok_or_else(|| RelayError::Unauthorized("missing trusted device".to_string()))?;
-        let (action, record, update, session, superseded_presence_ids) = {
+        let (action, created) = {
             let mut store = self.inner.store.lock().await;
-            let record = {
+            let (record, is_new) = {
                 let session = store
                     .data
                     .sessions
@@ -2523,7 +2626,7 @@ impl AppState {
                                 .to_string(),
                         ));
                     }
-                    existing
+                    (existing, false)
                 } else {
                     let now = Utc::now();
                     let action = QueuedActionRecord {
@@ -2544,37 +2647,44 @@ impl AppState {
                         .actions
                         .insert(action.action_id.clone(), action.clone());
                     session.updated_at = now;
-                    action
+                    (action, true)
                 }
             };
             let action = record.to_public();
-            // Append the Queued status while still holding the lock that
-            // inserted the action, so its sequence number always precedes
-            // any Dispatched status a concurrent dispatch pass appends.
-            let (update, session, superseded_presence_ids) = self.append_update_locked(
-                &mut store,
-                session_id,
-                RelayUpdateBody::ActionStatus {
-                    action: action.clone(),
-                },
-            )?;
-            (action, record, update, session, superseded_presence_ids)
+            let created = if is_new {
+                // Append the Queued status while still holding the lock that
+                // inserted the action, so its sequence number always precedes
+                // any Dispatched status a concurrent dispatch pass appends.
+                let (update, session, superseded_presence_ids) = self.append_update_locked(
+                    &mut store,
+                    session_id,
+                    RelayUpdateBody::ActionStatus {
+                        action: action.clone(),
+                    },
+                )?;
+                Some((record, update, session, superseded_presence_ids))
+            } else {
+                None
+            };
+            (action, created)
         };
 
-        self.persist_action_state(
-            &session,
-            std::slice::from_ref(&record),
-            PersistMode::Immediate,
-        )
-        .await?;
-        self.persist_appended_update(
-            session_id,
-            &session,
-            &update,
-            &superseded_presence_ids,
-            PersistMode::Immediate,
-        )
-        .await?;
+        if let Some((record, update, session, superseded_presence_ids)) = created {
+            self.persist_action_state(
+                &session,
+                std::slice::from_ref(&record),
+                PersistMode::Immediate,
+            )
+            .await?;
+            self.persist_appended_update(
+                session_id,
+                &session,
+                &update,
+                &superseded_presence_ids,
+                PersistMode::Immediate,
+            )
+            .await?;
+        }
         self.dispatch_pending_actions(session_id).await;
         Ok(action)
     }
@@ -3771,7 +3881,7 @@ impl SessionRecord {
         // Only retention pruning advances `oldest_lost_seq`: superseded
         // presence rows leave gaps in the retained sequence range without
         // losing anything a client needs to replay.
-        after_seq.saturating_add(1) < self.oldest_lost_seq
+        after_seq >= self.next_seq() || after_seq.saturating_add(1) < self.oldest_lost_seq
     }
 
     fn trusted_devices(&self) -> Vec<TrustedDevice> {
@@ -4225,7 +4335,10 @@ fn push_notification_content<'a>(
     kind: &str,
     thread_title: Option<&'a str>,
 ) -> (&'a str, &'static str) {
-    let title = thread_title.unwrap_or("FalconDeck");
+    let title = thread_title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("FalconDeck");
     let body = match kind {
         "approval" => "An agent is waiting for your approval",
         "question" => "An agent asked you a question",
@@ -4372,6 +4485,18 @@ mod tests {
         assert_eq!(
             push_notification_content("question", None),
             ("FalconDeck", "An agent asked you a question")
+        );
+    }
+
+    #[test]
+    fn push_notifications_fall_back_for_blank_titles_and_trim_display_copy() {
+        assert_eq!(
+            push_notification_content("approval", Some("   ")),
+            ("FalconDeck", "An agent is waiting for your approval")
+        );
+        assert_eq!(
+            push_notification_content("approval", Some("  Review changes  ")),
+            ("Review changes", "An agent is waiting for your approval")
         );
     }
 
@@ -4715,6 +4840,81 @@ mod tests {
     }
 
     #[test]
+    fn byte_heavy_replay_uses_snapshot_recovery_before_peer_queue_overflow() {
+        let now = Utc::now();
+        let updates = (1..=100)
+            .map(|seq| RelayUpdate {
+                id: format!("update-{seq}"),
+                seq,
+                body: RelayUpdateBody::Encrypted {
+                    envelope: EncryptedEnvelope {
+                        encryption_variant: EncryptionVariant::DataKeyV1,
+                        ciphertext: "x".repeat(450 * 1024),
+                    },
+                },
+                created_at: now,
+            })
+            .collect::<Vec<_>>();
+        let response = RelayUpdatesResponse {
+            session_id: "session-heavy".to_string(),
+            updates,
+            next_seq: 101,
+            cursor: SyncCursor {
+                session_id: "session-heavy".to_string(),
+                next_seq: 101,
+                last_acknowledged_seq: 0,
+                requires_bootstrap: true,
+                history_truncated: false,
+            },
+            presence: MachinePresence {
+                session_id: "session-heavy".to_string(),
+                daemon_connected: true,
+                daemon_rpc_ready: true,
+                last_seen_at: Some(now),
+            },
+        };
+
+        let messages = sync_messages(response);
+        assert!(matches!(
+            messages.as_slice(),
+            [super::RelayServerMessage::Sync {
+                updates,
+                history_truncated: true,
+                ..
+            }] if updates.is_empty()
+        ));
+    }
+
+    #[test]
+    fn future_replay_cursor_requires_snapshot_recovery() {
+        let now = Utc::now();
+        let session = SessionRecord {
+            session_id: "session-future".to_string(),
+            pairing_id: "pairing-future".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            daemon_last_seen_at: None,
+            devices: HashMap::new(),
+            device_id: None,
+            device_created_at: None,
+            client_token: None,
+            client_label: None,
+            client_public_key: None,
+            client_last_seen_at: None,
+            revoked_at: None,
+            created_at: now,
+            updated_at: now,
+            next_seq: 7,
+            oldest_lost_seq: 0,
+            updates: Vec::new(),
+            actions: HashMap::new(),
+        };
+
+        assert!(session.history_truncated(7));
+        assert!(session.history_truncated(u64::MAX));
+        assert!(!session.history_truncated(6));
+    }
+
+    #[test]
     fn push_dedupe_key_separates_kinds_on_the_same_thread() {
         assert_ne!(
             push_dedupe_key("session-1", "turn-complete", Some("thread-1")),
@@ -4780,6 +4980,16 @@ mod tests {
     }
 
     #[test]
+    fn peer_queue_accepts_a_websocket_legal_single_message() {
+        let (queue, _rx) = PeerQueue::new(1);
+        let message = super::RelayServerMessage::Ephemeral {
+            body: serde_json::json!({ "blob": "x".repeat(33 << 20) }),
+        };
+
+        assert!(queue.try_send(message).is_ok());
+    }
+
+    #[test]
     fn daemon_presence_is_not_sync_ready_until_snapshot_and_thread_detail_are_owned() {
         let (tx, _rx) = PeerQueue::new(1);
         let mut live = LiveSession::default();
@@ -4789,6 +4999,7 @@ mod tests {
                 role: falcondeck_core::RelayPeerRole::Daemon,
                 device_id: None,
                 tx,
+                operation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             },
         );
 
@@ -4818,6 +5029,7 @@ mod tests {
                     role: falcondeck_core::RelayPeerRole::Daemon,
                     device_id: None,
                     tx: tx.clone(),
+                    operation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
         }
@@ -4844,6 +5056,7 @@ mod tests {
                     role: falcondeck_core::RelayPeerRole::Daemon,
                     device_id: None,
                     tx: tx.clone(),
+                    operation_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 },
             );
             live.daemon_peer_ids.push(peer_id.to_string());
