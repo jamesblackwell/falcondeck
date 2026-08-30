@@ -41,8 +41,6 @@ export interface SessionSyncInput {
   isEncrypted: boolean
   /** A snapshot RPC is in flight. */
   isSyncing: boolean
-  /** Any snapshot is loaded — including the stale offline cache. */
-  hasSnapshot: boolean
   /** The paired desktop is reachable through the relay. */
   daemonConnected: boolean
   /** Presence has arrived from the relay. False avoids briefly reporting an
@@ -66,7 +64,6 @@ export function resolveSessionSyncStatus(
     connectionStatus,
     isEncrypted,
     isSyncing,
-    hasSnapshot,
     daemonConnected,
     hasSyncedOnce,
   } = input
@@ -107,7 +104,6 @@ export function resolveSessionSyncStatus(
         // The phone connects to the relay. Desktop may be online while this
         // socket is down, especially on spotty cellular.
         CONNECTION_COPY.reconnecting,
-        hasSnapshot ? CONNECTION_COPY.reconnectingStaleDetail : '',
       )
     }
     return busy(
@@ -138,11 +134,7 @@ export function resolveSessionSyncStatus(
   }
 
   if (isSyncing || !hasSyncedOnce) {
-    return busy(
-      'syncing',
-      CONNECTION_COPY.syncing,
-      hasSnapshot ? CONNECTION_COPY.syncingStaleDetail : '',
-    )
+    return busy('syncing', CONNECTION_COPY.syncing)
   }
 
   return {
@@ -172,15 +164,4 @@ export function sessionSendBlockReason(
     case 'offline':
       return status.label
   }
-}
-
-/**
- * The connection screen appears only after its own grace period, so it can
- * calmly explain any prolonged wait without flashing during ordinary 4G/Wi-Fi
- * flaps. Detailed transport history stays behind an explicit control there.
- */
-export function shouldAutoShowConnectionDebug(
-  status: SessionSyncStatus,
-): boolean {
-  return status.isBusy
 }

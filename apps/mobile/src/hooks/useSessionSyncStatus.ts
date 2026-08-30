@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { isDaemonRpcReady } from '@falcondeck/client-core'
 
-import { useRelayStore, useSessionStore } from '@/store'
+import { useRelayStore } from '@/store'
 import { resolveSessionSyncStatus, type SessionSyncStatus } from '@/lib/session-status'
 
 /**
@@ -16,7 +16,6 @@ export function useSessionSyncStatus(): SessionSyncStatus {
   const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
   const machinePresence = useRelayStore((s) => s.machinePresence)
   const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
-  const hasSnapshot = useSessionStore((s) => s.snapshot !== null)
   const daemonConnected = machinePresence?.daemon_connected ?? false
   const daemonPresenceKnown = machinePresence !== null
   // Older relays omit readiness. Preserve their transport-only behaviour
@@ -31,7 +30,6 @@ export function useSessionSyncStatus(): SessionSyncStatus {
         connectionStatus,
         isEncrypted,
         isSyncing,
-        hasSnapshot,
         daemonConnected,
         daemonPresenceKnown,
         daemonRpcReady,
@@ -46,7 +44,6 @@ export function useSessionSyncStatus(): SessionSyncStatus {
       daemonConnected,
       daemonPresenceKnown,
       daemonRpcReady,
-      hasSnapshot,
       hasSyncedOnce,
       isEncrypted,
       isSyncing,

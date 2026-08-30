@@ -12,7 +12,6 @@ const base = {
   connectionStatus: 'encrypted',
   isEncrypted: true,
   isSyncing: false,
-  hasSnapshot: true,
   daemonConnected: true,
   daemonRpcReady: true,
   hasSyncedOnce: true,
@@ -35,7 +34,7 @@ describe('SyncBanner', () => {
 
     const text = textOf(r)
     expect(text).toContain('Syncing your projects…')
-    expect(text).toContain('out of date')
+    expect(text).not.toContain('out of date')
   })
 
   it('immediately names a relay reconnect', () => {

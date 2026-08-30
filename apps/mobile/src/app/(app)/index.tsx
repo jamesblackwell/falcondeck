@@ -190,12 +190,8 @@ export default function HomeScreen() {
     })),
   );
   const syncStatus = useSessionSyncStatus();
-  // The debug screen subscribes to every connection-log append, so keep it
-  // unmounted whenever it cannot be or become visible: manual opens flip
-  // `visible`, and auto-show only ever fires while a connection run is busy —
-  // which is exactly when this condition keeps it mounted for its own 7s
-  // timer to decide visibility.
-  const isConnectionDebugMounted = useConnectionLogStore((s) => s.visible || syncStatus.isBusy);
+  // Connection detail is explicitly user-invoked from the header icon.
+  const isConnectionDebugMounted = useConnectionLogStore((s) => s.visible);
   const daemonRpcReady = isDaemonRpcReady(machinePresence);
   const {
     attachments,

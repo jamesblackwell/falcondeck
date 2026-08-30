@@ -1,22 +1,15 @@
 /**
  * Connection debug screen.
  *
- * A calm, closable full-screen connection view. The first layer explains that
- * FalconDeck is recovering normally; detailed transport history is opt-in.
- *
- * Split into a shell and a body: the shell only watches sync status to run the
- * auto-show timer, while everything expensive — the connection-log
- * subscription, the shared clock, the modal tree — mounts only while the
- * screen is actually visible. The previous single-component version subscribed
- * to every log append and ticked a 100ms clock whenever the session was busy,
- * which kept the JS thread hot for as long as the desktop was offline.
+ * Opened explicitly from the connection icon. The first layer states the
+ * current connection state; detailed transport history stays opt-in.
  */
 import { memo, useEffect, useRef, useState } from 'react'
 import { Modal, Pressable, ScrollView, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { shouldAutoShowConnectionDebug, type SessionSyncStatus } from '@/lib/session-status'
+import type { SessionSyncStatus } from '@/lib/session-status'
 import { useConnectionLogStore, useRelayStore } from '@/store'
 import {
   connectionActionDurationMs,
@@ -28,12 +21,6 @@ import {
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
 import { ActivityDiamond } from '@/components/ui/ActivityDiamond'
 import { Text } from '@/components/ui/Text'
-
-/**
- * Ordinary 4G/Wi-Fi handoffs settle before this timer. Longer waits get the
- * connection view instead of a stream of low-level errors.
- */
-const AUTO_SHOW_DELAY_MS = 7_000
 
 function formatClock(at: number): string {
   const d = new Date(at)
@@ -124,31 +111,7 @@ const LogLine = memo(
 
 export const ConnectionDebugScreen = memo(function ConnectionDebugScreen() {
   const visible = useConnectionLogStore((s) => s.visible)
-  const show = useConnectionLogStore((s) => s.show)
   const status = useSessionSyncStatus()
-
-  // A normal cellular handoff should stay invisible. If it lasts, put a calm
-  // connection screen in front of a disabled composer instead of exposing a
-  // wall of transport warnings.
-  const autoShowDebug = shouldAutoShowConnectionDebug(status)
-  const autoScreenVisible = useRef(false)
-  useEffect(() => {
-    if (!autoShowDebug) {
-      if (autoScreenVisible.current) {
-        useConnectionLogStore.setState({ visible: false })
-        autoScreenVisible.current = false
-      }
-      return
-    }
-    const timer = setTimeout(() => {
-      const connectionLog = useConnectionLogStore.getState()
-      if (!connectionLog.dismissedForRun && !connectionLog.visible) {
-        autoScreenVisible.current = true
-        show()
-      }
-    }, AUTO_SHOW_DELAY_MS)
-    return () => clearTimeout(timer)
-  }, [autoShowDebug, show])
 
   if (!visible) return null
   return <ConnectionDebugBody status={status} />
@@ -197,9 +160,6 @@ function ConnectionDebugBody({ status }: { status: SessionSyncStatus }) {
     status.nextRetryAt === null
       ? null
       : Math.max(0, Math.ceil((status.nextRetryAt - now) / 1_000))
-  const recoveryDetail =
-    status.detail ||
-    'Re-establishing the encrypted connection. Your most recently synced threads stay available.'
 
   return (
     <Modal
@@ -216,13 +176,8 @@ function ConnectionDebugBody({ status }: { status: SessionSyncStatus }) {
           <View style={styles.header}>
             <View style={styles.headerText}>
               <Text variant="heading" size="md" weight="semibold">
-                {status.isBusy ? status.label : 'Connection restored'}
+                {status.label}
               </Text>
-              {!status.isBusy ? (
-                <Text variant="caption" size="xs" color="muted">
-                  Session is live and synced.
-                </Text>
-              ) : null}
             </View>
             {status.isBusy ? (
               <ActivityDiamond
@@ -244,31 +199,6 @@ function ConnectionDebugBody({ status }: { status: SessionSyncStatus }) {
               </Text>
             </Pressable>
           </View>
-
-          {status.isBusy ? (
-            <View style={styles.recoveryCard}>
-              <ActivityDiamond
-                size={theme.iconSize.xl}
-                color={theme.colors.info.default}
-              />
-              <Text
-                variant="body"
-                size="sm"
-                color="primary"
-                style={styles.recoveryCopy}
-              >
-                {recoveryDetail}
-              </Text>
-              <Text
-                variant="caption"
-                size="xs"
-                color="muted"
-                style={styles.recoveryCopy}
-              >
-                FalconDeck will keep trying automatically.
-              </Text>
-            </View>
-          ) : null}
 
           <Pressable
             onPress={() => setShowDetails((current) => !current)}
@@ -416,19 +346,11 @@ const styles = StyleSheet.create((theme) => ({
   stateSection: {
     flex: 1,
   },
-  recoveryCard: {
-    alignItems: 'center',
-    gap: theme.spacing[3],
-    paddingHorizontal: theme.spacing[6],
-    paddingVertical: theme.spacing[8],
-  },
-  recoveryCopy: {
-    textAlign: 'center',
-  },
   detailsButton: {
     alignSelf: 'center',
     minHeight: theme.minTouchTarget,
     justifyContent: 'center',
+    marginTop: theme.spacing[3],
     paddingHorizontal: theme.spacing[3],
   },
   stateContent: {

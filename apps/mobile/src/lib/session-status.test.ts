@@ -1,16 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  resolveSessionSyncStatus,
-  sessionSendBlockReason,
-  shouldAutoShowConnectionDebug,
-} from './session-status'
+import { resolveSessionSyncStatus, sessionSendBlockReason } from './session-status'
 
 const ready = {
   connectionStatus: 'encrypted',
   isEncrypted: true,
   isSyncing: false,
-  hasSnapshot: true,
   daemonConnected: true,
   daemonPresenceKnown: true,
   daemonRpcReady: true,
@@ -49,25 +44,24 @@ describe('resolveSessionSyncStatus', () => {
     }
   })
 
-  it('mentions the stale cache when reconnecting over cached projects', () => {
+  it('keeps reconnecting to one clear status line', () => {
     const status = resolveSessionSyncStatus({
       ...ready,
       connectionStatus: 'connecting',
       isEncrypted: false,
     })
-    expect(status.detail).toContain('last synced')
+    expect(status.detail).toBe('')
   })
 
-  it('stays busy until the first snapshot lands, even with a cached one on screen', () => {
+  it('stays busy until the first snapshot lands without stale-cache commentary', () => {
     const status = resolveSessionSyncStatus({ ...ready, hasSyncedOnce: false })
     expect(status.stage).toBe('syncing')
-    expect(status.detail).toContain('out of date')
+    expect(status.detail).toBe('')
   })
 
   it('leaves the second line empty when it would only restate the headline', () => {
     const firstLoad = resolveSessionSyncStatus({
       ...ready,
-      hasSnapshot: false,
       hasSyncedOnce: false,
     })
     expect(firstLoad.label).toBe('Syncing your projects…')
@@ -186,44 +180,5 @@ describe('sessionSendBlockReason', () => {
         resolveSessionSyncStatus({ ...ready, daemonConnected: false }),
       ),
     ).toBe('Waiting for desktop…')
-  })
-})
-
-describe('shouldAutoShowConnectionDebug', () => {
-  it('uses the delayed connection screen for every prolonged wait', () => {
-    expect(
-      shouldAutoShowConnectionDebug(
-        resolveSessionSyncStatus({
-          ...ready,
-          connectionStatus: 'connecting',
-          isEncrypted: false,
-        }),
-      ),
-    ).toBe(true)
-    expect(
-      shouldAutoShowConnectionDebug(
-        resolveSessionSyncStatus({ ...ready, daemonConnected: false }),
-      ),
-    ).toBe(true)
-  })
-
-  it('includes a stuck handshake and first sync, but never a ready session', () => {
-    expect(
-      shouldAutoShowConnectionDebug(
-        resolveSessionSyncStatus({
-          ...ready,
-          connectionStatus: 'connected',
-          isEncrypted: false,
-        }),
-      ),
-    ).toBe(true)
-    expect(
-      shouldAutoShowConnectionDebug(
-        resolveSessionSyncStatus({ ...ready, hasSyncedOnce: false }),
-      ),
-    ).toBe(true)
-    expect(shouldAutoShowConnectionDebug(resolveSessionSyncStatus(ready))).toBe(
-      false,
-    )
   })
 })

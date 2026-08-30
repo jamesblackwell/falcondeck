@@ -18,7 +18,6 @@ describe('connection-log-store', () => {
     useConnectionLogStore.setState({
       entries: [],
       visible: false,
-      dismissedForRun: false,
     })
   })
 
@@ -88,15 +87,12 @@ describe('connection-log-store', () => {
     expect(isConnectionActionInFlight(entries[1]!)).toBe(false)
   })
 
-  it('hide dismisses auto-show for the run; openConnectionDebug reopens without clearing the dismissal', () => {
+  it('opens and closes connection details explicitly', () => {
     useConnectionLogStore.getState().hide()
-    expect(useConnectionLogStore.getState().dismissedForRun).toBe(true)
     expect(useConnectionLogStore.getState().visible).toBe(false)
 
     openConnectionDebug()
     expect(useConnectionLogStore.getState().visible).toBe(true)
-    // Still dismissed: a later busy period must not auto-show again.
-    expect(useConnectionLogStore.getState().dismissedForRun).toBe(true)
   })
 
   describe('timed actions', () => {

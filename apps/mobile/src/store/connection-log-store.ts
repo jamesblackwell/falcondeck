@@ -37,13 +37,8 @@ let nextId = 1
 
 interface ConnectionLogState {
   entries: ConnectionLogEntry[]
-  /** Debug screen visibility, driven by auto-show logic plus manual opens. */
+  /** Debug screen visibility, driven only by the header connection control. */
   visible: boolean
-  /**
-   * Set when the user closes the screen; suppresses auto-show until the next
-   * app run so closing it once is a real dismissal, not a repeat popup.
-   */
-  dismissedForRun: boolean
 }
 
 interface ConnectionLogActions {
@@ -97,7 +92,6 @@ export const useConnectionLogStore = create<
 >((set) => ({
   entries: [],
   visible: false,
-  dismissedForRun: false,
 
   _append: (entry) =>
     set((state) => {
@@ -181,7 +175,7 @@ export const useConnectionLogStore = create<
     }),
 
   show: () => set({ visible: true }),
-  hide: () => set({ visible: false, dismissedForRun: true }),
+  hide: () => set({ visible: false }),
 }))
 
 /** Log from anywhere — stores, hooks, callbacks — without a React binding. */
@@ -284,7 +278,7 @@ export function formatConnectionDurationMs(ms: number): string {
   return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`
 }
 
-/** Open the debug screen without clearing the run's dismissal flag. */
+/** Open connection details from the header status control. */
 export function openConnectionDebug(): void {
   useConnectionLogStore.getState().show()
 }

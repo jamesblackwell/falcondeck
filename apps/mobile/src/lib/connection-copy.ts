@@ -26,8 +26,6 @@ export const CONNECTION_COPY = {
   repairing: 'Repairing sync…',
   repairingDetail: 'Desktop is online but not ready to sync yet.',
   syncing: 'Syncing your projects…',
-  syncingStaleDetail: 'Threads may be a few seconds out of date.',
-  reconnectingStaleDetail: 'Showing your last synced threads.',
   connected: 'Connected',
   notConnected: 'Not connected',
   notConnectedDetail: 'Pair this device from Settings.',

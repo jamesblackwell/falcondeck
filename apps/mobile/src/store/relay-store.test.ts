@@ -155,7 +155,6 @@ describe('relay-store', () => {
       useConnectionLogStore.setState({
         entries: [],
         visible: false,
-        dismissedForRun: false,
       })
       const store = useRelayStore.getState()
       store._startSyncAttempt()
@@ -177,7 +176,6 @@ describe('relay-store', () => {
       useConnectionLogStore.setState({
         entries: [],
         visible: false,
-        dismissedForRun: false,
       })
       const store = useRelayStore.getState()
       store._setConnectionStatus('connecting')
