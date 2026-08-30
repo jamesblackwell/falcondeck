@@ -203,6 +203,7 @@ impl std::ops::Deref for CachedEnvelope {
 
 #[derive(Debug, Clone)]
 struct ExtensionBridgeCapability {
+    provider: AgentProvider,
     workspace_path: String,
     thread_id: Option<String>,
     expires_at: chrono::DateTime<Utc>,
@@ -994,7 +995,7 @@ impl AppState {
                 .builtin_control_spec(provider, workspace_path, thread_id)
                 .await,
             extensions: self
-                .builtin_extensions_spec(workspace_path, thread_id)
+                .builtin_extensions_spec(provider, workspace_path, thread_id)
                 .await,
         }
     }
@@ -1005,6 +1006,7 @@ impl AppState {
     /// catalogue.
     async fn builtin_extensions_spec(
         &self,
+        provider: &AgentProvider,
         workspace_path: &str,
         thread_id: Option<&str>,
     ) -> Option<crate::connectors::BuiltinExtensionsSpec> {
@@ -1018,6 +1020,7 @@ impl AppState {
         capabilities.insert(
             bridge_capability.clone(),
             ExtensionBridgeCapability {
+                provider: provider.clone(),
                 workspace_path: workspace_path.to_string(),
                 thread_id: thread_id.map(str::to_string),
                 expires_at: now + chrono::Duration::hours(12),
@@ -2148,6 +2151,9 @@ impl AppState {
                 },
             );
         }
+        if enabled && !self.inner.extensions.lock().await.agent_tools().is_empty() {
+            self.refresh_idle_codex_extension_bridges().await;
+        }
         Ok(updated)
     }
 
@@ -2213,7 +2219,41 @@ impl AppState {
                 },
             );
         }
+        if granted && permission == extensions::AGENT_TOOLS_PERMISSION {
+            self.refresh_idle_codex_extension_bridges().await;
+        }
         Ok(updated)
+    }
+
+    /// Codex receives MCP server configuration when its workspace app-server
+    /// starts. Enabling the first agent-tool extension therefore retires idle
+    /// sessions so the next turn starts a process with the bridge attached.
+    /// Active tasks are never interrupted; their existing process retires by
+    /// the normal runtime lifecycle later.
+    async fn refresh_idle_codex_extension_bridges(&self) {
+        let sessions = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values_mut()
+                .filter_map(|workspace| {
+                    let has_active_codex = workspace.threads.values().any(|thread| {
+                        thread.summary.provider == AgentProvider::CODEX
+                            && matches!(
+                                thread.summary.status,
+                                ThreadStatus::Running | ThreadStatus::WaitingForInput
+                            )
+                    });
+                    (!has_active_codex)
+                        .then(|| workspace.codex_session.take())
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+        };
+        for session in sessions {
+            if let Err(error) = session.shutdown().await {
+                tracing::warn!(%error, "failed to refresh idle Codex extension bridge");
+            }
+        }
     }
 
     /// Invokes a manifest-declared action through the isolated extension host.
@@ -2368,10 +2408,27 @@ impl AppState {
         let trusted_bridge = self
             .extension_bridge_context(request.bridge_capability.as_deref())
             .await;
-        let effective_thread_id = trusted_bridge
+        let inferred_codex_thread = match trusted_bridge.as_ref() {
+            Some(context)
+                if context.thread_id.is_none() && context.provider == AgentProvider::CODEX =>
+            {
+                self.unambiguous_running_extension_thread(
+                    &context.workspace_path,
+                    &context.provider,
+                )
+                .await
+            }
+            _ => None,
+        };
+        let trusted_thread_id = trusted_bridge
             .as_ref()
             .and_then(|context| context.thread_id.as_deref())
-            .or(request.thread_id.as_deref());
+            .or(inferred_codex_thread.as_deref());
+        let effective_thread_id = if trusted_bridge.is_some() {
+            trusted_thread_id
+        } else {
+            request.thread_id.as_deref()
+        };
         let effective_workspace_path = trusted_bridge
             .as_ref()
             .map(|context| context.workspace_path.as_str())
@@ -2396,9 +2453,6 @@ impl AppState {
         } else {
             None
         };
-        let trusted_thread_id = trusted_bridge
-            .as_ref()
-            .and_then(|context| context.thread_id.as_deref());
         let orchestration_runs = if can_orchestrate && trusted_thread_id.is_some() {
             Some(orchestration::owned_runs(self, &package.id).await)
         } else {
@@ -2602,6 +2656,29 @@ impl AppState {
         let mut capabilities = self.inner.extension_bridge_capabilities.lock().await;
         capabilities.retain(|_, capability| capability.expires_at > now);
         capabilities.get(token).cloned()
+    }
+
+    /// Resolves a workspace-wide bridge to a task only when provider state
+    /// makes the caller unambiguous. Codex app-server owns one MCP bridge per
+    /// workspace, so the daemon fails closed when two Codex tasks are running
+    /// instead of trusting model-supplied request fields.
+    async fn unambiguous_running_extension_thread(
+        &self,
+        workspace_path: &str,
+        provider: &AgentProvider,
+    ) -> Option<String> {
+        let canonical = std::path::PathBuf::from(workspace_path)
+            .canonicalize()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| workspace_path.to_string());
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .values()
+            .find(|workspace| workspace.summary.path == canonical)?;
+        unambiguous_running_thread_id(
+            workspace.threads.values().map(|thread| &thread.summary),
+            provider,
+        )
     }
 
     /// Broadcasts changed projections so every connected client re-renders.
@@ -3538,6 +3615,17 @@ impl AppState {
             .unwrap_or(&workspace.summary.path)
             .to_string())
     }
+}
+
+fn unambiguous_running_thread_id<'a>(
+    threads: impl Iterator<Item = &'a ThreadSummary>,
+    provider: &AgentProvider,
+) -> Option<String> {
+    let mut candidates = threads.filter(|thread| {
+        thread.provider == *provider && thread.status == ThreadStatus::Running
+    });
+    let only = candidates.next()?.id.clone();
+    candidates.next().is_none().then_some(only)
 }
 
 trait IntoWorkspaceAgentUpdate {

@@ -38,11 +38,14 @@ type ExtensionRunSummary = {
   approvalGeneration: number;
   automaticTurnsStarted: number;
   maxAutomaticTurns: number;
+  maxWorkers: number;
+  awaitingWorkers: boolean;
   createdAt: string;
   updatedAt: string;
   deadlineAt: string;
   completionProposed: boolean;
   operations: unknown[];
+  workers: unknown[];
 };
 type OrchestrationEffect = { type: string; [key: string]: unknown };
 type ActionInvocation = {

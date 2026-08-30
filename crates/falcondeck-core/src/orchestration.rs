@@ -9,8 +9,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AgentProvider;
+
 /// Maximum automatic provider turns admitted by a v1 run.
 pub const MAX_AUTOMATIC_TURNS: u32 = 4;
+/// Maximum one-turn worker tasks a run may create.
+pub const MAX_MANAGED_WORKERS: u32 = 3;
 /// Initial v1 lease duration in minutes.
 pub const DEFAULT_LEASE_MINUTES: i64 = 30;
 /// Maximum cumulative lease duration after human extensions.
@@ -19,6 +23,8 @@ pub const MAX_LEASE_MINUTES: i64 = 120;
 pub const MAX_OPERATION_PROMPT_BYTES: usize = 32 * 1024;
 /// Maximum bytes in an extension-owned checkpoint.
 pub const MAX_CHECKPOINT_BYTES: usize = 128 * 1024;
+/// Maximum bytes retained from a worker's final report.
+pub const MAX_WORKER_REPORT_BYTES: usize = 16 * 1024;
 
 /// Whether an orchestration run may admit more automatic work.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +77,73 @@ impl ExtensionOperationStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Settled | Self::Rejected | Self::Cancelled)
     }
+}
+
+/// Lifecycle of one daemon-managed, single-turn worker task.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionWorkerStatus {
+    /// The durable worker intent has not created a provider task yet.
+    Queued,
+    /// Provider task creation is in flight.
+    CreatingThread,
+    /// The provider task exists and its one assignment has not been admitted.
+    ThreadReady,
+    /// Assignment admission is in flight.
+    Dispatching,
+    /// The provider accepted the worker turn.
+    Running,
+    /// The worker turn settled successfully.
+    Succeeded,
+    /// The worker turn settled in an error state.
+    Failed,
+    /// FalconDeck cannot prove whether task creation or admission completed.
+    OutcomeUnknown,
+    /// Work was cancelled before provider admission.
+    Cancelled,
+}
+
+impl ExtensionWorkerStatus {
+    /// Whether no further automatic action is permitted for this worker.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::OutcomeUnknown | Self::Cancelled
+        )
+    }
+}
+
+/// Durable audit record for one bounded worker task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionRunWorker {
+    /// Stable worker identifier supplied by the owner extension.
+    pub id: String,
+    /// Harness selected for the worker. V1 admits Codex only.
+    pub provider: AgentProvider,
+    /// Immutable one-turn assignment.
+    pub assignment: String,
+    /// Current durable lifecycle state.
+    pub status: ExtensionWorkerStatus,
+    /// FalconDeck task created for the worker, once known.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Provider turn receipt, once observed.
+    #[serde(default)]
+    pub provider_turn_id: Option<String>,
+    /// Provider turn visible immediately before assignment dispatch.
+    #[serde(default)]
+    pub source_turn_id_before_dispatch: Option<String>,
+    /// Bounded final assistant report retained for coordinator synthesis.
+    #[serde(default)]
+    pub report: Option<String>,
+    /// Bounded failure or reconciliation note.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// When the intent was accepted by the broker.
+    pub created_at: DateTime<Utc>,
+    /// Most recent lifecycle transition.
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Bounded audit record for one automatic coordinator turn.
@@ -151,6 +224,12 @@ pub struct ExtensionRunSummary {
     pub automatic_turns_started: u32,
     /// Hard automatic-turn ceiling.
     pub max_automatic_turns: u32,
+    /// Hard ceiling for daemon-managed worker tasks.
+    #[serde(default = "default_max_managed_workers")]
+    pub max_workers: u32,
+    /// Whether the coordinator asked to resume after current workers settle.
+    #[serde(default)]
+    pub awaiting_workers: bool,
     /// Lease start.
     pub created_at: DateTime<Utc>,
     /// Most recent run mutation.
@@ -169,6 +248,13 @@ pub struct ExtensionRunSummary {
     /// Bounded operation journal, newest operation last.
     #[serde(default)]
     pub operations: Vec<ExtensionRunOperation>,
+    /// Bounded worker journal, oldest worker first.
+    #[serde(default)]
+    pub workers: Vec<ExtensionRunWorker>,
+}
+
+fn default_max_managed_workers() -> u32 {
+    MAX_MANAGED_WORKERS
 }
 
 /// Human-only mutation exposed through an extension action.
@@ -237,6 +323,30 @@ pub enum ExtensionOrchestrationEffect {
         progress_fingerprint: String,
         /// Immutable successor prompt.
         prompt: String,
+    },
+    /// Persist one single-turn worker intent. The daemon creates and drives
+    /// workers serially so same-folder tasks cannot edit concurrently.
+    DelegateWorker {
+        /// Owned run.
+        run_id: String,
+        /// Compare-and-swap policy revision.
+        expected_policy_revision: u64,
+        /// Stable worker identifier.
+        worker_id: String,
+        /// Worker harness. V1 admits Codex only.
+        provider: AgentProvider,
+        /// Immutable worker assignment.
+        assignment: String,
+    },
+    /// Save a checkpoint and resume the coordinator after all current workers
+    /// settle. At least one worker must already exist.
+    AwaitWorkers {
+        /// Owned run.
+        run_id: String,
+        /// Compare-and-swap policy revision.
+        expected_policy_revision: u64,
+        /// New bounded checkpoint.
+        checkpoint: Value,
     },
     /// Save evidence and pause for human completion review after settlement.
     ProposeCompletion {

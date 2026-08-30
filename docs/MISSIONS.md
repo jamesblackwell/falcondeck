@@ -1,13 +1,14 @@
 # Missions: critique and improved implementation specification
 
-Status: v1 single-coordinator slice implemented on 2026-08-30. Multi-task workers and the later
-phases in this document remain proposals.
+Status: bounded coordinator plus serial Codex-worker slice implemented on 2026-08-30. Richer team
+planning, parallel read-only workers, worker follow-ups, and the later phases remain proposals.
 
 `docs/EXTENSIONS.md` remains the canonical extension contract. The v1 generic identity, permission,
 run/effect, receipt, panel-action, and lifecycle changes are now reflected there and in the public
-schemas. Sensitive orchestration calls use an opaque, daemon-issued bridge capability bound to the
-task selected at provider spawn. Workspace-wide Codex/OpenCode bridges still cannot bind an exact
-task, so Missions v1 admits Claude coordinators only.
+schemas. Sensitive orchestration calls use an opaque, daemon-issued bridge capability. Claude binds
+it directly to the task selected at provider spawn. For Codex, the daemon binds a workspace-wide
+bridge only when exactly one Codex task in that workspace is running and rejects ambiguous calls.
+OpenCode coordinators remain ineligible.
 
 This document replaces the earlier idea of implementing Missions as an indefinitely continuing
 coordinator prompt with a few thread tools. It keeps the useful product idea—an ordinary FalconDeck
@@ -23,8 +24,9 @@ task**. User-initiated turns remain outside that automatic envelope and may caus
   product mode.
 - Harness-native goals are optional. A Mission can supervise ordinary threads and turns on a
   harness that has no goal feature at all.
-- Release v1 has one existing coordinator task and no workers. It proves secure continuation,
-  deadlines, restart recovery, human races, and completion before adding multi-task coordination.
+- The first slice proved one existing coordinator task, secure continuation, deadlines, restart
+  recovery, human races, and completion. The current slice adds at most three serial, one-turn Codex
+  workers without adding worker-to-worker messaging or native delegation.
 - The human continues talking in the coordinator task. FalconDeck does not add a conversation
   database or replace harness-owned history.
 - A coordinator turn is finite and may end normally. The Mission persists while every task is idle,
@@ -768,10 +770,11 @@ sufficient while workspace-wide bridges still lack task identity.
 
 Provider strategy:
 
-- **Codex:** evaluate [app-server dynamic tools](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
-  because their callback includes native thread, turn, and call identity. The API remains
-  experimental and [tools currently need to be supplied when the thread starts](https://github.com/openai/codex/issues/24808),
-  so feature-gate by a tested Codex version.
+- **Codex:** the implemented compatibility path retains the stable MCP bridge but derives its caller
+  only when exactly one Codex task is running in the capability-bound workspace. A concurrent Codex
+  task makes the call ineligible rather than guessing. App-server dynamic tools remain a useful
+  future path because their callback carries native thread and turn identity, but the API is still
+  experimental and tools currently need to be supplied when the thread starts.
 - **Claude:** bind the existing per-turn connector to the daemon-owned task and turn.
 - **OpenCode/ACP:** add an equivalent session-bound identity before allowing conversational Mission
   creation. The OpenCode goal plugin is a behavioral reference, not a trusted control path.
@@ -784,12 +787,10 @@ An **eligible task** is one that:
 4. exposes the provider capabilities needed by the approved plan; and
 5. has a user-visible safety profile.
 
-Once Missions is enabled **and** its existing `agent-tools:register` permission is granted, newly
-created eligible tasks may receive the harmless draft/read tools. The new orchestration permission is
-separate and still denied until activation. An older task that cannot securely receive the tools
-cannot become a conversational coordinator in place. The UI may offer a dedicated coordinator task
-seeded with the user-approved objective; it must not pretend that model-supplied IDs attached the old
-conversation safely.
+Once Missions is enabled **and** its existing `agent-tools:register` permission is granted, the daemon
+retires idle Codex app-server sessions so their next turn starts with the extension bridge. The new
+orchestration permission is separate and still denied until activation. Calls are authorized from
+daemon task state, never model-supplied thread IDs.
 
 ## 8. Missions extension state
 
@@ -1080,12 +1081,13 @@ Rules:
 
 - zero workers is the default;
 - at most three managed worker tasks over the Mission lifetime;
-- at most two managed turns run concurrently;
-- the worker roster and initial assignments are approved before activation;
-- no autonomous new worker is added after activation;
-- one follow-up per job and one Mission recovery round by default;
-- workers cannot create FalconDeck-managed workers/Missions or message managed peers; and
-- a new worker or materially changed assignment returns to human approval.
+- exactly one Mission-managed turn runs at a time in the current slice;
+- the coordinator may allocate unused slots after activation, but the three-worker lifetime ceiling
+  is daemon-enforced and every assignment is immutable and one-turn;
+- worker follow-ups and replacement workers are not supported;
+- worker-task calls cannot mutate their parent Mission because the daemon authorizes effects only
+  from the exact coordinator task; and
+- workers receive no FalconDeck peer-messaging or worker-creation API.
 
 Automatic team mode requires a mechanically enforced provider profile that removes native delegation
 tools. If a harness cannot provide one, it is ineligible for the hard fixed-topology mode; merely

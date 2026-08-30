@@ -25,7 +25,12 @@ type MissionCheckpoint = {
   schemaVersion: 1;
   objective: string;
   acceptanceCriteria: string[];
-  disposition: "planning" | "continue_self" | "needs_human" | "proposing_completion";
+  disposition:
+    | "planning"
+    | "continue_self"
+    | "awaiting_workers"
+    | "needs_human"
+    | "proposing_completion";
   summary: string;
   nextAction?: string;
   evidence: string[];
@@ -81,6 +86,7 @@ function checkpointOf(run: ExtensionRunSummary): MissionCheckpoint {
       : [],
     disposition:
       candidate?.disposition === "continue_self" ||
+      candidate?.disposition === "awaiting_workers" ||
       candidate?.disposition === "needs_human" ||
       candidate?.disposition === "proposing_completion"
         ? candidate.disposition
@@ -112,8 +118,17 @@ function statusLabel(run: ExtensionRunSummary): string {
     return run.outcome === "completed" ? "Complete" : "Closed";
   }
   if (run.gate === "paused") {
-    return run.completionProposed ? "Ready for review" : "Paused";
+    if (run.completionProposed) return "Ready for review";
+    if (
+      run.operations.some((operation) =>
+        ["dispatching", "acknowledged"].includes(operation.status),
+      )
+    ) {
+      return "Coordinator settling";
+    }
+    return "Paused";
   }
+  if (run.awaitingWorkers) return "Workers running";
   const active = run.operations.at(-1)?.status;
   return active === "acknowledged" || active === "dispatching"
     ? "Coordinator running"
@@ -132,9 +147,10 @@ function toneFor(run: ExtensionRunSummary) {
 function runControls(run: ExtensionRunSummary): ExtensionUiNode[] {
   if (run.gate === "closed") return [];
   const input = { runId: run.id, expectedPolicyRevision: run.policyRevision };
-  const hasUnknownOutcome = run.operations.some(
-    (operation) => operation.status === "outcome_unknown",
-  );
+  const hasUnknownOutcome =
+    run.operations.some(
+      (operation) => operation.status === "outcome_unknown",
+    ) || run.workers.some((worker) => worker.status === "outcome_unknown");
   if (hasUnknownOutcome) {
     return [
       {
@@ -152,6 +168,24 @@ function runControls(run: ExtensionRunSummary): ExtensionUiNode[] {
         label: "Accept completion",
         variant: "primary",
         action: { actionId: "accept-completion", input },
+      },
+      {
+        type: "button",
+        label: "Close incomplete",
+        variant: "danger",
+        action: { actionId: "close-incomplete", input },
+      },
+    ];
+  }
+  const coordinatorSettling = run.operations.some((operation) =>
+    ["dispatching", "acknowledged"].includes(operation.status),
+  );
+  if (run.gate === "paused" && coordinatorSettling) {
+    return [
+      {
+        type: "button",
+        label: "Extend 30 min",
+        action: { actionId: "extend-run", input },
       },
       {
         type: "button",
@@ -206,6 +240,11 @@ function runNode(run: ExtensionRunSummary): ExtensionUiNode {
             text: `${run.automaticTurnsStarted}/${run.maxAutomaticTurns} automatic turns`,
             tone: "muted",
           },
+          {
+            type: "badge",
+            text: `${run.workers.length}/${run.maxWorkers} workers`,
+            tone: "muted",
+          },
         ],
       },
       { type: "text", text: run.objective },
@@ -227,15 +266,28 @@ function runNode(run: ExtensionRunSummary): ExtensionUiNode {
             },
           ]
         : []),
+      ...run.workers.map((worker) => ({
+        type: "text" as const,
+        text: `Worker ${worker.id.slice(0, 8)} · ${worker.provider} · ${worker.status.replaceAll("_", " ")}`,
+        style: "caption" as const,
+        tone:
+          worker.status === "failed" || worker.status === "outcome_unknown"
+            ? ("warning" as const)
+            : ("muted" as const),
+      })),
       ...(run.gate === "paused" && !run.completionProposed
         ? [
             {
               type: "text" as const,
-              text: run.operations.some(
-                (operation) => operation.status === "outcome_unknown",
-              )
-                ? "FalconDeck will not retry an ambiguous provider operation. Review the coordinator task, then close this v1 Mission if its outcome cannot be proved."
-                : "Resume here before continuing the conversation in the coordinator task.",
+              text:
+                run.operations.some(
+                  (operation) => operation.status === "outcome_unknown",
+                ) ||
+                run.workers.some(
+                  (worker) => worker.status === "outcome_unknown",
+                )
+                  ? "FalconDeck will not retry an ambiguous provider operation. Review the coordinator and worker tasks, then close this Mission if its outcome cannot be proved."
+                  : "Resume here before continuing the conversation in the coordinator task.",
               style: "caption" as const,
               tone: "muted" as const,
             },
@@ -314,7 +366,7 @@ function panel(
     .filter(
       (thread) =>
         thread.status === "idle" &&
-        thread.provider === "claude" &&
+        (thread.provider === "claude" || thread.provider === "codex") &&
         !occupied.has(`${thread.workspaceId}:${thread.id}`),
     )
     .slice(0, 8);
@@ -367,7 +419,7 @@ function coordinatorPrompt(
   const criteria = acceptanceCriteria.length
     ? acceptanceCriteria.map((item, index) => `${index + 1}. ${item}`).join("\n")
     : "1. Verify the requested outcome with concrete evidence appropriate to the task.";
-  return `You are coordinating a bounded FalconDeck Mission in this existing task.\n\nObjective:\n${objective}\n\nAcceptance criteria:\n${criteria}\n\nWork directly and conservatively. Do not spawn or hand off to other agents in Missions v1. A turn may end normally, but the Mission cannot become complete from prose alone. Before finishing this turn, call the FalconDeck mission checkpoint tool exactly once: request one continuation only after meaningful durable progress, pause for human input when authority or intent is missing, or propose completion with criterion-level evidence. Never route around a denial, safety boundary, exhausted limit, or ambiguous user intent.`;
+  return `You are coordinating a bounded FalconDeck Mission in this existing task.\n\nObjective:\n${objective}\n\nAcceptance criteria:\n${criteria}\n\nWork directly and conservatively. You may delegate at most three genuinely independent, one-turn assignments with the FalconDeck Mission delegate tool; workers run serially in separate Codex tasks and cannot delegate further. Prefer doing small or tightly coupled work yourself. After delegating, call the Mission checkpoint tool with awaiting_workers. Otherwise call it exactly once before finishing this turn: request one continuation only after meaningful durable progress, pause for human input when authority or intent is missing, or propose completion with criterion-level evidence. The Mission cannot become complete from prose alone. Never route around a denial, safety boundary, exhausted limit, or ambiguous user intent.`;
 }
 
 function continuationPrompt(nextAction: string): string {
@@ -506,10 +558,29 @@ export default defineExtension({
 
     context.actions.register("resume-run", async ({ input }) => {
       const target = runInput(input);
+      const run = (await context.orchestration.list()).find(
+        (candidate) => candidate.id === target.runId,
+      );
+      if (!run) throw new Error("Mission run no longer exists");
+      const checkpoint = checkpointOf(run);
+      const hasUnresolvedOperation = run.operations.some(
+        (operation) =>
+          !["settled", "rejected", "cancelled"].includes(operation.status),
+      );
       await context.orchestration.apply({
         type: "human_command",
         ...target,
         command: "resume",
+        ...(!run.awaitingWorkers && !hasUnresolvedOperation
+          ? {
+              operationId: crypto.randomUUID(),
+              resumePrompt: continuationPrompt(
+                checkpoint.nextAction ??
+                  checkpoint.humanQuestion ??
+                  "Reassess the Mission after the human resumed it and choose the next bounded action.",
+              ),
+            }
+          : {}),
       });
       return { updated: true };
     });
@@ -578,9 +649,66 @@ export default defineExtension({
         deadlineAt: run.deadlineAt,
         automaticTurnsStarted: run.automaticTurnsStarted,
         maxAutomaticTurns: run.maxAutomaticTurns,
+        maxWorkers: run.maxWorkers,
+        workers: run.workers.map((worker) => ({
+          id: worker.id,
+          provider: worker.provider,
+          status: worker.status,
+          threadId: worker.threadId,
+          report: worker.report,
+          message: worker.message,
+        })),
         checkpoint: checkpointOf(run),
       };
     });
+
+    context.tools.register(
+      "mission-delegate",
+      async ({ input, threadId, workspaceId }) => {
+        if (!threadId || !workspaceId) {
+          throw new Error(
+            "this delegation is not bound to an eligible coordinator task",
+          );
+        }
+        const run = (await context.orchestration.list()).find(
+          (candidate) =>
+            candidate.workspaceId === workspaceId &&
+            candidate.coordinatorThreadId === threadId &&
+            candidate.gate === "open",
+        );
+        if (!run) {
+          throw new Error("this task does not coordinate an open Mission");
+        }
+        if (run.automaticTurnsStarted >= run.maxAutomaticTurns) {
+          throw new Error(
+            "no automatic coordinator turn remains to review worker reports",
+          );
+        }
+        const value = record(input);
+        const assignment = requiredString(
+          value.assignment,
+          "assignment",
+          12_000,
+        );
+        const workerId = crypto.randomUUID();
+        await context.orchestration.apply({
+          type: "delegate_worker",
+          runId: run.id,
+          expectedPolicyRevision: run.policyRevision,
+          workerId,
+          provider: "codex",
+          assignment,
+        });
+        return {
+          delegated: true,
+          workerId,
+          remainingWorkerSlots: Math.max(
+            0,
+            run.maxWorkers - run.workers.length - 1,
+          ),
+        };
+      },
+    );
 
     context.tools.register("mission-checkpoint", async ({ input, threadId, workspaceId }) => {
       if (!threadId || !workspaceId) {
@@ -598,6 +726,7 @@ export default defineExtension({
       const disposition = requiredString(value.disposition, "disposition", 40);
       if (
         disposition !== "continue_self" &&
+        disposition !== "awaiting_workers" &&
         disposition !== "needs_human" &&
         disposition !== "proposing_completion"
       ) {
@@ -641,6 +770,26 @@ export default defineExtension({
           checkpoint,
           progressFingerprint,
           prompt: continuationPrompt(nextAction),
+        });
+      } else if (disposition === "awaiting_workers") {
+        if (
+          !run.workers.some(
+            (worker) =>
+              ![
+                "succeeded",
+                "failed",
+                "outcome_unknown",
+                "cancelled",
+              ].includes(worker.status),
+          )
+        ) {
+          throw new Error("awaiting_workers requires an active delegated worker");
+        }
+        await context.orchestration.apply({
+          type: "await_workers",
+          runId: run.id,
+          expectedPolicyRevision: run.policyRevision,
+          checkpoint,
         });
       } else if (disposition === "needs_human") {
         await context.orchestration.apply({

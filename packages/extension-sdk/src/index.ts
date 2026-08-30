@@ -173,6 +173,16 @@ export type ExtensionOperationStatus =
   | "outcome_unknown"
   | "rejected"
   | "cancelled";
+export type ExtensionWorkerStatus =
+  | "queued"
+  | "creating_thread"
+  | "thread_ready"
+  | "dispatching"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "outcome_unknown"
+  | "cancelled";
 
 /** Owner-only durable run projection. Provider transcripts are never exposed. */
 export type ExtensionRunSummary = {
@@ -191,6 +201,8 @@ export type ExtensionRunSummary = {
   approvalGeneration: number;
   automaticTurnsStarted: number;
   maxAutomaticTurns: number;
+  maxWorkers: number;
+  awaitingWorkers: boolean;
   createdAt: string;
   updatedAt: string;
   deadlineAt: string;
@@ -211,6 +223,19 @@ export type ExtensionRunSummary = {
     providerTurnId?: string;
     sourceTurnIdBeforeDispatch?: string;
     message?: string;
+  }>;
+  workers: Array<{
+    id: string;
+    provider: string;
+    assignment: string;
+    status: ExtensionWorkerStatus;
+    threadId?: string;
+    providerTurnId?: string;
+    sourceTurnIdBeforeDispatch?: string;
+    report?: string;
+    message?: string;
+    createdAt: string;
+    updatedAt: string;
   }>;
 };
 
@@ -250,6 +275,20 @@ export type ExtensionOrchestrationEffect =
       checkpoint: unknown;
       progressFingerprint: string;
       prompt: string;
+    }
+  | {
+      type: "delegate_worker";
+      runId: string;
+      expectedPolicyRevision: number;
+      workerId: string;
+      provider: string;
+      assignment: string;
+    }
+  | {
+      type: "await_workers";
+      runId: string;
+      expectedPolicyRevision: number;
+      checkpoint: unknown;
     }
   | {
       type: "propose_completion";

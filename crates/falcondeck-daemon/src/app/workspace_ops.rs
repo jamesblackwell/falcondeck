@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
     CompactThreadRequest, ConversationItem, ForkThreadRequest, ImageInput,
     InteractiveRequestOutcome, InteractiveRequestResolution, SetThreadGoalRequest, ThreadDetail,
-    ThreadDetailMode, ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
+    ThreadDetailMode, ThreadDetailRequest, ThreadGoal, ThreadIsolation, ThreadOrigin, TurnInputItem,
 };
 use uuid::Uuid;
 
@@ -932,6 +932,28 @@ pub(super) async fn start_thread(
     app: &AppState,
     request: StartThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
+    start_thread_internal(app, request, None, true).await
+}
+
+/// Creates a daemon-owned task without changing the user's selected task or
+/// default harness. The provenance is committed with the task so a partially
+/// completed orchestration attempt remains inspectable after restart.
+pub(super) async fn start_background_thread(
+    app: &AppState,
+    request: StartThreadRequest,
+    origin: ThreadOrigin,
+) -> Result<ThreadHandle, DaemonError> {
+    let handle = start_thread_internal(app, request, Some(origin), false).await?;
+    app.persist_local_state().await?;
+    Ok(handle)
+}
+
+async fn start_thread_internal(
+    app: &AppState,
+    request: StartThreadRequest,
+    origin: Option<ThreadOrigin>,
+    foreground: bool,
+) -> Result<ThreadHandle, DaemonError> {
     let (provider, default_model_id, workspace_path) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -1052,6 +1074,10 @@ pub(super) async fn start_thread(
     }
     let now = Utc::now();
     let is_handoff = request.handoff_from.is_some();
+    let title = match &origin {
+        Some(ThreadOrigin::MissionWorker { title, .. }) => format!("Mission worker · {title}"),
+        _ => title,
+    };
 
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
@@ -1065,7 +1091,7 @@ pub(super) async fn start_thread(
         native_session_id,
         provider_transport,
         handoff_from: request.handoff_from,
-        origin: None,
+        origin,
         status: ThreadStatus::Idle,
         updated_at: now,
         last_message_preview: None,
@@ -1091,9 +1117,11 @@ pub(super) async fn start_thread(
         queued_turns: Vec::new(),
         variant,
     };
-    workspace.summary.current_thread_id = Some(thread_id.clone());
-    if !is_handoff {
-        workspace.summary.default_provider = provider;
+    if foreground {
+        workspace.summary.current_thread_id = Some(thread_id.clone());
+        if !is_handoff {
+            workspace.summary.default_provider = provider;
+        }
     }
     workspace.summary.updated_at = now;
     workspace

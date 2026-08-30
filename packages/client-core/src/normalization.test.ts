@@ -651,6 +651,28 @@ describe("malformed conversation output normalization", () => {
     );
   });
 
+  it("preserves Mission worker provenance on ordinary thread summaries", () => {
+    const detail = normalizeThreadDetail({
+      workspace: {},
+      thread: {
+        origin: {
+          kind: "mission_worker",
+          run_id: "run-1",
+          worker_id: "worker-1",
+          title: "Ship parser fix",
+        },
+      },
+      items: [],
+    });
+
+    expect(detail.thread.origin).toEqual({
+      kind: "mission_worker",
+      run_id: "run-1",
+      worker_id: "worker-1",
+      title: "Ship parser fix",
+    });
+  });
+
   it("filters malformed user attachments before native or DOM image rendering", () => {
     const item = normalizeConversationItem({
       kind: "user_message",

@@ -726,6 +726,8 @@ mod tests {
             approval_generation: 1,
             automatic_turns_started: 1,
             max_automatic_turns: MAX_AUTOMATIC_TURNS,
+            max_workers: falcondeck_core::orchestration::MAX_MANAGED_WORKERS,
+            awaiting_workers: false,
             created_at: now,
             updated_at: now,
             deadline_at: now + chrono::Duration::minutes(30),
@@ -733,6 +735,7 @@ mod tests {
             pending_continuation: None,
             completion_proposed: false,
             operations: Vec::new(),
+            workers: Vec::new(),
         }];
         let threads = [ExtensionThreadSummary {
             id: "thread-1".to_string(),

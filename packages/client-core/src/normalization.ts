@@ -629,7 +629,11 @@ export function normalizeThreadSummary(
         typeof thread.origin.title === "string") ||
       (thread.origin?.kind === "automation" &&
         typeof thread.origin.automation_id === "string" &&
-        typeof thread.origin.name === "string")
+        typeof thread.origin.name === "string") ||
+      (thread.origin?.kind === "mission_worker" &&
+        typeof thread.origin.run_id === "string" &&
+        typeof thread.origin.worker_id === "string" &&
+        typeof thread.origin.title === "string")
         ? thread.origin
         : null,
     status: thread.status ?? "idle",

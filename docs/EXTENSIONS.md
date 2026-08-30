@@ -369,9 +369,10 @@ context.tools.register("suggest-follow-ups", async ({ input, threadId }) => {
 Registration fails closed without the `agent-tools:register` grant. Ordinary
 tool context is projected from the harness spawn. Sensitive orchestration
 effects additionally require an opaque daemon-issued bridge capability bound
-to an exact task; request-body identifiers do not authorize them. Missions v1
-therefore supports Claude only, because current Codex and OpenCode bridges are
-workspace-wide rather than task-bound. A handler that raises is an
+to an exact task; request-body identifiers do not authorize them. Claude binds
+directly at spawn. Codex binds a workspace bridge only when daemon state has
+exactly one running Codex task in that workspace; an ambiguous call is denied.
+OpenCode remains ineligible. A handler that raises is an
 ordinary rejection — the message goes back to the calling agent as a tool error
 and the extension keeps its healthy status, because models routinely pass
 arguments an extension declines. Only a host that dies, times out, or breaks
@@ -648,9 +649,11 @@ currently publishes a granted tool, so a user with none pays for no subprocess.
 
 Thread and workspace fields passed to a tool handler are transport context, not
 model arguments. Sensitive facets still fail closed unless that connector has
-an exact task binding. Claude's per-turn connector supplies one. The current
-Codex and OpenCode workspace-wide connectors do not, so Missions v1 rejects
-them rather than trusting a model-supplied task id.
+an exact task binding. Claude's per-turn connector supplies one. Codex's
+workspace connector is bound only when the daemon observes one running Codex
+task for that provider and workspace. Two running tasks make the call
+ambiguous and therefore unauthorized. OpenCode remains ineligible rather than
+trusting a model-supplied task id.
 
 The third explicit capability is `orchestration:manage-owned-tasks`. It exposes
 only runs whose `ownerExtensionId` matches the callback's extension. A callback
@@ -660,15 +663,19 @@ and admission count before committing it. The effect commits the opaque
 extension checkpoint and durable operation intent before provider dispatch;
 extension code never waits for a harness.
 
-V1 supports one existing Claude coordinator task, an initial 30-minute lease,
-at most four automatic turns, and one unresolved continuation. Background
-dispatch uses an explicit safer execution profile and does not change current
+The current slice supports one existing Claude or Codex coordinator task, an
+initial 30-minute lease, at most four automatic coordinator turns, one
+unresolved continuation, and at most three serial one-turn Codex workers.
+Background dispatch uses an explicit safer execution profile and does not change current
 task selection or the workspace default provider. Repeated progress
 fingerprints, provider ambiguity, task errors, permission revocation, and
 extension disable pause the run. Restart never blindly resends accepted work.
 The owner may propose completion, but only a human panel action can accept it.
 The bundled `falcondeck.missions` package is the reference consumer and is
-disabled with all grants denied by default. Worker tasks remain outside v1.
+disabled with all grants denied by default. Worker tasks are ordinary visible
+FalconDeck tasks with durable Mission provenance; they cannot delegate, are
+never retried after an ambiguous admission, and their bounded reports return
+to the coordinator as untrusted input.
 
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
 official extensions stay within baseline capabilities unless the catalog grants
@@ -916,13 +923,14 @@ identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
 
 Progress (2026-08-30): the neutral orchestration facet, `panelActions`
-contribution point, durable run/operation store, safe background turn path,
-fake-host support, and bundled Missions v1 reference are implemented. Desktop
-and remote web render Missions through the existing shared extension-panel and
-action routes; mobile retains the generic unsupported-panel fallback. Exact-task
-tool identity deliberately limits the first release to Claude. Multi-task
-worker pools, Codex/OpenCode dynamic task binding, automatic completion, and
-native harness delegation are not implemented.
+contribution point, durable run/operation/worker store, safe background task
+and turn paths, fake-host support, and bundled Missions reference are
+implemented. Desktop and remote web render Missions through the existing
+shared extension-panel and action routes; mobile retains the generic
+unsupported-panel fallback. Claude and unambiguous Codex tasks can coordinate;
+up to three serial Codex workers are supported. OpenCode coordinator identity,
+parallel worker pools, automatic completion, worker follow-ups, and native
+harness delegation are not implemented.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;

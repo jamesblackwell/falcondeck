@@ -3596,6 +3596,15 @@ pub enum ThreadOrigin {
         /// Automation name captured when the invocation started.
         name: String,
     },
+    /// A bounded extension-owned orchestration run created this worker task.
+    MissionWorker {
+        /// Owning orchestration run.
+        run_id: String,
+        /// Stable worker identifier within the run.
+        worker_id: String,
+        /// Human-facing Mission title captured at delegation time.
+        title: String,
+    },
 }
 
 impl ThreadSummary {

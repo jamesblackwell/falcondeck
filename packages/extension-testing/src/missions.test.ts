@@ -44,11 +44,14 @@ function openRun(): ExtensionRunSummary {
     approvalGeneration: 1,
     automaticTurnsStarted: 1,
     maxAutomaticTurns: 4,
+    maxWorkers: 3,
+    awaitingWorkers: false,
     createdAt: "2026-08-30T10:00:00Z",
     updatedAt: "2026-08-30T10:01:00Z",
     deadlineAt: "2026-08-30T10:30:00Z",
     completionProposed: false,
     operations: [],
+    workers: [],
   };
 }
 
@@ -57,7 +60,12 @@ function host(runs: ExtensionRunSummary[] = []) {
     extensionId: "falcondeck.missions",
     declaredActions: actions,
     declaredViews: ["missions-panel"],
-    declaredTools: ["draft-mission", "mission-status", "mission-checkpoint"],
+    declaredTools: [
+      "draft-mission",
+      "mission-status",
+      "mission-delegate",
+      "mission-checkpoint",
+    ],
     grantedPermissions: permissions,
     orchestrationRuns: runs,
     threadSummaries: [
@@ -132,6 +140,109 @@ describe("official Missions extension", () => {
         expectedPolicyRevision: 3,
         progressFingerprint: "core-implemented-v1",
       }),
+    ]);
+  });
+
+  it("delegates one Codex worker and can wait for its bounded result", async () => {
+    const run = openRun();
+    const testHost = host([run]);
+    const delegated = await testHost.invokeTool("mission-delegate", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: { assignment: "Inspect the parser and report the failing edge case" },
+    });
+    expect(delegated.orchestrationEffects).toEqual([
+      expect.objectContaining({
+        type: "delegate_worker",
+        runId: "run-1",
+        provider: "codex",
+      }),
+    ]);
+
+    testHost.setOrchestrationRuns([
+      {
+        ...run,
+        policyRevision: 4,
+        workers: [
+          {
+            id: "worker-1",
+            provider: "codex",
+            assignment: "Inspect the parser",
+            status: "queued",
+            createdAt: "2026-08-30T10:02:00Z",
+            updatedAt: "2026-08-30T10:02:00Z",
+          },
+        ],
+      },
+    ]);
+    const waiting = await testHost.invokeTool("mission-checkpoint", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: {
+        disposition: "awaiting_workers",
+        summary: "Delegated an independent parser investigation",
+      },
+    });
+    expect(waiting.orchestrationEffects).toEqual([
+      expect.objectContaining({
+        type: "await_workers",
+        runId: "run-1",
+        expectedPolicyRevision: 4,
+      }),
+    ]);
+  });
+
+  it("queues a bounded coordinator turn when a human resumes a paused run", async () => {
+    const paused = {
+      ...openRun(),
+      gate: "paused" as const,
+      pauseReason: "Needs a human decision",
+    };
+    const testHost = host([paused]);
+
+    const resumed = await testHost.invokeAction("resume-run", {
+      input: { runId: "run-1", expectedPolicyRevision: 3 },
+    });
+
+    expect(resumed.orchestrationEffects).toEqual([
+      expect.objectContaining({
+        type: "human_command",
+        command: "resume",
+        runId: "run-1",
+        resumePrompt: expect.stringContaining("Continue the bounded FalconDeck Mission"),
+        operationId: expect.any(String),
+      }),
+    ]);
+  });
+
+  it("resumes an interrupted in-flight coordinator turn without duplicating it", async () => {
+    const paused = {
+      ...openRun(),
+      gate: "paused" as const,
+      pauseReason: "Coordinator needs human input",
+      operations: [
+        {
+          id: "turn-1",
+          prompt: "Continue",
+          status: "acknowledged" as const,
+          createdAt: "2026-08-30T10:00:00Z",
+          updatedAt: "2026-08-30T10:01:00Z",
+        },
+      ],
+    };
+    const testHost = host([paused]);
+
+    const resumed = await testHost.invokeAction("resume-run", {
+      input: { runId: "run-1", expectedPolicyRevision: 3 },
+    });
+
+    expect(resumed.orchestrationEffects).toEqual([
+      {
+        type: "human_command",
+        command: "resume",
+        runId: "run-1",
+        expectedPolicyRevision: 3,
+      },
     ]);
   });
 

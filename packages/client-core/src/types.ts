@@ -600,6 +600,12 @@ export type ThreadSummary = {
   origin?:
     | { kind: "scheduled_task"; task_id: string; title: string }
     | { kind: "automation"; automation_id: string; name: string }
+    | {
+        kind: "mission_worker";
+        run_id: string;
+        worker_id: string;
+        title: string;
+      }
     | null;
   status: ThreadStatus;
   updated_at: string;

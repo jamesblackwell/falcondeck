@@ -2446,6 +2446,7 @@ async fn extension_bridge_capability_is_opaque_task_bound_and_expires() {
     app.inner.extension_bridge_capabilities.lock().await.insert(
         "valid-capability".to_string(),
         super::ExtensionBridgeCapability {
+            provider: AgentProvider::CLAUDE,
             workspace_path: "/tmp/project".to_string(),
             thread_id: Some("thread-1".to_string()),
             expires_at: Utc::now() + Duration::minutes(5),
@@ -2454,6 +2455,7 @@ async fn extension_bridge_capability_is_opaque_task_bound_and_expires() {
     app.inner.extension_bridge_capabilities.lock().await.insert(
         "expired-capability".to_string(),
         super::ExtensionBridgeCapability {
+            provider: AgentProvider::CLAUDE,
             workspace_path: "/tmp/other".to_string(),
             thread_id: Some("thread-2".to_string()),
             expires_at: Utc::now() - Duration::minutes(1),
@@ -2477,6 +2479,53 @@ async fn extension_bridge_capability_is_opaque_task_bound_and_expires() {
         .expect("daemon-issued capability should resolve");
     assert_eq!(context.workspace_path, "/tmp/project");
     assert_eq!(context.thread_id.as_deref(), Some("thread-1"));
+}
+
+#[test]
+fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
+    let make_thread = |id: &str, provider: AgentProvider, status: ThreadStatus| ThreadSummary {
+        id: id.to_string(),
+        workspace_id: "workspace-1".to_string(),
+        title: id.to_string(),
+        provider,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    let idle = make_thread("idle", AgentProvider::CODEX, ThreadStatus::Idle);
+    let running = make_thread("running", AgentProvider::CODEX, ThreadStatus::Running);
+    let claude = make_thread("claude", AgentProvider::CLAUDE, ThreadStatus::Running);
+    let threads = [&idle, &running, &claude];
+
+    assert_eq!(
+        super::unambiguous_running_thread_id(threads.into_iter(), &AgentProvider::CODEX)
+            .as_deref(),
+        Some("running")
+    );
+
+    let second = make_thread("second", AgentProvider::CODEX, ThreadStatus::Running);
+    let ambiguous = [&running, &second];
+    assert!(
+        super::unambiguous_running_thread_id(ambiguous.into_iter(), &AgentProvider::CODEX)
+            .is_none()
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -85,6 +85,19 @@
         }
       },
       {
+        "id": "mission-delegate",
+        "title": "Delegate one Mission worker",
+        "description": "Delegate one independent, bounded assignment to a separate Codex worker task. At most three workers may be created and FalconDeck runs them serially.",
+        "inputSchema": {
+          "type": "object",
+          "required": ["assignment"],
+          "properties": {
+            "assignment": { "type": "string", "maxLength": 12000 }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
         "id": "mission-checkpoint",
         "title": "Checkpoint a FalconDeck mission",
         "description": "Persist meaningful Mission progress, request one bounded continuation, pause for human input, or propose evidence-backed completion for human acceptance.",
@@ -94,7 +107,7 @@
           "properties": {
             "disposition": {
               "type": "string",
-              "enum": ["continue_self", "needs_human", "proposing_completion"]
+              "enum": ["continue_self", "awaiting_workers", "needs_human", "proposing_completion"]
             },
             "summary": { "type": "string", "maxLength": 4000 },
             "nextAction": { "type": "string", "maxLength": 2000 },
