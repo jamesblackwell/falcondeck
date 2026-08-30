@@ -951,6 +951,7 @@ export default function HomeScreen() {
   }, []);
 
   const handleOpenDrawer = useCallback(() => {
+    triggerThreadSelectionHaptic();
     navigation.dispatch(DrawerActions.openDrawer());
   }, [navigation]);
 
