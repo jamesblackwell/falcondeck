@@ -64,6 +64,13 @@ export function SidebarDrawerContent({
     [snapshot?.extensions],
   );
 
+  // The drawer covers the whole screen, so destination actions must dismiss
+  // it explicitly. Navigating to the already-active app route is otherwise a
+  // no-op and leaves the newly selected conversation hidden underneath.
+  const handleClose = useCallback(() => {
+    navigation.dispatch(DrawerActions.closeDrawer());
+  }, [navigation]);
+
   const handleSelectThread = useCallback(
     (wId: string, tId: string) => {
       if (selectedWorkspaceId !== wId || selectedThreadId !== tId) {
@@ -71,8 +78,9 @@ export function SidebarDrawerContent({
       }
       useSessionStore.getState().selectThread(wId, tId);
       router.navigate("/(app)");
+      handleClose();
     },
-    [router, selectedThreadId, selectedWorkspaceId],
+    [handleClose, router, selectedThreadId, selectedWorkspaceId],
   );
 
   const handleNewThread = useCallback(
@@ -85,8 +93,9 @@ export function SidebarDrawerContent({
       }
       useSessionStore.getState().selectNewThread(wId);
       router.navigate("/(app)");
+      handleClose();
     },
-    [router, selectedThreadId, selectedWorkspaceId],
+    [handleClose, router, selectedThreadId, selectedWorkspaceId],
   );
 
   const handleNewChat = useCallback(async () => {
@@ -96,27 +105,24 @@ export function SidebarDrawerContent({
         ._callRpc<WorkspaceSummary>("chat.create", { create: true });
       useSessionStore.getState().selectNewThread(workspace.id);
       router.navigate("/(app)");
+      handleClose();
     } catch (error) {
       Alert.alert(
         "Couldn't create chat",
         error instanceof Error ? error.message : "The desktop could not create the chat folder.",
       );
     }
-  }, [router]);
+  }, [handleClose, router]);
 
   const handleOpenSettings = useCallback(() => {
     router.navigate("/(app)/settings");
-  }, [router]);
+    handleClose();
+  }, [handleClose, router]);
 
   const handleOpenAutomations = useCallback(() => {
     router.navigate("/(app)/automations" as Href);
-  }, [router]);
-
-  // The drawer covers the whole screen, so there is no scrim left to tap:
-  // closing it has to come from a control inside the sidebar.
-  const handleClose = useCallback(() => {
-    navigation.dispatch(DrawerActions.closeDrawer());
-  }, [navigation]);
+    handleClose();
+  }, [handleClose, router]);
 
   return (
     <SidebarFreeze isOpen={isOpen}>
