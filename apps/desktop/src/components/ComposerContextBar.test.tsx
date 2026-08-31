@@ -66,6 +66,49 @@ describe('ComposerContextBar', () => {
     expect(screen.getByRole('menuitemradio', { name: 'lucidpic' })).toBeInTheDocument()
   })
 
+  it('does not replay a handled project-menu request after the composer remounts', () => {
+    function RemountingContextBar() {
+      const [selectedWorkspace, setSelectedWorkspace] = React.useState(localWorkspace)
+      const [projectMenuRequestKey, setProjectMenuRequestKey] = React.useState(0)
+
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => setProjectMenuRequestKey((current) => current + 1)}
+          >
+            Request project menu
+          </button>
+          <ComposerContextBar
+            key={selectedWorkspace.id}
+            {...baseProps}
+            selectedWorkspace={selectedWorkspace}
+            onSelectWorkspace={(workspaceId) => {
+              const nextWorkspace = baseProps.workspaces.find(
+                (candidate) => candidate.id === workspaceId,
+              )
+              if (nextWorkspace) setSelectedWorkspace(nextWorkspace)
+            }}
+            projectMenuRequestKey={projectMenuRequestKey}
+          />
+        </>
+      )
+    }
+
+    render(<RemountingContextBar />)
+    fireEvent.click(screen.getByRole('button', { name: 'Request project menu' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'lucidpic' }))
+
+    expect(screen.getByRole('button', { name: 'Project' })).toHaveTextContent('lucidpic')
+    expect(screen.queryByRole('menuitemradio', { name: 'falcondeck' })).not.toBeInTheDocument()
+  })
+
+  it('does not open from a request key already present at mount time', () => {
+    render(<ComposerContextBar {...baseProps} projectMenuRequestKey={3} />)
+
+    expect(screen.queryByRole('menuitemradio', { name: 'lucidpic' })).not.toBeInTheDocument()
+  })
+
   it('selects a filtered project with the keyboard', () => {
     const onSelectWorkspace = vi.fn()
     const workspaces = Array.from({ length: 9 }, (_, index) =>
@@ -102,6 +145,9 @@ describe('ComposerContextBar', () => {
 
     expect(onSelectWorkspace).toHaveBeenCalledWith('ws-8')
     expect(screen.queryByRole('searchbox', { name: 'Search projects' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    expect(screen.getByRole('searchbox', { name: 'Search projects' })).toHaveValue('')
   })
 
   it('moves through project picker options with arrow, Home, and End keys', () => {
@@ -114,6 +160,9 @@ describe('ComposerContextBar', () => {
     const noProject = screen.getByRole('menuitem', { name: 'Don’t work in a project' })
 
     expect(falcondeck).toHaveFocus()
+    expect(falcondeck).toHaveClass('bg-interactive-selected')
+    expect(falcondeck).toHaveClass('focus-visible:bg-interactive-active')
+    expect(lucidpic).not.toHaveClass('bg-interactive-selected')
     fireEvent.keyDown(falcondeck, { key: 'ArrowDown' })
     expect(lucidpic).toHaveFocus()
     fireEvent.keyDown(lucidpic, { key: 'End' })

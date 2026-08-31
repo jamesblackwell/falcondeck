@@ -79,7 +79,7 @@ const CHIP_CLASS =
   'fd-focus inline-flex h-7 max-w-56 items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-primary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-primary'
 
 const MENU_ITEM_CLASS =
-  'fd-focus-fill flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2 focus-visible:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60'
+  'fd-focus-fill flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-60'
 
 function projectName(path: string) {
   return path.split('/').filter(Boolean).pop() || path
@@ -252,8 +252,14 @@ function ProjectMenu({
   const [remotePath, setRemotePath] = useState('')
   const [remoteError, setRemoteError] = useState<string | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  // The composer remounts when its project changes, while the host-owned
+  // request counter survives. Seed from the mount-time value so an old
+  // shortcut request cannot reopen this menu after a selection or New Thread.
+  const handledOpenRequestKeyRef = useRef(openRequestKey)
 
   useEffect(() => {
+    if (openRequestKey === handledOpenRequestKeyRef.current) return
+    handledOpenRequestKeyRef.current = openRequestKey
     if (openRequestKey > 0 && !disabled) setOpen(true)
   }, [disabled, openRequestKey])
 
@@ -389,8 +395,7 @@ function ProjectMenu({
     setRemoteError(null)
     try {
       await onAddRemoteProject(hostId, path)
-      setOpen(false)
-      resetAddFlow()
+      handleOpenChange(false)
     } catch (error) {
       setRemoteError(error instanceof Error ? error.message : 'Failed to add project')
     }
@@ -460,15 +465,18 @@ function ProjectMenu({
                       data-project-workspace
                       onClick={() => {
                         onSelectWorkspace(workspace.id)
-                        setOpen(false)
+                        handleOpenChange(false)
                       }}
-                      className={MENU_ITEM_CLASS}
+                      className={cn(
+                        MENU_ITEM_CLASS,
+                        selected && 'bg-interactive-selected',
+                      )}
                     >
                       <Icon
                         aria-hidden="true"
                         className={cn(
                           'h-3.5 w-3.5 shrink-0',
-                          host ? 'text-accent' : 'text-fg-muted',
+                          host || selected ? 'text-accent' : 'text-fg-muted',
                           host && !host.connected && 'opacity-60',
                         )}
                       />
@@ -486,7 +494,7 @@ function ProjectMenu({
                         </span>
                       </span>
                       {selected ? (
-                        <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                        <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-accent" />
                       ) : null}
                     </button>
                   )
@@ -526,7 +534,7 @@ function ProjectMenu({
                       data-project-menu-item
                       onClick={() => {
                         void onAddLocalProject()
-                        setOpen(false)
+                        handleOpenChange(false)
                       }}
                       className={MENU_ITEM_CLASS}
                     >
@@ -545,7 +553,7 @@ function ProjectMenu({
                       data-project-menu-item
                       onClick={() => {
                         void onNewChat()
-                        setOpen(false)
+                        handleOpenChange(false)
                       }}
                       className={MENU_ITEM_CLASS}
                     >

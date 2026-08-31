@@ -42,7 +42,7 @@ export function OptionFilterField({
         placeholder="Search…"
         autoComplete="off"
         spellCheck={false}
-        className="h-8 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 py-1 pl-8 pr-8 text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted focus:border-border-emphasis"
+        className="fd-focus h-8 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 py-1 pl-8 pr-8 text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted focus:border-border-emphasis"
       />
       {value ? (
         <button
