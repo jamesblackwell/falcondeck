@@ -690,6 +690,14 @@ impl ExtensionRegistry {
             .flatten()
             .cloned()
             .collect();
+        let resolved_error = format!("{permission} permission is not granted");
+        if granted
+            && summary.enabled
+            && summary.last_error.as_deref() == Some(resolved_error.as_str())
+        {
+            summary.status = ExtensionStatus::Active;
+            summary.last_error = None;
+        }
         Ok(summary.clone())
     }
 
@@ -2110,6 +2118,49 @@ mod tests {
                 .expect("Mini Zen should restore after revocation")
                 .granted_permissions
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn granting_a_permission_clears_only_its_matching_denial_error() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
+        registry.restore().await.expect("registry should restore");
+        registry
+            .update_enabled("falcondeck.mini-zen", true)
+            .await
+            .expect("Mini Zen should enable");
+
+        registry
+            .mark_error(
+                "falcondeck.mini-zen",
+                "threads:read permission is not granted",
+            )
+            .await
+            .expect("permission denial should be recorded");
+        let recovered = registry
+            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .await
+            .expect("matching permission should grant");
+        assert_eq!(recovered.status, ExtensionStatus::Active);
+        assert_eq!(recovered.last_error, None);
+
+        registry
+            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, false)
+            .await
+            .expect("permission should revoke");
+        registry
+            .mark_error("falcondeck.mini-zen", "extension host crashed")
+            .await
+            .expect("unrelated failure should be recorded");
+        let still_failed = registry
+            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .await
+            .expect("permission should grant without hiding another failure");
+        assert_eq!(still_failed.status, ExtensionStatus::Error);
+        assert_eq!(
+            still_failed.last_error.as_deref(),
+            Some("extension host crashed")
         );
     }
 
