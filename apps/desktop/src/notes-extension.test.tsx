@@ -9,7 +9,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { collectExtensionApp } from "@falcondeck/extension-sdk/app";
 
-import notesApp from "../../../extensions/official/notes/app";
+import notesApp, {
+  friendlyNoteDate,
+} from "../../../extensions/official/notes/app";
 
 type StoredNote = {
   id: string;
@@ -39,8 +41,9 @@ function libraryStub(initial: StoredNote[]) {
       body?: string;
     };
     if (request.operation === "create") {
+      const body = request.body ?? "";
       notes = [
-        note(`note-${notes.length + 1}`, request.body ?? "", "New note"),
+        note(`note-${notes.length + 1}`, body, body.trim() || "New note"),
         ...notes,
       ];
     } else if (request.operation === "save") {
@@ -71,6 +74,15 @@ function renderNotes(invokeAction: ReturnType<typeof libraryStub>) {
 }
 
 describe("Notes trusted frontend", () => {
+  it("formats friendly note dates with ordinal suffixes", () => {
+    expect(friendlyNoteDate(new Date(2026, 7, 31))).toBe(
+      "Monday 31st August",
+    );
+    expect(friendlyNoteDate(new Date(2026, 0, 11))).toBe(
+      "Sunday 11th January",
+    );
+  });
+
   it("registers a Notes panel", () => {
     const registration = collectExtensionApp(notesApp);
     expect(registration.extensionId).toBe("falcondeck.notes");
@@ -100,19 +112,24 @@ describe("Notes trusted frontend", () => {
     );
   });
 
-  it("creates a note and focuses the empty editor", async () => {
+  it("creates a note with today's friendly date and focuses after it", async () => {
     const invokeAction = libraryStub([note("note-1", "Meeting", "Meeting")]);
     renderNotes(invokeAction);
 
     await screen.findByRole("textbox", { name: "Note" });
     fireEvent.click(screen.getByRole("button", { name: "New note" }));
 
+    const body = `${friendlyNoteDate(new Date())}\n\n`;
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: "Note" })).toHaveValue(""),
+      expect(screen.getByRole("textbox", { name: "Note" })).toHaveValue(body),
     );
     expect(invokeAction).toHaveBeenCalledWith("notes", {
       operation: "create",
+      body,
     });
+    const editor = screen.getByRole("textbox", { name: "Note" });
+    expect(editor).toHaveFocus();
+    expect((editor as HTMLTextAreaElement).selectionStart).toBe(body.length);
   });
 
   it("deletes a note and selects what remains", async () => {

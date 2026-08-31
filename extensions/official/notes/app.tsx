@@ -14,6 +14,30 @@ import {
 
 const SAVE_DELAY_MS = 400;
 
+const WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+] as const;
+
 type Note = {
   id: string;
   title: string;
@@ -21,6 +45,23 @@ type Note = {
   createdAt: string;
   updatedAt: string;
 };
+
+/** A readable English date for the first line of a fresh note. */
+export function friendlyNoteDate(date: Date): string {
+  const day = date.getDate();
+  const tens = day % 100;
+  const suffix =
+    tens >= 11 && tens <= 13
+      ? "th"
+      : day % 10 === 1
+        ? "st"
+        : day % 10 === 2
+          ? "nd"
+          : day % 10 === 3
+            ? "rd"
+            : "th";
+  return `${WEEKDAYS[date.getDay()]} ${day}${suffix} ${MONTHS[date.getMonth()]}`;
+}
 
 function parseNotes(value: unknown): Note[] {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -385,7 +426,8 @@ function Notes({ invokeAction }: ExtensionAppPanelProps) {
   const createNote = useCallback(async () => {
     await flushSave();
     try {
-      const saved = await run({ operation: "create" });
+      const body = `${friendlyNoteDate(new Date())}\n\n`;
+      const saved = await run({ operation: "create", body });
       const known = new Set(notes.map((note) => note.id));
       const created =
         saved.find((note) => !known.has(note.id)) ?? saved[0] ?? null;
@@ -396,7 +438,12 @@ function Notes({ invokeAction }: ExtensionAppPanelProps) {
       setMode("write");
       setQuery("");
       setError(null);
-      window.setTimeout(() => editorRef.current?.focus(), 0);
+      window.setTimeout(() => {
+        const editor = editorRef.current;
+        if (!editor) return;
+        editor.focus();
+        editor.setSelectionRange(editor.value.length, editor.value.length);
+      }, 0);
     } catch (reason) {
       setError(describe(reason, "Could not create a note"));
     }
