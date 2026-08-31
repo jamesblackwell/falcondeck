@@ -4,16 +4,17 @@ import {
   ActivityDiamond,
   Badge,
   Button,
-  Card,
-
-  SettingsPage,
-
-  SettingsPageHeader,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
   Input,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  SettingList,
+  SettingsPage,
+  SettingsPageHeader,
+  SettingsSection,
+  Switch,
   cn,
 } from '@falcondeck/ui'
 import { ClipboardPaste, Globe, Plug, Plus, Trash2, X } from 'lucide-react'
@@ -223,6 +224,26 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
     return overview.data.merged
   }, [overview, isWorkspaceScope, ready])
 
+  const selectScope = useCallback((nextScope: string) => {
+    setScope(nextScope)
+    setIsAdding(false)
+    setIsImporting(false)
+  }, [])
+
+  const toggleImport = useCallback(() => {
+    setIsImporting((open) => {
+      if (!open) setIsAdding(false)
+      return !open
+    })
+  }, [])
+
+  const toggleAdd = useCallback(() => {
+    setIsAdding((open) => {
+      if (!open) setIsImporting(false)
+      return !open
+    })
+  }, [])
+
   return (
     <SettingsPage>
       <SettingsPageHeader
@@ -230,109 +251,124 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
         description="MCP servers give your agents tools. Configure a server once and every agent — Claude, Codex, and any custom provider — can use it."
       />
 
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle>MCP servers</CardTitle>
-            <CardDescription>
-              {isWorkspaceScope
-                ? 'Workspace entries override global entries with the same name.'
-                : 'Global servers apply to every workspace on this machine.'}
-            </CardDescription>
-          </div>
-          <div className="flex items-center gap-2">
+      <SettingsSection
+        title="MCP servers"
+        description={
+          isWorkspaceScope
+            ? 'Project entries override global entries with the same name.'
+            : 'Global servers are available to every project on this machine.'
+        }
+        actions={
+          <>
             <Button
               size="sm"
               variant="secondary"
               disabled={!ready}
-              onClick={() => setIsImporting((value) => !value)}
+              onClick={toggleImport}
             >
-              <ClipboardPaste className="h-4 w-4" />
-              Paste JSON
+              {isImporting ? (
+                <X className="h-4 w-4" />
+              ) : (
+                <ClipboardPaste className="h-4 w-4" />
+              )}
+              {isImporting ? 'Close' : 'Paste JSON'}
             </Button>
-            <Button size="sm" disabled={!ready} onClick={() => setIsAdding((value) => !value)}>
+            <Button size="sm" disabled={!ready} onClick={toggleAdd}>
               {isAdding ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               {isAdding ? 'Close' : 'Add server'}
             </Button>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {projectWorkspaces.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-2">
-              <ScopeChip
-                active={!isWorkspaceScope}
-                label="Global"
-                onClick={() => setScope('global')}
-              />
-              {projectWorkspaces.map((workspace) => (
-                <ScopeChip
-                  key={workspace.id}
-                  active={scope === workspace.id}
-                  label={workspaceLabel(workspace.path)}
-                  onClick={() => setScope(workspace.id)}
-                />
-              ))}
-            </div>
-          ) : null}
-
-          {isImporting ? (
-            <ImportJsonForm
-              onCancel={() => setIsImporting(false)}
-              onImport={async (servers) => {
-                const ok = await writeScope(
-                  isWorkspaceScope ? 'workspace' : 'global',
-                  (current) => ({ ...current, ...servers }),
-                )
-                if (ok) {
-                  setIsImporting(false)
-                  onToast({
-                    variant: 'success',
-                    title: `Imported ${Object.keys(servers).length} server${Object.keys(servers).length === 1 ? '' : 's'}`,
-                  })
-                }
-              }}
-            />
-          ) : null}
-
-          {isAdding ? (
-            <AddConnectorForm
-              onCancel={() => setIsAdding(false)}
-              onAdd={async (name, entry) => {
-                const ok = await writeScope(
-                  isWorkspaceScope ? 'workspace' : 'global',
-                  (current) => ({ ...current, [name]: entry }),
-                )
-                if (ok) {
-                  setIsAdding(false)
-                  onToast({ variant: 'success', title: `Added ${name}` })
-                }
-              }}
-            />
-          ) : null}
-
-          {isLoading && !ready ? (
-            <div className="flex items-center gap-2 px-2 py-6 text-[length:var(--fd-text-sm)] text-fg-muted">
-              <ActivityDiamond size="md" /> Loading connectors…
-            </div>
-          ) : loadError ? (
-            <div className="flex items-center gap-3 px-2 py-4">
-              <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
-              <Button size="sm" variant="secondary" onClick={() => void load()}>
-                Retry
-              </Button>
-            </div>
-          ) : rows.length === 0 && !isAdding && !isImporting ? (
-            <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
-              <Plug className="h-6 w-6 text-fg-muted" />
-              <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-                No MCP servers yet. Add one, or paste a config from any server&apos;s README.
+          </>
+        }
+        contentClassName="space-y-4"
+      >
+        {projectWorkspaces.length > 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[var(--fd-radius-lg)] bg-surface-2 px-3 py-2.5">
+            <div className="min-w-0">
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                Configuration scope
+              </p>
+              <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                Choose whether you are editing every project or just one.
               </p>
             </div>
-          ) : (
-            rows.map((row) => (
+            <Select value={scope} onValueChange={selectScope}>
+              <SelectTrigger
+                aria-label="Configuration scope"
+                className="w-full text-fg-primary sm:w-64"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent label="Configuration scope">
+                <SelectItem value="global" description="Available to every local project">
+                  Global
+                </SelectItem>
+                {projectWorkspaces.map((workspace) => (
+                  <SelectItem
+                    key={workspace.id}
+                    value={workspace.id}
+                    description={workspace.path}
+                  >
+                    {workspaceLabel(workspace.path)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
+
+        {isImporting ? (
+          <ImportJsonForm
+            onCancel={() => setIsImporting(false)}
+            onImport={async (servers) => {
+              const ok = await writeScope(
+                isWorkspaceScope ? 'workspace' : 'global',
+                (current) => ({ ...current, ...servers }),
+              )
+              if (ok) {
+                setIsImporting(false)
+                onToast({
+                  variant: 'success',
+                  title: `Imported ${Object.keys(servers).length} server${Object.keys(servers).length === 1 ? '' : 's'}`,
+                })
+              }
+            }}
+          />
+        ) : null}
+
+        {isAdding ? (
+          <AddConnectorForm
+            onCancel={() => setIsAdding(false)}
+            onAdd={async (name, entry) => {
+              const ok = await writeScope(
+                isWorkspaceScope ? 'workspace' : 'global',
+                (current) => ({ ...current, [name]: entry }),
+              )
+              if (ok) {
+                setIsAdding(false)
+                onToast({ variant: 'success', title: `Added ${name}` })
+              }
+            }}
+          />
+        ) : null}
+
+        {isLoading && !ready ? (
+          <div className="flex items-center gap-2 px-2 py-6 text-[length:var(--fd-text-sm)] text-fg-muted">
+            <ActivityDiamond size="md" /> Loading connectors…
+          </div>
+        ) : loadError ? (
+          <div className="flex items-center gap-3 px-2 py-4">
+            <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+            <Button size="sm" variant="secondary" onClick={() => void load()}>
+              Retry
+            </Button>
+          </div>
+        ) : rows.length > 0 ? (
+          <SettingList>
+            {rows.map((row) => (
               <ConnectorRow
                 key={`${row.scope}:${row.name}`}
                 row={row}
+                showScope={isWorkspaceScope}
                 disabled={isWriting}
                 onToggle={() => {
                   const { name, scope: rowScope, ...entry } = row
@@ -364,21 +400,28 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
                   })
                 }}
               />
-            ))
-          )}
-        </CardContent>
-      </Card>
+            ))}
+          </SettingList>
+        ) : !isAdding && !isImporting ? (
+          <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
+            <Plug className="h-6 w-6 text-fg-muted" />
+            <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+              No MCP servers yet. Add one, or paste a config from any server&apos;s README.
+            </p>
+          </div>
+        ) : null}
+      </SettingsSection>
 
-      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-        Stored in <code>~/.falcondeck/connectors.json</code> and{' '}
-        <code>&lt;workspace&gt;/.falcondeck/connectors.json</code>. Changes apply on the next turn —
-        no restart needed. See docs/CONNECTORS.md for the format.
+      <p className="max-w-[72ch] text-[length:var(--fd-text-xs)] leading-relaxed text-fg-muted">
+        Changes apply on the next turn — no restart needed. Advanced config lives in{' '}
+        <code>~/.falcondeck/connectors.json</code> globally and{' '}
+        <code>.falcondeck/connectors.json</code> inside a project.
       </p>
     </SettingsPage>
   )
 }
 
-function ScopeChip({
+function ModeChip({
   active,
   label,
   onClick,
@@ -390,12 +433,13 @@ function ScopeChip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={cn(
-        'rounded-full border px-3 py-1 text-[length:var(--fd-text-xs)] transition-colors',
+        'fd-focus rounded-[var(--fd-radius-md)] px-3 py-1.5 text-[length:var(--fd-text-xs)] font-medium transition-colors',
         active
-          ? 'border-accent bg-accent/10 text-accent'
-          : 'border-border-subtle text-fg-secondary hover:border-border-emphasis',
+          ? 'bg-surface-3 text-fg-primary'
+          : 'text-fg-muted hover:bg-surface-2 hover:text-fg-primary',
       )}
     >
       {label}
@@ -405,69 +449,61 @@ function ScopeChip({
 
 function ConnectorRow({
   row,
+  showScope = false,
   disabled = false,
   onToggle,
   onRemove,
 }: {
   row: ConnectorEntry & { name: string; scope: 'global' | 'workspace' }
+  showScope?: boolean
   disabled?: boolean
   onToggle: () => void
   onRemove: () => void
 }) {
   const enabled = row.enabled !== false
   return (
-    <div className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3">
-      {row.url ? (
-        <Globe className="h-4 w-4 shrink-0 text-fg-muted" />
-      ) : (
-        <Plug className="h-4 w-4 shrink-0 text-fg-muted" />
-      )}
+    <div className="flex min-w-0 items-center gap-3 px-5 py-3.5">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] bg-surface-3 text-fg-muted">
+        {row.url ? <Globe className="h-4 w-4" /> : <Plug className="h-4 w-4" />}
+      </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
             {row.name}
           </span>
-          <Badge variant={row.scope === 'workspace' ? 'info' : 'default'}>
-            {row.scope === 'workspace' ? 'Workspace' : 'Global'}
-          </Badge>
+          {showScope ? (
+            <Badge variant={row.scope === 'workspace' ? 'info' : 'default'}>
+              {row.scope === 'workspace' ? 'Project' : 'Global'}
+            </Badge>
+          ) : null}
           {row.providers && row.providers.length > 0 ? (
             <span className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
               {row.providers.join(', ')} only
             </span>
           ) : null}
         </div>
-        <p className="truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+        <p className="mt-0.5 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
           {entrySummary(row)}
         </p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={enabled}
-        aria-label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
-        disabled={disabled}
-        onClick={onToggle}
-        className={cn(
-          'relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50',
-          enabled ? 'bg-accent' : 'bg-surface-4',
-        )}
-      >
-        <span
-          className={cn(
-            'absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform',
-            enabled ? 'translate-x-4' : 'translate-x-0.5',
-          )}
+      <div className="flex shrink-0 items-center gap-1">
+        <Switch
+          checked={enabled}
+          onCheckedChange={onToggle}
+          label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
+          disabled={disabled}
         />
-      </button>
-      <Button
-        size="icon"
-        variant="ghost"
-        aria-label={`Remove ${row.name}`}
-        disabled={disabled}
-        onClick={onRemove}
-      >
-        <Trash2 className="h-4 w-4" />
-      </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          aria-label={`Remove ${row.name}`}
+          disabled={disabled}
+          onClick={onRemove}
+          className="text-fg-muted"
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   )
 }
@@ -550,8 +586,8 @@ function AddConnectorForm({
   return (
     <div className="space-y-3 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
       <div className="flex items-center gap-2">
-        <ScopeChip active={mode === 'command'} label="Command" onClick={() => setMode('command')} />
-        <ScopeChip active={mode === 'url'} label="URL" onClick={() => setMode('url')} />
+        <ModeChip active={mode === 'command'} label="Command" onClick={() => setMode('command')} />
+        <ModeChip active={mode === 'url'} label="URL" onClick={() => setMode('url')} />
       </div>
       <Input
         aria-label="Connector name"

@@ -1,7 +1,7 @@
 /* Standalone settings fixture: `npm run dev` → /settings-qa.html.
    Renders the settings shell with stubbed props so page layout, hierarchy and
    spacing can be checked without launching the app or a daemon.
-   `?section=speech|general|appearance|keyboard` picks the panel,
+   `?section=speech|general|appearance|keyboard|connectors` picks the panel,
    `?theme=light|dark` the mode, `?baseUrl=` points panels at a live daemon. */
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -9,6 +9,7 @@ import { createRoot } from "react-dom/client";
 import { initAppearance, updateAppearance } from "@falcondeck/ui";
 
 import { AppearanceSettingsPanel } from "./components/settings/AppearanceSettingsPanel";
+import { ConnectorsPanel } from "./components/settings/ConnectorsPanel";
 import { GeneralSettingsPanel } from "./components/settings/GeneralSettingsPanel";
 import { KeyboardShortcutsPanel } from "./components/settings/KeyboardShortcutsPanel";
 import { SettingsSidebar } from "./components/settings/SettingsSidebar";
@@ -49,6 +50,21 @@ const UPDATER = {
   lastTrigger: null,
 };
 
+const CONNECTOR_WORKSPACES = [
+  "falcondeck",
+  "James",
+  "lucidpic",
+  "miner",
+  "penta-quest",
+  "quizgecko",
+  "runpod-comfyui-workstation",
+  "testsetgo",
+].map((name) => ({
+  id: `workspace-${name}`,
+  path: `/Users/dev/${name}`,
+  kind: "project" as const,
+}));
+
 export function Fixture() {
   const [section, setSection] = useState<SettingsSectionId>(
     (params.get("section") as SettingsSectionId | null) ?? "speech",
@@ -78,6 +94,12 @@ export function Fixture() {
               onDownloadUpdate={() => {}}
               onRestartToInstallUpdate={() => {}}
               onShowOnboardingAtNextLaunch={() => {}}
+            />
+          ) : section === "connectors" ? (
+            <ConnectorsPanel
+              baseUrl={baseUrl}
+              workspaces={CONNECTOR_WORKSPACES}
+              onToast={() => {}}
             />
           ) : (
             <SpeechSettingsPanel baseUrl={baseUrl} onToast={() => {}} />

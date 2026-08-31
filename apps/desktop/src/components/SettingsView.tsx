@@ -27,8 +27,7 @@ import { UsagePanel } from "./settings/UsagePanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
 
 export type SettingsViewProps = {
-  /** Section shown when the view mounts; deep-links like the composer's
-   * connectors chip land directly on their panel. */
+  /** Section shown when the view mounts so app-level deep links can land on a panel. */
   initialSection?: SettingsSectionId;
   /** Changes for every deep-link request, including repeats of the same section. */
   sectionRequestKey?: number;

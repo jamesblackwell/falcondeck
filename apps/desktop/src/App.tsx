@@ -1125,11 +1125,6 @@ function AppInner() {
       null,
     [selectedWorkspaceId, viewSnapshot?.workspaces],
   );
-  // Enabled MCP servers usable by the selected local workspace's agents; feeds
-  // the composer's tools chip. Re-fetched when settings close so panel edits
-  // show up. Depends on scalar keys only — object/map identities churn per
-  // render and would turn every keystroke into a connector fetch.
-  const [connectorCount, setConnectorCount] = useState(0);
   const isRemoteWorkspaceSelected = workspaceHostIndex.has(
     selectedWorkspaceId ?? "",
   );
@@ -1210,56 +1205,6 @@ function AppInner() {
     },
     [toast],
   );
-  const workspaceProviderIds = (selectedWorkspace?.agents ?? [])
-    .map((agent) => agent.provider)
-    .sort()
-    .join(",");
-  useEffect(() => {
-    if (!baseUrl || !selectedWorkspaceId || isRemoteWorkspaceSelected) {
-      setConnectorCount(0);
-      return;
-    }
-    if (isSettingsOpen) return;
-    const workspaceProviders = new Set(
-      workspaceProviderIds.split(",").filter(Boolean),
-    );
-    let cancelled = false;
-    void fetch(
-      `${baseUrl}/api/connectors?workspace_id=${encodeURIComponent(selectedWorkspaceId)}`,
-    )
-      .then(async (response) => (response.ok ? response.json() : null))
-      .then(
-        (
-          overview: {
-            merged?: Array<{ enabled?: boolean; providers?: string[] }>;
-          } | null,
-        ) => {
-          if (cancelled) return;
-          setConnectorCount(
-            overview?.merged?.filter(
-              (entry) =>
-                entry.enabled !== false &&
-                (!entry.providers?.length ||
-                  entry.providers.some((provider) =>
-                    workspaceProviders.has(provider),
-                  )),
-            ).length ?? 0,
-          );
-        },
-      )
-      .catch(() => {
-        if (!cancelled) setConnectorCount(0);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    baseUrl,
-    selectedWorkspaceId,
-    isRemoteWorkspaceSelected,
-    isSettingsOpen,
-    workspaceProviderIds,
-  ]);
   const selectedThread = useMemo(
     () =>
       threadForSelection(
@@ -6148,15 +6093,6 @@ function AppInner() {
                   selectedThread?.status === "running" ||
                   selectedThread?.status === "waiting_for_input",
                 isStopping,
-                connectorCount,
-                onConnectorsClick: () => {
-                  setSettingsSection("connectors");
-                  setSettingsRequestKey((current) => current + 1);
-                  setIsSettingsOpen(true);
-                  setIsScheduledOpen(false);
-                  setIsActivityOpen(false);
-                  setIsExtensionsOpen(false);
-                },
                 // Goals live in the composer's plus menu, not the header.
                 goal:
                   selectedWorkspace && activeCapabilities.supports_goals

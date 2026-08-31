@@ -4,7 +4,6 @@ import {
   ChevronLeft,
   ImagePlus,
   Mic,
-  Plug,
   Plus,
   Quote,
   Send,
@@ -198,9 +197,6 @@ export type PromptInputProps = {
   /** True while an interrupt request is in flight. */
   isStopping?: boolean;
   compact?: boolean;
-  /** Enabled MCP servers for this workspace; renders a tools chip when > 0. */
-  connectorCount?: number;
-  onConnectorsClick?: () => void;
   /**
    * Thread goal wiring. When passed, the plus menu gains a Goal entry that
    * opens the set/clear surface in place. Hosts may create the thread lazily
@@ -295,8 +291,6 @@ export const PromptInput = memo(function PromptInput({
   isRunning = false,
   isStopping = false,
   compact = false,
-  connectorCount = 0,
-  onConnectorsClick,
   goal,
   quotedSelections = EMPTY_QUOTED_SELECTIONS,
   onRemoveQuotedSelection,
@@ -1394,23 +1388,6 @@ export const PromptInput = memo(function PromptInput({
                 {...optionMenuProps("model")}
               />
             </>
-          ) : null}
-
-          {!compact && connectorCount > 0 ? (
-            <button
-              type="button"
-              onClick={onConnectorsClick}
-              disabled={!onConnectorsClick}
-              title={`${connectorCount} MCP server${connectorCount === 1 ? "" : "s"} available to agents in this workspace`}
-              className={cn(
-                "flex items-center gap-1 rounded-full border border-border-subtle px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted",
-                onConnectorsClick &&
-                  "hover:border-border-emphasis hover:text-fg-secondary",
-              )}
-            >
-              <Plug className="h-3 w-3" aria-hidden="true" />
-              {connectorCount}
-            </button>
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">
