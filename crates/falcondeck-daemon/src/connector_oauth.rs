@@ -226,6 +226,17 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String
         .map_err(|error| format!("failed to parse {url}: {error}"))
 }
 
+fn authorization_server_metadata_url(issuer: &str) -> Result<String, String> {
+    let parsed = issuer
+        .parse::<reqwest::Url>()
+        .map_err(|error| format!("invalid OAuth issuer URL: {error}"))?;
+    let origin = origin_of(issuer)?;
+    let issuer_path = parsed.path().trim_end_matches('/');
+    Ok(format!(
+        "{origin}/.well-known/oauth-authorization-server{issuer_path}"
+    ))
+}
+
 async fn discover(mcp_url: &str) -> Result<AuthorizationServerMetadata, String> {
     let origin = origin_of(mcp_url)?;
     let issuer = match fetch_json::<ProtectedResourceMetadata>(&format!(
@@ -240,10 +251,7 @@ async fn discover(mcp_url: &str) -> Result<AuthorizationServerMetadata, String> 
             .unwrap_or_else(|| origin.clone()),
         Err(_) => origin.clone(),
     };
-    fetch_json::<AuthorizationServerMetadata>(&format!(
-        "{issuer}/.well-known/oauth-authorization-server"
-    ))
-    .await
+    fetch_json::<AuthorizationServerMetadata>(&authorization_server_metadata_url(&issuer)?).await
 }
 
 /// Starts a browser OAuth login for a catalog server.
@@ -487,6 +495,18 @@ mod tests {
         assert_eq!(
             pkce_challenge(verifier),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn authorization_server_metadata_url_uses_rfc_8414_path_insertion() {
+        assert_eq!(
+            authorization_server_metadata_url("https://access.stripe.com/mcp").unwrap(),
+            "https://access.stripe.com/.well-known/oauth-authorization-server/mcp"
+        );
+        assert_eq!(
+            authorization_server_metadata_url("https://example.com").unwrap(),
+            "https://example.com/.well-known/oauth-authorization-server"
         );
     }
 
