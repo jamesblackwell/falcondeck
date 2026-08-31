@@ -27,6 +27,8 @@ const MAX_SCOPE_KIND_CHARS: usize = 64;
 const MAX_SCOPE_ID_CHARS: usize = 512;
 const LEGACY_SCRATCH_PAD_ID: &str = "falcondeck.scratch-pad";
 const NOTES_ID: &str = "falcondeck.notes";
+const MISSIONS_ID: &str = "falcondeck.missions";
+const MISSIONS_DRAFT_TOOL_ID: &str = "draft-mission";
 const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -504,6 +506,19 @@ impl ExtensionRegistry {
         tools
     }
 
+    /// Mission instructions should enter an agent's context only when the
+    /// extension can actually draft and coordinate. This prevents a stale
+    /// prompt from advertising a feature whose tool or required projections
+    /// the user has disabled.
+    pub(super) fn missions_agent_context_available(&self) -> bool {
+        self.has_grant(MISSIONS_ID, THREADS_READ_PERMISSION)
+            && self.has_grant(MISSIONS_ID, AGENT_TOOLS_PERMISSION)
+            && self.has_grant(MISSIONS_ID, ORCHESTRATION_PERMISSION)
+            && self.agent_tools().iter().any(|tool| {
+                tool.extension_id == MISSIONS_ID && tool.tool_id == MISSIONS_DRAFT_TOOL_ID
+            })
+    }
+
     /// Resolves one MCP tool name to its package, failing closed when the
     /// extension is unknown, disabled, ungranted, or never declared the tool.
     pub(super) fn tool_package(
@@ -889,6 +904,34 @@ impl ExtensionRegistry {
 
     async fn persist_state(&self, state: &PersistedExtensionState) -> Result<(), DaemonError> {
         write_atomically(&self.state_path, serde_json::to_vec_pretty(state)?).await
+    }
+}
+
+impl super::AppState {
+    /// Adds extension-owned instructions to the ordinary FalconDeck agent
+    /// context. Provider spawn paths use this wrapper so Codex, Claude, and
+    /// ACP harnesses receive the same Mission trigger semantics.
+    pub(crate) async fn agent_context_instructions_with_extensions(
+        &self,
+        provider: &falcondeck_core::AgentProvider,
+    ) -> Option<String> {
+        let mut instructions = self.agent_context_instructions(provider).await?;
+        if !self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .missions_agent_context_available()
+        {
+            return Some(instructions);
+        }
+
+        let skill = crate::mission_context::stage_skill(&self.inner.state_path);
+        if let Err(error) = &skill {
+            tracing::warn!(%error, "failed to stage FalconDeck Missions skill");
+        }
+        crate::mission_context::append_instructions(&mut instructions, skill.as_deref().ok());
+        Some(instructions)
     }
 }
 
@@ -2235,6 +2278,36 @@ mod tests {
         assert_eq!(tools.len(), 1, "only follow-ups publishes a tool today");
         assert_eq!(tools[0].name, FOLLOW_UPS_TOOL);
         assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_ok());
+    }
+
+    #[tokio::test]
+    async fn mission_agent_context_requires_the_complete_ready_toolset() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
+        registry.restore().await.expect("registry should restore");
+        assert!(!registry.missions_agent_context_available());
+
+        registry
+            .update_enabled(MISSIONS_ID, true)
+            .await
+            .expect("Missions should enable");
+        for permission in [
+            THREADS_READ_PERMISSION,
+            AGENT_TOOLS_PERMISSION,
+            ORCHESTRATION_PERMISSION,
+        ] {
+            registry
+                .update_permission(MISSIONS_ID, permission, true)
+                .await
+                .expect("Missions permission should grant");
+        }
+        assert!(registry.missions_agent_context_available());
+
+        registry
+            .update_permission(MISSIONS_ID, THREADS_READ_PERMISSION, false)
+            .await
+            .expect("thread permission should revoke");
+        assert!(!registry.missions_agent_context_available());
     }
 
     #[tokio::test]

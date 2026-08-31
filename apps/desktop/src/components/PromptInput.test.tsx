@@ -645,6 +645,42 @@ describe("PromptInput", () => {
     ).toBeInTheDocument();
   });
 
+  it("offers /mission only when Missions is ready and expands clear agent intent", () => {
+    const onValueChange = vi.fn();
+    const { rerender } = render(
+      <PromptInput
+        {...promptInputProps}
+        value="/mission"
+        onValueChange={onValueChange}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    textarea.setSelectionRange(8, 8);
+    fireEvent.click(textarea);
+    expect(screen.queryByRole("button", { name: /mission/i })).toBeNull();
+
+    rerender(
+      <PromptInput
+        {...promptInputProps}
+        value="/mission"
+        onValueChange={onValueChange}
+        missionCommandAvailable
+      />,
+    );
+    textarea.setSelectionRange(8, 8);
+    fireEvent.click(textarea);
+
+    const command = screen.getByRole("button", { name: /mission/i });
+    expect(command).toHaveTextContent("FalconDeck");
+    expect(command).toHaveTextContent("human review");
+    fireEvent.mouseDown(command);
+    expect(onValueChange).toHaveBeenCalledWith(
+      "Start a FalconDeck Mission for this task: ",
+    );
+  });
+
   it("hides skills the current provider cannot use", () => {
     render(
       <PromptInput

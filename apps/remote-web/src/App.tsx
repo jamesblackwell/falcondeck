@@ -52,6 +52,7 @@ import {
   workspaceOperationalConditions,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
+  missionCommandAvailable,
   mergeThreadDetailPage,
   normalizeDaemonSnapshot,
   normalizeRelayUrl,
@@ -5215,6 +5216,9 @@ function RemoteApp() {
                     selectedThread?.status !== "running" &&
                     selectedThread?.status !== "waiting_for_input"
                   }
+                  missionCommandAvailable={missionCommandAvailable(
+                    snapshot?.extensions,
+                  )}
                   providerLocked={Boolean(selectedThread)}
                   showProviderSelector={!selectedThread}
                   handoffProviders={handoffProviderOptions}

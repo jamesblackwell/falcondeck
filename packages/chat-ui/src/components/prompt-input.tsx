@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ImagePlus,
   Mic,
+  Orbit,
   Plus,
   Quote,
   Send,
@@ -135,6 +136,8 @@ export type PromptInputProps = {
   capabilities?: AgentCapabilitySummary;
   /** Shows the native /compact command for an existing compactable thread. */
   compactCommandAvailable?: boolean;
+  /** Shows FalconDeck's native /mission prompt expansion when Missions is ready. */
+  missionCommandAvailable?: boolean;
   providerLocked?: boolean;
   showProviderSelector?: boolean;
   /** Cross-provider destinations shown behind the model menu's handoff step. */
@@ -291,6 +294,7 @@ export const PromptInput = memo(function PromptInput({
   isRunning = false,
   isStopping = false,
   compact = false,
+  missionCommandAvailable = false,
   goal,
   quotedSelections = EMPTY_QUOTED_SELECTIONS,
   onRemoveQuotedSelection,
@@ -380,11 +384,16 @@ export const PromptInput = memo(function PromptInput({
   const showGoalCommand =
     Boolean(goal) &&
     "goal".includes(slashQuery?.query.trim().toLowerCase() ?? "");
+  const showMissionCommand =
+    missionCommandAvailable &&
+    "mission".includes(slashQuery?.query.trim().toLowerCase() ?? "");
   const showCompactCommand =
     compactCommandAvailable &&
     "compact".includes(slashQuery?.query.trim().toLowerCase() ?? "");
   const nativeCommandCount =
-    (showGoalCommand ? 1 : 0) + (showCompactCommand ? 1 : 0);
+    (showGoalCommand ? 1 : 0) +
+    (showMissionCommand ? 1 : 0) +
+    (showCompactCommand ? 1 : 0);
   const slashSuggestionCount =
     filteredSkills.length + nativeCommandCount;
 
@@ -515,9 +524,12 @@ export const PromptInput = memo(function PromptInput({
         ] ?? null)
       : null;
   const goalCommandActive = showGoalCommand && activeSkillIndex === 0;
+  const missionCommandActive =
+    showMissionCommand && activeSkillIndex === (showGoalCommand ? 1 : 0);
   const compactCommandActive =
     showCompactCommand &&
-    activeSkillIndex === (showGoalCommand ? 1 : 0);
+    activeSkillIndex ===
+      (showGoalCommand ? 1 : 0) + (showMissionCommand ? 1 : 0);
 
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex?: number | null) => {
@@ -580,6 +592,15 @@ export const PromptInput = memo(function PromptInput({
       ) {
         event.preventDefault();
         openGoalCommand();
+        return;
+      }
+      if (
+        !hasCommandModifier &&
+        (event.key === "Tab" || event.key === "Enter") &&
+        missionCommandActive
+      ) {
+        event.preventDefault();
+        insertMissionPrompt();
         return;
       }
       if (
@@ -759,6 +780,10 @@ export const PromptInput = memo(function PromptInput({
     },
     [onValueChange, slashQuery, updateSlashQuery, value],
   );
+
+  const insertMissionPrompt = useCallback(() => {
+    insertSkillAlias("Start a FalconDeck Mission for this task:");
+  }, [insertSkillAlias]);
 
   const openGoalCommand = useCallback(() => {
     const query = slashQuery;
@@ -1080,6 +1105,36 @@ export const PromptInput = memo(function PromptInput({
                       </div>
                       <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
                         Set a goal to keep pursuing
+                      </div>
+                    </div>
+                  </button>
+                ) : null}
+                {showMissionCommand ? (
+                  <button
+                    type="button"
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      insertMissionPrompt();
+                    }}
+                    className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
+                      missionCommandActive
+                        ? "bg-surface-3"
+                        : "hover:bg-surface-2"
+                    }`}
+                  >
+                    <Orbit
+                      className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted"
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
+                        <span className="font-medium">/mission</span>
+                        <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
+                          FalconDeck
+                        </span>
+                      </div>
+                      <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
+                        Draft a bounded mission for human review
                       </div>
                     </div>
                   </button>

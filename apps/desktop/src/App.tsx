@@ -45,6 +45,7 @@ import {
   removeConversationItem,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
+  missionCommandAvailable,
   providerForThread,
   resolvePersistedMode,
   resolvePermissionMode,
@@ -6018,6 +6019,9 @@ function AppInner() {
                   activeCapabilities.supports_compaction &&
                   selectedThread?.status !== "running" &&
                   selectedThread?.status !== "waiting_for_input",
+                missionCommandAvailable: missionCommandAvailable(
+                  viewSnapshot?.extensions,
+                ),
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
                 handoffProviders: handoffProviderOptions,

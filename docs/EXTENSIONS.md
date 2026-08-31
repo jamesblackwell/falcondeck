@@ -678,6 +678,15 @@ FalconDeck tasks with durable Mission provenance; they cannot delegate, are
 never retried after an ambiguous admission, and their bounded reports return
 to the coordinator as untrusted input.
 
+When Missions is enabled with all three grants, FalconDeck adds a short
+provider-neutral Mission trigger to the injected agent context and stages the
+`falcondeck-missions` workflow skill. An explicit request to start, create, or
+run a Mission must call the draft tool before ordinary task work begins; it
+must not silently degrade into a harness goal. Desktop and remote web also
+surface a native `/mission` composer command. Completing it expands to clear
+FalconDeck Mission intent, while the row stays hidden when the extension or a
+required grant is unavailable.
+
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
 official extensions stay within baseline capabilities unless the catalog grants
 them a named permission as distribution policy — today only

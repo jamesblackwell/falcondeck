@@ -24,6 +24,7 @@ pub mod extension_mcp;
 mod git;
 pub mod harness_conformance;
 pub mod logging;
+mod mission_context;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 mod ship;

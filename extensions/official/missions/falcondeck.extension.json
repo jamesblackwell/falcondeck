@@ -30,8 +30,8 @@
     "agentTools": [
       {
         "id": "draft-mission",
-        "title": "Draft a FalconDeck mission",
-        "description": "Create a bounded mission draft for this exact task. A human must review and start it from the Missions panel before any automatic work begins.",
+        "title": "Start a FalconDeck Mission draft",
+        "description": "Use this when the user explicitly asks to start, create, or run a FalconDeck Mission. Create a bounded draft for this exact task before doing the requested work; do not substitute a harness goal or merely describe a mission. A human must review and start it from the Missions panel before automatic work begins.",
         "inputSchema": {
           "type": "object",
           "required": ["objective"],

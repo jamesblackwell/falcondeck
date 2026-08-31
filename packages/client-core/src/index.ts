@@ -45,6 +45,7 @@ export * from "./starred-models";
 export * from "./workspace-colors";
 export * from "./extension-views";
 export * from "./composer-suggestions";
+export * from "./missions";
 export * from "./thread-commands";
 export * from "./extension-ui";
 export * from "./mermaid";

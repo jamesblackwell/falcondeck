@@ -157,7 +157,9 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let instructions = app.agent_context_instructions(&AgentProvider::CODEX).await;
+                let instructions = app
+                    .agent_context_instructions_with_extensions(&AgentProvider::CODEX)
+                    .await;
                 let result = session
                     .send_request(
                         "thread/start",
@@ -405,7 +407,9 @@ impl ProviderRuntime {
                         Some(spec.thread_id),
                     )
                     .await;
-                let agent_context = app.agent_context_instructions(&AgentProvider::CLAUDE).await;
+                let agent_context = app
+                    .agent_context_instructions_with_extensions(&AgentProvider::CLAUDE)
+                    .await;
                 let spawn = runtime
                     .spawn_turn(
                         spec.thread_id,
