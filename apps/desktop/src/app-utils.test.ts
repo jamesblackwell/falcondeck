@@ -70,6 +70,19 @@ describe('workspaceComposerDisabled', () => {
 })
 
 describe('workspaceSendBlockReason', () => {
+  it('lets a new casual chat send while its provider starts in the background', () => {
+    expect(
+      workspaceSendBlockReason(
+        workspace({
+          kind: 'casual',
+          status: 'connecting',
+          path: '/Users/james/Documents/FalconDeck/2026-08-31/chat-120000-abcdef',
+        }),
+        'codex',
+      ),
+    ).toBeNull()
+  })
+
   it('surfaces concise reconnecting project guidance', () => {
     expect(
       workspaceSendBlockReason(

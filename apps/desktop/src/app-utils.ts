@@ -103,6 +103,13 @@ export function workspaceSendBlockReason(
 ) {
   if (!workspace) return 'Select a project to get started.'
 
+  // A new casual chat is published as a connecting placeholder so its folder
+  // opens immediately while the provider starts in the background. It is not
+  // a reconnect, and the daemon can wake the selected provider on first send.
+  if (workspace.kind === 'casual' && workspace.status === 'connecting') {
+    return null
+  }
+
   if (workspaceProviderCanSend(workspace, provider)) {
     return null
   }
