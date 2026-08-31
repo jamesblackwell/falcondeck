@@ -120,7 +120,7 @@ export function DesktopShell({
   }, [railOpen])
 
   const shell = (
-    <ResizableShell animating={animating}>
+    <ResizableShell animating={animating} className={bottom ? 'h-full' : undefined}>
       <ResizableSidePanel
         id="sidebar"
         side="left"

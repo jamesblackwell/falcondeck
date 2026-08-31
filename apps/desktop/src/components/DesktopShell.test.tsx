@@ -15,6 +15,21 @@ function renderShell(props: { sidebarVisible: boolean; railVisible: boolean }) {
 }
 
 describe('DesktopShell panel collapse', () => {
+  it('lets the main shell shrink when a bottom panel is present', () => {
+    const { container } = render(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        bottom={<div>bottom content</div>}
+      />,
+    )
+
+    const shell = container.querySelector('[data-fd-shell]')?.parentElement
+    expect(shell).toHaveClass('h-full')
+    expect(shell).not.toHaveClass('h-screen')
+    expect(screen.getByText('bottom content')).toBeInTheDocument()
+  })
+
   it('keeps the sidebar mounted while collapsed so the width can animate', () => {
     const { rerender } = renderShell({ sidebarVisible: true, railVisible: false })
     const sidebar = screen.getByText('sidebar content')
