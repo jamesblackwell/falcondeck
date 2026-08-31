@@ -19,6 +19,7 @@ import type {
 } from "@falcondeck/client-core";
 import {
   Conversation,
+  GoalBubble,
   InterruptedTurnNotice,
   OperationalNotice,
   PlanBar,
@@ -264,6 +265,14 @@ export function DesktopConversationPane({
                   `${queuedAttachmentBaseUrl}/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/threads/${encodeURIComponent(selectedThreadId)}/queue/${encodeURIComponent(queuedId)}/attachment-preview`
               : undefined
           }
+        />
+      ) : null}
+      {promptInputProps.goal?.goal ? (
+        <GoalBubble
+          goal={promptInputProps.goal.goal}
+          provider={promptInputProps.goal.provider}
+          onClearGoal={promptInputProps.goal.onClearGoal}
+          onSetGoalStatus={promptInputProps.goal.onSetGoalStatus}
         />
       ) : null}
       {onSubmitComposerSuggestion && onDismissComposerSuggestions ? (

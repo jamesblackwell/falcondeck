@@ -2393,15 +2393,6 @@ impl AppState {
                 extensions::MAX_TOOL_ARGUMENT_BYTES
             )));
         }
-        if request.name == BUILTIN_RENAME_THREAD_TOOL {
-            return self.invoke_builtin_rename_thread_tool(request).await;
-        }
-        let (package, tool_id) = self
-            .inner
-            .extensions
-            .lock()
-            .await
-            .tool_package(&request.name)?;
         // Ordinary tools retain the legacy spawn projection. Sensitive run
         // access is derived only from the opaque capability created by the
         // daemon at provider spawn, never from these request-body fields.
@@ -2433,6 +2424,39 @@ impl AppState {
             .as_ref()
             .map(|context| context.workspace_path.as_str())
             .or(request.workspace_path.as_deref());
+        if request.name == BUILTIN_RENAME_THREAD_TOOL {
+            // Some harnesses keep one MCP bridge for the whole workspace
+            // rather than creating it per thread. Rename is safe to bind when
+            // that provider has exactly one running thread in the capability-
+            // bound workspace; ambiguity still fails closed.
+            let inferred_rename_thread = if effective_thread_id.is_none() {
+                match trusted_bridge.as_ref() {
+                    Some(context) => {
+                        self.unambiguous_running_extension_thread(
+                            &context.workspace_path,
+                            &context.provider,
+                        )
+                        .await
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            return self
+                .invoke_builtin_rename_thread_tool(
+                    &request.arguments,
+                    effective_thread_id.or(inferred_rename_thread.as_deref()),
+                    effective_workspace_path,
+                )
+                .await;
+        }
+        let (package, tool_id) = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .tool_package(&request.name)?;
         let workspace_id = self
             .extension_call_workspace_id(effective_thread_id, effective_workspace_path)
             .await;
@@ -2535,27 +2559,23 @@ impl AppState {
 
     async fn invoke_builtin_rename_thread_tool(
         &self,
-        request: falcondeck_core::InvokeExtensionToolRequest,
+        arguments: &Value,
+        thread_id: Option<&str>,
+        workspace_path: Option<&str>,
     ) -> Result<falcondeck_core::ExtensionToolResponse, DaemonError> {
-        let Some(thread_id) = request
-            .thread_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        else {
+        let Some(thread_id) = thread_id.map(str::trim).filter(|id| !id.is_empty()) else {
             return Err(DaemonError::BadRequest(
                 "this turn is not attached to a thread, so nothing was renamed".to_string(),
             ));
         };
-        let title = request
-            .arguments
+        let title = arguments
             .get("title")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .ok_or_else(|| DaemonError::BadRequest("title is required".to_string()))?;
         let workspace_id = self
-            .extension_call_workspace_id(Some(thread_id), request.workspace_path.as_deref())
+            .extension_call_workspace_id(Some(thread_id), workspace_path)
             .await
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         let handle = self

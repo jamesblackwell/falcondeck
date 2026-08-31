@@ -2343,6 +2343,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-a");
     std::fs::create_dir_all(&workspace_path).unwrap();
+    let workspace_path = workspace_path.canonicalize().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
     let app = AppState::new_with_state_path(
         "test".to_string(),
@@ -2433,6 +2434,73 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
 
     let handle = app.thread_summary(&workspace_id, &thread_id).await.unwrap();
     assert_eq!(handle.title, "Billing webhook");
+
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .get_mut(&workspace_id)
+        .unwrap()
+        .threads
+        .get_mut(&thread_id)
+        .unwrap()
+        .summary
+        .status = ThreadStatus::Running;
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "workspace-capability".to_string(),
+        super::ExtensionBridgeCapability {
+            provider: AgentProvider::CODEX,
+            workspace_path: workspace_path.to_string_lossy().to_string(),
+            thread_id: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        },
+    );
+    let response = app
+        .invoke_extension_tool(falcondeck_core::InvokeExtensionToolRequest {
+            name: super::BUILTIN_RENAME_THREAD_TOOL.to_string(),
+            arguments: json!({ "title": "Workspace bridge rename" }),
+            thread_id: None,
+            workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+            bridge_capability: Some("workspace-capability".to_string()),
+        })
+        .await
+        .expect("workspace-wide Codex bridge should bind to its running thread");
+    assert_eq!(response.result["renamed"], true);
+    assert_eq!(response.result["title"], "Workspace bridge rename");
+
+    app.inner
+        .workspaces
+        .lock()
+        .await
+        .get_mut(&workspace_id)
+        .unwrap()
+        .threads
+        .get_mut(&thread_id)
+        .unwrap()
+        .summary
+        .provider = AgentProvider::OPENCODE;
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "opencode-workspace-capability".to_string(),
+        super::ExtensionBridgeCapability {
+            provider: AgentProvider::OPENCODE,
+            workspace_path: workspace_path.to_string_lossy().to_string(),
+            thread_id: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        },
+    );
+
+    let response = app
+        .invoke_extension_tool(falcondeck_core::InvokeExtensionToolRequest {
+            name: super::BUILTIN_RENAME_THREAD_TOOL.to_string(),
+            arguments: json!({ "title": "OpenCode bridge rename" }),
+            thread_id: None,
+            workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+            bridge_capability: Some("opencode-workspace-capability".to_string()),
+        })
+        .await
+        .expect("workspace-wide OpenCode bridge should bind to its running thread");
+    assert_eq!(response.result["renamed"], true);
+    assert_eq!(response.result["title"], "OpenCode bridge rename");
 }
 
 #[tokio::test]
