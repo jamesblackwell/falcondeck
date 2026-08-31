@@ -197,7 +197,7 @@ describe("SidebarView component", () => {
     expect(onNewThread).toHaveBeenCalledWith("w2");
   });
 
-  it("retargets a new conversation when another project row is pressed", () => {
+  it("collapses a project when its name is pressed, even mid new-conversation", () => {
     const onNewThread = vi.fn();
     const groups: ProjectGroup[] = [
       {
@@ -220,6 +220,40 @@ describe("SidebarView component", () => {
 
     act(() => {
       r.root.findByProps({ accessibilityLabel: "other" }).props.onPress();
+    });
+
+    expect(onNewThread).not.toHaveBeenCalled();
+    expect(
+      r.root.findByProps({ accessibilityLabel: "other" }).props
+        .accessibilityState.expanded,
+    ).toBe(false);
+  });
+
+  it("moves a new conversation to a project via its pen button", () => {
+    const onNewThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [],
+      },
+      {
+        workspace: workspace({ id: "w2", path: "/tmp/other" }),
+        threads: [],
+      },
+    ];
+    const r = renderComponent(
+      <SidebarView
+        {...base}
+        groups={groups}
+        selectedWorkspaceId="w1"
+        onNewThread={onNewThread}
+      />,
+    );
+
+    act(() => {
+      r.root
+        .findByProps({ accessibilityLabel: "New thread in other" })
+        .props.onPress();
     });
 
     expect(onNewThread).toHaveBeenCalledWith("w2");

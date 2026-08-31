@@ -518,29 +518,19 @@ export const SidebarView = memo(function SidebarView({
         );
         const isNewConversationProject =
           selectedThreadId === null && item.workspaceId === selectedWorkspaceId;
-        const shouldRetargetNewConversation =
-          selectedThreadId === null && !isNewConversationProject;
         // Two sibling controls, not a button inside a button: nesting them made
         // VoiceOver read the row as one element and swallowed "new thread".
+        // The name always collapses/expands; moving a new conversation to a
+        // project is the pen button's job, so a tap never leaves the drawer.
         return (
           <View style={styles.workspaceHeader}>
             <Pressable
               style={styles.workspaceLeft}
-              onPress={() => {
-                if (shouldRetargetNewConversation) {
-                  onNewThread(item.workspaceId);
-                } else {
-                  toggleWorkspaceCollapse(item.workspaceId);
-                }
-              }}
+              onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
               accessibilityRole="button"
               accessibilityLabel={item.workspaceName}
               accessibilityHint={
-                shouldRetargetNewConversation
-                  ? "Moves the new conversation to this project"
-                  : item.isOpen
-                    ? "Collapses this project"
-                    : "Expands this project"
+                item.isOpen ? "Collapses this project" : "Expands this project"
               }
               accessibilityState={{
                 expanded: item.isOpen,
@@ -704,6 +694,12 @@ export const SidebarView = memo(function SidebarView({
             getItemType={(item) => item.type}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={listContentStyle}
+            // Collapsing a section rewrites the heights of rows *above* the
+            // viewport, which visible-content anchoring answers by shifting
+            // the scroll offset — that is the blank stretch at the top until
+            // the next scroll forces a re-layout. A drawer list has no feed
+            // semantics to preserve, so anchor to the plain offset instead.
+            maintainVisibleContentPosition={{ disabled: true }}
           />
         )}
       </View>
