@@ -382,6 +382,56 @@ describe("CommandPalette controlled requests", () => {
     expect(titlesOf()[0]).toContain("First thread");
   });
 
+  it("hides unused placeholder threads without hiding started sessions", () => {
+    const onSelectThread = vi.fn();
+    const emptyPlaceholder = thread({
+      id: "empty-placeholder",
+      title: "New thread",
+    });
+    const startedPlaceholder = thread({
+      id: "started-placeholder",
+      title: "New thread",
+      latest_turn_id: "turn-1",
+      last_message_preview: "Help me debug this",
+      attention: {
+        ...thread().attention,
+        last_agent_activity_seq: 1,
+        last_read_seq: 1,
+      },
+    });
+
+    render(
+      <CommandPalette
+        groups={[
+          {
+            workspace: workspace(),
+            threads: [emptyPlaceholder, startedPlaceholder],
+          },
+        ]}
+        onSelectThread={onSelectThread}
+        onNewThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "new thread" },
+    });
+
+    const matchingRows = screen
+      .getAllByRole("option")
+      .filter((option) => option.textContent?.startsWith("New thread"));
+    expect(matchingRows).toHaveLength(2);
+    expect(screen.getByRole("option", { name: "New thread…" })).toBeInTheDocument();
+
+    fireEvent.click(matchingRows[0]!);
+    expect(onSelectThread).toHaveBeenCalledWith(
+      "workspace-1",
+      "started-placeholder",
+    );
+  });
+
   it("starts a new thread in two steps: action, then project", () => {
     const onNewThread = vi.fn();
     const groups: ProjectGroup[] = [

@@ -134,6 +134,33 @@ function needsAttention(attention: ThreadAttentionPresentation): boolean {
   )
 }
 
+const UNUSED_THREAD_TITLES = new Set([
+  '',
+  'untitled thread',
+  'new thread',
+  'new claude thread',
+  'claude thread',
+  'restored thread',
+])
+
+/**
+ * Opening a composer can leave a persisted provider thread behind even when
+ * no prompt was sent. Those rows look exactly like the New thread command in
+ * search, so omit only the inert placeholders while preserving any session
+ * that actually started but has not received its generated title yet.
+ */
+function isUnusedPlaceholderThread(thread: ThreadSummary): boolean {
+  return (
+    thread.status === 'idle' &&
+    UNUSED_THREAD_TITLES.has(thread.title.trim().toLocaleLowerCase()) &&
+    !thread.latest_turn_id &&
+    !thread.last_message_preview?.trim() &&
+    !thread.last_error &&
+    thread.attention.last_agent_activity_seq <= 0 &&
+    thread.queued_turns.length === 0
+  )
+}
+
 /**
  * Row order and section membership are captured when the palette opens and
  * kept for the whole open. Streaming snapshots keep repainting statuses and
@@ -582,7 +609,10 @@ export const CommandPalette = memo(function CommandPalette({
       .flatMap((group) => {
         const projectLabel = getProjectLabel(group.workspace.path)
         return group.threads
-          .filter((thread) => !thread.is_archived)
+          .filter(
+            (thread) =>
+              !thread.is_archived && !isUnusedPlaceholderThread(thread),
+          )
           .map((thread) => {
             const attention = deriveThreadAttentionPresentation(thread)
             return {
