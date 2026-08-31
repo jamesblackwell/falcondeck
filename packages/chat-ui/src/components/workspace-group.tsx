@@ -90,7 +90,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
           }
           className={cn(
             'group flex w-full items-stretch gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
-            'transition-colors duration-[var(--fd-duration-fast)]',
+            'transition-colors duration-[var(--fd-duration-hover)]',
             // The project row is a header, not a selection target — the
             // selected thread inside it already carries the highlight, so this
             // row only shifts text weight.

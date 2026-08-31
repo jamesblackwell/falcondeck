@@ -137,7 +137,7 @@ export const AttentionInbox = memo(function AttentionInbox({
               onClick={() => onSelectThread(entry.workspaceId, entry.thread.id)}
               className={cn(
                 'fd-focus-fill flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left',
-                'transition-colors duration-[var(--fd-duration-fast)]',
+                'transition-colors duration-[var(--fd-duration-hover)]',
                 // Same ladder as the thread rows below: hover lifts, pressing
                 // previews the selection fill so release is not a colour change.
                 selectedThreadId === entry.thread.id

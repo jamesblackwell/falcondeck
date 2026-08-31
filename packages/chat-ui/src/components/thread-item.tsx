@@ -88,7 +88,7 @@ export const ThreadItem = memo(
           // A container so the provider label can bow out on a narrow sidebar
           // without the row measuring itself in JS.
           '@container group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
-          'transition-colors duration-[var(--fd-duration-fast)]',
+          'transition-colors duration-[var(--fd-duration-hover)]',
           // Pressing previews the selection fill rather than a brighter tone of
           // its own. A hotter pressed state overshoots the colour the row is
           // about to land on, so the click read as a white flash followed by a

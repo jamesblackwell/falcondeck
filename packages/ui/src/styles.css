@@ -277,6 +277,7 @@
   --fd-focus-ring-color: var(--fd-accent);
 
   /* === Transitions === */
+  --fd-duration-hover: 60ms;
   --fd-duration-fast: 100ms;
   --fd-duration-normal: 150ms;
   --fd-duration-slow: 250ms;
@@ -298,6 +299,7 @@
    loading feedback carry their own durations and keep running. */
 @media (prefers-reduced-motion: reduce) {
   :root {
+    --fd-duration-hover: 0.01ms;
     --fd-duration-fast: 0.01ms;
     --fd-duration-normal: 0.01ms;
     --fd-duration-slow: 0.01ms;
