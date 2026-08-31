@@ -168,7 +168,9 @@ desktop-prepare:
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 			($(DESKTOP_NATIVE_CHECK)); \
-		fi
+		fi; \
+		echo "Preparing extension runtime"; \
+		cd "$(ROOT)" && npm run extension-runtime:prepare
 
 # Regenerates only when brand sources (or the generator) are newer than outputs.
 # Force with: make desktop-brand-assets FORCE_BRAND=1
