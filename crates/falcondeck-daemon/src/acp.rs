@@ -2186,7 +2186,8 @@ impl AcpRuntime {
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
             &crate::connectors::with_builtin_servers(
-                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                crate::connectors::materialize_mcp_servers(&self.workspace_path, &self.config.id)
+                    .await,
                 builtin,
             ),
             self.supports_http_mcp().await,
@@ -2413,7 +2414,8 @@ impl AcpRuntime {
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
             &crate::connectors::with_builtin_servers(
-                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                crate::connectors::materialize_mcp_servers(&self.workspace_path, &self.config.id)
+                    .await,
                 builtin,
             ),
             self.supports_http_mcp().await,
@@ -2531,7 +2533,8 @@ impl AcpRuntime {
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
             &crate::connectors::with_builtin_servers(
-                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                crate::connectors::materialize_mcp_servers(&self.workspace_path, &self.config.id)
+                    .await,
                 builtin,
             ),
             self.supports_http_mcp().await,

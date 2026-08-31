@@ -309,6 +309,36 @@ pub fn load_mcp_servers(workspace_path: &str, provider: &str) -> Vec<McpServerCo
     )
 }
 
+/// Refreshes any OAuth credentials needed by this provider, then materializes
+/// the connector list. Provider launch paths should use this instead of the
+/// synchronous loader so an expired token never reaches a newly spawned
+/// harness.
+pub async fn materialize_mcp_servers(workspace_path: &str, provider: &str) -> Vec<McpServerConfig> {
+    let global_path = global_connectors_path();
+    let workspace_path = workspace_connectors_path(workspace_path);
+    let mut merged = read_connectors_file(&global_path);
+    merged.extend(read_connectors_file(&workspace_path));
+    let oauth_names = merged
+        .iter()
+        .filter(|(_, entry)| {
+            entry.enabled
+                && entry.auth.as_deref() == Some("oauth")
+                && (entry.providers.is_empty()
+                    || entry
+                        .providers
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(provider)))
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    for name in oauth_names {
+        if let Err(error) = crate::connector_oauth::refresh_access_token(&name).await {
+            tracing::warn!(server = %name, %error, "failed to refresh OAuth connector");
+        }
+    }
+    load_mcp_servers_from(&global_path, &workspace_path, provider)
+}
+
 fn load_mcp_servers_from(
     global_path: &Path,
     workspace_path: &Path,
@@ -345,8 +375,9 @@ fn load_mcp_servers_from(
                         } else {
                             tracing::warn!(
                                 server = %name,
-                                "oauth connector has no stored access token"
+                                "skipping OAuth connector without a current access token"
                             );
+                            return None;
                         }
                     }
                     McpTransport::Http { url, headers }
@@ -1366,6 +1397,32 @@ mod tests {
             headers.get("Authorization").map(String::as_str),
             Some("Bearer ntn_live")
         );
+    }
+
+    #[test]
+    fn oauth_connectors_without_a_current_token_are_not_materialized() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        crate::connector_oauth::save_token(
+            "notion",
+            crate::connector_oauth::StoredToken {
+                access_token: "expired".into(),
+                refresh_token: None,
+                expires_at: Some(1),
+                token_endpoint: "https://mcp.notion.com/token".into(),
+                client_id: "cid".into(),
+            },
+        )
+        .unwrap();
+        let connectors = write(
+            dir.path(),
+            r#"{"mcpServers":{"notion":{"url":"https://mcp.notion.com/mcp","auth":"oauth"}}}"#,
+        );
+
+        let servers = load_mcp_servers_from(&connectors, &dir.path().join("missing.json"), "codex");
+
+        assert!(servers.is_empty());
     }
 
     #[test]

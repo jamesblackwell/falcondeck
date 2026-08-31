@@ -530,7 +530,7 @@ impl CodexSession {
         let mut command = Command::new(&resolved.executable);
         command.arg("app-server");
         let mcp_servers = crate::connectors::with_builtin_servers(
-            crate::connectors::load_mcp_servers(&workspace_path, "codex"),
+            crate::connectors::materialize_mcp_servers(&workspace_path, "codex").await,
             &state
                 .builtin_connectors(&AgentProvider::CODEX, &workspace_path, None)
                 .await,

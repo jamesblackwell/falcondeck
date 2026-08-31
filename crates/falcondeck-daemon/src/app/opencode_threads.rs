@@ -108,7 +108,7 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
         let mut env = config.env.clone();
         let servers = crate::connectors::with_builtin_servers(
-            crate::connectors::load_mcp_servers(&workspace_path, "opencode"),
+            crate::connectors::materialize_mcp_servers(&workspace_path, "opencode").await,
             &self
                 .builtin_connectors(
                     &falcondeck_core::AgentProvider::OPENCODE,

@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::connector_catalog::{self, CatalogAuth};
 
 const PENDING_TTL: Duration = Duration::from_secs(10 * 60);
+const TOKEN_EXPIRY_SKEW: u64 = 60;
 
 #[derive(Debug, Clone)]
 struct PendingAuthorization {
@@ -33,7 +34,7 @@ struct PendingAuthorization {
     created: Instant,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct StoredToken {
     pub(crate) access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,6 +53,11 @@ fn pending() -> &'static Mutex<HashMap<String, PendingAuthorization>> {
 fn store_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn refresh_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[cfg(test)]
@@ -124,11 +130,27 @@ fn write_store(tokens: &HashMap<String, StoredToken>) -> Result<(), String> {
     Ok(())
 }
 
-/// Access token for an OAuth-brokered connector, if one is stored.
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn token_is_current(token: &StoredToken, now: u64) -> bool {
+    token
+        .expires_at
+        .is_none_or(|expires_at| expires_at > now.saturating_add(TOKEN_EXPIRY_SKEW))
+}
+
+/// Current access token for an OAuth-brokered connector. Expired tokens are
+/// deliberately hidden so they cannot be injected into a harness as if the
+/// connector were still authenticated.
 pub fn access_token(name: &str) -> Option<String> {
     let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
     read_store()
         .get(name)
+        .filter(|token| token_is_current(token, now_epoch_seconds()))
         .map(|token| token.access_token.clone())
 }
 
@@ -137,6 +159,95 @@ pub(crate) fn save_token(name: &str, token: StoredToken) -> Result<(), String> {
     let mut tokens = read_store();
     tokens.insert(name.to_string(), token);
     write_store(&tokens)
+}
+
+fn save_refreshed_token(
+    name: &str,
+    previous: &StoredToken,
+    refreshed: StoredToken,
+) -> Result<Option<String>, String> {
+    let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut tokens = read_store();
+    if let Some(current) = tokens.get(name)
+        && current != previous
+    {
+        return Ok(
+            token_is_current(current, now_epoch_seconds()).then(|| current.access_token.clone())
+        );
+    }
+    let access_token = refreshed.access_token.clone();
+    tokens.insert(name.to_string(), refreshed);
+    write_store(&tokens)?;
+    Ok(Some(access_token))
+}
+
+/// Returns a current token, refreshing an expired access token when the
+/// authorization server supplied a refresh token. Refreshes are serialized so
+/// concurrent provider starts cannot rotate the same credential twice.
+pub async fn refresh_access_token(name: &str) -> Result<Option<String>, String> {
+    if let Some(token) = access_token(name) {
+        return Ok(Some(token));
+    }
+
+    let _refresh_guard = refresh_lock().lock().await;
+    if let Some(token) = access_token(name) {
+        return Ok(Some(token));
+    }
+
+    let stored = {
+        let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
+        read_store().get(name).cloned()
+    };
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let Some(refresh_token) = stored.refresh_token.as_deref() else {
+        return Ok(None);
+    };
+
+    let mut form = vec![
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+        ("client_id", stored.client_id.clone()),
+    ];
+    if let Some(resource) = connector_catalog::get(name).and_then(|server| server.resource) {
+        form.push(("resource", resource.to_string()));
+    }
+    let form = form
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", encode_query(key), encode_query(&value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let response = reqwest::Client::new()
+        .post(&stored.token_endpoint)
+        .timeout(Duration::from_secs(20))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(form)
+        .send()
+        .await
+        .map_err(|error| format!("token refresh failed: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("token refresh returned {status}: {body}"));
+    }
+    let token: TokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid token refresh response: {error}"))?;
+    let refreshed = StoredToken {
+        access_token: token.access_token,
+        refresh_token: token.refresh_token.or_else(|| stored.refresh_token.clone()),
+        expires_at: token
+            .expires_in
+            .map(|seconds| now_epoch_seconds().saturating_add(seconds)),
+        token_endpoint: stored.token_endpoint.clone(),
+        client_id: stored.client_id.clone(),
+    };
+    save_refreshed_token(name, &stored, refreshed)
 }
 
 fn random_urlsafe(nbytes: usize) -> String {
@@ -448,10 +559,7 @@ pub async fn complete_authorization(
             );
         }
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = now_epoch_seconds();
     if let Err(error) = save_token(
         &pending_item.name,
         StoredToken {
@@ -487,6 +595,21 @@ pub async fn complete_authorization(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn refresh_token_handler(
+        axum::extract::State(requests): axum::extract::State<std::sync::Arc<Mutex<Vec<String>>>>,
+        body: String,
+    ) -> axum::Json<Value> {
+        requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(body);
+        axum::Json(json!({
+            "access_token": "fresh-access",
+            "refresh_token": "fresh-refresh",
+            "expires_in": 3600,
+        }))
+    }
 
     #[test]
     fn pkce_challenge_is_s256_base64url() {
@@ -528,5 +651,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(access_token("notion").as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn access_token_hides_expired_credentials() {
+        let _lock = lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        set_store_path_for_test(dir.path().join("oauth.json"));
+        save_token(
+            "sentry",
+            StoredToken {
+                access_token: "stale".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: Some(now_epoch_seconds().saturating_sub(1)),
+                token_endpoint: "https://example/token".into(),
+                client_id: "cid".into(),
+            },
+        )
+        .unwrap();
+        assert!(access_token("sentry").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_access_token_is_refreshed_and_persisted() {
+        let _lock = lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        set_store_path_for_test(dir.path().join("oauth.json"));
+        let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/token", axum::routing::post(refresh_token_handler))
+            .with_state(std::sync::Arc::clone(&requests));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        save_token(
+            "sentry",
+            StoredToken {
+                access_token: "stale-access".into(),
+                refresh_token: Some("stale-refresh".into()),
+                expires_at: Some(now_epoch_seconds().saturating_sub(1)),
+                token_endpoint: format!("http://{address}/token"),
+                client_id: "client-id".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            refresh_access_token("sentry").await.unwrap().as_deref(),
+            Some("fresh-access")
+        );
+        assert_eq!(access_token("sentry").as_deref(), Some("fresh-access"));
+        let stored = read_store().remove("sentry").unwrap();
+        assert_eq!(stored.refresh_token.as_deref(), Some("fresh-refresh"));
+        assert!(stored.expires_at.unwrap() > now_epoch_seconds());
+        let request = requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .first()
+            .cloned()
+            .unwrap();
+        assert!(request.contains("grant_type=refresh_token"));
+        assert!(request.contains("refresh_token=stale-refresh"));
+        assert!(request.contains("client_id=client-id"));
+        assert!(request.contains("resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp"));
+        server.abort();
     }
 }

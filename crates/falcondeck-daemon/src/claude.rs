@@ -385,7 +385,7 @@ impl ClaudeRuntime {
         {
             command.arg("--settings").arg(settings_path);
         }
-        let mcp_config = self.write_mcp_config_file(settings_dir, builtin);
+        let mcp_config = self.write_mcp_config_file(settings_dir, builtin).await;
         if let Some(lease) = &mcp_config {
             command.arg("--mcp-config").arg(lease.path());
             command.arg("--strict-mcp-config");
@@ -811,13 +811,13 @@ impl ClaudeRuntime {
     /// `--strict-mcp-config` cannot fall through to the user's global Claude
     /// MCP list. The file is 0400 in the daemon's 0700 state dir and is
     /// unlinked when the turn is dropped.
-    fn write_mcp_config_file(
+    async fn write_mcp_config_file(
         &self,
         settings_dir: &Path,
         builtin: &crate::connectors::BuiltinConnectors,
     ) -> Option<crate::connectors::LeasedMcpConfig> {
         let servers = crate::connectors::with_builtin_servers(
-            crate::connectors::load_mcp_servers(&self.workspace_path, "claude"),
+            crate::connectors::materialize_mcp_servers(&self.workspace_path, "claude").await,
             builtin,
         );
         let body = crate::connectors::claude_mcp_config_json(&servers);
