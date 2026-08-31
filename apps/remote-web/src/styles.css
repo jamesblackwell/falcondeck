@@ -3,6 +3,7 @@
 
 @source "../../../packages/ui/src";
 @source "../../../packages/chat-ui/src";
+@source "../../../extensions/official";
 
 html {
   height: 100%;

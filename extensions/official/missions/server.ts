@@ -1,43 +1,20 @@
 import {
   defineExtension,
-  defineExtensionUi,
   type ExtensionContext,
   type ExtensionRunSummary,
   type ExtensionThreadSummary,
-  type ExtensionUiNode,
 } from "@falcondeck/extension-sdk";
+
+import type {
+  MissionCheckpoint,
+  MissionDraft,
+  MissionPanelRun,
+  MissionPanelState,
+} from "./model";
 
 const PANEL_VIEW = "missions-panel";
 const DRAFTS_KEY = "missionDrafts";
 const MAX_DRAFTS = 20;
-
-type MissionDraft = {
-  id: string;
-  workspaceId: string;
-  threadId: string;
-  title: string;
-  objective: string;
-  acceptanceCriteria: string[];
-  createdAt: string;
-};
-
-type MissionCheckpoint = {
-  schemaVersion: 1;
-  objective: string;
-  acceptanceCriteria: string[];
-  disposition:
-    | "planning"
-    | "continue_self"
-    | "awaiting_workers"
-    | "needs_human"
-    | "proposing_completion";
-  summary: string;
-  nextAction?: string;
-  evidence: string[];
-  limitations: string[];
-  humanQuestion?: string;
-  updatedAt: string;
-};
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -137,226 +114,19 @@ function statusLabel(run: ExtensionRunSummary): string {
       : "Active";
 }
 
-function toneFor(run: ExtensionRunSummary) {
-  if (run.outcome === "completed") return "success" as const;
-  if (run.gate === "closed") return "gray" as const;
-  if (run.gate === "paused") return "warning" as const;
-  return "accent" as const;
+function compactText(value: string, maxCharacters: number): string {
+  const characters = Array.from(value);
+  return characters.length > maxCharacters
+    ? `${characters.slice(0, maxCharacters).join("").trimEnd()}…`
+    : value;
 }
 
-function runControls(run: ExtensionRunSummary): ExtensionUiNode[] {
-  if (run.gate === "closed") return [];
-  const input = { runId: run.id, expectedPolicyRevision: run.policyRevision };
-  const hasUnknownOutcome =
-    run.operations.some(
-      (operation) => operation.status === "outcome_unknown",
-    ) || run.workers.some((worker) => worker.status === "outcome_unknown");
-  if (hasUnknownOutcome) {
-    return [
-      {
-        type: "button",
-        label: "Close incomplete",
-        variant: "danger",
-        action: { actionId: "close-incomplete", input },
-      },
-    ];
-  }
-  if (run.completionProposed && run.gate === "paused") {
-    return [
-      {
-        type: "button",
-        label: "Accept completion",
-        variant: "primary",
-        action: { actionId: "accept-completion", input },
-      },
-      {
-        type: "button",
-        label: "Close incomplete",
-        variant: "danger",
-        action: { actionId: "close-incomplete", input },
-      },
-    ];
-  }
-  const coordinatorSettling = run.operations.some((operation) =>
-    ["dispatching", "acknowledged"].includes(operation.status),
-  );
-  if (run.gate === "paused" && coordinatorSettling) {
-    return [
-      {
-        type: "button",
-        label: "Extend 30 min",
-        action: { actionId: "extend-run", input },
-      },
-      {
-        type: "button",
-        label: "Close incomplete",
-        variant: "danger",
-        action: { actionId: "close-incomplete", input },
-      },
-    ];
-  }
-  return [
-    run.gate === "open"
-      ? {
-          type: "button",
-          label: "Pause",
-          action: { actionId: "pause-run", input },
-        }
-      : {
-          type: "button",
-          label: "Resume",
-          variant: "primary",
-          action: { actionId: "resume-run", input },
-        },
-    {
-      type: "button",
-      label: "Extend 30 min",
-      action: { actionId: "extend-run", input },
-    },
-    {
-      type: "button",
-      label: "Close incomplete",
-      variant: "danger",
-      action: { actionId: "close-incomplete", input },
-    },
-  ];
-}
-
-function runNode(run: ExtensionRunSummary): ExtensionUiNode {
-  const checkpoint = checkpointOf(run);
-  return {
-    type: "stack",
-    gap: "small",
-    children: [
-      {
-        type: "row",
-        gap: "small",
-        wrap: true,
-        children: [
-          { type: "text", text: run.title, style: "heading" },
-          { type: "badge", text: statusLabel(run), tone: toneFor(run) },
-          {
-            type: "badge",
-            text: `${run.automaticTurnsStarted}/${run.maxAutomaticTurns} automatic turns`,
-            tone: "muted",
-          },
-          {
-            type: "badge",
-            text: `${run.workers.length}/${run.maxWorkers} workers`,
-            tone: "muted",
-          },
-        ],
-      },
-      { type: "text", text: run.objective },
-      ...(checkpoint.summary
-        ? [
-            {
-              type: "text" as const,
-              text: checkpoint.summary,
-              tone: "muted" as const,
-            },
-          ]
-        : []),
-      ...(run.pauseReason
-        ? [
-            {
-              type: "text" as const,
-              text: run.pauseReason,
-              tone: "warning" as const,
-            },
-          ]
-        : []),
-      ...run.workers.map((worker) => ({
-        type: "text" as const,
-        text: `Worker ${worker.id.slice(0, 8)} · ${worker.provider} · ${worker.status.replaceAll("_", " ")}`,
-        style: "caption" as const,
-        tone:
-          worker.status === "failed" || worker.status === "outcome_unknown"
-            ? ("warning" as const)
-            : ("muted" as const),
-      })),
-      ...(run.gate === "paused" && !run.completionProposed
-        ? [
-            {
-              type: "text" as const,
-              text:
-                run.operations.some(
-                  (operation) => operation.status === "outcome_unknown",
-                ) ||
-                run.workers.some(
-                  (worker) => worker.status === "outcome_unknown",
-                )
-                  ? "FalconDeck will not retry an ambiguous provider operation. Review the coordinator and worker tasks, then close this Mission if its outcome cannot be proved."
-                  : "Resume here before continuing the conversation in the coordinator task.",
-              style: "caption" as const,
-              tone: "muted" as const,
-            },
-          ]
-        : []),
-      {
-        type: "text",
-        text: `Deadline ${new Date(run.deadlineAt).toLocaleString()}`,
-        style: "caption",
-        tone: "muted",
-      },
-      { type: "row", gap: "small", wrap: true, children: runControls(run) },
-      { type: "divider" },
-    ],
-  };
-}
-
-function draftNode(draft: MissionDraft): ExtensionUiNode {
-  return {
-    type: "stack",
-    gap: "small",
-    children: [
-      { type: "text", text: draft.title, style: "heading" },
-      { type: "text", text: draft.objective },
-      {
-        type: "text",
-        text: `${draft.acceptanceCriteria.length} acceptance criteria · no work starts until you confirm`,
-        tone: "muted",
-      },
-      {
-        type: "button",
-        label: "Start bounded mission",
-        variant: "primary",
-        action: { actionId: "start-draft", input: { draftId: draft.id } },
-      },
-      { type: "divider" },
-    ],
-  };
-}
-
-function candidateNode(thread: ExtensionThreadSummary): ExtensionUiNode {
-  return {
-    type: "row",
-    gap: "small",
-    wrap: true,
-    children: [
-      { type: "text", text: thread.title },
-      {
-        type: "button",
-        label: "Make coordinator",
-        action: {
-          actionId: "adopt-task",
-          input: {
-            workspaceId: thread.workspaceId,
-            threadId: thread.id,
-            title: thread.title,
-          },
-        },
-      },
-    ],
-  };
-}
-
-function panel(
+function panelState(
   runs: readonly ExtensionRunSummary[],
   drafts: readonly MissionDraft[],
   threads: readonly ExtensionThreadSummary[],
   notice?: string,
-) {
+): MissionPanelState {
   const occupied = new Set(
     runs
       .filter((run) => run.gate !== "closed")
@@ -373,43 +143,82 @@ function panel(
   const visibleDrafts = drafts.filter(
     (draft) => !occupied.has(`${draft.workspaceId}:${draft.threadId}`),
   );
-  const children: ExtensionUiNode[] = [
-    { type: "text", text: "Missions", style: "heading" },
-    {
-      type: "text",
-      text: "A Mission keeps policy and limits above the harness while the full conversation stays in its coordinator task.",
-      tone: "muted",
-    },
-    ...(notice
-      ? [{ type: "text" as const, text: notice, tone: "info" as const }]
-      : []),
-    { type: "divider" },
-  ];
-  if (runs.length > 0) {
-    children.push({ type: "text", text: "Runs", style: "heading" });
-    children.push(...runs.slice(0, 12).map(runNode));
-  }
-  if (visibleDrafts.length > 0) {
-    children.push({ type: "text", text: "Drafts", style: "heading" });
-    children.push(...visibleDrafts.slice(0, 12).map(draftNode));
-  }
-  children.push({ type: "text", text: "Start from an idle task", style: "heading" });
-  if (candidates.length === 0) {
-    children.push({
-      type: "state",
-      state: "empty",
-      title: "No eligible idle tasks",
-      description: "Finish the current turn or create a Mission draft from an eligible task.",
-    });
-  } else {
-    children.push({ type: "list", items: candidates.map(candidateNode) });
-  }
-  children.push({
-    type: "button",
-    label: "Refresh",
-    action: { actionId: "refresh-missions", input: {} },
+  const panelRuns: MissionPanelRun[] = runs.slice(0, 12).map((run) => {
+    const checkpoint = checkpointOf(run);
+    const hasUnknownOutcome =
+      run.operations.some(
+        (operation) => operation.status === "outcome_unknown",
+      ) || run.workers.some((worker) => worker.status === "outcome_unknown");
+    const coordinatorSettling = run.operations.some((operation) =>
+      ["dispatching", "acknowledged"].includes(operation.status),
+    );
+    return {
+      id: run.id,
+      workspaceId: run.workspaceId,
+      coordinatorThreadId: run.coordinatorThreadId,
+      title: compactText(run.title, 120),
+      objective: compactText(run.objective, 1_200),
+      gate: run.gate,
+      ...(run.outcome ? { outcome: run.outcome } : {}),
+      ...(run.pauseReason
+        ? { pauseReason: compactText(run.pauseReason, 500) }
+        : {}),
+      policyRevision: run.policyRevision,
+      automaticTurnsStarted: run.automaticTurnsStarted,
+      maxAutomaticTurns: run.maxAutomaticTurns,
+      maxWorkers: run.maxWorkers,
+      deadlineAt: run.deadlineAt,
+      completionProposed: run.completionProposed,
+      status: statusLabel(run),
+      checkpoint: {
+        summary: compactText(checkpoint.summary, 1_200),
+        ...(checkpoint.nextAction
+          ? { nextAction: compactText(checkpoint.nextAction, 600) }
+          : {}),
+        evidence: checkpoint.evidence
+          .slice(0, 5)
+          .map((item) => compactText(item, 300)),
+        limitations: checkpoint.limitations
+          .slice(0, 5)
+          .map((item) => compactText(item, 300)),
+        ...(checkpoint.humanQuestion
+          ? { humanQuestion: compactText(checkpoint.humanQuestion, 600) }
+          : {}),
+      },
+      workers: run.workers.map((worker) => ({
+        id: worker.id,
+        provider: worker.provider,
+        status: worker.status,
+        ...(worker.threadId ? { threadId: worker.threadId } : {}),
+        ...(worker.message
+          ? { message: compactText(worker.message, 500) }
+          : {}),
+      })),
+      hasUnknownOutcome,
+      coordinatorSettling,
+    };
   });
-  return defineExtensionUi({ version: 1, root: { type: "stack", gap: "large", children } });
+  return {
+    schemaVersion: 1,
+    runs: panelRuns,
+    drafts: visibleDrafts.slice(0, 12).map((draft) => ({
+      id: draft.id,
+      workspaceId: draft.workspaceId,
+      threadId: draft.threadId,
+      title: compactText(draft.title, 120),
+      objective: compactText(draft.objective, 1_200),
+      acceptanceCriteriaCount: draft.acceptanceCriteria.length,
+      createdAt: draft.createdAt,
+    })),
+    candidates: candidates.map((thread) => ({
+      id: thread.id,
+      workspaceId: thread.workspaceId,
+      title: compactText(thread.title, 120),
+      provider: thread.provider,
+    })),
+    ...(notice ? { notice: compactText(notice, 500) } : {}),
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function coordinatorPrompt(
@@ -450,7 +259,7 @@ async function publish(context: ExtensionContext, notice?: string) {
   }
   await context.views.publish({
     viewId: PANEL_VIEW,
-    value: panel(runs, retainedDrafts, threads, notice),
+    value: panelState(runs, retainedDrafts, threads, notice),
   });
 }
 
@@ -624,7 +433,12 @@ export default defineExtension({
       const threads = await context.threads.list();
       await context.views.publish({
         viewId: PANEL_VIEW,
-        value: panel(runs, next, threads, "A human must start this draft before automatic work begins."),
+        value: panelState(
+          runs,
+          next,
+          threads,
+          "A human must start this draft before automatic work begins.",
+        ),
       });
       return { draftId: draft.id, status: "awaiting_human_start" };
     });

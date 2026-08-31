@@ -47,6 +47,8 @@ export type ExtensionAppPanelProps = {
     target?: ExtensionAppViewScope | null,
   ): Promise<ExtensionAppActionResponse>;
   openThread(workspaceId: string, threadId: string): void;
+  /** Opens the host's extension settings when that surface is available. */
+  openExtensionSettings?(): void;
 };
 
 export type ExtensionAppPanelRegistration = {

@@ -2,11 +2,12 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "engines": {
     "falcondeck": "^0.1"
   },
   "entrypoint": "server.ts",
+  "frontend": "app.tsx",
   "contributes": {
     "panelActions": [
       { "id": "refresh-missions", "title": "Refresh missions" },
@@ -23,35 +24,7 @@
         "id": "missions",
         "title": "Missions",
         "view": "missions-panel",
-        "icon": "activity",
-        "ui": {
-          "version": 1,
-          "root": {
-            "type": "stack",
-            "gap": "large",
-            "children": [
-              { "type": "text", "text": "Missions", "style": "heading" },
-              {
-                "type": "text",
-                "text": "Bounded, durable coordination attached to an ordinary task.",
-                "tone": "muted"
-              },
-              { "type": "divider" },
-              {
-                "type": "state",
-                "state": "empty",
-                "title": "Load the Missions panel",
-                "description": "Grant Threads, Agent tools, and Manage owned tasks in Settings, then load the panel. Missions is disabled by default."
-              },
-              {
-                "type": "button",
-                "label": "Load missions",
-                "action": { "actionId": "refresh-missions", "input": {} },
-                "variant": "primary"
-              }
-            ]
-          }
-        }
+        "icon": "activity"
       }
     ],
     "agentTools": [

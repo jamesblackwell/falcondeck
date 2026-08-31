@@ -60,7 +60,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   catalog policy on first discovery;
 - the public `orchestration` run/effect facet, denied-by-default
   `orchestration:manage-owned-tasks` grant, durable daemon journal, and bundled
-  disabled-by-default Missions v1 reference;
+  disabled-by-default Missions v1 reference with a permission-aware trusted
+  dashboard on desktop and remote web;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 

@@ -84,6 +84,30 @@ function host(runs: ExtensionRunSummary[] = []) {
 }
 
 describe("official Missions extension", () => {
+  it("publishes a bounded frontend view model after permission checks pass", async () => {
+    const testHost = host([openRun()]);
+
+    const refreshed = await testHost.invokeAction("refresh-missions");
+
+    expect(refreshed.publishedViews).toEqual([
+      {
+        viewId: "missions-panel",
+        value: expect.objectContaining({
+          schemaVersion: 1,
+          runs: [
+            expect.objectContaining({
+              id: "run-1",
+              title: "Ship the feature",
+              status: "Active",
+            }),
+          ],
+          drafts: [],
+          candidates: [],
+        }),
+      },
+    ]);
+  });
+
   it("creates only a draft from the agent and requires a human start action", async () => {
     const testHost = host();
     const drafted = await testHost.invokeTool("draft-mission", {

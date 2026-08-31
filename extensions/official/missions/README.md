@@ -15,6 +15,13 @@ permission checks, deadlines, admission count, restart handling, and provider
 dispatch. Completion is never inferred from an agent reply: the human accepts
 it in the Missions panel.
 
+Desktop and remote web render a trusted Missions dashboard. Before the three
+permissions are granted it shows a setup checklist and links to Extension
+settings; it does not offer an action that is guaranteed to fail. After setup,
+the same panel shows bounded run state, human controls, pending drafts, and
+eligible coordinator tasks. Mobile keeps the attributed unsupported fallback
+for trusted extension frontends.
+
 Claude uses its task-bound per-turn bridge. Codex uses its workspace bridge
 only when the daemon can prove there is exactly one running Codex task in that
 workspace; ambiguous calls fail closed. FalconDeck refreshes idle Codex

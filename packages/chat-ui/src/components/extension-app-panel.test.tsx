@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -65,5 +65,37 @@ describe("ExtensionAppPanel", () => {
       screen.getByText("Example Kanban could not render this panel."),
     ).toBeVisible();
     consoleError.mockRestore();
+  });
+
+  it("offers trusted frontends a host-owned Extension settings shortcut", () => {
+    const onOpenExtensionSettings = vi.fn();
+    const registration: ExtensionAppPanelRegistration = {
+      id: "board",
+      title: "Kanban",
+      component({ openExtensionSettings }) {
+        return (
+          <button type="button" onClick={openExtensionSettings}>
+            Open settings
+          </button>
+        );
+      },
+    };
+
+    render(
+      <ExtensionAppPanel
+        panel={panel}
+        registration={registration}
+        extension={extension}
+        threads={[]}
+        views={[]}
+        onInvokeAction={vi.fn()}
+        onOpenThread={vi.fn()}
+        onOpenExtensionSettings={onOpenExtensionSettings}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
+    expect(onOpenExtensionSettings).toHaveBeenCalledOnce();
   });
 });

@@ -5895,6 +5895,7 @@ function AppInner() {
                         views={ownerSnapshot.extensions.views}
                         onClose={() => setActiveExtensionPanelKey(null)}
                         onOpenThread={handleSelectThread}
+                        onOpenExtensionSettings={handleOpenExtensions}
                         onInvokeAction={(
                           _registeredPanel,
                           actionId,
