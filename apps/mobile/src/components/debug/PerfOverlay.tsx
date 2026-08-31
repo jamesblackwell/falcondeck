@@ -34,13 +34,13 @@ function PerfOverlayBody() {
   }, [])
 
   const label = sample
-    ? `CPU ${formatCpu(sample.cpuPercent)} · ${formatMemory(sample.memoryBytes)}`
+    ? `CPU ${formatCpu(sample.cpuPercent)} · ${formatMemory(sample.memoryBytes)} · ${sample.threadCount}T`
     : 'perf n/a'
 
   return (
     <View
       pointerEvents="none"
-      style={[styles.container, { top: insets.top + 2 }]}
+      style={[styles.container, { top: insets.top }]}
     >
       <View style={styles.pill}>
         <Text variant="mono" size="2xs" color="secondary" style={styles.label}>
