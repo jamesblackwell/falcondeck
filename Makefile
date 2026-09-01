@@ -32,6 +32,7 @@ CARGO := cargo
 PROJECT_CARGO := $(shell if command -v rustup >/dev/null 2>&1; then rustup which cargo; else command -v cargo; fi)
 PROJECT_RUSTC := $(shell if command -v rustup >/dev/null 2>&1; then rustup which rustc; else command -v rustc; fi)
 PROJECT_RUSTDOC := $(shell if command -v rustup >/dev/null 2>&1; then rustup which rustdoc; else command -v rustdoc; fi)
+PROJECT_RUST_LIB := $(abspath $(dir $(PROJECT_RUSTC))/../lib)
 DAEMON_PORT ?= 4123
 OPENCODE_MODEL ?= default
 OPENCODE_TRANSPORT ?= auto
@@ -88,7 +89,9 @@ FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true)
 # the final link of the desktop binary sit on "607/608" for minutes and defeats
 # incremental reuse. Local installs override both (parallel codegen, no LTO);
 # distribution builds keep the fully-optimized release profile.
-DESKTOP_INSTALL_CARGO_ENV = RUSTC="$(PROJECT_RUSTC)" RUSTDOC="$(PROJECT_RUSTDOC)" CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+# Rust 1.98's macOS rust-objcopy looks one directory too low for libLLVM.
+# Point dyld at the toolchain library directory so release stripping works.
+DESKTOP_INSTALL_CARGO_ENV = RUSTC="$(PROJECT_RUSTC)" RUSTDOC="$(PROJECT_RUSTDOC)" $(if $(filter Darwin,$(UNAME_S)),DYLD_LIBRARY_PATH="$(PROJECT_RUST_LIB)$(if $(DYLD_LIBRARY_PATH),:$(DYLD_LIBRARY_PATH))") CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build
 TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --runner "$(PROJECT_CARGO)" --bundles app --config src-tauri/tauri.local.conf.json
