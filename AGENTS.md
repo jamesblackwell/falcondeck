@@ -67,9 +67,11 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 ## Code Review
 
-- For major changes, run the repo-local autoreview before committing or handing off.
-- Treat new features, protocol or API changes, cross-package refactors, migrations, release work, and changes spanning several packages as major changes.
-- For uncommitted work, run `.agents/skills/autoreview/scripts/autoreview --mode local`.
+- Run the repo-local autoreview on any significant change before handing off, not just headline features. Tests and typecheck alone are not a review.
+- Changes to core functionality always warrant a review: the daemon event stream and RPC surface, relay protocol/replay/pairing, `client-core` sync/streaming/normalization, approval and turn flow, and storage or persistence behavior on any client.
+- Also treat new features, protocol or API changes, cross-package refactors, migrations, and release work as significant.
+- Skipping is fine only for trivial mechanical edits (copy, comments, isolated styling) — say so in the handoff.
+- For uncommitted work, run `.agents/skills/autoreview/scripts/autoreview --mode local`; for work already committed to `main`, run `--mode commit --commit <sha>` per commit.
 - Verify accepted findings against the real code path, fix in-scope issues, rerun focused checks, and rerun autoreview until clean.
 - Record the autoreview command and result in the handoff when you skip it or when it finds follow-up work.
 
