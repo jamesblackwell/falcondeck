@@ -1,5 +1,5 @@
 //! Mission-specific agent context, staged only while the bundled Missions
-//! extension is ready to publish its complete coordinator toolset.
+//! extension is ready to publish its durable project tools.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,11 +27,11 @@ pub(crate) fn append_instructions(text: &mut String, skill_path: Option<&Path>) 
         text.push('\n');
     }
     text.push_str(
-        "- When the user explicitly asks to start, create, or run a FalconDeck Mission, call `falcondeck_missions-draft_mission` before doing the requested work. Put agreed limits in its structured fields, not only prompt prose. Do not substitute a harness goal, merely describe a mission, or begin the task as an ordinary turn. The tool creates a draft for human review and start.",
+        "- When the user explicitly asks to start or create a FalconDeck Mission, call `falcondeck_missions-create_mission` before doing the requested work. Create a durable brief with concrete success criteria and only include a deadline when the user wants one. Do not substitute a harness goal or merely describe a Mission. The tool links this task and creates a draft for human review and activation.",
     );
     if let Some(path) = skill_path {
         text.push_str(&format!(
-            "\n- FalconDeck Mission workflow (read when Mission intent is present or this task is a Mission coordinator): {}",
+            "\n- FalconDeck Mission workflow (read when Mission intent is present or this task is linked to a Mission): {}",
             path.display()
         ));
     }
@@ -49,7 +49,7 @@ mod tests {
             Some(Path::new("/tmp/skills/falcondeck-missions/SKILL.md")),
         );
 
-        assert!(text.contains("falcondeck_missions-draft_mission"));
+        assert!(text.contains("falcondeck_missions-create_mission"));
         assert!(text.contains("Do not substitute a harness goal"));
         assert!(text.contains("/tmp/skills/falcondeck-missions/SKILL.md"));
     }

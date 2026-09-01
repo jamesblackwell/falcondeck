@@ -1,7 +1,6 @@
 /* Standalone Missions fixture: `npm run dev` → /missions-qa.html.
    Use ?state=setup for incomplete permissions; the default renders a populated
-   operational dashboard. Theme and palette query parameters match other QA
-   fixtures. */
+   long-horizon project dashboard. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -25,93 +24,52 @@ initAppearance();
 if (qaTheme) document.documentElement.dataset.theme = qaTheme;
 if (qaPalette) document.documentElement.dataset.palette = qaPalette;
 
-const deadline = new Date(Date.now() + 24 * 60 * 1000).toISOString();
 const updatedAt = new Date().toISOString();
 const state: MissionPanelState = {
-  schemaVersion: 1,
-  runs: [
+  schemaVersion: 2,
+  missions: [
     {
-      id: "run-release",
-      workspaceId: "falcondeck",
-      coordinatorThreadId: "coordinator-release",
-      title: "Ship the Missions extension",
-      objective:
-        "Finish the coordinator workflow, verify its safety boundaries, and prepare a clear handoff.",
-      gate: "open",
-      policyRevision: 4,
-      automaticTurnsStarted: 2,
-      maxAutomaticTurns: 4,
-      maxWorkers: 3,
-      deadlineAt: deadline,
-      completionProposed: false,
-      status: "Workers running",
-      checkpoint: {
-        summary:
-          "The coordinator completed the core implementation and delegated an independent verification pass.",
-        nextAction: "Review the worker report and run the focused test suite.",
-        evidence: ["Mission policy tests pass"],
-        limitations: [],
-      },
-      workers: [
+      id: "mission-release",
+      title: "Launch and observe FalconDeck Missions",
+      brief:
+        "Ship the durable project model, then collect real usage evidence over several weeks before expanding the orchestration surface.",
+      successCriteria: [
+        "The durable Mission record ships",
+        "Agents can update it from linked tasks",
+        "Follow-up evidence is recorded",
+      ],
+      status: "needs_human",
+      threads: [
         {
-          id: "worker-review-42",
+          workspaceId: "falcondeck",
+          threadId: "task-release",
+          role: "source",
+          linkedAt: updatedAt,
+          title: "Implement Mission v2",
           provider: "codex",
-          status: "running",
-          threadId: "worker-review",
+          status: "idle",
         },
       ],
-      hasUnknownOutcome: false,
-      coordinatorSettling: false,
-    },
-    {
-      id: "run-docs",
-      workspaceId: "falcondeck",
-      coordinatorThreadId: "coordinator-docs",
-      title: "Reconcile the extension documentation",
-      objective: "Check the shipping behavior against the canonical docs.",
-      gate: "paused",
-      pauseReason: "Waiting for a decision about the mobile fallback.",
-      policyRevision: 2,
-      automaticTurnsStarted: 1,
-      maxAutomaticTurns: 4,
-      maxWorkers: 3,
-      deadlineAt: deadline,
-      completionProposed: false,
-      status: "Paused",
-      checkpoint: {
-        summary: "Desktop and remote behavior are reconciled.",
-        evidence: [],
-        limitations: ["Mobile uses the unsupported frontend fallback."],
-        humanQuestion: "Should the mobile fallback include a link to desktop?",
-      },
-      workers: [],
-      hasUnknownOutcome: false,
-      coordinatorSettling: false,
-    },
-  ],
-  drafts: [
-    {
-      id: "draft-review",
-      workspaceId: "falcondeck",
-      threadId: "draft-thread",
-      title: "Run a release readiness review",
-      objective: "Verify the extension against its acceptance criteria.",
-      acceptanceCriteriaCount: 3,
+      updates: [
+        {
+          id: "update-1",
+          actor: "agent",
+          kind: "evidence",
+          body: "The durable storage and task-bound tool tests pass.",
+          threadId: "task-release",
+          createdAt: updatedAt,
+        },
+        {
+          id: "update-2",
+          actor: "agent",
+          kind: "question",
+          body: "Should the first scheduled review run daily or weekly?",
+          threadId: "task-release",
+          createdAt: updatedAt,
+        },
+      ],
       createdAt: updatedAt,
-    },
-  ],
-  candidates: [
-    {
-      id: "candidate-1",
-      workspaceId: "falcondeck",
-      title: "Investigate intermittent reconnects",
-      provider: "codex",
-    },
-    {
-      id: "candidate-2",
-      workspaceId: "falcondeck",
-      title: "Plan the next extension API slice",
-      provider: "claude",
+      updatedAt,
     },
   ],
   updatedAt,

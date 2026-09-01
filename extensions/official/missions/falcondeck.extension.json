@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -11,14 +11,10 @@
   "contributes": {
     "panelActions": [
       { "id": "refresh-missions", "title": "Refresh missions" },
-      { "id": "start-draft", "title": "Start mission draft" },
-      { "id": "update-draft", "title": "Edit mission draft" },
-      { "id": "adopt-task", "title": "Start mission from task" },
-      { "id": "pause-run", "title": "Pause mission" },
-      { "id": "resume-run", "title": "Resume mission" },
-      { "id": "extend-run", "title": "Extend mission deadline" },
-      { "id": "accept-completion", "title": "Accept mission completion" },
-      { "id": "close-incomplete", "title": "Close mission incomplete" }
+      { "id": "activate-mission", "title": "Activate mission" },
+      { "id": "edit-mission", "title": "Edit mission draft" },
+      { "id": "add-mission-update", "title": "Message mission" },
+      { "id": "set-mission-status", "title": "Change mission status" }
     ],
     "panels": [
       {
@@ -30,100 +26,88 @@
     ],
     "agentTools": [
       {
-        "id": "draft-mission",
-        "title": "Start a FalconDeck Mission draft",
-        "description": "Use this when the user explicitly asks to start, create, or run a FalconDeck Mission. Create a bounded draft for this exact task before doing the requested work; do not substitute a harness goal or merely describe a mission. Include the agreed time, coordinator-turn, and worker limits as structured fields. A human must review and start it before automatic work begins.",
+        "id": "create-mission",
+        "title": "Create a FalconDeck Mission draft",
+        "description": "Use this when the user explicitly asks to start or create a FalconDeck Mission. Create a durable project brief linked to this exact task; do not substitute a harness goal or merely describe a mission. A human reviews and activates the draft. Deadlines are optional and there is no default lifespan.",
         "inputSchema": {
           "type": "object",
-          "required": ["objective"],
+          "required": ["title", "brief", "successCriteria"],
           "properties": {
             "title": { "type": "string", "maxLength": 120 },
-            "objective": { "type": "string", "maxLength": 12000 },
-            "acceptanceCriteria": {
+            "brief": { "type": "string", "maxLength": 4000 },
+            "successCriteria": {
               "type": "array",
-              "maxItems": 12,
-              "items": { "type": "string", "maxLength": 500 }
+              "minItems": 1,
+              "maxItems": 8,
+              "items": { "type": "string", "maxLength": 300 }
             },
-            "leaseMinutes": {
-              "type": "integer",
-              "minimum": 15,
-              "maximum": 1440,
-              "description": "Hard runtime deadline in minutes. Defaults to 180."
-            },
-            "maxAutomaticTurns": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 24,
-              "description": "Hard coordinator-turn budget. Defaults to 12."
-            },
-            "maxWorkers": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 4,
-              "description": "Hard worker-task budget. Defaults to 3."
+            "deadline": {
+              "type": "string",
+              "description": "Optional ISO 8601 deadline chosen by the human. Omit for an open-ended Mission."
             }
           },
           "additionalProperties": false
         }
       },
       {
-        "id": "mission-status",
-        "title": "Read this task's mission",
-        "description": "Read the bounded Mission state owned by this exact coordinator task, including its remaining automatic-turn allowance and deadline.",
+        "id": "read-mission",
+        "title": "Read a linked FalconDeck Mission",
+        "description": "Read the durable brief, success criteria, status, linked tasks, and updates for a Mission linked to this exact task.",
         "inputSchema": {
           "type": "object",
-          "properties": {},
-          "additionalProperties": false
-        }
-      },
-      {
-        "id": "mission-delegate",
-        "title": "Delegate one Mission worker",
-        "description": "Delegate one independent, bounded assignment to a separate Codex worker task. The human-approved Mission budget permits at most four workers and FalconDeck runs them serially.",
-        "inputSchema": {
-          "type": "object",
-          "required": ["assignment"],
           "properties": {
-            "assignment": { "type": "string", "maxLength": 12000 }
+            "missionId": { "type": "string", "maxLength": 128 }
           },
           "additionalProperties": false
         }
       },
       {
-        "id": "mission-checkpoint",
-        "title": "Checkpoint a FalconDeck mission",
-        "description": "Persist meaningful Mission progress, request one bounded continuation, pause for human input, or propose evidence-backed completion for human acceptance.",
+        "id": "update-mission",
+        "title": "Update a linked FalconDeck Mission",
+        "description": "Append a meaningful update, change a non-terminal status, link an existing FalconDeck task, or edit a draft. Read the Mission first. Agents cannot activate, complete, or cancel Missions.",
         "inputSchema": {
           "type": "object",
-          "required": ["disposition", "summary"],
+          "required": ["operation"],
           "properties": {
-            "disposition": {
+            "missionId": { "type": "string", "maxLength": 128 },
+            "operation": {
               "type": "string",
-              "enum": ["continue_self", "awaiting_workers", "needs_human", "proposing_completion"]
+              "enum": [
+                "add_update",
+                "set_status",
+                "link_thread",
+                "edit_definition"
+              ]
             },
-            "summary": { "type": "string", "maxLength": 4000 },
-            "nextAction": { "type": "string", "maxLength": 2000 },
-            "progressFingerprint": { "type": "string", "maxLength": 256 },
-            "evidence": {
+            "kind": {
+              "type": "string",
+              "enum": ["comment", "evidence", "question", "status"]
+            },
+            "body": { "type": "string", "maxLength": 1000 },
+            "status": {
+              "type": "string",
+              "enum": ["active", "waiting", "needs_human", "review", "paused"]
+            },
+            "workspaceId": { "type": "string", "maxLength": 256 },
+            "threadId": { "type": "string", "maxLength": 256 },
+            "role": {
+              "type": "string",
+              "enum": ["source", "work", "review"]
+            },
+            "title": { "type": "string", "maxLength": 120 },
+            "brief": { "type": "string", "maxLength": 4000 },
+            "successCriteria": {
               "type": "array",
-              "maxItems": 20,
-              "items": { "type": "string", "maxLength": 1000 }
+              "minItems": 1,
+              "maxItems": 8,
+              "items": { "type": "string", "maxLength": 300 }
             },
-            "limitations": {
-              "type": "array",
-              "maxItems": 12,
-              "items": { "type": "string", "maxLength": 1000 }
-            },
-            "humanQuestion": { "type": "string", "maxLength": 1000 }
+            "deadline": { "type": "string" }
           },
           "additionalProperties": false
         }
       }
     ]
   },
-  "permissions": [
-    "threads:read",
-    "agent-tools:register",
-    "orchestration:manage-owned-tasks"
-  ]
+  "permissions": ["threads:read", "agent-tools:register"]
 }

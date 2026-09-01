@@ -28,7 +28,7 @@ const MAX_SCOPE_ID_CHARS: usize = 512;
 const LEGACY_SCRATCH_PAD_ID: &str = "falcondeck.scratch-pad";
 const NOTES_ID: &str = "falcondeck.notes";
 const MISSIONS_ID: &str = "falcondeck.missions";
-const MISSIONS_DRAFT_TOOL_ID: &str = "draft-mission";
+const MISSIONS_CREATE_TOOL_ID: &str = "create-mission";
 const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -507,15 +507,14 @@ impl ExtensionRegistry {
     }
 
     /// Mission instructions should enter an agent's context only when the
-    /// extension can actually draft and coordinate. This prevents a stale
+    /// extension can actually create and update its durable project. This prevents a stale
     /// prompt from advertising a feature whose tool or required projections
     /// the user has disabled.
     pub(super) fn missions_agent_context_available(&self) -> bool {
         self.has_grant(MISSIONS_ID, THREADS_READ_PERMISSION)
             && self.has_grant(MISSIONS_ID, AGENT_TOOLS_PERMISSION)
-            && self.has_grant(MISSIONS_ID, ORCHESTRATION_PERMISSION)
             && self.agent_tools().iter().any(|tool| {
-                tool.extension_id == MISSIONS_ID && tool.tool_id == MISSIONS_DRAFT_TOOL_ID
+                tool.extension_id == MISSIONS_ID && tool.tool_id == MISSIONS_CREATE_TOOL_ID
             })
     }
 
@@ -2291,11 +2290,7 @@ mod tests {
             .update_enabled(MISSIONS_ID, true)
             .await
             .expect("Missions should enable");
-        for permission in [
-            THREADS_READ_PERMISSION,
-            AGENT_TOOLS_PERMISSION,
-            ORCHESTRATION_PERMISSION,
-        ] {
+        for permission in [THREADS_READ_PERMISSION, AGENT_TOOLS_PERMISSION] {
             registry
                 .update_permission(MISSIONS_ID, permission, true)
                 .await

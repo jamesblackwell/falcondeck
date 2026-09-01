@@ -22,13 +22,13 @@ describe("parseMcpResult", () => {
         _meta: {
           "falcondeck/extensionTool": {
             extensionId: "falcondeck.missions",
-            toolId: "draft-mission",
+            toolId: "create-mission",
           },
         },
       }),
     ).toEqual({
       extensionId: "falcondeck.missions",
-      toolId: "draft-mission",
+      toolId: "create-mission",
     });
     expect(extensionToolResultIdentity({ _meta: { trace: "abc" } })).toBeNull();
   });

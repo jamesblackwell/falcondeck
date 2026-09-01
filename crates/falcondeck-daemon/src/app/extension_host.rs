@@ -198,6 +198,8 @@ struct HostActionResponse {
     #[serde(default)]
     orchestration_effects: Vec<ExtensionOrchestrationEffect>,
     #[serde(default)]
+    handler_errors: Vec<String>,
+    #[serde(default)]
     error: Option<String>,
 }
 
@@ -235,6 +237,10 @@ pub(super) struct ExtensionHostActionResult {
     pub(super) storage: BTreeMap<String, Value>,
     pub(super) published_views: Vec<PublishedExtensionView>,
     pub(super) orchestration_effects: Vec<ExtensionOrchestrationEffect>,
+    /// Event callbacks are isolated from one another. Their state and views
+    /// still commit, while these bounded errors keep the extension visibly
+    /// unhealthy instead of silently losing the failure.
+    pub(super) handler_errors: Vec<String>,
 }
 
 impl ExtensionHost {
@@ -310,6 +316,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            handler_errors: response.handler_errors,
         })
     }
 
@@ -352,6 +359,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            handler_errors: response.handler_errors,
         })
     }
 
@@ -388,6 +396,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            handler_errors: response.handler_errors,
         })
     }
 
@@ -581,13 +590,7 @@ fn extension_host_script(state_dir: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcondeck_core::{
-        InvokeExtensionActionRequest, ThreadStatus,
-        orchestration::{
-            ExtensionOrchestrationEffect, ExtensionRunGate, ExtensionRunSummary,
-            MAX_AUTOMATIC_TURNS,
-        },
-    };
+    use falcondeck_core::{InvokeExtensionActionRequest, ThreadStatus};
 
     #[test]
     fn host_pool_reuses_one_host_per_extension_and_isolates_others() {
@@ -683,7 +686,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn official_missions_uses_only_the_public_run_facet() {
+    async fn official_missions_uses_storage_tools_and_thread_summaries() {
         let deno = resolve_agent_binary("deno", "deno").executable;
         if Command::new(deno).arg("--version").output().await.is_err() {
             return;
@@ -701,42 +704,6 @@ mod tests {
             .expect("runtime support assets should restore");
         let mut host = ExtensionHost::new(&state_path, "deno".to_string());
         let now = chrono::Utc::now();
-        let runs = [ExtensionRunSummary {
-            id: "run-1".to_string(),
-            owner_extension_id: "falcondeck.missions".to_string(),
-            workspace_id: "workspace-1".to_string(),
-            coordinator_thread_id: "thread-1".to_string(),
-            title: "Mission test".to_string(),
-            objective: "Prove the public extension contract".to_string(),
-            gate: ExtensionRunGate::Open,
-            outcome: None,
-            pause_reason: None,
-            checkpoint: serde_json::json!({
-                "schemaVersion": 1,
-                "objective": "Prove the public extension contract",
-                "acceptanceCriteria": ["A checkpoint is emitted"],
-                "disposition": "planning",
-                "summary": "",
-                "evidence": [],
-                "limitations": [],
-                "updatedAt": now,
-            }),
-            policy_revision: 3,
-            journal_sequence: 2,
-            approval_generation: 1,
-            automatic_turns_started: 1,
-            max_automatic_turns: MAX_AUTOMATIC_TURNS,
-            max_workers: falcondeck_core::orchestration::MAX_MANAGED_WORKERS,
-            awaiting_workers: false,
-            created_at: now,
-            updated_at: now,
-            deadline_at: now + chrono::Duration::minutes(30),
-            last_progress_fingerprint: None,
-            pending_continuation: None,
-            completion_proposed: false,
-            operations: Vec::new(),
-            workers: Vec::new(),
-        }];
         let threads = [ExtensionThreadSummary {
             id: "thread-1".to_string(),
             workspace_id: "workspace-1".to_string(),
@@ -748,50 +715,41 @@ mod tests {
             pending_question_count: 0,
         }];
 
-        let refreshed = host
-            .invoke(
-                &package,
-                "refresh-missions",
-                None,
-                &serde_json::json!({}),
-                &BTreeMap::new(),
-                Some(&threads),
-                Some(&runs),
-            )
-            .await
-            .expect("Missions panel should render through the public host");
-        assert_eq!(refreshed.published_views[0].view_id, "missions-panel");
-        assert!(refreshed.orchestration_effects.is_empty());
-
-        let checkpointed = host
+        let created = host
             .invoke_tool(
                 &package,
-                "mission-checkpoint",
+                "create-mission",
                 &serde_json::json!({
-                    "disposition": "continue_self",
-                    "summary": "Recorded a durable checkpoint",
-                    "nextAction": "Run the focused test",
-                    "progressFingerprint": "checkpoint-v1",
-                    "evidence": [],
-                    "limitations": []
+                    "title": "Mission test",
+                    "brief": "Prove the public extension contract",
+                    "successCriteria": ["A durable draft is stored"]
                 }),
                 Some("thread-1"),
                 Some("workspace-1"),
-                &refreshed.storage,
+                &BTreeMap::new(),
                 Some(&threads),
-                Some(&runs),
+                None,
             )
             .await
-            .expect("coordinator checkpoint should return one broker effect");
-        assert!(matches!(
-            checkpointed.orchestration_effects.as_slice(),
-            [ExtensionOrchestrationEffect::RequestContinuation {
-                run_id,
-                expected_policy_revision: 3,
-                progress_fingerprint,
-                ..
-            }] if run_id == "run-1" && progress_fingerprint == "checkpoint-v1"
-        ));
+            .expect("Mission draft should be created through the public host");
+        assert_eq!(created.published_views[0].view_id, "missions-panel");
+        assert!(created.orchestration_effects.is_empty());
+
+        let read = host
+            .invoke_tool(
+                &package,
+                "read-mission",
+                &serde_json::json!({}),
+                Some("thread-1"),
+                Some("workspace-1"),
+                &created.storage,
+                Some(&threads),
+                None,
+            )
+            .await
+            .expect("linked task should read the durable Mission");
+        assert_eq!(read.result["status"], "draft");
+        assert!(read.orchestration_effects.is_empty());
         host.stop().await;
     }
 
@@ -906,6 +864,10 @@ import { defineExtension } from '@falcondeck/extension-sdk'
 export default defineExtension({
   activate(context) {
     context.events.on('thread.updated', async ({ threadId }) => {
+      await context.storage.set('attemptedThreadId', threadId)
+      throw new Error('fixture handler failed')
+    })
+    context.events.on('thread.updated', async ({ threadId }) => {
       const threads = await context.threads.list()
       const thread = threads.find((candidate) => candidate.id === threadId)
       await context.storage.set('threadId', threadId)
@@ -939,17 +901,19 @@ export default defineExtension({
             pending_approval_count: 1,
             pending_question_count: 0,
         }];
-        let denied = match host
+        let denied = host
             .dispatch_event(&package, &event, &BTreeMap::new(), None, None)
             .await
-        {
-            Ok(_) => panic!("thread reads must be denied without a grant projection"),
-            Err(error) => error,
-        };
+            .expect("one failed event handler must not abort event dispatch");
         assert!(
             denied
-                .to_string()
-                .contains("threads:read permission is not granted")
+                .handler_errors
+                .iter()
+                .any(|error| error.contains("threads:read permission is not granted"))
+        );
+        assert_eq!(
+            denied.storage.get("attemptedThreadId"),
+            Some(&serde_json::json!("thread-1"))
         );
         let result = host
             .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries), None)
@@ -962,6 +926,7 @@ export default defineExtension({
             Some(&serde_json::json!("thread-1"))
         );
         assert_eq!(result.published_views.len(), 1);
+        assert_eq!(result.handler_errors, ["fixture handler failed"]);
         let published = &result.published_views[0];
         assert_eq!(published.view_id, "latest");
         assert_eq!(published.scope, None);

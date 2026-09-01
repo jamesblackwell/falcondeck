@@ -1,10 +1,10 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ButtonHTMLAttributes,
+  type FormEvent,
   type HTMLAttributes,
   type ReactNode,
 } from "react";
@@ -19,35 +19,30 @@ import {
 
 import {
   parseMissionPanelState,
-  type MissionPanelRun,
+  type MissionPanelEntry,
   type MissionPanelState,
+  type MissionStatus,
 } from "./model";
 
 const PANEL_VIEW = "missions-panel";
-const AUTONOMOUS_ACCESS_LABEL = "Full access · Never ask";
 const MISSION_CREATION_PROMPT =
-  "Let’s set up a FalconDeck Mission together. Help me define the objective, acceptance criteria, and sensible limits for time, coordinator turns, and workers. Ask only for details that materially affect the plan. Once we’ve agreed, use the FalconDeck Mission tools to create a draft for my review, passing the agreed limits in the structured leaseMinutes, maxAutomaticTurns, and maxWorkers fields rather than only writing them in the objective. Do not begin the work until I start the Mission.";
+  "Let’s create a FalconDeck Mission for a piece of work that may span multiple tasks or periods of waiting. Help me define a durable brief and concrete success criteria. Ask only for details that materially affect them. Include a deadline only if I choose one. Once agreed, call the FalconDeck create-mission tool to create a draft linked to this task for my review. Do not substitute a harness goal.";
 const REQUIRED_PERMISSIONS = [
   {
     id: "threads:read",
-    label: "Read tasks",
-    description: "Find an existing task that can coordinate the work.",
+    label: "Read task summaries",
+    description:
+      "Show and verify the native agent tasks linked to each Mission.",
   },
   {
     id: "agent-tools:register",
-    label: "Agent tools",
-    description: "Let coordinators checkpoint progress and delegate workers.",
-  },
-  {
-    id: "orchestration:manage-owned-tasks",
-    label: "Manage owned tasks",
-    description: "Continue and pause only work owned by this Mission.",
+    label: "Offer Mission tools",
+    description: "Let agents create, read, and update durable Mission state.",
   },
 ] as const;
 
 type BadgeVariant = "default" | "success" | "warning" | "danger" | "info";
 type ButtonVariant = "default" | "outline" | "ghost" | "danger";
-type ButtonSize = "default" | "sm";
 
 function classes(...values: Array<string | false | undefined>): string {
   return values.filter(Boolean).join(" ");
@@ -56,15 +51,10 @@ function classes(...values: Array<string | false | undefined>): string {
 function Button({
   className,
   variant = "default",
-  size = "default",
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: ButtonVariant;
-  size?: ButtonSize;
-}) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
   const variants: Record<ButtonVariant, string> = {
-    default:
-      "bg-accent text-surface-0 shadow-[var(--fd-shadow-sm)] hover:bg-accent-strong",
+    default: "bg-accent text-surface-0 hover:bg-accent-strong",
     outline:
       "border border-border-emphasis bg-transparent text-fg-primary hover:bg-surface-3",
     ghost:
@@ -75,10 +65,7 @@ function Button({
     <button
       type="button"
       className={classes(
-        "fd-focus inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium transition-colors disabled:pointer-events-none disabled:opacity-40",
-        size === "sm"
-          ? "h-7 rounded-[var(--fd-radius-md)] px-2.5 text-[length:var(--fd-text-xs)]"
-          : "h-9 rounded-[var(--fd-radius-lg)] px-3.5 text-[length:var(--fd-text-sm)]",
+        "fd-focus inline-flex h-8 items-center justify-center rounded-[var(--fd-radius-md)] px-3 text-[length:var(--fd-text-xs)] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40",
         variants[variant],
         className,
       )}
@@ -88,14 +75,11 @@ function Button({
 }
 
 function Badge({
-  className,
   variant = "default",
-  dot,
   children,
-  ...props
-}: HTMLAttributes<HTMLDivElement> & {
+}: {
   variant?: BadgeVariant;
-  dot?: boolean;
+  children: ReactNode;
 }) {
   const variants: Record<BadgeVariant, string> = {
     default: "bg-surface-3 text-fg-secondary",
@@ -104,75 +88,26 @@ function Badge({
     danger: "bg-danger-muted text-danger",
     info: "bg-info-muted text-info",
   };
-  const dots: Record<BadgeVariant, string> = {
-    default: "bg-fg-tertiary",
-    success: "bg-success",
-    warning: "bg-warning",
-    danger: "bg-danger",
-    info: "bg-info",
-  };
   return (
-    <div
+    <span
       className={classes(
-        "inline-flex items-center gap-1.5 rounded-[var(--fd-radius-full)] px-2.5 py-0.5 text-[length:var(--fd-text-xs)] font-medium",
+        "inline-flex rounded-[var(--fd-radius-full)] px-2.5 py-0.5 text-[length:var(--fd-text-xs)] font-medium capitalize",
         variants[variant],
-        className,
       )}
-      {...props}
     >
-      {dot ? (
-        <span
-          aria-hidden="true"
-          className={classes("h-1.5 w-1.5 rounded-full", dots[variant])}
-        />
-      ) : null}
       {children}
-    </div>
+    </span>
   );
 }
 
-function Card({
-  className,
-  variant = "flat",
-  ...props
-}: HTMLAttributes<HTMLDivElement> & { variant?: "flat" | "elevated" }) {
+function Card(props: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
+      {...props}
       className={classes(
         "rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1",
-        variant === "elevated" &&
-          "bg-surface-2 shadow-[var(--fd-shadow-lg)]",
-        className,
+        props.className,
       )}
-      {...props}
-    />
-  );
-}
-
-function CardHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return (
-    <div
-      className={classes("flex flex-col gap-2 p-5 pb-3", className)}
-      {...props}
-    />
-  );
-}
-
-function CardContent({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={classes("px-5 pb-5", className)} {...props} />;
-}
-
-function CardTitle({
-  className,
-  ...props
-}: HTMLAttributes<HTMLHeadingElement>) {
-  return (
-    <h2
-      className={classes(
-        "text-[length:var(--fd-text-lg)] font-semibold tracking-tight text-fg-primary",
-        className,
-      )}
-      {...props}
     />
   );
 }
@@ -195,363 +130,299 @@ function stateFromResponse(
 function friendlyError(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : "";
   if (message.toLowerCase().includes("permission")) {
-    return "Missions still needs permission setup. Review its permissions in Extension settings.";
+    return "Missions still needs permission setup. Review it in Extension settings.";
   }
   return message || "Missions could not update. Try again.";
 }
 
-function formatDeadline(value: string): string {
+function formatDate(value: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "No valid deadline";
+  if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString(undefined, {
-    weekday: "short",
-    hour: "numeric",
-    minute: "2-digit",
     month: "short",
     day: "numeric",
+    year:
+      date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
-function formatDuration(minutes: number): string {
-  if (minutes < 60) return `${minutes} min`;
-  const hours = minutes / 60;
-  return Number.isInteger(hours) ? `${hours} hr` : `${hours.toFixed(1)} hr`;
-}
-
-function statusVariant(run: MissionPanelRun): BadgeVariant {
-  if (run.outcome === "completed") return "success";
-  if (run.hasUnknownOutcome) return "danger";
-  if (run.gate === "paused") return "warning";
-  if (run.gate === "open") return "info";
+function statusVariant(status: MissionStatus): BadgeVariant {
+  if (status === "completed") return "success";
+  if (status === "needs_human") return "danger";
+  if (status === "review" || status === "waiting") return "warning";
+  if (status === "active") return "info";
   return "default";
 }
 
 function SetupState({
   hasPermission,
   openExtensionSettings,
-}: Pick<
-  ExtensionAppPanelProps,
-  "hasPermission" | "openExtensionSettings"
->) {
+}: Pick<ExtensionAppPanelProps, "hasPermission" | "openExtensionSettings">) {
   return (
-    <div className="flex min-h-full items-start justify-center overflow-y-auto px-5 py-10 sm:items-center sm:py-14">
-      <Card className="w-full max-w-xl" variant="elevated">
-        <CardHeader className="gap-3 border-b border-border-default pb-5">
-          <Badge className="w-fit" variant="warning" dot>
-            Setup required
-          </Badge>
-          <div className="space-y-1.5">
-            <CardTitle>Finish setting up Missions</CardTitle>
-            <p className="max-w-lg text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              Missions is intentionally off by default. Grant these three
-              capabilities before a coordinator can start or manage work.
-            </p>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-5 pt-5">
-          <div className="divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
-            {REQUIRED_PERMISSIONS.map((permission) => {
-              const granted = hasPermission(permission.id);
-              return (
-                <div
-                  key={permission.id}
-                  className="flex items-start gap-3 px-4 py-3.5"
+    <div className="flex min-h-full items-center justify-center overflow-y-auto px-5 py-12">
+      <Card className="w-full max-w-xl p-6 shadow-[var(--fd-shadow-lg)]">
+        <Badge variant="warning">Setup required</Badge>
+        <h2 className="mt-3 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+          Finish setting up Missions
+        </h2>
+        <p className="mt-1.5 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+          Missions is off by default. Grant these two capabilities before agents
+          can create or update Mission projects.
+        </p>
+        <div className="mt-5 divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default">
+          {REQUIRED_PERMISSIONS.map((permission) => {
+            const granted = hasPermission(permission.id);
+            return (
+              <div key={permission.id} className="flex gap-3 px-4 py-3.5">
+                <span
+                  className={classes(
+                    "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[length:var(--fd-text-xs)] font-semibold",
+                    granted
+                      ? "bg-success-muted text-success"
+                      : "border border-border-emphasis text-fg-tertiary",
+                  )}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[length:var(--fd-text-xs)] font-semibold ${
-                      granted
-                        ? "bg-success-muted text-success"
-                        : "border border-border-emphasis bg-surface-2 text-fg-tertiary"
-                    }`}
-                  >
-                    {granted ? "✓" : ""}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                        {permission.label}
-                      </p>
-                      <span
-                        className={`text-[length:var(--fd-text-xs)] font-medium ${
-                          granted ? "text-success" : "text-fg-tertiary"
-                        }`}
-                      >
-                        {granted ? "Granted" : "Required"}
-                      </span>
-                    </div>
-                    <p className="mt-0.5 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
-                      {permission.description}
-                    </p>
-                  </div>
+                  {granted ? "✓" : ""}
+                </span>
+                <div>
+                  <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                    {permission.label}
+                  </p>
+                  <p className="mt-0.5 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
+                    {permission.description}
+                  </p>
                 </div>
-              );
-            })}
-          </div>
-          {openExtensionSettings ? (
-            <Button className="w-full sm:w-auto" onClick={openExtensionSettings}>
-              Open Extension settings
-            </Button>
-          ) : (
-            <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-              Open Extension settings and select Missions to grant access.
-            </p>
-          )}
-        </CardContent>
+              </div>
+            );
+          })}
+        </div>
+        {openExtensionSettings ? (
+          <Button className="mt-5" onClick={openExtensionSettings}>
+            Open Extension settings
+          </Button>
+        ) : null}
       </Card>
     </div>
   );
 }
 
-function Stat({ value, label }: { value: number; label: string }) {
-  return (
-    <div className="rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 px-4 py-3">
-      <p className="text-[length:var(--fd-text-xl)] font-semibold tabular-nums text-fg-primary">
-        {value}
-      </p>
-      <p className="mt-0.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-        {label}
-      </p>
-    </div>
-  );
-}
-
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: ReactNode;
-}) {
-  return (
-    <section aria-labelledby={`missions-${title.toLowerCase().replaceAll(" ", "-")}`}>
-      <div className="mb-3">
-        <h2
-          id={`missions-${title.toLowerCase().replaceAll(" ", "-")}`}
-          className="text-[length:var(--fd-text-base)] font-semibold text-fg-primary"
-        >
-          {title}
-        </h2>
-        <p className="mt-0.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-          {description}
-        </p>
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function EmptySection({ children }: { children: ReactNode }) {
-  return (
-    <div className="rounded-[var(--fd-radius-lg)] border border-dashed border-border-emphasis px-4 py-6 text-center text-[length:var(--fd-text-sm)] text-fg-tertiary">
-      {children}
-    </div>
-  );
-}
-
-function RunActions({
-  run,
+function StatusActions({
+  mission,
   pending,
   act,
 }: {
-  run: MissionPanelRun;
-  pending: string | null;
-  act(actionId: string, input: unknown, pendingKey: string): void;
+  mission: MissionPanelEntry;
+  pending: boolean;
+  act(status: MissionStatus): void;
 }) {
-  if (run.gate === "closed") return null;
-  const input = {
-    runId: run.id,
-    expectedPolicyRevision: run.policyRevision,
-  };
-  const button = (
-    actionId: string,
-    label: string,
-    variant: ButtonVariant = "outline",
-  ) => {
-    const key = `${run.id}:${actionId}`;
-    return (
-      <Button
-        key={actionId}
-        size="sm"
-        variant={variant}
-        disabled={pending !== null}
-        onClick={() => act(actionId, input, key)}
-      >
-        {pending === key ? "Working…" : label}
-      </Button>
-    );
-  };
-
-  if (run.hasUnknownOutcome) {
-    return button("close-incomplete", "Close incomplete", "danger");
-  }
-  if (run.completionProposed && run.gate === "paused") {
+  if (mission.status === "completed" || mission.status === "cancelled")
+    return null;
+  if (mission.status === "draft") {
     return (
       <>
-        {button("accept-completion", "Accept completion", "default")}
-        {button("close-incomplete", "Close incomplete", "danger")}
-      </>
-    );
-  }
-  if (run.gate === "paused" && run.coordinatorSettling) {
-    return (
-      <>
-        {button("extend-run", "Extend 1 hour")}
-        {button("close-incomplete", "Close incomplete", "danger")}
+        <Button disabled={pending} onClick={() => act("active")}>
+          Activate
+        </Button>
+        <Button
+          disabled={pending}
+          variant="ghost"
+          onClick={() => act("cancelled")}
+        >
+          Cancel
+        </Button>
       </>
     );
   }
   return (
     <>
-      {run.gate === "open"
-        ? button("pause-run", "Pause")
-        : button("resume-run", "Resume", "default")}
-      {button("extend-run", "Extend 1 hour")}
-      {button("close-incomplete", "Close incomplete", "danger")}
+      {mission.status === "paused" ? (
+        <Button
+          disabled={pending}
+          variant="outline"
+          onClick={() => act("active")}
+        >
+          Reactivate
+        </Button>
+      ) : (
+        <Button
+          disabled={pending}
+          variant="outline"
+          onClick={() => act("paused")}
+        >
+          Pause
+        </Button>
+      )}
+      {mission.status === "review" ? (
+        <Button disabled={pending} onClick={() => act("completed")}>
+          Accept completion
+        </Button>
+      ) : null}
+      <Button
+        disabled={pending}
+        variant="ghost"
+        onClick={() => act("cancelled")}
+      >
+        Cancel
+      </Button>
     </>
   );
 }
 
-function RunCard({
-  run,
-  pending,
-  act,
+function MissionCard({
+  mission,
+  busy,
+  invoke,
   openThread,
 }: {
-  run: MissionPanelRun;
-  pending: string | null;
-  act(actionId: string, input: unknown, pendingKey: string): void;
+  mission: MissionPanelEntry;
+  busy: boolean;
+  invoke(actionId: string, input: unknown): Promise<boolean>;
   openThread(workspaceId: string, threadId: string): void;
 }) {
+  const [message, setMessage] = useState("");
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!message.trim()) return;
+    void invoke("add-mission-update", {
+      missionId: mission.id,
+      body: message,
+    }).then((updated) => updated && setMessage(""));
+  };
+
+  const setStatus = (status: MissionStatus) => {
+    if (mission.status === "draft" && status === "active") {
+      void invoke("activate-mission", { missionId: mission.id });
+      return;
+    }
+    void invoke("set-mission-status", { missionId: mission.id, status });
+  };
+
   return (
-    <Card>
-      <CardHeader className="gap-3">
+    <Card className="overflow-hidden">
+      <div className="p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            <CardTitle className="text-[length:var(--fd-text-base)]">
-              {run.title}
-            </CardTitle>
-            <p className="mt-1 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              {run.objective}
-            </p>
+            <h2 className="text-[length:var(--fd-text-base)] font-semibold text-fg-primary">
+              {mission.title}
+            </h2>
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              <Badge variant={statusVariant(mission.status)}>
+                {mission.status.replaceAll("_", " ")}
+              </Badge>
+              {mission.deadline ? (
+                <span>Deadline {formatDate(mission.deadline)}</span>
+              ) : (
+                <span>No deadline</span>
+              )}
+              <span>
+                {mission.threads.length} linked{" "}
+                {mission.threads.length === 1 ? "task" : "tasks"}
+              </span>
+            </div>
           </div>
-          <Badge variant={statusVariant(run)} dot>
-            {run.status}
-          </Badge>
+          <div className="flex flex-wrap justify-end gap-2">
+            <StatusActions mission={mission} pending={busy} act={setStatus} />
+          </div>
         </div>
-        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-          <span>
-            {run.automaticTurnsStarted}/{run.maxAutomaticTurns} automatic turns
-          </span>
-          <span>
-            {run.workers.length}/{run.maxWorkers} workers
-          </span>
-          <span>Due {formatDeadline(run.deadlineAt)}</span>
-          <span>{AUTONOMOUS_ACCESS_LABEL}</span>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {run.checkpoint.summary ? (
-          <div className="rounded-[var(--fd-radius-md)] bg-surface-2 px-3.5 py-3">
+
+        <p className="mt-4 whitespace-pre-wrap text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+          {mission.brief}
+        </p>
+
+        {mission.successCriteria.length > 0 ? (
+          <div className="mt-4">
             <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
-              Latest checkpoint
+              Success criteria
             </p>
-            <p className="mt-1 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              {run.checkpoint.summary}
-            </p>
+            <ul className="mt-1.5 list-disc space-y-1 pl-5 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+              {mission.successCriteria.map((criterion, index) => (
+                <li key={`${mission.id}:criterion:${index}`}>{criterion}</li>
+              ))}
+            </ul>
           </div>
         ) : null}
-        {run.checkpoint.nextAction ? (
-          <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-            <span className="font-medium text-fg-primary">Next: </span>
-            {run.checkpoint.nextAction}
-          </p>
-        ) : null}
-        {run.checkpoint.evidence.length > 0 ||
-        run.checkpoint.limitations.length > 0 ? (
-          <div className="grid gap-3 sm:grid-cols-2">
-            {run.checkpoint.evidence.length > 0 ? (
-              <div>
-                <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
-                  Evidence
-                </p>
-                <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
-                  {run.checkpoint.evidence.map((item, index) => (
-                    <li key={`${run.id}:evidence:${index}`}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {run.checkpoint.limitations.length > 0 ? (
-              <div>
-                <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
-                  Limitations
-                </p>
-                <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
-                  {run.checkpoint.limitations.map((item, index) => (
-                    <li key={`${run.id}:limitation:${index}`}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-        {run.pauseReason || run.checkpoint.humanQuestion ? (
-          <div className="rounded-[var(--fd-radius-md)] border border-warning/25 bg-warning-muted px-3.5 py-3 text-[length:var(--fd-text-sm)] leading-relaxed text-warning">
-            {run.checkpoint.humanQuestion ?? run.pauseReason}
-          </div>
-        ) : null}
-        {run.hasUnknownOutcome ? (
-          <p className="text-[length:var(--fd-text-xs)] leading-relaxed text-danger">
-            A provider operation has an unknown outcome. FalconDeck will not
-            retry it automatically; review the related tasks before closing.
-          </p>
-        ) : null}
-        {run.workers.length > 0 ? (
-          <div className="space-y-2">
+
+        {mission.updates.length > 0 ? (
+          <div className="mt-4 rounded-[var(--fd-radius-lg)] bg-surface-2 px-4 py-3">
             <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
-              Workers
+              Recent updates
             </p>
-            <div className="divide-y divide-border-default rounded-[var(--fd-radius-md)] border border-border-default">
-              {run.workers.map((worker) => (
-                <button
-                  key={worker.id}
-                  type="button"
-                  disabled={!worker.threadId}
-                  onClick={() =>
-                    worker.threadId &&
-                    openThread(run.workspaceId, worker.threadId)
-                  }
-                  className="fd-focus flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[length:var(--fd-text-xs)] enabled:hover:bg-surface-2 disabled:cursor-default"
+            <div className="mt-2 space-y-2.5">
+              {[...mission.updates].reverse().map((update) => (
+                <div
+                  key={update.id}
+                  className="text-[length:var(--fd-text-xs)] leading-relaxed"
                 >
-                  <span className="truncate capitalize text-fg-secondary">
-                    {worker.provider} · {worker.id.slice(0, 8)}
+                  <div className="flex flex-wrap gap-2 text-fg-tertiary">
+                    <span className="capitalize">
+                      {update.actor} · {update.kind}
+                    </span>
+                    <span>{formatDate(update.createdAt)}</span>
+                  </div>
+                  <p className="mt-0.5 text-fg-secondary">{update.body}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {mission.threads.length > 0 ? (
+          <div className="mt-4">
+            <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
+              Linked tasks
+            </p>
+            <div className="mt-1.5 divide-y divide-border-default overflow-hidden rounded-[var(--fd-radius-md)] border border-border-default">
+              {mission.threads.map((thread) => (
+                <button
+                  key={`${thread.workspaceId}:${thread.threadId}`}
+                  type="button"
+                  onClick={() =>
+                    openThread(thread.workspaceId, thread.threadId)
+                  }
+                  className="fd-focus flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-surface-2"
+                >
+                  <span className="min-w-0 truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
+                    {thread.title}
                   </span>
-                  <span className="shrink-0 capitalize text-fg-tertiary">
-                    {worker.status.replaceAll("_", " ")}
+                  <span className="shrink-0 text-[length:var(--fd-text-xs)] capitalize text-fg-tertiary">
+                    {thread.provider} · {thread.role}
                   </span>
                 </button>
               ))}
             </div>
           </div>
         ) : null}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border-default pt-4">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() =>
-              openThread(run.workspaceId, run.coordinatorThreadId)
-            }
+      </div>
+
+      {mission.status !== "completed" && mission.status !== "cancelled" ? (
+        <form
+          onSubmit={submit}
+          className="border-t border-border-default bg-surface-2 px-5 py-4"
+        >
+          <label
+            className="text-[length:var(--fd-text-xs)] font-medium text-fg-secondary"
+            htmlFor={`message-${mission.id}`}
           >
-            Open coordinator
-          </Button>
-          <div className="flex flex-wrap justify-end gap-2">
-            <RunActions run={run} pending={pending} act={act} />
+            Message Mission
+          </label>
+          <div className="mt-1.5 flex gap-2">
+            <input
+              id={`message-${mission.id}`}
+              value={message}
+              maxLength={1_000}
+              onChange={(event) => setMessage(event.target.value)}
+              placeholder="Add guidance, a decision, or context for the next review"
+              className="fd-focus h-9 min-w-0 flex-1 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary placeholder:text-fg-tertiary"
+            />
+            <Button disabled={busy || !message.trim()} type="submit">
+              Post update
+            </Button>
           </div>
-        </div>
-      </CardContent>
+        </form>
+      ) : null}
     </Card>
   );
 }
@@ -570,27 +441,40 @@ function MissionDashboard({
   const [state, setState] = useState<MissionPanelState | null>(() =>
     stateFromViews(views),
   );
-  const [loading, setLoading] = useState(ready);
-  const [pending, setPending] = useState<string | null>(null);
+  const [loading, setLoading] = useState(ready && !state);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const initialLoadStarted = useRef(false);
+  const initialLoad = useRef(false);
 
-  const refresh = useCallback(
-    async (showLoading = true) => {
-      if (showLoading) setLoading(true);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await invokeAction("refresh-missions", {});
+      const next = stateFromResponse(response);
+      if (!next) throw new Error("Missions returned an invalid view");
+      setState(next);
+      setError(null);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, [invokeAction]);
+
+  const invoke = useCallback(
+    async (actionId: string, input: unknown): Promise<boolean> => {
+      setBusy(true);
       try {
-        const response = await invokeAction("refresh-missions", {});
+        const response = await invokeAction(actionId, input);
         const next = stateFromResponse(response);
-        if (!next) {
-          setError("Missions returned an invalid update. Try again.");
-          return;
-        }
-        setState(next);
+        if (next) setState(next);
         setError(null);
+        return true;
       } catch (reason) {
         setError(friendlyError(reason));
+        return false;
       } finally {
-        if (showLoading) setLoading(false);
+        setBusy(false);
       }
     },
     [invokeAction],
@@ -602,38 +486,10 @@ function MissionDashboard({
   }, [views]);
 
   useEffect(() => {
-    if (!ready) {
-      initialLoadStarted.current = false;
-      setLoading(false);
-      return;
-    }
-    if (initialLoadStarted.current) return;
-    initialLoadStarted.current = true;
+    if (!ready || initialLoad.current) return;
+    initialLoad.current = true;
     void refresh();
   }, [ready, refresh]);
-
-  const act = useCallback(
-    async (actionId: string, input: unknown, pendingKey: string) => {
-      setPending(pendingKey);
-      setError(null);
-      try {
-        const response = await invokeAction(actionId, input);
-        const next = stateFromResponse(response);
-        if (next) setState(next);
-        await refresh(false);
-      } catch (reason) {
-        setError(friendlyError(reason));
-      } finally {
-        setPending(null);
-      }
-    },
-    [invokeAction, refresh],
-  );
-
-  const activeRuns = useMemo(
-    () => state?.runs.filter((run) => run.gate !== "closed").length ?? 0,
-    [state],
-  );
 
   if (!ready) {
     return (
@@ -646,225 +502,73 @@ function MissionDashboard({
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-8 px-5 py-6 sm:px-7 sm:py-8">
+      <div className="mx-auto w-full max-w-5xl px-5 py-7 sm:px-7">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-2xl">
+          <div className="max-w-3xl">
             <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              Missions are for work that is too large for one agent turn. One
-              task coordinates the job, can hand off bounded pieces to worker
-              tasks, and keeps things moving without constant supervision.
-              FalconDeck enforces the limits you approve, shows progress, and
-              leaves final completion for you to accept.
-            </p>
-            <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
-              Mission coordinator and worker turns use {AUTONOMOUS_ACCESS_LABEL}
-              so long-running work does not stop for routine tool approvals.
+              Missions keep larger outcomes visible when the work spans several
+              agent tasks or long periods of waiting. Each Mission holds the
+              durable brief, success criteria, decisions, evidence, and linked
+              tasks; native Goals do the focused work and Automations will
+              handle future check-ins.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex gap-2">
             <Button
-              size="sm"
               disabled={!startTask}
-              title={
-                startTask
-                  ? undefined
-                  : "Select a project to start a new Mission."
-              }
               onClick={() => startTask?.(MISSION_CREATION_PROMPT)}
             >
               New mission
             </Button>
             <Button
-              size="sm"
               variant="outline"
-              disabled={loading || pending !== null}
+              disabled={loading}
               onClick={() => void refresh()}
             >
-              {loading ? "Refreshing…" : "Refresh"}
+              Refresh
             </Button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <Stat value={activeRuns} label="Open missions" />
-          <Stat value={state?.drafts.length ?? 0} label="Drafts to review" />
-          <Stat value={state?.candidates.length ?? 0} label="Available tasks" />
-        </div>
-
         {error ? (
-          <div
+          <p
             role="alert"
-            className="rounded-[var(--fd-radius-lg)] border border-danger/25 bg-danger-muted px-4 py-3 text-[length:var(--fd-text-sm)] text-danger"
+            className="mt-4 text-[length:var(--fd-text-xs)] text-danger"
           >
             {error}
-          </div>
-        ) : null}
-        {state?.notice ? (
-          <div className="rounded-[var(--fd-radius-lg)] border border-info/25 bg-info-muted px-4 py-3 text-[length:var(--fd-text-sm)] text-info">
-            {state.notice}
-          </div>
+          </p>
         ) : null}
 
-        {loading && !state ? (
-          <div className="py-16 text-center text-[length:var(--fd-text-sm)] text-fg-tertiary">
-            Loading Missions…
-          </div>
-        ) : (
-          <>
-            <Section
-              title="Mission runs"
-              description="Review progress and control every active or recently closed mission."
-            >
-              {state?.runs.length ? (
-                <div className="space-y-3">
-                  {state.runs.map((run) => (
-                    <RunCard
-                      key={run.id}
-                      run={run}
-                      pending={pending}
-                      act={(actionId, input, pendingKey) =>
-                        void act(actionId, input, pendingKey)
-                      }
-                      openThread={openThread}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <EmptySection>No missions have been started yet.</EmptySection>
-              )}
-            </Section>
-
-            <Section
-              title="Drafts"
-              description="Nothing runs until you explicitly start a draft."
-            >
-              {state?.drafts.length ? (
-                <div className="grid gap-3 md:grid-cols-2">
-                  {state.drafts.map((draft) => {
-                    const key = `${draft.id}:start-draft`;
-                    return (
-                      <Card key={draft.id}>
-                        <CardHeader>
-                          <CardTitle className="text-[length:var(--fd-text-base)]">
-                            {draft.title}
-                          </CardTitle>
-                          <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-                            {draft.objective}
-                          </p>
-                        </CardHeader>
-                        <CardContent className="flex flex-wrap items-center justify-between gap-3">
-                          <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                            {formatDuration(draft.leaseMinutes)} ·{" "}
-                            {draft.maxAutomaticTurns} turns · {draft.maxWorkers}{" "}
-                            workers · {draft.acceptanceCriteria.length} criteria ·{" "}
-                            {AUTONOMOUS_ACCESS_LABEL}
-                          </span>
-                          <Button
-                            size="sm"
-                            disabled={pending !== null}
-                            onClick={() =>
-                              void act(
-                                "start-draft",
-                                { draftId: draft.id },
-                                key,
-                              )
-                            }
-                          >
-                            {pending === key ? "Starting…" : "Start mission"}
-                          </Button>
-                        </CardContent>
-                      </Card>
-                    );
-                  })}
-                </div>
-              ) : (
-                <EmptySection>
-                  Start a new Mission, or ask an available task to “start a
-                  mission,” to create a draft for review.
-                </EmptySection>
-              )}
-            </Section>
-
-            <Section
-              title="Use an existing task"
-              description="Choose an idle Claude or Codex task as the Mission coordinator."
-            >
-              {state?.candidates.length ? (
-                <div className="divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
-                  {state.candidates.map((candidate) => {
-                    const key = `${candidate.id}:adopt-task`;
-                    return (
-                      <div
-                        key={`${candidate.workspaceId}:${candidate.id}`}
-                        className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
-                      >
-                        <div className="min-w-0">
-                          <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                            {candidate.title}
-                          </p>
-                          <p className="mt-0.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                            <span className="capitalize">
-                              {candidate.provider}
-                            </span>{" "}
-                            task
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() =>
-                              openThread(candidate.workspaceId, candidate.id)
-                            }
-                          >
-                            Open task
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={pending !== null}
-                            onClick={() =>
-                              void act(
-                                "adopt-task",
-                                {
-                                  workspaceId: candidate.workspaceId,
-                                  threadId: candidate.id,
-                                  title: candidate.title,
-                                },
-                                key,
-                              )
-                            }
-                          >
-                            {pending === key
-                              ? "Starting…"
-                              : "Use as coordinator"}
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <EmptySection>
-                  No eligible idle Claude or Codex tasks right now.
-                </EmptySection>
-              )}
-            </Section>
-          </>
-        )}
+        <div className="mt-7 space-y-4">
+          {loading && !state ? (
+            <Card className="p-8 text-center text-[length:var(--fd-text-sm)] text-fg-tertiary">
+              Loading Missions…
+            </Card>
+          ) : state?.missions.length ? (
+            state.missions.map((mission) => (
+              <MissionCard
+                key={mission.id}
+                mission={mission}
+                busy={busy}
+                invoke={invoke}
+                openThread={openThread}
+              />
+            ))
+          ) : (
+            <Card className="p-8 text-center">
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                No Missions yet
+              </p>
+              <p className="mx-auto mt-1 max-w-lg text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
+                Start one when work needs a durable home above a single agent
+                task—not simply because the task is difficult.
+              </p>
+            </Card>
+          )}
+        </div>
       </div>
     </div>
   );
-}
-
-function resultDraftId(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const root = value as Record<string, unknown>;
-  const result =
-    root.result && typeof root.result === "object" && !Array.isArray(root.result)
-      ? (root.result as Record<string, unknown>)
-      : null;
-  return typeof result?.draftId === "string" ? result.draftId : null;
 }
 
 function MissionDraftToolResult({
@@ -872,275 +576,81 @@ function MissionDraftToolResult({
   views,
   invokeAction,
 }: ExtensionAppAgentToolResultProps) {
-  const draftId = resultDraftId(result);
-  const published = useMemo(() => stateFromViews(views), [views]);
-  const draft = useMemo(
-    () => published?.drafts.find((candidate) => candidate.id === draftId),
-    [draftId, published],
-  );
-  const draftSignature = draft ? JSON.stringify(draft) : null;
-  const [editing, setEditing] = useState(false);
-  const [started, setStarted] = useState(false);
-  const [pending, setPending] = useState<"save" | "start" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [title, setTitle] = useState(draft?.title ?? "");
-  const [objective, setObjective] = useState(draft?.objective ?? "");
-  const [criteria, setCriteria] = useState(
-    draft?.acceptanceCriteria.join("\n") ?? "",
-  );
-  const [leaseMinutes, setLeaseMinutes] = useState(
-    draft?.leaseMinutes ?? 180,
-  );
-  const [maxAutomaticTurns, setMaxAutomaticTurns] = useState(
-    draft?.maxAutomaticTurns ?? 12,
-  );
-  const [maxWorkers, setMaxWorkers] = useState(draft?.maxWorkers ?? 3);
+  const envelope =
+    result && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>)
+      : null;
+  const inner =
+    envelope?.result &&
+    typeof envelope.result === "object" &&
+    !Array.isArray(envelope.result)
+      ? (envelope.result as Record<string, unknown>)
+      : envelope;
+  const missionId =
+    typeof inner?.missionId === "string" ? inner.missionId : null;
+  const mission = missionId
+    ? stateFromViews(views)?.missions.find(
+        (candidate) => candidate.id === missionId,
+      )
+    : null;
+  const [pending, setPending] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!draft) return;
-    setTitle(draft.title);
-    setObjective(draft.objective);
-    setCriteria(draft.acceptanceCriteria.join("\n"));
-    setLeaseMinutes(draft.leaseMinutes);
-    setMaxAutomaticTurns(draft.maxAutomaticTurns);
-    setMaxWorkers(draft.maxWorkers);
-  }, [draftSignature]);
+  if (!missionId) return null;
 
-  const input = useMemo(
-    () => ({
-      draftId,
-      title,
-      objective,
-      acceptanceCriteria: criteria
-        .split("\n")
-        .map((item) => item.trim())
-        .filter(Boolean),
-      leaseMinutes,
-      maxAutomaticTurns,
-      maxWorkers,
-    }),
-    [
-      criteria,
-      draftId,
-      leaseMinutes,
-      maxAutomaticTurns,
-      maxWorkers,
-      objective,
-      title,
-    ],
-  );
-
-  const save = useCallback(async () => {
-    if (!draftId) return false;
-    setPending("save");
-    setError(null);
+  const activate = async () => {
+    setPending(true);
     try {
-      await invokeAction("update-draft", input);
-      setEditing(false);
-      return true;
+      await invokeAction("activate-mission", { missionId });
+      setMessage(
+        "Mission activated. This task is linked, and the Mission now persists independently of it.",
+      );
     } catch (reason) {
-      setError(friendlyError(reason));
-      return false;
+      setMessage(friendlyError(reason));
     } finally {
-      setPending(null);
+      setPending(false);
     }
-  }, [draftId, input, invokeAction]);
-
-  const start = useCallback(async () => {
-    if (!draftId) return;
-    setPending("start");
-    setError(null);
-    try {
-      await invokeAction("update-draft", input);
-      await invokeAction("start-draft", { draftId });
-      setEditing(false);
-      setStarted(true);
-    } catch (reason) {
-      setError(friendlyError(reason));
-    } finally {
-      setPending(null);
-    }
-  }, [draftId, input, invokeAction]);
-
-  if (!draftId) return null;
-  if (started || (!draft && published)) {
-    return (
-      <Card className="border-success bg-success-muted">
-        <CardContent className="flex items-center gap-2 py-4 text-[length:var(--fd-text-sm)] text-success">
-          <span aria-hidden="true">✓</span>
-          Mission started. This task is now the coordinator.
-        </CardContent>
-      </Card>
-    );
-  }
+  };
 
   return (
-    <Card className="border-border-emphasis bg-surface-2 shadow-[var(--fd-shadow-md)]">
-      <CardHeader className="gap-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-accent">
-              Mission draft ready
-            </p>
-            <CardTitle className="mt-1 text-[length:var(--fd-text-base)]">
-              {title || draft?.title || "Untitled mission"}
-            </CardTitle>
-          </div>
-          <Badge variant="warning">Needs your approval</Badge>
-        </div>
-        {!editing ? (
-          <>
-            <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              {objective || draft?.objective}
-            </p>
-            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-              <span>{formatDuration(leaseMinutes)}</span>
-              <span>{maxAutomaticTurns} coordinator turns</span>
-              <span>{maxWorkers} workers</span>
-              <span>{input.acceptanceCriteria.length} acceptance criteria</span>
-            </div>
-          </>
-        ) : null}
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="rounded-[var(--fd-radius-md)] border border-info/25 bg-info-muted px-3.5 py-3 text-[length:var(--fd-text-xs)] leading-relaxed text-info">
-          <span className="font-medium">Autonomous access:</span>{" "}
-          {AUTONOMOUS_ACCESS_LABEL}. Starting authorizes this coordinator and
-          its Mission workers to run without routine tool approvals.
-        </div>
-        {editing ? (
-          <div className="space-y-3">
-            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
-              <span>Title</span>
-              <input
-                value={title}
-                maxLength={120}
-                onChange={(event) => setTitle(event.target.value)}
-                className="fd-focus h-9 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
-              />
-            </label>
-            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
-              <span>Objective</span>
-              <textarea
-                value={objective}
-                rows={4}
-                maxLength={12_000}
-                onChange={(event) => setObjective(event.target.value)}
-                className="fd-focus w-full resize-y rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-primary"
-              />
-            </label>
-            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
-              <span>Acceptance criteria · one per line</span>
-              <textarea
-                value={criteria}
-                rows={4}
-                onChange={(event) => setCriteria(event.target.value)}
-                className="fd-focus w-full resize-y rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-primary"
-              />
-            </label>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <NumberField
-                label="Time limit (minutes)"
-                value={leaseMinutes}
-                minimum={15}
-                maximum={1_440}
-                onChange={setLeaseMinutes}
-              />
-              <NumberField
-                label="Coordinator turns"
-                value={maxAutomaticTurns}
-                minimum={1}
-                maximum={24}
-                onChange={setMaxAutomaticTurns}
-              />
-              <NumberField
-                label="Workers"
-                value={maxWorkers}
-                minimum={0}
-                maximum={4}
-                onChange={setMaxWorkers}
-              />
-            </div>
-          </div>
-        ) : null}
-        {error ? (
-          <p role="alert" className="text-[length:var(--fd-text-xs)] text-danger">
-            {error}
+    <Card className="my-3 p-4">
+      <Badge variant="warning">Draft</Badge>
+      <h3 className="mt-2 text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+        Mission draft ready
+      </h3>
+      {mission ? (
+        <>
+          <p className="mt-1 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+            {mission.title}
           </p>
-        ) : null}
-        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border-default pt-4">
-          {editing ? (
-            <>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={pending !== null}
-                onClick={() => setEditing(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={pending !== null}
-                onClick={() => void save()}
-              >
-                {pending === "save" ? "Saving…" : "Save draft"}
-              </Button>
-            </>
-          ) : (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={!draft || pending !== null}
-              onClick={() => setEditing(true)}
-            >
-              Review and edit
-            </Button>
-          )}
-          <Button
-            size="sm"
-            disabled={!draft || pending !== null}
-            onClick={() => void start()}
-          >
-            {pending === "start" ? "Starting…" : "Start mission"}
+          <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+            {mission.brief}
+          </p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-[length:var(--fd-text-xs)] text-fg-secondary">
+            {mission.successCriteria.map((criterion, index) => (
+              <li key={index}>{criterion}</li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+            {mission.deadline
+              ? `Deadline ${formatDate(mission.deadline)}`
+              : "No deadline"}
+          </p>
+        </>
+      ) : null}
+      {message ? (
+        <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-secondary">
+          {message}
+        </p>
+      ) : null}
+      {!message ? (
+        <div className="mt-3 flex justify-end">
+          <Button disabled={pending} onClick={() => void activate()}>
+            {pending ? "Activating…" : "Activate mission"}
           </Button>
         </div>
-      </CardContent>
+      ) : null}
     </Card>
-  );
-}
-
-function NumberField({
-  label,
-  value,
-  minimum,
-  maximum,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  minimum: number;
-  maximum: number;
-  onChange(value: number): void;
-}) {
-  return (
-    <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
-      <span>{label}</span>
-      <input
-        type="number"
-        min={minimum}
-        max={maximum}
-        step={1}
-        value={value}
-        onChange={(event) => {
-          if (!Number.isNaN(event.target.valueAsNumber)) {
-            onChange(event.target.valueAsNumber);
-          }
-        }}
-        className="fd-focus h-9 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] tabular-nums text-fg-primary"
-      />
-    </label>
   );
 }
 
@@ -1152,7 +662,7 @@ export default defineExtensionApp("falcondeck.missions", (app) => {
     component: MissionDashboard,
   });
   app.agentToolResults.register({
-    toolId: "draft-mission",
+    toolId: "create-mission",
     component: MissionDraftToolResult,
   });
 });

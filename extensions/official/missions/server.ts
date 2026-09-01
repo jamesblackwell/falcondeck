@@ -1,40 +1,71 @@
 import {
   defineExtension,
   type ExtensionContext,
-  type ExtensionRunSummary,
   type ExtensionThreadSummary,
 } from "@falcondeck/extension-sdk";
 
 import type {
-  MissionCheckpoint,
-  MissionDraft,
-  MissionPanelRun,
+  Mission,
+  MissionPanelEntry,
   MissionPanelState,
+  MissionStatus,
+  MissionThreadLink,
+  MissionThreadRole,
+  MissionUpdate,
+  MissionUpdateKind,
 } from "./model";
 
 const PANEL_VIEW = "missions-panel";
-const DRAFTS_KEY = "missionDrafts";
-const MAX_DRAFTS = 20;
-const DEFAULT_LEASE_MINUTES = 180;
-const MIN_LEASE_MINUTES = 15;
-const MAX_LEASE_MINUTES = 1_440;
-const DEFAULT_AUTOMATIC_TURNS = 12;
-const MAX_AUTOMATIC_TURNS = 24;
-const DEFAULT_WORKERS = 3;
-const MAX_WORKERS = 4;
+const MISSIONS_KEY = "missionsV2";
+const LEGACY_DRAFTS_KEY = "missionDrafts";
+const MAX_MISSIONS = 20;
+const MAX_TOTAL_UPDATES = 300;
+const MAX_PANEL_MISSIONS = 8;
+const AGENT_STATUSES = new Set<MissionStatus>([
+  "active",
+  "waiting",
+  "needs_human",
+  "review",
+  "paused",
+]);
+const HUMAN_STATUSES = new Set<MissionStatus>([
+  "active",
+  "waiting",
+  "needs_human",
+  "review",
+  "paused",
+  "completed",
+  "cancelled",
+]);
+const UPDATE_KINDS = new Set<MissionUpdateKind>([
+  "comment",
+  "evidence",
+  "question",
+  "status",
+]);
+const THREAD_ROLES = new Set<MissionThreadRole>(["source", "work", "review"]);
+const MISSION_STATUSES = new Set<MissionStatus>([
+  "draft",
+  "active",
+  "waiting",
+  "needs_human",
+  "review",
+  "paused",
+  "completed",
+  "cancelled",
+]);
+const UPDATE_ACTORS = new Set(["human", "agent", "system"]);
+
+type MissionStore = { schemaVersion: 2; missions: Mission[] };
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("action input must be an object");
+    throw new Error("input must be an object");
   }
   return value as Record<string, unknown>;
 }
 
-function requiredString(
-  value: unknown,
-  label: string,
-  max: number,
-): string {
+function requiredString(value: unknown, label: string, max: number): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`${label} is required`);
   }
@@ -45,719 +76,565 @@ function requiredString(
   return normalized;
 }
 
-function stringList(value: unknown, label: string, maxItems: number): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > maxItems) {
-    throw new Error(`${label} must be an array of at most ${maxItems} strings`);
+function optionalString(
+  value: unknown,
+  label: string,
+  max: number,
+): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return requiredString(value, label, max);
+}
+
+function stringList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) {
+    throw new Error(`${label} must contain between 1 and 8 strings`);
   }
   return value.map((item, index) =>
-    requiredString(item, `${label}[${index}]`, 1000),
+    requiredString(item, `${label}[${index}]`, 300),
   );
 }
 
-function boundedInteger(
-  value: unknown,
-  label: string,
-  minimum: number,
-  maximum: number,
-  fallback: number,
-): number {
-  if (value === undefined) return fallback;
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < minimum ||
-    value > maximum
-  ) {
-    throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
+function isoDeadline(value: unknown): string | undefined {
+  const raw = optionalString(value, "deadline", 64);
+  if (!raw) return undefined;
+  const instant = new Date(raw);
+  if (Number.isNaN(instant.getTime())) {
+    throw new Error("deadline must be a valid date and time");
   }
-  return value;
+  return instant.toISOString();
 }
 
-function draftPolicy(draft: Partial<MissionDraft>) {
-  return {
-    leaseMinutes: boundedInteger(
-      draft.leaseMinutes,
-      "leaseMinutes",
-      MIN_LEASE_MINUTES,
-      MAX_LEASE_MINUTES,
-      DEFAULT_LEASE_MINUTES,
-    ),
-    maxAutomaticTurns: boundedInteger(
-      draft.maxAutomaticTurns,
-      "maxAutomaticTurns",
-      1,
-      MAX_AUTOMATIC_TURNS,
-      DEFAULT_AUTOMATIC_TURNS,
-    ),
-    maxWorkers: boundedInteger(
-      draft.maxWorkers,
-      "maxWorkers",
-      0,
-      MAX_WORKERS,
-      DEFAULT_WORKERS,
-    ),
-  };
-}
-
-function checkpointOf(run: ExtensionRunSummary): MissionCheckpoint {
-  const candidate = run.checkpoint as Partial<MissionCheckpoint> | null;
-  return {
-    schemaVersion: 1,
-    objective:
-      typeof candidate?.objective === "string"
-        ? candidate.objective
-        : run.objective,
-    acceptanceCriteria: Array.isArray(candidate?.acceptanceCriteria)
-      ? candidate.acceptanceCriteria.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : [],
-    disposition:
-      candidate?.disposition === "continue_self" ||
-      candidate?.disposition === "awaiting_workers" ||
-      candidate?.disposition === "needs_human" ||
-      candidate?.disposition === "proposing_completion"
-        ? candidate.disposition
-        : "planning",
-    summary: typeof candidate?.summary === "string" ? candidate.summary : "",
-    ...(typeof candidate?.nextAction === "string"
-      ? { nextAction: candidate.nextAction }
-      : {}),
-    evidence: Array.isArray(candidate?.evidence)
-      ? candidate.evidence.filter((item): item is string => typeof item === "string")
-      : [],
-    limitations: Array.isArray(candidate?.limitations)
-      ? candidate.limitations.filter(
-          (item): item is string => typeof item === "string",
-        )
-      : [],
-    ...(typeof candidate?.humanQuestion === "string"
-      ? { humanQuestion: candidate.humanQuestion }
-      : {}),
-    updatedAt:
-      typeof candidate?.updatedAt === "string"
-        ? candidate.updatedAt
-        : run.updatedAt,
-  };
-}
-
-function statusLabel(run: ExtensionRunSummary): string {
-  if (run.gate === "closed") {
-    return run.outcome === "completed" ? "Complete" : "Closed";
-  }
-  if (run.gate === "paused") {
-    if (run.completionProposed) return "Ready for review";
-    if (
-      run.operations.some((operation) =>
-        ["dispatching", "acknowledged"].includes(operation.status),
-      )
-    ) {
-      return "Coordinator settling";
-    }
-    return "Paused";
-  }
-  if (run.awaitingWorkers) return "Workers running";
-  const active = run.operations.at(-1)?.status;
-  return active === "acknowledged" || active === "dispatching"
-    ? "Coordinator running"
-    : active === "queued"
-      ? "Waiting to continue"
-      : "Active";
-}
-
-function compactText(value: string, maxCharacters: number): string {
-  const characters = Array.from(value);
-  return characters.length > maxCharacters
-    ? `${characters.slice(0, maxCharacters).join("").trimEnd()}…`
+function compact(value: string, max: number): string {
+  const characters = [...value];
+  return characters.length > max
+    ? `${characters.slice(0, max).join("").trimEnd()}…`
     : value;
 }
 
-function panelState(
-  runs: readonly ExtensionRunSummary[],
-  drafts: readonly MissionDraft[],
-  threads: readonly ExtensionThreadSummary[],
-  notice?: string,
-): MissionPanelState {
-  const occupied = new Set(
-    runs
-      .filter((run) => run.gate !== "closed")
-      .map((run) => `${run.workspaceId}:${run.coordinatorThreadId}`),
-  );
-  const candidates = threads
-    .filter(
+function isMission(value: unknown): value is Mission {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const mission = value as Partial<Mission>;
+  return (
+    typeof mission.id === "string" &&
+    typeof mission.title === "string" &&
+    typeof mission.brief === "string" &&
+    Array.isArray(mission.successCriteria) &&
+    mission.successCriteria.every((item) => typeof item === "string") &&
+    MISSION_STATUSES.has(mission.status as MissionStatus) &&
+    (mission.deadline === undefined || typeof mission.deadline === "string") &&
+    Array.isArray(mission.threads) &&
+    mission.threads.every(
       (thread) =>
-        thread.status === "idle" &&
-        (thread.provider === "claude" || thread.provider === "codex") &&
-        !occupied.has(`${thread.workspaceId}:${thread.id}`),
-    )
-    .slice(0, 8);
-  const visibleDrafts = drafts.filter(
-    (draft) => !occupied.has(`${draft.workspaceId}:${draft.threadId}`),
+        thread &&
+        typeof thread.workspaceId === "string" &&
+        typeof thread.threadId === "string" &&
+        THREAD_ROLES.has(thread.role) &&
+        typeof thread.linkedAt === "string",
+    ) &&
+    Array.isArray(mission.updates) &&
+    mission.updates.every(
+      (update) =>
+        update &&
+        typeof update.id === "string" &&
+        UPDATE_ACTORS.has(update.actor) &&
+        UPDATE_KINDS.has(update.kind) &&
+        typeof update.body === "string" &&
+        (update.threadId === undefined ||
+          typeof update.threadId === "string") &&
+        typeof update.createdAt === "string",
+    ) &&
+    typeof mission.createdAt === "string" &&
+    typeof mission.updatedAt === "string"
   );
-  const panelRuns: MissionPanelRun[] = runs.slice(0, 12).map((run) => {
-    const checkpoint = checkpointOf(run);
-    const hasUnknownOutcome =
-      run.operations.some(
-        (operation) => operation.status === "outcome_unknown",
-      ) || run.workers.some((worker) => worker.status === "outcome_unknown");
-    const coordinatorSettling = run.operations.some((operation) =>
-      ["dispatching", "acknowledged"].includes(operation.status),
-    );
-    return {
-      id: run.id,
-      workspaceId: run.workspaceId,
-      coordinatorThreadId: run.coordinatorThreadId,
-      title: compactText(run.title, 120),
-      objective: compactText(run.objective, 1_200),
-      gate: run.gate,
-      ...(run.outcome ? { outcome: run.outcome } : {}),
-      ...(run.pauseReason
-        ? { pauseReason: compactText(run.pauseReason, 500) }
-        : {}),
-      policyRevision: run.policyRevision,
-      automaticTurnsStarted: run.automaticTurnsStarted,
-      maxAutomaticTurns: run.maxAutomaticTurns,
-      maxWorkers: run.maxWorkers,
-      deadlineAt: run.deadlineAt,
-      completionProposed: run.completionProposed,
-      status: statusLabel(run),
-      checkpoint: {
-        summary: compactText(checkpoint.summary, 1_200),
-        ...(checkpoint.nextAction
-          ? { nextAction: compactText(checkpoint.nextAction, 600) }
-          : {}),
-        evidence: checkpoint.evidence
-          .slice(0, 5)
-          .map((item) => compactText(item, 300)),
-        limitations: checkpoint.limitations
-          .slice(0, 5)
-          .map((item) => compactText(item, 300)),
-        ...(checkpoint.humanQuestion
-          ? { humanQuestion: compactText(checkpoint.humanQuestion, 600) }
-          : {}),
-      },
-      workers: run.workers.map((worker) => ({
-        id: worker.id,
-        provider: worker.provider,
-        status: worker.status,
-        ...(worker.threadId ? { threadId: worker.threadId } : {}),
-        ...(worker.message
-          ? { message: compactText(worker.message, 500) }
-          : {}),
-      })),
-      hasUnknownOutcome,
-      coordinatorSettling,
-    };
-  });
+}
+
+function importedLegacyDraft(value: unknown): Mission | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const draft = value as Record<string, unknown>;
+  if (
+    typeof draft.id !== "string" ||
+    typeof draft.title !== "string" ||
+    typeof draft.objective !== "string" ||
+    typeof draft.workspaceId !== "string" ||
+    typeof draft.threadId !== "string" ||
+    !Array.isArray(draft.acceptanceCriteria)
+  ) {
+    return null;
+  }
+  const createdAt =
+    typeof draft.createdAt === "string"
+      ? draft.createdAt
+      : new Date().toISOString();
   return {
-    schemaVersion: 1,
-    runs: panelRuns,
-    drafts: visibleDrafts.slice(0, 12).map((draft) => ({
-      id: draft.id,
-      workspaceId: draft.workspaceId,
-      threadId: draft.threadId,
-      title: compactText(draft.title, 120),
-      objective: compactText(draft.objective, 1_200),
-      acceptanceCriteria: draft.acceptanceCriteria,
-      ...draftPolicy(draft),
-      createdAt: draft.createdAt,
-    })),
-    candidates: candidates.map((thread) => ({
-      id: thread.id,
-      workspaceId: thread.workspaceId,
-      title: compactText(thread.title, 120),
-      provider: thread.provider,
-    })),
-    ...(notice ? { notice: compactText(notice, 500) } : {}),
+    id: draft.id,
+    title: draft.title,
+    brief: draft.objective,
+    successCriteria: draft.acceptanceCriteria.filter(
+      (item): item is string => typeof item === "string",
+    ),
+    status: "draft",
+    threads: [
+      {
+        workspaceId: draft.workspaceId,
+        threadId: draft.threadId,
+        role: "source",
+        linkedAt: createdAt,
+      },
+    ],
+    updates: [
+      {
+        id: crypto.randomUUID(),
+        actor: "system",
+        kind: "status",
+        body: "Imported from the bounded Missions v1 draft format. No legacy run was started.",
+        createdAt,
+      },
+    ],
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+async function loadStore(context: ExtensionContext): Promise<MissionStore> {
+  const stored = await context.storage.get<unknown>(MISSIONS_KEY, null);
+  if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+    const candidate = stored as Partial<MissionStore>;
+    if (
+      candidate.schemaVersion === 2 &&
+      Array.isArray(candidate.missions) &&
+      candidate.missions.every(isMission)
+    ) {
+      return { schemaVersion: 2, missions: candidate.missions };
+    }
+    throw new Error("stored Mission data is malformed");
+  }
+
+  const legacy = await context.storage.get<unknown[]>(LEGACY_DRAFTS_KEY, []);
+  const missions = Array.isArray(legacy)
+    ? legacy.flatMap((value) => {
+        const mission = importedLegacyDraft(value);
+        return mission ? [mission] : [];
+      })
+    : [];
+  const migrated = { schemaVersion: 2 as const, missions };
+  await context.storage.set(MISSIONS_KEY, migrated);
+  if (missions.length > 0) await context.storage.delete(LEGACY_DRAFTS_KEY);
+  return migrated;
+}
+
+async function saveStore(
+  context: ExtensionContext,
+  store: MissionStore,
+): Promise<void> {
+  const totalUpdates = store.missions.reduce(
+    (total, mission) => total + mission.updates.length,
+    0,
+  );
+  if (store.missions.length > MAX_MISSIONS) {
+    throw new Error(`Missions is limited to ${MAX_MISSIONS} stored projects`);
+  }
+  if (totalUpdates > MAX_TOTAL_UPDATES) {
+    throw new Error(
+      `Missions has reached its ${MAX_TOTAL_UPDATES}-update storage limit; close or export older Missions first`,
+    );
+  }
+  await context.storage.set(MISSIONS_KEY, store);
+}
+
+function threadKey(workspaceId: string, threadId: string): string {
+  return `${workspaceId}:${threadId}`;
+}
+
+function attentionRank(mission: Mission): number {
+  if (mission.status === "needs_human") return 0;
+  if (
+    mission.deadline &&
+    new Date(mission.deadline).getTime() < Date.now() &&
+    !["completed", "cancelled"].includes(mission.status)
+  ) {
+    return 1;
+  }
+  if (mission.status === "review") return 2;
+  if (["active", "waiting", "draft"].includes(mission.status)) return 3;
+  if (mission.status === "paused") return 4;
+  return 5;
+}
+
+function panelState(
+  missions: Mission[],
+  threads: ExtensionThreadSummary[],
+): MissionPanelState {
+  const summaries = new Map(
+    threads.map((thread) => [threadKey(thread.workspaceId, thread.id), thread]),
+  );
+  const entries: MissionPanelEntry[] = [...missions]
+    .sort(
+      (left, right) =>
+        attentionRank(left) - attentionRank(right) ||
+        right.updatedAt.localeCompare(left.updatedAt),
+    )
+    .slice(0, MAX_PANEL_MISSIONS)
+    .map((mission) => ({
+      ...mission,
+      brief: compact(mission.brief, 240),
+      successCriteria: mission.successCriteria
+        .slice(0, 3)
+        .map((criterion) => compact(criterion, 120)),
+      updates: mission.updates
+        .slice(-2)
+        .map((update) => ({ ...update, body: compact(update.body, 160) })),
+      threads: mission.threads.slice(0, 4).map((link) => {
+        const summary = summaries.get(
+          threadKey(link.workspaceId, link.threadId),
+        );
+        return {
+          ...link,
+          title: summary?.title ?? "Unavailable task",
+          provider: summary?.provider ?? "unknown",
+          status: summary?.status ?? "unavailable",
+        };
+      }),
+    }));
+  return {
+    schemaVersion: 2,
+    missions: entries,
     updatedAt: new Date().toISOString(),
   };
 }
 
-function coordinatorPrompt(
-  objective: string,
-  acceptanceCriteria: readonly string[],
-  policy: {
-    leaseMinutes: number;
-    maxAutomaticTurns: number;
-    maxWorkers: number;
-  },
-): string {
-  const criteria = acceptanceCriteria.length
-    ? acceptanceCriteria.map((item, index) => `${index + 1}. ${item}`).join("\n")
-    : "1. Verify the requested outcome with concrete evidence appropriate to the task.";
-  const workerInstruction =
-    policy.maxWorkers === 0
-      ? "This Mission has no worker budget, so do not delegate."
-      : `You may delegate at most ${policy.maxWorkers} genuinely independent, one-turn assignment${policy.maxWorkers === 1 ? "" : "s"} with the FalconDeck Mission delegate tool; workers run serially in separate Codex tasks and cannot delegate further.`;
-  return `You are coordinating a bounded FalconDeck Mission in this existing task. FalconDeck will enforce a ${policy.leaseMinutes}-minute lease, ${policy.maxAutomaticTurns} automatic coordinator turns, and ${policy.maxWorkers} worker tasks.\n\nObjective:\n${objective}\n\nAcceptance criteria:\n${criteria}\n\nWork directly and conservatively. ${workerInstruction} Prefer doing small or tightly coupled work yourself. After delegating, call the Mission checkpoint tool with awaiting_workers. Otherwise call it exactly once before finishing this turn: request one continuation only after meaningful durable progress, pause for human input when authority or intent is missing, or propose completion with criterion-level evidence. The Mission cannot become complete from prose alone. Never route around a denial, safety boundary, exhausted limit, or ambiguous user intent.`;
-}
-
-function continuationPrompt(nextAction: string): string {
-  return `Continue the bounded FalconDeck Mission. The durable next action is:\n\n${nextAction}\n\nRe-read the task state, do the work, and call the Mission checkpoint tool exactly once before ending. Do not claim completion without concrete evidence for the acceptance criteria.`;
-}
-
-async function currentState(context: ExtensionContext) {
-  const [runs, drafts, threads] = await Promise.all([
-    context.orchestration.list(),
-    context.storage.get<MissionDraft[]>(DRAFTS_KEY, []),
-    context.threads.list(),
-  ]);
-  return { runs, drafts, threads };
-}
-
-async function publish(context: ExtensionContext, notice?: string) {
-  const { runs, drafts, threads } = await currentState(context);
-  const occupied = new Set(
-    runs
-      .filter((run) => run.gate !== "closed")
-      .map((run) => `${run.workspaceId}:${run.coordinatorThreadId}`),
-  );
-  const retainedDrafts = drafts.filter(
-    (draft) => !occupied.has(`${draft.workspaceId}:${draft.threadId}`),
-  );
-  if (retainedDrafts.length !== drafts.length) {
-    await context.storage.set(DRAFTS_KEY, retainedDrafts);
-  }
+async function publish(
+  context: ExtensionContext,
+  store: MissionStore,
+): Promise<void> {
+  const threads = await context.threads.list();
   await context.views.publish({
     viewId: PANEL_VIEW,
-    value: panelState(runs, retainedDrafts, threads, notice),
+    value: panelState(store.missions, threads),
   });
 }
 
-function runInput(input: unknown) {
-  const value = record(input);
+function missionById(store: MissionStore, missionId: string): Mission {
+  const mission = store.missions.find(
+    (candidate) => candidate.id === missionId,
+  );
+  if (!mission) throw new Error("Mission was not found");
+  return mission;
+}
+
+function missionForAgent(
+  store: MissionStore,
+  missionId: unknown,
+  workspaceId: string,
+  threadId: string,
+): Mission {
+  const linked = store.missions.filter((mission) =>
+    mission.threads.some(
+      (thread) =>
+        thread.workspaceId === workspaceId && thread.threadId === threadId,
+    ),
+  );
+  if (typeof missionId === "string") {
+    const mission = missionById(store, missionId);
+    if (!linked.some((candidate) => candidate.id === mission.id)) {
+      throw new Error("this task is not linked to that Mission");
+    }
+    return mission;
+  }
+  if (linked.length === 0)
+    throw new Error("this task is not linked to a Mission");
+  if (linked.length > 1)
+    throw new Error(
+      "missionId is required because this task has multiple Missions",
+    );
+  return linked[0]!;
+}
+
+function addUpdate(
+  mission: Mission,
+  update: Omit<MissionUpdate, "id" | "createdAt">,
+  now = new Date().toISOString(),
+): void {
+  mission.updates.push({ id: crypto.randomUUID(), ...update, createdAt: now });
+  mission.updatedAt = now;
+}
+
+function createMissionInput(input: unknown) {
+  const args = record(input);
   return {
-    runId: requiredString(value.runId, "runId", 128),
-    expectedPolicyRevision:
-      typeof value.expectedPolicyRevision === "number"
-        ? value.expectedPolicyRevision
-        : (() => {
-            throw new Error("expectedPolicyRevision is required");
-          })(),
+    title: requiredString(args.title, "title", 120),
+    brief: requiredString(args.brief, "brief", 4_000),
+    successCriteria: stringList(args.successCriteria, "successCriteria"),
+    deadline: isoDeadline(args.deadline),
   };
 }
 
 export default defineExtension({
-  activate(context) {
+  async activate(context) {
     context.actions.register("refresh-missions", async () => {
-      await publish(context);
+      const store = await loadStore(context);
+      await publish(context, store);
       return { refreshed: true };
     });
 
-    context.actions.register("start-draft", async ({ input }) => {
-      const draftId = requiredString(record(input).draftId, "draftId", 128);
-      const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
-      const draft = drafts.find((candidate) => candidate.id === draftId);
-      if (!draft) throw new Error("mission draft no longer exists");
-      const policy = draftPolicy(draft);
-      const runId = crypto.randomUUID();
-      const checkpoint: MissionCheckpoint = {
-        schemaVersion: 1,
-        objective: draft.objective,
-        acceptanceCriteria: draft.acceptanceCriteria,
-        disposition: "planning",
-        summary: "Mission accepted; coordinator has not reported its first checkpoint yet.",
-        evidence: [],
-        limitations: [],
-        updatedAt: new Date().toISOString(),
-      };
-      await context.orchestration.apply({
-        type: "create_run",
-        runId,
-        workspaceId: draft.workspaceId,
-        coordinatorThreadId: draft.threadId,
-        title: draft.title,
-        objective: draft.objective,
-        checkpoint,
-        leaseMinutes: policy.leaseMinutes,
-        maxAutomaticTurns: policy.maxAutomaticTurns,
-        maxWorkers: policy.maxWorkers,
-        initialPrompt: coordinatorPrompt(
-          draft.objective,
-          draft.acceptanceCriteria,
-          policy,
-        ),
-      });
-      return { runId, started: true };
-    });
-
-    context.actions.register("update-draft", async ({ input }) => {
-      const value = record(input);
-      const draftId = requiredString(value.draftId, "draftId", 128);
-      const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
-      const index = drafts.findIndex((candidate) => candidate.id === draftId);
-      if (index < 0) throw new Error("mission draft no longer exists");
-      const current = drafts[index];
-      const updated: MissionDraft = {
-        ...current,
-        title: requiredString(value.title, "title", 120),
-        objective: requiredString(value.objective, "objective", 12_000),
-        acceptanceCriteria: stringList(
-          value.acceptanceCriteria,
-          "acceptanceCriteria",
-          12,
-        ),
-        ...draftPolicy({
-          leaseMinutes: value.leaseMinutes as number | undefined,
-          maxAutomaticTurns: value.maxAutomaticTurns as number | undefined,
-          maxWorkers: value.maxWorkers as number | undefined,
-        }),
-      };
-      const next = [...drafts];
-      next[index] = updated;
-      await context.storage.set(DRAFTS_KEY, next);
-      const runs = await context.orchestration.list();
-      const threads = await context.threads.list();
-      await context.views.publish({
-        viewId: PANEL_VIEW,
-        value: panelState(runs, next, threads),
-      });
-      return { draftId, updated: true };
-    });
-
-    context.actions.register("adopt-task", async ({ input }) => {
-      const value = record(input);
-      const workspaceId = requiredString(value.workspaceId, "workspaceId", 512);
-      const threadId = requiredString(value.threadId, "threadId", 512);
-      const title = requiredString(value.title, "title", 120);
-      const objective = `Complete and verify the objective already discussed in the task “${title}”. Preserve the task's existing conversational context and ask the human if the desired outcome is materially ambiguous.`;
-      const runId = crypto.randomUUID();
-      const checkpoint: MissionCheckpoint = {
-        schemaVersion: 1,
-        objective,
-        acceptanceCriteria: [
-          "The outcome discussed in the coordinator task is implemented or otherwise completed.",
-          "Relevant verification is run and concrete evidence is reported for human review.",
-        ],
-        disposition: "planning",
-        summary: "Mission accepted from an existing task.",
-        evidence: [],
-        limitations: [],
-        updatedAt: new Date().toISOString(),
-      };
-      await context.orchestration.apply({
-        type: "create_run",
-        runId,
-        workspaceId,
-        coordinatorThreadId: threadId,
-        title,
-        objective,
-        checkpoint,
-        leaseMinutes: DEFAULT_LEASE_MINUTES,
-        maxAutomaticTurns: DEFAULT_AUTOMATIC_TURNS,
-        maxWorkers: DEFAULT_WORKERS,
-        initialPrompt: coordinatorPrompt(
-          objective,
-          checkpoint.acceptanceCriteria,
-          {
-            leaseMinutes: DEFAULT_LEASE_MINUTES,
-            maxAutomaticTurns: DEFAULT_AUTOMATIC_TURNS,
-            maxWorkers: DEFAULT_WORKERS,
-          },
-        ),
-      });
-      return { runId, started: true };
-    });
-
-    for (const [actionId, command] of [
-      ["pause-run", "pause"],
-      ["extend-run", "extend"],
-      ["accept-completion", "accept_completion"],
-      ["close-incomplete", "close_incomplete"],
-    ] as const) {
-      context.actions.register(actionId, async ({ input }) => {
-        const target = runInput(input);
-        await context.orchestration.apply({
-          type: "human_command",
-          ...target,
-          command,
-        });
-        return { updated: true };
-      });
-    }
-
-    context.actions.register("resume-run", async ({ input }) => {
-      const target = runInput(input);
-      const run = (await context.orchestration.list()).find(
-        (candidate) => candidate.id === target.runId,
+    context.actions.register("activate-mission", async ({ input }) => {
+      const args = record(input);
+      const store = await loadStore(context);
+      const mission = missionById(
+        store,
+        requiredString(args.missionId, "missionId", 128),
       );
-      if (!run) throw new Error("Mission run no longer exists");
-      const checkpoint = checkpointOf(run);
-      const hasUnresolvedOperation = run.operations.some(
-        (operation) =>
-          !["settled", "rejected", "cancelled"].includes(operation.status),
-      );
-      await context.orchestration.apply({
-        type: "human_command",
-        ...target,
-        command: "resume",
-        ...(!run.awaitingWorkers && !hasUnresolvedOperation
-          ? {
-              operationId: crypto.randomUUID(),
-              resumePrompt: continuationPrompt(
-                checkpoint.nextAction ??
-                  checkpoint.humanQuestion ??
-                  "Reassess the Mission after the human resumed it and choose the next bounded action.",
-              ),
-            }
-          : {}),
+      if (mission.status !== "draft")
+        throw new Error("only a draft Mission can be activated");
+      mission.status = "active";
+      addUpdate(mission, {
+        actor: "human",
+        kind: "status",
+        body: "Mission activated.",
       });
-      return { updated: true };
+      await saveStore(context, store);
+      await publish(context, store);
+      return { missionId: mission.id, status: mission.status };
     });
 
-    context.tools.register("draft-mission", async ({ input, threadId, workspaceId }) => {
-      if (!threadId || !workspaceId) {
-        throw new Error(
-          "this task cannot be securely bound to a Mission draft; use the Missions panel",
-        );
+    context.actions.register("edit-mission", async ({ input }) => {
+      const args = record(input);
+      const store = await loadStore(context);
+      const mission = missionById(
+        store,
+        requiredString(args.missionId, "missionId", 128),
+      );
+      if (mission.status !== "draft")
+        throw new Error("only a draft Mission can be edited here");
+      const edited = createMissionInput(args);
+      mission.title = edited.title;
+      mission.brief = edited.brief;
+      mission.successCriteria = edited.successCriteria;
+      if (edited.deadline) mission.deadline = edited.deadline;
+      else delete mission.deadline;
+      mission.updatedAt = new Date().toISOString();
+      await saveStore(context, store);
+      await publish(context, store);
+      return { missionId: mission.id, updated: true };
+    });
+
+    context.actions.register("add-mission-update", async ({ input }) => {
+      const args = record(input);
+      const store = await loadStore(context);
+      const mission = missionById(
+        store,
+        requiredString(args.missionId, "missionId", 128),
+      );
+      addUpdate(mission, {
+        actor: "human",
+        kind: "comment",
+        body: requiredString(args.body, "body", 1_000),
+      });
+      await saveStore(context, store);
+      await publish(context, store);
+      return { missionId: mission.id, posted: true };
+    });
+
+    context.actions.register("set-mission-status", async ({ input }) => {
+      const args = record(input);
+      const store = await loadStore(context);
+      const mission = missionById(
+        store,
+        requiredString(args.missionId, "missionId", 128),
+      );
+      const status = requiredString(args.status, "status", 32) as MissionStatus;
+      if (!HUMAN_STATUSES.has(status))
+        throw new Error("unsupported Mission status");
+      if (["completed", "cancelled"].includes(mission.status)) {
+        throw new Error("a completed or cancelled Mission is terminal");
       }
-      const value = record(input);
-      const objective = requiredString(value.objective, "objective", 12_000);
-      const title =
-        typeof value.title === "string" && value.title.trim()
-          ? requiredString(value.title, "title", 120)
-          : objective.slice(0, 80);
-      const acceptanceCriteria = stringList(
-        value.acceptanceCriteria,
-        "acceptanceCriteria",
-        12,
-      );
-      const policy = draftPolicy({
-        leaseMinutes: value.leaseMinutes as number | undefined,
-        maxAutomaticTurns: value.maxAutomaticTurns as number | undefined,
-        maxWorkers: value.maxWorkers as number | undefined,
-      });
-      const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
-      const draft: MissionDraft = {
-        id: crypto.randomUUID(),
-        workspaceId,
-        threadId,
-        title,
-        objective,
-        acceptanceCriteria,
-        ...policy,
-        createdAt: new Date().toISOString(),
-      };
-      const next = [
-        ...drafts.filter(
-          (candidate) =>
-            candidate.workspaceId !== workspaceId || candidate.threadId !== threadId,
-        ),
-        draft,
-      ].slice(-MAX_DRAFTS);
-      await context.storage.set(DRAFTS_KEY, next);
-      const runs = await context.orchestration.list();
-      const threads = await context.threads.list();
-      await context.views.publish({
-        viewId: PANEL_VIEW,
-        value: panelState(
-          runs,
-          next,
-          threads,
-          "A human must start this draft before automatic work begins.",
-        ),
-      });
-      return {
-        draftId: draft.id,
-        status: "awaiting_human_start",
-        policy,
-      };
-    });
-
-    context.tools.register("mission-status", async ({ threadId, workspaceId }) => {
-      if (!threadId || !workspaceId) {
-        throw new Error("this tool call is not bound to an eligible task");
+      if (
+        mission.status === "draft" &&
+        status !== "active" &&
+        status !== "cancelled"
+      ) {
+        throw new Error("a draft Mission must be activated or cancelled first");
       }
-      const run = (await context.orchestration.list()).find(
-        (candidate) =>
-          candidate.workspaceId === workspaceId &&
-          candidate.coordinatorThreadId === threadId &&
-          candidate.gate !== "closed",
-      );
-      if (!run) return { active: false };
-      return {
-        active: true,
-        runId: run.id,
-        gate: run.gate,
-        status: statusLabel(run),
-        objective: run.objective,
-        deadlineAt: run.deadlineAt,
-        automaticTurnsStarted: run.automaticTurnsStarted,
-        maxAutomaticTurns: run.maxAutomaticTurns,
-        maxWorkers: run.maxWorkers,
-        workers: run.workers.map((worker) => ({
-          id: worker.id,
-          provider: worker.provider,
-          status: worker.status,
-          threadId: worker.threadId,
-          report: worker.report,
-          message: worker.message,
-        })),
-        checkpoint: checkpointOf(run),
-      };
+      mission.status = status;
+      addUpdate(mission, {
+        actor: "human",
+        kind: "status",
+        body: `Mission marked ${status.replaceAll("_", " ")}.`,
+      });
+      await saveStore(context, store);
+      await publish(context, store);
+      return { missionId: mission.id, status };
     });
 
     context.tools.register(
-      "mission-delegate",
+      "create-mission",
       async ({ input, threadId, workspaceId }) => {
         if (!threadId || !workspaceId) {
+          throw new Error("FalconDeck could not verify the calling task");
+        }
+        const store = await loadStore(context);
+        if (store.missions.length >= MAX_MISSIONS) {
           throw new Error(
-            "this delegation is not bound to an eligible coordinator task",
+            `Missions is limited to ${MAX_MISSIONS} stored projects`,
           );
         }
-        const run = (await context.orchestration.list()).find(
-          (candidate) =>
-            candidate.workspaceId === workspaceId &&
-            candidate.coordinatorThreadId === threadId &&
-            candidate.gate === "open",
-        );
-        if (!run) {
-          throw new Error("this task does not coordinate an open Mission");
-        }
-        if (run.automaticTurnsStarted >= run.maxAutomaticTurns) {
-          throw new Error(
-            "no automatic coordinator turn remains to review worker reports",
-          );
-        }
-        const value = record(input);
-        const assignment = requiredString(
-          value.assignment,
-          "assignment",
-          12_000,
-        );
-        const workerId = crypto.randomUUID();
-        await context.orchestration.apply({
-          type: "delegate_worker",
-          runId: run.id,
-          expectedPolicyRevision: run.policyRevision,
-          workerId,
-          provider: "codex",
-          assignment,
-        });
-        return {
-          delegated: true,
-          workerId,
-          remainingWorkerSlots: Math.max(
-            0,
-            run.maxWorkers - run.workers.length - 1,
-          ),
+        const args = createMissionInput(input);
+        const now = new Date().toISOString();
+        const mission: Mission = {
+          id: crypto.randomUUID(),
+          title: args.title,
+          brief: args.brief,
+          successCriteria: args.successCriteria,
+          status: "draft",
+          ...(args.deadline ? { deadline: args.deadline } : {}),
+          threads: [{ workspaceId, threadId, role: "source", linkedAt: now }],
+          updates: [
+            {
+              id: crypto.randomUUID(),
+              actor: "agent",
+              kind: "status",
+              body: "Mission draft created for human review.",
+              threadId,
+              createdAt: now,
+            },
+          ],
+          createdAt: now,
+          updatedAt: now,
         };
+        store.missions.unshift(mission);
+        await saveStore(context, store);
+        await publish(context, store);
+        return { missionId: mission.id, status: mission.status };
       },
     );
 
-    context.tools.register("mission-checkpoint", async ({ input, threadId, workspaceId }) => {
-      if (!threadId || !workspaceId) {
-        throw new Error("this checkpoint is not bound to an eligible coordinator task");
-      }
-      const runs = await context.orchestration.list();
-      const run = runs.find(
-        (candidate) =>
-          candidate.workspaceId === workspaceId &&
-          candidate.coordinatorThreadId === threadId &&
-          candidate.gate !== "closed",
-      );
-      if (!run) throw new Error("this task does not coordinate an open Mission");
-      const value = record(input);
-      const disposition = requiredString(value.disposition, "disposition", 40);
-      if (
-        disposition !== "continue_self" &&
-        disposition !== "awaiting_workers" &&
-        disposition !== "needs_human" &&
-        disposition !== "proposing_completion"
-      ) {
-        throw new Error("unsupported Mission disposition");
-      }
-      const summary = requiredString(value.summary, "summary", 4000);
-      const nextAction =
-        typeof value.nextAction === "string" && value.nextAction.trim()
-          ? requiredString(value.nextAction, "nextAction", 2000)
-          : undefined;
-      const checkpoint: MissionCheckpoint = {
-        ...checkpointOf(run),
-        disposition,
-        summary,
-        ...(nextAction ? { nextAction } : {}),
-        evidence: stringList(value.evidence, "evidence", 20),
-        limitations: stringList(value.limitations, "limitations", 12),
-        ...(typeof value.humanQuestion === "string" && value.humanQuestion.trim()
-          ? {
-              humanQuestion: requiredString(
-                value.humanQuestion,
-                "humanQuestion",
-                1000,
-              ),
-            }
-          : {}),
-        updatedAt: new Date().toISOString(),
-      };
-      if (disposition === "continue_self") {
-        if (!nextAction) throw new Error("continue_self requires nextAction");
-        const progressFingerprint = requiredString(
-          value.progressFingerprint,
-          "progressFingerprint",
-          256,
-        );
-        await context.orchestration.apply({
-          type: "request_continuation",
-          runId: run.id,
-          expectedPolicyRevision: run.policyRevision,
-          operationId: crypto.randomUUID(),
-          checkpoint,
-          progressFingerprint,
-          prompt: continuationPrompt(nextAction),
-        });
-      } else if (disposition === "awaiting_workers") {
-        if (
-          !run.workers.some(
-            (worker) =>
-              ![
-                "succeeded",
-                "failed",
-                "outcome_unknown",
-                "cancelled",
-              ].includes(worker.status),
-          )
-        ) {
-          throw new Error("awaiting_workers requires an active delegated worker");
+    context.tools.register(
+      "read-mission",
+      async ({ input, threadId, workspaceId }) => {
+        if (!threadId || !workspaceId) {
+          throw new Error("FalconDeck could not verify the calling task");
         }
-        await context.orchestration.apply({
-          type: "await_workers",
-          runId: run.id,
-          expectedPolicyRevision: run.policyRevision,
-          checkpoint,
-        });
-      } else if (disposition === "needs_human") {
-        await context.orchestration.apply({
-          type: "pause_for_human",
-          runId: run.id,
-          expectedPolicyRevision: run.policyRevision,
-          checkpoint,
-          reason:
-            checkpoint.humanQuestion ??
-            "The coordinator needs a human decision before continuing",
-        });
-      } else {
-        if (checkpoint.evidence.length === 0) {
-          throw new Error("proposing_completion requires concrete evidence");
-        }
-        await context.orchestration.apply({
-          type: "propose_completion",
-          runId: run.id,
-          expectedPolicyRevision: run.policyRevision,
-          checkpoint,
-        });
-      }
-      return { recorded: true, disposition };
-    });
+        const args = record(input);
+        const store = await loadStore(context);
+        return missionForAgent(store, args.missionId, workspaceId, threadId);
+      },
+    );
 
-    for (const event of [
-      "thread.updated",
-      "turn.start",
-      "turn.ended",
-      "orchestration.updated",
-    ] as const) {
-      context.events.on(event, async () => publish(context));
-    }
+    context.tools.register(
+      "update-mission",
+      async ({ input, threadId, workspaceId }) => {
+        if (!threadId || !workspaceId) {
+          throw new Error("FalconDeck could not verify the calling task");
+        }
+        const args = record(input);
+        const store = await loadStore(context);
+        const mission = missionForAgent(
+          store,
+          args.missionId,
+          workspaceId,
+          threadId,
+        );
+        if (["completed", "cancelled"].includes(mission.status)) {
+          throw new Error("a completed or cancelled Mission is terminal");
+        }
+        const operation = requiredString(args.operation, "operation", 32);
+
+        if (operation === "add_update") {
+          const kind = requiredString(
+            args.kind,
+            "kind",
+            32,
+          ) as MissionUpdateKind;
+          if (!UPDATE_KINDS.has(kind))
+            throw new Error("unsupported Mission update kind");
+          addUpdate(mission, {
+            actor: "agent",
+            kind,
+            body: requiredString(args.body, "body", 1_000),
+            threadId,
+          });
+        } else if (operation === "set_status") {
+          const status = requiredString(
+            args.status,
+            "status",
+            32,
+          ) as MissionStatus;
+          if (!AGENT_STATUSES.has(status)) {
+            throw new Error(
+              "agents cannot activate, complete, or cancel a Mission",
+            );
+          }
+          if (mission.status === "draft")
+            throw new Error("a human must activate this Mission first");
+          mission.status = status;
+          addUpdate(mission, {
+            actor: "agent",
+            kind: "status",
+            body:
+              optionalString(args.body, "body", 1_000) ??
+              `Mission marked ${status.replaceAll("_", " ")}.`,
+            threadId,
+          });
+        } else if (operation === "link_thread") {
+          const targetWorkspaceId =
+            optionalString(args.workspaceId, "workspaceId", 256) ?? workspaceId;
+          const targetThreadId = requiredString(args.threadId, "threadId", 256);
+          const role = (optionalString(args.role, "role", 32) ??
+            "work") as MissionThreadRole;
+          if (!THREAD_ROLES.has(role))
+            throw new Error("unsupported Mission task role");
+          const threads = await context.threads.list();
+          if (
+            !threads.some(
+              (thread) =>
+                thread.workspaceId === targetWorkspaceId &&
+                thread.id === targetThreadId,
+            )
+          ) {
+            throw new Error("the task to link was not found in FalconDeck");
+          }
+          if (
+            !mission.threads.some(
+              (link) =>
+                link.workspaceId === targetWorkspaceId &&
+                link.threadId === targetThreadId,
+            )
+          ) {
+            const link: MissionThreadLink = {
+              workspaceId: targetWorkspaceId,
+              threadId: targetThreadId,
+              role,
+              linkedAt: new Date().toISOString(),
+            };
+            mission.threads.push(link);
+            addUpdate(mission, {
+              actor: "agent",
+              kind: "status",
+              body: `Linked a ${role} task to the Mission.`,
+              threadId,
+            });
+          }
+        } else if (operation === "edit_definition") {
+          if (mission.status !== "draft")
+            throw new Error("agents may edit only draft Missions");
+          const edited = createMissionInput(args);
+          mission.title = edited.title;
+          mission.brief = edited.brief;
+          mission.successCriteria = edited.successCriteria;
+          if (edited.deadline) mission.deadline = edited.deadline;
+          else delete mission.deadline;
+          mission.updatedAt = new Date().toISOString();
+        } else {
+          throw new Error("unsupported Mission update operation");
+        }
+
+        await saveStore(context, store);
+        await publish(context, store);
+        return {
+          missionId: mission.id,
+          status: mission.status,
+          updatedAt: mission.updatedAt,
+        };
+      },
+    );
   },
 });

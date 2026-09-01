@@ -11,7 +11,7 @@ function snapshot(
       {
         id: "falcondeck.missions",
         name: "Missions",
-        version: "0.3.0",
+        version: "0.5.0",
         source: "bundled",
         bundled: true,
         enabled: true,
@@ -22,22 +22,14 @@ function snapshot(
           sidebarFilters: [],
           agentTools: [
             {
-              id: "draft-mission",
-              title: "Start a FalconDeck Mission draft",
-              description: "Create a bounded Mission draft.",
+              id: "create-mission",
+              title: "Create a FalconDeck Mission draft",
+              description: "Create a durable Mission draft.",
             },
           ],
         },
-        permissions: [
-          "threads:read",
-          "agent-tools:register",
-          "orchestration:manage-owned-tasks",
-        ],
-        granted_permissions: [
-          "threads:read",
-          "agent-tools:register",
-          "orchestration:manage-owned-tasks",
-        ],
+        permissions: ["threads:read", "agent-tools:register"],
+        granted_permissions: ["threads:read", "agent-tools:register"],
         ...overrides,
       },
     ],
@@ -46,14 +38,14 @@ function snapshot(
 }
 
 describe("missionCommandAvailable", () => {
-  it("requires an active extension with every Mission permission", () => {
+  it("requires an active extension with both Mission permissions", () => {
     expect(missionCommandAvailable(snapshot())).toBe(true);
     expect(missionCommandAvailable(snapshot({ enabled: false }))).toBe(false);
     expect(missionCommandAvailable(snapshot({ status: "error" }))).toBe(false);
     expect(
       missionCommandAvailable(
         snapshot({
-          granted_permissions: ["threads:read", "agent-tools:register"],
+          granted_permissions: ["threads:read"],
         }),
       ),
     ).toBe(false);

@@ -1,82 +1,43 @@
 import { describe, expect, it } from "vitest";
 
 import missions from "../../../extensions/official/missions/server";
-import type { ExtensionRunSummary } from "@falcondeck/extension-sdk";
 import { createExtensionTestHost } from "./index";
 
 const actions = [
   "refresh-missions",
-  "start-draft",
-  "update-draft",
-  "adopt-task",
-  "pause-run",
-  "resume-run",
-  "extend-run",
-  "accept-completion",
-  "close-incomplete",
+  "activate-mission",
+  "edit-mission",
+  "add-mission-update",
+  "set-mission-status",
 ];
-const permissions = [
-  "threads:read",
-  "agent-tools:register",
-  "orchestration:manage-owned-tasks",
-];
+const permissions = ["threads:read", "agent-tools:register"];
 
-function openRun(): ExtensionRunSummary {
-  return {
-    id: "run-1",
-    ownerExtensionId: "falcondeck.missions",
-    workspaceId: "workspace-1",
-    coordinatorThreadId: "thread-1",
-    title: "Ship the feature",
-    objective: "Implement and verify the feature",
-    gate: "open",
-    checkpoint: {
-      schemaVersion: 1,
-      objective: "Implement and verify the feature",
-      acceptanceCriteria: ["Focused tests pass"],
-      disposition: "planning",
-      summary: "",
-      evidence: [],
-      limitations: [],
-      updatedAt: "2026-08-30T10:00:00Z",
-    },
-    policyRevision: 3,
-    journalSequence: 2,
-    approvalGeneration: 1,
-    automaticTurnsStarted: 1,
-    maxAutomaticTurns: 4,
-    maxWorkers: 3,
-    awaitingWorkers: false,
-    createdAt: "2026-08-30T10:00:00Z",
-    updatedAt: "2026-08-30T10:01:00Z",
-    deadlineAt: "2026-08-30T10:30:00Z",
-    completionProposed: false,
-    operations: [],
-    workers: [],
-  };
-}
-
-function host(runs: ExtensionRunSummary[] = []) {
+function host(storage?: Record<string, unknown>) {
   return createExtensionTestHost(missions, {
     extensionId: "falcondeck.missions",
     declaredActions: actions,
     declaredViews: ["missions-panel"],
-    declaredTools: [
-      "draft-mission",
-      "mission-status",
-      "mission-delegate",
-      "mission-checkpoint",
-    ],
+    declaredTools: ["create-mission", "read-mission", "update-mission"],
     grantedPermissions: permissions,
-    orchestrationRuns: runs,
+    storage,
     threadSummaries: [
       {
         id: "thread-1",
         workspaceId: "workspace-1",
-        title: "Ship the feature",
+        title: "Plan the release",
+        provider: "codex",
+        status: "idle",
+        updatedAt: "2026-09-01T10:00:00Z",
+        pendingApprovalCount: 0,
+        pendingQuestionCount: 0,
+      },
+      {
+        id: "thread-2",
+        workspaceId: "workspace-1",
+        title: "Independent review",
         provider: "claude",
         status: "idle",
-        updatedAt: "2026-08-30T10:00:00Z",
+        updatedAt: "2026-09-01T11:00:00Z",
         pendingApprovalCount: 0,
         pendingQuestionCount: 0,
       },
@@ -84,220 +45,181 @@ function host(runs: ExtensionRunSummary[] = []) {
   });
 }
 
-describe("official Missions extension", () => {
-  it("publishes a bounded frontend view model after permission checks pass", async () => {
-    const testHost = host([openRun()]);
+async function create(testHost = host()) {
+  const response = await testHost.invokeTool("create-mission", {
+    threadId: "thread-1",
+    workspaceId: "workspace-1",
+    input: {
+      title: "Ship the release",
+      brief: "Prepare, publish, and observe the release over time.",
+      successCriteria: [
+        "Release is published",
+        "Post-release evidence is recorded",
+      ],
+    },
+  });
+  return {
+    testHost,
+    missionId: (response.result as { missionId: string }).missionId,
+    response,
+  };
+}
 
+describe("official Missions extension v2", () => {
+  it("creates a durable draft linked to the daemon-verified calling task", async () => {
+    const { testHost, missionId, response } = await create();
+
+    expect(response.orchestrationEffects).toEqual([]);
+    expect(response.result).toEqual({ missionId, status: "draft" });
+    expect(testHost.storageSnapshot()).toEqual({
+      missionsV2: {
+        schemaVersion: 2,
+        missions: [
+          expect.objectContaining({
+            id: missionId,
+            status: "draft",
+            threads: [
+              expect.objectContaining({
+                workspaceId: "workspace-1",
+                threadId: "thread-1",
+                role: "source",
+              }),
+            ],
+          }),
+        ],
+      },
+    });
+  });
+
+  it("publishes a compact attention view with linked native task metadata", async () => {
+    const { testHost } = await create();
     const refreshed = await testHost.invokeAction("refresh-missions");
 
     expect(refreshed.publishedViews).toEqual([
       {
         viewId: "missions-panel",
         value: expect.objectContaining({
-          schemaVersion: 1,
-          runs: [
+          schemaVersion: 2,
+          missions: [
             expect.objectContaining({
-              id: "run-1",
-              title: "Ship the feature",
-              status: "Active",
+              title: "Ship the release",
+              threads: [
+                expect.objectContaining({
+                  title: "Plan the release",
+                  provider: "codex",
+                }),
+              ],
             }),
           ],
-          drafts: [],
-          candidates: [],
         }),
       },
     ]);
   });
 
-  it("creates only a draft from the agent and requires a human start action", async () => {
-    const testHost = host();
-    const drafted = await testHost.invokeTool("draft-mission", {
-      threadId: "thread-1",
-      workspaceId: "workspace-1",
-      input: {
-        title: "Ship the feature",
-        objective: "Implement and verify the feature",
-        acceptanceCriteria: ["Focused tests pass"],
-        leaseMinutes: 180,
-        maxAutomaticTurns: 18,
-        maxWorkers: 4,
-      },
-    });
-    expect(drafted.orchestrationEffects).toEqual([]);
-    const draftId = (drafted.result as { draftId: string }).draftId;
+  it("requires a human action to activate and complete a Mission", async () => {
+    const { testHost, missionId } = await create();
 
-    await testHost.invokeAction("update-draft", {
-      input: {
-        draftId,
-        title: "Ship the verified feature",
-        objective: "Implement, test, and verify the feature",
-        acceptanceCriteria: ["Focused tests pass", "Evidence is reported"],
-        leaseMinutes: 240,
-        maxAutomaticTurns: 16,
-        maxWorkers: 2,
-      },
-    });
-
-    const started = await testHost.invokeAction("start-draft", {
-      input: { draftId },
-    });
-    expect(started.orchestrationEffects).toEqual([
-      expect.objectContaining({
-        type: "create_run",
+    await expect(
+      testHost.invokeTool("update-mission", {
+        threadId: "thread-1",
         workspaceId: "workspace-1",
-        coordinatorThreadId: "thread-1",
-        title: "Ship the verified feature",
-        leaseMinutes: 240,
-        maxAutomaticTurns: 16,
-        maxWorkers: 2,
+        input: { missionId, operation: "set_status", status: "completed" },
       }),
-    ]);
-    expect(testHost.storageSnapshot()).toEqual({
-      missionDrafts: [expect.objectContaining({ id: draftId })],
-    });
+    ).rejects.toThrow("agents cannot activate, complete, or cancel");
 
-    testHost.setOrchestrationRuns([openRun()]);
-    await testHost.dispatchEvent({
-      type: "orchestration.updated",
-      workspaceId: "workspace-1",
-      runId: "run-1",
+    const activated = await testHost.invokeAction("activate-mission", {
+      input: { missionId },
     });
-    expect(testHost.storageSnapshot()).toEqual({ missionDrafts: [] });
+    expect(activated.result).toEqual({ missionId, status: "active" });
+
+    const completed = await testHost.invokeAction("set-mission-status", {
+      input: { missionId, status: "completed" },
+    });
+    expect(completed.result).toEqual({ missionId, status: "completed" });
   });
 
-  it("turns one coordinator checkpoint into one bounded successor intent", async () => {
-    const testHost = host([openRun()]);
-    const checkpoint = await testHost.invokeTool("mission-checkpoint", {
+  it("lets a linked agent post evidence and link a verified existing task", async () => {
+    const { testHost, missionId } = await create();
+    await testHost.invokeAction("activate-mission", { input: { missionId } });
+
+    await testHost.invokeTool("update-mission", {
       threadId: "thread-1",
       workspaceId: "workspace-1",
       input: {
-        disposition: "continue_self",
-        summary: "Implemented the core path",
-        nextAction: "Run the focused test",
-        progressFingerprint: "core-implemented-v1",
+        missionId,
+        operation: "add_update",
+        kind: "evidence",
+        body: "The release build completed successfully.",
       },
     });
-    expect(checkpoint.orchestrationEffects).toEqual([
-      expect.objectContaining({
-        type: "request_continuation",
-        runId: "run-1",
-        expectedPolicyRevision: 3,
-        progressFingerprint: "core-implemented-v1",
-      }),
-    ]);
-  });
-
-  it("delegates one Codex worker and can wait for its bounded result", async () => {
-    const run = openRun();
-    const testHost = host([run]);
-    const delegated = await testHost.invokeTool("mission-delegate", {
-      threadId: "thread-1",
-      workspaceId: "workspace-1",
-      input: { assignment: "Inspect the parser and report the failing edge case" },
-    });
-    expect(delegated.orchestrationEffects).toEqual([
-      expect.objectContaining({
-        type: "delegate_worker",
-        runId: "run-1",
-        provider: "codex",
-      }),
-    ]);
-
-    testHost.setOrchestrationRuns([
-      {
-        ...run,
-        policyRevision: 4,
-        workers: [
-          {
-            id: "worker-1",
-            provider: "codex",
-            assignment: "Inspect the parser",
-            status: "queued",
-            createdAt: "2026-08-30T10:02:00Z",
-            updatedAt: "2026-08-30T10:02:00Z",
-          },
-        ],
-      },
-    ]);
-    const waiting = await testHost.invokeTool("mission-checkpoint", {
+    await testHost.invokeTool("update-mission", {
       threadId: "thread-1",
       workspaceId: "workspace-1",
       input: {
-        disposition: "awaiting_workers",
-        summary: "Delegated an independent parser investigation",
+        missionId,
+        operation: "link_thread",
+        threadId: "thread-2",
+        role: "review",
       },
     });
-    expect(waiting.orchestrationEffects).toEqual([
-      expect.objectContaining({
-        type: "await_workers",
-        runId: "run-1",
-        expectedPolicyRevision: 4,
-      }),
-    ]);
-  });
 
-  it("queues a bounded coordinator turn when a human resumes a paused run", async () => {
-    const paused = {
-      ...openRun(),
-      gate: "paused" as const,
-      pauseReason: "Needs a human decision",
-    };
-    const testHost = host([paused]);
-
-    const resumed = await testHost.invokeAction("resume-run", {
-      input: { runId: "run-1", expectedPolicyRevision: 3 },
+    const read = await testHost.invokeTool("read-mission", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: { missionId },
     });
-
-    expect(resumed.orchestrationEffects).toEqual([
+    expect(read.result).toEqual(
       expect.objectContaining({
-        type: "human_command",
-        command: "resume",
-        runId: "run-1",
-        resumePrompt: expect.stringContaining("Continue the bounded FalconDeck Mission"),
-        operationId: expect.any(String),
+        threads: expect.arrayContaining([
+          expect.objectContaining({ threadId: "thread-2", role: "review" }),
+        ]),
+        updates: expect.arrayContaining([
+          expect.objectContaining({
+            actor: "agent",
+            kind: "evidence",
+            body: "The release build completed successfully.",
+          }),
+        ]),
       }),
-    ]);
+    );
   });
 
-  it("resumes an interrupted in-flight coordinator turn without duplicating it", async () => {
-    const paused = {
-      ...openRun(),
-      gate: "paused" as const,
-      pauseReason: "Coordinator needs human input",
-      operations: [
+  it("rejects a tool caller that is not linked to the Mission", async () => {
+    const { testHost, missionId } = await create();
+
+    await expect(
+      testHost.invokeTool("read-mission", {
+        threadId: "thread-2",
+        workspaceId: "workspace-1",
+        input: { missionId },
+      }),
+    ).rejects.toThrow("this task is not linked to that Mission");
+  });
+
+  it("migrates legacy drafts without starting legacy orchestration", async () => {
+    const testHost = host({
+      missionDrafts: [
         {
-          id: "turn-1",
-          prompt: "Continue",
-          status: "acknowledged" as const,
-          createdAt: "2026-08-30T10:00:00Z",
-          updatedAt: "2026-08-30T10:01:00Z",
+          id: "legacy-draft",
+          workspaceId: "workspace-1",
+          threadId: "thread-1",
+          title: "Legacy draft",
+          objective: "Preserve this brief",
+          acceptanceCriteria: ["Brief survives"],
+          createdAt: "2026-08-31T10:00:00Z",
         },
       ],
-    };
-    const testHost = host([paused]);
-
-    const resumed = await testHost.invokeAction("resume-run", {
-      input: { runId: "run-1", expectedPolicyRevision: 3 },
     });
 
-    expect(resumed.orchestrationEffects).toEqual([
-      {
-        type: "human_command",
-        command: "resume",
-        runId: "run-1",
-        expectedPolicyRevision: 3,
+    const refreshed = await testHost.invokeAction("refresh-missions");
+    expect(refreshed.orchestrationEffects).toEqual([]);
+    expect(testHost.storageSnapshot()).toEqual({
+      missionsV2: {
+        schemaVersion: 2,
+        missions: [
+          expect.objectContaining({ id: "legacy-draft", status: "draft" }),
+        ],
       },
-    ]);
-  });
-
-  it("denies the run facet immediately after permission revocation", async () => {
-    const testHost = host([openRun()]);
-    testHost.setPermissionGranted(
-      "orchestration:manage-owned-tasks",
-      false,
-    );
-    await expect(testHost.invokeAction("refresh-missions")).rejects.toThrow(
-      "orchestration:manage-owned-tasks permission is not granted",
-    );
+    });
   });
 });

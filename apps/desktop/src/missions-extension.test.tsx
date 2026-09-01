@@ -13,80 +13,54 @@ import {
   type MissionPanelState,
 } from "../../../extensions/official/missions/model";
 
-const permissions = [
-  "threads:read",
-  "agent-tools:register",
-  "orchestration:manage-owned-tasks",
-];
-
+const permissions = ["threads:read", "agent-tools:register"];
 const panelState: MissionPanelState = {
-  schemaVersion: 1,
-  runs: [
+  schemaVersion: 2,
+  missions: [
     {
-      id: "run-1",
-      workspaceId: "workspace-1",
-      coordinatorThreadId: "thread-1",
-      title: "Release the Missions feature",
-      objective: "Finish the implementation and verify the bounded workflow.",
-      gate: "open",
-      policyRevision: 3,
-      automaticTurnsStarted: 1,
-      maxAutomaticTurns: 4,
-      maxWorkers: 3,
-      deadlineAt: "2026-08-31T13:30:00.000Z",
-      completionProposed: false,
-      status: "Active",
-      checkpoint: {
-        summary: "The coordinator has implemented the first working slice.",
-        evidence: [],
-        limitations: [],
-      },
-      workers: [],
-      hasUnknownOutcome: false,
-      coordinatorSettling: false,
+      id: "mission-1",
+      title: "Launch and observe the release",
+      brief: "Publish the release and keep collecting evidence after launch.",
+      successCriteria: ["Release is live", "Post-launch evidence is recorded"],
+      status: "needs_human",
+      threads: [
+        {
+          workspaceId: "workspace-1",
+          threadId: "thread-1",
+          role: "source",
+          linkedAt: "2026-09-01T10:00:00.000Z",
+          title: "Prepare the release",
+          provider: "codex",
+          status: "idle",
+        },
+      ],
+      updates: [
+        {
+          id: "update-1",
+          actor: "agent",
+          kind: "question",
+          body: "Which launch date should I use?",
+          threadId: "thread-1",
+          createdAt: "2026-09-01T12:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-09-01T10:00:00.000Z",
+      updatedAt: "2026-09-01T12:00:00.000Z",
     },
   ],
-  drafts: [
-    {
-      id: "draft-1",
-      workspaceId: "workspace-1",
-      threadId: "thread-2",
-      title: "Review the release",
-      objective: "Check the completed release against its acceptance criteria.",
-      acceptanceCriteria: ["Review the code", "Report concrete evidence"],
-      leaseMinutes: 180,
-      maxAutomaticTurns: 12,
-      maxWorkers: 3,
-      createdAt: "2026-08-31T12:00:00.000Z",
-    },
-  ],
-  candidates: [
-    {
-      id: "thread-3",
-      workspaceId: "workspace-1",
-      title: "Investigate the flaky test",
-      provider: "codex",
-    },
-  ],
-  updatedAt: "2026-08-31T12:30:00.000Z",
+  updatedAt: "2026-09-01T12:00:00.000Z",
 };
 
 function response(state = panelState): ExtensionAppActionResponse {
   return {
     result: { refreshed: true },
     updatedViews: [
-      {
-        viewId: "missions-panel",
-        value: state,
-        updatedAt: state.updatedAt,
-      },
+      { viewId: "missions-panel", value: state, updatedAt: state.updatedAt },
     ],
   };
 }
 
-function renderMissions(
-  overrides: Partial<ExtensionAppPanelProps> = {},
-) {
+function renderMissions(overrides: Partial<ExtensionAppPanelProps> = {}) {
   const Component = collectExtensionApp(missionsApp).panels[0]!.component;
   const props: ExtensionAppPanelProps = {
     extensionId: "falcondeck.missions",
@@ -101,44 +75,33 @@ function renderMissions(
   return props;
 }
 
-describe("Missions trusted frontend", () => {
-  it("registers the Missions panel", () => {
+describe("Missions v2 trusted frontend", () => {
+  it("registers the project panel and create tool result", () => {
     const registration = collectExtensionApp(missionsApp);
-    expect(registration.extensionId).toBe("falcondeck.missions");
     expect(registration.panels[0]!.title).toBe("Missions");
-    expect(registration.agentToolResults[0]!.toolId).toBe("draft-mission");
+    expect(registration.agentToolResults[0]!.toolId).toBe("create-mission");
   });
 
-  it("fails closed instead of silently hiding malformed mission entries", () => {
+  it("fails closed on malformed Mission projections", () => {
     expect(
-      parseMissionPanelState({
-        ...panelState,
-        runs: [...panelState.runs, { id: "malformed-run" }],
-      }),
+      parseMissionPanelState({ ...panelState, missions: [{ id: "broken" }] }),
     ).toBeNull();
   });
 
-  it("shows a permission checklist without invoking an action that must fail", () => {
+  it("shows only the two permissions Missions v2 uses", () => {
     const invokeAction = vi.fn(async () => response());
-    const openExtensionSettings = vi.fn();
     renderMissions({
       hasPermission: (permission) => permission === "threads:read",
       invokeAction,
-      openExtensionSettings,
     });
 
     expect(screen.getByText("Finish setting up Missions")).toBeVisible();
-    expect(screen.getByText("Read tasks")).toBeVisible();
-    expect(screen.getAllByText("Required")).toHaveLength(2);
+    expect(screen.getByText("Read task summaries")).toBeVisible();
+    expect(screen.getByText("Offer Mission tools")).toBeVisible();
     expect(invokeAction).not.toHaveBeenCalled();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open Extension settings" }),
-    );
-    expect(openExtensionSettings).toHaveBeenCalledOnce();
   });
 
-  it("loads a compact dashboard and opens its coordinator task", async () => {
+  it("renders the durable brief, updates, and linked tasks", async () => {
     const openThread = vi.fn();
     const invokeAction = vi.fn(async () => response());
     renderMissions({
@@ -148,120 +111,94 @@ describe("Missions trusted frontend", () => {
       views: response().updatedViews,
     });
 
-    expect(screen.getByText("Release the Missions feature")).toBeVisible();
+    expect(screen.getByText("Launch and observe the release")).toBeVisible();
     expect(
-      screen.getByText(/Missions are for work that is too large/),
-    ).toHaveTextContent("leaves final completion for you to accept");
-    expect(screen.getByText("Drafts to review")).toBeVisible();
-    expect(screen.getByText("Investigate the flaky test")).toBeVisible();
+      screen.getByText(/Missions keep larger outcomes visible/),
+    ).toBeVisible();
+    expect(screen.getByText("Which launch date should I use?")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: /Prepare the release/ }),
+    );
+    expect(openThread).toHaveBeenCalledWith("workspace-1", "thread-1");
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith("refresh-missions", {}),
     );
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open coordinator" }),
-    );
-    expect(openThread).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
-  it("opens a guided task for creating a new Mission", async () => {
+  it("starts a guided ordinary task for creating a Mission", async () => {
     const startTask = vi.fn();
-    const invokeAction = vi.fn(async () => response());
     renderMissions({
       hasPermission: (permission) => permissions.includes(permission),
-      invokeAction,
       startTask,
       views: response().updatedViews,
     });
-    await waitFor(() => expect(invokeAction).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText("Launch and observe the release")).toBeVisible(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "New mission" }));
-
-    expect(startTask).toHaveBeenCalledOnce();
     expect(startTask).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "use the FalconDeck Mission tools to create a draft for my review",
-      ),
+      expect.stringContaining("call the FalconDeck create-mission tool"),
     );
   });
 
-  it("disables new Mission creation when the host has no selected project", async () => {
+  it("posts human guidance and changes status through extension actions", async () => {
     const invokeAction = vi.fn(async () => response());
     renderMissions({
       hasPermission: (permission) => permissions.includes(permission),
       invokeAction,
       views: response().updatedViews,
     });
-    await waitFor(() => expect(invokeAction).toHaveBeenCalled());
 
-    expect(screen.getByRole("button", { name: "New mission" })).toBeDisabled();
-  });
-
-  it("sends bounded run controls with the current policy revision", async () => {
-    const invokeAction = vi.fn(async () => response());
-    renderMissions({
-      hasPermission: (permission) => permissions.includes(permission),
-      invokeAction,
-      views: response().updatedViews,
+    fireEvent.change(screen.getByLabelText("Message Mission"), {
+      target: { value: "Use next Tuesday." },
     });
-    await waitFor(() => expect(invokeAction).toHaveBeenCalled());
-    invokeAction.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Post update" }));
+    await waitFor(() =>
+      expect(invokeAction).toHaveBeenCalledWith("add-mission-update", {
+        missionId: "mission-1",
+        body: "Use next Tuesday.",
+      }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
-
     await waitFor(() =>
-      expect(invokeAction).toHaveBeenCalledWith("pause-run", {
-        runId: "run-1",
-        expectedPolicyRevision: 3,
+      expect(invokeAction).toHaveBeenCalledWith("set-mission-status", {
+        missionId: "mission-1",
+        status: "paused",
       }),
     );
   });
 
-  it("reviews, edits, and starts a draft from the agent-tool result", async () => {
+  it("lets the human activate a draft inline", async () => {
     const registration = collectExtensionApp(missionsApp).agentToolResults[0]!;
     const Component = registration.component;
-    const invokeAction = vi.fn(async (actionId: string) => ({
-      result: { updated: true },
-      updatedViews: actionId === "start-draft" ? [] : response().updatedViews,
-    }));
+    const draftState: MissionPanelState = {
+      ...panelState,
+      missions: [{ ...panelState.missions[0]!, status: "draft" }],
+    };
+    const invokeAction = vi.fn(async () => response(draftState));
     render(
       <Component
         extensionId="falcondeck.missions"
-        toolId="draft-mission"
+        toolId="create-mission"
         arguments={{}}
         result={{
           ok: true,
-          result: { draftId: "draft-1", status: "awaiting_human_start" },
+          result: { missionId: "mission-1", status: "draft" },
         }}
-        views={response().updatedViews}
+        views={response(draftState).updatedViews}
         invokeAction={invokeAction}
       />,
     );
 
     expect(screen.getByText("Mission draft ready")).toBeVisible();
-    expect(screen.getByText("3 hr")).toBeVisible();
-    expect(screen.getByText(/Full access · Never ask/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "Review and edit" }));
-    fireEvent.change(screen.getByLabelText("Coordinator turns"), {
-      target: { value: "18" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Start mission" }));
-
-    await waitFor(() => {
-      expect(invokeAction).toHaveBeenNthCalledWith(
-        1,
-        "update-draft",
-        expect.objectContaining({
-          draftId: "draft-1",
-          leaseMinutes: 180,
-          maxAutomaticTurns: 18,
-          maxWorkers: 3,
-        }),
-      );
-      expect(invokeAction).toHaveBeenNthCalledWith(2, "start-draft", {
-        draftId: "draft-1",
-      });
-    });
-    expect(screen.getByText(/Mission started/)).toBeVisible();
+    expect(screen.getByText("No deadline")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Activate mission" }));
+    await waitFor(() =>
+      expect(invokeAction).toHaveBeenCalledWith("activate-mission", {
+        missionId: "mission-1",
+      }),
+    );
   });
 });

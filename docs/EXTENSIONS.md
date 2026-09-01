@@ -58,17 +58,18 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   composer in desktop, remote web, and mobile;
 - the bundled, enabled-by-default Follow-up suggestions extension, granted by
   catalog policy on first discovery;
-- the public `orchestration` run/effect facet, denied-by-default
-  `orchestration:manage-owned-tasks` grant, durable daemon journal, and bundled
-  disabled-by-default Missions v1 reference with a permission-aware trusted
-  dashboard on desktop and remote web;
+- the public `orchestration` run/effect facet and durable daemon journal used
+  by the bounded Missions v1 experiment. This facet is now legacy: Missions v2
+  stores a durable project brief through ordinary extension storage and agent
+  tools, while future wake-ups reuse the existing Automation service;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
 third-party trusted-frontend building or loading,
-permissions beyond summary-only `threads:read`, `agent-tools:register`, and
-`orchestration:manage-owned-tasks`,
+permissions beyond summary-only `threads:read`, `agent-tools:register`, and the
+legacy `orchestration:manage-owned-tasks`, including the planned generic
+`automations:manage-owned`,
 direct shell execution from an extension tool, trusted extension frontends for
 third parties, persistent suggestion dismissals, Ask User Question, more than
 one visible suggestion pill, the remaining declarative form
@@ -216,9 +217,10 @@ Initial policy:
   `agent-tools:register` grant is applied once, on first discovery; afterwards
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
-- `falcondeck.missions`: bundled and disabled by default. All three requested
-  permissions remain denied until the user grants them; open runs pause if the
-  extension or orchestration grant is disabled.
+- `falcondeck.missions`: bundled and disabled by default. Missions v2 requests
+  `threads:read` and `agent-tools:register`; both remain denied until the user
+  grants them. The legacy orchestration permission remains supported only while
+  old v1 runs are migrated and retired.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
@@ -243,7 +245,14 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
     "sidebarFilters": [
       { "id": "tags", "title": "Stages", "view": "tag-index" }
     ],
-    "panels": [{ "id": "board", "title": "Kanban", "view": "kanban-board", "icon": "kanban" }]
+    "panels": [
+      {
+        "id": "board",
+        "title": "Kanban",
+        "view": "kanban-board",
+        "icon": "kanban"
+      }
+    ]
   },
   "permissions": ["threads:read"]
 }
@@ -255,7 +264,8 @@ contributions, and a permissions array. `frontend` is optional and currently
 accepted only as a build input for bundled official packages. The v0.1
 validator accepts at most 16
 unique permissions and currently recognizes `threads:read`,
-`agent-tools:register`, and `orchestration:manage-owned-tasks`; unknown or duplicate permissions are rejected rather
+`agent-tools:register`, and the legacy
+`orchestration:manage-owned-tasks`; unknown or duplicate permissions are rejected rather
 than run without enforcement.
 
 `panelActions`, `agentTools`, and `composerSuggestions` have no standalone
@@ -315,21 +325,22 @@ export default defineExtension({
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
 `storage`, `views`, `actions`, identifier-only `events`, the permission-gated
 `threads` summary reader, agent `tools`, `composer`, and the bounded owner-only
-`orchestration` reducer. The remaining rows are planned capabilities:
+legacy `orchestration` reducer. The remaining rows are planned capabilities:
 
-| Facet       | Purpose                                                     |
-| ----------- | ----------------------------------------------------------- |
-| `extension` | Identity, installed version, API version, lifecycle signal  |
-| `log`       | Structured, attributed diagnostics with redaction           |
-| `storage`   | Namespaced private storage and transactions                 |
-| `views`     | Publish bounded synchronized state declared by the manifest |
-| `actions`   | Handle invocations from declared UI actions                 |
-| `events`    | Subscribe to bounded identifier-only lifecycle events       |
-| `threads`   | List summary-only threads with a `threads:read` grant       |
-| `tools`     | Handle agent tool calls with an `agent-tools:register` grant |
-| `composer`  | Publish or clear a thread's bounded next-action offers      |
-| `orchestration` | Read owned bounded runs and return one durable effect   |
-| `commands`  | Planned: slash or command-palette commands                  |
+| Facet           | Purpose                                                           |
+| --------------- | ----------------------------------------------------------------- |
+| `extension`     | Identity, installed version, API version, lifecycle signal        |
+| `log`           | Structured, attributed diagnostics with redaction                 |
+| `storage`       | Namespaced private storage and transactions                       |
+| `views`         | Publish bounded synchronized state declared by the manifest       |
+| `actions`       | Handle invocations from declared UI actions                       |
+| `events`        | Subscribe to bounded identifier-only lifecycle events             |
+| `threads`       | List summary-only threads with a `threads:read` grant             |
+| `tools`         | Handle agent tool calls with an `agent-tools:register` grant      |
+| `composer`      | Publish or clear a thread's bounded next-action offers            |
+| `orchestration` | Legacy: read owned bounded runs and return one effect             |
+| `automations`   | Planned: manage only Automation resources owned by this extension |
+| `commands`      | Planned: slash or command-palette commands                        |
 
 Later facets may add schedules, notifications, turn control, workspace files,
 and mediated network access. Plausibility alone does not put a facet into v1.
@@ -370,12 +381,7 @@ context.tools.register("suggest-follow-ups", async ({ input, threadId }) => {
 ```
 
 Registration fails closed without the `agent-tools:register` grant. Ordinary
-tool context is projected from the harness spawn. Sensitive orchestration
-effects additionally require an opaque daemon-issued bridge capability bound
-to an exact task; request-body identifiers do not authorize them. Claude binds
-directly at spawn. Codex binds a workspace bridge only when daemon state has
-exactly one running Codex task in that workspace; an ambiguous call is denied.
-OpenCode remains ineligible. A handler that raises is an
+tool context is projected from the harness spawn. A handler that raises is an
 ordinary rejection — the message goes back to the calling agent as a tool error
 and the extension keeps its healthy status, because models routinely pass
 arguments an extension declines. Only a host that dies, times out, or breaks
@@ -417,7 +423,7 @@ boundary rather than degrading across three renderers. Publishing an empty
 `actions` array is the documented way to clear a thread's offers.
 
 Staleness is the daemon's rule, not the extension's. Offers describe what to do
-*next*, so the daemon retires a thread's composer-suggestion projections at its
+_next_, so the daemon retires a thread's composer-suggestion projections at its
 turn-start boundary — the one provider-independent path every steer, queued
 turn, and fresh dispatch passes through. Retirement emits the same
 view-retraction event as a permission revoke, so every client drops the
@@ -652,43 +658,27 @@ The bridge is only injected into a spawn when at least one enabled extension
 currently publishes a granted tool, so a user with none pays for no subprocess.
 
 Thread and workspace fields passed to a tool handler are transport context, not
-model arguments. Sensitive facets still fail closed unless that connector has
-an exact task binding. Claude's per-turn connector supplies one. Codex's
-workspace connector is bound only when the daemon observes one running Codex
-task for that provider and workspace. Two running tasks make the call
-ambiguous and therefore unauthorized. OpenCode remains ineligible rather than
-trusting a model-supplied task id.
+model arguments. Extensions should use this daemon-supplied identity to bind
+entity mutations to the calling task. A request-body task id is never caller
+authority.
 
-The third explicit capability is `orchestration:manage-owned-tasks`. It exposes
-only runs whose `ownerExtensionId` matches the callback's extension. A callback
-may return at most one typed effect. The daemon validates actor class, owner,
-task binding, compare-and-swap revision, checkpoint/prompt bounds, deadline,
-and admission count before committing it. The effect commits the opaque
-extension checkpoint and durable operation intent before provider dispatch;
-extension code never waits for a harness.
+`orchestration:manage-owned-tasks` and `context.orchestration` are a legacy
+capability from the bounded Missions v1 experiment. They expose owner-filtered
+runs and one daemon-validated effect, but the experiment's 24-hour lease,
+automatic-turn counter, permanent coordinator, serial worker pool, and special
+background permission profile do not fit long-horizon Missions. No new
+extension should adopt this facet. It remains implemented only until old runs
+are migrated without automatic resumption, after which its types, permission,
+journal, dispatcher, and Mission-specific task origin are removed.
 
-The current slice supports one existing Claude or Codex coordinator task, a
-human-reviewed 15-minute-to-24-hour lease, 1–24 automatic coordinator turns,
-one unresolved continuation, and 0–4 serial one-turn Codex workers. New drafts
-default to three hours, 12 turns, and three workers; these values are stored as
-structured policy and enforced by the daemon rather than inferred from prompt
-prose. A human may extend a run by one hour up to the 24-hour cumulative
-ceiling.
-Background dispatch uses an explicit autonomous execution profile: Codex
-coordinators and workers run with `never` approval plus `danger-full-access`,
-and Claude coordinators run with `bypassPermissions`. The human Start action
-shows this posture before authorizing the run. Mission-owned turns therefore
-do not inherit an interactive task mode that would stall unattended work. This
-does not change current task selection or the workspace default provider.
-Repeated progress fingerprints, provider ambiguity, task errors, permission
-revocation, and extension disable pause the run. Restart never blindly resends
-accepted work.
-The owner may propose completion, but only a human panel action can accept it.
-The bundled `falcondeck.missions` package is the reference consumer and is
-disabled with all grants denied by default. Worker tasks are ordinary visible
-FalconDeck tasks with durable Mission provenance; they cannot delegate, are
-never retried after an ambiguous admission, and their bounded reports return
-to the coordinator as untrusted input.
+The replacement capability is the planned `automations:manage-owned` facet.
+It mediates the existing Agent Control service rather than introducing another
+scheduler. An Automation may carry an opaque `{ extensionId, resourceId }`
+owner. The callback receives only Automations owned by itself and may manage
+only those resources; ordinary Automation revisions, validation, elevated
+authority settings, history, idempotency, and dispatch remain authoritative.
+`falcondeck.missions` is the reference consumer described in
+`docs/MISSIONS.md`.
 
 Trusted extension frontends may register a renderer for one of their own
 manifest-declared `agentTools`. The bridge attaches non-model-authored
@@ -697,14 +687,15 @@ web then render the newest matching result at transcript level, even when the
 provider's ordinary work session is folded. The component receives only that
 extension's synchronized views and the existing permission-checked action
 route. It cannot approve itself: Missions uses the slot to show human-only
-Review/edit and Start controls for a draft. Mobile, older clients, disabled
+review and activation controls for a draft. Mobile, older clients, disabled
 extensions, undeclared tools, and frontend failures retain the ordinary MCP
 result as a visible fallback.
 
-When Missions is enabled with all three grants, FalconDeck adds a short
-provider-neutral Mission trigger to the injected agent context and stages the
-`falcondeck-missions` workflow skill. An explicit request to start, create, or
-run a Mission must call the draft tool before ordinary task work begins; it
+When Missions is enabled with its task-summary and agent-tool grants,
+FalconDeck adds a short provider-neutral Mission trigger to the injected agent
+context and stages the `falcondeck-missions` workflow skill. An explicit
+request to start, create, or run a Mission must call `create-mission` before
+ordinary task work begins; it
 must not silently degrade into a harness goal. Desktop and remote web also
 surface a native `/mission` composer command. Completing it expands to clear
 FalconDeck Mission intent, while the row stays hidden when the extension or a
@@ -955,17 +946,17 @@ its panel through declarative UI v1. Before the grant it still renders an
 identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
 
-Progress (2026-09-01): the neutral orchestration facet, `panelActions`
+Progress (2026-09-01): the bounded orchestration experiment, `panelActions`
 contribution point, durable run/operation/worker store, safe background task
-and turn paths, fake-host support, and bundled Missions reference are
-implemented. Desktop and remote web render Missions through the existing
-shared extension-panel and action routes, and may render extension-owned agent
-tool results inline with generic transcript fallback. Mission drafts carry the
-actual daemon-enforced lease, turn, and worker policy. Mobile retains the
-generic unsupported-panel/tool-result fallback. Claude and unambiguous Codex
-tasks can coordinate; up to four serial Codex workers are supported. OpenCode coordinator identity,
-parallel worker pools, automatic completion, worker follow-ups, and native
-harness delegation are not implemented.
+and turn paths, fake-host support, and bundled Missions v1 reference were
+implemented. Product testing showed that its permanent coordinator, 24-hour
+ceiling, turn/worker counters, and duplicate runtime model were the wrong
+abstraction for work lasting weeks or months. Missions v2 now uses ordinary
+extension storage and tools for a durable brief, status, update log, and linked
+tasks. The v1 orchestration facet is legacy migration input. The next generic
+extension capability is owner-scoped access to existing Automations; it will
+not add another scheduler or Mission-specific agent loop. See
+`docs/MISSIONS.md`.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;

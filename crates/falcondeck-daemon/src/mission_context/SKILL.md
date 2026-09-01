@@ -1,41 +1,41 @@
 ---
 name: falcondeck-missions
-description: Start and coordinate FalconDeck Missions. Use when the user explicitly asks to start, create, or run a Mission, or when FalconDeck identifies the current task as a Mission coordinator.
+description: Create and update durable FalconDeck Missions. Use when the user explicitly asks to start or create a Mission, or when the current task is linked to one.
 ---
 
 # FalconDeck Missions
 
-Treat a FalconDeck Mission as an explicit coordination mode, not a synonym for
-a difficult task or a harness goal.
+A Mission is a durable project brief above ordinary agent tasks. It is not a
+synonym for a difficult task, a harness goal, a permanent coordinator thread,
+or an agent process that must keep running.
 
-## Start
+## Create
 
 When the user explicitly requests a Mission:
 
-1. Call `falcondeck_missions-draft_mission` before doing the requested work.
-2. Put the full outcome in `objective` and extract concrete acceptance criteria
-   when the prompt supplies them. Do not invent requirements.
-3. Put agreed limits in the structured `leaseMinutes`, `maxAutomaticTurns`, and
-   `maxWorkers` fields. Do not leave limits only in objective prose. If the
-   user did not specify them, omit them so FalconDeck applies its reviewed
-   defaults (three hours, 12 turns, three workers).
-4. Report that the draft awaits human review and start. Supported clients show
-   those controls in this conversation; the Missions panel remains available.
-5. Do not begin the task as an ordinary turn and do not create a harness goal
-   instead.
+1. Call `falcondeck_missions-create_mission` before doing the requested work.
+2. Supply a concise title, the durable brief, and concrete success criteria.
+3. Include `deadline` only when the user requests or agrees to one. Missions
+   have no default lifespan, worker count, or automatic-turn limit.
+4. Report that the draft awaits human review and activation. Supported clients
+   show the controls in the conversation and on the Missions page.
+5. Do not silently substitute a native harness goal. A linked task may use its
+   own Goal after the Mission is active.
 
-## Coordinate
+## Work
 
-When FalconDeck starts or continues this task as a Mission coordinator:
+When this task is linked to a Mission:
 
-- Follow the coordinator prompt and the Mission's hard limits.
-- Use `falcondeck_missions-mission_status` when durable state is unclear.
-- Delegate only genuinely independent work with
-  `falcondeck_missions-mission_delegate`; do not spawn workers merely to extend
-  the Mission.
-- Call `falcondeck_missions-mission_checkpoint` exactly once before the turn
-  ends. A prose claim does not complete the Mission; completion requires
-  evidence and human acceptance.
-- Work around ordinary technical blocks within the Mission's authority and
-  limits. Pause for the human when intent, permission, safety, or external
-  authority is missing.
+- call `falcondeck_missions-read_mission` before material work when the durable
+  brief or latest decisions are not already clear;
+- use native Goals for focused execution inside this task when useful;
+- use `falcondeck_missions-update_mission` only for meaningful progress,
+  evidence, questions, decisions, task links, or status changes;
+- prefer an existing linked task and create another only for clean context, a
+  distinct harness/capability, independent work, or independent review;
+- mark the Mission `waiting` instead of consuming tokens while nothing can
+  change;
+- mark it `needs_human` with a concrete question when authority or judgment is
+  required;
+- mark it `review` with evidence when the criteria appear satisfied; and
+- never mark it complete or cancelled. Those are human decisions.
