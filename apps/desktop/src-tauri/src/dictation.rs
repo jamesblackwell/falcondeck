@@ -58,9 +58,15 @@ static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
 static OPENROUTER_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::builder().build().unwrap_or_default());
 
+#[derive(Clone, Debug)]
+struct RecordedAudio {
+    path: PathBuf,
+    duration_seconds: Option<f64>,
+}
+
 /// The recording the native side is currently working on, so a transcript or
 /// a failure arriving from Apple Speech can be filed against its audio.
-static CURRENT_RECORDING: RwLock<Option<PathBuf>> = RwLock::new(None);
+static CURRENT_RECORDING: RwLock<Option<RecordedAudio>> = RwLock::new(None);
 
 /// Mirrors `FDEventKind` in `dictation_events.h`; a unit test asserts the two
 /// definitions stay in sync.
@@ -196,6 +202,7 @@ unsafe extern "C" {
         retain_recordings: bool,
     );
     fn fd_dictation_retained_recording_path() -> *mut std::ffi::c_char;
+    fn fd_dictation_retained_recording_duration_seconds() -> f64;
     fn fd_dictation_audio_devices_json() -> *mut std::ffi::c_char;
     fn fd_dictation_temp_directory() -> *mut std::ffi::c_char;
     fn fd_dictation_free_string(value: *mut std::ffi::c_char);
@@ -217,6 +224,8 @@ unsafe extern "C" {
     fn fd_dictation_test_overlay_panel_contract() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_transient_pasteboard_round_trip() -> bool;
+    #[cfg(test)]
+    fn fd_dictation_test_recording_duration_is_usable(duration_seconds: f64) -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
@@ -604,6 +613,7 @@ pub async fn dictation_history_retry(
         audio,
         model.clone(),
         config.fallback_model.clone(),
+        measured_recording_duration(entry.duration_seconds),
     )
     .await
     {
@@ -841,6 +851,22 @@ fn validate_recording_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn measured_recording_duration(seconds: f64) -> Option<f64> {
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
+#[cfg(target_os = "macos")]
+fn native_recorded_audio(path: PathBuf) -> RecordedAudio {
+    // SAFETY: The native getter synchronizes access to the controller's
+    // retained-recording state and returns a scalar value.
+    let duration_seconds =
+        measured_recording_duration(unsafe { fd_dictation_retained_recording_duration_seconds() });
+    RecordedAudio {
+        path,
+        duration_seconds,
+    }
+}
+
 /// What the daemon actually managed to transcribe, including which model
 /// produced it — the daemon may have fallen through to another one.
 struct Transcription {
@@ -862,8 +888,10 @@ async fn request_transcription(
     audio: Vec<u8>,
     model: String,
     fallback_model: Option<String>,
+    measured_duration_seconds: Option<f64>,
 ) -> Result<Transcription, String> {
-    let duration_seconds = audio.len() as f64 / RECORDING_BYTES_PER_SECOND;
+    let duration_seconds = measured_duration_seconds
+        .unwrap_or_else(|| audio.len() as f64 / RECORDING_BYTES_PER_SECOND);
     let response = OPENROUTER_CLIENT
         .post(format!("{daemon_url}/api/speech/transcribe"))
         .timeout(transcription_timeout(audio.len()))
@@ -916,6 +944,7 @@ async fn request_transcription(
 /// is switched off. Either way the audio stops being the recorder's problem.
 fn file_recording(
     path: &Path,
+    duration_seconds: Option<f64>,
     provider: &str,
     model: Option<String>,
     text: Option<String>,
@@ -925,10 +954,13 @@ fn file_recording(
     let kept = dictation_history::record(
         &dictation_temp_dir(),
         path,
-        provider,
-        model,
-        text,
-        error,
+        dictation_history::RecordingOutcome {
+            duration_seconds,
+            provider,
+            model,
+            text,
+            error,
+        },
         retention_hours,
     );
     if !kept {
@@ -941,6 +973,7 @@ fn file_recording(
 /// native side still retains it for the overlay's Retry.
 fn record_recording_detached(
     path: PathBuf,
+    duration_seconds: Option<f64>,
     provider: &'static str,
     model: Option<String>,
     text: Option<String>,
@@ -951,10 +984,13 @@ fn record_recording_detached(
         dictation_history::record(
             &dictation_temp_dir(),
             &path,
-            provider,
-            model,
-            text,
-            error,
+            dictation_history::RecordingOutcome {
+                duration_seconds,
+                provider,
+                model,
+                text,
+                error,
+            },
             retention_hours,
         );
     });
@@ -964,6 +1000,7 @@ fn record_recording_detached(
 /// the main thread, which must not wait on index IO and expiry deletions.
 fn file_recording_detached(
     path: PathBuf,
+    duration_seconds: Option<f64>,
     provider: &'static str,
     model: Option<String>,
     text: Option<String>,
@@ -971,15 +1008,27 @@ fn file_recording_detached(
     retention_hours: u32,
 ) {
     tauri::async_runtime::spawn_blocking(move || {
-        file_recording(&path, provider, model, text, error, retention_hours);
+        file_recording(
+            &path,
+            duration_seconds,
+            provider,
+            model,
+            text,
+            error,
+            retention_hours,
+        );
     });
 }
 
 async fn transcribe_openrouter(
     app: AppHandle,
-    path: PathBuf,
+    recording: RecordedAudio,
     transcription_id: u64,
 ) -> Result<(), String> {
+    let RecordedAudio {
+        path,
+        duration_seconds,
+    } = recording;
     validate_recording_path(&path)?;
     let config = CONFIG
         .read()
@@ -998,6 +1047,7 @@ async fn transcribe_openrouter(
         audio,
         config.model.clone(),
         config.fallback_model.clone(),
+        duration_seconds,
     )
     .await
     {
@@ -1009,10 +1059,13 @@ async fn transcribe_openrouter(
             dictation_history::record(
                 &dictation_temp_dir(),
                 &path,
-                "open_router",
-                Some(config.model.clone()),
-                None,
-                Some(error.clone()),
+                dictation_history::RecordingOutcome {
+                    duration_seconds,
+                    provider: "open_router",
+                    model: Some(config.model.clone()),
+                    text: None,
+                    error: Some(error.clone()),
+                },
                 retention_hours,
             );
             return Err(error);
@@ -1049,6 +1102,7 @@ async fn transcribe_openrouter(
         if !pasted {
             record_recording_detached(
                 path.clone(),
+                duration_seconds,
                 "open_router",
                 Some(model),
                 Some(text.clone()),
@@ -1066,6 +1120,7 @@ async fn transcribe_openrouter(
         }
         file_recording_detached(
             path.clone(),
+            duration_seconds,
             "open_router",
             Some(model),
             Some(text.clone()),
@@ -1095,18 +1150,23 @@ async fn transcribe_openrouter(
 /// the native side for this path — a failed transcript keeps its audio for the
 /// overlay's Retry — so this only ever adds to history.
 fn file_native_recording(text: Option<String>, error: Option<String>) {
-    let Some(path) = CURRENT_RECORDING
+    let Some(recording) = CURRENT_RECORDING
         .write()
         .ok()
         .and_then(|mut current| current.take())
     else {
         return;
     };
+    let RecordedAudio {
+        path,
+        duration_seconds,
+    } = recording;
     let Ok(config) = current_dictation_config() else {
         return;
     };
     record_recording_detached(
         path,
+        duration_seconds,
         "system",
         None,
         text,
@@ -1203,7 +1263,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             close_undo_window_after(app, generation, CANCEL_UNDO_WINDOW);
         }
         event_kind::AUDIO_READY => {
-            let path = PathBuf::from(payload);
+            let recording = native_recorded_audio(PathBuf::from(payload));
             let transcription_id = NEXT_TRANSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
             if ACTIVE_OPENROUTER_TRANSCRIPTION
                 .compare_exchange(0, transcription_id, Ordering::AcqRel, Ordering::Acquire)
@@ -1217,7 +1277,8 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 return;
             }
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = transcribe_openrouter(app.clone(), path, transcription_id).await
+                if let Err(error) =
+                    transcribe_openrouter(app.clone(), recording, transcription_id).await
                 {
                     if ACTIVE_OPENROUTER_TRANSCRIPTION
                         .compare_exchange(transcription_id, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -1236,7 +1297,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
         // learn which file the transcript (or failure) will belong to.
         event_kind::AUDIO_RECORDED => {
             if let Ok(mut current) = CURRENT_RECORDING.write() {
-                *current = Some(PathBuf::from(payload));
+                *current = Some(native_recorded_audio(PathBuf::from(payload)));
             }
         }
         // The paste target is FalconDeck itself: native paste is unreliable
@@ -1269,8 +1330,8 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
 #[cfg(test)]
 mod tests {
     use super::{
-        dictation_audio_devices, parse_audio_level, permission_label, validate_local_daemon_url,
-        validate_recording_path,
+        dictation_audio_devices, measured_recording_duration, parse_audio_level, permission_label,
+        validate_local_daemon_url, validate_recording_path,
     };
 
     #[test]
@@ -1319,6 +1380,13 @@ mod tests {
         assert!(unsafe { super::fd_dictation_test_transient_pasteboard_round_trip() });
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_recorder_rejects_startup_artifacts_but_accepts_speech() {
+        assert!(!unsafe { super::fd_dictation_test_recording_duration_is_usable(0.020) });
+        assert!(unsafe { super::fd_dictation_test_recording_duration_is_usable(0.250) });
+    }
+
     #[test]
     fn permission_label_preserves_unsupported_platform_state() {
         assert_eq!(permission_label(3), "unsupported");
@@ -1330,6 +1398,13 @@ mod tests {
         assert_eq!(parse_audio_level("2"), Some(1.0));
         assert_eq!(parse_audio_level("-1"), Some(0.0));
         assert_eq!(parse_audio_level("not-a-level"), None);
+    }
+
+    #[test]
+    fn measured_recording_duration_rejects_invalid_values() {
+        assert_eq!(measured_recording_duration(7.68), Some(7.68));
+        assert_eq!(measured_recording_duration(0.0), None);
+        assert_eq!(measured_recording_duration(f64::NAN), None);
     }
 
     #[test]

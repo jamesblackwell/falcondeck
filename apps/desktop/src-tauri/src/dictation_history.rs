@@ -21,9 +21,13 @@ const HISTORY_FILE: &str = "falcondeck-dictation-history.json";
 /// Retention is the real bound; this only stops a runaway index file from an
 /// unusually chatty day.
 const MAX_ENTRIES: usize = 200;
-/// Recordings are 32 kbps mono AAC, so a second of speech is about 4 kB. The
-/// duration is only ever shown as a rough "how long was that" label.
+/// Legacy recordings do not carry the native recorder's measured duration.
+/// Keep the old byte estimate as a migration fallback for those entries only.
 const BYTES_PER_SECOND: f64 = 4_000.0;
+
+fn valid_duration(seconds: Option<f64>) -> Option<f64> {
+    seconds.filter(|value| value.is_finite() && *value > 0.0)
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +47,14 @@ pub struct DictationHistoryEntry {
     /// which is what tells the UI a retry is no longer possible.
     #[serde(default)]
     pub audio_available: bool,
+}
+
+pub struct RecordingOutcome<'a> {
+    pub duration_seconds: Option<f64>,
+    pub provider: &'a str,
+    pub model: Option<String>,
+    pub text: Option<String>,
+    pub error: Option<String>,
 }
 
 static ENTRIES: LazyLock<Mutex<Option<Vec<DictationHistoryEntry>>>> =
@@ -156,10 +168,7 @@ fn with_entries<T>(
 pub fn record(
     temp_dir: &Path,
     path: &Path,
-    provider: &str,
-    model: Option<String>,
-    text: Option<String>,
-    error: Option<String>,
+    outcome: RecordingOutcome<'_>,
     retention_hours: u32,
 ) -> bool {
     if retention_hours == 0 || !owns_recording(temp_dir, path) || !path.is_file() {
@@ -171,16 +180,17 @@ pub fn record(
     let bytes = std::fs::metadata(path)
         .map(|value| value.len())
         .unwrap_or(0);
+    let measured_duration = valid_duration(outcome.duration_seconds);
     let entry = DictationHistoryEntry {
         id: id.to_string(),
         path: path.to_string_lossy().into_owned(),
         recorded_at_ms: file_recorded_at_ms(path),
-        duration_seconds: bytes as f64 / BYTES_PER_SECOND,
+        duration_seconds: measured_duration.unwrap_or(bytes as f64 / BYTES_PER_SECOND),
         bytes,
-        provider: provider.to_string(),
-        model,
-        text,
-        error,
+        provider: outcome.provider.to_string(),
+        model: outcome.model,
+        text: outcome.text,
+        error: outcome.error,
         audio_available: true,
     };
     with_entries(temp_dir, retention_hours, |entries| {
@@ -193,7 +203,12 @@ pub fn record(
                 existing.text = entry.text;
                 existing.error = entry.error;
                 existing.bytes = entry.bytes;
-                existing.duration_seconds = entry.duration_seconds;
+                // A retry may come from an older native bridge that cannot
+                // report media duration. Preserve the measurement already in
+                // the index instead of replacing it with a byte estimate.
+                if measured_duration.is_some() {
+                    existing.duration_seconds = entry.duration_seconds;
+                }
                 existing.audio_available = true;
             }
             None => entries.push(entry),
@@ -224,7 +239,7 @@ pub fn record_retry(
 pub fn entries(temp_dir: &Path, retention_hours: u32) -> Vec<DictationHistoryEntry> {
     with_entries(temp_dir, retention_hours, |entries| {
         let mut visible = entries.clone();
-        visible.sort_by(|left, right| right.recorded_at_ms.cmp(&left.recorded_at_ms));
+        visible.sort_by_key(|entry| std::cmp::Reverse(entry.recorded_at_ms));
         visible
     })
 }
@@ -329,6 +344,22 @@ mod tests {
         path
     }
 
+    fn outcome(
+        duration_seconds: Option<f64>,
+        provider: &str,
+        model: Option<String>,
+        text: Option<String>,
+        error: Option<String>,
+    ) -> RecordingOutcome<'_> {
+        RecordingOutcome {
+            duration_seconds,
+            provider,
+            model,
+            text,
+            error,
+        }
+    }
+
     #[test]
     fn recording_is_filed_and_listed_newest_first() {
         let (dir, _guard) = fresh_dir("listing");
@@ -337,19 +368,19 @@ mod tests {
         assert!(record(
             &dir,
             &first,
-            "open_router",
-            Some("model-a".into()),
-            Some("first".into()),
-            None,
+            outcome(
+                Some(0.75),
+                "open_router",
+                Some("model-a".into()),
+                Some("first".into()),
+                None,
+            ),
             6
         ));
         assert!(record(
             &dir,
             &second,
-            "system",
-            None,
-            Some("second".into()),
-            None,
+            outcome(Some(1.5), "system", None, Some("second".into()), None),
             6
         ));
 
@@ -360,7 +391,7 @@ mod tests {
             .iter()
             .find(|entry| entry.text.as_deref() == Some("first"));
         let one = one.expect("first entry");
-        assert_eq!(one.duration_seconds, 1.0);
+        assert_eq!(one.duration_seconds, 0.75);
         assert!(one.audio_available);
     }
 
@@ -371,10 +402,7 @@ mod tests {
         assert!(!record(
             &dir,
             &path,
-            "system",
-            None,
-            Some("hi".into()),
-            None,
+            outcome(None, "system", None, Some("hi".into()), None),
             0
         ));
         // The caller still owns the file when history declines it.
@@ -386,7 +414,12 @@ mod tests {
     fn expired_recordings_are_deleted_with_their_entry() {
         let (dir, _guard) = fresh_dir("expiry");
         let path = write_recording(&dir, "one", 1_000);
-        record(&dir, &path, "system", None, Some("hi".into()), None, 6);
+        record(
+            &dir,
+            &path,
+            outcome(None, "system", None, Some("hi".into()), None),
+            6,
+        );
         // Age the entry past a one-hour window.
         with_entries(&dir, 6, |entries| {
             entries[0].recorded_at_ms -= 2 * 60 * 60 * 1000;
@@ -402,10 +435,13 @@ mod tests {
         record(
             &dir,
             &path,
-            "open_router",
-            Some("model-a".into()),
-            None,
-            Some("provider outage".into()),
+            outcome(
+                None,
+                "open_router",
+                Some("model-a".into()),
+                None,
+                Some("provider outage".into()),
+            ),
             6,
         );
         let updated = record_retry(
@@ -423,10 +459,48 @@ mod tests {
     }
 
     #[test]
+    fn filing_without_a_measurement_preserves_the_existing_duration() {
+        let (dir, _guard) = fresh_dir("duration-preserved");
+        let path = write_recording(&dir, "one", 8_000);
+        record(
+            &dir,
+            &path,
+            outcome(
+                Some(0.75),
+                "open_router",
+                Some("model-a".into()),
+                None,
+                Some("first failure".into()),
+            ),
+            6,
+        );
+        record(
+            &dir,
+            &path,
+            outcome(
+                None,
+                "open_router",
+                Some("model-b".into()),
+                Some("recovered".into()),
+                None,
+            ),
+            6,
+        );
+
+        let listed = entries(&dir, 6);
+        assert_eq!(listed[0].duration_seconds, 0.75);
+    }
+
+    #[test]
     fn deleting_an_entry_removes_its_audio() {
         let (dir, _guard) = fresh_dir("delete");
         let path = write_recording(&dir, "one", 1_000);
-        record(&dir, &path, "system", None, Some("hi".into()), None, 6);
+        record(
+            &dir,
+            &path,
+            outcome(None, "system", None, Some("hi".into()), None),
+            6,
+        );
         assert!(delete(&dir, 6, "falcondeck-dictation-one"));
         assert!(!path.is_file());
         assert!(entries(&dir, 6).is_empty());
@@ -438,8 +512,18 @@ mod tests {
         let (dir, _guard) = fresh_dir("clear");
         let first = write_recording(&dir, "one", 1_000);
         let second = write_recording(&dir, "two", 1_000);
-        record(&dir, &first, "system", None, Some("a".into()), None, 6);
-        record(&dir, &second, "system", None, Some("b".into()), None, 6);
+        record(
+            &dir,
+            &first,
+            outcome(None, "system", None, Some("a".into()), None),
+            6,
+        );
+        record(
+            &dir,
+            &second,
+            outcome(None, "system", None, Some("b".into()), None),
+            6,
+        );
         assert_eq!(clear(&dir), 2);
         assert!(!first.is_file() && !second.is_file());
         assert!(entries(&dir, 6).is_empty());
@@ -449,7 +533,12 @@ mod tests {
     fn entries_report_audio_that_disappeared_underneath_them() {
         let (dir, _guard) = fresh_dir("missing");
         let path = write_recording(&dir, "one", 1_000);
-        record(&dir, &path, "system", None, Some("hi".into()), None, 6);
+        record(
+            &dir,
+            &path,
+            outcome(None, "system", None, Some("hi".into()), None),
+            6,
+        );
         std::fs::remove_file(&path).expect("remove");
         let listed = entries(&dir, 6);
         assert_eq!(listed.len(), 1, "the transcript is still worth keeping");
@@ -461,7 +550,12 @@ mod tests {
         let (dir, _guard) = fresh_dir("orphans");
         let orphan = write_recording(&dir, "orphan", 1_000);
         let tracked = write_recording(&dir, "tracked", 1_000);
-        record(&dir, &tracked, "system", None, Some("hi".into()), None, 6);
+        record(
+            &dir,
+            &tracked,
+            outcome(None, "system", None, Some("hi".into()), None),
+            6,
+        );
         // Age both files past a one-hour window.
         let old = SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
         for path in [&orphan, &tracked] {
@@ -505,13 +599,23 @@ mod tests {
         let (dir, _guard) = fresh_dir("foreign");
         let outsider = dir.join("someone-elses-notes.m4a");
         std::fs::write(&outsider, b"not ours").expect("write");
-        assert!(!record(&dir, &outsider, "system", None, None, None, 6));
+        assert!(!record(
+            &dir,
+            &outsider,
+            outcome(None, "system", None, None, None),
+            6
+        ));
         remove_recording(&dir, &outsider);
         assert!(outsider.is_file());
         // Nor from another directory, even with our own naming.
         let elsewhere = std::env::temp_dir().join(format!("{RECORDING_PREFIX}elsewhere.m4a"));
         std::fs::write(&elsewhere, b"x").expect("write");
-        assert!(!record(&dir, &elsewhere, "system", None, None, None, 6));
+        assert!(!record(
+            &dir,
+            &elsewhere,
+            outcome(None, "system", None, None, None),
+            6
+        ));
         assert!(elsewhere.is_file());
         let _ = std::fs::remove_file(elsewhere);
     }
