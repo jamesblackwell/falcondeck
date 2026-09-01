@@ -149,6 +149,9 @@ describe("Missions trusted frontend", () => {
     });
 
     expect(screen.getByText("Release the Missions feature")).toBeVisible();
+    expect(
+      screen.getByText(/Missions are for work that is too large/),
+    ).toHaveTextContent("leaves final completion for you to accept");
     expect(screen.getByText("Drafts to review")).toBeVisible();
     expect(screen.getByText("Investigate the flaky test")).toBeVisible();
     await waitFor(() =>

@@ -650,8 +650,11 @@ function MissionDashboard({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-2xl">
             <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              Coordinate bounded work from an agent task while FalconDeck
-              enforces the deadline, turn limit, and worker limit.
+              Missions are for work that is too large for one agent turn. One
+              task coordinates the job, can hand off bounded pieces to worker
+              tasks, and keeps things moving without constant supervision.
+              FalconDeck enforces the limits you approve, shows progress, and
+              leaves final completion for you to accept.
             </p>
             <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
               Mission coordinator and worker turns use {AUTONOMOUS_ACCESS_LABEL}
