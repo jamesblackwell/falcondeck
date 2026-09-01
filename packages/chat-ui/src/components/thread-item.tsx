@@ -247,8 +247,8 @@ export const ThreadItem = memo(
             {/*
               The timestamp and the archive action share one grid cell and
               swap in place instead of reflowing the row. Hide the outgoing
-              label immediately so it cannot show through the archive glyph
-              while that action fades in.
+              element immediately in either direction so the opacity fades
+              never show both at once.
             */}
             <span className="group/actions grid shrink-0 grid-cols-1 items-center justify-items-end">
               {wasInterrupted ? (
@@ -295,7 +295,7 @@ export const ThreadItem = memo(
                   }}
                   title="Archive thread"
                   aria-label={`Archive thread ${thread.title}`}
-                  className="fd-focus pointer-events-none z-10 col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+                  className="fd-focus pointer-events-none invisible z-10 col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:visible focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
                 >
                   <Archive aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
