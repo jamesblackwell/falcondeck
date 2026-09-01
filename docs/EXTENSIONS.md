@@ -58,10 +58,6 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   composer in desktop, remote web, and mobile;
 - the bundled, enabled-by-default Follow-up suggestions extension, granted by
   catalog policy on first discovery;
-- the public `orchestration` run/effect facet and durable daemon journal used
-  by the bounded Missions v1 experiment. This facet is now legacy: Missions v2
-  stores a durable project brief through ordinary extension storage and agent
-  tools, while future wake-ups reuse the existing Automation service;
 - generic extension-owned Automations through `automations:manage-owned`:
   owner-scoped projections and mutations reuse Agent Control validation,
   persistence, scheduling, dispatch, and run history without exposing another
@@ -71,9 +67,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 The following planned parts are not yet public API: user/local-path install,
 third-party trusted-frontend building or loading,
-permissions beyond summary-only `threads:read`, `agent-tools:register`,
-`automations:manage-owned`, and the legacy
-`orchestration:manage-owned-tasks`,
+permissions beyond summary-only `threads:read`, `agent-tools:register`, and
+`automations:manage-owned`,
 direct shell execution from an extension tool, trusted extension frontends for
 third parties, persistent suggestion dismissals, Ask User Question, more than
 one visible suggestion pill, the remaining declarative form
@@ -221,10 +216,9 @@ Initial policy:
   `agent-tools:register` grant is applied once, on first discovery; afterwards
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
-- `falcondeck.missions`: bundled and disabled by default. Missions v2 requests
+- `falcondeck.missions`: bundled and disabled by default. Missions requests
   `threads:read`, `agent-tools:register`, and `automations:manage-owned`; all
-  remain denied until the user grants them. The legacy orchestration permission
-  remains supported only while old v1 runs are migrated and retired.
+  remain denied until the user grants them.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
@@ -266,11 +260,9 @@ Required properties are a globally unique reverse-domain-style id, name,
 semantic version, supported extension API range, backend entrypoint, declared
 contributions, and a permissions array. `frontend` is optional and currently
 accepted only as a build input for bundled official packages. The v0.1
-validator accepts at most 16
-unique permissions and currently recognizes `threads:read`,
-`agent-tools:register`, and the legacy
-`orchestration:manage-owned-tasks`; unknown or duplicate permissions are rejected rather
-than run without enforcement.
+validator accepts at most 16 unique permissions and currently recognizes
+`threads:read`, `agent-tools:register`, and `automations:manage-owned`; unknown
+or duplicate permissions are rejected rather than run without enforcement.
 
 `panelActions`, `agentTools`, and `composerSuggestions` have no standalone
 client-rendered declarative UI of their own. Panel actions are the declared
@@ -328,9 +320,8 @@ export default defineExtension({
 
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
 `storage`, `views`, `actions`, identifier-only `events`, the permission-gated
-`threads` summary reader, agent `tools`, `composer`, and the bounded owner-only
-`automations` reducer. The bounded `orchestration` reducer is legacy. The
-remaining rows are planned capabilities:
+`threads` summary reader, agent `tools`, `composer`, and the owner-only
+`automations` reducer. The remaining rows are planned capabilities:
 
 | Facet           | Purpose                                                           |
 | --------------- | ----------------------------------------------------------------- |
@@ -343,7 +334,6 @@ remaining rows are planned capabilities:
 | `threads`       | List summary-only threads with a `threads:read` grant             |
 | `tools`         | Handle agent tool calls with an `agent-tools:register` grant      |
 | `composer`      | Publish or clear a thread's bounded next-action offers            |
-| `orchestration` | Legacy: read owned bounded runs and return one effect             |
 | `automations`   | Manage only Automation resources owned by this extension          |
 | `commands`      | Planned: slash or command-palette commands                        |
 
@@ -357,13 +347,12 @@ their storage/view effects commit atomically through the same daemon boundary
 as actions.
 
 The event union contains `thread.updated`, `turn.start`, `turn.ended`,
-`attention.opened`, `attention.resolved`, and owner-targeted
-`orchestration.updated`. Payloads contain only stable workspace, thread, turn,
-request, and owned-run identifiers. Status, title, preview, prompt, transcript,
-and resolution fields are deliberately absent. An extension that needs thread
-or run metadata requests it separately through the declared, granted, and
-enforced projection facet. Lifecycle delivery is bounded and lossy; events are
-refresh hints, never a durable journal.
+`attention.opened`, and `attention.resolved`. Payloads contain only stable
+workspace, thread, turn, and request identifiers. Status, title, preview,
+prompt, transcript, and resolution fields are deliberately absent. An
+extension that needs thread metadata requests it separately through the
+declared, granted, and enforced projection facet. Lifecycle delivery is bounded
+and lossy; events are refresh hints, never a durable journal.
 
 `context.threads.list()` fails closed unless the manifest declares
 `threads:read` and the user has granted it. The returned projection is capped
@@ -597,9 +586,8 @@ The daemon owns this lifecycle:
 5. Activate the package and collect its action registrations and event subscriptions.
 6. Route a declared action, agent tool call, or identifier-only event with
    bounded input and a private-state copy.
-7. Validate storage/views and any single owner-only orchestration effect. The
-   orchestration checkpoint and operation intent commit atomically before an
-   asynchronous provider side effect.
+7. Validate and atomically commit storage, views, and owner-scoped Automation
+   mutations.
 8. Publish status and view changes through the unified event stream.
 9. Dispose the process on disable, shutdown, timeout, or protocol failure.
 
@@ -667,18 +655,10 @@ model arguments. Extensions should use this daemon-supplied identity to bind
 entity mutations to the calling task. A request-body task id is never caller
 authority.
 
-`orchestration:manage-owned-tasks` and `context.orchestration` are a legacy
-capability from the bounded Missions v1 experiment. They expose owner-filtered
-runs and one daemon-validated effect, but the experiment's 24-hour lease,
-automatic-turn counter, permanent coordinator, serial worker pool, and special
-background permission profile do not fit long-horizon Missions. No new
-extension should adopt this facet. It remains implemented only until old runs
-are migrated without automatic resumption, after which its types, permission,
-journal, dispatcher, and Mission-specific task origin are removed.
+The shipped `automations:manage-owned` facet mediates the existing Agent
+Control service rather than introducing another scheduler.
 
-The replacement capability is the shipped `automations:manage-owned` facet.
-It mediates the existing Agent Control service rather than introducing another
-scheduler. An Automation may carry an opaque `{ extensionId, resourceId }`
+An Automation may carry an opaque `{ extensionId, resourceId }`
 owner. The callback receives only Automations owned by itself and may manage
 only those resources; ordinary Automation revisions, validation, elevated
 authority settings, history, idempotency, and dispatch remain authoritative.
@@ -959,19 +939,12 @@ its panel through declarative UI v1. Before the grant it still renders an
 identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
 
-Progress (2026-09-01): the bounded orchestration experiment, `panelActions`
-contribution point, durable run/operation/worker store, safe background task
-and turn paths, fake-host support, and bundled Missions v1 reference were
-implemented. Product testing showed that its permanent coordinator, 24-hour
-ceiling, turn/worker counters, and duplicate runtime model were the wrong
-abstraction for work lasting weeks or months. Missions v2 now uses ordinary
-extension storage and tools for a durable brief, status, update log, and linked
-tasks. The v1 orchestration facet is legacy migration input. The generic
-`automations:manage-owned` capability now gives an extension owner-scoped
-access to existing Automations without adding another scheduler or a
-Mission-specific agent loop. Missions uses it for optional periodic reviews
-whose native tasks receive daemon-verified Mission provenance. See
-`docs/MISSIONS.md`.
+Progress (2026-09-01): `panelActions`, agent tools, and generic
+`automations:manage-owned` are implemented. Missions uses ordinary extension
+storage for a durable brief, status, update log, and linked tasks, with optional
+periodic reviews backed by the existing Automation scheduler. Review tasks
+receive daemon-verified Mission provenance. There is no Mission-specific agent
+loop, run journal, worker pool, or scheduler. See `docs/MISSIONS.md`.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;

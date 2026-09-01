@@ -11,8 +11,7 @@ bounded published views, identifier-only lifecycle events, identity, and
 attributed logging. `automations:manage-owned` adds an owner-only projection and
 validated effect facet over FalconDeck's existing Agent Control scheduler. An
 extension can manage only its own Automations and creates them from a
-daemon-verified task rather than inventing an execution target. The older
-`orchestration:manage-owned-tasks` facet is retained only for v1 migration.
+daemon-verified task rather than inventing an execution target.
 Event subscriptions return idempotent disposables; richer thread fields require
 a separately granted read facet, and publishing tools to agents requires the
 `agent-tools:register` grant.

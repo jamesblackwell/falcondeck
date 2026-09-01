@@ -132,11 +132,6 @@ export type ExtensionEvent =
       threadId?: string;
       requestId: string;
     }
-  | {
-      type: "orchestration.updated";
-      workspaceId: string;
-      runId: string;
-    }
   | { type: "automations.updated" };
 
 export type ExtensionEventType = ExtensionEvent["type"];
@@ -234,165 +229,6 @@ export type ExtensionAutomationEffect =
       idempotencyKey: string;
     }
   | { type: "pause_resource"; resourceId: string };
-
-export type ExtensionRunGate = "open" | "paused" | "closed";
-export type ExtensionRunOutcome =
-  | "completed"
-  | "closed_incomplete"
-  | "expired"
-  | "cancelled";
-export type ExtensionOperationStatus =
-  | "queued"
-  | "dispatching"
-  | "acknowledged"
-  | "settled"
-  | "outcome_unknown"
-  | "rejected"
-  | "cancelled";
-export type ExtensionWorkerStatus =
-  | "queued"
-  | "creating_thread"
-  | "thread_ready"
-  | "dispatching"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "outcome_unknown"
-  | "cancelled";
-
-/** Owner-only durable run projection. Provider transcripts are never exposed. */
-export type ExtensionRunSummary = {
-  id: string;
-  ownerExtensionId: string;
-  workspaceId: string;
-  coordinatorThreadId: string;
-  title: string;
-  objective: string;
-  gate: ExtensionRunGate;
-  outcome?: ExtensionRunOutcome;
-  pauseReason?: string;
-  checkpoint: unknown;
-  policyRevision: number;
-  journalSequence: number;
-  approvalGeneration: number;
-  automaticTurnsStarted: number;
-  maxAutomaticTurns: number;
-  maxWorkers: number;
-  awaitingWorkers: boolean;
-  createdAt: string;
-  updatedAt: string;
-  deadlineAt: string;
-  lastProgressFingerprint?: string;
-  pendingContinuation?: {
-    operationId: string;
-    prompt: string;
-    progressFingerprint: string;
-    requestedAt: string;
-  };
-  completionProposed: boolean;
-  operations: Array<{
-    id: string;
-    prompt: string;
-    status: ExtensionOperationStatus;
-    createdAt: string;
-    updatedAt: string;
-    providerTurnId?: string;
-    sourceTurnIdBeforeDispatch?: string;
-    message?: string;
-  }>;
-  workers: Array<{
-    id: string;
-    provider: string;
-    assignment: string;
-    status: ExtensionWorkerStatus;
-    threadId?: string;
-    providerTurnId?: string;
-    sourceTurnIdBeforeDispatch?: string;
-    report?: string;
-    message?: string;
-    createdAt: string;
-    updatedAt: string;
-  }>;
-};
-
-export type ExtensionRunCommand =
-  | "pause"
-  | "resume"
-  | "extend"
-  | "accept_completion"
-  | "close_incomplete";
-
-/**
- * One short, durable orchestration reduction. The daemon validates ownership,
- * actor type, CAS revision, limits and task identity before committing it.
- */
-export type ExtensionOrchestrationEffect =
-  | {
-      type: "create_run";
-      runId: string;
-      workspaceId: string;
-      coordinatorThreadId: string;
-      title: string;
-      objective: string;
-      checkpoint: unknown;
-      /** Human-approved hard coordinator-turn budget (default 12, max 24). */
-      maxAutomaticTurns?: number;
-      /** Human-approved hard worker budget (default 3, max 4). */
-      maxWorkers?: number;
-      /** Human-approved initial lease in minutes (default 180, max 1440). */
-      leaseMinutes?: number;
-      initialPrompt?: string;
-    }
-  | {
-      type: "update_checkpoint";
-      runId: string;
-      expectedPolicyRevision: number;
-      checkpoint: unknown;
-    }
-  | {
-      type: "request_continuation";
-      runId: string;
-      expectedPolicyRevision: number;
-      operationId: string;
-      checkpoint: unknown;
-      progressFingerprint: string;
-      prompt: string;
-    }
-  | {
-      type: "delegate_worker";
-      runId: string;
-      expectedPolicyRevision: number;
-      workerId: string;
-      provider: string;
-      assignment: string;
-    }
-  | {
-      type: "await_workers";
-      runId: string;
-      expectedPolicyRevision: number;
-      checkpoint: unknown;
-    }
-  | {
-      type: "propose_completion";
-      runId: string;
-      expectedPolicyRevision: number;
-      checkpoint: unknown;
-    }
-  | {
-      type: "pause_for_human";
-      runId: string;
-      expectedPolicyRevision: number;
-      checkpoint: unknown;
-      reason: string;
-    }
-  | {
-      type: "human_command";
-      runId: string;
-      expectedPolicyRevision: number;
-      command: ExtensionRunCommand;
-      resumePrompt?: string;
-      operationId?: string;
-    };
 
 /** Bounds the daemon enforces on every published suggestion set. */
 export const MIN_COMPOSER_SUGGESTIONS = 1;
@@ -544,12 +380,6 @@ export type ExtensionContext = {
     list(): Promise<ExtensionOwnedAutomationSummary[]>;
     /** Queues one owner-scoped effect for daemon validation after callback. */
     apply(effect: ExtensionAutomationEffect): Promise<void>;
-  };
-  orchestration: {
-    /** Lists only runs owned by this extension when its grant is active. */
-    list(): Promise<ExtensionRunSummary[]>;
-    /** Queues one effect for the daemon to validate after this callback. */
-    apply(effect: ExtensionOrchestrationEffect): Promise<void>;
   };
   log: {
     info(message: string, fields?: Record<string, unknown>): void;

@@ -91,7 +91,6 @@ mod harness_user_text;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
-mod orchestration;
 mod provider_runtime;
 mod provider_usage;
 mod remote_bridge;
@@ -222,7 +221,6 @@ struct InnerState {
     state_path: PathBuf,
     preferences_path: PathBuf,
     scheduled_tasks_path: PathBuf,
-    orchestration_path: PathBuf,
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<Arc<CachedEnvelope>>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
@@ -286,12 +284,6 @@ struct InnerState {
     scheduled_scheduler_started: AtomicBool,
     /// Global cap for unattended scheduled executions.
     scheduled_run_slots: Semaphore,
-    /// Durable, extension-owned bounded execution runs.
-    orchestration_runs: Mutex<orchestration::OrchestrationRegistry>,
-    /// Serializes orchestration checkpoint, journal, and admission mutations.
-    orchestration_mutation: Mutex<()>,
-    /// Prevents restore from replacing live extension-run mutations.
-    orchestration_restored: OnceCell<()>,
     /// Installed extension catalog, private state, and synchronized projections.
     extensions: Mutex<extensions::ExtensionRegistry>,
     /// Lazily started Deno sidecars, isolated and serialized per extension.
@@ -780,7 +772,6 @@ impl AppState {
         let (broadcaster, _) = broadcast::channel::<Arc<CachedEnvelope>>(512);
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
-        let orchestration_path = orchestration::orchestration_path(&state_path);
         let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
@@ -798,7 +789,6 @@ impl AppState {
                 state_path,
                 preferences_path,
                 scheduled_tasks_path,
-                orchestration_path,
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
@@ -828,9 +818,6 @@ impl AppState {
                 scheduled_notify: Notify::new(),
                 scheduled_scheduler_started: AtomicBool::new(false),
                 scheduled_run_slots: Semaphore::new(scheduled_tasks::MAX_CONCURRENT_RUNS),
-                orchestration_runs: Mutex::new(orchestration::OrchestrationRegistry::default()),
-                orchestration_mutation: Mutex::new(()),
-                orchestration_restored: OnceCell::new(),
                 extensions: Mutex::new(extension_registry),
                 extension_hosts: Mutex::new(extension_hosts),
                 extension_bridge_capabilities: Mutex::new(HashMap::new()),
@@ -1282,7 +1269,6 @@ impl AppState {
         // reconnects can persist state; starting them first could race with
         // remote restoration and overwrite a valid pairing with `remote: null`.
         self.restore_scheduled_tasks().await?;
-        self.restore_orchestration().await?;
         scheduled_tasks::migrate_compatible(self).await;
         // Interrupted projects become actionable first. Unrelated harness
         // probes must not hold the recovery dialog's Continue action behind
@@ -1393,14 +1379,6 @@ impl AppState {
         self.inner
             .scheduled_tasks_restored
             .get_or_try_init(|| async { scheduled_tasks::restore(self).await })
-            .await
-            .map(|_| ())
-    }
-
-    pub(crate) async fn restore_orchestration(&self) -> Result<(), DaemonError> {
-        self.inner
-            .orchestration_restored
-            .get_or_try_init(|| async { orchestration::restore(self).await })
             .await
             .map(|_| ())
     }
@@ -2178,8 +2156,6 @@ impl AppState {
         drop(host);
         if !enabled {
             self.inner.extension_hosts.lock().await.remove(extension_id);
-            orchestration::pause_owned_runs(self, extension_id, "Owner extension was disabled")
-                .await?;
         }
         self.sync_extension_event_workers().await;
         let (catalog, retained_views) = {
@@ -2252,14 +2228,6 @@ impl AppState {
             (updated, revoked_views)
         };
         let catalog = self.inner.extensions.lock().await.snapshot().catalog;
-        if !granted && permission == extensions::ORCHESTRATION_PERMISSION {
-            orchestration::pause_owned_runs(
-                self,
-                extension_id,
-                "Orchestration permission was revoked",
-            )
-            .await?;
-        }
         self.emit(
             None,
             None,
@@ -2340,23 +2308,17 @@ impl AppState {
         // updates from one stale snapshot and overwrite each other.
         let host = self.inner.extension_hosts.lock().await.host(extension_id);
         let mut host = host.lock().await;
-        let (package, storage, can_read_threads, can_orchestrate, can_manage_automations) = {
+        let (package, storage, can_read_threads, can_manage_automations) = {
             let registry = self.inner.extensions.lock().await;
             (
                 registry.package(extension_id, action_id)?,
                 registry.storage(extension_id),
                 registry.has_grant(extension_id, extensions::THREADS_READ_PERMISSION),
-                registry.has_grant(extension_id, extensions::ORCHESTRATION_PERMISSION),
                 registry.has_grant(extension_id, extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
             Some(self.extension_thread_summaries().await)
-        } else {
-            None
-        };
-        let orchestration_runs = if can_orchestrate {
-            Some(orchestration::owned_runs(self, extension_id).await)
         } else {
             None
         };
@@ -2373,7 +2335,6 @@ impl AppState {
                 &request.input,
                 &storage,
                 thread_summaries.as_deref(),
-                orchestration_runs.as_deref(),
                 owned_automations.as_deref(),
             )
             .await;
@@ -2396,22 +2357,7 @@ impl AppState {
                 return Err(error);
             }
         };
-        let orchestration_effects = host_result.orchestration_effects;
         let automation_effects = host_result.automation_effects;
-        if !orchestration_effects.is_empty() && !automation_effects.is_empty() {
-            return Err(DaemonError::BadRequest(
-                "one extension callback cannot combine legacy orchestration and Automation effects"
-                    .to_string(),
-            ));
-        }
-        if !orchestration_effects.is_empty()
-            && (host_result.storage != storage || !host_result.published_views.is_empty())
-        {
-            return Err(DaemonError::BadRequest(
-                "an orchestration callback cannot also mutate extension storage or views; render from orchestration.updated"
-                    .to_string(),
-            ));
-        }
         let updated_views = self
             .inner
             .extensions
@@ -2423,17 +2369,6 @@ impl AppState {
                 host_result.published_views,
             )
             .await?;
-        // Extension state/view validation commits before a durable external
-        // effect is admitted. Missions callbacks that return an effect do not
-        // also mutate extension state; the owner-targeted update event renders
-        // the authoritative run after this succeeds.
-        orchestration::apply_effects(
-            self,
-            extension_id,
-            orchestration_effects,
-            orchestration::EffectActor::Human,
-        )
-        .await?;
         for effect in automation_effects {
             let change = self
                 .control()
@@ -2545,24 +2480,18 @@ impl AppState {
             .await;
         let host = self.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let (storage, can_read_threads, can_orchestrate, can_manage_automations) = {
+        let (storage, can_read_threads, can_manage_automations) = {
             let registry = self.inner.extensions.lock().await;
             // Re-check under the host gate: disable cannot interleave here.
             registry.tool_package(&request.name)?;
             (
                 registry.storage(&package.id),
                 registry.has_grant(&package.id, extensions::THREADS_READ_PERMISSION),
-                registry.has_grant(&package.id, extensions::ORCHESTRATION_PERMISSION),
                 registry.has_grant(&package.id, extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
             Some(self.extension_thread_summaries().await)
-        } else {
-            None
-        };
-        let orchestration_runs = if can_orchestrate && trusted_thread_id.is_some() {
-            Some(orchestration::owned_runs(self, &package.id).await)
         } else {
             None
         };
@@ -2588,7 +2517,6 @@ impl AppState {
                 automation_owner_resource_id.as_deref(),
                 &storage,
                 thread_summaries.as_deref(),
-                orchestration_runs.as_deref(),
                 owned_automations.as_deref(),
             )
             .await;
@@ -2618,22 +2546,7 @@ impl AppState {
                 return Err(error);
             }
         };
-        let orchestration_effects = host_result.orchestration_effects;
         let automation_effects = host_result.automation_effects;
-        if !orchestration_effects.is_empty() && !automation_effects.is_empty() {
-            return Err(DaemonError::BadRequest(
-                "one extension callback cannot combine legacy orchestration and Automation effects"
-                    .to_string(),
-            ));
-        }
-        if !orchestration_effects.is_empty()
-            && (host_result.storage != storage || !host_result.published_views.is_empty())
-        {
-            return Err(DaemonError::BadRequest(
-                "an orchestration callback cannot also mutate extension storage or views; render from orchestration.updated"
-                    .to_string(),
-            ));
-        }
         let updated_views = self
             .inner
             .extensions
@@ -2645,16 +2558,6 @@ impl AppState {
                 host_result.published_views,
             )
             .await?;
-        orchestration::apply_effects(
-            self,
-            &package.id,
-            orchestration_effects,
-            orchestration::EffectActor::AgentTool {
-                workspace_id: workspace_id.as_deref(),
-                thread_id: trusted_thread_id,
-            },
-        )
-        .await?;
         for effect in automation_effects {
             let change = self
                 .control()

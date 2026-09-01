@@ -33,13 +33,6 @@ function permissionPresentation(permission: string) {
         "Create and control scheduled agent check-ins that belong to this extension. It cannot change standalone automations or automations owned by another extension.",
     };
   }
-  if (permission === "orchestration:manage-owned-tasks") {
-    return {
-      title: "Manage bounded agent tasks",
-      description:
-        "Lets this extension own durable, time- and turn-limited runs in tasks you explicitly adopt. Revoking pauses open runs immediately.",
-    };
-  }
   return { title: permission, description: "Requested extension capability." };
 }
 

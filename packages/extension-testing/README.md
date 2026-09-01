@@ -30,12 +30,6 @@ without the `agent-tools:register` grant. Pass `declaredTools` and
 `declaredSuggestionViews` from the fixture manifest so undeclared tools and
 out-of-bounds composer suggestions fail here rather than at the daemon.
 
-Pass `orchestrationRuns` plus the
-`orchestration:manage-owned-tasks` grant to exercise owner-only run reads and
-inspect the single returned `orchestrationEffects` reduction. The fake host
-mirrors denial, revocation, JSON isolation, and the one-effect-per-callback
-limit; lifecycle events may not return orchestration effects.
-
 Pass `ownedAutomations` plus the `automations:manage-owned` grant to exercise
 the generic owner-only Automation projection and inspect the single returned
 `automationEffects` request. Tool invocations may include

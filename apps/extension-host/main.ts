@@ -10,7 +10,6 @@ type ExtensionEvent = {
   threadId?: string;
   turnId?: string;
   requestId?: string;
-  runId?: string;
 };
 type ExtensionThreadSummary = {
   id: string;
@@ -34,32 +33,6 @@ type OwnedAutomationSummary = {
   latestOutcome?: unknown;
 };
 type AutomationEffect = { type: string; [key: string]: unknown };
-type ExtensionRunSummary = {
-  id: string;
-  ownerExtensionId: string;
-  workspaceId: string;
-  coordinatorThreadId: string;
-  title: string;
-  objective: string;
-  gate: "open" | "paused" | "closed";
-  outcome?: string;
-  pauseReason?: string;
-  checkpoint: unknown;
-  policyRevision: number;
-  journalSequence: number;
-  approvalGeneration: number;
-  automaticTurnsStarted: number;
-  maxAutomaticTurns: number;
-  maxWorkers: number;
-  awaitingWorkers: boolean;
-  createdAt: string;
-  updatedAt: string;
-  deadlineAt: string;
-  completionProposed: boolean;
-  operations: unknown[];
-  workers: unknown[];
-};
-type OrchestrationEffect = { type: string; [key: string]: unknown };
 type ActionInvocation = {
   target?: ViewScope;
   input: unknown;
@@ -115,10 +88,6 @@ type ExtensionContext = {
     list(): Promise<OwnedAutomationSummary[]>;
     apply(effect: AutomationEffect): Promise<void>;
   };
-  orchestration: {
-    list(): Promise<ExtensionRunSummary[]>;
-    apply(effect: OrchestrationEffect): Promise<void>;
-  };
   log: {
     info(message: string, fields?: JsonObject): void;
     error(message: string, fields?: JsonObject): void;
@@ -138,8 +107,6 @@ type Runtime = {
   storage: Map<string, unknown>;
   publishedViews: PublishedView[];
   threadSummaries: ExtensionThreadSummary[] | null;
-  orchestrationRuns: ExtensionRunSummary[] | null;
-  orchestrationEffects: OrchestrationEffect[];
   ownedAutomations: OwnedAutomationSummary[] | null;
   automationEffects: AutomationEffect[];
   context: ExtensionContext;
@@ -150,7 +117,6 @@ type RuntimeRequest = {
   entrypoint: string;
   storage: Record<string, unknown>;
   threadSummaries?: ExtensionThreadSummary[];
-  orchestrationRuns?: ExtensionRunSummary[];
   ownedAutomations?: OwnedAutomationSummary[];
 };
 type ActionRequest = RuntimeRequest & {
@@ -181,7 +147,6 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "turn.ended",
   "attention.opened",
   "attention.resolved",
-  "orchestration.updated",
   "automations.updated",
 ]);
 const protocolEncoder = new TextEncoder();
@@ -220,8 +185,6 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
     existing.storage = new Map(Object.entries(request.storage));
     existing.publishedViews = [];
     existing.threadSummaries = request.threadSummaries ?? null;
-    existing.orchestrationRuns = request.orchestrationRuns ?? null;
-    existing.orchestrationEffects = [];
     existing.ownedAutomations = request.ownedAutomations ?? null;
     existing.automationEffects = [];
     return existing;
@@ -235,8 +198,6 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
   runtime.storage = new Map(Object.entries(request.storage));
   runtime.publishedViews = [];
   runtime.threadSummaries = request.threadSummaries ?? null;
-  runtime.orchestrationRuns = request.orchestrationRuns ?? null;
-  runtime.orchestrationEffects = [];
   runtime.ownedAutomations = request.ownedAutomations ?? null;
   runtime.automationEffects = [];
   runtime.context = {
@@ -371,40 +332,6 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
         return Promise.resolve();
       },
     },
-    orchestration: {
-      list() {
-        if (runtime.orchestrationRuns === null) {
-          return Promise.reject(
-            new Error("orchestration:manage-owned-tasks permission is not granted"),
-          );
-        }
-        return Promise.resolve(
-          runtime.orchestrationRuns.map((run) => structuredClone(run)),
-        );
-      },
-      apply(effect) {
-        if (runtime.orchestrationRuns === null) {
-          return Promise.reject(
-            new Error("orchestration:manage-owned-tasks permission is not granted"),
-          );
-        }
-        if (
-          !effect ||
-          typeof effect !== "object" ||
-          Array.isArray(effect) ||
-          typeof effect.type !== "string"
-        ) {
-          return Promise.reject(new Error("orchestration effect must be an object with a type"));
-        }
-        if (runtime.orchestrationEffects.length >= 1) {
-          return Promise.reject(
-            new Error("only one orchestration effect is allowed per callback"),
-          );
-        }
-        runtime.orchestrationEffects.push(structuredClone(effect));
-        return Promise.resolve();
-      },
-    },
     log: {
       info(message, fields) {
         writeStructuredDiagnostic("info", request.extensionId, message, fields);
@@ -450,7 +377,6 @@ async function invoke(request: ActionRequest): Promise<JsonObject> {
     result: result ?? null,
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
-    orchestrationEffects: runtime.orchestrationEffects,
     automationEffects: runtime.automationEffects,
   };
 }
@@ -473,7 +399,6 @@ async function invokeTool(request: ToolRequest): Promise<JsonObject> {
     result: result ?? null,
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
-    orchestrationEffects: runtime.orchestrationEffects,
     automationEffects: runtime.automationEffects,
   };
 }
@@ -490,7 +415,6 @@ async function dispatchEvent(request: EventRequest): Promise<JsonObject> {
     result: null,
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
-    orchestrationEffects: runtime.orchestrationEffects,
   };
 }
 

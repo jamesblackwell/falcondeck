@@ -17,8 +17,7 @@ import type {
 } from "./model";
 
 const PANEL_VIEW = "missions-panel";
-const MISSIONS_KEY = "missionsV2";
-const LEGACY_DRAFTS_KEY = "missionDrafts";
+const MISSIONS_KEY = "missions";
 const MAX_MISSIONS = 20;
 const MAX_TOTAL_UPDATES = 300;
 const MAX_PANEL_MISSIONS = 8;
@@ -149,53 +148,6 @@ function isMission(value: unknown): value is Mission {
   );
 }
 
-function importedLegacyDraft(value: unknown): Mission | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const draft = value as Record<string, unknown>;
-  if (
-    typeof draft.id !== "string" ||
-    typeof draft.title !== "string" ||
-    typeof draft.objective !== "string" ||
-    typeof draft.workspaceId !== "string" ||
-    typeof draft.threadId !== "string" ||
-    !Array.isArray(draft.acceptanceCriteria)
-  ) {
-    return null;
-  }
-  const createdAt =
-    typeof draft.createdAt === "string"
-      ? draft.createdAt
-      : new Date().toISOString();
-  return {
-    id: draft.id,
-    title: draft.title,
-    brief: draft.objective,
-    successCriteria: draft.acceptanceCriteria.filter(
-      (item): item is string => typeof item === "string",
-    ),
-    status: "draft",
-    threads: [
-      {
-        workspaceId: draft.workspaceId,
-        threadId: draft.threadId,
-        role: "source",
-        linkedAt: createdAt,
-      },
-    ],
-    updates: [
-      {
-        id: crypto.randomUUID(),
-        actor: "system",
-        kind: "status",
-        body: "Imported from the bounded Missions v1 draft format. No legacy run was started.",
-        createdAt,
-      },
-    ],
-    createdAt,
-    updatedAt: createdAt,
-  };
-}
-
 async function loadStore(context: ExtensionContext): Promise<MissionStore> {
   const stored = await context.storage.get<unknown>(MISSIONS_KEY, null);
   if (stored && typeof stored === "object" && !Array.isArray(stored)) {
@@ -210,17 +162,9 @@ async function loadStore(context: ExtensionContext): Promise<MissionStore> {
     throw new Error("stored Mission data is malformed");
   }
 
-  const legacy = await context.storage.get<unknown[]>(LEGACY_DRAFTS_KEY, []);
-  const missions = Array.isArray(legacy)
-    ? legacy.flatMap((value) => {
-        const mission = importedLegacyDraft(value);
-        return mission ? [mission] : [];
-      })
-    : [];
-  const migrated = { schemaVersion: 2 as const, missions };
-  await context.storage.set(MISSIONS_KEY, migrated);
-  if (missions.length > 0) await context.storage.delete(LEGACY_DRAFTS_KEY);
-  return migrated;
+  const empty = { schemaVersion: 2 as const, missions: [] };
+  await context.storage.set(MISSIONS_KEY, empty);
+  return empty;
 }
 
 async function saveStore(

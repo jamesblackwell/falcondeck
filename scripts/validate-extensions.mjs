@@ -42,7 +42,6 @@ const supportedPermissions = new Set([
   "threads:read",
   "agent-tools:register",
   "automations:manage-owned",
-  "orchestration:manage-owned-tasks",
 ]);
 const AGENT_TOOLS_PERMISSION = "agent-tools:register";
 const uiTones = new Set([

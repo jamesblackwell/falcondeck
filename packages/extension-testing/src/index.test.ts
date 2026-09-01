@@ -39,7 +39,6 @@ describe("ExtensionTestHost", () => {
       result: { count: 5 },
       storage: { count: 5 },
       publishedViews: [{ viewId: "counter", value: { count: 5 } }],
-      orchestrationEffects: [],
       automationEffects: [],
     });
   });

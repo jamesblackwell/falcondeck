@@ -57,20 +57,6 @@ impl AppState {
         }
     }
 
-    /// Delivers a capability-specific event only to its owning extension.
-    /// Orchestration run identifiers and update cadence are not broadcast to
-    /// unrelated extensions.
-    pub(super) fn enqueue_extension_event_for(&self, extension_id: &str, event: ExtensionEvent) {
-        let queues = self
-            .inner
-            .extension_event_queues
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(queue) = queues.get(extension_id) {
-            queue.enqueue(event);
-        }
-    }
-
     pub(super) async fn sync_extension_event_workers(&self) {
         let packages = self.inner.extensions.lock().await.enabled_packages();
         let enabled_ids = packages
@@ -190,7 +176,7 @@ async fn run_extension_event_worker(
         }
         let host = app.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let (storage, can_read_threads, can_orchestrate, can_manage_automations) = {
+        let (storage, can_read_threads, can_manage_automations) = {
             let registry = app.inner.extensions.lock().await;
             if !registry.is_enabled(&package.id) {
                 continue;
@@ -198,17 +184,11 @@ async fn run_extension_event_worker(
             (
                 registry.storage(&package.id),
                 registry.has_grant(&package.id, super::extensions::THREADS_READ_PERMISSION),
-                registry.has_grant(&package.id, super::extensions::ORCHESTRATION_PERMISSION),
                 registry.has_grant(&package.id, super::extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
             Some(app.extension_thread_summaries().await)
-        } else {
-            None
-        };
-        let orchestration_runs = if can_orchestrate {
-            Some(super::orchestration::owned_runs(&app, &package.id).await)
         } else {
             None
         };
@@ -223,7 +203,6 @@ async fn run_extension_event_worker(
                 &event,
                 &storage,
                 thread_summaries.as_deref(),
-                orchestration_runs.as_deref(),
                 owned_automations.as_deref(),
             )
             .await;
@@ -237,15 +216,6 @@ async fn run_extension_event_worker(
         if cancelled.load(Ordering::Acquire)
             || !app.inner.extensions.lock().await.is_enabled(&package.id)
         {
-            continue;
-        }
-        if !result.orchestration_effects.is_empty() {
-            mark_extension_event_error(
-                &app,
-                &package.id,
-                "orchestration effects are not accepted from lossy lifecycle events",
-            )
-            .await;
             continue;
         }
         if !result.automation_effects.is_empty() {
@@ -364,18 +334,6 @@ mod tests {
             })
         );
 
-        let run_event = ExtensionEvent::OrchestrationUpdated {
-            workspace_id: "workspace-1".to_string(),
-            run_id: "run-1".to_string(),
-        };
-        assert_eq!(
-            serde_json::to_value(run_event).expect("run event should serialize"),
-            serde_json::json!({
-                "type": "orchestration.updated",
-                "workspaceId": "workspace-1",
-                "runId": "run-1",
-            })
-        );
     }
 
     #[tokio::test]

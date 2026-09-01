@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "engines": {
     "falcondeck": "^0.1"
   },

@@ -76,11 +76,10 @@ describe("official Missions extension v2", () => {
   it("creates a durable draft linked to the daemon-verified calling task", async () => {
     const { testHost, missionId, response } = await create();
 
-    expect(response.orchestrationEffects).toEqual([]);
     expect(response.automationEffects).toEqual([]);
     expect(response.result).toEqual({ missionId, status: "draft" });
     expect(testHost.storageSnapshot()).toEqual({
-      missionsV2: {
+      missions: {
         schemaVersion: 2,
         missions: [
           expect.objectContaining({
@@ -282,30 +281,4 @@ describe("official Missions extension v2", () => {
     ).rejects.toThrow("activate the Mission before requesting a review");
   });
 
-  it("migrates legacy drafts without starting legacy orchestration", async () => {
-    const testHost = host({
-      missionDrafts: [
-        {
-          id: "legacy-draft",
-          workspaceId: "workspace-1",
-          threadId: "thread-1",
-          title: "Legacy draft",
-          objective: "Preserve this brief",
-          acceptanceCriteria: ["Brief survives"],
-          createdAt: "2026-08-31T10:00:00Z",
-        },
-      ],
-    });
-
-    const refreshed = await testHost.invokeAction("refresh-missions");
-    expect(refreshed.orchestrationEffects).toEqual([]);
-    expect(testHost.storageSnapshot()).toEqual({
-      missionsV2: {
-        schemaVersion: 2,
-        missions: [
-          expect.objectContaining({ id: "legacy-draft", status: "draft" }),
-        ],
-      },
-    });
-  });
 });

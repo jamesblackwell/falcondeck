@@ -457,7 +457,7 @@ impl ProviderRuntime {
                 .await?;
                 // Claude's stream-json protocol does not publish the app-server
                 // style turn id Codex provides. Mint a daemon receipt for this
-                // exact spawned generation so background orchestration can
+                // exact spawned generation so background work can
                 // correlate its admitted intent with a terminal event instead
                 // of treating a later Idle snapshot as proof.
                 let turn_id = format!("claude-turn-{}", Uuid::new_v4().simple());

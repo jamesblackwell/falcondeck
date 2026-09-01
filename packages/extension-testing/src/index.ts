@@ -6,9 +6,7 @@ import {
   type ExtensionDefinition,
   type ExtensionEvent,
   type ExtensionEventType,
-  type ExtensionOrchestrationEffect,
   type ExtensionOwnedAutomationSummary,
-  type ExtensionRunSummary,
   type ExtensionThreadSummary,
   type ExtensionToolInvocation,
   type PublishedExtensionView,
@@ -20,7 +18,6 @@ const MAX_EVENT_HANDLERS_PER_TYPE = 32;
 const MAX_THREAD_SUMMARIES = 1_000;
 const MAX_THREAD_SUMMARY_BYTES = 2 * 1024 * 1024;
 const AGENT_TOOLS_PERMISSION = "agent-tools:register";
-const ORCHESTRATION_PERMISSION = "orchestration:manage-owned-tasks";
 const AUTOMATIONS_PERMISSION = "automations:manage-owned";
 const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
 const SUPPORTED_EVENT_TYPES = new Set<ExtensionEventType>([
@@ -29,7 +26,6 @@ const SUPPORTED_EVENT_TYPES = new Set<ExtensionEventType>([
   "turn.ended",
   "attention.opened",
   "attention.resolved",
-  "orchestration.updated",
   "automations.updated",
 ]);
 const MAX_EXTENSION_STORAGE_BYTES = 512 * 1024;
@@ -60,7 +56,6 @@ export type ExtensionTestHostOptions = {
   declaredSuggestionViews?: readonly string[];
   grantedPermissions?: readonly string[];
   threadSummaries?: readonly ExtensionThreadSummary[];
-  orchestrationRuns?: readonly ExtensionRunSummary[];
   ownedAutomations?: readonly ExtensionOwnedAutomationSummary[];
 };
 
@@ -73,7 +68,6 @@ export type ExtensionTestActionResult = {
   result: unknown;
   storage: JsonRecord;
   publishedViews: PublishedExtensionView[];
-  orchestrationEffects: ExtensionOrchestrationEffect[];
   automationEffects: ExtensionAutomationEffect[];
 };
 
@@ -196,8 +190,6 @@ export class ExtensionTestHost {
   private readonly retainedViews = new Map<string, PublishedExtensionView>();
   private readonly grantedPermissions = new Set<string>();
   private threadSummaries: ExtensionThreadSummary[];
-  private orchestrationRuns: ExtensionRunSummary[];
-  private orchestrationEffects: ExtensionOrchestrationEffect[] = [];
   private ownedAutomations: ExtensionOwnedAutomationSummary[];
   private automationEffects: ExtensionAutomationEffect[] = [];
   private publishedViews: PublishedExtensionView[] = [];
@@ -227,7 +219,6 @@ export class ExtensionTestHost {
       this.grantedPermissions.add(permission);
     }
     this.threadSummaries = boundThreadSummaries(options.threadSummaries ?? []);
-    this.orchestrationRuns = cloneJson([...(options.orchestrationRuns ?? [])]);
     this.ownedAutomations = cloneJson([...(options.ownedAutomations ?? [])]);
     for (const [key, value] of Object.entries(options.storage ?? {})) {
       this.storage.set(key, cloneJson(value));
@@ -354,23 +345,6 @@ export class ExtensionTestHost {
           this.automationEffects.push(cloneJson(effect));
         },
       },
-      orchestration: {
-        list: async () => {
-          if (!this.grantedPermissions.has(ORCHESTRATION_PERMISSION)) {
-            throw new Error(`${ORCHESTRATION_PERMISSION} permission is not granted`);
-          }
-          return cloneJson(this.orchestrationRuns);
-        },
-        apply: async (effect) => {
-          if (!this.grantedPermissions.has(ORCHESTRATION_PERMISSION)) {
-            throw new Error(`${ORCHESTRATION_PERMISSION} permission is not granted`);
-          }
-          if (this.orchestrationEffects.length >= 1) {
-            throw new Error("only one orchestration effect is allowed per callback");
-          }
-          this.orchestrationEffects.push(cloneJson(effect));
-        },
-      },
       log: {
         info: (message, fields) => {
           this.diagnostics.push({
@@ -429,10 +403,6 @@ export class ExtensionTestHost {
     this.threadSummaries = boundThreadSummaries(summaries);
   }
 
-  setOrchestrationRuns(runs: readonly ExtensionRunSummary[]): void {
-    this.orchestrationRuns = cloneJson([...runs]);
-  }
-
   setOwnedAutomations(
     automations: readonly ExtensionOwnedAutomationSummary[],
   ): void {
@@ -471,7 +441,6 @@ export class ExtensionTestHost {
       this.activated = false;
     }
     this.publishedViews = [];
-    this.orchestrationEffects = [];
     this.automationEffects = [];
   }
 
@@ -524,7 +493,6 @@ export class ExtensionTestHost {
       result: cloneJson(result ?? null),
       storage,
       publishedViews: cloneJson(this.publishedViews),
-      orchestrationEffects: cloneJson(this.orchestrationEffects),
       automationEffects: cloneJson(this.automationEffects),
     };
     if (
@@ -547,7 +515,6 @@ export class ExtensionTestHost {
     invocation: ExtensionTestInvocation = {},
   ): Promise<ExtensionTestActionResult> {
     this.publishedViews = [];
-    this.orchestrationEffects = [];
     this.automationEffects = [];
     if (this.nextFailure) {
       const error = this.nextFailure;
@@ -590,7 +557,6 @@ export class ExtensionTestHost {
     event: ExtensionEvent,
   ): Promise<ExtensionTestEventResult> {
     this.publishedViews = [];
-    this.orchestrationEffects = [];
     this.automationEffects = [];
     if (this.nextEventFailure) {
       const error = this.nextEventFailure;
@@ -612,19 +578,13 @@ export class ExtensionTestHost {
       )) {
         await handler(delivered);
       }
-      const { storage, publishedViews, orchestrationEffects, automationEffects } =
-        this.commitEffects(null);
-      if (orchestrationEffects.length > 0) {
-        throw new Error(
-          "orchestration effects are not accepted from lossy lifecycle events",
-        );
-      }
+      const { storage, publishedViews, automationEffects } = this.commitEffects(null);
       if (automationEffects.length > 0) {
         throw new Error(
           "Automation effects are not accepted from lossy lifecycle events",
         );
       }
-      return { storage, publishedViews, orchestrationEffects, automationEffects };
+      return { storage, publishedViews, automationEffects };
     } catch (error) {
       this.restoreAfterFailure(
         previousStorage,
@@ -645,7 +605,6 @@ export class ExtensionTestHost {
     invocation: ExtensionTestToolInvocation = {},
   ): Promise<ExtensionTestActionResult> {
     this.publishedViews = [];
-    this.orchestrationEffects = [];
     this.automationEffects = [];
     if (this.nextFailure) {
       const error = this.nextFailure;

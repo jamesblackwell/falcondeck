@@ -8,7 +8,6 @@ use std::{
 use falcondeck_core::{
     ExtensionThreadSummary, ExtensionViewScope,
     control::{ExtensionAutomationEffect, ExtensionOwnedAutomationSummary},
-    orchestration::{ExtensionOrchestrationEffect, ExtensionRunSummary},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,8 +91,6 @@ struct HostActionRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
 
@@ -115,8 +112,6 @@ struct HostToolRequest<'a> {
     storage: &'a BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
@@ -167,13 +162,6 @@ pub(super) enum ExtensionEvent {
         #[serde(rename = "requestId")]
         request_id: String,
     },
-    #[serde(rename = "orchestration.updated")]
-    OrchestrationUpdated {
-        #[serde(rename = "workspaceId")]
-        workspace_id: String,
-        #[serde(rename = "runId")]
-        run_id: String,
-    },
     #[serde(rename = "automations.updated")]
     AutomationsUpdated,
 }
@@ -190,8 +178,6 @@ struct HostEventRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    orchestration_runs: Option<&'a [ExtensionRunSummary]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
 
@@ -206,8 +192,6 @@ struct HostActionResponse {
     storage: BTreeMap<String, Value>,
     #[serde(default)]
     published_views: Vec<PublishedExtensionView>,
-    #[serde(default)]
-    orchestration_effects: Vec<ExtensionOrchestrationEffect>,
     #[serde(default)]
     automation_effects: Vec<ExtensionAutomationEffect>,
     #[serde(default)]
@@ -249,7 +233,6 @@ pub(super) struct ExtensionHostActionResult {
     pub(super) result: Value,
     pub(super) storage: BTreeMap<String, Value>,
     pub(super) published_views: Vec<PublishedExtensionView>,
-    pub(super) orchestration_effects: Vec<ExtensionOrchestrationEffect>,
     pub(super) automation_effects: Vec<ExtensionAutomationEffect>,
     /// Event callbacks are isolated from one another. Their state and views
     /// still commit, while these bounded errors keep the extension visibly
@@ -306,7 +289,6 @@ impl ExtensionHost {
         input: &Value,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
-        orchestration_runs: Option<&[ExtensionRunSummary]>,
         owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         self.prepare(package).await?;
@@ -321,7 +303,6 @@ impl ExtensionHost {
             input,
             storage,
             thread_summaries,
-            orchestration_runs,
             owned_automations,
         };
         let response = self
@@ -331,7 +312,6 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
-            orchestration_effects: response.orchestration_effects,
             automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
@@ -350,7 +330,6 @@ impl ExtensionHost {
         automation_owner_resource_id: Option<&str>,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
-        orchestration_runs: Option<&[ExtensionRunSummary]>,
         owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, ExtensionToolError> {
         self.prepare(package)
@@ -369,7 +348,6 @@ impl ExtensionHost {
             automation_owner_resource_id,
             storage,
             thread_summaries,
-            orchestration_runs,
             owned_automations,
         };
         let response = self
@@ -379,7 +357,6 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
-            orchestration_effects: response.orchestration_effects,
             automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
@@ -391,7 +368,6 @@ impl ExtensionHost {
         event: &ExtensionEvent,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
-        orchestration_runs: Option<&[ExtensionRunSummary]>,
         owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         if serde_json::to_vec(event)?.len() > MAX_EXTENSION_EVENT_BYTES {
@@ -409,7 +385,6 @@ impl ExtensionHost {
             event,
             storage,
             thread_summaries,
-            orchestration_runs,
             owned_automations,
         };
         let response = self
@@ -419,7 +394,6 @@ impl ExtensionHost {
             result: response.result,
             storage: response.storage,
             published_views: response.published_views,
-            orchestration_effects: response.orchestration_effects,
             automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
@@ -665,7 +639,6 @@ mod tests {
                 &BTreeMap::new(),
                 None,
                 None,
-                None,
             )
             .await
             .expect("a bounded offer set should publish");
@@ -700,7 +673,6 @@ mod tests {
                 None,
                 None,
                 &published.storage,
-                None,
                 None,
                 None,
             )
@@ -758,13 +730,11 @@ mod tests {
                 None,
                 &BTreeMap::new(),
                 Some(&threads),
-                None,
                 Some(&[]),
             )
             .await
             .expect("Mission draft should be created through the public host");
         assert_eq!(created.published_views[0].view_id, "missions-panel");
-        assert!(created.orchestration_effects.is_empty());
         assert!(created.automation_effects.is_empty());
         let mission_id = created.result["missionId"]
             .as_str()
@@ -778,7 +748,6 @@ mod tests {
                 &serde_json::json!({ "missionId": mission_id }),
                 &created.storage,
                 Some(&threads),
-                None,
                 Some(&[]),
             )
             .await
@@ -791,7 +760,6 @@ mod tests {
                 &serde_json::json!({ "missionId": mission_id, "cadenceDays": 7 }),
                 &activated.storage,
                 Some(&threads),
-                None,
                 Some(&[]),
             )
             .await
@@ -818,13 +786,11 @@ mod tests {
                 None,
                 &activated.storage,
                 Some(&threads),
-                None,
                 Some(&[]),
             )
             .await
             .expect("linked task should read the durable Mission");
         assert_eq!(read.result["status"], "active");
-        assert!(read.orchestration_effects.is_empty());
         let automation_read = host
             .invoke_tool(
                 &package,
@@ -835,7 +801,6 @@ mod tests {
                 Some(mission_id),
                 &activated.storage,
                 Some(&threads),
-                None,
                 Some(&[]),
             )
             .await
@@ -887,7 +852,6 @@ mod tests {
                 &legacy_storage,
                 None,
                 None,
-                None,
             )
             .await
             .expect("legacy colour labels should be dropped");
@@ -912,7 +876,6 @@ mod tests {
                     "stageId": "in_progress"
                 }),
                 &migrated.storage,
-                None,
                 None,
                 None,
             )
@@ -1001,7 +964,7 @@ export default defineExtension({
             pending_question_count: 0,
         }];
         let denied = host
-            .dispatch_event(&package, &event, &BTreeMap::new(), None, None, None)
+            .dispatch_event(&package, &event, &BTreeMap::new(), None, None)
             .await
             .expect("one failed event handler must not abort event dispatch");
         assert!(
@@ -1020,7 +983,6 @@ export default defineExtension({
                 &event,
                 &BTreeMap::new(),
                 Some(&summaries),
-                None,
                 None,
             )
             .await
@@ -1116,7 +1078,6 @@ export default defineExtension({
                 None,
                 &Value::Null,
                 &BTreeMap::new(),
-                None,
                 None,
                 None,
             )

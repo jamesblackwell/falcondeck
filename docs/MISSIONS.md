@@ -1,9 +1,6 @@
 # Missions
 
-Status: canonical v2 product and implementation specification. Phase 1—the
-durable Mission record, agent tools, linked tasks, update log, and simplified
-dashboard—is being implemented. Owner-scoped Automation integration and legacy
-run migration follow as separate protocol changes.
+Status: implemented product and architecture specification.
 
 `docs/EXTENSIONS.md` remains the source of truth for the extension contract.
 `docs/SCHEDULED_TASKS.md` and `docs/AGENT-CONTROL.md` remain the source of truth
@@ -86,7 +83,7 @@ and restart semantics.
 
 ## 4. Canonical data model
 
-Phase 1 stores the following extension-owned entity:
+The extension stores the following entity:
 
 ```ts
 type MissionStatus =
@@ -141,8 +138,8 @@ that agents need planned items before a native task exists.
 
 ### Bounds
 
-Extension storage and published views are deliberately bounded. Phase 1 keeps
-a bounded number of Missions and update entries and publishes compact previews.
+Extension storage and published views are deliberately bounded. The extension
+keeps a bounded number of Missions and update entries and publishes compact previews.
 The full Mission is available through the owner tool, not copied into every
 client snapshot. If real use outgrows extension private storage, add a generic
 extension-resource store rather than a Mission-specific database.
@@ -195,9 +192,9 @@ Performs one bounded mutation:
 
 The daemon supplies the calling task identity. A tool caller may update only a
 Mission already linked to that task. A linked agent can explicitly link another
-existing task. Phase 2 additionally authorizes tasks created by a Mission-owned
-Automation using daemon-observed run provenance; possession of a Mission id is
-never sufficient authority.
+existing task. Tasks created by a Mission-owned Automation are authorized using
+daemon-observed provenance; possession of a Mission id is never sufficient
+authority.
 
 The injected Mission guidance should remain short:
 
@@ -213,7 +210,7 @@ The injected Mission guidance should remain short:
 
 ## 7. Automation ownership
 
-Phase 2 uses one generic extension capability:
+Missions uses one generic extension capability:
 
 ```text
 automations:manage-owned
@@ -335,50 +332,22 @@ not spawn more tasks merely because slots are available.
 - If the owning daemon is offline, local reviews do not run. A remote always-on
   daemon is required for continuous unattended execution.
 
-## 11. Migration from bounded Mission runs
+## 11. Implementation boundary
 
-The legacy v1 implementation created short-lived orchestration runs with a
-coordinator lease, automatic-turn count, managed workers, checkpoints, and a
-special `MissionWorker` task origin. It must not be the foundation of v2.
+Missions is an extension-owned record and tool/UI layer over existing native
+tasks and Automations. FalconDeck does not maintain a Mission coordinator,
+worker pool, execution lease, automatic-turn counter, or separate run journal.
+Deleting or disabling Missions therefore removes no hidden agent runtime.
 
-Migration is explicit and non-resuming:
+The implemented surface is:
 
-- drafts become `draft` Missions;
-- open/paused runs become `paused` Missions requiring review;
-- completed runs become `completed` Missions;
-- coordinator and worker tasks become linked tasks;
-- checkpoint summary, evidence, limitations, and human question become
-  attributed imported updates;
-- legacy deadlines are preserved only as optional deadlines with an import
-  note; and
-- no old run automatically dispatches another turn after migration.
-
-Keep the old journal readable for one compatibility release. Once migration is
-proven, remove the legacy `ExtensionRunSummary`, orchestration effect API,
-durable orchestration journal, Mission-specific admission/continuation/worker
-dispatcher, `ThreadOrigin::MissionWorker`, Mission bypass profile, and
-`orchestration:manage-owned-tasks` permission.
-
-## 12. Delivery plan
-
-### Phase 1 — durable Mission project
-
-- replace the extension's run/draft view model with the canonical Mission;
-- implement create/read/update tools with task-bound authorization;
-- implement human activation, update, pause, completion, and cancellation;
-- simplify the dashboard to attention, updates, and linked tasks;
-- retain the legacy daemon runtime only as dormant migration input; and
-- update `/mission` availability to require only the tools actually used.
-
-### Phase 2 — owned Automations
-
-- [x] add the generic owner reference to Automation definitions and projections;
-- [x] add `automations:manage-owned` to the public extension host and fake host;
-- [x] expose owner-scoped create, update, pause, resume, delete, and run-now
-  through the existing control service;
-- [x] authorize Automation-created tasks using daemon-observed run provenance;
-- [x] show Mission-owned Automations on Mission and Scheduled surfaces; and
-- [x] wire `Message Mission` to optional run-now.
+- durable Mission brief, status, criteria, updates, and task links;
+- task-bound create/read/update tools;
+- human activation, guidance, pause, completion, and cancellation;
+- owner-scoped Automation create, update, pause, resume, delete, and run-now;
+- daemon-observed provenance for Automation-created review tasks;
+- Mission-owned Automation state on Mission and Scheduled surfaces; and
+- `Message Mission` with optional immediate review.
 
 The Mission does not become a long-running agent process. The Mission record
 can remain active for months while its Automation sleeps. At each due check-in,
@@ -394,14 +363,7 @@ resume, run-now, next-run, and latest-outcome state. Pausing or closing a
 Mission pauses future owned reviews but does not interrupt a task already
 running.
 
-### Phase 3 — migration and deletion
-
-- migrate legacy drafts/runs without resuming them;
-- remove unused run/coordinator/worker code and schemas;
-- remove the old permission and special Mission execution profile; and
-- retain only generic extension, Automation, task-link, and update primitives.
-
-### Explicitly deferred
+## 12. Explicitly deferred
 
 - virtual work items or Kanban;
 - automatic model scoring/router;
@@ -414,33 +376,22 @@ running.
 
 ## 13. Acceptance criteria
 
-Phase 1 is complete when:
-
 1. Any eligible ordinary task can create a Mission draft through the declared
    extension tool.
 2. The task is linked as the source and can read/update only that Mission.
 3. A human can activate, guide, pause, complete, and cancel the Mission from the
    Missions UI.
 4. Agents can add evidence/questions/status and link verified existing tasks.
-5. No new legacy orchestration run, coordinator continuation, deadline lease,
-   or managed worker is created.
-6. The dashboard remains useful with no coordinator task running.
+5. The dashboard remains useful with no agent task running.
+6. Mission work uses ordinary tasks and the existing Automation scheduler.
 7. A malformed or oversized update fails visibly without corrupting stored
    Mission state.
 8. Focused extension-host, fake-host, client-core, and desktop tests pass.
-
-Phase 2 is complete when:
-
-1. Only the owning extension can manage an owned Automation.
-2. Mission-owned Automations use the existing scheduler and appear grouped in
+9. Only the owning extension can manage an owned Automation.
+10. Mission-owned Automations use the existing scheduler and appear grouped in
    both Mission and Scheduled UI.
-3. A task produced by an owned Automation can read/update its Mission through
+11. A task produced by an owned Automation can read/update its Mission through
    daemon-observed provenance.
-4. Pausing or closing a Mission prevents future owned Automation runs.
-5. Restart, misfire, revision, elevated-authority, and unknown-outcome semantics
+12. Pausing or closing a Mission prevents future owned Automation runs.
+13. Restart, misfire, revision, elevated-authority, and unknown-outcome semantics
    remain those of Agent Control rather than a Mission-specific copy.
-
-These criteria describe the implemented Phase 2 path. Phase 3 is separate: it
-migrates old bounded v1 run records into paused/read-only Mission history and
-then deletes the legacy coordinator runtime. Until that explicit migration,
-old v1 records remain dormant and never resume automatically.
