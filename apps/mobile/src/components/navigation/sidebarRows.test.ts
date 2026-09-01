@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { workspace, thread } from '@/test/factories'
 
-import { buildSidebarRows, VISIBLE_THREAD_LIMIT } from './sidebarRows'
+import { buildSidebarRows, sidebarRowsEqual, VISIBLE_THREAD_LIMIT } from './sidebarRows'
 
 const emptyCollapsed = new Set<string>()
 const defaultCounts = new Map<string, number>()
@@ -350,5 +350,74 @@ describe('buildSidebarRows', () => {
 
     const overflow = rows.find((r) => r.type === 'overflow')
     expect((overflow as any).hiddenCount).toBe(1)
+  })
+})
+
+describe('sidebarRowsEqual', () => {
+  const groups = [
+    {
+      workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),
+      threads: [
+        thread({ id: 't1', workspace_id: 'w1' }),
+        thread({ id: 't2', workspace_id: 'w1' }),
+      ],
+    },
+  ]
+
+  it('treats a rebuild for a plain selection change as equal', () => {
+    const before = buildSidebarRows(groups, emptyCollapsed, defaultCounts, null)
+    const after = buildSidebarRows(groups, emptyCollapsed, defaultCounts, 't1')
+    expect(after).not.toBe(before)
+    expect(sidebarRowsEqual(before, after)).toBe(true)
+  })
+
+  it('detects a selection that expands the visible window', () => {
+    const manyThreads = [
+      {
+        workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),
+        threads: Array.from({ length: VISIBLE_THREAD_LIMIT + 2 }, (_, index) =>
+          thread({
+            id: `t${index}`,
+            workspace_id: 'w1',
+            updated_at: `2026-03-0${(index % 9) + 1}T10:00:00Z`,
+          }),
+        ),
+      },
+    ]
+    const before = buildSidebarRows(manyThreads, emptyCollapsed, defaultCounts, null)
+    const hidden = buildSidebarRows(manyThreads, emptyCollapsed, defaultCounts, null)
+      .filter((row) => row.type === 'thread')
+    const overflowed = manyThreads[0].threads.find(
+      (candidate) => !hidden.some((row) => row.type === 'thread' && row.thread.id === candidate.id),
+    )
+    expect(overflowed).toBeDefined()
+    const after = buildSidebarRows(manyThreads, emptyCollapsed, defaultCounts, overflowed!.id)
+    expect(sidebarRowsEqual(before, after)).toBe(false)
+  })
+
+  it('detects content changes with identical keys', () => {
+    const before = buildSidebarRows(groups, emptyCollapsed, defaultCounts, null)
+    const renamed = [
+      {
+        workspace: groups[0].workspace,
+        threads: [
+          thread({ id: 't1', workspace_id: 'w1', title: 'Renamed' }),
+          groups[0].threads[1],
+        ],
+      },
+    ]
+    const after = buildSidebarRows(renamed, emptyCollapsed, defaultCounts, null)
+    expect(sidebarRowsEqual(before, after)).toBe(false)
+  })
+
+  it('detects length changes', () => {
+    const before = buildSidebarRows(groups, emptyCollapsed, defaultCounts, null)
+    const after = buildSidebarRows(
+      [{ workspace: groups[0].workspace, threads: groups[0].threads.slice(0, 1) }],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+    )
+    expect(sidebarRowsEqual(before, after)).toBe(false)
   })
 })

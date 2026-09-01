@@ -612,6 +612,42 @@ describe('session-store', () => {
       expect(loadMobileSessionCache()).not.toBeNull()
     })
 
+    it('defers selection and detail-merge cache writes off the caller frame', () => {
+      vi.useFakeTimers()
+      try {
+        __resetSessionCachePersistThrottleForTests()
+        useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 't1' })],
+          threads: [
+            thread({ id: 't1', workspace_id: 'workspace-1' }),
+            thread({ id: 't2', workspace_id: 'workspace-1' }),
+          ],
+        })))
+        expect(loadMobileSessionCache()).not.toBeNull()
+
+        // A tap on a thread must never pay the cache stringify + MMKV write
+        // before navigation; the write lands on the trailing timer.
+        useSessionStore.getState().selectThread('workspace-1', 't2')
+        expect(loadMobileSessionCache()?.selectedThreadId).not.toBe('t2')
+        vi.advanceTimersByTime(1_000)
+        expect(loadMobileSessionCache()?.selectedThreadId).toBe('t2')
+
+        // Same for the post-RPC detail merge, which already sits in a heavy
+        // decrypt/normalize/derive batch.
+        useSessionStore.getState().setThreadDetail(threadDetail({
+          thread: thread({ id: 't2', workspace_id: 'workspace-1' }),
+          items: [assistantMessage('m1', 'hello')],
+        }))
+        expect(loadMobileSessionCache()?.threadHistories['t2']).toBeUndefined()
+        vi.advanceTimersByTime(1_000)
+        expect(
+          loadMobileSessionCache()?.threadHistories['t2']?.items.map((item) => item.id),
+        ).toEqual(['m1'])
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('throttles rapid cache writes and flushes the latest state in a trailing write', () => {
       vi.useFakeTimers()
       try {

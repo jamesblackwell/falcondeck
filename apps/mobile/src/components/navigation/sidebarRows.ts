@@ -50,6 +50,29 @@ export type SidebarRow =
       isCollapsed: boolean
     }
 
+/**
+ * Selecting a thread rebuilds the rows with identical content (thread objects
+ * are reused by reference), and a fresh array identity makes FlashList treat
+ * the whole sidebar as new data mid drawer animation. Rows are flat records,
+ * so a shallow field compare is exact; callers keep the previous array when
+ * this returns true and repaint selection highlights via extraData instead.
+ */
+export function sidebarRowsEqual(previous: SidebarRow[], next: SidebarRow[]): boolean {
+  if (previous === next) return true
+  if (previous.length !== next.length) return false
+  for (let index = 0; index < previous.length; index += 1) {
+    const left = previous[index] as Record<string, unknown>
+    const right = next[index] as Record<string, unknown>
+    if (left === right) continue
+    const leftKeys = Object.keys(left)
+    if (leftKeys.length !== Object.keys(right).length) return false
+    for (const key of leftKeys) {
+      if (left[key] !== right[key]) return false
+    }
+  }
+  return true
+}
+
 export function buildSidebarRows(
   groups: ProjectGroup[],
   collapsedWorkspaces: Set<string>,

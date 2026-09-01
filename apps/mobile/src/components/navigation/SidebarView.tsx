@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -63,6 +64,7 @@ import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
 import {
   buildSidebarRows,
   SHOW_MORE_STEP,
+  sidebarRowsEqual,
   type SidebarRow,
 } from "./sidebarRows";
 import { ThreadOptionsSheet } from "./ThreadOptionsSheet";
@@ -268,7 +270,7 @@ export const SidebarView = memo(function SidebarView({
     return selected ?? displayGroups[0]?.workspace.id ?? null;
   }, [displayGroups, selectedWorkspaceId]);
 
-  const rows = useMemo(
+  const builtRows = useMemo(
     () =>
       buildSidebarRows(
         displayGroups,
@@ -289,6 +291,15 @@ export const SidebarView = memo(function SidebarView({
       chatsCollapsed,
     ],
   );
+  // Selecting a visible thread rebuilds builtRows with identical content;
+  // keeping the previous array identity spares FlashList a whole-list data
+  // change during the drawer-close/navigation frame. Selection highlights
+  // repaint through extraData below.
+  const previousRowsRef = useRef(builtRows);
+  const rows = sidebarRowsEqual(previousRowsRef.current, builtRows)
+    ? previousRowsRef.current
+    : builtRows;
+  previousRowsRef.current = rows;
 
   const handleExtensionFilterChange = useCallback(
     (key: string, values: ReadonlySet<string>) => {
@@ -690,6 +701,10 @@ export const SidebarView = memo(function SidebarView({
           <FlashList
             data={rows}
             renderItem={renderRow}
+            // renderRow closes over selection/tags/colors; with row identity
+            // now stable across selection changes, this is what tells the
+            // list to repaint visible cells when any of those inputs move.
+            extraData={renderRow}
             keyExtractor={(item) => item.key}
             getItemType={(item) => item.type}
             showsVerticalScrollIndicator={false}

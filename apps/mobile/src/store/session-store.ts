@@ -474,6 +474,23 @@ function persistStateCache(state: SessionState) {
   }, CACHE_PERSIST_THROTTLE_MS - elapsed);
 }
 
+/**
+ * Cache persistence for paths that run inside a tap or an RPC continuation
+ * (thread selection, detail merges). The full-cache stringify + MMKV write is
+ * heavy enough to delay the screen transition those paths are about to
+ * trigger, and it is crash-recovery bookkeeping only — so it never writes in
+ * the caller's frame. The write always waits a full throttle window, landing
+ * after the navigation/render burst and coalescing with any event-driven
+ * trailing write already scheduled.
+ */
+function schedulePersistStateCache() {
+  if (trailingCachePersistTimer) return;
+  trailingCachePersistTimer = setTimeout(() => {
+    trailingCachePersistTimer = null;
+    writeStateCache(useSessionStore.getState());
+  }, CACHE_PERSIST_THROTTLE_MS);
+}
+
 function applyEventsToState(state: SessionState, events: EventEnvelope[]): SessionState {
   if (events.length === 0) return state;
 
@@ -628,7 +645,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
     }));
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   selectWorkspace: (workspaceId) => {
@@ -640,7 +657,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
     }));
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   selectNewThread: (workspaceId) => {
@@ -649,7 +666,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedThreadId: null,
       threadDetail: null,
     });
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   applyThreadHandle: (handle) => {
@@ -756,7 +773,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           : state.threadDetailErrors,
       };
     });
-    persistStateCache(get());
+    // The RPC continuation that lands here has just decrypted, normalized and
+    // merged up to 150 items and is about to derive presentation for all of
+    // them; the cache write must not extend that same JS-thread batch.
+    schedulePersistStateCache();
   },
 
   setThreadDetailError: (threadId, message) => {
