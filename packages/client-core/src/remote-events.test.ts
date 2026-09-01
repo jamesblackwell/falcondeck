@@ -4,6 +4,7 @@ import {
   captureRelayDisplayFrame,
   encryptedPayloadIsSoleSnapshotEvent,
   parseDaemonEvents,
+  relayReplayStillPending,
   returnUnprocessedRelayUpdates,
   selectPresenceFromRelayBatch,
   shouldIgnoreReplaySnapshotEvent,
@@ -112,6 +113,22 @@ describe('shouldYieldBeforeRelayDisplayFlush', () => {
 
   it('yields before a reconnect dump so cached nav can take a tap', () => {
     expect(shouldYieldBeforeRelayDisplayFlush(2)).toBe(true)
+  })
+})
+
+describe('relayReplayStillPending', () => {
+  it('is never pending without a sync window', () => {
+    expect(relayReplayStillPending(null, [{ seq: 1 }], [{ seq: 2 }])).toBe(false)
+  })
+
+  it('holds the replay buffer while queued or parked updates sit below next_seq', () => {
+    expect(relayReplayStillPending(10, [{ seq: 4 }], [])).toBe(true)
+    expect(relayReplayStillPending(10, [], [{ seq: 9 }])).toBe(true)
+  })
+
+  it('releases the buffer once only live updates remain', () => {
+    expect(relayReplayStillPending(10, [{ seq: 10 }, { seq: 11 }], [])).toBe(false)
+    expect(relayReplayStillPending(10, [], [])).toBe(false)
   })
 })
 

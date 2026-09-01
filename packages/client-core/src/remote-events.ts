@@ -130,6 +130,24 @@ export function encryptedPayloadIsSoleSnapshotEvent(plaintext: string) {
 }
 
 /**
+ * A sync replay window re-delivers the original per-token delta events, and
+ * the 8ms display-frame pacing makes an hours-old message visibly "type"
+ * back in if each frame commits. Decoded backlog events are therefore held
+ * until no queued or parked update remains below the sync response's
+ * next_seq, then applied as one commit so completed turns appear in final
+ * form. Returns true while that window is still being consumed.
+ */
+export function relayReplayStillPending(
+  horizonSeq: number | null,
+  pendingUpdates: Array<{ seq: number }>,
+  parkedUpdates: Array<{ seq: number }>,
+) {
+  if (horizonSeq === null) return false
+  const belowHorizon = (update: { seq: number }) => update.seq < horizonSeq
+  return pendingUpdates.some(belowHorizon) || parkedUpdates.some(belowHorizon)
+}
+
+/**
  * Reads both the original one-event envelope and the batched streaming form.
  * Keeping the old form accepted lets older daemons and clients reconnect
  * without a protocol migration.

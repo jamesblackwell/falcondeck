@@ -11,6 +11,7 @@ import {
   publicKeyToBase64,
   relayBacklogWouldOverflow,
   relayReconnectDelayMs,
+  relayReplayStillPending,
   resolveRelayTruncationCursor,
   returnUnprocessedRelayUpdates,
   selectPresenceFromRelayBatch,
@@ -248,6 +249,15 @@ export function useRelayConnection() {
   // replay window. Presence updates already in that window predate next_seq,
   // so they must not overwrite the authoritative value after a reconnect.
   const syncedPresenceFloor = useRef<number | null>(null)
+  // Replay window boundary from the latest sync response. Decoded events for
+  // updates below it are buffered in bufferedReplayEvents instead of being
+  // committed frame-by-frame, so a message that finished hours ago reappears
+  // in one commit instead of re-streaming token by token. The buffer is
+  // applied when the window is consumed (or on disconnect, since the cursor
+  // has already advanced past the buffered updates) and dropped when an
+  // authoritative snapshot supersedes it.
+  const replayHorizonSeq = useRef<number | null>(null)
+  const bufferedReplayEvents = useRef<EventEnvelope[]>([])
   const pendingRelayUpdates = useRef<RelayUpdate[]>([])
   const ephemeralAudioChain = useRef<Promise<void>>(Promise.resolve())
   const relayFlushFrame = useRef<number | null>(null)
@@ -320,6 +330,11 @@ export function useRelayConnection() {
     ]
     useSessionStore.getState().applyDaemonEvents(events)
     publishControlStateChanges(events)
+    // Buffered replay events all predate this snapshot: events raced during
+    // the RPC were applied above via pendingSnapshotEvents, and older ones
+    // are already reflected in the snapshot itself. Applying them later
+    // would regress items to pre-snapshot state.
+    bufferedReplayEvents.current = []
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
@@ -650,7 +665,14 @@ export function useRelayConnection() {
                 continue
               }
               realtimeAudioPlayer.handleEvent(event)
-              daemonEvents.push(event)
+              if (
+                replayHorizonSeq.current !== null &&
+                update.seq < replayHorizonSeq.current
+              ) {
+                bufferedReplayEvents.current.push(event)
+              } else {
+                daemonEvents.push(event)
+              }
               if (snapshotRequestInFlight.current) {
                 snapshotRaceOverflowed.current ||= bufferSnapshotRaceEvent(
                   pendingSnapshotEvents.current,
@@ -691,6 +713,23 @@ export function useRelayConnection() {
 
         if (nextPresence !== undefined) {
           relay._setMachinePresence(nextPresence)
+        }
+
+        // Replayed backlog events commit as one batch once nothing below the
+        // sync window remains queued or parked; buffered events all predate
+        // this frame's live events, so they go in front.
+        if (
+          !relayReplayStillPending(
+            replayHorizonSeq.current,
+            pendingRelayUpdates.current,
+            pendingEncrypted.current,
+          )
+        ) {
+          replayHorizonSeq.current = null
+          if (bufferedReplayEvents.current.length > 0) {
+            daemonEvents.unshift(...bufferedReplayEvents.current)
+            bufferedReplayEvents.current = []
+          }
         }
 
         if (daemonEvents.length > 0) {
@@ -842,6 +881,8 @@ export function useRelayConnection() {
     evictedWhileParked.current = false
     pendingTruncationNextSeq.current = null
     syncedPresenceFloor.current = null
+    replayHorizonSeq.current = null
+    bufferedReplayEvents.current = []
     pendingRelayUpdates.current = []
     relayFlushGeneration.current += 1
     snapshotRequestGeneration.current += 1
@@ -922,6 +963,20 @@ export function useRelayConnection() {
       }, BOOTSTRAP_REQUEST_RETRY_MS)
     }
 
+    // The replay cursor already advanced past buffered backlog events, so the
+    // next sync will not re-deliver them — they must be applied, not dropped,
+    // when this connection ends mid-replay. Skipped if the session changed
+    // underneath us; a different session resets the store anyway.
+    const commitBufferedReplayEvents = () => {
+      replayHorizonSeq.current = null
+      const buffered = bufferedReplayEvents.current
+      if (buffered.length === 0) return
+      bufferedReplayEvents.current = []
+      if (useRelayStore.getState().sessionId !== sessionId) return
+      useSessionStore.getState().applyDaemonEvents(buffered)
+      publishControlStateChanges(buffered)
+    }
+
     const scheduleReconnect = () => {
       // Guards must run BEFORE touching any timers: a stale socket's close
       // event otherwise reaches into the live run and cancels its retry
@@ -937,6 +992,7 @@ export function useRelayConnection() {
       relay._setMachinePresence(null)
       relay._setSocket(null)
       relay._failPendingRpcs(RELAY_TRANSPORT_ERRORS.dropped)
+      commitBufferedReplayEvents()
       pendingEncrypted.current = []
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null
@@ -1127,6 +1183,15 @@ export function useRelayConnection() {
                   snapshotAfterCrypto.current = true
                 }
               }
+              if (payload.updates.length > 0) {
+                // Everything below next_seq is historical replay — hold its
+                // decoded events for a single commit so completed messages
+                // do not visibly re-stream.
+                replayHorizonSeq.current = Math.max(
+                  replayHorizonSeq.current ?? 0,
+                  payload.next_seq,
+                )
+              }
               pendingRelayUpdates.current.push(...payload.updates)
               scheduleRelayFlush()
               if (
@@ -1251,6 +1316,7 @@ export function useRelayConnection() {
       activeSocket?.close()
       relay._setSocket(null)
       relay._failPendingRpcs(RELAY_TRANSPORT_ERRORS.closed)
+      commitBufferedReplayEvents()
       pendingEncrypted.current = []
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null

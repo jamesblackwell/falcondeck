@@ -515,6 +515,138 @@ describe('useRelayConnection session rotation', () => {
     ])
   })
 
+  it('applies a sync replay window in one commit instead of re-streaming it', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'replay-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const queuedFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback)
+      return queuedFrames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    // Each decrypt burns past the display-frame budget so the backlog spreads
+    // across several frames — the exact shape that used to re-stream old text.
+    let now = 0
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+
+    useRelayStore.getState().setPairingCode(securePairingCode('REPLAY'))
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useSessionStore.getState().applyDaemonEvents([snapshotEvent(snapshot())])
+
+    renderRelayConnection()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+
+    const textDeltaEvent = (seq: number, delta: string, start: number) => ({
+      seq,
+      emitted_at: '2026-03-16T10:01:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: {
+        type: 'text' as const,
+        item_id: 'replay-1',
+        delta,
+        target: 'assistant_text' as const,
+        start_offset: start,
+        end_offset: start + delta.length,
+      },
+    })
+    const eventsByCiphertext: Record<string, unknown> = {
+      added: conversationItemAddedEvent(assistantMessage('replay-1', 'Hel')),
+      middle: textDeltaEvent(11, 'lo wor', 3),
+      tail: textDeltaEvent(12, 'ld', 9),
+      live: textDeltaEvent(13, '!', 11),
+    }
+    const decryptJson = vi.fn(async <T,>(envelope: EncryptedEnvelope): Promise<T> => {
+      now += 20
+      return { kind: 'daemon-event', event: eventsByCiphertext[envelope.ciphertext] } as T
+    })
+    useRelayStore.getState()._decryptJson = decryptJson as unknown as typeof originalDecryptJson
+
+    const socket = TestWebSocket.instances[0]!
+    const encryptedUpdate = (seq: number, ciphertext: string) => ({
+      id: `update-${seq}`,
+      seq,
+      body: {
+        t: 'encrypted',
+        envelope: { encryption_variant: 'data_key_v1', ciphertext },
+      },
+      created_at: '2026-08-09T12:00:00Z',
+    })
+
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [
+            encryptedUpdate(1, 'added'),
+            encryptedUpdate(2, 'middle'),
+            encryptedUpdate(3, 'tail'),
+          ],
+          next_seq: 4,
+        }),
+      })
+    })
+
+    // The first frames (including the pre-flush yields a multi-update batch
+    // takes) consume one backlog update each; nothing may commit yet — a
+    // partial commit here is the visible "typing" regression.
+    for (let frame = 0; frame < 4; frame += 1) {
+      await act(async () => {
+        queuedFrames.shift()?.(performance.now())
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(useSessionStore.getState().threadItems['thread-1'] ?? []).toEqual([])
+    }
+
+    // Final frame drains the window: the whole message lands in one commit.
+    await act(async () => {
+      queuedFrames.shift()?.(performance.now())
+      await vi.waitFor(() => expect(decryptJson).toHaveBeenCalledTimes(3))
+    })
+    expect(useSessionStore.getState().threadItems['thread-1']).toEqual([
+      expect.objectContaining({ id: 'replay-1', text: 'Hello world' }),
+    ])
+
+    // A live update after the window still applies frame-by-frame.
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({ type: 'update', update: encryptedUpdate(4, 'live') }),
+      })
+    })
+    await act(async () => {
+      queuedFrames.shift()?.(performance.now())
+      await vi.waitFor(() => expect(decryptJson).toHaveBeenCalledTimes(4))
+    })
+    expect(useSessionStore.getState().threadItems['thread-1']).toEqual([
+      expect.objectContaining({ id: 'replay-1', text: 'Hello world!' }),
+    ])
+  })
+
   it('checkpoints a decrypted update after its raced snapshot is replaced', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
