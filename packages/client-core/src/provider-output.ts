@@ -416,6 +416,24 @@ export function parseMcpResult(value: unknown): ParsedMcpResult {
   return parsed;
 }
 
+export type ExtensionToolResultIdentity = {
+  extensionId: string;
+  toolId: string;
+};
+
+/** Identifies a result emitted by FalconDeck's manifest-declared tool bridge. */
+export function extensionToolResultIdentity(
+  value: unknown,
+): ExtensionToolResultIdentity | null {
+  const metadata = record(parseMcpResult(value).metadata);
+  const identity = record(metadata?.["falcondeck/extensionTool"]);
+  const extensionId = identity?.extensionId;
+  const toolId = identity?.toolId;
+  return typeof extensionId === "string" && typeof toolId === "string"
+    ? { extensionId, toolId }
+    : null;
+}
+
 export function isSafeMediaUrl(url: string, media: "image" | "audio"): boolean {
   const normalized = url.trim();
   if (/^https?:\/\//i.test(normalized)) return isSafeExternalUrl(normalized);

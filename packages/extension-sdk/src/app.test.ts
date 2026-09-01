@@ -6,6 +6,10 @@ function Panel() {
   return null;
 }
 
+function ToolResult() {
+  return null;
+}
+
 describe("extension app registrations", () => {
   it("collects a typed panel for its declared extension identity", () => {
     const registration = collectExtensionApp(
@@ -21,6 +25,21 @@ describe("extension app registrations", () => {
     expect(registration.extensionId).toBe("example.kanban");
     expect(registration.panels).toEqual([
       expect.objectContaining({ id: "board", title: "Board" }),
+    ]);
+  });
+
+  it("collects a trusted renderer for a manifest-declared agent tool", () => {
+    const registration = collectExtensionApp(
+      defineExtensionApp("example.kanban", (app) => {
+        app.agentToolResults.register({
+          toolId: "create-card",
+          component: ToolResult,
+        });
+      }),
+    );
+
+    expect(registration.agentToolResults).toEqual([
+      expect.objectContaining({ toolId: "create-card" }),
     ]);
   });
 

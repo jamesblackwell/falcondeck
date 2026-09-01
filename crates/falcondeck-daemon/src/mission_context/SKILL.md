@@ -15,8 +15,13 @@ When the user explicitly requests a Mission:
 1. Call `falcondeck_missions-draft_mission` before doing the requested work.
 2. Put the full outcome in `objective` and extract concrete acceptance criteria
    when the prompt supplies them. Do not invent requirements.
-3. Report that the draft awaits human review and start in the Missions panel.
-4. Do not begin the task as an ordinary turn and do not create a harness goal
+3. Put agreed limits in the structured `leaseMinutes`, `maxAutomaticTurns`, and
+   `maxWorkers` fields. Do not leave limits only in objective prose. If the
+   user did not specify them, omit them so FalconDeck applies its reviewed
+   defaults (three hours, 12 turns, three workers).
+4. Report that the draft awaits human review and start. Supported clients show
+   those controls in this conversation; the Missions panel remains available.
+5. Do not begin the task as an ordinary turn and do not create a harness goal
    instead.
 
 ## Coordinate

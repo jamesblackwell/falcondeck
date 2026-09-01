@@ -8,15 +8,19 @@
 use std::{collections::HashMap, path::Path, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
+#[cfg(test)]
+use falcondeck_core::orchestration::{
+    DEFAULT_AUTOMATIC_TURNS, DEFAULT_LEASE_MINUTES, DEFAULT_MANAGED_WORKERS,
+};
 use falcondeck_core::{
     AgentProvider, SendTurnRequest, StartThreadRequest, ThreadIsolation, ThreadOrigin,
     ThreadStatus, TurnInputItem,
     orchestration::{
-        DEFAULT_LEASE_MINUTES, ExtensionOperationStatus, ExtensionOrchestrationEffect,
-        ExtensionPendingContinuation, ExtensionRunCommand, ExtensionRunGate, ExtensionRunOperation,
-        ExtensionRunOutcome, ExtensionRunSummary, ExtensionRunWorker, ExtensionWorkerStatus,
+        ExtensionOperationStatus, ExtensionOrchestrationEffect, ExtensionPendingContinuation,
+        ExtensionRunCommand, ExtensionRunGate, ExtensionRunOperation, ExtensionRunOutcome,
+        ExtensionRunSummary, ExtensionRunWorker, ExtensionWorkerStatus, LEASE_EXTENSION_MINUTES,
         MAX_AUTOMATIC_TURNS, MAX_CHECKPOINT_BYTES, MAX_LEASE_MINUTES, MAX_MANAGED_WORKERS,
-        MAX_OPERATION_PROMPT_BYTES, MAX_WORKER_REPORT_BYTES,
+        MAX_OPERATION_PROMPT_BYTES, MAX_WORKER_REPORT_BYTES, MIN_LEASE_MINUTES,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -204,6 +208,17 @@ fn validate_run(run: &ExtensionRunSummary) -> Result<(), DaemonError> {
     {
         return Err(DaemonError::BadRequest(format!(
             "run worker journal exceeds {MAX_WORKERS_PER_RUN} entries"
+        )));
+    }
+    if run.max_automatic_turns == 0 || run.max_automatic_turns > MAX_AUTOMATIC_TURNS {
+        return Err(DaemonError::BadRequest(format!(
+            "run automatic-turn budget must be between 1 and {MAX_AUTOMATIC_TURNS}"
+        )));
+    }
+    let lease_minutes = (run.deadline_at - run.created_at).num_minutes();
+    if !(MIN_LEASE_MINUTES..=MAX_LEASE_MINUTES).contains(&lease_minutes) {
+        return Err(DaemonError::BadRequest(format!(
+            "run lease must be between {MIN_LEASE_MINUTES} and {MAX_LEASE_MINUTES} minutes"
         )));
     }
     for operation in &run.operations {
@@ -400,6 +415,9 @@ fn apply_effect(
             title,
             objective,
             checkpoint,
+            max_automatic_turns,
+            max_workers,
+            lease_minutes,
             initial_prompt,
         } => {
             if registry.runs.len() >= MAX_RUNS {
@@ -425,6 +443,21 @@ fn apply_effect(
             validate_text("title", &title, MAX_TITLE_CHARS)?;
             validate_text("objective", &objective, MAX_OBJECTIVE_CHARS)?;
             validate_checkpoint(&checkpoint)?;
+            if max_automatic_turns == 0 || max_automatic_turns > MAX_AUTOMATIC_TURNS {
+                return Err(DaemonError::BadRequest(format!(
+                    "maxAutomaticTurns must be between 1 and {MAX_AUTOMATIC_TURNS}"
+                )));
+            }
+            if max_workers > MAX_MANAGED_WORKERS {
+                return Err(DaemonError::BadRequest(format!(
+                    "maxWorkers must be between 0 and {MAX_MANAGED_WORKERS}"
+                )));
+            }
+            if !(MIN_LEASE_MINUTES..=MAX_LEASE_MINUTES).contains(&lease_minutes) {
+                return Err(DaemonError::BadRequest(format!(
+                    "leaseMinutes must be between {MIN_LEASE_MINUTES} and {MAX_LEASE_MINUTES}"
+                )));
+            }
             let mut operations = Vec::new();
             let gate = if let Some(prompt) = initial_prompt {
                 validate_prompt(&prompt)?;
@@ -451,12 +484,12 @@ fn apply_effect(
                     journal_sequence: u64::from(!operations.is_empty()),
                     approval_generation: 1,
                     automatic_turns_started: 0,
-                    max_automatic_turns: MAX_AUTOMATIC_TURNS,
-                    max_workers: MAX_MANAGED_WORKERS,
+                    max_automatic_turns,
+                    max_workers,
                     awaiting_workers: false,
                     created_at: now,
                     updated_at: now,
-                    deadline_at: now + Duration::minutes(DEFAULT_LEASE_MINUTES),
+                    deadline_at: now + Duration::minutes(lease_minutes),
                     last_progress_fingerprint: None,
                     pending_continuation: None,
                     completion_proposed: false,
@@ -806,7 +839,7 @@ fn apply_human_command(
                 return Err(DaemonError::BadRequest("run is already closed".to_string()));
             }
             let maximum = run.created_at + Duration::minutes(MAX_LEASE_MINUTES);
-            let extended = run.deadline_at + Duration::minutes(DEFAULT_LEASE_MINUTES);
+            let extended = run.deadline_at + Duration::minutes(LEASE_EXTENSION_MINUTES);
             let deadline_at = extended.min(maximum);
             if deadline_at <= now {
                 return Err(DaemonError::BadRequest(
@@ -2150,8 +2183,8 @@ mod tests {
             journal_sequence: 0,
             approval_generation: 1,
             automatic_turns_started: 0,
-            max_automatic_turns: MAX_AUTOMATIC_TURNS,
-            max_workers: MAX_MANAGED_WORKERS,
+            max_automatic_turns: DEFAULT_AUTOMATIC_TURNS,
+            max_workers: DEFAULT_MANAGED_WORKERS,
             awaiting_workers: false,
             created_at: now,
             updated_at: now,
@@ -2229,7 +2262,7 @@ mod tests {
     #[test]
     fn automatic_turn_limit_is_a_hard_gate() {
         let mut run = run();
-        run.automatic_turns_started = MAX_AUTOMATIC_TURNS;
+        run.automatic_turns_started = run.max_automatic_turns;
         run.pending_continuation = Some(ExtensionPendingContinuation {
             operation_id: "operation-5".to_string(),
             prompt: "Continue".to_string(),
@@ -2336,7 +2369,9 @@ mod tests {
     #[test]
     fn worker_delegation_is_codex_only_and_hard_bounded() {
         let mut registry = OrchestrationRegistry::default();
-        registry.runs.insert("run-1".to_string(), run());
+        let mut bounded_run = run();
+        bounded_run.max_workers = MAX_MANAGED_WORKERS;
+        registry.runs.insert("run-1".to_string(), bounded_run);
         let actor = EffectActor::AgentTool {
             workspace_id: Some("workspace-1"),
             thread_id: Some("thread-1"),
@@ -2373,7 +2408,38 @@ mod tests {
         )
         .expect_err("worker ceiling must be hard");
         assert!(error.to_string().contains("worker limit"));
-        assert_eq!(registry.runs["run-1"].workers.len(), 3);
+        assert_eq!(
+            registry.runs["run-1"].workers.len(),
+            MAX_MANAGED_WORKERS as usize
+        );
+    }
+
+    #[test]
+    fn create_run_persists_the_human_approved_policy() {
+        let mut registry = OrchestrationRegistry::default();
+        apply_effect(
+            &mut registry,
+            MISSIONS_EXTENSION_ID,
+            ExtensionOrchestrationEffect::CreateRun {
+                run_id: "run-policy".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                coordinator_thread_id: "thread-policy".to_string(),
+                title: "Long mission".to_string(),
+                objective: "Complete and verify the longer task".to_string(),
+                checkpoint: json!({ "disposition": "planning" }),
+                max_automatic_turns: 18,
+                max_workers: 4,
+                lease_minutes: 180,
+                initial_prompt: Some("Begin the mission".to_string()),
+            },
+            &EffectActor::Human,
+        )
+        .expect("policy should be admitted within hard ceilings");
+
+        let run = &registry.runs["run-policy"];
+        assert_eq!(run.max_automatic_turns, 18);
+        assert_eq!(run.max_workers, 4);
+        assert_eq!((run.deadline_at - run.created_at).num_minutes(), 180);
     }
 
     #[test]

@@ -5,6 +5,9 @@ export type MissionDraft = {
   title: string;
   objective: string;
   acceptanceCriteria: string[];
+  leaseMinutes: number;
+  maxAutomaticTurns: number;
+  maxWorkers: number;
   createdAt: string;
 };
 
@@ -65,10 +68,17 @@ export type MissionPanelRun = {
 
 export type MissionPanelDraft = Pick<
   MissionDraft,
-  "id" | "workspaceId" | "threadId" | "title" | "objective" | "createdAt"
-> & {
-  acceptanceCriteriaCount: number;
-};
+  | "id"
+  | "workspaceId"
+  | "threadId"
+  | "title"
+  | "objective"
+  | "acceptanceCriteria"
+  | "leaseMinutes"
+  | "maxAutomaticTurns"
+  | "maxWorkers"
+  | "createdAt"
+>;
 
 export type MissionPanelCandidate = {
   id: string;
@@ -202,7 +212,10 @@ export function parseMissionPanelState(value: unknown): MissionPanelState | null
       typeof draft.title === "string" &&
       typeof draft.objective === "string" &&
       typeof draft.createdAt === "string" &&
-      typeof draft.acceptanceCriteriaCount === "number"
+      Array.isArray(draft.acceptanceCriteria) &&
+      typeof draft.leaseMinutes === "number" &&
+      typeof draft.maxAutomaticTurns === "number" &&
+      typeof draft.maxWorkers === "number"
       ? [
           {
             id: draft.id,
@@ -210,8 +223,11 @@ export function parseMissionPanelState(value: unknown): MissionPanelState | null
             threadId: draft.threadId,
             title: draft.title,
             objective: draft.objective,
+            acceptanceCriteria: strings(draft.acceptanceCriteria),
+            leaseMinutes: draft.leaseMinutes,
+            maxAutomaticTurns: draft.maxAutomaticTurns,
+            maxWorkers: draft.maxWorkers,
             createdAt: draft.createdAt,
-            acceptanceCriteriaCount: draft.acceptanceCriteriaCount,
           },
         ]
       : [];

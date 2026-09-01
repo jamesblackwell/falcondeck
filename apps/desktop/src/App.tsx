@@ -98,6 +98,7 @@ import {
   ComposerContextBar,
   ExtensionPanel,
   ExtensionAppPanel,
+  ExtensionAgentToolUiProvider,
   NewThreadState,
   ShipMenu,
   useShipThread,
@@ -1090,6 +1091,27 @@ function AppInner() {
       return response;
     },
     [api, remoteHosts.hosts, remoteHosts.manager, setSnapshot],
+  );
+  const invokeConversationExtensionAction = useCallback(
+    async (
+      extensionId: string,
+      actionId: string,
+      input?: unknown,
+      target?: ExtensionAppViewScope | null,
+    ) => {
+      const host = remoteHosts.hostForWorkspace(selectedWorkspaceId);
+      const actionApi = host ? host.api() : api;
+      if (!actionApi) throw new Error(CONNECTION_COPY.notConnected);
+      const response = await actionApi.invokeExtensionAction(
+        extensionId,
+        actionId,
+        { target, input: input ?? null },
+      );
+      if (host) await host.refresh();
+      else if (api) setSnapshot(await api.snapshot());
+      return response;
+    },
+    [api, remoteHosts, selectedWorkspaceId, setSnapshot],
   );
   const invokeExtensionPanelAction = useCallback(
     async (
@@ -5879,7 +5901,23 @@ function AppInner() {
             },
             activeMainViewId,
           ) ?? (
-            <DesktopConversationPane
+            <ExtensionAgentToolUiProvider
+              apps={extensionApps}
+              extensions={
+                remoteHosts.hostForWorkspace(selectedWorkspaceId)?.snapshot
+                  ?.extensions.catalog ??
+                snapshot?.extensions.catalog ??
+                []
+              }
+              views={
+                remoteHosts.hostForWorkspace(selectedWorkspaceId)?.snapshot
+                  ?.extensions.views ??
+                snapshot?.extensions.views ??
+                []
+              }
+              onInvokeAction={invokeConversationExtensionAction}
+            >
+              <DesktopConversationPane
               selectedWorkspace={selectedWorkspace}
               selectedThread={selectedThread}
               selectedWorkspaceId={selectedWorkspaceId}
@@ -6134,7 +6172,8 @@ function AppInner() {
                   onToggleRail={toggleRail}
                 />
               }
-            />
+              />
+            </ExtensionAgentToolUiProvider>
           )
         }
         rail={

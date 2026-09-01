@@ -289,6 +289,7 @@ async fn handle_tool_call(
                 id,
                 json!({ "ok": false, "error": format!("FalconDeck daemon is unreachable: {error}") }),
                 true,
+                None,
             );
         }
     };
@@ -300,22 +301,35 @@ async fn handle_tool_call(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("daemon returned HTTP {status}"));
-        return tool_result(id, json!({ "ok": false, "error": message }), true);
+        return tool_result(id, json!({ "ok": false, "error": message }), true, None);
     }
     let result = payload.get("result").cloned().unwrap_or(Value::Null);
-    tool_result(id, json!({ "ok": true, "result": result }), false)
+    let metadata = match (
+        payload.get("extension_id").and_then(Value::as_str),
+        payload.get("tool_id").and_then(Value::as_str),
+    ) {
+        (Some(extension_id), Some(tool_id)) => Some(json!({
+            "falcondeck/extensionTool": {
+                "extensionId": extension_id,
+                "toolId": tool_id,
+            }
+        })),
+        _ => None,
+    };
+    tool_result(id, json!({ "ok": true, "result": result }), false, metadata)
 }
 
-fn tool_result(id: Value, structured: Value, is_error: bool) -> Value {
+fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Value>) -> Value {
     let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{\"ok\":false}".to_string());
-    success_response(
-        id,
-        json!({
-            "content": [{ "type": "text", "text": text }],
-            "structuredContent": structured,
-            "isError": is_error,
-        }),
-    )
+    let mut result = json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": structured,
+        "isError": is_error,
+    });
+    if let Some(metadata) = metadata {
+        result["_meta"] = metadata;
+    }
+    success_response(id, result)
 }
 
 fn success_response(id: Value, result: Value) -> Value {
@@ -362,6 +376,29 @@ mod tests {
     fn initialize_echoes_the_client_protocol_version() {
         let requested = handshake_response(json!(1), "2025-06-18");
         assert_eq!(requested["result"]["protocolVersion"], json!("2025-06-18"));
+    }
+
+    #[test]
+    fn extension_tool_metadata_is_attached_without_changing_structured_content() {
+        let response = tool_result(
+            json!(1),
+            json!({ "ok": true, "result": { "draftId": "draft-1" } }),
+            false,
+            Some(json!({
+                "falcondeck/extensionTool": {
+                    "extensionId": "falcondeck.missions",
+                    "toolId": "draft-mission"
+                }
+            })),
+        );
+        assert_eq!(
+            response["result"]["_meta"]["falcondeck/extensionTool"]["toolId"],
+            json!("draft-mission")
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["result"]["draftId"],
+            json!("draft-1")
+        );
     }
 
     #[tokio::test]

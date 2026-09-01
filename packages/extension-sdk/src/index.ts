@@ -259,6 +259,12 @@ export type ExtensionOrchestrationEffect =
       title: string;
       objective: string;
       checkpoint: unknown;
+      /** Human-approved hard coordinator-turn budget (default 12, max 24). */
+      maxAutomaticTurns?: number;
+      /** Human-approved hard worker budget (default 3, max 4). */
+      maxWorkers?: number;
+      /** Human-approved initial lease in minutes (default 180, max 1440). */
+      leaseMinutes?: number;
       initialPrompt?: string;
     }
   | {

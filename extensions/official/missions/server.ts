@@ -15,6 +15,13 @@ import type {
 const PANEL_VIEW = "missions-panel";
 const DRAFTS_KEY = "missionDrafts";
 const MAX_DRAFTS = 20;
+const DEFAULT_LEASE_MINUTES = 180;
+const MIN_LEASE_MINUTES = 15;
+const MAX_LEASE_MINUTES = 1_440;
+const DEFAULT_AUTOMATIC_TURNS = 12;
+const MAX_AUTOMATIC_TURNS = 24;
+const DEFAULT_WORKERS = 3;
+const MAX_WORKERS = 4;
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -46,6 +53,51 @@ function stringList(value: unknown, label: string, maxItems: number): string[] {
   return value.map((item, index) =>
     requiredString(item, `${label}[${index}]`, 1000),
   );
+}
+
+function boundedInteger(
+  value: unknown,
+  label: string,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+
+function draftPolicy(draft: Partial<MissionDraft>) {
+  return {
+    leaseMinutes: boundedInteger(
+      draft.leaseMinutes,
+      "leaseMinutes",
+      MIN_LEASE_MINUTES,
+      MAX_LEASE_MINUTES,
+      DEFAULT_LEASE_MINUTES,
+    ),
+    maxAutomaticTurns: boundedInteger(
+      draft.maxAutomaticTurns,
+      "maxAutomaticTurns",
+      1,
+      MAX_AUTOMATIC_TURNS,
+      DEFAULT_AUTOMATIC_TURNS,
+    ),
+    maxWorkers: boundedInteger(
+      draft.maxWorkers,
+      "maxWorkers",
+      0,
+      MAX_WORKERS,
+      DEFAULT_WORKERS,
+    ),
+  };
 }
 
 function checkpointOf(run: ExtensionRunSummary): MissionCheckpoint {
@@ -207,7 +259,8 @@ function panelState(
       threadId: draft.threadId,
       title: compactText(draft.title, 120),
       objective: compactText(draft.objective, 1_200),
-      acceptanceCriteriaCount: draft.acceptanceCriteria.length,
+      acceptanceCriteria: draft.acceptanceCriteria,
+      ...draftPolicy(draft),
       createdAt: draft.createdAt,
     })),
     candidates: candidates.map((thread) => ({
@@ -224,11 +277,20 @@ function panelState(
 function coordinatorPrompt(
   objective: string,
   acceptanceCriteria: readonly string[],
+  policy: {
+    leaseMinutes: number;
+    maxAutomaticTurns: number;
+    maxWorkers: number;
+  },
 ): string {
   const criteria = acceptanceCriteria.length
     ? acceptanceCriteria.map((item, index) => `${index + 1}. ${item}`).join("\n")
     : "1. Verify the requested outcome with concrete evidence appropriate to the task.";
-  return `You are coordinating a bounded FalconDeck Mission in this existing task.\n\nObjective:\n${objective}\n\nAcceptance criteria:\n${criteria}\n\nWork directly and conservatively. You may delegate at most three genuinely independent, one-turn assignments with the FalconDeck Mission delegate tool; workers run serially in separate Codex tasks and cannot delegate further. Prefer doing small or tightly coupled work yourself. After delegating, call the Mission checkpoint tool with awaiting_workers. Otherwise call it exactly once before finishing this turn: request one continuation only after meaningful durable progress, pause for human input when authority or intent is missing, or propose completion with criterion-level evidence. The Mission cannot become complete from prose alone. Never route around a denial, safety boundary, exhausted limit, or ambiguous user intent.`;
+  const workerInstruction =
+    policy.maxWorkers === 0
+      ? "This Mission has no worker budget, so do not delegate."
+      : `You may delegate at most ${policy.maxWorkers} genuinely independent, one-turn assignment${policy.maxWorkers === 1 ? "" : "s"} with the FalconDeck Mission delegate tool; workers run serially in separate Codex tasks and cannot delegate further.`;
+  return `You are coordinating a bounded FalconDeck Mission in this existing task. FalconDeck will enforce a ${policy.leaseMinutes}-minute lease, ${policy.maxAutomaticTurns} automatic coordinator turns, and ${policy.maxWorkers} worker tasks.\n\nObjective:\n${objective}\n\nAcceptance criteria:\n${criteria}\n\nWork directly and conservatively. ${workerInstruction} Prefer doing small or tightly coupled work yourself. After delegating, call the Mission checkpoint tool with awaiting_workers. Otherwise call it exactly once before finishing this turn: request one continuation only after meaningful durable progress, pause for human input when authority or intent is missing, or propose completion with criterion-level evidence. The Mission cannot become complete from prose alone. Never route around a denial, safety boundary, exhausted limit, or ambiguous user intent.`;
 }
 
 function continuationPrompt(nextAction: string): string {
@@ -288,6 +350,7 @@ export default defineExtension({
       const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
       const draft = drafts.find((candidate) => candidate.id === draftId);
       if (!draft) throw new Error("mission draft no longer exists");
+      const policy = draftPolicy(draft);
       const runId = crypto.randomUUID();
       const checkpoint: MissionCheckpoint = {
         schemaVersion: 1,
@@ -307,12 +370,50 @@ export default defineExtension({
         title: draft.title,
         objective: draft.objective,
         checkpoint,
+        leaseMinutes: policy.leaseMinutes,
+        maxAutomaticTurns: policy.maxAutomaticTurns,
+        maxWorkers: policy.maxWorkers,
         initialPrompt: coordinatorPrompt(
           draft.objective,
           draft.acceptanceCriteria,
+          policy,
         ),
       });
       return { runId, started: true };
+    });
+
+    context.actions.register("update-draft", async ({ input }) => {
+      const value = record(input);
+      const draftId = requiredString(value.draftId, "draftId", 128);
+      const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
+      const index = drafts.findIndex((candidate) => candidate.id === draftId);
+      if (index < 0) throw new Error("mission draft no longer exists");
+      const current = drafts[index];
+      const updated: MissionDraft = {
+        ...current,
+        title: requiredString(value.title, "title", 120),
+        objective: requiredString(value.objective, "objective", 12_000),
+        acceptanceCriteria: stringList(
+          value.acceptanceCriteria,
+          "acceptanceCriteria",
+          12,
+        ),
+        ...draftPolicy({
+          leaseMinutes: value.leaseMinutes as number | undefined,
+          maxAutomaticTurns: value.maxAutomaticTurns as number | undefined,
+          maxWorkers: value.maxWorkers as number | undefined,
+        }),
+      };
+      const next = [...drafts];
+      next[index] = updated;
+      await context.storage.set(DRAFTS_KEY, next);
+      const runs = await context.orchestration.list();
+      const threads = await context.threads.list();
+      await context.views.publish({
+        viewId: PANEL_VIEW,
+        value: panelState(runs, next, threads),
+      });
+      return { draftId, updated: true };
     });
 
     context.actions.register("adopt-task", async ({ input }) => {
@@ -343,7 +444,18 @@ export default defineExtension({
         title,
         objective,
         checkpoint,
-        initialPrompt: coordinatorPrompt(objective, checkpoint.acceptanceCriteria),
+        leaseMinutes: DEFAULT_LEASE_MINUTES,
+        maxAutomaticTurns: DEFAULT_AUTOMATIC_TURNS,
+        maxWorkers: DEFAULT_WORKERS,
+        initialPrompt: coordinatorPrompt(
+          objective,
+          checkpoint.acceptanceCriteria,
+          {
+            leaseMinutes: DEFAULT_LEASE_MINUTES,
+            maxAutomaticTurns: DEFAULT_AUTOMATIC_TURNS,
+            maxWorkers: DEFAULT_WORKERS,
+          },
+        ),
       });
       return { runId, started: true };
     });
@@ -411,6 +523,11 @@ export default defineExtension({
         "acceptanceCriteria",
         12,
       );
+      const policy = draftPolicy({
+        leaseMinutes: value.leaseMinutes as number | undefined,
+        maxAutomaticTurns: value.maxAutomaticTurns as number | undefined,
+        maxWorkers: value.maxWorkers as number | undefined,
+      });
       const drafts = await context.storage.get<MissionDraft[]>(DRAFTS_KEY, []);
       const draft: MissionDraft = {
         id: crypto.randomUUID(),
@@ -419,6 +536,7 @@ export default defineExtension({
         title,
         objective,
         acceptanceCriteria,
+        ...policy,
         createdAt: new Date().toISOString(),
       };
       const next = [
@@ -440,7 +558,11 @@ export default defineExtension({
           "A human must start this draft before automatic work begins.",
         ),
       });
-      return { draftId: draft.id, status: "awaiting_human_start" };
+      return {
+        draftId: draft.id,
+        status: "awaiting_human_start",
+        policy,
+      };
     });
 
     context.tools.register("mission-status", async ({ threadId, workspaceId }) => {

@@ -2554,6 +2554,8 @@ impl AppState {
         self.emit_extension_view_updates(&updated_views);
         Ok(falcondeck_core::ExtensionToolResponse {
             result: host_result.result,
+            extension_id: Some(package.id.clone()),
+            tool_id: Some(tool_id),
         })
     }
 
@@ -2601,6 +2603,8 @@ impl AppState {
                 "renamed": true,
                 "title": handle.thread.title,
             }),
+            extension_id: None,
+            tool_id: None,
         })
     }
 

@@ -171,6 +171,7 @@ import {
   OperationalNotice,
   ExtensionPanel,
   ExtensionAppPanel,
+  ExtensionAgentToolUiProvider,
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
@@ -5121,7 +5122,13 @@ function RemoteApp() {
                 />
               ) : null}
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                <Conversation
+                <ExtensionAgentToolUiProvider
+                  apps={extensionApps}
+                  extensions={snapshot?.extensions.catalog ?? []}
+                  views={snapshot?.extensions.views ?? []}
+                  onInvokeAction={invokeExtensionAppAction}
+                >
+                  <Conversation
                   threadKey={
                     selectedThreadId
                       ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`
@@ -5163,7 +5170,8 @@ function RemoteApp() {
                   }
                   pinnedPlanId={pinnedPlan?.itemId ?? null}
                   readAloud={readAloud}
-                />
+                  />
+                </ExtensionAgentToolUiProvider>
               </div>
 
               <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:bg-transparent md:backdrop-blur-0">

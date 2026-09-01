@@ -27,7 +27,7 @@ pub(crate) fn append_instructions(text: &mut String, skill_path: Option<&Path>) 
         text.push('\n');
     }
     text.push_str(
-        "- When the user explicitly asks to start, create, or run a FalconDeck Mission, call `falcondeck_missions-draft_mission` before doing the requested work. Do not substitute a harness goal, merely describe a mission, or begin the task as an ordinary turn. The tool creates a draft for human review and start.",
+        "- When the user explicitly asks to start, create, or run a FalconDeck Mission, call `falcondeck_missions-draft_mission` before doing the requested work. Put agreed limits in its structured fields, not only prompt prose. Do not substitute a harness goal, merely describe a mission, or begin the task as an ordinary turn. The tool creates a draft for human review and start.",
     );
     if let Some(path) = skill_path {
         text.push_str(&format!(

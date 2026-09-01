@@ -60,9 +60,29 @@ export type ExtensionAppPanelRegistration = {
   component: ComponentType<ExtensionAppPanelProps>;
 };
 
+/** Props for a trusted rendering of one manifest-declared agent-tool result. */
+export type ExtensionAppAgentToolResultProps = {
+  extensionId: string;
+  toolId: string;
+  arguments: unknown;
+  result: unknown;
+  views: readonly ExtensionAppView[];
+  invokeAction(
+    actionId: string,
+    input?: unknown,
+    target?: ExtensionAppViewScope | null,
+  ): Promise<ExtensionAppActionResponse>;
+};
+
+export type ExtensionAppAgentToolResultRegistration = {
+  toolId: string;
+  component: ComponentType<ExtensionAppAgentToolResultProps>;
+};
+
 export type ExtensionAppRegistration = {
   extensionId: string;
   panels: readonly ExtensionAppPanelRegistration[];
+  agentToolResults: readonly ExtensionAppAgentToolResultRegistration[];
 };
 
 export type ExtensionAppDefinition = {
@@ -74,6 +94,9 @@ export type ExtensionAppDefinition = {
 export type ExtensionAppBuilder = {
   panels: {
     register(panel: ExtensionAppPanelRegistration): void;
+  };
+  agentToolResults: {
+    register(result: ExtensionAppAgentToolResultRegistration): void;
   };
 };
 
@@ -100,11 +123,13 @@ export function collectExtensionApp(
     throw new Error("Unsupported extension app definition");
   }
   const panels: ExtensionAppPanelRegistration[] = [];
-  const ids = new Set<string>();
+  const panelIds = new Set<string>();
+  const agentToolResults: ExtensionAppAgentToolResultRegistration[] = [];
+  const agentToolIds = new Set<string>();
   definition.setup({
     panels: {
       register(panel) {
-        if (!ID_PATTERN.test(panel.id) || ids.has(panel.id)) {
+        if (!ID_PATTERN.test(panel.id) || panelIds.has(panel.id)) {
           throw new Error(
             `Invalid or duplicate extension panel id: ${panel.id}`,
           );
@@ -112,13 +137,30 @@ export function collectExtensionApp(
         if (!panel.title.trim() || typeof panel.component !== "function") {
           throw new Error(`Invalid extension panel registration: ${panel.id}`);
         }
-        ids.add(panel.id);
+        panelIds.add(panel.id);
         panels.push(Object.freeze({ ...panel }));
+      },
+    },
+    agentToolResults: {
+      register(result) {
+        if (!ID_PATTERN.test(result.toolId) || agentToolIds.has(result.toolId)) {
+          throw new Error(
+            `Invalid or duplicate extension agent-tool result id: ${result.toolId}`,
+          );
+        }
+        if (typeof result.component !== "function") {
+          throw new Error(
+            `Invalid extension agent-tool result registration: ${result.toolId}`,
+          );
+        }
+        agentToolIds.add(result.toolId);
+        agentToolResults.push(Object.freeze({ ...result }));
       },
     },
   });
   return Object.freeze({
     extensionId: definition.extensionId,
     panels: Object.freeze(panels),
+    agentToolResults: Object.freeze(agentToolResults),
   });
 }

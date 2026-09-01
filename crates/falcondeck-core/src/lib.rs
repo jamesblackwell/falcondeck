@@ -1211,7 +1211,7 @@ pub struct ExtensionContributions {
     /// Actions shown in a thread context menu.
     #[serde(default)]
     pub thread_menu_actions: Vec<ExtensionActionContribution>,
-    /// Actions referenced only from an extension's trusted panel UI.
+    /// Actions referenced only from an extension's trusted frontend UI.
     #[serde(default)]
     pub panel_actions: Vec<ExtensionActionContribution>,
     /// Decorations rendered on thread rows.
@@ -1300,6 +1300,12 @@ pub struct ExtensionToolResponse {
     /// Tool-specific result handed back to the agent.
     #[serde(default)]
     pub result: Value,
+    /// Owning extension, present for manifest-declared extension tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    /// Stable manifest tool id, present for extension tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_id: Option<String>,
 }
 
 /// One offered next action rendered above the composer.

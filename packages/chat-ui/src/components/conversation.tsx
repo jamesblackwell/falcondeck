@@ -41,6 +41,7 @@ import { normalizeQuotedSelection } from "../lib/quoted-selection";
 import type { ReadAloudController } from "../lib/read-aloud";
 import { WebLinkProvider, type WebLinkOpener } from "../lib/web-link-context";
 import { ConversationExportButton } from "./conversation-export-button";
+import { ExtensionAgentToolResultCards } from "./extension-agent-tool-results";
 import {
   AGENT_STATUS_ROW_CLASS,
   LiveActivityLane,
@@ -978,6 +979,8 @@ export const Conversation = memo(function Conversation({
                     }
                   />
                 ))}
+
+                <ExtensionAgentToolResultCards items={items} />
 
                 {/* A blocked turn outranks every indicator heuristic: whatever the
                   transcript's tail looks like, the user must see that the agent

@@ -12,6 +12,7 @@ import {
 import {
   defineExtensionApp,
   type ExtensionAppActionResponse,
+  type ExtensionAppAgentToolResultProps,
   type ExtensionAppPanelProps,
   type ExtensionAppView,
 } from "@falcondeck/extension-sdk/app";
@@ -24,7 +25,7 @@ import {
 
 const PANEL_VIEW = "missions-panel";
 const MISSION_CREATION_PROMPT =
-  "Let’s set up a FalconDeck Mission together. Help me define the objective, acceptance criteria, and sensible limits for time, coordinator turns, and workers. Ask only for details that materially affect the plan. Once we’ve agreed, use the FalconDeck Mission tools to create a draft for my review. Do not begin the work until I start the Mission.";
+  "Let’s set up a FalconDeck Mission together. Help me define the objective, acceptance criteria, and sensible limits for time, coordinator turns, and workers. Ask only for details that materially affect the plan. Once we’ve agreed, use the FalconDeck Mission tools to create a draft for my review, passing the agreed limits in the structured leaseMinutes, maxAutomaticTurns, and maxWorkers fields rather than only writing them in the objective. Do not begin the work until I start the Mission.";
 const REQUIRED_PERMISSIONS = [
   {
     id: "threads:read",
@@ -210,6 +211,12 @@ function formatDeadline(value: string): string {
   });
 }
 
+function formatDuration(minutes: number): string {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = minutes / 60;
+  return Number.isInteger(hours) ? `${hours} hr` : `${hours.toFixed(1)} hr`;
+}
+
 function statusVariant(run: MissionPanelRun): BadgeVariant {
   if (run.outcome === "completed") return "success";
   if (run.hasUnknownOutcome) return "danger";
@@ -390,7 +397,7 @@ function RunActions({
   if (run.gate === "paused" && run.coordinatorSettling) {
     return (
       <>
-        {button("extend-run", "Extend 30 min")}
+        {button("extend-run", "Extend 1 hour")}
         {button("close-incomplete", "Close incomplete", "danger")}
       </>
     );
@@ -400,7 +407,7 @@ function RunActions({
       {run.gate === "open"
         ? button("pause-run", "Pause")
         : button("resume-run", "Resume", "default")}
-      {button("extend-run", "Extend 30 min")}
+      {button("extend-run", "Extend 1 hour")}
       {button("close-incomplete", "Close incomplete", "danger")}
     </>
   );
@@ -738,7 +745,9 @@ function MissionDashboard({
                         </CardHeader>
                         <CardContent className="flex flex-wrap items-center justify-between gap-3">
                           <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                            {draft.acceptanceCriteriaCount} acceptance criteria
+                            {formatDuration(draft.leaseMinutes)} ·{" "}
+                            {draft.maxAutomaticTurns} turns · {draft.maxWorkers}{" "}
+                            workers · {draft.acceptanceCriteria.length} criteria
                           </span>
                           <Button
                             size="sm"
@@ -838,11 +847,297 @@ function MissionDashboard({
   );
 }
 
+function resultDraftId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const root = value as Record<string, unknown>;
+  const result =
+    root.result && typeof root.result === "object" && !Array.isArray(root.result)
+      ? (root.result as Record<string, unknown>)
+      : null;
+  return typeof result?.draftId === "string" ? result.draftId : null;
+}
+
+function MissionDraftToolResult({
+  result,
+  views,
+  invokeAction,
+}: ExtensionAppAgentToolResultProps) {
+  const draftId = resultDraftId(result);
+  const published = useMemo(() => stateFromViews(views), [views]);
+  const draft = useMemo(
+    () => published?.drafts.find((candidate) => candidate.id === draftId),
+    [draftId, published],
+  );
+  const draftSignature = draft ? JSON.stringify(draft) : null;
+  const [editing, setEditing] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [pending, setPending] = useState<"save" | "start" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [title, setTitle] = useState(draft?.title ?? "");
+  const [objective, setObjective] = useState(draft?.objective ?? "");
+  const [criteria, setCriteria] = useState(
+    draft?.acceptanceCriteria.join("\n") ?? "",
+  );
+  const [leaseMinutes, setLeaseMinutes] = useState(
+    draft?.leaseMinutes ?? 180,
+  );
+  const [maxAutomaticTurns, setMaxAutomaticTurns] = useState(
+    draft?.maxAutomaticTurns ?? 12,
+  );
+  const [maxWorkers, setMaxWorkers] = useState(draft?.maxWorkers ?? 3);
+
+  useEffect(() => {
+    if (!draft) return;
+    setTitle(draft.title);
+    setObjective(draft.objective);
+    setCriteria(draft.acceptanceCriteria.join("\n"));
+    setLeaseMinutes(draft.leaseMinutes);
+    setMaxAutomaticTurns(draft.maxAutomaticTurns);
+    setMaxWorkers(draft.maxWorkers);
+  }, [draftSignature]);
+
+  const input = useMemo(
+    () => ({
+      draftId,
+      title,
+      objective,
+      acceptanceCriteria: criteria
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean),
+      leaseMinutes,
+      maxAutomaticTurns,
+      maxWorkers,
+    }),
+    [
+      criteria,
+      draftId,
+      leaseMinutes,
+      maxAutomaticTurns,
+      maxWorkers,
+      objective,
+      title,
+    ],
+  );
+
+  const save = useCallback(async () => {
+    if (!draftId) return false;
+    setPending("save");
+    setError(null);
+    try {
+      await invokeAction("update-draft", input);
+      setEditing(false);
+      return true;
+    } catch (reason) {
+      setError(friendlyError(reason));
+      return false;
+    } finally {
+      setPending(null);
+    }
+  }, [draftId, input, invokeAction]);
+
+  const start = useCallback(async () => {
+    if (!draftId) return;
+    setPending("start");
+    setError(null);
+    try {
+      await invokeAction("update-draft", input);
+      await invokeAction("start-draft", { draftId });
+      setEditing(false);
+      setStarted(true);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    } finally {
+      setPending(null);
+    }
+  }, [draftId, input, invokeAction]);
+
+  if (!draftId) return null;
+  if (started || (!draft && published)) {
+    return (
+      <Card className="border-success bg-success-muted">
+        <CardContent className="flex items-center gap-2 py-4 text-[length:var(--fd-text-sm)] text-success">
+          <span aria-hidden="true">✓</span>
+          Mission started. This task is now the coordinator.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="border-border-emphasis bg-surface-2 shadow-[var(--fd-shadow-md)]">
+      <CardHeader className="gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-accent">
+              Mission draft ready
+            </p>
+            <CardTitle className="mt-1 text-[length:var(--fd-text-base)]">
+              {title || draft?.title || "Untitled mission"}
+            </CardTitle>
+          </div>
+          <Badge variant="warning">Needs your approval</Badge>
+        </div>
+        {!editing ? (
+          <>
+            <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+              {objective || draft?.objective}
+            </p>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              <span>{formatDuration(leaseMinutes)}</span>
+              <span>{maxAutomaticTurns} coordinator turns</span>
+              <span>{maxWorkers} workers</span>
+              <span>{input.acceptanceCriteria.length} acceptance criteria</span>
+            </div>
+          </>
+        ) : null}
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {editing ? (
+          <div className="space-y-3">
+            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+              <span>Title</span>
+              <input
+                value={title}
+                maxLength={120}
+                onChange={(event) => setTitle(event.target.value)}
+                className="fd-focus h-9 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
+              />
+            </label>
+            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+              <span>Objective</span>
+              <textarea
+                value={objective}
+                rows={4}
+                maxLength={12_000}
+                onChange={(event) => setObjective(event.target.value)}
+                className="fd-focus w-full resize-y rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-primary"
+              />
+            </label>
+            <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+              <span>Acceptance criteria · one per line</span>
+              <textarea
+                value={criteria}
+                rows={4}
+                onChange={(event) => setCriteria(event.target.value)}
+                className="fd-focus w-full resize-y rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-primary"
+              />
+            </label>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <NumberField
+                label="Time limit (minutes)"
+                value={leaseMinutes}
+                minimum={15}
+                maximum={1_440}
+                onChange={setLeaseMinutes}
+              />
+              <NumberField
+                label="Coordinator turns"
+                value={maxAutomaticTurns}
+                minimum={1}
+                maximum={24}
+                onChange={setMaxAutomaticTurns}
+              />
+              <NumberField
+                label="Workers"
+                value={maxWorkers}
+                minimum={0}
+                maximum={4}
+                onChange={setMaxWorkers}
+              />
+            </div>
+          </div>
+        ) : null}
+        {error ? (
+          <p role="alert" className="text-[length:var(--fd-text-xs)] text-danger">
+            {error}
+          </p>
+        ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border-default pt-4">
+          {editing ? (
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={pending !== null}
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pending !== null}
+                onClick={() => void save()}
+              >
+                {pending === "save" ? "Saving…" : "Save draft"}
+              </Button>
+            </>
+          ) : (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!draft || pending !== null}
+              onClick={() => setEditing(true)}
+            >
+              Review and edit
+            </Button>
+          )}
+          <Button
+            size="sm"
+            disabled={!draft || pending !== null}
+            onClick={() => void start()}
+          >
+            {pending === "start" ? "Starting…" : "Start mission"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  minimum,
+  maximum,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  minimum: number;
+  maximum: number;
+  onChange(value: number): void;
+}) {
+  return (
+    <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+      <span>{label}</span>
+      <input
+        type="number"
+        min={minimum}
+        max={maximum}
+        step={1}
+        value={value}
+        onChange={(event) => {
+          if (!Number.isNaN(event.target.valueAsNumber)) {
+            onChange(event.target.valueAsNumber);
+          }
+        }}
+        className="fd-focus h-9 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] tabular-nums text-fg-primary"
+      />
+    </label>
+  );
+}
+
 export default defineExtensionApp("falcondeck.missions", (app) => {
   app.panels.register({
     id: "missions",
     title: "Missions",
     icon: "activity",
     component: MissionDashboard,
+  });
+  app.agentToolResults.register({
+    toolId: "draft-mission",
+    component: MissionDraftToolResult,
   });
 });

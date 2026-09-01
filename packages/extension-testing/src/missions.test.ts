@@ -7,6 +7,7 @@ import { createExtensionTestHost } from "./index";
 const actions = [
   "refresh-missions",
   "start-draft",
+  "update-draft",
   "adopt-task",
   "pause-run",
   "resume-run",
@@ -117,10 +118,25 @@ describe("official Missions extension", () => {
         title: "Ship the feature",
         objective: "Implement and verify the feature",
         acceptanceCriteria: ["Focused tests pass"],
+        leaseMinutes: 180,
+        maxAutomaticTurns: 18,
+        maxWorkers: 4,
       },
     });
     expect(drafted.orchestrationEffects).toEqual([]);
     const draftId = (drafted.result as { draftId: string }).draftId;
+
+    await testHost.invokeAction("update-draft", {
+      input: {
+        draftId,
+        title: "Ship the verified feature",
+        objective: "Implement, test, and verify the feature",
+        acceptanceCriteria: ["Focused tests pass", "Evidence is reported"],
+        leaseMinutes: 240,
+        maxAutomaticTurns: 16,
+        maxWorkers: 2,
+      },
+    });
 
     const started = await testHost.invokeAction("start-draft", {
       input: { draftId },
@@ -130,6 +146,10 @@ describe("official Missions extension", () => {
         type: "create_run",
         workspaceId: "workspace-1",
         coordinatorThreadId: "thread-1",
+        title: "Ship the verified feature",
+        leaseMinutes: 240,
+        maxAutomaticTurns: 16,
+        maxWorkers: 2,
       }),
     ]);
     expect(testHost.storageSnapshot()).toEqual({

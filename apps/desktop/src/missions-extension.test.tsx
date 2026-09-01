@@ -53,7 +53,10 @@ const panelState: MissionPanelState = {
       threadId: "thread-2",
       title: "Review the release",
       objective: "Check the completed release against its acceptance criteria.",
-      acceptanceCriteriaCount: 2,
+      acceptanceCriteria: ["Review the code", "Report concrete evidence"],
+      leaseMinutes: 180,
+      maxAutomaticTurns: 12,
+      maxWorkers: 3,
       createdAt: "2026-08-31T12:00:00.000Z",
     },
   ],
@@ -103,6 +106,7 @@ describe("Missions trusted frontend", () => {
     const registration = collectExtensionApp(missionsApp);
     expect(registration.extensionId).toBe("falcondeck.missions");
     expect(registration.panels[0]!.title).toBe("Missions");
+    expect(registration.agentToolResults[0]!.toolId).toBe("draft-mission");
   });
 
   it("fails closed instead of silently hiding malformed mission entries", () => {
@@ -208,5 +212,52 @@ describe("Missions trusted frontend", () => {
         expectedPolicyRevision: 3,
       }),
     );
+  });
+
+  it("reviews, edits, and starts a draft from the agent-tool result", async () => {
+    const registration = collectExtensionApp(missionsApp).agentToolResults[0]!;
+    const Component = registration.component;
+    const invokeAction = vi.fn(async (actionId: string) => ({
+      result: { updated: true },
+      updatedViews: actionId === "start-draft" ? [] : response().updatedViews,
+    }));
+    render(
+      <Component
+        extensionId="falcondeck.missions"
+        toolId="draft-mission"
+        arguments={{}}
+        result={{
+          ok: true,
+          result: { draftId: "draft-1", status: "awaiting_human_start" },
+        }}
+        views={response().updatedViews}
+        invokeAction={invokeAction}
+      />,
+    );
+
+    expect(screen.getByText("Mission draft ready")).toBeVisible();
+    expect(screen.getByText("3 hr")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Review and edit" }));
+    fireEvent.change(screen.getByLabelText("Coordinator turns"), {
+      target: { value: "18" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start mission" }));
+
+    await waitFor(() => {
+      expect(invokeAction).toHaveBeenNthCalledWith(
+        1,
+        "update-draft",
+        expect.objectContaining({
+          draftId: "draft-1",
+          leaseMinutes: 180,
+          maxAutomaticTurns: 18,
+          maxWorkers: 3,
+        }),
+      );
+      expect(invokeAction).toHaveBeenNthCalledWith(2, "start-draft", {
+        draftId: "draft-1",
+      });
+    });
+    expect(screen.getByText(/Mission started/)).toBeVisible();
   });
 });

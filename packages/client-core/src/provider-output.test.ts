@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatDurationMs,
+  extensionToolResultIdentity,
   guardianReviewPresentation,
   imageInputLabel,
   inspectMcpResult,
@@ -15,6 +16,22 @@ import {
 } from "./provider-output";
 
 describe("parseMcpResult", () => {
+  it("identifies FalconDeck extension-tool results without parsing tool names", () => {
+    expect(
+      extensionToolResultIdentity({
+        _meta: {
+          "falcondeck/extensionTool": {
+            extensionId: "falcondeck.missions",
+            toolId: "draft-mission",
+          },
+        },
+      }),
+    ).toEqual({
+      extensionId: "falcondeck.missions",
+      toolId: "draft-mission",
+    });
+    expect(extensionToolResultIdentity({ _meta: { trace: "abc" } })).toBeNull();
+  });
   it("reuses the parsed view of an immutable provider result", () => {
     const result = {
       content: [

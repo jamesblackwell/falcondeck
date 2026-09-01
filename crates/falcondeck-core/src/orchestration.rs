@@ -11,14 +11,22 @@ use serde_json::Value;
 
 use crate::AgentProvider;
 
+/// Default automatic provider-turn budget for a new run.
+pub const DEFAULT_AUTOMATIC_TURNS: u32 = 12;
 /// Maximum automatic provider turns admitted by a v1 run.
-pub const MAX_AUTOMATIC_TURNS: u32 = 4;
+pub const MAX_AUTOMATIC_TURNS: u32 = 24;
+/// Default one-turn worker-task budget for a new run.
+pub const DEFAULT_MANAGED_WORKERS: u32 = 3;
 /// Maximum one-turn worker tasks a run may create.
-pub const MAX_MANAGED_WORKERS: u32 = 3;
-/// Initial v1 lease duration in minutes.
-pub const DEFAULT_LEASE_MINUTES: i64 = 30;
+pub const MAX_MANAGED_WORKERS: u32 = 4;
+/// Default initial lease duration in minutes.
+pub const DEFAULT_LEASE_MINUTES: i64 = 180;
+/// Smallest initial lease accepted for a run.
+pub const MIN_LEASE_MINUTES: i64 = 15;
+/// Minutes added by one explicit human extension.
+pub const LEASE_EXTENSION_MINUTES: i64 = 60;
 /// Maximum cumulative lease duration after human extensions.
-pub const MAX_LEASE_MINUTES: i64 = 120;
+pub const MAX_LEASE_MINUTES: i64 = 24 * 60;
 /// Maximum bytes in an inline automatic-turn prompt.
 pub const MAX_OPERATION_PROMPT_BYTES: usize = 32 * 1024;
 /// Maximum bytes in an extension-owned checkpoint.
@@ -254,7 +262,19 @@ pub struct ExtensionRunSummary {
 }
 
 fn default_max_managed_workers() -> u32 {
-    MAX_MANAGED_WORKERS
+    DEFAULT_MANAGED_WORKERS
+}
+
+fn default_automatic_turns() -> u32 {
+    DEFAULT_AUTOMATIC_TURNS
+}
+
+fn default_managed_workers() -> u32 {
+    DEFAULT_MANAGED_WORKERS
+}
+
+fn default_lease_minutes() -> i64 {
+    DEFAULT_LEASE_MINUTES
 }
 
 /// Human-only mutation exposed through an extension action.
@@ -265,7 +285,7 @@ pub enum ExtensionRunCommand {
     Pause,
     /// Reopen a paused gate without adding a turn by itself.
     Resume,
-    /// Add another 30 minutes, within the cumulative lease ceiling.
+    /// Add another hour, within the cumulative lease ceiling.
     Extend,
     /// Accept the owner's completion proposal and close successfully.
     AcceptCompletion,
@@ -295,6 +315,15 @@ pub enum ExtensionOrchestrationEffect {
         objective: String,
         /// Initial domain checkpoint.
         checkpoint: Value,
+        /// Human-approved automatic coordinator-turn budget.
+        #[serde(default = "default_automatic_turns")]
+        max_automatic_turns: u32,
+        /// Human-approved daemon-managed worker budget.
+        #[serde(default = "default_managed_workers")]
+        max_workers: u32,
+        /// Human-approved initial lease in minutes.
+        #[serde(default = "default_lease_minutes")]
+        lease_minutes: i64,
         /// First coordinator prompt. Its presence opens the gate and admits
         /// the first bounded turn; absence creates a paused draft run.
         #[serde(default)]

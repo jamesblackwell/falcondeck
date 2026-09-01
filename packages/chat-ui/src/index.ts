@@ -49,3 +49,4 @@ export * from "./components/extension-ui-renderer";
 export * from "./components/extension-sidebar-filters";
 export * from "./components/extension-panel";
 export * from "./components/extension-app-panel";
+export * from "./components/extension-agent-tool-results";

@@ -32,8 +32,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   and remote web, with an explicit mobile fallback;
 - optional trusted React frontend entries for bundled official extensions,
   built as lazy desktop/remote-web chunks with typed panel registrations,
-  action routing, thread navigation, permission-reduced props, and per-panel
-  crash containment;
+  agent-tool result registrations, action routing, thread navigation,
+  permission-reduced props, and per-contribution crash containment;
 - bounded, identifier-only lifecycle events delivered to disposable public-SDK
   subscriptions through independently supervised per-extension queues;
 - daemon-owned, denied-by-default `threads:read` grants, summary-only thread
@@ -259,8 +259,10 @@ unique permissions and currently recognizes `threads:read`,
 than run without enforcement.
 
 `panelActions`, `agentTools`, and `composerSuggestions` have no standalone
-client-rendered declarative UI of their own. Panel actions are referenced by a
-panel document; the other two bind agent tools and host-owned composer UI:
+client-rendered declarative UI of their own. Panel actions are the declared
+action allowlist for trusted extension frontend surfaces, including panels and
+registered agent-tool results; the other two bind agent tools and host-owned
+composer UI:
 
 ```json
 {
@@ -665,9 +667,13 @@ and admission count before committing it. The effect commits the opaque
 extension checkpoint and durable operation intent before provider dispatch;
 extension code never waits for a harness.
 
-The current slice supports one existing Claude or Codex coordinator task, an
-initial 30-minute lease, at most four automatic coordinator turns, one
-unresolved continuation, and at most three serial one-turn Codex workers.
+The current slice supports one existing Claude or Codex coordinator task, a
+human-reviewed 15-minute-to-24-hour lease, 1–24 automatic coordinator turns,
+one unresolved continuation, and 0–4 serial one-turn Codex workers. New drafts
+default to three hours, 12 turns, and three workers; these values are stored as
+structured policy and enforced by the daemon rather than inferred from prompt
+prose. A human may extend a run by one hour up to the 24-hour cumulative
+ceiling.
 Background dispatch uses an explicit safer execution profile and does not change current
 task selection or the workspace default provider. Repeated progress
 fingerprints, provider ambiguity, task errors, permission revocation, and
@@ -678,6 +684,17 @@ disabled with all grants denied by default. Worker tasks are ordinary visible
 FalconDeck tasks with durable Mission provenance; they cannot delegate, are
 never retried after an ambiguous admission, and their bounded reports return
 to the coordinator as untrusted input.
+
+Trusted extension frontends may register a renderer for one of their own
+manifest-declared `agentTools`. The bridge attaches non-model-authored
+extension/tool identity metadata to successful MCP results. Desktop and remote
+web then render the newest matching result at transcript level, even when the
+provider's ordinary work session is folded. The component receives only that
+extension's synchronized views and the existing permission-checked action
+route. It cannot approve itself: Missions uses the slot to show human-only
+Review/edit and Start controls for a draft. Mobile, older clients, disabled
+extensions, undeclared tools, and frontend failures retain the ordinary MCP
+result as a visible fallback.
 
 When Missions is enabled with all three grants, FalconDeck adds a short
 provider-neutral Mission trigger to the injected agent context and stages the
@@ -933,13 +950,15 @@ its panel through declarative UI v1. Before the grant it still renders an
 identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
 
-Progress (2026-08-30): the neutral orchestration facet, `panelActions`
+Progress (2026-09-01): the neutral orchestration facet, `panelActions`
 contribution point, durable run/operation/worker store, safe background task
 and turn paths, fake-host support, and bundled Missions reference are
 implemented. Desktop and remote web render Missions through the existing
-shared extension-panel and action routes; mobile retains the generic
-unsupported-panel fallback. Claude and unambiguous Codex tasks can coordinate;
-up to three serial Codex workers are supported. OpenCode coordinator identity,
+shared extension-panel and action routes, and may render extension-owned agent
+tool results inline with generic transcript fallback. Mission drafts carry the
+actual daemon-enforced lease, turn, and worker policy. Mobile retains the
+generic unsupported-panel/tool-result fallback. Claude and unambiguous Codex
+tasks can coordinate; up to four serial Codex workers are supported. OpenCode coordinator identity,
 parallel worker pools, automatic completion, worker follow-ups, and native
 harness delegation are not implemented.
 
