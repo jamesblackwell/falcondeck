@@ -11,7 +11,7 @@ function snapshot(
       {
         id: "falcondeck.missions",
         name: "Missions",
-        version: "0.5.0",
+        version: "0.6.0",
         source: "bundled",
         bundled: true,
         enabled: true,
@@ -28,8 +28,16 @@ function snapshot(
             },
           ],
         },
-        permissions: ["threads:read", "agent-tools:register"],
-        granted_permissions: ["threads:read", "agent-tools:register"],
+        permissions: [
+          "threads:read",
+          "agent-tools:register",
+          "automations:manage-owned",
+        ],
+        granted_permissions: [
+          "threads:read",
+          "agent-tools:register",
+          "automations:manage-owned",
+        ],
         ...overrides,
       },
     ],
@@ -38,7 +46,7 @@ function snapshot(
 }
 
 describe("missionCommandAvailable", () => {
-  it("requires an active extension with both Mission permissions", () => {
+  it("requires an active extension with all Mission permissions", () => {
     expect(missionCommandAvailable(snapshot())).toBe(true);
     expect(missionCommandAvailable(snapshot({ enabled: false }))).toBe(false);
     expect(missionCommandAvailable(snapshot({ status: "error" }))).toBe(false);

@@ -36,6 +36,13 @@ inspect the single returned `orchestrationEffects` reduction. The fake host
 mirrors denial, revocation, JSON isolation, and the one-effect-per-callback
 limit; lifecycle events may not return orchestration effects.
 
+Pass `ownedAutomations` plus the `automations:manage-owned` grant to exercise
+the generic owner-only Automation projection and inspect the single returned
+`automationEffects` request. Tool invocations may include
+`automationOwnerResourceId` as daemon-trusted provenance for a task created by
+that extension's Automation. Lifecycle events may refresh projections but may
+not return Automation effects.
+
 `publishedViewSnapshot` exposes the latest successfully committed projection
 per view and scope. The fake boundary also enforces the daemon's per-view,
 retained-view-state, publication-count, action-input, storage, scope, and host

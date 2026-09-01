@@ -47,8 +47,24 @@ export type MissionPanelThread = MissionThreadLink & {
   status: string;
 };
 
+export type MissionPanelAutomation = {
+  id: string;
+  revision: number;
+  name: string;
+  state: "enabled" | "paused" | "completed" | "failed";
+  provider: string;
+  resolvedSchedule: string;
+  nextRunAt?: string;
+  latestOutcome?: {
+    status: string;
+    finishedAt: string;
+    preview?: string;
+  };
+};
+
 export type MissionPanelEntry = Omit<Mission, "threads"> & {
   threads: MissionPanelThread[];
+  automations: MissionPanelAutomation[];
 };
 
 export type MissionPanelState = {
@@ -132,6 +148,62 @@ function parseUpdate(value: unknown): MissionUpdate | null {
   };
 }
 
+function parseAutomation(value: unknown): MissionPanelAutomation | null {
+  const automation = record(value);
+  if (
+    !automation ||
+    typeof automation.id !== "string" ||
+    typeof automation.revision !== "number" ||
+    !Number.isSafeInteger(automation.revision) ||
+    automation.revision < 1 ||
+    typeof automation.name !== "string" ||
+    !["enabled", "paused", "completed", "failed"].includes(
+      String(automation.state),
+    ) ||
+    typeof automation.provider !== "string" ||
+    typeof automation.resolvedSchedule !== "string" ||
+    (automation.nextRunAt !== undefined &&
+      typeof automation.nextRunAt !== "string")
+  ) {
+    return null;
+  }
+  const latest =
+    automation.latestOutcome === undefined
+      ? null
+      : record(automation.latestOutcome);
+  if (
+    automation.latestOutcome !== undefined &&
+    (!latest ||
+      typeof latest.status !== "string" ||
+      typeof latest.finishedAt !== "string" ||
+      (latest.preview !== undefined && typeof latest.preview !== "string"))
+  ) {
+    return null;
+  }
+  return {
+    id: automation.id,
+    revision: automation.revision,
+    name: automation.name,
+    state: automation.state as MissionPanelAutomation["state"],
+    provider: automation.provider,
+    resolvedSchedule: automation.resolvedSchedule,
+    ...(typeof automation.nextRunAt === "string"
+      ? { nextRunAt: automation.nextRunAt }
+      : {}),
+    ...(latest
+      ? {
+          latestOutcome: {
+            status: latest.status as string,
+            finishedAt: latest.finishedAt as string,
+            ...(typeof latest.preview === "string"
+              ? { preview: latest.preview }
+              : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 function parseMission(value: unknown): MissionPanelEntry | null {
   const mission = record(value);
   if (
@@ -144,6 +216,7 @@ function parseMission(value: unknown): MissionPanelEntry | null {
     !MISSION_STATUSES.has(mission.status as MissionStatus) ||
     (mission.deadline !== undefined && typeof mission.deadline !== "string") ||
     !Array.isArray(mission.threads) ||
+    !Array.isArray(mission.automations) ||
     !Array.isArray(mission.updates) ||
     typeof mission.createdAt !== "string" ||
     typeof mission.updatedAt !== "string"
@@ -152,9 +225,11 @@ function parseMission(value: unknown): MissionPanelEntry | null {
   }
   const threads = mission.threads.map(parseThread);
   const updates = mission.updates.map(parseUpdate);
+  const automations = mission.automations.map(parseAutomation);
   if (
     threads.some((item) => item === null) ||
-    updates.some((item) => item === null)
+    updates.some((item) => item === null) ||
+    automations.some((item) => item === null)
   ) {
     return null;
   }
@@ -168,6 +243,7 @@ function parseMission(value: unknown): MissionPanelEntry | null {
       ? { deadline: mission.deadline }
       : {}),
     threads: threads as MissionPanelThread[],
+    automations: automations as MissionPanelAutomation[],
     updates: updates as MissionUpdate[],
     createdAt: mission.createdAt,
     updatedAt: mission.updatedAt,

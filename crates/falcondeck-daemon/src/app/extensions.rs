@@ -48,11 +48,14 @@ pub(super) const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 pub(super) const THREADS_READ_PERMISSION: &str = "threads:read";
 /// Lets an extension publish manifest-declared tools to agent harnesses.
 pub(super) const AGENT_TOOLS_PERMISSION: &str = "agent-tools:register";
+/// Lets an extension create and manage only Automations carrying its owner id.
+pub(super) const AUTOMATIONS_PERMISSION: &str = "automations:manage-owned";
 /// Lets an extension own bounded daemon-dispatched runs in adopted tasks.
 pub(super) const ORCHESTRATION_PERMISSION: &str = "orchestration:manage-owned-tasks";
 const SUPPORTED_PERMISSIONS: &[&str] = &[
     THREADS_READ_PERMISSION,
     AGENT_TOOLS_PERMISSION,
+    AUTOMATIONS_PERMISSION,
     ORCHESTRATION_PERMISSION,
 ];
 /// Clients qualify MCP tools as `{server}__{name}`. A `__` inside `name`

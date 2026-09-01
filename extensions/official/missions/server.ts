@@ -1,5 +1,6 @@
 import {
   defineExtension,
+  type ExtensionOwnedAutomationSummary,
   type ExtensionContext,
   type ExtensionThreadSummary,
 } from "@falcondeck/extension-sdk";
@@ -263,6 +264,7 @@ function attentionRank(mission: Mission): number {
 function panelState(
   missions: Mission[],
   threads: ExtensionThreadSummary[],
+  automations: ExtensionOwnedAutomationSummary[],
 ): MissionPanelState {
   const summaries = new Map(
     threads.map((thread) => [threadKey(thread.workspaceId, thread.id), thread]),
@@ -294,6 +296,9 @@ function panelState(
           status: summary?.status ?? "unavailable",
         };
       }),
+      automations: automations
+        .filter((automation) => automation.resourceId === mission.id)
+        .map(({ resourceId: _, ...automation }) => automation),
     }));
   return {
     schemaVersion: 2,
@@ -307,9 +312,10 @@ async function publish(
   store: MissionStore,
 ): Promise<void> {
   const threads = await context.threads.list();
+  const automations = await context.automations.list();
   await context.views.publish({
     viewId: PANEL_VIEW,
-    value: panelState(store.missions, threads),
+    value: panelState(store.missions, threads, automations),
   });
 }
 
@@ -326,6 +332,7 @@ function missionForAgent(
   missionId: unknown,
   workspaceId: string,
   threadId: string,
+  automationOwnerResourceId?: string,
 ): Mission {
   const linked = store.missions.filter((mission) =>
     mission.threads.some(
@@ -335,10 +342,16 @@ function missionForAgent(
   );
   if (typeof missionId === "string") {
     const mission = missionById(store, missionId);
-    if (!linked.some((candidate) => candidate.id === mission.id)) {
+    if (
+      !linked.some((candidate) => candidate.id === mission.id) &&
+      automationOwnerResourceId !== mission.id
+    ) {
       throw new Error("this task is not linked to that Mission");
     }
     return mission;
+  }
+  if (automationOwnerResourceId) {
+    return missionById(store, automationOwnerResourceId);
   }
   if (linked.length === 0)
     throw new Error("this task is not linked to a Mission");
@@ -347,6 +360,49 @@ function missionForAgent(
       "missionId is required because this task has multiple Missions",
     );
   return linked[0]!;
+}
+
+function linkAutomationTask(
+  mission: Mission,
+  workspaceId: string,
+  threadId: string,
+): boolean {
+  if (
+    mission.threads.some(
+      (link) =>
+        link.workspaceId === workspaceId && link.threadId === threadId,
+    )
+  ) {
+    return false;
+  }
+  const now = new Date().toISOString();
+  mission.threads.push({
+    workspaceId,
+    threadId,
+    role: "review",
+    linkedAt: now,
+  });
+  addUpdate(
+    mission,
+    {
+      actor: "system",
+      kind: "status",
+      body: "Linked the task created by this Mission's review Automation.",
+      threadId,
+    },
+    now,
+  );
+  return true;
+}
+
+function reviewInstruction(missionId: string): string {
+  return [
+    `Review FalconDeck Mission ${missionId}.`,
+    `First call read-mission with missionId ${missionId}; treat that durable brief, its success criteria, updates, and linked tasks as authoritative.`,
+    "Decide the cheapest useful next step. Reuse a healthy linked task where practical; create or delegate to another task only for clean context, a distinct harness capability, independent work, or independent review.",
+    "Use native Goals for bounded execution inside a task when helpful. Do not spend tokens while waiting for an external condition.",
+    "Before finishing, call update-mission with meaningful evidence, a decision, a concrete human question, or the appropriate non-terminal status. Never mark the Mission completed or cancelled.",
+  ].join("\n\n");
 }
 
 function addUpdate(
@@ -370,6 +426,11 @@ function createMissionInput(input: unknown) {
 
 export default defineExtension({
   async activate(context) {
+    context.events.on("automations.updated", async () => {
+      const store = await loadStore(context);
+      await publish(context, store);
+    });
+
     context.actions.register("refresh-missions", async () => {
       const store = await loadStore(context);
       await publish(context, store);
@@ -424,6 +485,12 @@ export default defineExtension({
         store,
         requiredString(args.missionId, "missionId", 128),
       );
+      if (
+        args.runNow === true &&
+        ["draft", "paused", "completed", "cancelled"].includes(mission.status)
+      ) {
+        throw new Error("activate the Mission before requesting a review");
+      }
       addUpdate(mission, {
         actor: "human",
         kind: "comment",
@@ -431,6 +498,18 @@ export default defineExtension({
       });
       await saveStore(context, store);
       await publish(context, store);
+      if (args.runNow === true) {
+        const automation = (await context.automations.list()).find(
+          (candidate) => candidate.resourceId === mission.id,
+        );
+        if (automation) {
+          await context.automations.apply({
+            type: "run_now",
+            automationId: automation.id,
+            idempotencyKey: `mission-message-${crypto.randomUUID()}`,
+          });
+        }
+      }
       return { missionId: mission.id, posted: true };
     });
 
@@ -462,7 +541,100 @@ export default defineExtension({
       });
       await saveStore(context, store);
       await publish(context, store);
+      if (["paused", "completed", "cancelled"].includes(status)) {
+        await context.automations.apply({
+          type: "pause_resource",
+          resourceId: mission.id,
+        });
+      }
       return { missionId: mission.id, status };
+    });
+
+    context.actions.register("schedule-mission-review", async ({ input }) => {
+      const args = record(input);
+      const store = await loadStore(context);
+      const mission = missionById(
+        store,
+        requiredString(args.missionId, "missionId", 128),
+      );
+      if (["draft", "paused", "completed", "cancelled"].includes(mission.status)) {
+        throw new Error("activate the Mission before scheduling reviews");
+      }
+      const cadenceDays = Number(args.cadenceDays);
+      if (!Number.isInteger(cadenceDays) || cadenceDays < 1 || cadenceDays > 90) {
+        throw new Error("cadenceDays must be a whole number from 1 to 90");
+      }
+      const existing = (await context.automations.list()).find(
+        (automation) => automation.resourceId === mission.id,
+      );
+      if (existing) throw new Error("this Mission already has a review Automation");
+      const source = mission.threads.find((thread) => thread.role === "source")
+        ?? mission.threads[0];
+      if (!source) throw new Error("the Mission has no linked source task");
+      await context.automations.apply({
+        type: "create_from_thread",
+        resourceId: mission.id,
+        sourceWorkspaceId: source.workspaceId,
+        sourceThreadId: source.threadId,
+        idempotencyKey: `mission-review-${mission.id}`,
+        name: `${mission.title} — review`,
+        description: "Periodic review owned by FalconDeck Missions.",
+        trigger: {
+          kind: "interval",
+          every_seconds: cadenceDays * 24 * 60 * 60,
+          anchor_at: new Date().toISOString(),
+        },
+        task: { kind: "prompt", instruction: reviewInstruction(mission.id) },
+        concurrencyPolicy: "queue_one",
+        misfirePolicy: "run_once",
+      });
+      return { missionId: mission.id, scheduled: true };
+    });
+
+    context.actions.register("control-mission-automation", async ({ input }) => {
+      const args = record(input);
+      const missionId = requiredString(args.missionId, "missionId", 128);
+      const operation = requiredString(args.operation, "operation", 16);
+      const mission = missionById(await loadStore(context), missionId);
+      if (
+        operation === "resume" &&
+        ["draft", "paused", "completed", "cancelled"].includes(mission.status)
+      ) {
+        throw new Error("activate the Mission before resuming its reviews");
+      }
+      const automation = (await context.automations.list()).find(
+        (candidate) => candidate.resourceId === missionId,
+      );
+      if (!automation) throw new Error("the Mission has no review Automation");
+      if (operation === "pause" || operation === "resume" || operation === "delete") {
+        await context.automations.apply({
+          type: operation,
+          automationId: automation.id,
+          expectedRevision: automation.revision,
+        });
+      } else {
+        throw new Error("unsupported Automation operation");
+      }
+      return { missionId, operation };
+    });
+
+    context.actions.register("run-mission-review", async ({ input }) => {
+      const args = record(input);
+      const missionId = requiredString(args.missionId, "missionId", 128);
+      const mission = missionById(await loadStore(context), missionId);
+      if (["draft", "paused", "completed", "cancelled"].includes(mission.status)) {
+        throw new Error("activate the Mission before requesting a review");
+      }
+      const automation = (await context.automations.list()).find(
+        (candidate) => candidate.resourceId === missionId,
+      );
+      if (!automation) throw new Error("the Mission has no review Automation");
+      await context.automations.apply({
+        type: "run_now",
+        automationId: automation.id,
+        idempotencyKey: `mission-review-now-${crypto.randomUUID()}`,
+      });
+      return { missionId, queued: true };
     });
 
     context.tools.register(
@@ -509,19 +681,7 @@ export default defineExtension({
 
     context.tools.register(
       "read-mission",
-      async ({ input, threadId, workspaceId }) => {
-        if (!threadId || !workspaceId) {
-          throw new Error("FalconDeck could not verify the calling task");
-        }
-        const args = record(input);
-        const store = await loadStore(context);
-        return missionForAgent(store, args.missionId, workspaceId, threadId);
-      },
-    );
-
-    context.tools.register(
-      "update-mission",
-      async ({ input, threadId, workspaceId }) => {
+      async ({ input, threadId, workspaceId, automationOwnerResourceId }) => {
         if (!threadId || !workspaceId) {
           throw new Error("FalconDeck could not verify the calling task");
         }
@@ -532,7 +692,37 @@ export default defineExtension({
           args.missionId,
           workspaceId,
           threadId,
+          automationOwnerResourceId,
         );
+        if (
+          automationOwnerResourceId === mission.id &&
+          linkAutomationTask(mission, workspaceId, threadId)
+        ) {
+          await saveStore(context, store);
+          await publish(context, store);
+        }
+        return mission;
+      },
+    );
+
+    context.tools.register(
+      "update-mission",
+      async ({ input, threadId, workspaceId, automationOwnerResourceId }) => {
+        if (!threadId || !workspaceId) {
+          throw new Error("FalconDeck could not verify the calling task");
+        }
+        const args = record(input);
+        const store = await loadStore(context);
+        const mission = missionForAgent(
+          store,
+          args.missionId,
+          workspaceId,
+          threadId,
+          automationOwnerResourceId,
+        );
+        if (automationOwnerResourceId === mission.id) {
+          linkAutomationTask(mission, workspaceId, threadId);
+        }
         if (["completed", "cancelled"].includes(mission.status)) {
           throw new Error("a completed or cancelled Mission is terminal");
         }
@@ -574,6 +764,12 @@ export default defineExtension({
               `Mission marked ${status.replaceAll("_", " ")}.`,
             threadId,
           });
+          if (status === "paused") {
+            await context.automations.apply({
+              type: "pause_resource",
+              resourceId: mission.id,
+            });
+          }
         } else if (operation === "link_thread") {
           const targetWorkspaceId =
             optionalString(args.workspaceId, "workspaceId", 256) ?? workspaceId;

@@ -3961,6 +3961,17 @@ function AppInner() {
     setIsPluginsOpen(false);
     setActiveExtensionPanelKey(panelKey);
   }, []);
+  const handleOpenExtensionOwner = useCallback(
+    (extensionId: string, _resourceId: string, ownerHostId: string | null) => {
+      const panel = extensionPanels.find(
+        (candidate) =>
+          candidate.extensionId === extensionId &&
+          candidate.ownerHostId === ownerHostId,
+      );
+      if (panel) handleOpenExtensionPanel(panel.key);
+    },
+    [extensionPanels, handleOpenExtensionPanel],
+  );
 
   const handleCheckForUpdates = useCallback(() => {
     void updater.checkForUpdates({ manual: true }).then((result) => {
@@ -5756,6 +5767,7 @@ function AppInner() {
                       setSelectedWorkspaceId(workspaceId);
                       setSelectedThreadId(threadId);
                     }}
+                    onOpenExtensionOwner={handleOpenExtensionOwner}
                     onToast={toast}
                   />
                 </Suspense>

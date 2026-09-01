@@ -77,7 +77,7 @@
     "permissions": {
       "type": "array",
       "maxItems": 16,
-      "items": { "enum": ["threads:read", "agent-tools:register", "orchestration:manage-owned-tasks"] },
+      "items": { "enum": ["threads:read", "agent-tools:register", "automations:manage-owned", "orchestration:manage-owned-tasks"] },
       "uniqueItems": true
     }
   },

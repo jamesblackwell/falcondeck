@@ -346,6 +346,7 @@ pub fn decode_cursor(cursor: &str) -> Option<(String, String)> {
 pub const DEFAULT_AUTOMATION_LIST_FIELDS: &[&str] = &[
     "id",
     "revision",
+    "owner",
     "name",
     "state",
     "trigger",

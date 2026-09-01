@@ -62,14 +62,18 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   by the bounded Missions v1 experiment. This facet is now legacy: Missions v2
   stores a durable project brief through ordinary extension storage and agent
   tools, while future wake-ups reuse the existing Automation service;
+- generic extension-owned Automations through `automations:manage-owned`:
+  owner-scoped projections and mutations reuse Agent Control validation,
+  persistence, scheduling, dispatch, and run history without exposing another
+  extension's or a user's standalone Automations;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
 third-party trusted-frontend building or loading,
-permissions beyond summary-only `threads:read`, `agent-tools:register`, and the
-legacy `orchestration:manage-owned-tasks`, including the planned generic
-`automations:manage-owned`,
+permissions beyond summary-only `threads:read`, `agent-tools:register`,
+`automations:manage-owned`, and the legacy
+`orchestration:manage-owned-tasks`,
 direct shell execution from an extension tool, trusted extension frontends for
 third parties, persistent suggestion dismissals, Ask User Question, more than
 one visible suggestion pill, the remaining declarative form
@@ -218,9 +222,9 @@ Initial policy:
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
 - `falcondeck.missions`: bundled and disabled by default. Missions v2 requests
-  `threads:read` and `agent-tools:register`; both remain denied until the user
-  grants them. The legacy orchestration permission remains supported only while
-  old v1 runs are migrated and retired.
+  `threads:read`, `agent-tools:register`, and `automations:manage-owned`; all
+  remain denied until the user grants them. The legacy orchestration permission
+  remains supported only while old v1 runs are migrated and retired.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
@@ -325,7 +329,8 @@ export default defineExtension({
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
 `storage`, `views`, `actions`, identifier-only `events`, the permission-gated
 `threads` summary reader, agent `tools`, `composer`, and the bounded owner-only
-legacy `orchestration` reducer. The remaining rows are planned capabilities:
+`automations` reducer. The bounded `orchestration` reducer is legacy. The
+remaining rows are planned capabilities:
 
 | Facet           | Purpose                                                           |
 | --------------- | ----------------------------------------------------------------- |
@@ -339,7 +344,7 @@ legacy `orchestration` reducer. The remaining rows are planned capabilities:
 | `tools`         | Handle agent tool calls with an `agent-tools:register` grant      |
 | `composer`      | Publish or clear a thread's bounded next-action offers            |
 | `orchestration` | Legacy: read owned bounded runs and return one effect             |
-| `automations`   | Planned: manage only Automation resources owned by this extension |
+| `automations`   | Manage only Automation resources owned by this extension          |
 | `commands`      | Planned: slash or command-palette commands                        |
 
 Later facets may add schedules, notifications, turn control, workspace files,
@@ -671,7 +676,7 @@ extension should adopt this facet. It remains implemented only until old runs
 are migrated without automatic resumption, after which its types, permission,
 journal, dispatcher, and Mission-specific task origin are removed.
 
-The replacement capability is the planned `automations:manage-owned` facet.
+The replacement capability is the shipped `automations:manage-owned` facet.
 It mediates the existing Agent Control service rather than introducing another
 scheduler. An Automation may carry an opaque `{ extensionId, resourceId }`
 owner. The callback receives only Automations owned by itself and may manage
@@ -679,6 +684,14 @@ only those resources; ordinary Automation revisions, validation, elevated
 authority settings, history, idempotency, and dispatch remain authoritative.
 `falcondeck.missions` is the reference consumer described in
 `docs/MISSIONS.md`.
+
+An extension creates an owned Automation from a daemon-verified existing task.
+FalconDeck copies that task's workspace, provider, model, permission, sandbox,
+and related execution settings into the Automation target; an extension cannot
+invent a more privileged target. When the Automation later starts a native
+task, the daemon supplies the matching opaque owner resource as trusted tool
+provenance. This lets that task read or update the owning resource without
+trusting a resource id supplied by the model.
 
 Trusted extension frontends may register a renderer for one of their own
 manifest-declared `agentTools`. The bridge attaches non-model-authored
@@ -953,9 +966,11 @@ implemented. Product testing showed that its permanent coordinator, 24-hour
 ceiling, turn/worker counters, and duplicate runtime model were the wrong
 abstraction for work lasting weeks or months. Missions v2 now uses ordinary
 extension storage and tools for a durable brief, status, update log, and linked
-tasks. The v1 orchestration facet is legacy migration input. The next generic
-extension capability is owner-scoped access to existing Automations; it will
-not add another scheduler or Mission-specific agent loop. See
+tasks. The v1 orchestration facet is legacy migration input. The generic
+`automations:manage-owned` capability now gives an extension owner-scoped
+access to existing Automations without adding another scheduler or a
+Mission-specific agent loop. Missions uses it for optional periodic reviews
+whose native tasks receive daemon-verified Mission provenance. See
 `docs/MISSIONS.md`.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen

@@ -26,6 +26,13 @@ function permissionPresentation(permission: string) {
         "Publishes this extension's declared tools to agents running in FalconDeck. Revoking removes them from the next agent session and fails any call in the meantime.",
     };
   }
+  if (permission === "automations:manage-owned") {
+    return {
+      title: "Manage owned automations",
+      description:
+        "Create and control scheduled agent check-ins that belong to this extension. It cannot change standalone automations or automations owned by another extension.",
+    };
+  }
   if (permission === "orchestration:manage-owned-tasks") {
     return {
       title: "Manage bounded agent tasks",

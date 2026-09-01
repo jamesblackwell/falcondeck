@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use falcondeck_core::control::{
-    AgentControlSettings, AuditResult, Automation, AutomationRun, AutomationRunStatus,
-    AutomationRunTrigger, AutomationState, ControlAuditEntry, ControlDomain, ControlErrorDetail,
-    ControlExecuteRequest, ControlExecuteResponse, ControlGetRequest, ControlGetResponse,
-    ControlOrigin, ControlRequestContext, ControlSearchRequest, ControlSearchResponse,
-    ControlStateChanged, FieldError,
+    AgentControlSettings, AuditResult, Automation, AutomationOwner, AutomationRun,
+    AutomationRunStatus, AutomationRunTrigger, AutomationState, ControlAuditEntry, ControlDomain,
+    ControlErrorDetail, ControlExecuteRequest, ControlExecuteResponse, ControlGetRequest,
+    ControlGetResponse, ControlOrigin, ControlRequestContext, ControlSearchRequest,
+    ControlSearchResponse, ControlStateChanged, ExtensionAutomationEffect,
+    ExtensionAutomationOutcomeSummary, ExtensionOwnedAutomationSummary, FieldError,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, Semaphore};
@@ -711,23 +712,23 @@ impl ControlService {
         match capability.id {
             ops::SETTINGS_UPDATE => self.update_settings(&request.arguments).await,
             ops::AUTOMATION_CREATE => {
-                self.create_automation(&request.arguments, deps, settings)
+                self.create_automation(&request.arguments, deps, settings, None)
                     .await
             }
-            ops::AUTOMATION_UPDATE => self.update_automation(request, deps, settings).await,
+            ops::AUTOMATION_UPDATE => self.update_automation(request, deps, settings, None).await,
             ops::AUTOMATION_PAUSE => {
-                self.set_automation_state(request, AutomationState::Paused)
+                self.set_automation_state(request, AutomationState::Paused, None)
                     .await
             }
             ops::AUTOMATION_RESUME => {
-                self.set_automation_state(request, AutomationState::Enabled)
+                self.set_automation_state(request, AutomationState::Enabled, None)
                     .await
             }
             ops::AUTOMATION_RUN_NOW => {
-                self.run_automation_now(&request.arguments, context.origin.clone())
+                self.run_automation_now(&request.arguments, context.origin.clone(), None)
                     .await
             }
-            ops::AUTOMATION_DELETE => self.delete_automation(request).await,
+            ops::AUTOMATION_DELETE => self.delete_automation(request, None).await,
             other => Err(ControlError::internal(format!(
                 "operation {other} is registered but not implemented"
             ))),
@@ -791,6 +792,7 @@ impl ControlService {
         arguments: &serde_json::Map<String, Value>,
         deps: &ControlDeps<'_>,
         settings: &AgentControlSettings,
+        owner: Option<AutomationOwner>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::CreateAutomationArgs = decode_arguments(arguments)?;
         automations::validate_definition(
@@ -814,6 +816,7 @@ impl ControlService {
         let automation = Automation {
             id: format!("automation-{}", Uuid::new_v4().simple()),
             revision: 1,
+            owner,
             name: args.name.trim().to_string(),
             description: args
                 .description
@@ -845,6 +848,7 @@ impl ControlService {
         request: &ControlExecuteRequest,
         deps: &ControlDeps<'_>,
         settings: &AgentControlSettings,
+        owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::UpdateAutomationArgs = decode_arguments(&request.arguments)?;
         if args.is_empty() {
@@ -853,6 +857,11 @@ impl ControlService {
             ));
         }
         require_revision(request)?;
+        let existing = self
+            .automation(&args.automation_id)
+            .await
+            .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+        ensure_automation_authority(&existing, owner_extension_id)?;
         // Deep validation runs against the proposed target — or the stored
         // one when only the connectors change — before mutating.
         if args.target.is_some() || args.required_connectors.is_some() {
@@ -943,9 +952,15 @@ impl ControlService {
         &self,
         request: &ControlExecuteRequest,
         target_state: AutomationState,
+        owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::AutomationRefArgs = decode_arguments(&request.arguments)?;
         require_revision(request)?;
+        let existing = self
+            .automation(&args.automation_id)
+            .await
+            .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+        ensure_automation_authority(&existing, owner_extension_id)?;
         let automation_id = args.automation_id.clone();
         self.mutate(move |state, now| {
             let automation = state
@@ -993,8 +1008,14 @@ impl ControlService {
         &self,
         arguments: &serde_json::Map<String, Value>,
         origin: ControlOrigin,
+        owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::AutomationRefArgs = decode_arguments(arguments)?;
+        let existing = self
+            .automation(&args.automation_id)
+            .await
+            .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+        ensure_automation_authority(&existing, owner_extension_id)?;
         let run = self
             .enqueue_run(&args.automation_id, None, RunSource::Manual { origin })
             .await?;
@@ -1006,9 +1027,15 @@ impl ControlService {
     async fn delete_automation(
         &self,
         request: &ControlExecuteRequest,
+        owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
         let args: registry::AutomationRefArgs = decode_arguments(&request.arguments)?;
         require_revision(request)?;
+        let existing = self
+            .automation(&args.automation_id)
+            .await
+            .ok_or_else(|| ControlError::resource_not_found("automation", &args.automation_id))?;
+        ensure_automation_authority(&existing, owner_extension_id)?;
         let automation_id = args.automation_id.clone();
         let deleted_id = automation_id.clone();
         self.mutate(move |state, _now| {
@@ -1465,6 +1492,345 @@ impl ControlService {
         self.state.lock().await.settings.clone()
     }
 
+    /// Owner-only Automation projection for one extension host invocation.
+    pub async fn owned_automations(
+        &self,
+        extension_id: &str,
+    ) -> Vec<ExtensionOwnedAutomationSummary> {
+        let mut rows = self
+            .state
+            .lock()
+            .await
+            .automations
+            .iter()
+            .filter_map(|automation| {
+                let owner = automation.owner.as_ref()?;
+                (owner.extension_id == extension_id).then(|| ExtensionOwnedAutomationSummary {
+                    id: automation.id.clone(),
+                    resource_id: owner.resource_id.clone(),
+                    revision: automation.revision,
+                    name: automation.name.clone(),
+                    state: automation.state,
+                    provider: automation.target.provider.clone(),
+                    resolved_schedule: automations::schedule_summary(&automation.trigger),
+                    next_run_at: automation.next_run_at,
+                    latest_outcome: automation.latest_outcome.as_ref().map(|outcome| {
+                        ExtensionAutomationOutcomeSummary {
+                            status: outcome.status,
+                            finished_at: outcome.finished_at,
+                            preview: outcome.preview.clone(),
+                        }
+                    }),
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+        rows.truncate(256);
+        rows
+    }
+
+    /// Returns verified extension ownership for an Automation-created task.
+    pub async fn automation_owner(&self, automation_id: &str) -> Option<AutomationOwner> {
+        self.automation(automation_id)
+            .await
+            .and_then(|automation| automation.owner)
+    }
+
+    /// Applies one owner-scoped extension effect through the same validation,
+    /// persistence, revision and scheduler paths as ordinary Agent Control.
+    pub async fn apply_extension_automation_effect(
+        &self,
+        extension_id: &str,
+        effect: ExtensionAutomationEffect,
+        app: Option<&AppState>,
+    ) -> Result<Option<ControlStateChanged>, ControlError> {
+        let operation = match &effect {
+            ExtensionAutomationEffect::CreateFromThread { .. } => ops::AUTOMATION_CREATE,
+            ExtensionAutomationEffect::Update { .. } => ops::AUTOMATION_UPDATE,
+            ExtensionAutomationEffect::Pause { .. }
+            | ExtensionAutomationEffect::PauseResource { .. } => ops::AUTOMATION_PAUSE,
+            ExtensionAutomationEffect::Resume { .. } => ops::AUTOMATION_RESUME,
+            ExtensionAutomationEffect::RunNow { .. } => ops::AUTOMATION_RUN_NOW,
+            ExtensionAutomationEffect::Delete { .. } => ops::AUTOMATION_DELETE,
+        };
+        let mut audit_resource_id = match &effect {
+            ExtensionAutomationEffect::Update { automation_id, .. }
+            | ExtensionAutomationEffect::Pause { automation_id, .. }
+            | ExtensionAutomationEffect::Resume { automation_id, .. }
+            | ExtensionAutomationEffect::RunNow { automation_id, .. }
+            | ExtensionAutomationEffect::Delete { automation_id, .. } => {
+                Some(automation_id.clone())
+            }
+            _ => None,
+        };
+        let idempotency = match &effect {
+            ExtensionAutomationEffect::CreateFromThread {
+                idempotency_key, ..
+            } => Some((ops::AUTOMATION_CREATE, idempotency_key.as_str())),
+            ExtensionAutomationEffect::RunNow {
+                idempotency_key, ..
+            } => Some((ops::AUTOMATION_RUN_NOW, idempotency_key.as_str())),
+            _ => None,
+        };
+        let effect_arguments = serde_json::to_value(&effect)
+            .map_err(|error| ControlError::internal(error.to_string()))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| ControlError::internal("Automation effect was not an object"))?;
+        if let Some((_, key)) = idempotency {
+            let chars = key.chars().count();
+            if !(8..=128).contains(&chars) {
+                return Err(ControlError::field(
+                    "idempotencyKey",
+                    "idempotencyKey must be 8-128 characters",
+                ));
+            }
+        }
+        // Keep an owner-effect lookup, mutation, and record publication in one
+        // critical section so transport retries cannot enqueue twice.
+        let _idempotency_guard = if idempotency.is_some() {
+            Some(self.idempotent_execution.lock().await)
+        } else {
+            None
+        };
+        let idempotency_record = idempotency.map(|(operation, key)| {
+            (
+                format!("extension:{extension_id}|{operation}"),
+                key.to_string(),
+                arguments_hash(&effect_arguments),
+            )
+        });
+        if let Some((scope, key, arguments_hash)) = &idempotency_record {
+            let now = Utc::now();
+            let replay = self
+                .state
+                .lock()
+                .await
+                .idempotency_records
+                .iter()
+                .find(|record| {
+                    record.key == *key
+                        && record.scope == *scope
+                        && now.signed_duration_since(record.created_at) < store::IDEMPOTENCY_TTL
+                })
+                .cloned();
+            if let Some(record) = replay {
+                if record.arguments_hash != *arguments_hash {
+                    return Err(ControlError::idempotency_conflict());
+                }
+                return Ok(None);
+            }
+        }
+        let settings = self.settings_snapshot().await;
+        let deps = ControlDeps { app };
+        let mut domains = Vec::new();
+        match effect {
+            ExtensionAutomationEffect::CreateFromThread {
+                resource_id,
+                source_workspace_id,
+                source_thread_id,
+                idempotency_key: _,
+                name,
+                description,
+                trigger,
+                task,
+                required_connectors,
+                concurrency_policy,
+                misfire_policy,
+            } => {
+                validate_owner_reference(extension_id, &resource_id)?;
+                let duplicate = self
+                    .state
+                    .lock()
+                    .await
+                    .automations
+                    .iter()
+                    .any(|automation| {
+                        automation.owner.as_ref().is_some_and(|owner| {
+                            owner.extension_id == extension_id
+                                && owner.resource_id == resource_id
+                                && automation.name == name.trim()
+                        })
+                    });
+                if duplicate {
+                    return Ok(None);
+                }
+                let target = app
+                    .ok_or_else(|| {
+                        ControlError::new(
+                            "daemon_unavailable",
+                            "FalconDeck could not verify the source task for this Automation.",
+                            true,
+                        )
+                    })?
+                    .automation_target_from_thread(&source_workspace_id, &source_thread_id)
+                    .await?;
+                let arguments = json!({
+                    "name": name,
+                    "description": description,
+                    "trigger": trigger,
+                    "task": task,
+                    "target": target,
+                    "required_connectors": required_connectors,
+                    "concurrency_policy": concurrency_policy,
+                    "misfire_policy": misfire_policy,
+                });
+                let map = arguments.as_object().expect("automation arguments object");
+                let (data, changed) = self
+                    .create_automation(
+                        map,
+                        &deps,
+                        &settings,
+                        Some(AutomationOwner {
+                            extension_id: extension_id.to_string(),
+                            resource_id,
+                        }),
+                    )
+                    .await?;
+                audit_resource_id = data.get("id").and_then(Value::as_str).map(str::to_string);
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::Update {
+                automation_id,
+                expected_revision,
+                name,
+                description,
+                trigger,
+                task,
+                required_connectors,
+                concurrency_policy,
+                misfire_policy,
+            } => {
+                let mut arguments = serde_json::Map::new();
+                arguments.insert("automation_id".to_string(), json!(automation_id));
+                insert_some(&mut arguments, "name", name);
+                insert_some(&mut arguments, "description", description);
+                insert_some(&mut arguments, "trigger", trigger);
+                insert_some(&mut arguments, "task", task);
+                insert_some(&mut arguments, "required_connectors", required_connectors);
+                insert_some(&mut arguments, "concurrency_policy", concurrency_policy);
+                insert_some(&mut arguments, "misfire_policy", misfire_policy);
+                let request = ControlExecuteRequest {
+                    operation: ops::AUTOMATION_UPDATE.to_string(),
+                    arguments,
+                    expected_revision: Some(expected_revision),
+                    idempotency_key: None,
+                };
+                let (_, changed) = self
+                    .update_automation(&request, &deps, &settings, Some(extension_id))
+                    .await?;
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::Pause {
+                automation_id,
+                expected_revision,
+            } => {
+                let request = automation_ref_request(automation_id, Some(expected_revision));
+                let (_, changed) = self
+                    .set_automation_state(&request, AutomationState::Paused, Some(extension_id))
+                    .await?;
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::Resume {
+                automation_id,
+                expected_revision,
+            } => {
+                let request = automation_ref_request(automation_id, Some(expected_revision));
+                let (_, changed) = self
+                    .set_automation_state(&request, AutomationState::Enabled, Some(extension_id))
+                    .await?;
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::RunNow {
+                automation_id,
+                idempotency_key: _,
+            } => {
+                let arguments = json!({ "automation_id": automation_id });
+                let (_, changed) = self
+                    .run_automation_now(
+                        arguments.as_object().expect("automation arguments object"),
+                        ControlOrigin::System,
+                        Some(extension_id),
+                    )
+                    .await?;
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::Delete {
+                automation_id,
+                expected_revision,
+            } => {
+                let request = automation_ref_request(automation_id, Some(expected_revision));
+                let (_, changed) = self.delete_automation(&request, Some(extension_id)).await?;
+                domains.extend(changed);
+            }
+            ExtensionAutomationEffect::PauseResource { resource_id } => {
+                validate_owner_reference(extension_id, &resource_id)?;
+                let rows = self.owned_automations(extension_id).await;
+                for automation in rows.into_iter().filter(|automation| {
+                    automation.resource_id == resource_id
+                        && automation.state == AutomationState::Enabled
+                }) {
+                    let request = automation_ref_request(automation.id, Some(automation.revision));
+                    let (_, changed) = self
+                        .set_automation_state(&request, AutomationState::Paused, Some(extension_id))
+                        .await?;
+                    domains.extend(changed);
+                }
+            }
+        }
+        let mut unique = Vec::new();
+        for domain in domains {
+            if !unique.contains(&domain) {
+                unique.push(domain);
+            }
+        }
+        let audit = ControlAuditEntry {
+            id: format!("audit-{}", Uuid::new_v4().simple()),
+            occurred_at: Utc::now(),
+            context: ControlRequestContext {
+                origin: ControlOrigin::System,
+                ..Default::default()
+            },
+            operation: operation.to_string(),
+            resource_type: Some("automation".to_string()),
+            resource_id: audit_resource_id,
+            result: AuditResult::Success,
+            summary: format!("Extension {extension_id} requested {operation}"),
+        };
+        match self.append_audit(audit).await {
+            Ok(()) => unique.push(ControlDomain::Audit),
+            Err(error) => tracing::warn!(
+                error = %error.0.message,
+                operation,
+                "failed to persist extension Automation audit entry"
+            ),
+        }
+        if let Some((scope, key, arguments_hash)) = idempotency_record {
+            if let Err(error) = self
+                .record_idempotency(store::IdempotencyRecord {
+                    key,
+                    scope,
+                    arguments_hash,
+                    response: json!({ "ok": true }),
+                    created_at: Utc::now(),
+                })
+                .await
+            {
+                // The Automation mutation is already durable. Returning an
+                // error here would invite a retry of a known side effect.
+                tracing::warn!(
+                    error = %error.0.message,
+                    "failed to persist extension Automation idempotency record"
+                );
+            }
+        }
+        let store_revision = self.store_revision().await;
+        Ok((!unique.is_empty()).then(|| ControlStateChanged {
+            store_revision,
+            domains: unique,
+        }))
+    }
+
     /// Persists a managed automation's native thread id. The definition
     /// revision increments because this is a durable change, but the store
     /// change is internal: it never rewrites the schedule.
@@ -1539,6 +1905,26 @@ impl ControlService {
         }
     }
 
+    #[cfg(test)]
+    pub(super) async fn set_automation_owner_for_test(
+        &self,
+        automation_id: &str,
+        owner: AutomationOwner,
+    ) {
+        let automation_id = automation_id.to_string();
+        self.mutate(|state, _now| {
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
+            automation.owner = Some(owner);
+            Ok(((), vec![ControlDomain::Automations]))
+        })
+        .await
+        .expect("test Automation owner should persist");
+    }
+
     async fn mutate<F, T>(&self, mutation: F) -> Result<(T, Vec<ControlDomain>), ControlError>
     where
         F: FnOnce(
@@ -1581,6 +1967,72 @@ impl ControlService {
         })
         .await
         .map(|((), _)| ())
+    }
+}
+
+fn ensure_automation_authority(
+    automation: &Automation,
+    owner_extension_id: Option<&str>,
+) -> Result<(), ControlError> {
+    match (&automation.owner, owner_extension_id) {
+        (None, None) => Ok(()),
+        (Some(owner), Some(extension_id)) if owner.extension_id == extension_id => Ok(()),
+        (Some(_), None) => Err(ControlError::new(
+            "owned_automation",
+            "This Automation is managed by an extension. Open its owning feature to change it.",
+            false,
+        )),
+        _ => Err(ControlError::new(
+            "owner_mismatch",
+            "The extension does not own this Automation.",
+            false,
+        )),
+    }
+}
+
+fn validate_owner_reference(extension_id: &str, resource_id: &str) -> Result<(), ControlError> {
+    let extension_len = extension_id.chars().count();
+    let resource_len = resource_id.chars().count();
+    if !(1..=128).contains(&extension_len) {
+        return Err(ControlError::field(
+            "extensionId",
+            "extension owner id must be 1-128 characters",
+        ));
+    }
+    if !(1..=256).contains(&resource_len) {
+        return Err(ControlError::field(
+            "resourceId",
+            "owner resource id must be 1-256 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn automation_ref_request(
+    automation_id: String,
+    expected_revision: Option<u64>,
+) -> ControlExecuteRequest {
+    ControlExecuteRequest {
+        operation: String::new(),
+        arguments: json!({ "automation_id": automation_id })
+            .as_object()
+            .expect("automation arguments object")
+            .clone(),
+        expected_revision,
+        idempotency_key: None,
+    }
+}
+
+fn insert_some<T: serde::Serialize>(
+    arguments: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        arguments.insert(
+            key.to_string(),
+            serde_json::to_value(value).expect("extension Automation effect serializes"),
+        );
     }
 }
 

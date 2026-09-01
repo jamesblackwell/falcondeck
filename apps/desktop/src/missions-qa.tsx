@@ -50,6 +50,17 @@ const state: MissionPanelState = {
           status: "idle",
         },
       ],
+      automations: [
+        {
+          id: "automation-release",
+          revision: 2,
+          name: "Launch and observe FalconDeck Missions — review",
+          state: "enabled",
+          provider: "codex",
+          resolvedSchedule: "Every 7 days",
+          nextRunAt: updatedAt,
+        },
+      ],
       updates: [
         {
           id: "update-1",

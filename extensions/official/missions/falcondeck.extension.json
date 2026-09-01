@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -14,7 +14,10 @@
       { "id": "activate-mission", "title": "Activate mission" },
       { "id": "edit-mission", "title": "Edit mission draft" },
       { "id": "add-mission-update", "title": "Message mission" },
-      { "id": "set-mission-status", "title": "Change mission status" }
+      { "id": "set-mission-status", "title": "Change mission status" },
+      { "id": "schedule-mission-review", "title": "Schedule mission review" },
+      { "id": "control-mission-automation", "title": "Control mission automation" },
+      { "id": "run-mission-review", "title": "Run mission review now" }
     ],
     "panels": [
       {
@@ -109,5 +112,5 @@
       }
     ]
   },
-  "permissions": ["threads:read", "agent-tools:register"]
+  "permissions": ["threads:read", "agent-tools:register", "automations:manage-owned"]
 }

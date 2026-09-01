@@ -22,6 +22,18 @@ type ExtensionThreadSummary = {
   pendingApprovalCount: number;
   pendingQuestionCount: number;
 };
+type OwnedAutomationSummary = {
+  id: string;
+  resourceId: string;
+  revision: number;
+  name: string;
+  state: string;
+  provider: string;
+  resolvedSchedule: string;
+  nextRunAt?: string;
+  latestOutcome?: unknown;
+};
+type AutomationEffect = { type: string; [key: string]: unknown };
 type ExtensionRunSummary = {
   id: string;
   ownerExtensionId: string;
@@ -56,6 +68,7 @@ type ToolInvocation = {
   input: unknown;
   threadId?: string;
   workspaceId?: string;
+  automationOwnerResourceId?: string;
 };
 type ComposerSuggestion = {
   id: string;
@@ -98,6 +111,10 @@ type ExtensionContext = {
     ): { dispose(): void };
   };
   threads: { list(): Promise<ExtensionThreadSummary[]> };
+  automations: {
+    list(): Promise<OwnedAutomationSummary[]>;
+    apply(effect: AutomationEffect): Promise<void>;
+  };
   orchestration: {
     list(): Promise<ExtensionRunSummary[]>;
     apply(effect: OrchestrationEffect): Promise<void>;
@@ -123,6 +140,8 @@ type Runtime = {
   threadSummaries: ExtensionThreadSummary[] | null;
   orchestrationRuns: ExtensionRunSummary[] | null;
   orchestrationEffects: OrchestrationEffect[];
+  ownedAutomations: OwnedAutomationSummary[] | null;
+  automationEffects: AutomationEffect[];
   context: ExtensionContext;
 };
 type RuntimeRequest = {
@@ -132,6 +151,7 @@ type RuntimeRequest = {
   storage: Record<string, unknown>;
   threadSummaries?: ExtensionThreadSummary[];
   orchestrationRuns?: ExtensionRunSummary[];
+  ownedAutomations?: OwnedAutomationSummary[];
 };
 type ActionRequest = RuntimeRequest & {
   method: "action.invoke";
@@ -149,6 +169,7 @@ type ToolRequest = RuntimeRequest & {
   arguments: unknown;
   threadId?: string;
   workspaceId?: string;
+  automationOwnerResourceId?: string;
 };
 type HostRequest = ActionRequest | EventRequest | ToolRequest;
 
@@ -161,6 +182,7 @@ const SUPPORTED_EVENT_TYPES = new Set([
   "attention.opened",
   "attention.resolved",
   "orchestration.updated",
+  "automations.updated",
 ]);
 const protocolEncoder = new TextEncoder();
 const writeDiagnostic = console.error.bind(console);
@@ -200,6 +222,8 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
     existing.threadSummaries = request.threadSummaries ?? null;
     existing.orchestrationRuns = request.orchestrationRuns ?? null;
     existing.orchestrationEffects = [];
+    existing.ownedAutomations = request.ownedAutomations ?? null;
+    existing.automationEffects = [];
     return existing;
   }
 
@@ -213,6 +237,8 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
   runtime.threadSummaries = request.threadSummaries ?? null;
   runtime.orchestrationRuns = request.orchestrationRuns ?? null;
   runtime.orchestrationEffects = [];
+  runtime.ownedAutomations = request.ownedAutomations ?? null;
+  runtime.automationEffects = [];
   runtime.context = {
     extension: { id: request.extensionId },
     actions: {
@@ -307,6 +333,44 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
         );
       },
     },
+    automations: {
+      list() {
+        if (runtime.ownedAutomations === null) {
+          return Promise.reject(
+            new Error("automations:manage-owned permission is not granted"),
+          );
+        }
+        return Promise.resolve(
+          runtime.ownedAutomations.map((automation) =>
+            structuredClone(automation)
+          ),
+        );
+      },
+      apply(effect) {
+        if (runtime.ownedAutomations === null) {
+          return Promise.reject(
+            new Error("automations:manage-owned permission is not granted"),
+          );
+        }
+        if (
+          !effect ||
+          typeof effect !== "object" ||
+          Array.isArray(effect) ||
+          typeof effect.type !== "string"
+        ) {
+          return Promise.reject(
+            new Error("automation effect must be an object with a type"),
+          );
+        }
+        if (runtime.automationEffects.length >= 1) {
+          return Promise.reject(
+            new Error("only one automation effect is allowed per callback"),
+          );
+        }
+        runtime.automationEffects.push(structuredClone(effect));
+        return Promise.resolve();
+      },
+    },
     orchestration: {
       list() {
         if (runtime.orchestrationRuns === null) {
@@ -387,6 +451,7 @@ async function invoke(request: ActionRequest): Promise<JsonObject> {
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
     orchestrationEffects: runtime.orchestrationEffects,
+    automationEffects: runtime.automationEffects,
   };
 }
 
@@ -400,6 +465,7 @@ async function invokeTool(request: ToolRequest): Promise<JsonObject> {
     input: request.arguments,
     threadId: request.threadId,
     workspaceId: request.workspaceId,
+    automationOwnerResourceId: request.automationOwnerResourceId,
   });
   return {
     requestId: request.requestId,
@@ -408,6 +474,7 @@ async function invokeTool(request: ToolRequest): Promise<JsonObject> {
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
     orchestrationEffects: runtime.orchestrationEffects,
+    automationEffects: runtime.automationEffects,
   };
 }
 

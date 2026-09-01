@@ -13,7 +13,11 @@ import {
   type MissionPanelState,
 } from "../../../extensions/official/missions/model";
 
-const permissions = ["threads:read", "agent-tools:register"];
+const permissions = [
+  "threads:read",
+  "agent-tools:register",
+  "automations:manage-owned",
+];
 const panelState: MissionPanelState = {
   schemaVersion: 2,
   missions: [
@@ -34,6 +38,7 @@ const panelState: MissionPanelState = {
           status: "idle",
         },
       ],
+      automations: [],
       updates: [
         {
           id: "update-1",
@@ -88,7 +93,7 @@ describe("Missions v2 trusted frontend", () => {
     ).toBeNull();
   });
 
-  it("shows only the two permissions Missions v2 uses", () => {
+  it("shows the permissions Missions v2 uses", () => {
     const invokeAction = vi.fn(async () => response());
     renderMissions({
       hasPermission: (permission) => permission === "threads:read",
@@ -98,6 +103,7 @@ describe("Missions v2 trusted frontend", () => {
     expect(screen.getByText("Finish setting up Missions")).toBeVisible();
     expect(screen.getByText("Read task summaries")).toBeVisible();
     expect(screen.getByText("Offer Mission tools")).toBeVisible();
+    expect(screen.getByText("Manage Mission check-ins")).toBeVisible();
     expect(invokeAction).not.toHaveBeenCalled();
   });
 
@@ -158,6 +164,7 @@ describe("Missions v2 trusted frontend", () => {
       expect(invokeAction).toHaveBeenCalledWith("add-mission-update", {
         missionId: "mission-1",
         body: "Use next Tuesday.",
+        runNow: false,
       }),
     );
 
@@ -166,6 +173,29 @@ describe("Missions v2 trusted frontend", () => {
       expect(invokeAction).toHaveBeenCalledWith("set-mission-status", {
         missionId: "mission-1",
         status: "paused",
+      }),
+    );
+  });
+
+  it("lets the human add a periodic Mission check-in", async () => {
+    const invokeAction = vi.fn(async () => response());
+    renderMissions({
+      hasPermission: (permission) => permissions.includes(permission),
+      invokeAction,
+      views: response().updatedViews,
+    });
+
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: "Review cadence for Launch and observe the release",
+      }),
+      { target: { value: "30" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add check-in" }));
+    await waitFor(() =>
+      expect(invokeAction).toHaveBeenCalledWith("schedule-mission-review", {
+        missionId: "mission-1",
+        cadenceDays: 30,
       }),
     );
   });

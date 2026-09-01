@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -1013,6 +1014,7 @@ export function ScheduledTasksView({
   onRefreshLocal,
   onCreateWithAgent,
   onOpenThread,
+  onOpenExtensionOwner,
   onToast,
 }: {
   localSnapshot: DaemonSnapshot | null;
@@ -1023,6 +1025,11 @@ export function ScheduledTasksView({
   onRefreshLocal: () => Promise<void>;
   onCreateWithAgent?: () => void;
   onOpenThread: (workspaceId: string, threadId: string) => void;
+  onOpenExtensionOwner?: (
+    extensionId: string,
+    resourceId: string,
+    hostId: string | null,
+  ) => void;
   onToast: Toast;
 }) {
   const [query, setQuery] = useState("");
@@ -1209,7 +1216,14 @@ export function ScheduledTasksView({
       (hostFilter === "all" || (entry.hostId ?? "local") === hostFilter) &&
       haystack.includes(query.trim().toLowerCase())
     );
-  });
+  }).sort((left, right) =>
+    Number(Boolean(left.automation?.owner)) -
+      Number(Boolean(right.automation?.owner)) ||
+    left.task.title.localeCompare(right.task.title),
+  );
+  const firstOwnedIndex = visible.findIndex(
+    (entry) => entry.automation?.owner,
+  );
   const unsupportedHosts = hosts.filter(
     (host) =>
       host.snapshot && !host.snapshot.daemon.capabilities?.scheduled_tasks,
@@ -1594,20 +1608,37 @@ export function ScheduledTasksView({
           </p>
         ) : null}
         <div className="mt-6 divide-y divide-border-subtle rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
-          {visible.map((entry) => {
+          {visible.map((entry, index) => {
             const workspace = entry.workspaces.find(
               (item) => item.id === entry.task.workspace_id,
             );
             const key = `${entry.hostId ?? "local"}:${entry.task.id}`;
+            const owner = entry.automation?.owner;
+            const open = () => {
+              if (owner && onOpenExtensionOwner) {
+                onOpenExtensionOwner(
+                  owner.extension_id,
+                  owner.resource_id,
+                  entry.hostId,
+                );
+              } else {
+                openDetail(entry);
+              }
+            };
             return (
-              <article
-                key={key}
-                className="group relative flex items-start gap-3 px-4 py-3.5 transition-colors duration-[var(--fd-duration-fast)] first:rounded-t-[var(--fd-radius-xl)] last:rounded-b-[var(--fd-radius-xl)] hover:bg-interactive-hover focus-within:bg-interactive-hover"
-              >
+              <Fragment key={key}>
+                {index === firstOwnedIndex ? (
+                  <div className="bg-surface-1 px-4 py-2.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-muted">
+                    Used by Missions
+                  </div>
+                ) : null}
+                <article
+                  className="group relative flex items-start gap-3 px-4 py-3.5 transition-colors duration-[var(--fd-duration-fast)] first:rounded-t-[var(--fd-radius-xl)] last:rounded-b-[var(--fd-radius-xl)] hover:bg-interactive-hover focus-within:bg-interactive-hover"
+                >
                 <button
                   className="fd-focus mt-1 rounded-full"
                   aria-label={`Open ${entry.task.title}`}
-                  onClick={() => openDetail(entry)}
+                  onClick={open}
                 >
                   {entry.task.last_run?.status === "failed" ? (
                     <CircleAlert className="h-4 w-4 text-danger" />
@@ -1621,7 +1652,7 @@ export function ScheduledTasksView({
                 </button>
                 <button
                   className="fd-focus min-w-0 flex-1 rounded text-left"
-                  onClick={() => openDetail(entry)}
+                  onClick={open}
                 >
                   <h2 className="truncate font-medium">{entry.task.title}</h2>
                   <p className="mt-1 truncate text-sm text-fg-muted">
@@ -1634,47 +1665,58 @@ export function ScheduledTasksView({
                       : entry.task.last_run?.status === "awaiting_input"
                         ? " · Waiting for input"
                         : ""}
+                    {owner ? " · Mission-owned" : ""}
                   </p>
                 </button>
                 <div className="flex opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`Run ${entry.task.title} now`}
-                    disabled={!entry.online || busyKey === key}
-                    onClick={() => void mutate(entry, "run")}
-                  >
-                    <Play className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-label={`${entry.task.status === "paused" ? "Resume" : "Pause"} ${entry.task.title}`}
-                    disabled={
-                      !entry.online ||
-                      busyKey === key ||
-                      entry.task.status === "completed"
-                    }
-                    onClick={() => void mutate(entry, "toggle")}
-                  >
-                    {entry.task.status === "paused" ? (
-                      <Play className="h-4 w-4" />
-                    ) : (
-                      <Pause className="h-4 w-4" />
-                    )}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    aria-haspopup="menu"
-                    aria-expanded={menuKey === key}
-                    aria-label={`More actions for ${entry.task.title}`}
-                    onClick={() =>
-                      setMenuKey((current) => (current === key ? null : key))
-                    }
-                  >
-                    <MoreHorizontal className="h-4 w-4" />
-                  </Button>
+                  {owner ? (
+                    <Button variant="ghost" size="sm" onClick={open}>
+                      Open Mission
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`Run ${entry.task.title} now`}
+                        disabled={!entry.online || busyKey === key}
+                        onClick={() => void mutate(entry, "run")}
+                      >
+                        <Play className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label={`${entry.task.status === "paused" ? "Resume" : "Pause"} ${entry.task.title}`}
+                        disabled={
+                          !entry.online ||
+                          busyKey === key ||
+                          entry.task.status === "completed"
+                        }
+                        onClick={() => void mutate(entry, "toggle")}
+                      >
+                        {entry.task.status === "paused" ? (
+                          <Play className="h-4 w-4" />
+                        ) : (
+                          <Pause className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-haspopup="menu"
+                        aria-expanded={menuKey === key}
+                        aria-label={`More actions for ${entry.task.title}`}
+                        onClick={() =>
+                          setMenuKey((current) =>
+                            current === key ? null : key,
+                          )
+                        }
+                      >
+                        <MoreHorizontal className="h-4 w-4" />
+                      </Button>
+                    </>
+                  )}
                 </div>
                 {menuKey === key ? (
                   <div
@@ -1733,7 +1775,8 @@ export function ScheduledTasksView({
                     </button>
                   </div>
                 ) : null}
-              </article>
+                </article>
+              </Fragment>
             );
           })}
           {localSnapshot && visible.length === 0 ? (

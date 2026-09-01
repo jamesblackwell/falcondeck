@@ -136,7 +136,8 @@ export type ExtensionEvent =
       type: "orchestration.updated";
       workspaceId: string;
       runId: string;
-    };
+    }
+  | { type: "automations.updated" };
 
 export type ExtensionEventType = ExtensionEvent["type"];
 
@@ -158,6 +159,81 @@ export type ExtensionThreadSummary = {
   pendingApprovalCount: number;
   pendingQuestionCount: number;
 };
+
+export type ExtensionAutomationState =
+  | "enabled"
+  | "paused"
+  | "completed"
+  | "failed";
+
+export type ExtensionAutomationTrigger =
+  | { kind: "once"; run_at: string }
+  | { kind: "cron"; expression: string; timezone: string }
+  | { kind: "interval"; every_seconds: number; anchor_at: string };
+
+export type ExtensionAutomationTask =
+  | { kind: "prompt"; instruction: string }
+  | {
+      kind: "conditional_prompt";
+      instruction: string;
+      no_action_marker: string;
+    };
+
+/** Owner-only, transcript-free Automation projection. */
+export type ExtensionOwnedAutomationSummary = {
+  id: string;
+  resourceId: string;
+  revision: number;
+  name: string;
+  state: ExtensionAutomationState;
+  provider: string;
+  resolvedSchedule: string;
+  nextRunAt?: string;
+  latestOutcome?: {
+    status: string;
+    finishedAt: string;
+    preview?: string;
+  };
+};
+
+export type ExtensionAutomationEffect =
+  | {
+      type: "create_from_thread";
+      resourceId: string;
+      sourceWorkspaceId: string;
+      sourceThreadId: string;
+      idempotencyKey: string;
+      name: string;
+      description?: string;
+      trigger: ExtensionAutomationTrigger;
+      task: ExtensionAutomationTask;
+      requiredConnectors?: string[];
+      concurrencyPolicy?: "skip" | "queue_one" | "allow";
+      misfirePolicy?: "skip" | "run_once";
+    }
+  | {
+      type: "update";
+      automationId: string;
+      expectedRevision: number;
+      name?: string;
+      description?: string;
+      trigger?: ExtensionAutomationTrigger;
+      task?: ExtensionAutomationTask;
+      requiredConnectors?: string[];
+      concurrencyPolicy?: "skip" | "queue_one" | "allow";
+      misfirePolicy?: "skip" | "run_once";
+    }
+  | {
+      type: "pause" | "resume" | "delete";
+      automationId: string;
+      expectedRevision: number;
+    }
+  | {
+      type: "run_now";
+      automationId: string;
+      idempotencyKey: string;
+    }
+  | { type: "pause_resource"; resourceId: string };
 
 export type ExtensionRunGate = "open" | "paused" | "closed";
 export type ExtensionRunOutcome =
@@ -411,6 +487,9 @@ export type ExtensionToolInvocation<TInput = unknown> = {
   threadId?: string;
   /** Workspace the calling turn runs in, supplied by the daemon. */
   workspaceId?: string;
+  /** Verified owner resource when this task came from an Automation owned by
+   * the extension handling this tool call. */
+  automationOwnerResourceId?: string;
 };
 
 export type ExtensionContext = {
@@ -459,6 +538,12 @@ export type ExtensionContext = {
   threads: {
     /** Lists daemon-reduced summaries when `threads:read` is granted. */
     list(): Promise<ExtensionThreadSummary[]>;
+  };
+  automations: {
+    /** Lists only Automations owned by this extension. */
+    list(): Promise<ExtensionOwnedAutomationSummary[]>;
+    /** Queues one owner-scoped effect for daemon validation after callback. */
+    apply(effect: ExtensionAutomationEffect): Promise<void>;
   };
   orchestration: {
     /** Lists only runs owned by this extension when its grant is active. */

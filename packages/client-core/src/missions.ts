@@ -4,6 +4,7 @@ export const MISSIONS_EXTENSION_ID = "falcondeck.missions";
 export const MISSIONS_REQUIRED_PERMISSIONS = [
   "threads:read",
   "agent-tools:register",
+  "automations:manage-owned",
 ] as const;
 
 /** Whether the composer may honestly advertise FalconDeck's Mission flow. */

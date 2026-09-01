@@ -66,6 +66,7 @@ function setup(
   apiOverrides: Partial<HostScopedApi> = {},
   onCreateWithAgent: ReturnType<typeof vi.fn> | null = vi.fn(),
   hosts: HostView[] = [],
+  onOpenExtensionOwner = vi.fn(),
 ) {
   const runScheduledTask = vi.fn().mockResolvedValue({});
   const createScheduledTask = vi.fn().mockResolvedValue({});
@@ -108,6 +109,7 @@ function setup(
       onRefreshLocal={onRefreshLocal}
       onCreateWithAgent={onCreateWithAgent ?? undefined}
       onOpenThread={vi.fn()}
+      onOpenExtensionOwner={onOpenExtensionOwner}
       onToast={vi.fn()}
     />,
   );
@@ -119,6 +121,7 @@ function setup(
     controlGet,
     controlExecute,
     onCreateWithAgent,
+    onOpenExtensionOwner,
   };
 }
 
@@ -219,6 +222,43 @@ describe("ScheduledTasksView", () => {
     expect(
       await screen.findByText("Alert if ComfyUI is running at midday"),
     ).toBeInTheDocument();
+  });
+
+  it("separates extension-owned Automations and opens their owning Mission", async () => {
+    const ownedAutomation = {
+      ...conversationalAutomation,
+      id: "automation-mission-review",
+      name: "Launch review",
+      owner: {
+        extension_id: "falcondeck.missions",
+        resource_id: "mission-1",
+      },
+    } as unknown as Automation;
+    const onOpenExtensionOwner = vi.fn();
+    setup(
+      {
+        controlGet: vi.fn().mockResolvedValue({
+          resource: "automations",
+          data: [conversationalAutomation, ownedAutomation],
+        }),
+      },
+      vi.fn(),
+      [],
+      onOpenExtensionOwner,
+    );
+
+    expect(await screen.findByText("Used by Missions")).toBeInTheDocument();
+    expect(screen.getByText("Launch review")).toBeInTheDocument();
+    expect(screen.getByText(/Mission-owned/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open Launch review" }));
+    expect(onOpenExtensionOwner).toHaveBeenCalledWith(
+      "falcondeck.missions",
+      "mission-1",
+      null,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Pause Launch review" }),
+    ).not.toBeInTheDocument();
   });
 
   it("routes automation actions to the owning control service", async () => {

@@ -9,8 +9,15 @@ const actions = [
   "edit-mission",
   "add-mission-update",
   "set-mission-status",
+  "schedule-mission-review",
+  "control-mission-automation",
+  "run-mission-review",
 ];
-const permissions = ["threads:read", "agent-tools:register"];
+const permissions = [
+  "threads:read",
+  "agent-tools:register",
+  "automations:manage-owned",
+];
 
 function host(storage?: Record<string, unknown>) {
   return createExtensionTestHost(missions, {
@@ -70,6 +77,7 @@ describe("official Missions extension v2", () => {
     const { testHost, missionId, response } = await create();
 
     expect(response.orchestrationEffects).toEqual([]);
+    expect(response.automationEffects).toEqual([]);
     expect(response.result).toEqual({ missionId, status: "draft" });
     expect(testHost.storageSnapshot()).toEqual({
       missionsV2: {
@@ -194,6 +202,84 @@ describe("official Missions extension v2", () => {
         input: { missionId },
       }),
     ).rejects.toThrow("this task is not linked to that Mission");
+  });
+
+  it("creates a review Automation from a verified linked task", async () => {
+    const { testHost, missionId } = await create();
+    await testHost.invokeAction("activate-mission", { input: { missionId } });
+
+    const scheduled = await testHost.invokeAction("schedule-mission-review", {
+      input: { missionId, cadenceDays: 7 },
+    });
+
+    expect(scheduled.automationEffects).toEqual([
+      expect.objectContaining({
+        type: "create_from_thread",
+        resourceId: missionId,
+        sourceWorkspaceId: "workspace-1",
+        sourceThreadId: "thread-1",
+        trigger: expect.objectContaining({
+          kind: "interval",
+          every_seconds: 604800,
+        }),
+        misfirePolicy: "run_once",
+      }),
+    ]);
+  });
+
+  it("authorizes and links a fresh Automation task using daemon provenance", async () => {
+    const { testHost, missionId } = await create();
+
+    const read = await testHost.invokeTool("read-mission", {
+      threadId: "thread-automation",
+      workspaceId: "workspace-1",
+      automationOwnerResourceId: missionId,
+      input: { missionId },
+    });
+
+    expect(read.result).toEqual(
+      expect.objectContaining({
+        threads: expect.arrayContaining([
+          expect.objectContaining({
+            threadId: "thread-automation",
+            role: "review",
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it("does not resume or run reviews while the Mission is paused", async () => {
+    const { testHost, missionId } = await create();
+    await testHost.invokeAction("activate-mission", { input: { missionId } });
+    testHost.setOwnedAutomations([
+      {
+        id: "automation-1",
+        resourceId: missionId,
+        revision: 3,
+        name: "Mission review",
+        state: "paused",
+        provider: "codex",
+        resolvedSchedule: "Every 7 days",
+      },
+    ]);
+    const paused = await testHost.invokeAction("set-mission-status", {
+      input: { missionId, status: "paused" },
+    });
+    expect(paused.automationEffects).toEqual([
+      { type: "pause_resource", resourceId: missionId },
+    ]);
+
+    await expect(
+      testHost.invokeAction("control-mission-automation", {
+        input: { missionId, operation: "resume" },
+      }),
+    ).rejects.toThrow("activate the Mission before resuming its reviews");
+    await expect(
+      testHost.invokeAction("run-mission-review", {
+        input: { missionId },
+      }),
+    ).rejects.toThrow("activate the Mission before requesting a review");
   });
 
   it("migrates legacy drafts without starting legacy orchestration", async () => {

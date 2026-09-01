@@ -213,7 +213,7 @@ The injected Mission guidance should remain short:
 
 ## 7. Automation ownership
 
-Phase 2 adds one generic extension capability:
+Phase 2 uses one generic extension capability:
 
 ```text
 automations:manage-owned
@@ -232,8 +232,9 @@ The existing control service remains authoritative. The extension receives a
 reduced owner-only projection and can create, update, pause, resume, run now,
 or delete only Automations whose `extensionId` matches itself. Normal
 Automation validation, elevated-authority settings, revision checks,
-idempotency, run history, scheduler behaviour, and provider dispatch remain
-unchanged.
+run history, scheduler behaviour, and provider dispatch remain authoritative.
+Create and run-now requests carry idempotency keys, while revision-bearing
+updates use the same compare-and-swap rules as standalone Automations.
 
 The owner reference is the relationship. A Mission does not persist redundant
 Automation ids. Queries use `(extensionId, resourceId)`.
@@ -275,7 +276,7 @@ Sort first by attention:
 5. paused and closed work.
 
 Each row/card shows title, status, optional deadline, latest meaningful update,
-linked-task count, and next owned Automation run when phase 2 lands. Do not show
+linked-task count, and next owned Automation run. Do not show
 aggregate stat cards unless user testing proves they improve navigation.
 
 ### Detail
@@ -294,10 +295,10 @@ The first detail surface contains:
 Clicking a linked task opens the normal provider-owned conversation. FalconDeck
 does not copy transcripts into Mission storage.
 
-The Scheduled page groups owned Automations under `Used by Missions`, collapsed
-by Mission, while standalone Automations remain separate. Every owned row links
-back to its Mission. This prevents long-horizon check-ins from overwhelming the
-ordinary schedule list.
+The Scheduled page groups owned Automations under `Used by Missions`, while
+standalone Automations remain separate. Every owned row opens the owning
+extension's Mission surface. This prevents long-horizon check-ins from
+overwhelming the ordinary schedule list.
 
 ## 9. Choosing tasks, harnesses, and models
 
@@ -371,12 +372,27 @@ dispatcher, `ThreadOrigin::MissionWorker`, Mission bypass profile, and
 
 ### Phase 2 — owned Automations
 
-- add the generic owner reference to Automation definitions and projections;
-- add `automations:manage-owned` to the public extension host and fake host;
-- expose owner-scoped CRUD and run-now through the existing control service;
-- authorize Automation-created tasks using daemon run provenance;
-- show Mission-owned Automations on Mission and Scheduled surfaces; and
-- wire `Message Mission` to optional run-now.
+- [x] add the generic owner reference to Automation definitions and projections;
+- [x] add `automations:manage-owned` to the public extension host and fake host;
+- [x] expose owner-scoped create, update, pause, resume, delete, and run-now
+  through the existing control service;
+- [x] authorize Automation-created tasks using daemon-observed run provenance;
+- [x] show Mission-owned Automations on Mission and Scheduled surfaces; and
+- [x] wire `Message Mission` to optional run-now.
+
+The Mission does not become a long-running agent process. The Mission record
+can remain active for months while its Automation sleeps. At each due check-in,
+the existing scheduler starts or reuses an ordinary native task with a compact
+review prompt and verified Mission provenance. That task reads the current
+brief and updates, performs only the useful work available at that moment, and
+posts evidence, a decision, or a concrete human question back to the Mission.
+
+The initial UI deliberately creates review Automations only after a human
+chooses a cadence. It copies execution settings from the Mission's source task,
+uses `queue_one` concurrency and `run_once` misfire handling, and exposes pause,
+resume, run-now, next-run, and latest-outcome state. Pausing or closing a
+Mission pauses future owned reviews but does not interrupt a task already
+running.
 
 ### Phase 3 — migration and deletion
 
@@ -423,3 +439,8 @@ Phase 2 is complete when:
 4. Pausing or closing a Mission prevents future owned Automation runs.
 5. Restart, misfire, revision, elevated-authority, and unknown-outcome semantics
    remain those of Agent Control rather than a Mission-specific copy.
+
+These criteria describe the implemented Phase 2 path. Phase 3 is separate: it
+migrates old bounded v1 run records into paused/read-only Mission history and
+then deletes the legacy coordinator runtime. Until that explicit migration,
+old v1 records remain dormant and never resume automatically.

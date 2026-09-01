@@ -100,6 +100,12 @@ pub struct Automation {
     /// Monotonically increasing version; definition mutations increment it.
     pub revision: u64,
 
+    /// Optional extension resource that owns this definition. Owned
+    /// Automations remain visible in Agent Control, but only the owning
+    /// extension may mutate them through the extension host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<AutomationOwner>,
+
     /// Human-readable name.
     pub name: String,
     /// Optional longer description.
@@ -141,6 +147,112 @@ pub struct Automation {
     /// Bounded summary of the latest run.
     #[serde(default)]
     pub latest_outcome: Option<AutomationOutcomeSummary>,
+}
+
+/// Opaque relationship between an Automation and an extension-owned resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationOwner {
+    /// Extension with exclusive mutation authority.
+    pub extension_id: String,
+    /// Extension-defined durable resource identifier.
+    pub resource_id: String,
+}
+
+/// Reduced owner-only Automation projection exposed to an extension host.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(missing_docs)]
+pub struct ExtensionOwnedAutomationSummary {
+    pub id: String,
+    pub resource_id: String,
+    pub revision: u64,
+    pub name: String,
+    pub state: AutomationState,
+    pub provider: AgentProvider,
+    pub resolved_schedule: String,
+    #[serde(default)]
+    pub next_run_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub latest_outcome: Option<ExtensionAutomationOutcomeSummary>,
+}
+
+/// Bounded latest-run information in an extension Automation projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[allow(missing_docs)]
+pub struct ExtensionAutomationOutcomeSummary {
+    pub status: AutomationRunStatus,
+    pub finished_at: DateTime<Utc>,
+    #[serde(default)]
+    pub preview: Option<String>,
+}
+
+/// One owner-scoped Automation mutation requested by an extension callback.
+/// The daemon supplies the Automation target for creation from a verified
+/// existing task, then applies ordinary Agent Control validation and CAS.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+#[allow(missing_docs)]
+pub enum ExtensionAutomationEffect {
+    CreateFromThread {
+        resource_id: String,
+        source_workspace_id: String,
+        source_thread_id: String,
+        idempotency_key: String,
+        name: String,
+        #[serde(default)]
+        description: Option<String>,
+        trigger: AutomationTrigger,
+        task: AutomationTask,
+        #[serde(default)]
+        required_connectors: Vec<String>,
+        #[serde(default)]
+        concurrency_policy: AutomationConcurrencyPolicy,
+        #[serde(default)]
+        misfire_policy: AutomationMisfirePolicy,
+    },
+    Update {
+        automation_id: String,
+        expected_revision: u64,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        trigger: Option<AutomationTrigger>,
+        #[serde(default)]
+        task: Option<AutomationTask>,
+        #[serde(default)]
+        required_connectors: Option<Vec<String>>,
+        #[serde(default)]
+        concurrency_policy: Option<AutomationConcurrencyPolicy>,
+        #[serde(default)]
+        misfire_policy: Option<AutomationMisfirePolicy>,
+    },
+    Pause {
+        automation_id: String,
+        expected_revision: u64,
+    },
+    Resume {
+        automation_id: String,
+        expected_revision: u64,
+    },
+    RunNow {
+        automation_id: String,
+        idempotency_key: String,
+    },
+    Delete {
+        automation_id: String,
+        expected_revision: u64,
+    },
+    PauseResource {
+        resource_id: String,
+    },
 }
 
 /// Bounded summary of the most recent automation run.

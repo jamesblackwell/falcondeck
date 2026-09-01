@@ -39,6 +39,12 @@ const REQUIRED_PERMISSIONS = [
     label: "Offer Mission tools",
     description: "Let agents create, read, and update durable Mission state.",
   },
+  {
+    id: "automations:manage-owned",
+    label: "Manage Mission check-ins",
+    description:
+      "Schedule and control only the Automations that belong to Missions.",
+  },
 ] as const;
 
 type BadgeVariant = "default" | "success" | "warning" | "danger" | "info";
@@ -168,7 +174,7 @@ function SetupState({
           Finish setting up Missions
         </h2>
         <p className="mt-1.5 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-          Missions is off by default. Grant these two capabilities before agents
+          Missions is off by default. Grant these capabilities before agents
           can create or update Mission projects.
         </p>
         <div className="mt-5 divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default">
@@ -282,6 +288,8 @@ function MissionCard({
   openThread(workspaceId: string, threadId: string): void;
 }) {
   const [message, setMessage] = useState("");
+  const [runNow, setRunNow] = useState(false);
+  const [cadenceDays, setCadenceDays] = useState("7");
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -289,7 +297,13 @@ function MissionCard({
     void invoke("add-mission-update", {
       missionId: mission.id,
       body: message,
-    }).then((updated) => updated && setMessage(""));
+      runNow,
+    }).then((updated) => {
+      if (updated) {
+        setMessage("");
+        setRunNow(false);
+      }
+    });
   };
 
   const setStatus = (status: MissionStatus) => {
@@ -395,6 +409,121 @@ function MissionCard({
             </div>
           </div>
         ) : null}
+
+        <div className="mt-4">
+          <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
+            Review automation
+          </p>
+          {mission.automations.length > 0 ? (
+            <div className="mt-1.5 space-y-2">
+              {mission.automations.map((automation) => (
+                <div
+                  key={automation.id}
+                  className="rounded-[var(--fd-radius-md)] border border-border-default px-3 py-2.5"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+                      {automation.resolvedSchedule}
+                    </span>
+                    <Badge
+                      variant={automation.state === "enabled" ? "success" : "default"}
+                    >
+                      {automation.state}
+                    </Badge>
+                    <span className="text-[length:var(--fd-text-xs)] capitalize text-fg-tertiary">
+                      {automation.provider}
+                    </span>
+                    <span className="ml-auto flex gap-1.5">
+                      <Button
+                        variant="outline"
+                        disabled={
+                          busy ||
+                          automation.state !== "enabled" ||
+                          ["draft", "paused", "completed", "cancelled"].includes(
+                            mission.status,
+                          )
+                        }
+                        onClick={() =>
+                          void invoke("run-mission-review", {
+                            missionId: mission.id,
+                          })
+                        }
+                      >
+                        Review now
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        disabled={
+                          busy ||
+                          (automation.state !== "enabled" &&
+                            ["draft", "paused", "completed", "cancelled"].includes(
+                              mission.status,
+                            ))
+                        }
+                        onClick={() =>
+                          void invoke("control-mission-automation", {
+                            missionId: mission.id,
+                            operation:
+                              automation.state === "enabled" ? "pause" : "resume",
+                          })
+                        }
+                      >
+                        {automation.state === "enabled" ? "Pause" : "Resume"}
+                      </Button>
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                    {automation.nextRunAt
+                      ? `Next review ${formatDate(automation.nextRunAt)}`
+                      : "No scheduled review"}
+                    {automation.latestOutcome
+                      ? ` · Last ${automation.latestOutcome.status} ${formatDate(
+                          automation.latestOutcome.finishedAt,
+                        )}`
+                      : " · Never run"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : !["draft", "paused", "completed", "cancelled"].includes(
+              mission.status,
+            ) ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-[var(--fd-radius-md)] border border-dashed border-border-default px-3 py-2.5">
+              <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                Check this Mission every
+              </span>
+              <select
+                aria-label={`Review cadence for ${mission.title}`}
+                value={cadenceDays}
+                onChange={(event) => setCadenceDays(event.target.value)}
+                className="fd-focus h-8 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2 text-[length:var(--fd-text-xs)] text-fg-primary"
+              >
+                <option value="1">day</option>
+                <option value="7">week</option>
+                <option value="30">30 days</option>
+              </select>
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() =>
+                  void invoke("schedule-mission-review", {
+                    missionId: mission.id,
+                    cadenceDays: Number(cadenceDays),
+                  })
+                }
+              >
+                Add check-in
+              </Button>
+              <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                Uses the source task&apos;s provider, model, and authority settings.
+              </span>
+            </div>
+          ) : (
+            <p className="mt-1.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              No automatic reviews.
+            </p>
+          )}
+        </div>
       </div>
 
       {mission.status !== "completed" && mission.status !== "cancelled" ? (
@@ -421,6 +550,18 @@ function MissionCard({
               Post update
             </Button>
           </div>
+          {mission.automations.some(
+            (automation) => automation.state === "enabled",
+          ) ? (
+            <label className="mt-2 flex items-center gap-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              <input
+                type="checkbox"
+                checked={runNow}
+                onChange={(event) => setRunNow(event.target.checked)}
+              />
+              Ask the Mission to review this update now
+            </label>
+          ) : null}
         </form>
       ) : null}
     </Card>
@@ -468,6 +609,7 @@ function MissionDashboard({
         const response = await invokeAction(actionId, input);
         const next = stateFromResponse(response);
         if (next) setState(next);
+        else await refresh();
         setError(null);
         return true;
       } catch (reason) {
@@ -477,7 +619,7 @@ function MissionDashboard({
         setBusy(false);
       }
     },
-    [invokeAction],
+    [invokeAction, refresh],
   );
 
   useEffect(() => {
@@ -509,8 +651,8 @@ function MissionDashboard({
               Missions keep larger outcomes visible when the work spans several
               agent tasks or long periods of waiting. Each Mission holds the
               durable brief, success criteria, decisions, evidence, and linked
-              tasks; native Goals do the focused work and Automations will
-              handle future check-ins.
+              tasks; native Goals do the focused work and optional Automations
+              wake an agent for future check-ins.
             </p>
           </div>
           <div className="flex gap-2">

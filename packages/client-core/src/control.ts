@@ -81,6 +81,11 @@ export type AutomationOutcomeSummary = {
   preview?: string | null;
 };
 
+export type AutomationOwner = {
+  extension_id: string;
+  resource_id: string;
+};
+
 /**
  * A single automation. List responses return a summary projection that
  * omits `task`, `target.thread`, `created_at` and `updated_at`
@@ -90,6 +95,7 @@ export type AutomationOutcomeSummary = {
 export type Automation = {
   id: string;
   revision: number;
+  owner?: AutomationOwner | null;
   name: string;
   description?: string | null;
   trigger: AutomationTrigger;

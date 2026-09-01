@@ -3,8 +3,9 @@
 
 use chrono::{Duration, Utc};
 use falcondeck_core::control::{
-    AutomationRunStatus, AutomationState, ControlExecuteRequest, ControlGetRequest, ControlOrigin,
-    ControlRequestContext, ControlSearchRequest,
+    AutomationOwner, AutomationRunStatus, AutomationState, ControlExecuteRequest,
+    ControlGetRequest, ControlOrigin, ControlRequestContext, ControlSearchRequest,
+    ExtensionAutomationEffect,
 };
 use serde_json::{Value, json};
 
@@ -101,6 +102,95 @@ async fn create_returns_automation_with_next_run_and_resolved_schedule() {
         .await
         .expect("stored");
     assert_eq!(stored.name, "Weekday inbox review");
+}
+
+#[tokio::test]
+async fn owned_automations_are_projected_only_to_the_owner_and_reject_public_mutation() {
+    let (_dir, service) = service().await;
+    let data = create_valid_automation(&service).await;
+    let automation_id = data["id"].as_str().unwrap().to_string();
+    service
+        .set_automation_owner_for_test(
+            &automation_id,
+            AutomationOwner {
+                extension_id: "falcondeck.missions".to_string(),
+                resource_id: "mission-1".to_string(),
+            },
+        )
+        .await;
+
+    let owned = service.owned_automations("falcondeck.missions").await;
+    assert_eq!(owned.len(), 1);
+    assert_eq!(owned[0].id, automation_id);
+    assert_eq!(owned[0].resource_id, "mission-1");
+    assert!(
+        service
+            .owned_automations("another.extension")
+            .await
+            .is_empty()
+    );
+
+    let request = execute_request(
+        registry::ops::AUTOMATION_PAUSE,
+        json!({ "automation_id": automation_id }),
+        Some(1),
+    );
+    let (response, _) = service
+        .execute(request, &desktop(), &ControlDeps::none())
+        .await;
+    assert!(!response.ok);
+    assert_eq!(response.error.unwrap().code, "owned_automation");
+    assert_eq!(
+        service.automation(&owned[0].id).await.unwrap().state,
+        AutomationState::Enabled
+    );
+}
+
+#[tokio::test]
+async fn owned_run_now_is_owner_scoped_and_idempotent() {
+    let (_dir, service) = service().await;
+    let data = create_valid_automation(&service).await;
+    let automation_id = data["id"].as_str().unwrap().to_string();
+    service
+        .set_automation_owner_for_test(
+            &automation_id,
+            AutomationOwner {
+                extension_id: "falcondeck.missions".to_string(),
+                resource_id: "mission-1".to_string(),
+            },
+        )
+        .await;
+
+    let effect = || ExtensionAutomationEffect::RunNow {
+        automation_id: automation_id.clone(),
+        idempotency_key: "mission-review-now-1".to_string(),
+    };
+    service
+        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .await
+        .unwrap();
+    service
+        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .await
+        .unwrap();
+
+    let runs = service
+        .get(
+            ControlGetRequest {
+                resource: "automation.runs".to_string(),
+                ..Default::default()
+            },
+            &desktop(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runs.data.as_array().map(Vec::len), Some(1));
+
+    let error = service
+        .apply_extension_automation_effect("another.extension", effect(), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.0.code, "owner_mismatch");
 }
 
 #[tokio::test]

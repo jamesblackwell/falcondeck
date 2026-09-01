@@ -164,6 +164,16 @@ pub(super) fn lifecycle_event(
             thread_id: request.thread_id.clone(),
             request_id: id.clone(),
         }),
+        UnifiedEvent::ControlStateChanged { change }
+            if change
+                .domains
+                .contains(&falcondeck_core::control::ControlDomain::Automations)
+                || change
+                    .domains
+                    .contains(&falcondeck_core::control::ControlDomain::Runs) =>
+        {
+            Some(ExtensionEvent::AutomationsUpdated)
+        }
         _ => None,
     }
 }
@@ -180,7 +190,7 @@ async fn run_extension_event_worker(
         }
         let host = app.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let (storage, can_read_threads, can_orchestrate) = {
+        let (storage, can_read_threads, can_orchestrate, can_manage_automations) = {
             let registry = app.inner.extensions.lock().await;
             if !registry.is_enabled(&package.id) {
                 continue;
@@ -189,6 +199,7 @@ async fn run_extension_event_worker(
                 registry.storage(&package.id),
                 registry.has_grant(&package.id, super::extensions::THREADS_READ_PERMISSION),
                 registry.has_grant(&package.id, super::extensions::ORCHESTRATION_PERMISSION),
+                registry.has_grant(&package.id, super::extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
@@ -201,6 +212,11 @@ async fn run_extension_event_worker(
         } else {
             None
         };
+        let owned_automations = if can_manage_automations {
+            Some(app.control().owned_automations(&package.id).await)
+        } else {
+            None
+        };
         let result = host
             .dispatch_event(
                 &package,
@@ -208,6 +224,7 @@ async fn run_extension_event_worker(
                 &storage,
                 thread_summaries.as_deref(),
                 orchestration_runs.as_deref(),
+                owned_automations.as_deref(),
             )
             .await;
         let result = match result {
@@ -227,6 +244,15 @@ async fn run_extension_event_worker(
                 &app,
                 &package.id,
                 "orchestration effects are not accepted from lossy lifecycle events",
+            )
+            .await;
+            continue;
+        }
+        if !result.automation_effects.is_empty() {
+            mark_extension_event_error(
+                &app,
+                &package.id,
+                "Automation effects are not accepted from lossy lifecycle events",
             )
             .await;
             continue;

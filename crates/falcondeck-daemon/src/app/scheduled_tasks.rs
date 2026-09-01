@@ -335,6 +335,7 @@ fn legacy_automation(
     let automation = Automation {
         id: detail.summary.id.clone(),
         revision: 1,
+        owner: None,
         name: detail.summary.title.clone(),
         description: None,
         trigger,

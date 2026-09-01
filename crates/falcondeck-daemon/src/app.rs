@@ -882,6 +882,43 @@ impl AppState {
             .map(|workspace| workspace.summary.path.clone())
     }
 
+    /// Captures the provider and authority of a verified native task for an
+    /// extension-owned Automation. The extension receives only task ids; full
+    /// filesystem paths and agent settings never cross the host boundary.
+    pub(crate) async fn automation_target_from_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<falcondeck_core::control::AutomationTarget, crate::control::ControlError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces.get(workspace_id).ok_or_else(|| {
+            crate::control::ControlError::field(
+                "sourceWorkspaceId",
+                "the source task workspace is no longer available",
+            )
+        })?;
+        let thread = workspace.threads.get(thread_id).ok_or_else(|| {
+            crate::control::ControlError::field(
+                "sourceThreadId",
+                "the source task is no longer available",
+            )
+        })?;
+        let agent = &thread.summary.agent;
+        Ok(falcondeck_core::control::AutomationTarget {
+            workspace_path: workspace.summary.path.clone(),
+            provider: thread.summary.provider.clone(),
+            thread: falcondeck_core::control::AutomationThreadTarget::Managed { thread_id: None },
+            model_id: agent.model_id.clone(),
+            permission_mode: agent.permission_mode.clone(),
+            sandbox_mode: agent.sandbox_mode.clone(),
+            reasoning_effort: agent.reasoning_effort.clone(),
+            collaboration_mode_id: agent.collaboration_mode_id.clone(),
+            approval_policy: agent.approval_policy.clone(),
+            isolation: Some(falcondeck_core::ThreadIsolation::ProjectFolder),
+            selected_skills: Vec::new(),
+        })
+    }
+
     pub fn set_local_base_url(&self, url: String) {
         let _ = self.inner.local_base_url.set(url);
     }
@@ -2085,6 +2122,30 @@ impl AppState {
         bound_extension_thread_summaries(summaries)
     }
 
+    async fn automation_owner_resource_for_thread(
+        &self,
+        thread_id: &str,
+        extension_id: &str,
+    ) -> Option<String> {
+        let automation_id = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .find_map(|workspace| workspace.threads.get(thread_id))
+                .and_then(|thread| match thread.summary.origin.as_ref() {
+                    Some(falcondeck_core::ThreadOrigin::Automation { automation_id, .. }) => {
+                        Some(automation_id.clone())
+                    }
+                    _ => None,
+                })
+        }?;
+        self.control()
+            .automation_owner(&automation_id)
+            .await
+            .filter(|owner| owner.extension_id == extension_id)
+            .map(|owner| owner.resource_id)
+    }
+
     /// Enables or disables one installed extension without deleting its data.
     pub async fn update_extension(
         &self,
@@ -2279,13 +2340,14 @@ impl AppState {
         // updates from one stale snapshot and overwrite each other.
         let host = self.inner.extension_hosts.lock().await.host(extension_id);
         let mut host = host.lock().await;
-        let (package, storage, can_read_threads, can_orchestrate) = {
+        let (package, storage, can_read_threads, can_orchestrate, can_manage_automations) = {
             let registry = self.inner.extensions.lock().await;
             (
                 registry.package(extension_id, action_id)?,
                 registry.storage(extension_id),
                 registry.has_grant(extension_id, extensions::THREADS_READ_PERMISSION),
                 registry.has_grant(extension_id, extensions::ORCHESTRATION_PERMISSION),
+                registry.has_grant(extension_id, extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
@@ -2298,6 +2360,11 @@ impl AppState {
         } else {
             None
         };
+        let owned_automations = if can_manage_automations {
+            Some(self.control().owned_automations(extension_id).await)
+        } else {
+            None
+        };
         let host_result = host
             .invoke(
                 &package,
@@ -2307,6 +2374,7 @@ impl AppState {
                 &storage,
                 thread_summaries.as_deref(),
                 orchestration_runs.as_deref(),
+                owned_automations.as_deref(),
             )
             .await;
         let host_result = match host_result {
@@ -2329,6 +2397,13 @@ impl AppState {
             }
         };
         let orchestration_effects = host_result.orchestration_effects;
+        let automation_effects = host_result.automation_effects;
+        if !orchestration_effects.is_empty() && !automation_effects.is_empty() {
+            return Err(DaemonError::BadRequest(
+                "one extension callback cannot combine legacy orchestration and Automation effects"
+                    .to_string(),
+            ));
+        }
         if !orchestration_effects.is_empty()
             && (host_result.storage != storage || !host_result.published_views.is_empty())
         {
@@ -2359,6 +2434,16 @@ impl AppState {
             orchestration::EffectActor::Human,
         )
         .await?;
+        for effect in automation_effects {
+            let change = self
+                .control()
+                .apply_extension_automation_effect(extension_id, effect, Some(self))
+                .await
+                .map_err(|error| DaemonError::BadRequest(error.0.message))?;
+            if let Some(change) = change {
+                self.emit_control_state_change(change);
+            }
+        }
         drop(host);
         self.emit_extension_view_updates(&updated_views);
         Ok(ExtensionActionResponse {
@@ -2399,10 +2484,8 @@ impl AppState {
         let trusted_bridge = self
             .extension_bridge_context(request.bridge_capability.as_deref())
             .await;
-        let inferred_codex_thread = match trusted_bridge.as_ref() {
-            Some(context)
-                if context.thread_id.is_none() && context.provider == AgentProvider::CODEX =>
-            {
+        let inferred_bridge_thread = match trusted_bridge.as_ref() {
+            Some(context) if context.thread_id.is_none() => {
                 self.unambiguous_running_extension_thread(
                     &context.workspace_path,
                     &context.provider,
@@ -2414,7 +2497,7 @@ impl AppState {
         let trusted_thread_id = trusted_bridge
             .as_ref()
             .and_then(|context| context.thread_id.as_deref())
-            .or(inferred_codex_thread.as_deref());
+            .or(inferred_bridge_thread.as_deref());
         let effective_thread_id = if trusted_bridge.is_some() {
             trusted_thread_id
         } else {
@@ -2462,7 +2545,7 @@ impl AppState {
             .await;
         let host = self.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let (storage, can_read_threads, can_orchestrate) = {
+        let (storage, can_read_threads, can_orchestrate, can_manage_automations) = {
             let registry = self.inner.extensions.lock().await;
             // Re-check under the host gate: disable cannot interleave here.
             registry.tool_package(&request.name)?;
@@ -2470,6 +2553,7 @@ impl AppState {
                 registry.storage(&package.id),
                 registry.has_grant(&package.id, extensions::THREADS_READ_PERMISSION),
                 registry.has_grant(&package.id, extensions::ORCHESTRATION_PERMISSION),
+                registry.has_grant(&package.id, extensions::AUTOMATIONS_PERMISSION),
             )
         };
         let thread_summaries = if can_read_threads {
@@ -2482,6 +2566,18 @@ impl AppState {
         } else {
             None
         };
+        let owned_automations = if can_manage_automations {
+            Some(self.control().owned_automations(&package.id).await)
+        } else {
+            None
+        };
+        let automation_owner_resource_id = match trusted_thread_id {
+            Some(thread_id) => {
+                self.automation_owner_resource_for_thread(thread_id, &package.id)
+                    .await
+            }
+            None => None,
+        };
         let host_result = host
             .invoke_tool(
                 &package,
@@ -2489,9 +2585,11 @@ impl AppState {
                 &request.arguments,
                 effective_thread_id,
                 workspace_id.as_deref(),
+                automation_owner_resource_id.as_deref(),
                 &storage,
                 thread_summaries.as_deref(),
                 orchestration_runs.as_deref(),
+                owned_automations.as_deref(),
             )
             .await;
         let host_result = match host_result {
@@ -2521,6 +2619,13 @@ impl AppState {
             }
         };
         let orchestration_effects = host_result.orchestration_effects;
+        let automation_effects = host_result.automation_effects;
+        if !orchestration_effects.is_empty() && !automation_effects.is_empty() {
+            return Err(DaemonError::BadRequest(
+                "one extension callback cannot combine legacy orchestration and Automation effects"
+                    .to_string(),
+            ));
+        }
         if !orchestration_effects.is_empty()
             && (host_result.storage != storage || !host_result.published_views.is_empty())
         {
@@ -2550,6 +2655,16 @@ impl AppState {
             },
         )
         .await?;
+        for effect in automation_effects {
+            let change = self
+                .control()
+                .apply_extension_automation_effect(&package.id, effect, Some(self))
+                .await
+                .map_err(|error| DaemonError::BadRequest(error.0.message))?;
+            if let Some(change) = change {
+                self.emit_control_state_change(change);
+            }
+        }
         drop(host);
         self.emit_extension_view_updates(&updated_views);
         Ok(falcondeck_core::ExtensionToolResponse {
@@ -2683,9 +2798,9 @@ impl AppState {
     }
 
     /// Resolves a workspace-wide bridge to a task only when provider state
-    /// makes the caller unambiguous. Codex app-server owns one MCP bridge per
-    /// workspace, so the daemon fails closed when two Codex tasks are running
-    /// instead of trusting model-supplied request fields.
+    /// makes the caller unambiguous. Some harnesses own one MCP bridge per
+    /// workspace, so the daemon fails closed when two matching tasks are
+    /// running instead of trusting model-supplied request fields.
     async fn unambiguous_running_extension_thread(
         &self,
         workspace_path: &str,

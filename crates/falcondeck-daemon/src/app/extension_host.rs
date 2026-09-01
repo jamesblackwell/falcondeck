@@ -7,6 +7,7 @@ use std::{
 
 use falcondeck_core::{
     ExtensionThreadSummary, ExtensionViewScope,
+    control::{ExtensionAutomationEffect, ExtensionOwnedAutomationSummary},
     orchestration::{ExtensionOrchestrationEffect, ExtensionRunSummary},
 };
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,8 @@ struct HostActionRequest<'a> {
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     orchestration_runs: Option<&'a [ExtensionRunSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
 
 #[derive(Serialize)]
@@ -107,11 +110,15 @@ struct HostToolRequest<'a> {
     /// call lands on; the harness spawn decides it.
     thread_id: Option<&'a str>,
     workspace_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automation_owner_resource_id: Option<&'a str>,
     storage: &'a BTreeMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     orchestration_runs: Option<&'a [ExtensionRunSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -167,6 +174,8 @@ pub(super) enum ExtensionEvent {
         #[serde(rename = "runId")]
         run_id: String,
     },
+    #[serde(rename = "automations.updated")]
+    AutomationsUpdated,
 }
 
 #[derive(Serialize)]
@@ -182,6 +191,8 @@ struct HostEventRequest<'a> {
     thread_summaries: Option<&'a [ExtensionThreadSummary]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     orchestration_runs: Option<&'a [ExtensionRunSummary]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owned_automations: Option<&'a [ExtensionOwnedAutomationSummary]>,
 }
 
 #[derive(Deserialize)]
@@ -197,6 +208,8 @@ struct HostActionResponse {
     published_views: Vec<PublishedExtensionView>,
     #[serde(default)]
     orchestration_effects: Vec<ExtensionOrchestrationEffect>,
+    #[serde(default)]
+    automation_effects: Vec<ExtensionAutomationEffect>,
     #[serde(default)]
     handler_errors: Vec<String>,
     #[serde(default)]
@@ -237,6 +250,7 @@ pub(super) struct ExtensionHostActionResult {
     pub(super) storage: BTreeMap<String, Value>,
     pub(super) published_views: Vec<PublishedExtensionView>,
     pub(super) orchestration_effects: Vec<ExtensionOrchestrationEffect>,
+    pub(super) automation_effects: Vec<ExtensionAutomationEffect>,
     /// Event callbacks are isolated from one another. Their state and views
     /// still commit, while these bounded errors keep the extension visibly
     /// unhealthy instead of silently losing the failure.
@@ -293,6 +307,7 @@ impl ExtensionHost {
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
         orchestration_runs: Option<&[ExtensionRunSummary]>,
+        owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         self.prepare(package).await?;
         let request_id = self.take_request_id();
@@ -307,6 +322,7 @@ impl ExtensionHost {
             storage,
             thread_summaries,
             orchestration_runs,
+            owned_automations,
         };
         let response = self
             .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "action")
@@ -316,6 +332,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
     }
@@ -330,9 +347,11 @@ impl ExtensionHost {
         arguments: &Value,
         thread_id: Option<&str>,
         workspace_id: Option<&str>,
+        automation_owner_resource_id: Option<&str>,
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
         orchestration_runs: Option<&[ExtensionRunSummary]>,
+        owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, ExtensionToolError> {
         self.prepare(package)
             .await
@@ -347,9 +366,11 @@ impl ExtensionHost {
             arguments,
             thread_id,
             workspace_id,
+            automation_owner_resource_id,
             storage,
             thread_summaries,
             orchestration_runs,
+            owned_automations,
         };
         let response = self
             .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "tool")
@@ -359,6 +380,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
     }
@@ -370,6 +392,7 @@ impl ExtensionHost {
         storage: &BTreeMap<String, Value>,
         thread_summaries: Option<&[ExtensionThreadSummary]>,
         orchestration_runs: Option<&[ExtensionRunSummary]>,
+        owned_automations: Option<&[ExtensionOwnedAutomationSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         if serde_json::to_vec(event)?.len() > MAX_EXTENSION_EVENT_BYTES {
             return Err(DaemonError::BadRequest(format!(
@@ -387,6 +410,7 @@ impl ExtensionHost {
             storage,
             thread_summaries,
             orchestration_runs,
+            owned_automations,
         };
         let response = self
             .send_request(&request, request_id, HOST_EVENT_TIMEOUT, "event")
@@ -396,6 +420,7 @@ impl ExtensionHost {
             storage: response.storage,
             published_views: response.published_views,
             orchestration_effects: response.orchestration_effects,
+            automation_effects: response.automation_effects,
             handler_errors: response.handler_errors,
         })
     }
@@ -636,7 +661,9 @@ mod tests {
                 }),
                 Some("thread-1"),
                 Some("workspace-1"),
+                None,
                 &BTreeMap::new(),
+                None,
                 None,
                 None,
             )
@@ -671,7 +698,9 @@ mod tests {
                 }),
                 Some("thread-1"),
                 None,
+                None,
                 &published.storage,
+                None,
                 None,
                 None,
             )
@@ -726,14 +755,58 @@ mod tests {
                 }),
                 Some("thread-1"),
                 Some("workspace-1"),
+                None,
                 &BTreeMap::new(),
                 Some(&threads),
                 None,
+                Some(&[]),
             )
             .await
             .expect("Mission draft should be created through the public host");
         assert_eq!(created.published_views[0].view_id, "missions-panel");
         assert!(created.orchestration_effects.is_empty());
+        assert!(created.automation_effects.is_empty());
+        let mission_id = created.result["missionId"]
+            .as_str()
+            .expect("create result should identify the Mission");
+
+        let activated = host
+            .invoke(
+                &package,
+                "activate-mission",
+                None,
+                &serde_json::json!({ "missionId": mission_id }),
+                &created.storage,
+                Some(&threads),
+                None,
+                Some(&[]),
+            )
+            .await
+            .expect("Mission should activate through the public host");
+        let scheduled = host
+            .invoke(
+                &package,
+                "schedule-mission-review",
+                None,
+                &serde_json::json!({ "missionId": mission_id, "cadenceDays": 7 }),
+                &activated.storage,
+                Some(&threads),
+                None,
+                Some(&[]),
+            )
+            .await
+            .expect("Mission should request an owned review Automation");
+        assert!(matches!(
+            scheduled.automation_effects.as_slice(),
+            [ExtensionAutomationEffect::CreateFromThread {
+                resource_id,
+                source_workspace_id,
+                source_thread_id,
+                ..
+            }] if resource_id == mission_id
+                && source_workspace_id == "workspace-1"
+                && source_thread_id == "thread-1"
+        ));
 
         let read = host
             .invoke_tool(
@@ -742,14 +815,38 @@ mod tests {
                 &serde_json::json!({}),
                 Some("thread-1"),
                 Some("workspace-1"),
-                &created.storage,
+                None,
+                &activated.storage,
                 Some(&threads),
                 None,
+                Some(&[]),
             )
             .await
             .expect("linked task should read the durable Mission");
-        assert_eq!(read.result["status"], "draft");
+        assert_eq!(read.result["status"], "active");
         assert!(read.orchestration_effects.is_empty());
+        let automation_read = host
+            .invoke_tool(
+                &package,
+                "read-mission",
+                &serde_json::json!({ "missionId": mission_id }),
+                Some("thread-review"),
+                Some("workspace-1"),
+                Some(mission_id),
+                &activated.storage,
+                Some(&threads),
+                None,
+                Some(&[]),
+            )
+            .await
+            .expect("daemon provenance should authorize a fresh review task");
+        assert!(
+            automation_read.result["threads"]
+                .as_array()
+                .is_some_and(|threads| threads.iter().any(|thread| {
+                    thread["threadId"] == "thread-review" && thread["role"] == "review"
+                }))
+        );
         host.stop().await;
     }
 
@@ -790,6 +887,7 @@ mod tests {
                 &legacy_storage,
                 None,
                 None,
+                None,
             )
             .await
             .expect("legacy colour labels should be dropped");
@@ -814,6 +912,7 @@ mod tests {
                     "stageId": "in_progress"
                 }),
                 &migrated.storage,
+                None,
                 None,
                 None,
             )
@@ -902,7 +1001,7 @@ export default defineExtension({
             pending_question_count: 0,
         }];
         let denied = host
-            .dispatch_event(&package, &event, &BTreeMap::new(), None, None)
+            .dispatch_event(&package, &event, &BTreeMap::new(), None, None, None)
             .await
             .expect("one failed event handler must not abort event dispatch");
         assert!(
@@ -916,7 +1015,14 @@ export default defineExtension({
             Some(&serde_json::json!("thread-1"))
         );
         let result = host
-            .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries), None)
+            .dispatch_event(
+                &package,
+                &event,
+                &BTreeMap::new(),
+                Some(&summaries),
+                None,
+                None,
+            )
             .await
             .expect("event should run");
         host.stop().await;
@@ -1010,6 +1116,7 @@ export default defineExtension({
                 None,
                 &Value::Null,
                 &BTreeMap::new(),
+                None,
                 None,
                 None,
             )

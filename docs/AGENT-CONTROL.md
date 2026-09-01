@@ -56,6 +56,12 @@ keeps only bounded run metadata.
 - **Idempotency**: `falcondeck_execute` accepts an idempotency key scoped to
   origin + provider + operation; identical retries replay the original
   result, differing arguments conflict.
+- **Extension ownership**: an Automation may carry an opaque extension/resource
+  owner. It still uses this scheduler and run store, but public Control callers
+  cannot mutate it. Only the matching extension can manage it through the
+  separately granted `automations:manage-owned` facet. Creation copies the
+  target from a daemon-verified native task, so an extension cannot invent a
+  more privileged workspace or provider configuration.
 
 ## Agent context injection
 
@@ -118,7 +124,9 @@ and owns no state itself.
   stable-id duplicates during migration. Create/edit uses the same validated
   control payloads as conversational tools; pause/resume/run-now, history, and
   delete remain host-owned. `control-state-changed` events make conversational
-  changes appear immediately.
+  changes appear immediately. Extension-owned definitions are separated from
+  standalone Automations and open their owning extension instead of exposing
+  public edit/delete controls.
 
 ## Mobile
 
@@ -157,7 +165,9 @@ internal headers the model cannot set inside tool arguments. Known
 secret-bearing fields are redacted from every model-facing response;
 connector credentials are never returned; automation instructions appear
 only when a single automation is read explicitly, never in lists or audit
-summaries.
+summaries. Owner-scoped extension projections omit instructions, targets, and
+unrelated Automations. Automation-created tasks receive owner provenance from
+their daemon-recorded task origin, never from model-authored arguments.
 
 ## Architecture notes
 

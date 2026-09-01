@@ -12,9 +12,13 @@ existing tasks. A human activates, completes, or cancels the Mission.
 
 Desktop and remote web render the trusted Missions dashboard and the inline
 draft result. Mobile and older clients retain the attributed generic tool
-result fallback. The extension currently requires `threads:read` and
-`agent-tools:register`, both denied by default.
+result fallback. The extension requires `threads:read`,
+`agent-tools:register`, and `automations:manage-owned`, all denied by default.
 
-The next slice adds extension-owned Automations through the existing Agent
-Control scheduler. It will let a Mission wake an agent after days or months
-without adding a Mission-specific agent loop. See `docs/MISSIONS.md`.
+A human can add an optional daily, weekly, or 30-day review. This creates an
+extension-owned Automation in FalconDeck's existing Agent Control scheduler,
+using the source task's workspace, provider, model, and authority settings.
+Each check-in starts or reuses an ordinary native task, which receives verified
+Mission provenance and reads the durable brief before working. Pausing or
+closing the Mission pauses future reviews; there is no Mission-specific agent
+loop or default lifespan. See `docs/MISSIONS.md`.
