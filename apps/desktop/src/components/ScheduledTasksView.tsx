@@ -510,13 +510,15 @@ function TaskEditor({
       await manager.connection(hostId ?? "")?.refresh();
       onToast({
         variant: "success",
-        title: editing ? "Scheduled task updated" : "Scheduled task created",
+        title: editing ? "Scheduled task updated" : "Automation created",
       });
       onSaved();
     } catch (error) {
       onToast({
         variant: "danger",
-        title: "Could not save scheduled task",
+        title: editing
+          ? "Could not save scheduled task"
+          : "Could not save automation",
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -545,7 +547,7 @@ function TaskEditor({
             id="scheduled-task-editor-title"
             className="text-xl font-semibold text-fg-primary"
           >
-            {editing ? "Edit scheduled task" : "New scheduled task"}
+            {editing ? "Edit scheduled task" : "New automation"}
           </h2>
           <Button
             variant="ghost"
@@ -563,7 +565,7 @@ function TaskEditor({
               className="fd-focus w-full border-0 bg-transparent px-0 py-1 text-[length:var(--fd-text-xl)] font-semibold text-fg-primary placeholder:text-fg-muted"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder="Scheduled task title"
+              placeholder={editing ? "Scheduled task title" : "Automation name"}
             />
           </label>
           <label className="block">
@@ -1419,7 +1421,7 @@ export function ScheduledTasksView({
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-3xl font-semibold tracking-tight">
-              Scheduled tasks
+              Automations
             </h1>
             <p className="mt-2 text-fg-secondary">
               Run recurring agent work on this Mac or an enrolled server.
@@ -1432,14 +1434,14 @@ export function ScheduledTasksView({
               disabled={!onCreateWithAgent}
             >
               <Plus aria-hidden="true" className="h-4 w-4" />
-              New task
+              New automation
             </Button>
             <Popover.Root>
               <Popover.Trigger asChild>
                 <Button
                   className="rounded-l-none border-l border-surface-0 px-2"
                   aria-haspopup="menu"
-                  aria-label="New task options"
+                  aria-label="New automation options"
                   disabled={!onCreateWithAgent && !canCreate}
                 >
                   <ChevronDown aria-hidden="true" className="h-4 w-4" />
@@ -1450,7 +1452,7 @@ export function ScheduledTasksView({
                   align="end"
                   sideOffset={8}
                   role="menu"
-                  aria-label="New task options"
+                  aria-label="New automation options"
                   onKeyDown={handleMenuKeyDown}
                   className="z-50 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
                 >
@@ -1485,19 +1487,19 @@ export function ScheduledTasksView({
         </div>
         <label className="relative mt-8 block">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" />
-          <span className="sr-only">Search scheduled tasks</span>
+          <span className="sr-only">Search automations</span>
           <input
             className={`${inputClass} pl-10`}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search scheduled tasks"
+            placeholder="Search automations"
           />
         </label>
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <div
             className="inline-flex rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-0.5"
             role="group"
-            aria-label="Task status filter"
+            aria-label="Automation status filter"
           >
             {(["all", "active", "paused"] as const).map((value) => (
               <button
@@ -1572,7 +1574,7 @@ export function ScheduledTasksView({
         </div>
         {unsupportedHosts.length ? (
           <p className="mt-4 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-4 py-3 text-sm text-warning">
-            Scheduled tasks are unavailable on{" "}
+            Automations are unavailable on{" "}
             {unsupportedHosts.map((host) => host.name).join(", ")}
             {unsupportedHosts.length === 1
               ? " until its daemon is upgraded."
@@ -1582,7 +1584,7 @@ export function ScheduledTasksView({
         {localSnapshot &&
         !localSnapshot.daemon.capabilities?.scheduled_tasks ? (
           <p className="mt-4 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-4 py-3 text-sm text-warning">
-            Scheduled tasks are unavailable on This Mac until its daemon is
+            Automations are unavailable on This Mac until its daemon is
             upgraded.
           </p>
         ) : null}

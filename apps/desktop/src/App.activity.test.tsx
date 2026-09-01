@@ -301,10 +301,10 @@ describe("Activity takeover wiring", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
     expect(
-      await screen.findByRole("heading", { name: "Scheduled tasks" }),
+      await screen.findByRole("heading", { name: "Automations" }),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
 
     expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
     expect(screen.getByTestId("composer-draft")).toHaveTextContent(
@@ -340,8 +340,8 @@ describe("Activity takeover wiring", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
-    await screen.findByRole("heading", { name: "Scheduled tasks" });
-    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+    await screen.findByRole("heading", { name: "Automations" });
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
 
     expect(screen.getByTestId("composer-draft")).toHaveTextContent(
       /Current notes:\s*Keep this draft/,

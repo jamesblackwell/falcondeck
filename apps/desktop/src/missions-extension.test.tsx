@@ -157,6 +157,39 @@ describe("Missions trusted frontend", () => {
     expect(openThread).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
+  it("opens a guided task for creating a new Mission", async () => {
+    const startTask = vi.fn();
+    const invokeAction = vi.fn(async () => response());
+    renderMissions({
+      hasPermission: (permission) => permissions.includes(permission),
+      invokeAction,
+      startTask,
+      views: response().updatedViews,
+    });
+    await waitFor(() => expect(invokeAction).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "New mission" }));
+
+    expect(startTask).toHaveBeenCalledOnce();
+    expect(startTask).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "use the FalconDeck Mission tools to create a draft for my review",
+      ),
+    );
+  });
+
+  it("disables new Mission creation when the host has no selected project", async () => {
+    const invokeAction = vi.fn(async () => response());
+    renderMissions({
+      hasPermission: (permission) => permissions.includes(permission),
+      invokeAction,
+      views: response().updatedViews,
+    });
+    await waitFor(() => expect(invokeAction).toHaveBeenCalled());
+
+    expect(screen.getByRole("button", { name: "New mission" })).toBeDisabled();
+  });
+
   it("sends bounded run controls with the current policy revision", async () => {
     const invokeAction = vi.fn(async () => response());
     renderMissions({

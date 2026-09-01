@@ -67,6 +67,7 @@ export function ExtensionAppPanel({
   views,
   onInvokeAction,
   onOpenThread,
+  onStartTask,
   onOpenExtensionSettings,
   onClose,
 }: {
@@ -83,6 +84,7 @@ export function ExtensionAppPanel({
     target?: ExtensionAppViewScope | null,
   ): Promise<ExtensionActionResponse>;
   onOpenThread(workspaceId: string, threadId: string): void;
+  onStartTask?(draft: string): void;
   onOpenExtensionSettings?(): void;
   onClose(): void;
 }) {
@@ -171,6 +173,7 @@ export function ExtensionAppPanel({
           hasPermission={hasPermission}
           invokeAction={invokeAction}
           openThread={onOpenThread}
+          startTask={onStartTask}
           openExtensionSettings={onOpenExtensionSettings}
         />
       </ExtensionAppBoundary>

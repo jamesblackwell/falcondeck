@@ -547,9 +547,10 @@ the ordinary panel route and sidebar lifecycle.
 
 The host owns React, routing, enablement, and daemon transport. Panel props
 contain the extension's synchronized views, summary-only thread fields when
-`threads:read` is granted, a typed action invoker, and a thread-navigation
-request. Frontends do not receive message content, filesystem paths, daemon
-credentials, or application stores through the SDK. Imports are built into
+`threads:read` is granted, a typed action invoker, thread navigation, and an
+optional host-owned request to open a new task with an editable draft in the
+current workspace. Frontends do not receive message content, filesystem paths,
+daemon credentials, or application stores through the SDK. Imports are built into
 the host application, so React remains a singleton and a failed import or
 panel render is contained to that extension surface.
 

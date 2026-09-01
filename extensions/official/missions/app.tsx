@@ -23,6 +23,8 @@ import {
 } from "./model";
 
 const PANEL_VIEW = "missions-panel";
+const MISSION_CREATION_PROMPT =
+  "Let’s set up a FalconDeck Mission together. Help me define the objective, acceptance criteria, and sensible limits for time, coordinator turns, and workers. Ask only for details that materially affect the plan. Once we’ve agreed, use the FalconDeck Mission tools to create a draft for my review. Do not begin the work until I start the Mission.";
 const REQUIRED_PERMISSIONS = [
   {
     id: "threads:read",
@@ -550,6 +552,7 @@ function MissionDashboard({
   hasPermission,
   invokeAction,
   openThread,
+  startTask,
   openExtensionSettings,
 }: ExtensionAppPanelProps) {
   const ready = REQUIRED_PERMISSIONS.every((permission) =>
@@ -638,24 +641,38 @@ function MissionDashboard({
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="max-w-2xl">
             <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-              Coordinate bounded work from an ordinary task while FalconDeck
+              Coordinate bounded work from an agent task while FalconDeck
               enforces the deadline, turn limit, and worker limit.
             </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={loading || pending !== null}
-            onClick={() => void refresh()}
-          >
-            {loading ? "Refreshing…" : "Refresh"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              disabled={!startTask}
+              title={
+                startTask
+                  ? undefined
+                  : "Select a project to start a new Mission."
+              }
+              onClick={() => startTask?.(MISSION_CREATION_PROMPT)}
+            >
+              New mission
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || pending !== null}
+              onClick={() => void refresh()}
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Stat value={activeRuns} label="Open missions" />
           <Stat value={state?.drafts.length ?? 0} label="Drafts to review" />
-          <Stat value={state?.candidates.length ?? 0} label="Eligible tasks" />
+          <Stat value={state?.candidates.length ?? 0} label="Available tasks" />
         </div>
 
         {error ? (
@@ -743,15 +760,15 @@ function MissionDashboard({
                 </div>
               ) : (
                 <EmptySection>
-                  Ask an eligible agent to “start a mission” to create a draft
-                  here for review.
+                  Start a new Mission, or ask an available task to “start a
+                  mission,” to create a draft for review.
                 </EmptySection>
               )}
             </Section>
 
             <Section
-              title="Start from a task"
-              description="Turn an idle Claude or Codex task into the Mission coordinator."
+              title="Use an existing task"
+              description="Choose an idle Claude or Codex task as the Mission coordinator."
             >
               {state?.candidates.length ? (
                 <div className="divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
@@ -766,8 +783,11 @@ function MissionDashboard({
                           <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                             {candidate.title}
                           </p>
-                          <p className="mt-0.5 text-[length:var(--fd-text-xs)] capitalize text-fg-tertiary">
-                            {candidate.provider} task
+                          <p className="mt-0.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                            <span className="capitalize">
+                              {candidate.provider}
+                            </span>{" "}
+                            task
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
@@ -796,7 +816,9 @@ function MissionDashboard({
                               )
                             }
                           >
-                            {pending === key ? "Starting…" : "Make coordinator"}
+                            {pending === key
+                              ? "Starting…"
+                              : "Use as coordinator"}
                           </Button>
                         </div>
                       </div>

@@ -47,6 +47,8 @@ export type ExtensionAppPanelProps = {
     target?: ExtensionAppViewScope | null,
   ): Promise<ExtensionAppActionResponse>;
   openThread(workspaceId: string, threadId: string): void;
+  /** Opens a new task in the host's current workspace with an editable draft. */
+  startTask?(draft: string): void;
   /** Opens the host's extension settings when that surface is available. */
   openExtensionSettings?(): void;
 };

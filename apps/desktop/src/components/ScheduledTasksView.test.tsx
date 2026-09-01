@@ -168,7 +168,7 @@ describe("ScheduledTasksView", () => {
     expect(screen.getByText("Paused audit")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^all$/i }));
-    fireEvent.change(screen.getByPlaceholderText("Search scheduled tasks"), {
+    fireEvent.change(screen.getByPlaceholderText("Search automations"), {
       target: { value: "briefing" },
     });
     expect(screen.getByText("Daily briefing")).toBeInTheDocument();
@@ -343,16 +343,18 @@ describe("ScheduledTasksView", () => {
 
   it("opens a new agent conversation from the primary action", () => {
     const { onCreateWithAgent } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+    fireEvent.click(screen.getByRole("button", { name: "New automation" }));
     expect(onCreateWithAgent).toHaveBeenCalledOnce();
     expect(
-      screen.queryByRole("heading", { name: "New scheduled task" }),
+      screen.queryByRole("heading", { name: "New automation" }),
     ).not.toBeInTheDocument();
   });
 
   it("keeps the manual creation sheet in the task options menu", () => {
     setup();
-    const options = screen.getByRole("button", { name: "New task options" });
+    const options = screen.getByRole("button", {
+      name: "New automation options",
+    });
     expect(options).toHaveAttribute("aria-haspopup", "menu");
     fireEvent.click(options);
     expect(
@@ -360,7 +362,7 @@ describe("ScheduledTasksView", () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("menuitem", { name: "Set up manually" }));
     expect(
-      screen.getByRole("heading", { name: "New scheduled task" }),
+      screen.getByRole("heading", { name: "New automation" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Execution host")).toBeInTheDocument();
     expect(screen.getByLabelText("Project")).toBeInTheDocument();
@@ -375,9 +377,11 @@ describe("ScheduledTasksView", () => {
 
   it("creates manual tasks in the canonical automation store", async () => {
     const { controlExecute, createScheduledTask } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "New automation options" }),
+    );
     fireEvent.click(screen.getByRole("menuitem", { name: "Set up manually" }));
-    fireEvent.change(screen.getByPlaceholderText("Scheduled task title"), {
+    fireEvent.change(screen.getByPlaceholderText("Automation name"), {
       target: { value: "Canonical daily task" },
     });
     fireEvent.change(
@@ -409,7 +413,9 @@ describe("ScheduledTasksView", () => {
 
   it("focuses the enabled manual option when agent creation is unavailable", () => {
     setup({}, null);
-    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "New automation options" }),
+    );
 
     expect(
       screen.getByRole("menuitem", { name: "Set up manually" }),
@@ -420,7 +426,7 @@ describe("ScheduledTasksView", () => {
 
   it("searches prompt previews and exposes a keyboard-accessible action menu", () => {
     setup();
-    fireEvent.change(screen.getByPlaceholderText("Search scheduled tasks"), {
+    fireEvent.change(screen.getByPlaceholderText("Search automations"), {
       target: { value: "release permissions" },
     });
     expect(screen.getByText("Paused audit")).toBeInTheDocument();

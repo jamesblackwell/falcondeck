@@ -52,6 +52,7 @@ import {
   workspaceOperationalConditions,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
+  mergeGuidedComposerDraft,
   missionCommandAvailable,
   mergeThreadDetailPage,
   normalizeDaemonSnapshot,
@@ -3850,6 +3851,23 @@ function RemoteApp() {
     setSelectedThreadId(null);
     setShowProjects(false);
   }, []);
+  const handleStartTaskWithDraft = useCallback(
+    (guide: string) => {
+      if (!selectedWorkspaceId) return;
+      const key = draftKeyFor(selectedWorkspaceId, null);
+      setDrafts((current) => {
+        const next = upsertComposerDraft(
+          current,
+          key,
+          mergeGuidedComposerDraft(guide, current[key]?.text ?? ""),
+        );
+        if (next !== current) writeStoredDrafts(next);
+        return next;
+      });
+      handleNewThread(selectedWorkspaceId);
+    },
+    [handleNewThread, selectedWorkspaceId],
+  );
   const handleSelectExtensionPanel = useCallback((panelKey: string) => {
     setActiveExtensionPanelKey(panelKey);
     setShowProjects(false);
@@ -5083,6 +5101,9 @@ function RemoteApp() {
                 )
               }
               onOpenThread={handleSelectThread}
+              onStartTask={
+                selectedWorkspaceId ? handleStartTaskWithDraft : undefined
+              }
               onClose={() => setActiveExtensionPanelKey(null)}
             />
           ) : activeExtensionPanel ? (

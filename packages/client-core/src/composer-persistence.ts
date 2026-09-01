@@ -126,6 +126,21 @@ export function mergeFailedComposerDraft(
 }
 
 /**
+ * Starts a guided task without discarding notes already sitting in that
+ * workspace's new-task composer. Repeated launch requests are idempotent.
+ */
+export function mergeGuidedComposerDraft(
+  guide: string,
+  current: string,
+): string {
+  const trimmedGuide = guide.trim()
+  if (!trimmedGuide) return current
+  if (current.startsWith(trimmedGuide)) return current
+  if (!current.trim()) return trimmedGuide
+  return `${trimmedGuide}\n\nCurrent notes:\n${current}`
+}
+
+/**
  * Restores failed attachments ahead of newer picker additions, deduplicating
  * by stable attachment id. The current copy wins if metadata for the same id
  * changed while the request was pending, while its original position remains.

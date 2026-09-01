@@ -94,6 +94,23 @@ Rules:
 - For a translucent accent or semantic fill, reach for the tokenized `-muted` / `-dim` variant instead of an ad hoc alpha modifier like `bg-accent/10`.
 - Web tokens are named `--fd-*`. There is no `--fd-color-*` prefix; the `--color-*` aliases exist only so Tailwind can generate `bg-surface-1` style utilities. A `var(--fd-color-…)` reference silently resolves to nothing.
 
+## Product Language
+
+Use these nouns consistently in user-facing copy:
+
+- **Task** is an agent conversation or work session. It is the neutral product
+  term across harnesses.
+- **Thread** is the internal protocol and implementation term for a task. Do
+  not expose it in ordinary product copy.
+- **Mission** is a bounded coordinated run with one coordinator task and zero
+  or more worker tasks.
+- **Automation** is a saved scheduled instruction. It may create tasks when it
+  runs, but it is not itself a task.
+
+Name actions for the outcome the user intends, not the mechanism FalconDeck
+uses. For example, “New mission” and “New automation” may both open a new task
+with a guided draft.
+
 ## Typography
 
 Web:

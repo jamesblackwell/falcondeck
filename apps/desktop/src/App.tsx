@@ -45,6 +45,7 @@ import {
   removeConversationItem,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
+  mergeGuidedComposerDraft,
   missionCommandAvailable,
   providerForThread,
   resolvePersistedMode,
@@ -226,17 +227,7 @@ import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends
 const NO_ATTACHMENTS: ImageInput[] = [];
 const NO_QUOTED_SELECTIONS: QuotedSelection[] = [];
 const SCHEDULED_TASK_CREATION_PROMPT =
-  "Let’s set up a scheduled task together. First, explain how scheduled tasks work in FalconDeck. Then interview me to figure out what I need scheduled and when it should run. Once we’ve agreed on the details, use the FalconDeck MCP server to create the automation.";
-
-function scheduledTaskCreationDraft(existingDraft: string) {
-  if (existingDraft.startsWith(SCHEDULED_TASK_CREATION_PROMPT)) {
-    return existingDraft;
-  }
-  return mergeFailedComposerDraft(
-    SCHEDULED_TASK_CREATION_PROMPT,
-    existingDraft.trim() ? `Current notes:\n${existingDraft}` : "",
-  );
-}
+  "Let’s set up an automation together. First, explain how automations work in FalconDeck. Then interview me to figure out what I need to run and when it should run. Once we’ve agreed on the details, use the FalconDeck MCP server to create the automation.";
 
 type DesktopExtensionPanel = ExtensionPanelDefinition & {
   ownerHostId: string | null;
@@ -3234,15 +3225,22 @@ function AppInner() {
     [setSelectedWorkspaceId, setSelectedThreadId, setThreadDetail],
   );
 
+  const handleStartTaskWithDraft = useCallback(
+    (guide: string) => {
+      if (!selectedWorkspaceId) return;
+      const key = draftKeyFor(selectedWorkspaceId, null);
+      setDraftForConversation(
+        key,
+        mergeGuidedComposerDraft(guide, draftsRef.current[key]?.text ?? ""),
+      );
+      handleNewThread(selectedWorkspaceId);
+    },
+    [handleNewThread, selectedWorkspaceId, setDraftForConversation],
+  );
+
   const handleCreateScheduledTaskWithAgent = useCallback(() => {
-    if (!selectedWorkspaceId) return;
-    const key = draftKeyFor(selectedWorkspaceId, null);
-    setDraftForConversation(
-      key,
-      scheduledTaskCreationDraft(draftsRef.current[key]?.text ?? ""),
-    );
-    handleNewThread(selectedWorkspaceId);
-  }, [handleNewThread, selectedWorkspaceId, setDraftForConversation]);
+    handleStartTaskWithDraft(SCHEDULED_TASK_CREATION_PROMPT);
+  }, [handleStartTaskWithDraft]);
 
   const handleNewThreadProjectChange = useCallback(
     (workspaceId: string) => {
@@ -5841,6 +5839,15 @@ function AppInner() {
                         views={ownerSnapshot.extensions.views}
                         onClose={() => setActiveExtensionPanelKey(null)}
                         onOpenThread={handleSelectThread}
+                        onStartTask={
+                          selectedWorkspaceId &&
+                          ownerSnapshot.workspaces.some(
+                            (workspace) => workspace.id === selectedWorkspaceId,
+                          ) &&
+                          !(isSending && !selectedThreadId)
+                            ? handleStartTaskWithDraft
+                            : undefined
+                        }
                         onOpenExtensionSettings={handleOpenExtensions}
                         onInvokeAction={(
                           _registeredPanel,

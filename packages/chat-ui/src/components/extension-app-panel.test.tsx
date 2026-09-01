@@ -98,4 +98,36 @@ describe("ExtensionAppPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open settings" }));
     expect(onOpenExtensionSettings).toHaveBeenCalledOnce();
   });
+
+  it("offers trusted frontends a host-owned guided task launcher", () => {
+    const onStartTask = vi.fn();
+    const registration: ExtensionAppPanelRegistration = {
+      id: "board",
+      title: "Kanban",
+      component({ startTask }) {
+        return (
+          <button type="button" onClick={() => startTask?.("Guide me")}>
+            Start guided task
+          </button>
+        );
+      },
+    };
+
+    render(
+      <ExtensionAppPanel
+        panel={panel}
+        registration={registration}
+        extension={extension}
+        threads={[]}
+        views={[]}
+        onInvokeAction={vi.fn()}
+        onOpenThread={vi.fn()}
+        onStartTask={onStartTask}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Start guided task" }));
+    expect(onStartTask).toHaveBeenCalledWith("Guide me");
+  });
 });

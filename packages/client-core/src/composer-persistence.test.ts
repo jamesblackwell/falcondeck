@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
+  mergeGuidedComposerDraft,
   updateAttachmentPreparationCount,
 } from './composer-persistence'
 
@@ -63,5 +64,19 @@ describe('failed composer submission recovery', () => {
     ])
     expect(mergeFailedComposerAttachments([], current)).toEqual(current)
     expect(mergeFailedComposerAttachments(failed, [])).toEqual(failed)
+  })
+})
+
+describe('guided composer drafts', () => {
+  it('starts with the guide and preserves existing notes', () => {
+    expect(mergeGuidedComposerDraft('Set this up', '')).toBe('Set this up')
+    expect(mergeGuidedComposerDraft('Set this up', 'Keep this')).toBe(
+      'Set this up\n\nCurrent notes:\nKeep this',
+    )
+  })
+
+  it('does not duplicate a guide that is already present', () => {
+    const current = 'Set this up\n\nCurrent notes:\nKeep this'
+    expect(mergeGuidedComposerDraft('Set this up', current)).toBe(current)
   })
 })
