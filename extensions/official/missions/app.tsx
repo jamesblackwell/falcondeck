@@ -24,6 +24,7 @@ import {
 } from "./model";
 
 const PANEL_VIEW = "missions-panel";
+const AUTONOMOUS_ACCESS_LABEL = "Full access · Never ask";
 const MISSION_CREATION_PROMPT =
   "Let’s set up a FalconDeck Mission together. Help me define the objective, acceptance criteria, and sensible limits for time, coordinator turns, and workers. Ask only for details that materially affect the plan. Once we’ve agreed, use the FalconDeck Mission tools to create a draft for my review, passing the agreed limits in the structured leaseMinutes, maxAutomaticTurns, and maxWorkers fields rather than only writing them in the objective. Do not begin the work until I start the Mission.";
 const REQUIRED_PERMISSIONS = [
@@ -448,6 +449,7 @@ function RunCard({
             {run.workers.length}/{run.maxWorkers} workers
           </span>
           <span>Due {formatDeadline(run.deadlineAt)}</span>
+          <span>{AUTONOMOUS_ACCESS_LABEL}</span>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -651,6 +653,10 @@ function MissionDashboard({
               Coordinate bounded work from an agent task while FalconDeck
               enforces the deadline, turn limit, and worker limit.
             </p>
+            <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-tertiary">
+              Mission coordinator and worker turns use {AUTONOMOUS_ACCESS_LABEL}
+              so long-running work does not stop for routine tool approvals.
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -747,7 +753,8 @@ function MissionDashboard({
                           <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
                             {formatDuration(draft.leaseMinutes)} ·{" "}
                             {draft.maxAutomaticTurns} turns · {draft.maxWorkers}{" "}
-                            workers · {draft.acceptanceCriteria.length} criteria
+                            workers · {draft.acceptanceCriteria.length} criteria ·{" "}
+                            {AUTONOMOUS_ACCESS_LABEL}
                           </span>
                           <Button
                             size="sm"
@@ -993,6 +1000,11 @@ function MissionDraftToolResult({
         ) : null}
       </CardHeader>
       <CardContent className="space-y-4">
+        <div className="rounded-[var(--fd-radius-md)] border border-info/25 bg-info-muted px-3.5 py-3 text-[length:var(--fd-text-xs)] leading-relaxed text-info">
+          <span className="font-medium">Autonomous access:</span>{" "}
+          {AUTONOMOUS_ACCESS_LABEL}. Starting authorizes this coordinator and
+          its Mission workers to run without routine tool approvals.
+        </div>
         {editing ? (
           <div className="space-y-3">
             <label className="block space-y-1.5 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">

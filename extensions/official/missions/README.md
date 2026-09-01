@@ -7,7 +7,11 @@ keeps the conversation in the underlying harness, and asks the daemon's public
 orchestration facet to enforce a human-reviewed lease (three hours by default,
 up to 24 hours), coordinator-turn budget (12 by default, up to 24), and worker
 budget (three by default, up to four). Workers are visible ordinary tasks and
-run serially so same-folder writers never overlap.
+run serially so same-folder writers never overlap. After the human starts a
+Mission, its coordinator and worker turns use an explicit autonomous profile:
+Codex runs with never-ask/full access and Claude runs with bypass permissions.
+The approval UI states this before start; ordinary non-Mission tasks keep their
+own selected permission posture.
 
 The extension owns the objective, criteria, checkpoint, progress fingerprint,
 and completion proposal. The daemon owns the durable journal, task binding,

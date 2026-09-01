@@ -674,10 +674,15 @@ default to three hours, 12 turns, and three workers; these values are stored as
 structured policy and enforced by the daemon rather than inferred from prompt
 prose. A human may extend a run by one hour up to the 24-hour cumulative
 ceiling.
-Background dispatch uses an explicit safer execution profile and does not change current
-task selection or the workspace default provider. Repeated progress
-fingerprints, provider ambiguity, task errors, permission revocation, and
-extension disable pause the run. Restart never blindly resends accepted work.
+Background dispatch uses an explicit autonomous execution profile: Codex
+coordinators and workers run with `never` approval plus `danger-full-access`,
+and Claude coordinators run with `bypassPermissions`. The human Start action
+shows this posture before authorizing the run. Mission-owned turns therefore
+do not inherit an interactive task mode that would stall unattended work. This
+does not change current task selection or the workspace default provider.
+Repeated progress fingerprints, provider ambiguity, task errors, permission
+revocation, and extension disable pause the run. Restart never blindly resends
+accepted work.
 The owner may propose completion, but only a human panel action can accept it.
 The bundled `falcondeck.missions` package is the reference consumer and is
 disabled with all grants denied by default. Worker tasks are ordinary visible

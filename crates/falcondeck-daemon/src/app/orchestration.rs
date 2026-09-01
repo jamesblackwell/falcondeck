@@ -39,6 +39,43 @@ const MAX_FINGERPRINT_CHARS: usize = 256;
 const DRIVER_POLL: StdDuration = StdDuration::from_millis(500);
 const MISSIONS_EXTENSION_ID: &str = "falcondeck.missions";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MissionExecutionProfile {
+    approval_policy: &'static str,
+    permission_mode: &'static str,
+    sandbox_mode: Option<&'static str>,
+}
+
+/// Mission-owned turns are explicitly autonomous. They do not inherit the
+/// adopted task's interactive approval posture because a background run that
+/// waits for routine tool approvals cannot satisfy its long-running contract.
+fn mission_execution_profile(provider: &AgentProvider) -> MissionExecutionProfile {
+    if provider == &AgentProvider::CODEX {
+        MissionExecutionProfile {
+            approval_policy: "never",
+            permission_mode: "never",
+            sandbox_mode: Some("danger-full-access"),
+        }
+    } else if provider == &AgentProvider::CLAUDE {
+        MissionExecutionProfile {
+            // Claude's CLI consumes permission_mode; approval_policy is kept
+            // at its ordinary value because it is not a Claude CLI flag.
+            approval_policy: "on-request",
+            permission_mode: "bypassPermissions",
+            sandbox_mode: None,
+        }
+    } else {
+        // Admission currently limits coordinators to Claude/Codex and workers
+        // to Codex. Keep an interactive fallback if that contract widens
+        // without first adding a provider-specific autonomous mode here.
+        MissionExecutionProfile {
+            approval_policy: "on-request",
+            permission_mode: "on-request",
+            sandbox_mode: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct OrchestrationRegistry {
     #[serde(default = "store_version")]
@@ -1341,14 +1378,15 @@ async fn drive_worker(
             {
                 return Ok(());
             }
+            let profile = mission_execution_profile(&worker.provider);
             let request = StartThreadRequest {
                 workspace_id: run.workspace_id.clone(),
                 provider: Some(worker.provider.clone()),
                 model_id: None,
                 collaboration_mode_id: None,
-                approval_policy: Some("on-request".to_string()),
-                sandbox_mode: Some("workspace-write".to_string()),
-                permission_mode: Some("on-request".to_string()),
+                approval_policy: Some(profile.approval_policy.to_string()),
+                sandbox_mode: profile.sandbox_mode.map(str::to_string),
+                permission_mode: Some(profile.permission_mode.to_string()),
                 isolation: ThreadIsolation::ProjectFolder,
                 handoff_from: None,
             };
@@ -1631,20 +1669,7 @@ fn worker_status_label(status: ExtensionWorkerStatus) -> &'static str {
 }
 
 fn background_request(thread: &falcondeck_core::ThreadSummary, prompt: String) -> SendTurnRequest {
-    let (permission_mode, sandbox_mode, approval_policy) =
-        if thread.provider == AgentProvider::CODEX {
-            (
-                Some("on-request".to_string()),
-                Some("workspace-write".to_string()),
-                Some("on-request".to_string()),
-            )
-        } else {
-            (
-                Some("acceptEdits".to_string()),
-                thread.agent.sandbox_mode.clone(),
-                Some("on-request".to_string()),
-            )
-        };
+    let profile = mission_execution_profile(&thread.provider);
     SendTurnRequest {
         workspace_id: thread.workspace_id.clone(),
         thread_id: thread.id.clone(),
@@ -1656,10 +1681,10 @@ fn background_request(thread: &falcondeck_core::ThreadSummary, prompt: String) -
         provider: Some(thread.provider.clone()),
         model_id: thread.agent.model_id.clone(),
         reasoning_effort: thread.agent.reasoning_effort.clone(),
-        approval_policy,
+        approval_policy: Some(profile.approval_policy.to_string()),
         service_tier: thread.agent.service_tier.clone(),
-        permission_mode,
-        sandbox_mode,
+        permission_mode: Some(profile.permission_mode.to_string()),
+        sandbox_mode: profile.sandbox_mode.map(str::to_string),
         steer: false,
         user_item_id: None,
         resume_interrupted: false,
@@ -2195,6 +2220,26 @@ mod tests {
             operations: Vec::new(),
             workers: Vec::new(),
         }
+    }
+
+    #[test]
+    fn mission_turns_use_provider_bypass_profiles() {
+        assert_eq!(
+            mission_execution_profile(&AgentProvider::CODEX),
+            MissionExecutionProfile {
+                approval_policy: "never",
+                permission_mode: "never",
+                sandbox_mode: Some("danger-full-access"),
+            }
+        );
+        assert_eq!(
+            mission_execution_profile(&AgentProvider::CLAUDE),
+            MissionExecutionProfile {
+                approval_policy: "on-request",
+                permission_mode: "bypassPermissions",
+                sandbox_mode: None,
+            }
+        );
     }
 
     #[test]

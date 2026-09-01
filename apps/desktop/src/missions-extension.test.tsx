@@ -237,6 +237,7 @@ describe("Missions trusted frontend", () => {
 
     expect(screen.getByText("Mission draft ready")).toBeVisible();
     expect(screen.getByText("3 hr")).toBeVisible();
+    expect(screen.getByText(/Full access · Never ask/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Review and edit" }));
     fireEvent.change(screen.getByLabelText("Coordinator turns"), {
       target: { value: "18" },
