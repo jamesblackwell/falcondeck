@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "@falcondeck/ui/styles.css";
+@import "@xterm/xterm/css/xterm.css";
 
 @source "../../../packages/ui/src";
 @source "../../../packages/chat-ui/src";

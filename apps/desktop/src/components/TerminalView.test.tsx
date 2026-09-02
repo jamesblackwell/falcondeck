@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import type { TerminalChunk, TerminalSessionInfo } from '@falcondeck/client-core'
 
@@ -74,6 +76,13 @@ class FakeSocket {
 
 afterEach(() => {
   FakeSocket.instances = []
+})
+
+describe('TerminalView styles', () => {
+  it('loads the xterm stylesheet that hides and positions its keyboard textarea', () => {
+    const appStyles = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+    expect(appStyles).toContain('@import "@xterm/xterm/css/xterm.css"')
+  })
 })
 
 describe('TerminalView socket lifecycle', () => {
