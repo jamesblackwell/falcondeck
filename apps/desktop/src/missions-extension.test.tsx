@@ -85,6 +85,9 @@ describe("Missions v2 trusted frontend", () => {
     const registration = collectExtensionApp(missionsApp);
     expect(registration.panels[0]!.title).toBe("Missions");
     expect(registration.agentToolResults[0]!.toolId).toBe("create-mission");
+    expect(registration.agentToolResults[0]!.detail).toEqual({
+      title: "Mission draft",
+    });
   });
 
   it("fails closed on malformed Mission projections", () => {
@@ -208,6 +211,7 @@ describe("Missions v2 trusted frontend", () => {
       missions: [{ ...panelState.missions[0]!, status: "draft" }],
     };
     const invokeAction = vi.fn(async () => response(draftState));
+    const openDetails = vi.fn();
     render(
       <Component
         extensionId="falcondeck.missions"
@@ -218,12 +222,16 @@ describe("Missions v2 trusted frontend", () => {
           result: { missionId: "mission-1", status: "draft" },
         }}
         views={response(draftState).updatedViews}
+        presentation="inline"
+        openDetails={openDetails}
         invokeAction={invokeAction}
       />,
     );
 
     expect(screen.getByText("Mission draft ready")).toBeVisible();
     expect(screen.getByText("No deadline")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Open details" }));
+    expect(openDetails).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "Activate mission" }));
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith("activate-mission", {

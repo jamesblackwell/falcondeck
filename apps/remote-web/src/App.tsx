@@ -171,12 +171,14 @@ import {
   OperationalNotice,
   ExtensionPanel,
   ExtensionAppPanel,
+  ExtensionAgentToolDetailPanel,
   ExtensionAgentToolUiProvider,
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
   useReadAloud,
   useShipThread,
+  type ExtensionAgentToolDetailSelection,
 } from "@falcondeck/chat-ui";
 import { useExtensionApps } from "@falcondeck/extension-sdk/app-host";
 import type { ExtensionAppViewScope } from "@falcondeck/extension-sdk/app";
@@ -427,6 +429,8 @@ function RemoteApp() {
     null,
   );
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [extensionToolDetail, setExtensionToolDetail] =
+    useState<ExtensionAgentToolDetailSelection | null>(null);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
     string | null
   >(null);
@@ -453,6 +457,9 @@ function RemoteApp() {
       setActiveExtensionPanelKey(null);
     }
   }, [activeExtensionPanel, activeExtensionPanelKey]);
+  useEffect(() => {
+    setExtensionToolDetail(null);
+  }, [selectedThreadId, selectedWorkspaceId]);
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
@@ -5127,6 +5134,7 @@ function RemoteApp() {
                   extensions={snapshot?.extensions.catalog ?? []}
                   views={snapshot?.extensions.views ?? []}
                   onInvokeAction={invokeExtensionAppAction}
+                  onOpenDetails={setExtensionToolDetail}
                 >
                   <Conversation
                   threadKey={
@@ -5312,6 +5320,21 @@ function RemoteApp() {
             </>
           )}
         </div>
+        {extensionToolDetail ? (
+          <aside className="fixed inset-0 z-50 min-w-0 bg-surface-1 md:static md:z-auto md:w-[400px] md:shrink-0 md:border-l md:border-border-subtle">
+            <ExtensionAgentToolUiProvider
+              apps={extensionApps}
+              extensions={snapshot?.extensions.catalog ?? []}
+              views={snapshot?.extensions.views ?? []}
+              onInvokeAction={invokeExtensionAppAction}
+            >
+              <ExtensionAgentToolDetailPanel
+                selection={extensionToolDetail}
+                onClose={() => setExtensionToolDetail(null)}
+              />
+            </ExtensionAgentToolUiProvider>
+          </aside>
+        ) : null}
       </div>
     </div>
   );

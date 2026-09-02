@@ -67,6 +67,10 @@ export type ExtensionAppAgentToolResultProps = {
   arguments: unknown;
   result: unknown;
   views: readonly ExtensionAppView[];
+  /** Whether the host is rendering the compact transcript card or its detail surface. */
+  presentation: "inline" | "detail";
+  /** Present when the host can open this result in a dedicated detail surface. */
+  openDetails?: () => void;
   invokeAction(
     actionId: string,
     input?: unknown,
@@ -77,6 +81,10 @@ export type ExtensionAppAgentToolResultProps = {
 export type ExtensionAppAgentToolResultRegistration = {
   toolId: string;
   component: ComponentType<ExtensionAppAgentToolResultProps>;
+  /** Opts this renderer into the host-owned detail surface. */
+  detail?: {
+    title: string;
+  };
 };
 
 export type ExtensionAppRegistration = {
@@ -151,6 +159,11 @@ export function collectExtensionApp(
         if (typeof result.component !== "function") {
           throw new Error(
             `Invalid extension agent-tool result registration: ${result.toolId}`,
+          );
+        }
+        if (result.detail && !result.detail.title.trim()) {
+          throw new Error(
+            `Invalid extension agent-tool result detail: ${result.toolId}`,
           );
         }
         agentToolIds.add(result.toolId);

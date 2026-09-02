@@ -717,6 +717,8 @@ function MissionDraftToolResult({
   result,
   views,
   invokeAction,
+  presentation,
+  openDetails,
 }: ExtensionAppAgentToolResultProps) {
   const envelope =
     result && typeof result === "object" && !Array.isArray(result)
@@ -737,6 +739,7 @@ function MissionDraftToolResult({
     : null;
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const detailed = presentation === "detail";
 
   if (!missionId) return null;
 
@@ -755,8 +758,17 @@ function MissionDraftToolResult({
   };
 
   return (
-    <Card className="my-3 p-4">
-      <Badge variant="warning">Draft</Badge>
+    <Card
+      className={classes(detailed ? "border-0 bg-transparent p-0" : "my-3 p-4")}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <Badge variant="warning">Draft</Badge>
+        {!detailed && openDetails ? (
+          <Button variant="ghost" onClick={openDetails}>
+            Open details
+          </Button>
+        ) : null}
+      </div>
       <h3 className="mt-2 text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
         Mission draft ready
       </h3>
@@ -765,14 +777,31 @@ function MissionDraftToolResult({
           <p className="mt-1 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
             {mission.title}
           </p>
-          <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+          <p
+            className={classes(
+              "mt-1 whitespace-pre-wrap text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary",
+              !detailed && "line-clamp-4",
+            )}
+          >
             {mission.brief}
           </p>
           <ul className="mt-2 list-disc space-y-1 pl-5 text-[length:var(--fd-text-xs)] text-fg-secondary">
-            {mission.successCriteria.map((criterion, index) => (
-              <li key={index}>{criterion}</li>
-            ))}
+            {mission.successCriteria
+              .slice(0, detailed ? mission.successCriteria.length : 3)
+              .map((criterion, index) => (
+                <li
+                  className={detailed ? undefined : "line-clamp-2"}
+                  key={index}
+                >
+                  {criterion}
+                </li>
+              ))}
           </ul>
+          {!detailed && mission.successCriteria.length > 3 ? (
+            <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              +{mission.successCriteria.length - 3} more criteria
+            </p>
+          ) : null}
           <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
             {mission.deadline
               ? `Deadline ${formatDate(mission.deadline)}`
@@ -806,5 +835,6 @@ export default defineExtensionApp("falcondeck.missions", (app) => {
   app.agentToolResults.register({
     toolId: "create-mission",
     component: MissionDraftToolResult,
+    detail: { title: "Mission draft" },
   });
 });

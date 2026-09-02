@@ -34,13 +34,31 @@ describe("extension app registrations", () => {
         app.agentToolResults.register({
           toolId: "create-card",
           component: ToolResult,
+          detail: { title: "Card draft" },
         });
       }),
     );
 
     expect(registration.agentToolResults).toEqual([
-      expect.objectContaining({ toolId: "create-card" }),
+      expect.objectContaining({
+        toolId: "create-card",
+        detail: { title: "Card draft" },
+      }),
     ]);
+  });
+
+  it("rejects a detail surface without a title", () => {
+    const definition = defineExtensionApp("example.kanban", (app) => {
+      app.agentToolResults.register({
+        toolId: "create-card",
+        component: ToolResult,
+        detail: { title: "  " },
+      });
+    });
+
+    expect(() => collectExtensionApp(definition)).toThrow(
+      "Invalid extension agent-tool result detail: create-card",
+    );
   });
 
   it("rejects duplicate panel ids before the host mounts either component", () => {

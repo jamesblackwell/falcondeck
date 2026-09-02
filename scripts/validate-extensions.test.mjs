@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,44 @@ test("official Notes frontend and declarative UI validate", () => {
 
   assert.equal(result.status, 0);
   assert.deepEqual(result.output, { ok: true, diagnostics: [] });
+});
+
+test("official Missions declares operation-specific update arguments", () => {
+  const directory = resolve(repositoryRoot, "extensions/official/missions");
+  const result = validate(directory);
+  const manifest = JSON.parse(
+    readFileSync(resolve(directory, "falcondeck.extension.json"), "utf8"),
+  );
+  const updateMission = manifest.contributes.agentTools.find(
+    (tool) => tool.id === "update-mission",
+  );
+
+  assert.equal(result.status, 0);
+  assert.deepEqual(result.output, { ok: true, diagnostics: [] });
+  assert.deepEqual(
+    updateMission.inputSchema.oneOf.map((branch) => ({
+      operation: branch.properties.operation.const,
+      required: branch.required,
+    })),
+    [
+      {
+        operation: "add_update",
+        required: ["operation", "kind", "body"],
+      },
+      {
+        operation: "set_status",
+        required: ["operation", "status"],
+      },
+      {
+        operation: "link_thread",
+        required: ["operation", "threadId"],
+      },
+      {
+        operation: "edit_definition",
+        required: ["operation", "title", "brief", "successCriteria"],
+      },
+    ],
+  );
 });
 
 test("unknown panel icons fail with a stable diagnostic", () => {

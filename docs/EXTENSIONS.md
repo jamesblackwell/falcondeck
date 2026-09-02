@@ -684,6 +684,12 @@ review and activation controls for a draft. Mobile, older clients, disabled
 extensions, undeclared tools, and frontend failures retain the ordinary MCP
 result as a visible fallback.
 
+A trusted result renderer may also declare a titled detail surface. The
+transcript remains compact; the host opens the same renderer in its own side
+panel or drawer and marks the presentation as `detail`, so the extension can
+show the complete artifact without owning window layout or navigation. This is
+generic extension infrastructure rather than a Missions-only host feature.
+
 When Missions is enabled with its task-summary and agent-tool grants,
 FalconDeck adds a short provider-neutral Mission trigger to the injected agent
 context and stages the `falcondeck-missions` workflow skill. An explicit

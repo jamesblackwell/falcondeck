@@ -145,6 +145,57 @@ describe("official Missions extension v2", () => {
     expect(completed.result).toEqual({ missionId, status: "completed" });
   });
 
+  it("treats definition edits as complete draft-only replacements", async () => {
+    const { testHost, missionId } = await create();
+
+    await expect(
+      testHost.invokeTool("update-mission", {
+        threadId: "thread-1",
+        workspaceId: "workspace-1",
+        input: { missionId, operation: "edit_definition" },
+      }),
+    ).rejects.toThrow("title is required");
+
+    await testHost.invokeTool("update-mission", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: {
+        missionId,
+        operation: "edit_definition",
+        title: "Ship and assess the release",
+        brief:
+          "Publish the release, then collect enough evidence to assess it.",
+        successCriteria: ["Release is live", "Evidence is attached"],
+      },
+    });
+    const edited = await testHost.invokeTool("read-mission", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: { missionId },
+    });
+    expect(edited.result).toEqual(
+      expect.objectContaining({
+        title: "Ship and assess the release",
+        successCriteria: ["Release is live", "Evidence is attached"],
+      }),
+    );
+
+    await testHost.invokeAction("activate-mission", { input: { missionId } });
+    await expect(
+      testHost.invokeTool("update-mission", {
+        threadId: "thread-1",
+        workspaceId: "workspace-1",
+        input: {
+          missionId,
+          operation: "edit_definition",
+          title: "A stale replacement",
+          brief: "This edit should not be applied after activation.",
+          successCriteria: ["Nothing changed"],
+        },
+      }),
+    ).rejects.toThrow("agents may edit only draft Missions");
+  });
+
   it("lets a linked agent post evidence and link a verified existing task", async () => {
     const { testHost, missionId } = await create();
     await testHost.invokeAction("activate-mission", { input: { missionId } });

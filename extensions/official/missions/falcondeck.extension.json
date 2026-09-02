@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -67,7 +67,7 @@
       {
         "id": "update-mission",
         "title": "Update a linked FalconDeck Mission",
-        "description": "Append a meaningful update, change a non-terminal status, link an existing FalconDeck task, or edit a draft. Read the Mission first. Agents cannot activate, complete, or cancel Missions.",
+        "description": "Append a meaningful update, change a non-terminal status, link an existing FalconDeck task, or replace a draft definition. Read the Mission first. edit_definition is a full replacement and works only while the Mission is still a draft. Agents cannot activate, complete, or cancel Missions.",
         "inputSchema": {
           "type": "object",
           "required": ["operation"],
@@ -107,6 +107,32 @@
             },
             "deadline": { "type": "string" }
           },
+          "oneOf": [
+            {
+              "properties": {
+                "operation": { "const": "add_update" }
+              },
+              "required": ["operation", "kind", "body"]
+            },
+            {
+              "properties": {
+                "operation": { "const": "set_status" }
+              },
+              "required": ["operation", "status"]
+            },
+            {
+              "properties": {
+                "operation": { "const": "link_thread" }
+              },
+              "required": ["operation", "threadId"]
+            },
+            {
+              "properties": {
+                "operation": { "const": "edit_definition" }
+              },
+              "required": ["operation", "title", "brief", "successCriteria"]
+            }
+          ],
           "additionalProperties": false
         }
       }

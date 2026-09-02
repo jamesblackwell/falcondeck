@@ -98,6 +98,7 @@ import {
   ComposerContextBar,
   ExtensionPanel,
   ExtensionAppPanel,
+  ExtensionAgentToolDetailPanel,
   ExtensionAgentToolUiProvider,
   NewThreadState,
   ShipMenu,
@@ -106,6 +107,7 @@ import {
   normalizeQuotedSelection,
   useReadAloud,
   type ComposerMenuRequest,
+  type ExtensionAgentToolDetailSelection,
   type LocalPathAction,
   type QuotedSelection,
 } from "@falcondeck/chat-ui";
@@ -483,6 +485,8 @@ function AppInner() {
   const [diffSelection, setDiffSelection] = useState<DiffPanelSelection | null>(
     null,
   );
+  const [extensionToolDetail, setExtensionToolDetail] =
+    useState<ExtensionAgentToolDetailSelection | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [handoffPendingProvider, setHandoffPendingProvider] =
     useState<AgentProvider | null>(null);
@@ -1148,6 +1152,7 @@ function AppInner() {
   const handleOpenFileDiff = useCallback(
     (filePath: string, view: "changes" | "files" = "changes") => {
       if (!selectedWorkspaceId) return;
+      setExtensionToolDetail(null);
       setDiffSelection({
         workspaceId: selectedWorkspaceId,
         filePath,
@@ -1157,6 +1162,17 @@ function AppInner() {
     },
     [selectedWorkspaceId, showRail],
   );
+  const handleOpenExtensionToolDetails = useCallback(
+    (selection: ExtensionAgentToolDetailSelection) => {
+      setExtensionToolDetail(selection);
+      showRail();
+    },
+    [showRail],
+  );
+  const handleCloseExtensionToolDetails = useCallback(() => {
+    setExtensionToolDetail(null);
+    hideRail();
+  }, [hideRail]);
   // Transcript path/link actions. Detected editors load once per session so
   // the context menu can offer "Open in Zed" (or whatever is installed).
   const [desktopEditors, setDesktopEditors] = useState<DesktopEditor[]>([]);
@@ -5928,6 +5944,7 @@ function AppInner() {
                 []
               }
               onInvokeAction={invokeConversationExtensionAction}
+              onOpenDetails={handleOpenExtensionToolDetails}
             >
               <DesktopConversationPane
               selectedWorkspace={selectedWorkspace}
@@ -6190,22 +6207,46 @@ function AppInner() {
         }
         rail={
           activeMainViewId ? undefined : (
-            <Suspense fallback={null}>
-              <DiffPanel
-                api={apiFor(selectedWorkspaceId)}
-                workspaceId={selectedWorkspaceId}
-                threadId={selectedThread?.id ?? null}
-                refreshTrigger={combinedGitRefreshTrigger}
-                reviewThreadId={
-                  selectedThread && activeCapabilities.supports_review
-                    ? selectedThread.id
-                    : null
+            extensionToolDetail ? (
+              <ExtensionAgentToolUiProvider
+                apps={extensionApps}
+                extensions={
+                  remoteHosts.hostForWorkspace(selectedWorkspaceId)?.snapshot
+                    ?.extensions.catalog ??
+                  snapshot?.extensions.catalog ??
+                  []
                 }
-                selection={diffSelection}
-                onSelectionChange={setDiffSelection}
-                info={reviewInfo}
-              />
-            </Suspense>
+                views={
+                  remoteHosts.hostForWorkspace(selectedWorkspaceId)?.snapshot
+                    ?.extensions.views ??
+                  snapshot?.extensions.views ??
+                  []
+                }
+                onInvokeAction={invokeConversationExtensionAction}
+              >
+                <ExtensionAgentToolDetailPanel
+                  selection={extensionToolDetail}
+                  onClose={handleCloseExtensionToolDetails}
+                />
+              </ExtensionAgentToolUiProvider>
+            ) : (
+              <Suspense fallback={null}>
+                <DiffPanel
+                  api={apiFor(selectedWorkspaceId)}
+                  workspaceId={selectedWorkspaceId}
+                  threadId={selectedThread?.id ?? null}
+                  refreshTrigger={combinedGitRefreshTrigger}
+                  reviewThreadId={
+                    selectedThread && activeCapabilities.supports_review
+                      ? selectedThread.id
+                      : null
+                  }
+                  selection={diffSelection}
+                  onSelectionChange={setDiffSelection}
+                  info={reviewInfo}
+                />
+              </Suspense>
+            )
           )
         }
         // Settings takes over the window: the project sidebar steps aside so

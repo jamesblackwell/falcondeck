@@ -8,6 +8,7 @@ import type {
 import type { ExtensionAppRegistration } from "@falcondeck/extension-sdk/app";
 
 import {
+  ExtensionAgentToolDetailPanel,
   ExtensionAgentToolResultCards,
   ExtensionAgentToolUiProvider,
 } from "./extension-agent-tool-results";
@@ -43,10 +44,17 @@ const app: ExtensionAppRegistration = {
   agentToolResults: [
     {
       toolId: "draft-mission",
-      component: ({ result, invokeAction }) => (
+      detail: { title: "Mission draft" },
+      component: ({ result, invokeAction, presentation, openDetails }) => (
         <section>
           <h2>Review this Mission</h2>
+          <span>{presentation}</span>
           <span>{JSON.stringify(result)}</span>
+          {openDetails ? (
+            <button type="button" onClick={openDetails}>
+              Open details
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => void invokeAction("start-draft", { draftId: "d1" })}
@@ -104,19 +112,29 @@ const item: Extract<ConversationItem, { kind: "tool_call" }> = {
 describe("ExtensionAgentToolResultCards", () => {
   it("renders a declared extension-owned result and routes its human action", async () => {
     const invokeAction = vi.fn(async () => ({ result: {}, updated_views: [] }));
+    const openDetails = vi.fn();
     render(
       <ExtensionAgentToolUiProvider
         apps={new Map([[extension.id, app]])}
         extensions={[extension]}
         views={[]}
         onInvokeAction={invokeAction}
+        onOpenDetails={openDetails}
       >
         <ExtensionAgentToolResultCards items={[item]} />
       </ExtensionAgentToolUiProvider>,
     );
 
     expect(screen.getByText("Review this Mission")).toBeVisible();
+    expect(screen.getByText("inline")).toBeVisible();
     expect(screen.getByText(/\"draftId\":\"d1\"/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Open details" }));
+    expect(openDetails).toHaveBeenCalledWith({
+      extensionId: extension.id,
+      toolId: "draft-mission",
+      arguments: { objective: "Ship it" },
+      result: { ok: true, result: { draftId: "d1" } },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Start mission" }));
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith(
@@ -126,6 +144,33 @@ describe("ExtensionAgentToolResultCards", () => {
         undefined,
       ),
     );
+  });
+
+  it("renders the selected result in the host-owned detail surface", () => {
+    const onClose = vi.fn();
+    render(
+      <ExtensionAgentToolUiProvider
+        apps={new Map([[extension.id, app]])}
+        extensions={[extension]}
+        views={[]}
+        onInvokeAction={vi.fn()}
+      >
+        <ExtensionAgentToolDetailPanel
+          selection={{
+            extensionId: extension.id,
+            toolId: "draft-mission",
+            arguments: { objective: "Ship it" },
+            result: { ok: true, result: { draftId: "d1" } },
+          }}
+          onClose={onClose}
+        />
+      </ExtensionAgentToolUiProvider>,
+    );
+
+    expect(screen.getByText("Mission draft")).toBeVisible();
+    expect(screen.getByText("detail")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Close details" }));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("does not mount an undeclared or disabled trusted renderer", () => {
