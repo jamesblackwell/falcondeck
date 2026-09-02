@@ -262,7 +262,7 @@ pub fn with_builtin_servers(
 }
 
 /// Resolves this daemon's own executable for built-in connector spawns.
-fn daemon_executable() -> std::path::PathBuf {
+pub fn daemon_executable() -> std::path::PathBuf {
     std::env::current_exe().unwrap_or_else(|error| {
         tracing::warn!(%error, "failed to resolve the daemon executable for a builtin connector");
         std::path::PathBuf::from("falcondeck-daemon")
@@ -600,6 +600,29 @@ pub fn acp_mcp_servers(servers: &[McpServerConfig], supports_http: bool) -> Valu
         })
         .collect::<Vec<_>>();
     Value::Array(entries)
+}
+
+/// Serializes a merged connector list into JSON for injection via the
+/// `FALCONDECK_MCP_SERVERS` environment variable (e.g. for the Pi MCP bridge).
+pub fn mcp_servers_env_json(servers: &[McpServerConfig]) -> String {
+    let entries = servers
+        .iter()
+        .map(|server| match &server.transport {
+            McpTransport::Stdio { command, args, env } => json!({
+                "name": server.name,
+                "command": command,
+                "args": args,
+                "env": env,
+            }),
+            McpTransport::Http { url, headers } => json!({
+                "type": "http",
+                "name": server.name,
+                "url": url,
+                "headers": headers,
+            }),
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Codex app-server MCP injection: `-c` overrides plus env for Bearer tokens
@@ -1018,6 +1041,42 @@ mod tests {
         assert_eq!(list[1]["type"], "http");
         assert_eq!(list[1]["url"], "https://x");
         assert_eq!(list[1]["headers"][0]["name"], "Authorization");
+    }
+
+    #[test]
+    fn mcp_servers_env_json_serializes_stdio_and_http_entries() {
+        let servers = vec![
+            McpServerConfig {
+                name: "falcondeck".into(),
+                transport: McpTransport::Stdio {
+                    command: "falcondeck-daemon".into(),
+                    args: vec!["mcp".into()],
+                    env: BTreeMap::from([("FALCONDECK_DAEMON_URL".to_string(), "http://127.0.0.1:4123".to_string())]),
+                },
+            },
+            McpServerConfig {
+                name: "remote".into(),
+                transport: McpTransport::Http {
+                    url: "https://remote.test".into(),
+                    headers: BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer token".to_string(),
+                    )]),
+                },
+            },
+        ];
+        let json_str = mcp_servers_env_json(&servers);
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        let list = parsed.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0]["name"], "falcondeck");
+        assert_eq!(list[0]["command"], "falcondeck-daemon");
+        assert_eq!(list[0]["args"], json!(["mcp"]));
+        assert_eq!(list[0]["env"]["FALCONDECK_DAEMON_URL"], "http://127.0.0.1:4123");
+        assert_eq!(list[1]["name"], "remote");
+        assert_eq!(list[1]["type"], "http");
+        assert_eq!(list[1]["url"], "https://remote.test");
+        assert_eq!(list[1]["headers"]["Authorization"], "Bearer token");
     }
 
     #[test]

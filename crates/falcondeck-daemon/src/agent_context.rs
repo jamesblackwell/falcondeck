@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 const CONTROL_SKILL_BODY: &str = include_str!("agent_context/SKILL.md");
 /// Bundled in-session MCP usage skill body.
 const MCP_SKILL_BODY: &str = include_str!("agent_context/falcondeck-mcp/SKILL.md");
+/// Bundled Pi MCP bridge extension body.
+pub const PI_EXTENSION_BODY: &str = include_str!("agent_context/falcondeck-pi-extension.js");
 
 /// Directory (under the daemon state dir) holding staged bundled skills.
 pub const SKILLS_DIR_NAME: &str = "skills";
@@ -45,10 +47,47 @@ pub fn skills_root(state_path: &Path) -> PathBuf {
 /// Idempotent per file: identical content is left in place, a differing file
 /// is refreshed atomically so daemon upgrades pick up new content.
 pub fn stage_bundled_skills(state_path: &Path) -> io::Result<BundledSkillPaths> {
+    let _ = stage_pi_extension();
     Ok(BundledSkillPaths {
         control: stage_skill_file(state_path, SKILL_NAME, CONTROL_SKILL_BODY)?,
         mcp: stage_skill_file(state_path, MCP_SKILL_NAME, MCP_SKILL_BODY)?,
     })
+}
+
+/// Stages the FalconDeck Pi extension into the global Pi extensions directory
+/// (`~/.pi/agent/extensions/falcondeck.js` or `$PI_CODING_AGENT_DIR/extensions/falcondeck.js`).
+///
+/// Idempotent per file: identical content is left in place, differing content
+/// is refreshed atomically.
+pub fn stage_pi_extension() -> io::Result<PathBuf> {
+    let pi_agent_dir = match std::env::var("PI_CODING_AGENT_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+        _ => match std::env::var("HOME") {
+            Ok(home) => PathBuf::from(home).join(".pi").join("agent"),
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "neither HOME nor PI_CODING_AGENT_DIR is set",
+                ));
+            }
+        },
+    };
+    stage_pi_extension_in(&pi_agent_dir)
+}
+
+/// Stages the FalconDeck Pi extension into a specific Pi agent directory.
+pub fn stage_pi_extension_in(pi_agent_dir: &Path) -> io::Result<PathBuf> {
+    let extensions_dir = pi_agent_dir.join("extensions");
+    std::fs::create_dir_all(&extensions_dir)?;
+    let extension_path = extensions_dir.join("falcondeck.js");
+    let existing = std::fs::read_to_string(&extension_path).ok();
+    if existing.as_deref() == Some(PI_EXTENSION_BODY) {
+        return Ok(extension_path);
+    }
+    let tmp = extensions_dir.join(".falcondeck.js.tmp");
+    std::fs::write(&tmp, PI_EXTENSION_BODY)?;
+    std::fs::rename(&tmp, &extension_path)?;
+    Ok(extension_path)
 }
 
 fn stage_skill_file(state_path: &Path, name: &str, body: &str) -> io::Result<PathBuf> {
@@ -151,6 +190,35 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&staged.mcp).expect("read").as_str(),
             MCP_SKILL_BODY,
+            "differing content is refreshed"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn staging_pi_extension_writes_file_and_is_upgrade_aware() {
+        let dir = std::env::temp_dir().join(format!("fd-pi-ext-test-{}", std::process::id()));
+        let staged = stage_pi_extension_in(&dir).expect("stage pi ext");
+        assert!(staged.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&staged).expect("read pi ext"),
+            PI_EXTENSION_BODY
+        );
+        let first = std::fs::metadata(&staged)
+            .and_then(|meta| meta.modified())
+            .ok();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let again = stage_pi_extension_in(&dir).expect("stage again");
+        assert_eq!(staged, again);
+        let second = std::fs::metadata(&staged)
+            .and_then(|meta| meta.modified())
+            .ok();
+        assert_eq!(first, second, "identical content is not rewritten");
+        std::fs::write(&staged, "stale").expect("simulate old version");
+        stage_pi_extension_in(&dir).expect("restage");
+        assert_eq!(
+            std::fs::read_to_string(&staged).expect("read").as_str(),
+            PI_EXTENSION_BODY,
             "differing content is refreshed"
         );
         std::fs::remove_dir_all(&dir).ok();

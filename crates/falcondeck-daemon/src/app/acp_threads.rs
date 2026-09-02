@@ -454,7 +454,7 @@ impl AppState {
         // bounded gate; cached runtimes returned above do not.
         let _startup_permit = self.inner.runtime_lifecycle.optional_start_permit().await?;
 
-        let config = self
+        let mut config = self
             .fresh_acp_provider_configs()
             .into_iter()
             .find(|config| config.id == provider.as_str())
@@ -473,11 +473,53 @@ impl AppState {
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
         };
 
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
         let builtin = self
             .builtin_connectors(provider, &workspace_path, None)
             .await;
+        let servers = crate::connectors::with_builtin_servers(
+            crate::connectors::materialize_mcp_servers(&workspace_path, provider.as_str()).await,
+            &builtin,
+        );
+
+        if let Some(base_url) = self.local_base_url() {
+            config
+                .env
+                .insert("FALCONDECK_DAEMON_URL".to_string(), base_url);
+        }
+        config.env.insert(
+            "FALCONDECK_DAEMON_EXECUTABLE".to_string(),
+            crate::connectors::daemon_executable().display().to_string(),
+        );
+        config.env.insert(
+            "FALCONDECK_CONTROL_PROVIDER".to_string(),
+            provider.to_string(),
+        );
+        config.env.insert(
+            "FALCONDECK_CONTROL_WORKSPACE".to_string(),
+            workspace_path.clone(),
+        );
+        config.env.insert(
+            "FALCONDECK_MCP_SERVERS".to_string(),
+            crate::connectors::mcp_servers_env_json(&servers),
+        );
+        if let Some(extensions_spec) = &builtin.extensions {
+            config.env.insert(
+                crate::extension_mcp::ENV_EXTENSION_CAPABILITY.to_string(),
+                extensions_spec.bridge_capability.clone(),
+            );
+        }
+
+        if provider.as_str() == "pi"
+            || config
+                .command
+                .iter()
+                .any(|arg| arg.contains("pi-acp") || arg == "pi")
+        {
+            let _ = crate::agent_context::stage_pi_extension();
+        }
+
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
         // Grok (and similar) already advertise a catalog on initialize.
         // Publish it before the discovery session so a new-thread composer
         // can pick a model while plugins/MCP are still loading.
