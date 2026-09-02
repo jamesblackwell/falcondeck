@@ -279,6 +279,11 @@ impl AppState {
                     },
                 );
                 self.schedule_persist();
+                self.maybe_schedule_ai_thread_title(
+                    workspace_id.to_string(),
+                    thread_id.to_string(),
+                )
+                .await;
             }
         }
         Ok(session)
@@ -653,7 +658,6 @@ impl AppState {
                                 return;
                             }
                             thread.summary.title = title.clone();
-                            thread.summary.updated_at = Utc::now();
                             thread.ai_title_generated = true;
                             thread.ai_title_in_flight = false;
                             thread.title_is_provider_preview = false;

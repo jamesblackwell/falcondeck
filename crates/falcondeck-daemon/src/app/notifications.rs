@@ -108,10 +108,12 @@ pub(super) async fn ingest_notification(
             if let Some(thread_id) = extract_thread_id(&params) {
                 let title =
                     extract_thread_title(&params).unwrap_or_else(|| "Untitled thread".to_string());
-                let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 app.with_managed_thread_mut(workspace_id, &thread_id, |thread| {
                     thread.summary.title = title.clone();
-                    thread.summary.updated_at = updated_at;
+                    // A provider naming an existing thread is metadata, not
+                    // conversation activity. The turn events themselves own
+                    // `updated_at`; resume-time name replay must not make an
+                    // old task look newly active.
                     if !is_placeholder_thread_title(&title) && !is_provisional_thread_title(&title)
                     {
                         thread.ai_title_generated = true;

@@ -15,10 +15,22 @@ export const THREAD_SORT_MODES: readonly ThreadSortMode[] = [
   'alphabetical',
 ]
 
-export const THREAD_SORT_OPTIONS: { mode: ThreadSortMode; label: string }[] = [
-  { mode: 'priority', label: 'Priority' },
-  { mode: 'last_updated', label: 'Last updated' },
-  { mode: 'alphabetical', label: 'Name' },
+export const THREAD_SORT_OPTIONS: {
+  mode: ThreadSortMode
+  label: string
+  description: string
+}[] = [
+  {
+    mode: 'priority',
+    label: 'Priority',
+    description: 'Replies, unread results, then active work',
+  },
+  {
+    mode: 'last_updated',
+    label: 'Last updated',
+    description: 'Most recent activity first',
+  },
+  { mode: 'alphabetical', label: 'Name', description: 'Task titles from A–Z' },
 ]
 
 export function isThreadSortMode(value: unknown): value is ThreadSortMode {

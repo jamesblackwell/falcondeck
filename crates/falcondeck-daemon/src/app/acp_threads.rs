@@ -35,6 +35,15 @@ struct AcpToolItem<'a> {
     output: Option<&'a str>,
 }
 
+fn acp_metadata_updated_at(
+    current: chrono::DateTime<Utc>,
+    replay: bool,
+    changed: bool,
+    now: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
+    if replay || !changed { current } else { now }
+}
+
 impl AppState {
     /// Re-reads `providers.json` so provider edits apply without a daemon
     /// restart; the list cached at startup is only a fallback shape.
@@ -840,6 +849,7 @@ impl AppState {
                 let Some(title) = title.filter(|title| !title.trim().is_empty()) else {
                     return Ok(());
                 };
+                let replay = replaying_sessions.contains(&session_id);
                 let thread = {
                     let mut workspaces = self.inner.workspaces.lock().await;
                     let Some(thread) = workspaces
@@ -851,8 +861,16 @@ impl AppState {
                     if thread.manual_title {
                         return Ok(());
                     }
+                    let title_changed = thread.summary.title != title;
                     thread.summary.title = title;
-                    thread.summary.updated_at = Utc::now();
+                    // `session/load` replays the provider's title on every app
+                    // launch. It is metadata recovery, not fresh activity.
+                    thread.summary.updated_at = acp_metadata_updated_at(
+                        thread.summary.updated_at,
+                        replay,
+                        title_changed,
+                        Utc::now(),
+                    );
                     thread.ai_title_generated = true;
                     thread.summary.clone()
                 };
@@ -1011,10 +1029,12 @@ impl AppState {
                     return Ok(());
                 };
                 let plan_item_id = runtime.current_plan_item_id(&session_id).await;
+                let replay = replaying_sessions.contains(&session_id);
                 let thread = self
                     .upsert_thread(workspace_id, &thread_id, |thread| {
                         thread.latest_plan = Some(plan.clone());
-                        thread.updated_at = Utc::now();
+                        thread.updated_at =
+                            acp_metadata_updated_at(thread.updated_at, replay, true, Utc::now());
                     })
                     .await?;
                 self.insert_acp_conversation_item(
@@ -1026,7 +1046,7 @@ impl AppState {
                         created_at: Utc::now(),
                     },
                     true,
-                    replaying_sessions.contains(&session_id),
+                    replay,
                 )
                 .await?;
                 self.emit(
@@ -2490,12 +2510,31 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        acp_empty_turn_stop_reason, conversation_item_from_projected_user, default_acp_mode,
-        falcondeck_skill_path_preamble, latest_user_message_contains_echo,
+        acp_empty_turn_stop_reason, acp_metadata_updated_at, conversation_item_from_projected_user,
+        default_acp_mode, falcondeck_skill_path_preamble, latest_user_message_contains_echo,
     };
     use falcondeck_core::{ContentLifecycle, ConversationItem};
 
     use crate::app::AppState;
+
+    #[test]
+    fn replayed_acp_metadata_preserves_the_activity_timestamp() {
+        let activity = Utc::now() - chrono::Duration::days(2);
+        let relaunched = Utc::now();
+
+        assert_eq!(
+            acp_metadata_updated_at(activity, true, true, relaunched),
+            activity
+        );
+        assert_eq!(
+            acp_metadata_updated_at(activity, false, true, relaunched),
+            relaunched
+        );
+        assert_eq!(
+            acp_metadata_updated_at(activity, false, false, relaunched),
+            activity
+        );
+    }
 
     #[tokio::test]
     async fn transcript_hydration_is_serialized_per_thread() {

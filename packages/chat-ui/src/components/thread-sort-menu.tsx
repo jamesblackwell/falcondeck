@@ -67,7 +67,7 @@ export const ThreadSortMenu = memo(function ThreadSortMenu({
         <Popover.Content
           align="end"
           sideOffset={4}
-          className="z-50 w-48 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+          className="z-50 w-64 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
           <div role="menu" aria-label="Sort chats by" onKeyDown={handleMenuKeyDown}>
             <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
@@ -78,21 +78,27 @@ export const ThreadSortMenu = memo(function ThreadSortMenu({
                 key={option.mode}
                 type="button"
                 role="menuitemradio"
+                aria-label={option.label}
                 aria-checked={value === option.mode}
                 onClick={() => {
                   onChange(option.mode)
                   setOpen(false)
                 }}
-                className="fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
+                className="fd-focus-fill flex min-h-11 w-full items-start gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
               >
                 <Check
                   aria-hidden="true"
                   className={cn(
-                    'h-3.5 w-3.5 shrink-0',
+                    'mt-0.5 h-3.5 w-3.5 shrink-0',
                     value === option.mode ? 'text-fg-primary' : 'invisible',
                   )}
                 />
-                {option.label}
+                <span className="min-w-0">
+                  <span className="fd-type-label block">{option.label}</span>
+                  <span className="fd-type-meta block text-fg-muted">
+                    {option.description}
+                  </span>
+                </span>
               </button>
             ))}
           </div>

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     future::Future,
     io::{BufRead, BufReader as StdBufReader, Read},
@@ -79,6 +79,8 @@ pub struct HydratedThread {
     pub items: Vec<ConversationItem>,
     pub title_is_provider_preview: bool,
 }
+
+const CODEX_TURN_PAGE_SIZE: u32 = 100;
 
 /// Rebuild a thread from a `thread/read` or `thread/resume` response.
 ///
@@ -167,9 +169,53 @@ pub(crate) fn thread_resume_params(
     cwd: &str,
     developer_instructions: Option<&str>,
 ) -> Value {
-    let mut params = json!({ "threadId": thread_id, "cwd": cwd });
+    let mut params = json!({
+        "threadId": thread_id,
+        "cwd": cwd,
+        // Codex Desktop stores paginated histories. Asking app-server to put
+        // their full history in `thread.turns` is deprecated and returns no
+        // usable transcript; bootstrap the newest full page alongside resume
+        // and collect the remaining pages below.
+        "excludeTurns": true,
+        "initialTurnsPage": {
+            "limit": CODEX_TURN_PAGE_SIZE,
+            "sortDirection": "desc",
+            "itemsView": "full"
+        }
+    });
     insert_optional_str(&mut params, "developerInstructions", developer_instructions);
     params
+}
+
+fn turns_page(value: &Value) -> Option<&Value> {
+    value
+        .get("initialTurnsPage")
+        .filter(|page| !page.is_null())
+        .or_else(|| value.get("data").and_then(Value::as_array).map(|_| value))
+}
+
+fn turns_page_data(value: &Value) -> Vec<Value> {
+    turns_page(value)
+        .and_then(|page| page.get("data"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn turns_page_next_cursor(value: &Value) -> Option<String> {
+    turns_page(value)
+        .and_then(|page| page.get("nextCursor"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn install_paginated_turns(response: &mut Value, mut newest_first: Vec<Value>) {
+    newest_first.reverse();
+    if let Some(thread) = response.get_mut("thread")
+        && let Some(thread) = thread.as_object_mut()
+    {
+        thread.insert("turns".to_string(), Value::Array(newest_first));
+    }
 }
 
 /// Build `turn/start` params. Effort belongs here, not on thread start/resume.
@@ -969,11 +1015,52 @@ impl CodexSession {
             .state
             .agent_context_instructions_with_extensions(&AgentProvider::CODEX)
             .await;
-        self.send_control_request(
-            "thread/resume",
-            thread_resume_params(thread_id, cwd, instructions.as_deref()),
-        )
-        .await
+        let mut response = self
+            .send_control_request(
+                "thread/resume",
+                thread_resume_params(thread_id, cwd, instructions.as_deref()),
+            )
+            .await?;
+
+        // Legacy histories still arrive in `thread.turns`. Paginated Codex
+        // Desktop histories instead return a descending first page beside the
+        // thread record and require `thread/turns/list` for the rest.
+        if turns_page(&response).is_none() {
+            return Ok(response);
+        }
+
+        let mut newest_first = turns_page_data(&response);
+        let mut next_cursor = turns_page_next_cursor(&response);
+        let mut seen_cursors = HashSet::new();
+        while let Some(cursor) = next_cursor {
+            if !seen_cursors.insert(cursor.clone()) {
+                warn!(%thread_id, %cursor, "Codex turn pagination repeated a cursor");
+                break;
+            }
+            let page = match self
+                .send_control_request(
+                    "thread/turns/list",
+                    json!({
+                        "threadId": thread_id,
+                        "cursor": cursor,
+                        "limit": CODEX_TURN_PAGE_SIZE,
+                        "sortDirection": "desc",
+                        "itemsView": "full"
+                    }),
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    warn!(%thread_id, %error, "could not load an older Codex turn page");
+                    break;
+                }
+            };
+            newest_first.extend(turns_page_data(&page));
+            next_cursor = turns_page_next_cursor(&page);
+        }
+        install_paginated_turns(&mut response, newest_first);
+        Ok(response)
     }
 
     pub async fn respond_to_request(
@@ -1861,11 +1948,13 @@ pub fn extract_thread_title(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn is_codex_attachment_manifest(text: &str) -> bool {
-    text.trim_start()
+    let heading = text
+        .trim_start()
         .trim_start_matches('#')
         .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("files mentioned by the user")
+        .to_ascii_lowercase();
+    heading.starts_with("files mentioned by the user")
+        || heading.starts_with("files pasted by the user")
 }
 
 /// Codex Desktop / ChatGPT wrap pasted files in a markdown manifest and put
@@ -1973,6 +2062,55 @@ mod tests {
             params["developerInstructions"],
             "keep FalconDeck control short"
         );
+        assert_eq!(params["excludeTurns"], true);
+        assert_eq!(params["initialTurnsPage"]["limit"], CODEX_TURN_PAGE_SIZE);
+        assert_eq!(params["initialTurnsPage"]["sortDirection"], "desc");
+        assert_eq!(params["initialTurnsPage"]["itemsView"], "full");
+    }
+
+    #[test]
+    fn installs_paginated_codex_turns_in_chronological_order() {
+        let mut response = json!({
+            "thread": {
+                "id": "thread-1",
+                "turns": []
+            }
+        });
+        install_paginated_turns(
+            &mut response,
+            vec![
+                json!({
+                    "id": "turn-new",
+                    "status": "completed",
+                    "startedAt": 1_800_000_000,
+                    "items": [{
+                        "id": "user-new",
+                        "type": "userMessage",
+                        "content": [{"type": "text", "text": "Second request"}]
+                    }]
+                }),
+                json!({
+                    "id": "turn-old",
+                    "status": "completed",
+                    "startedAt": 1_700_000_000,
+                    "items": [{
+                        "id": "user-old",
+                        "type": "userMessage",
+                        "content": [{"type": "text", "text": "First request"}]
+                    }]
+                }),
+            ],
+        );
+
+        let items = hydrate_thread_items(&response);
+        let messages = items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::UserMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(messages, vec!["First request", "Second request"]);
     }
 
     #[test]
@@ -2501,6 +2639,12 @@ mod tests {
         assert_eq!(
             sanitize_codex_preview(
                 "# Files mentioned by the user:\n\n## clip.png: /tmp/clip.png\n\n## My request for Codex:\n"
+            ),
+            None
+        );
+        assert_eq!(
+            sanitize_codex_preview(
+                "# Files pasted by the user:\n\n## \"# Handoff ## Goal Prepare a campaign\": /tmp/pasted-text.txt\n\nPasted text contains the user's request.\n\n## My request:\n"
             ),
             None
         );

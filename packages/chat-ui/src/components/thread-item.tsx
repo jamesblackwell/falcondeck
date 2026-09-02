@@ -57,6 +57,21 @@ function timeAgo(dateStr: string) {
   return `${days}d`
 }
 
+export function formatThreadTimestamp(dateStr: string, now = new Date()) {
+  const date = new Date(dateStr)
+  if (Number.isNaN(date.getTime())) return undefined
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    ...(date.getFullYear() === now.getFullYear()
+      ? {}
+      : { year: 'numeric' as const }),
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date)
+}
+
 export const ThreadItem = memo(
   function ThreadItem({
     thread,
@@ -79,6 +94,10 @@ export const ThreadItem = memo(
     const timeString = useMemo(
       () => timeAgo(thread.updated_at),
       [nowTick, thread.updated_at],
+    )
+    const fullTimestamp = useMemo(
+      () => formatThreadTimestamp(thread.updated_at),
+      [thread.updated_at],
     )
 
     return (
@@ -274,7 +293,9 @@ export const ThreadItem = memo(
                   {attention.badgeLabel}
                 </Badge>
               ) : (
-                <span
+                <time
+                  dateTime={thread.updated_at}
+                  title={fullTimestamp}
                   className={cn(
                     'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
                     onArchive &&
@@ -282,7 +303,7 @@ export const ThreadItem = memo(
                   )}
                 >
                   {timeString}
-                </span>
+                </time>
               )}
               {onArchive ? (
                 <button
