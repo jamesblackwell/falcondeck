@@ -9,7 +9,14 @@ status window, and paste-at-cursor behavior.
 
 - Dictation is off until the user enables it in onboarding or Settings →
   Speech.
-- Right Command is the default trigger. Left Function is also available.
+- Right Command is the default trigger. Left Function is suggested beside
+  it. Settings and onboarding can record any other shortcut (F13, a chord
+  such as ⌘⇧D, Caps Lock, Left Command). Modifier-only keys still hold to
+  talk without stealing Command-C; chords are swallowed so they do not type
+  into the focused app.
+- Voice rewrite is a second, off-by-default mode. Select text, hold Right
+  Option (configurable), and speak how to edit it. FalconDeck rewrites through
+  OpenRouter (default GPT-5.6 Luna) and pastes over the selection.
 - Hold mode waits 180 ms before recording and cancels if another key is pressed,
   so ordinary modifier shortcuts continue to work. Toggle mode starts and stops
   on modifier-only presses.
@@ -39,6 +46,10 @@ status window, and paste-at-cursor behavior.
 - A completed transcript remains in the top pill for eight seconds with a Copy
   action. Explicit copy leaves the transcript on the clipboard; automatic paste
   still restores the clipboard contents it temporarily replaced.
+- If the destination cannot accept the paste, the overlay grows into a recovery
+  card: the transcript is shown as plain text (not a quotation), with Copy as
+  the primary action and Retry/Discard still available. The window is sized to
+  keep those controls on-screen.
 
 ## Native flow
 
@@ -123,11 +134,25 @@ becomes active again after the user changes System Settings.
 
 ## Follow-ups
 
-Local downloaded models, vocabulary/dictionary hints, transcript history,
-style cleanup, arbitrary multi-key shortcut recording, and Windows support are
-deliberately outside this first version. A local model should plug into the
-same post-recording provider boundary without moving durable conversation state
-into the desktop shell.
+Voice rewrite of selected text is a separate, off-by-default mode: select
+text, hold a different shortcut (Right Option by default), and speak an
+instruction such as "polish this in my style, but fix any grammar issues."
+FalconDeck captures the selection through Accessibility when the focused
+editor exposes it, otherwise by a snapshot-and-restore Command-C, transcribes
+the instruction with the same engine as dictation, then rewrites through
+OpenRouter (default `openai/gpt-5.6-luna`, with faster options such as
+`openai/gpt-oss-120b`) using the existing speech API key. Settings → Speech
+has a Custom prompt control that opens pre-filled with the built-in system
+prompt; Reset restores that original.
+The rewritten text is delivered with the same Command-V paste path as
+dictation. Empty selections fail instead of typing the instruction. The model
+is told to treat the passage as material to edit, never as a question to
+answer, and not to polish it into generic LLM prose.
+
+Local downloaded models, vocabulary/dictionary hints, learned writing-style
+profiles, and Windows support are deliberately outside this version. A local
+model should plug into the same post-recording provider boundary without
+moving durable conversation state into the desktop shell.
 
 ## Manual verification
 
@@ -149,3 +174,10 @@ into the desktop shell.
    TextEdit flow.
 10. Click Copy on a completed pill while another app is frontmost; confirm the
     transcript reaches the clipboard without FalconDeck coming to the front.
+11. Enable Voice rewrite, keep Right Option as the shortcut, select a sentence
+    in TextEdit, hold Right Option, say "make this shorter", and confirm the
+    selection is replaced rather than appended.
+12. Hold Right Option with nothing selected and confirm FalconDeck offers an
+    error instead of pasting the spoken instruction.
+13. Repeat the rewrite in a browser editor and in FalconDeck's own composer;
+    confirm each replaces the live selection through ordinary paste / insert.

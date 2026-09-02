@@ -13,10 +13,12 @@
 
 extern void fd_dictation_emit(int32_t kind, const char *payload);
 
-typedef NS_ENUM(NSInteger, FDShortcut) {
-  FDShortcutRightCommand = 0,
-  FDShortcutLeftFunction = 1,
-};
+typedef struct {
+  bool chord;
+  CGKeyCode keyCode;
+  CGEventFlags requiredFlags;
+  CGEventFlags deviceMask;
+} FDHotkey;
 
 typedef NS_ENUM(NSInteger, FDActivationMode) {
   FDActivationModeHold = 0,
@@ -30,9 +32,124 @@ typedef NS_ENUM(NSInteger, FDProvider) {
 
 static const CGKeyCode FDRightCommandKeyCode = 54;
 static const CGKeyCode FDFunctionKeyCode = 63;
+static const CGKeyCode FDRightOptionKeyCode = 61;
 static const CGKeyCode FDEscapeKeyCode = 53;
 static const CGKeyCode FDLeftCommandKeyCode = 55;
+static const CGKeyCode FDLeftOptionKeyCode = 58;
+static const CGKeyCode FDRightControlKeyCode = 62;
+static const CGKeyCode FDLeftControlKeyCode = 59;
+static const CGKeyCode FDCapsLockKeyCode = 57;
+static const CGKeyCode FDUnknownKeyCode = (CGKeyCode)UINT16_MAX;
+
+static CGEventFlags FDSignificantFlags(CGEventFlags flags) {
+  return flags & (kCGEventFlagMaskShift | kCGEventFlagMaskControl |
+                  kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand);
+}
+
+static BOOL FDHotkeysEqual(FDHotkey a, FDHotkey b) {
+  return a.chord == b.chord && a.keyCode == b.keyCode &&
+         a.requiredFlags == b.requiredFlags && a.deviceMask == b.deviceMask;
+}
+
+static FDHotkey FDModifierHotkey(CGKeyCode keyCode, CGEventFlags deviceMask) {
+  return (FDHotkey){false, keyCode, 0, deviceMask};
+}
+
+static FDHotkey FDDefaultHotkey(void) {
+  return FDModifierHotkey(FDRightCommandKeyCode, NX_DEVICERCMDKEYMASK);
+}
+
+static CGKeyCode FDKeyCodeForName(NSString *name) {
+  static NSDictionary<NSString *, NSNumber *> *map;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    map = @{
+      @"A" : @0,     @"S" : @1,     @"D" : @2,    @"F" : @3,    @"H" : @4,
+      @"G" : @5,     @"Z" : @6,     @"X" : @7,    @"C" : @8,    @"V" : @9,
+      @"B" : @11,    @"Q" : @12,    @"W" : @13,   @"E" : @14,   @"R" : @15,
+      @"Y" : @16,    @"T" : @17,    @"1" : @18,   @"2" : @19,   @"3" : @20,
+      @"4" : @21,    @"6" : @22,    @"5" : @23,   @"=" : @24,   @"Plus" : @24,
+      @"9" : @25,    @"7" : @26,    @"-" : @27,   @"8" : @28,   @"0" : @29,
+      @"]" : @30,    @"O" : @31,    @"U" : @32,   @"[" : @33,   @"I" : @34,
+      @"P" : @35,    @"Enter" : @36, @"Return" : @36, @"L" : @37, @"J" : @38,
+      @"'" : @39,    @"K" : @40,    @";" : @41,   @"\\" : @42,  @"," : @43,
+      @"/" : @44,    @"N" : @45,    @"M" : @46,   @"." : @47,   @"Tab" : @48,
+      @"Space" : @49, @"`" : @50,   @"Backspace" : @51,
+      @"F17" : @64,  @"F18" : @79,  @"F19" : @80, @"F20" : @90, @"F5" : @96,
+      @"F6" : @97,   @"F7" : @98,   @"F3" : @99,  @"F8" : @100, @"F9" : @101,
+      @"F11" : @103, @"F13" : @105, @"F16" : @106, @"F14" : @107, @"F10" : @109,
+      @"F12" : @111, @"F15" : @113, @"Home" : @115, @"PageUp" : @116,
+      @"Delete" : @117, @"F4" : @118, @"End" : @119, @"F2" : @120,
+      @"PageDown" : @121, @"F1" : @122, @"Left" : @123, @"Right" : @124,
+      @"Down" : @125, @"Up" : @126,
+    };
+  });
+  NSNumber *code = map[name];
+  if (!code && name.length == 1) {
+    code = map[name.uppercaseString];
+  }
+  return code ? (CGKeyCode)code.unsignedShortValue : FDUnknownKeyCode;
+}
+
+static FDHotkey FDParseHotkey(NSString *value) {
+  if (value.length == 0) return FDDefaultHotkey();
+  if ([value isEqualToString:@"right_command"]) {
+    return FDModifierHotkey(FDRightCommandKeyCode, NX_DEVICERCMDKEYMASK);
+  }
+  if ([value isEqualToString:@"left_command"]) {
+    return FDModifierHotkey(FDLeftCommandKeyCode, NX_DEVICELCMDKEYMASK);
+  }
+  if ([value isEqualToString:@"left_function"]) {
+    return FDModifierHotkey(FDFunctionKeyCode, kCGEventFlagMaskSecondaryFn);
+  }
+  if ([value isEqualToString:@"right_option"]) {
+    return FDModifierHotkey(FDRightOptionKeyCode, NX_DEVICERALTKEYMASK);
+  }
+  if ([value isEqualToString:@"left_option"]) {
+    return FDModifierHotkey(FDLeftOptionKeyCode, NX_DEVICELALTKEYMASK);
+  }
+  if ([value isEqualToString:@"right_control"]) {
+    return FDModifierHotkey(FDRightControlKeyCode, NX_DEVICERCTLKEYMASK);
+  }
+  if ([value isEqualToString:@"left_control"]) {
+    return FDModifierHotkey(FDLeftControlKeyCode, NX_DEVICELCTLKEYMASK);
+  }
+  if ([value isEqualToString:@"caps_lock"]) {
+    return FDModifierHotkey(FDCapsLockKeyCode, kCGEventFlagMaskAlphaShift);
+  }
+
+  NSArray<NSString *> *parts = [value componentsSeparatedByString:@"+"];
+  NSString *keyName = parts.lastObject;
+  CGKeyCode keyCode = FDKeyCodeForName(keyName);
+  if (keyCode == FDUnknownKeyCode) return FDDefaultHotkey();
+  CGEventFlags flags = 0;
+  for (NSUInteger index = 0; index + 1 < parts.count; index++) {
+    NSString *part = parts[index];
+    if ([part isEqualToString:@"Mod"] || [part isEqualToString:@"Cmd"] ||
+        [part isEqualToString:@"Command"] || [part isEqualToString:@"Meta"]) {
+      flags |= kCGEventFlagMaskCommand;
+    } else if ([part isEqualToString:@"Ctrl"] ||
+               [part isEqualToString:@"Control"]) {
+      flags |= kCGEventFlagMaskControl;
+    } else if ([part isEqualToString:@"Alt"] ||
+               [part isEqualToString:@"Option"]) {
+      flags |= kCGEventFlagMaskAlternate;
+    } else if ([part isEqualToString:@"Shift"]) {
+      flags |= kCGEventFlagMaskShift;
+    }
+  }
+  return (FDHotkey){true, keyCode, flags, 0};
+}
+
+static BOOL FDChordMatches(FDHotkey hotkey, CGKeyCode keyCode,
+                           CGEventFlags flags) {
+  return hotkey.chord && keyCode == hotkey.keyCode &&
+         FDSignificantFlags(flags) == hotkey.requiredFlags;
+}
 static const CGKeyCode FDQwertyVKeyCode = 9;
+static const CGKeyCode FDQwertyCKeyCode = 8;
+static const useconds_t FDCopyPollIntervalMicros = 25 * 1000;
+static const int FDCopyPollAttempts = 16;
 static const useconds_t FDPasteboardPrepareDelayMicros = 80 * 1000;
 static const useconds_t FDPasteShortcutEventDelayMicros = 10 * 1000;
 static const int64_t FDPasteEventUserData = 0x46445053; // "FDPS"
@@ -123,6 +240,58 @@ static AXUIElementRef FDCopyFocusedUIElement(pid_t *processIdentifier) {
   return (AXUIElementRef)focusedElement;
 }
 
+// Returns selected text when the focused element exposes it. An empty string
+// means the attribute exists and nothing is selected. nil means the app did
+// not report a selection (Electron editors, many web fields).
+static NSString *FDSelectedTextFromElement(AXUIElementRef element) {
+  if (!element) return nil;
+  CFTypeRef value = NULL;
+  AXError result =
+      AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute, &value);
+  if (result == kAXErrorSuccess && value) {
+    if (CFGetTypeID(value) == CFStringGetTypeID()) {
+      return (__bridge_transfer NSString *)value;
+    }
+    CFRelease(value);
+  }
+
+  CFTypeRef selectedRangeRef = NULL;
+  AXError rangeResult = AXUIElementCopyAttributeValue(
+      element, kAXSelectedTextRangeAttribute, &selectedRangeRef);
+  if (rangeResult != kAXErrorSuccess || !selectedRangeRef) {
+    if (selectedRangeRef) CFRelease(selectedRangeRef);
+    return nil;
+  }
+  if (CFGetTypeID(selectedRangeRef) != AXValueGetTypeID()) {
+    CFRelease(selectedRangeRef);
+    return nil;
+  }
+  CFRange range = {0, 0};
+  Boolean gotRange =
+      AXValueGetValue((AXValueRef)selectedRangeRef, kAXValueCFRangeType, &range);
+  CFRelease(selectedRangeRef);
+  if (!gotRange || range.location == kCFNotFound) return nil;
+  if (range.length <= 0) return @"";
+
+  CFTypeRef fullValueRef = NULL;
+  AXError valueResult =
+      AXUIElementCopyAttributeValue(element, kAXValueAttribute, &fullValueRef);
+  if (valueResult != kAXErrorSuccess || !fullValueRef) {
+    if (fullValueRef) CFRelease(fullValueRef);
+    return nil;
+  }
+  if (CFGetTypeID(fullValueRef) != CFStringGetTypeID()) {
+    CFRelease(fullValueRef);
+    return nil;
+  }
+  NSString *fullText = (__bridge_transfer NSString *)fullValueRef;
+  if (range.location < 0 || range.length < 0) return nil;
+  NSUInteger location = (NSUInteger)range.location;
+  NSUInteger length = (NSUInteger)range.length;
+  if (location + length > fullText.length) return nil;
+  return [fullText substringWithRange:NSMakeRange(location, length)];
+}
+
 static NSArray<NSPasteboardItem *> *FDSnapshotPasteboard(
     NSPasteboard *pasteboard) {
   NSMutableArray<NSPasteboardItem *> *snapshots = [NSMutableArray array];
@@ -190,29 +359,40 @@ static CGKeyCode FDVirtualKeyCodeForCharacter(UniChar target,
   return result;
 }
 
+static CGKeyCode FDCharacterVirtualKeyCode(UniChar target, CGKeyCode fallback) {
+  UInt32 commandModifiers = (UInt32)((cmdKey & 0xff00) >> 8);
+  CGKeyCode commandMapped =
+      FDVirtualKeyCodeForCharacter(target, commandModifiers, UINT16_MAX);
+  if (commandMapped != UINT16_MAX) return commandMapped;
+  return FDVirtualKeyCodeForCharacter(target, 0, fallback);
+}
+
 static CGKeyCode FDPasteVirtualKeyCode(void) {
   // Command-switching layouts (for example Dvorak-QWERTY ⌘) can map a
   // different physical key while Command is held. Resolve the shortcut using
   // the same modifier state as the event, then fall back to the unmodified
   // layout and finally the physical QWERTY V key.
-  UInt32 commandModifiers = (UInt32)((cmdKey & 0xff00) >> 8);
-  CGKeyCode commandMapped = FDVirtualKeyCodeForCharacter(
-      (UniChar)'v', commandModifiers, UINT16_MAX);
-  if (commandMapped != UINT16_MAX) return commandMapped;
-  return FDVirtualKeyCodeForCharacter((UniChar)'v', 0,
-                                      FDQwertyVKeyCode);
+  return FDCharacterVirtualKeyCode((UniChar)'v', FDQwertyVKeyCode);
+}
+
+static CGKeyCode FDCopyVirtualKeyCode(void) {
+  return FDCharacterVirtualKeyCode((UniChar)'c', FDQwertyCKeyCode);
 }
 
 @interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate> {
   AXUIElementRef _pasteTargetElement;
 }
 @property(nonatomic) BOOL enabled;
+@property(nonatomic) BOOL rewriteEnabled;
 @property(nonatomic) BOOL modifierDown;
+@property(nonatomic) BOOL rewriteModifierDown;
 @property(nonatomic) BOOL modifierUsedInChord;
+@property(nonatomic) BOOL rewriteModifierUsedInChord;
 @property(nonatomic) BOOL cancelling;
 @property(nonatomic) BOOL recording;
 @property(nonatomic) BOOL stopping;
 @property(nonatomic) NSUInteger modifierGeneration;
+@property(nonatomic) NSUInteger rewriteModifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
 @property(nonatomic) pid_t pasteTargetProcessIdentifier;
 @property(nonatomic) pid_t pasteTargetApplicationProcessIdentifier;
@@ -229,8 +409,13 @@ static CGKeyCode FDPasteVirtualKeyCode(void) {
 // Provider used for the retained recording; -1 when unknown (no recording,
 // or a recording that predates this field).
 @property(nonatomic) NSInteger retainedProvider;
-@property(nonatomic) FDShortcut shortcut;
-@property(nonatomic) FDShortcut recordingShortcut;
+@property(nonatomic) FDHotkey shortcut;
+@property(nonatomic) FDHotkey rewriteShortcut;
+@property(nonatomic) FDHotkey recordingShortcut;
+@property(nonatomic) BOOL rewriteSession;
+@property(nonatomic, copy) NSString *rewriteSelection;
+@property(nonatomic, copy) NSString *pendingRewriteSelection;
+@property(nonatomic) BOOL pendingRewriteAxResolved;
 @property(nonatomic) FDActivationMode activationMode;
 @property(nonatomic) FDProvider provider;
 @property(nonatomic) FDProvider recordingProvider;
@@ -252,7 +437,17 @@ static CGKeyCode FDPasteVirtualKeyCode(void) {
 @property(nonatomic) CFMachPortRef eventTap;
 @property(nonatomic) CFRunLoopSourceRef eventTapSource;
 - (void)handleFlagsChanged:(CGKeyCode)keyCode flags:(CGEventFlags)flags;
-- (void)handleKeyDown:(CGKeyCode)keyCode;
+- (void)handleKeyDown:(CGKeyCode)keyCode
+                flags:(CGEventFlags)flags
+               repeat:(BOOL)repeat;
+- (void)handleKeyUp:(CGKeyCode)keyCode flags:(CGEventFlags)flags;
+- (void)handleChordDown:(BOOL)rewrite;
+- (void)handleChordUp:(BOOL)rewrite;
+- (void)startRecordingAsRewrite:(BOOL)rewrite;
+- (NSString *)captureSelectedText;
+- (BOOL)postCopyShortcut;
+- (void)clearRewriteSession;
+- (void)primeRewriteSelectionCapture;
 - (void)transcribeSystemRecording:(NSURL *)url API_AVAILABLE(macos(10.15));
 - (void)startAudioLevelMeter;
 - (void)stopAudioLevelMeter;
@@ -280,17 +475,41 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return event;
   }
 
+  // FalconDeck's own Cmd-C / Cmd-V injections carry this tag. If they re-enter
+  // the tap they look like a real chord on the still-held rewrite key and
+  // cancel the recording they were meant to serve.
+  if (CGEventGetIntegerValueField(event, kCGEventSourceUserData) ==
+      FDPasteEventUserData) {
+    return event;
+  }
+
   CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(
       event, kCGKeyboardEventKeycode);
   CGEventFlags flags = CGEventGetFlags(event);
+  BOOL repeat = type == kCGEventKeyDown &&
+                CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) !=
+                    0;
+  BOOL consume = NO;
+  if (type == kCGEventKeyDown || type == kCGEventKeyUp) {
+    if (controller.enabled &&
+        FDChordMatches(controller.shortcut, keyCode, flags)) {
+      consume = YES;
+    }
+    if (controller.rewriteEnabled &&
+        FDChordMatches(controller.rewriteShortcut, keyCode, flags)) {
+      consume = YES;
+    }
+  }
   dispatch_async(dispatch_get_main_queue(), ^{
     if (type == kCGEventFlagsChanged) {
       [controller handleFlagsChanged:keyCode flags:flags];
     } else if (type == kCGEventKeyDown) {
-      [controller handleKeyDown:keyCode];
+      [controller handleKeyDown:keyCode flags:flags repeat:repeat];
+    } else if (type == kCGEventKeyUp) {
+      [controller handleKeyUp:keyCode flags:flags];
     }
   });
-  return event;
+  return consume ? NULL : event;
 }
 
 @implementation FDDictationController
@@ -309,6 +528,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (!self) return nil;
   self.sessionQueue = dispatch_queue_create(
       "com.falcondeck.dictation.session", DISPATCH_QUEUE_SERIAL);
+  self.shortcut = FDDefaultHotkey();
+  self.rewriteShortcut = FDModifierHotkey(
+      FDRightOptionKeyCode, NX_DEVICERALTKEYMASK);
   NSString *retainedPath =
       [NSUserDefaults.standardUserDefaults stringForKey:FDRetainedRecordingPathKey];
   if (retainedPath.length > 0 &&
@@ -341,7 +563,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
   (void)notification;
-  if (self.enabled) [self installEventTapIfNeeded];
+  if (self.enabled || self.rewriteEnabled) [self installEventTapIfNeeded];
 }
 
 - (void)setRetainedRecordingURL:(NSURL *)url provider:(FDProvider)provider {
@@ -375,31 +597,45 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)configureEnabled:(BOOL)enabled
-                 shortcut:(FDShortcut)shortcut
+                 shortcut:(FDHotkey)shortcut
            activationMode:(FDActivationMode)activationMode
                   provider:(FDProvider)provider
-             inputDeviceID:(NSString *)inputDeviceID
-         retainRecordings:(BOOL)retainRecordings {
+           inputDeviceID:(NSString *)inputDeviceID
+        retainRecordings:(BOOL)retainRecordings
+          rewriteEnabled:(BOOL)rewriteEnabled
+         rewriteShortcut:(FDHotkey)rewriteShortcut {
   self.retainRecordings = retainRecordings;
-  BOOL shouldResetModifier = self.enabled != enabled || self.shortcut != shortcut;
+  BOOL shouldResetModifier =
+      self.enabled != enabled || !FDHotkeysEqual(self.shortcut, shortcut);
+  BOOL shouldResetRewrite =
+      self.rewriteEnabled != rewriteEnabled ||
+      !FDHotkeysEqual(self.rewriteShortcut, rewriteShortcut);
   self.enabled = enabled;
   self.shortcut = shortcut;
   self.activationMode = activationMode;
   self.provider = provider;
   self.inputDeviceID = inputDeviceID.length > 0 ? inputDeviceID : nil;
+  self.rewriteEnabled = rewriteEnabled;
+  self.rewriteShortcut = rewriteShortcut;
   if (shouldResetModifier && !self.recording && !self.stopping) {
     self.modifierDown = NO;
     self.modifierUsedInChord = NO;
     self.modifierGeneration += 1;
   }
-  if (enabled) {
+  if (shouldResetRewrite && !self.recording && !self.stopping) {
+    self.rewriteModifierDown = NO;
+    self.rewriteModifierUsedInChord = NO;
+    self.rewriteModifierGeneration += 1;
+  }
+  if (enabled || rewriteEnabled) {
     [self installEventTapIfNeeded];
     [self surfaceRetainedRecordingIfNeeded];
   } else {
     // Stop routing every system-wide keystroke through the callback while
-    // dictation is off; re-enabling re-arms the existing tap.
+    // dictation and rewrite are both off; re-enabling re-arms the existing tap.
     if (self.eventTap) CGEventTapEnable(self.eventTap, false);
     if (self.recording) [self cancelRecording];
+    if (!self.recording) [self clearRewriteSession];
   }
 }
 
@@ -409,10 +645,18 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     return;
   }
   CGEventMask mask = CGEventMaskBit(kCGEventFlagsChanged) |
-                     CGEventMaskBit(kCGEventKeyDown);
+                     CGEventMaskBit(kCGEventKeyDown) |
+                     CGEventMaskBit(kCGEventKeyUp);
+  // Filter so chord shortcuts do not also type into the focused app. Modifier-
+  // only triggers still pass through (the callback returns those events).
   self.eventTap = CGEventTapCreate(
-      kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
+      kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
       mask, FDEventTapCallback, (__bridge void *)self);
+  if (!self.eventTap) {
+    self.eventTap = CGEventTapCreate(
+        kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
+        mask, FDEventTapCallback, (__bridge void *)self);
+  }
   if (!self.eventTap) {
     return;
   }
@@ -423,12 +667,47 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   CGEventTapEnable(self.eventTap, true);
 }
 
-- (BOOL)isConfiguredModifier:(CGKeyCode)keyCode {
-  FDShortcut shortcut = self.recording ? self.recordingShortcut : self.shortcut;
-  return (shortcut == FDShortcutRightCommand &&
-          keyCode == FDRightCommandKeyCode) ||
-         (shortcut == FDShortcutLeftFunction &&
-          keyCode == FDFunctionKeyCode);
+- (BOOL)isKey:(CGKeyCode)keyCode forShortcut:(FDHotkey)shortcut {
+  return keyCode == shortcut.keyCode;
+}
+
+- (BOOL)isShortcutDown:(FDHotkey)shortcut
+               keyCode:(CGKeyCode)keyCode
+                 flags:(CGEventFlags)flags {
+  if (shortcut.chord) {
+    return FDSignificantFlags(flags) == shortcut.requiredFlags;
+  }
+  if (shortcut.deviceMask != 0 && (flags & shortcut.deviceMask) != 0) {
+    return YES;
+  }
+  CGEventFlags generic = 0;
+  if (shortcut.deviceMask == NX_DEVICERCMDKEYMASK ||
+      shortcut.deviceMask == NX_DEVICELCMDKEYMASK) {
+    generic = kCGEventFlagMaskCommand;
+  } else if (shortcut.deviceMask == NX_DEVICERALTKEYMASK ||
+             shortcut.deviceMask == NX_DEVICELALTKEYMASK) {
+    generic = kCGEventFlagMaskAlternate;
+  } else if (shortcut.deviceMask == NX_DEVICERCTLKEYMASK ||
+             shortcut.deviceMask == NX_DEVICELCTLKEYMASK) {
+    generic = kCGEventFlagMaskControl;
+  } else {
+    generic = shortcut.deviceMask;
+  }
+  return keyCode == shortcut.keyCode && generic != 0 && (flags & generic) != 0;
+}
+
+- (BOOL)isDictationKey:(CGKeyCode)keyCode {
+  return self.enabled && !self.shortcut.chord &&
+         [self isKey:keyCode forShortcut:self.shortcut];
+}
+
+- (BOOL)isRewriteKey:(CGKeyCode)keyCode {
+  if (!self.rewriteEnabled || self.rewriteShortcut.chord) return NO;
+  // Dictation keeps the key if both features are bound to it.
+  if (self.enabled && FDHotkeysEqual(self.shortcut, self.rewriteShortcut)) {
+    return NO;
+  }
+  return [self isKey:keyCode forShortcut:self.rewriteShortcut];
 }
 
 - (void)startAudioLevelMeter {
@@ -465,62 +744,221 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.audioLevelTimer = nil;
 }
 
-- (BOOL)configuredModifierIsDown:(CGEventFlags)flags {
-  FDShortcut shortcut = self.recording ? self.recordingShortcut : self.shortcut;
-  if (shortcut == FDShortcutRightCommand) {
-    return (flags & NX_DEVICERCMDKEYMASK) != 0;
+- (void)primeRewriteSelectionCapture {
+  [self capturePasteTarget];
+  NSString *axText = FDSelectedTextFromElement(_pasteTargetElement);
+  if (!axText) {
+    self.pendingRewriteAxResolved = NO;
+    self.pendingRewriteSelection = nil;
+    return;
   }
-  return (flags & kCGEventFlagMaskSecondaryFn) != 0;
+  NSString *trimmed = [axText
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  self.pendingRewriteAxResolved = YES;
+  self.pendingRewriteSelection = trimmed.length > 0 ? axText : nil;
+}
+
+- (void)armHoldRecording:(BOOL)rewrite {
+  if (self.activationMode != FDActivationModeHold) return;
+  if (rewrite) [self primeRewriteSelectionCapture];
+  NSUInteger generation =
+      rewrite ? self.rewriteModifierGeneration : self.modifierGeneration;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
+                 dispatch_get_main_queue(), ^{
+    BOOL stillDown =
+        rewrite ? self.rewriteModifierDown : self.modifierDown;
+    BOOL unused =
+        rewrite ? !self.rewriteModifierUsedInChord : !self.modifierUsedInChord;
+    BOOL sameGeneration =
+        rewrite ? self.rewriteModifierGeneration == generation
+                : self.modifierGeneration == generation;
+    BOOL featureOn = rewrite ? self.rewriteEnabled : self.enabled;
+    if (featureOn && stillDown && unused && sameGeneration && !self.recording) {
+      [self startRecordingAsRewrite:rewrite];
+    }
+  });
+}
+
+- (void)handleTriggerRelease:(BOOL)rewrite {
+  if (rewrite) {
+    self.rewriteModifierGeneration += 1;
+    if (self.rewriteModifierUsedInChord) {
+      self.pendingRewriteAxResolved = NO;
+      self.pendingRewriteSelection = nil;
+      return;
+    }
+  } else {
+    self.modifierGeneration += 1;
+    if (self.modifierUsedInChord) return;
+  }
+  if (self.activationMode == FDActivationModeHold) {
+    if (self.recording && self.rewriteSession == rewrite) [self stopRecording];
+    else if (rewrite && !self.recording) {
+      self.pendingRewriteAxResolved = NO;
+      self.pendingRewriteSelection = nil;
+    }
+    return;
+  }
+  if (self.recording) {
+    if (self.rewriteSession == rewrite) [self stopRecording];
+  } else {
+    [self startRecordingAsRewrite:rewrite];
+  }
 }
 
 - (void)handleFlagsChanged:(CGKeyCode)keyCode flags:(CGEventFlags)flags {
-  if (!self.enabled || ![self isConfiguredModifier:keyCode]) return;
-  BOOL isDown = [self configuredModifierIsDown:flags];
-  if (isDown == self.modifierDown) return;
-  self.modifierDown = isDown;
-
-  if (isDown) {
-    self.modifierUsedInChord = NO;
-    self.modifierGeneration += 1;
-    if (self.activationMode == FDActivationModeHold) {
-      NSUInteger generation = self.modifierGeneration;
-      // Short chord grace: long enough that most Right-Command shortcuts are
-      // recognized as chords first, short enough that dictation feels instant.
-      dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
-                     dispatch_get_main_queue(), ^{
-        if (self.enabled && self.modifierDown &&
-            !self.modifierUsedInChord &&
-            self.modifierGeneration == generation && !self.recording) {
-          [self startRecording];
-        }
-      });
+  if (!self.enabled && !self.rewriteEnabled) return;
+  if (self.recording && self.recordingShortcut.chord) {
+    if (FDSignificantFlags(flags) != self.recordingShortcut.requiredFlags) {
+      if (self.rewriteSession) {
+        self.rewriteModifierDown = NO;
+      } else {
+        self.modifierDown = NO;
+      }
+      [self handleTriggerRelease:self.rewriteSession];
+    }
+    return;
+  }
+  if (self.recording) {
+    if (self.rewriteSession) {
+      if (![self isKey:keyCode forShortcut:self.recordingShortcut]) return;
+      BOOL isDown = [self isShortcutDown:self.recordingShortcut
+                                keyCode:keyCode
+                                  flags:flags];
+      if (isDown == self.rewriteModifierDown) return;
+      self.rewriteModifierDown = isDown;
+      if (isDown) {
+        self.rewriteModifierUsedInChord = NO;
+        self.rewriteModifierGeneration += 1;
+        return;
+      }
+      [self handleTriggerRelease:YES];
+    } else {
+      if (![self isKey:keyCode forShortcut:self.recordingShortcut]) return;
+      BOOL isDown = [self isShortcutDown:self.recordingShortcut
+                                keyCode:keyCode
+                                  flags:flags];
+      if (isDown == self.modifierDown) return;
+      self.modifierDown = isDown;
+      if (isDown) {
+        self.modifierUsedInChord = NO;
+        self.modifierGeneration += 1;
+        return;
+      }
+      [self handleTriggerRelease:NO];
     }
     return;
   }
 
-  self.modifierGeneration += 1;
-  if (self.modifierUsedInChord) return;
-  if (self.activationMode == FDActivationModeHold) {
-    if (self.recording) [self stopRecording];
-  } else if (self.recording) {
-    [self stopRecording];
-  } else {
-    [self startRecording];
+  if ([self isDictationKey:keyCode]) {
+    BOOL isDown = [self isShortcutDown:self.shortcut keyCode:keyCode flags:flags];
+    if (isDown == self.modifierDown) return;
+    self.modifierDown = isDown;
+    if (isDown) {
+      self.modifierUsedInChord = NO;
+      self.modifierGeneration += 1;
+      [self armHoldRecording:NO];
+      return;
+    }
+    [self handleTriggerRelease:NO];
+    return;
+  }
+
+  if ([self isRewriteKey:keyCode]) {
+    BOOL isDown =
+        [self isShortcutDown:self.rewriteShortcut keyCode:keyCode flags:flags];
+    if (isDown == self.rewriteModifierDown) return;
+    self.rewriteModifierDown = isDown;
+    if (isDown) {
+      self.rewriteModifierUsedInChord = NO;
+      self.rewriteModifierGeneration += 1;
+      [self armHoldRecording:YES];
+      return;
+    }
+    [self handleTriggerRelease:YES];
   }
 }
 
-- (void)handleKeyDown:(CGKeyCode)keyCode {
-  if (!self.enabled) return;
+- (void)handleChordDown:(BOOL)rewrite {
+  if (rewrite) {
+    if (self.rewriteModifierDown) return;
+    self.rewriteModifierDown = YES;
+    self.rewriteModifierUsedInChord = NO;
+    self.rewriteModifierGeneration += 1;
+  } else {
+    if (self.modifierDown) return;
+    self.modifierDown = YES;
+    self.modifierUsedInChord = NO;
+    self.modifierGeneration += 1;
+  }
+  if (self.activationMode == FDActivationModeHold) {
+    [self armHoldRecording:rewrite];
+    return;
+  }
+  [self handleTriggerRelease:rewrite];
+}
+
+- (void)handleChordUp:(BOOL)rewrite {
+  if (rewrite) {
+    if (!self.rewriteModifierDown) return;
+    self.rewriteModifierDown = NO;
+  } else {
+    if (!self.modifierDown) return;
+    self.modifierDown = NO;
+  }
+  if (self.activationMode == FDActivationModeHold) {
+    [self handleTriggerRelease:rewrite];
+  }
+}
+
+- (void)handleKeyDown:(CGKeyCode)keyCode
+                flags:(CGEventFlags)flags
+               repeat:(BOOL)repeat {
+  if (!self.enabled && !self.rewriteEnabled) return;
   if (self.recording && keyCode == FDEscapeKeyCode) {
     [self cancelRecording];
     return;
   }
+  if (!repeat && self.enabled &&
+      FDChordMatches(self.shortcut, keyCode, flags)) {
+    [self handleChordDown:NO];
+    return;
+  }
+  if (!repeat && self.rewriteEnabled &&
+      FDChordMatches(self.rewriteShortcut, keyCode, flags)) {
+    [self handleChordDown:YES];
+    return;
+  }
+  if (repeat) return;
   if (self.modifierDown) {
     self.modifierUsedInChord = YES;
     self.modifierGeneration += 1;
-    if (self.recording && self.activationMode == FDActivationModeHold) {
+    if (self.recording && !self.rewriteSession &&
+        self.activationMode == FDActivationModeHold) {
       [self cancelRecording];
     }
+  }
+  if (self.rewriteModifierDown) {
+    self.rewriteModifierUsedInChord = YES;
+    self.rewriteModifierGeneration += 1;
+    self.pendingRewriteAxResolved = NO;
+    self.pendingRewriteSelection = nil;
+    if (self.recording && self.rewriteSession &&
+        self.activationMode == FDActivationModeHold) {
+      [self cancelRecording];
+    }
+  }
+}
+
+- (void)handleKeyUp:(CGKeyCode)keyCode flags:(CGEventFlags)flags {
+  (void)flags;
+  if (self.enabled && self.shortcut.chord &&
+      keyCode == self.shortcut.keyCode) {
+    [self handleChordUp:NO];
+  }
+  if (self.rewriteEnabled && self.rewriteShortcut.chord &&
+      keyCode == self.rewriteShortcut.keyCode) {
+    [self handleChordUp:YES];
   }
 }
 
@@ -547,7 +985,19 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)startRecording {
-  if (!self.enabled || self.recording || self.stopping) return;
+  [self startRecordingAsRewrite:NO];
+}
+
+- (void)clearRewriteSession {
+  self.rewriteSession = NO;
+  self.rewriteSelection = nil;
+  self.pendingRewriteAxResolved = NO;
+  self.pendingRewriteSelection = nil;
+}
+
+- (void)startRecordingAsRewrite:(BOOL)rewrite {
+  BOOL featureOn = rewrite ? self.rewriteEnabled : self.enabled;
+  if (!featureOn || self.recording || self.stopping) return;
   [self dropCancelledRecording];
   if (self.recordingURL &&
       [NSFileManager.defaultManager fileExistsAtPath:self.recordingURL.path]) {
@@ -590,6 +1040,29 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // the dictation overlay must not cause a later paste to be routed back
   // through FalconDeck's global event stream or into a newly focused app.
   [self capturePasteTarget];
+  if (rewrite) {
+    NSString *selection = nil;
+    if (self.pendingRewriteAxResolved) {
+      selection = self.pendingRewriteSelection;
+    } else {
+      selection = [self captureSelectedText];
+    }
+    self.pendingRewriteAxResolved = NO;
+    self.pendingRewriteSelection = nil;
+    NSString *trimmed = [selection
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) {
+      [self clearRewriteSession];
+      FDEmit(FDEventRewriteSelection, @"");
+      FDEmit(FDEventFailed,
+             @"Select text first, then hold the rewrite shortcut and say how to edit it.");
+      return;
+    }
+    self.rewriteSession = YES;
+    self.rewriteSelection = selection;
+  } else {
+    [self clearRewriteSession];
+  }
 
   NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.m4a",
                                              NSUUID.UUID.UUIDString];
@@ -600,6 +1073,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       : nil;
   if (!device) device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
   if (!device) {
+    if (rewrite) [self clearRewriteSession];
     FDEmit(FDEventFailed, @"No microphone is currently available.");
     return;
   }
@@ -608,6 +1082,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   AVCaptureDeviceInput *input = [AVCaptureDeviceInput deviceInputWithDevice:device
                                                                       error:&error];
   if (!input || error) {
+    if (rewrite) [self clearRewriteSession];
     FDEmit(FDEventFailed,
            error.localizedDescription ?: @"FalconDeck could not open the selected microphone.");
     return;
@@ -615,6 +1090,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   AVCaptureSession *session = [[AVCaptureSession alloc] init];
   AVCaptureAudioFileOutput *output = [[AVCaptureAudioFileOutput alloc] init];
   if (![session canAddInput:input] || ![session canAddOutput:output]) {
+    if (rewrite) [self clearRewriteSession];
     FDEmit(FDEventFailed, @"FalconDeck could not configure the selected microphone.");
     return;
   }
@@ -635,6 +1111,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   };
   if (![[AVCaptureAudioFileOutput availableOutputFileTypes]
           containsObject:AVFileTypeAppleM4A]) {
+    if (rewrite) [self clearRewriteSession];
     FDEmit(FDEventFailed, @"This Mac cannot create an M4A dictation recording.");
     return;
   }
@@ -642,13 +1119,16 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.audioFileOutput = output;
   [self setRetainedRecordingURL:url provider:self.provider];
   self.cancelling = NO;
-  self.recordingShortcut = self.shortcut;
+  self.recordingShortcut = rewrite ? self.rewriteShortcut : self.shortcut;
   self.recordingProvider = self.provider;
   self.recording = YES;
   self.fileOutputActive = NO;
   // Surface the overlay before the microphone is warm: -startRunning blocks
   // for hundreds of milliseconds and previously gated all recording feedback.
-  FDEmit(FDEventRecording, @"");
+  if (rewrite && self.rewriteSelection.length > 0) {
+    FDEmit(FDEventRewriteSelection, self.rewriteSelection);
+  }
+  FDEmit(FDEventRecording, rewrite ? @"rewrite" : @"");
   __weak FDDictationController *weakSelf = self;
   dispatch_async(self.sessionQueue, ^{
     [session startRunning];
@@ -848,6 +1328,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
                error.localizedDescription ?: @"No speech was detected. Your recording has been retained.");
         return;
       }
+      if (self.rewriteSession) {
+        FDEmit(FDEventRewriteInstruction, text);
+        return;
+      }
       if (![self pasteText:text]) {
         // Carries the transcript so the overlay can offer a clipboard copy.
         FDEmit(FDEventPasteFailed, text);
@@ -967,6 +1451,93 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
               "posted paste shortcut appPid=%{public}d keyCode=%{public}u",
               self.pasteTargetApplicationProcessIdentifier, pasteKeyCode);
   return YES;
+}
+
+- (BOOL)postCopyShortcut {
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (!source) return NO;
+  CGKeyCode copyKeyCode = FDCopyVirtualKeyCode();
+  CGEventRef commandDown =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, true);
+  CGEventRef copyDown =
+      CGEventCreateKeyboardEvent(source, copyKeyCode, true);
+  CGEventRef copyUp =
+      CGEventCreateKeyboardEvent(source, copyKeyCode, false);
+  CGEventRef commandUp =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, false);
+  if (!commandDown || !copyDown || !copyUp || !commandUp) {
+    if (commandDown) CFRelease(commandDown);
+    if (copyDown) CFRelease(copyDown);
+    if (copyUp) CFRelease(copyUp);
+    if (commandUp) CFRelease(commandUp);
+    CFRelease(source);
+    return NO;
+  }
+
+  CGEventSetFlags(commandDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(copyDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(copyUp, kCGEventFlagMaskCommand);
+  CGEventSetFlags(commandUp, 0);
+  CGEventRef events[] = {commandDown, copyDown, copyUp, commandUp};
+  for (NSUInteger index = 0; index < 4; index += 1) {
+    CGEventSetIntegerValueField(events[index], kCGEventSourceUserData,
+                                FDPasteEventUserData);
+    CGEventPost(kCGHIDEventTap, events[index]);
+    if (index < 3) usleep(FDPasteShortcutEventDelayMicros);
+  }
+  CFRelease(commandDown);
+  CFRelease(copyDown);
+  CFRelease(copyUp);
+  CFRelease(commandUp);
+  CFRelease(source);
+  return YES;
+}
+
+- (NSString *)captureSelectedText {
+  NSString *axText = FDSelectedTextFromElement(_pasteTargetElement);
+  if (axText) {
+    NSString *trimmed = [axText
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return trimmed.length > 0 ? axText : nil;
+  }
+
+  NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+  NSArray<NSPasteboardItem *> *previousItems = nil;
+  @try {
+    previousItems = FDSnapshotPasteboard(pasteboard);
+  } @catch (__unused NSException *exception) {
+    previousItems = @[];
+  }
+  NSInteger before = pasteboard.changeCount;
+  if (![self postCopyShortcut]) {
+    @try {
+      FDRestorePasteboard(pasteboard, previousItems);
+    } @catch (__unused NSException *exception) {
+    }
+    return nil;
+  }
+  for (int attempt = 0; attempt < FDCopyPollAttempts; attempt += 1) {
+    usleep(FDCopyPollIntervalMicros);
+    if (pasteboard.changeCount == before) continue;
+    NSString *text = nil;
+    @try {
+      text = [pasteboard stringForType:NSPasteboardTypeString];
+    } @catch (__unused NSException *exception) {
+      text = nil;
+    }
+    @try {
+      FDRestorePasteboard(pasteboard, previousItems);
+    } @catch (__unused NSException *exception) {
+    }
+    NSString *trimmed = [text
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return trimmed.length > 0 ? text : nil;
+  }
+  @try {
+    FDRestorePasteboard(pasteboard, previousItems);
+  } @catch (__unused NSException *exception) {
+  }
+  return nil;
 }
 
 - (void)finishActivePasteboardSessionIfOwned {
@@ -1103,6 +1674,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     }
   }
   FDEmit(FDEventProcessing, @"");
+  if (self.rewriteSession && self.rewriteSelection.length > 0) {
+    FDEmit(FDEventRewriteSelection, self.rewriteSelection);
+  }
   if (provider == FDProviderSystem) {
     if (@available(macOS 10.15, *)) {
       FDEmit(FDEventAudioRecorded, url.path);
@@ -1156,18 +1730,23 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
     [self setRetainedRecordingURL:nil provider:0];
   }
+  [self clearRewriteSession];
   FDEmit(FDEventCancelled, @"");
 }
 
 - (void)markLastRecordingCompleted {
   [self setRetainedRecordingURL:nil provider:0];
+  [self clearRewriteSession];
 }
 
 // A recording restored from a previous session (or left over from a failed
 // transcription) otherwise blocks every new recording invisibly. Surface it
 // whenever dictation is (re-)enabled and the controller is idle.
 - (void)surfaceRetainedRecordingIfNeeded {
-  if (!self.enabled || self.recording || self.stopping) return;
+  if ((!self.enabled && !self.rewriteEnabled) || self.recording ||
+      self.stopping) {
+    return;
+  }
   if (self.cancelledRecordingPending) return;
   if (@available(macOS 10.15, *)) {
     if (self.speechTask) return;
@@ -1267,21 +1846,32 @@ bool fd_dictation_test_overlay_panel_contract(void) {
           method_getImplementation(panelCanMain);
 }
 
-void fd_dictation_configure(bool enabled, int32_t shortcut,
+void fd_dictation_configure(bool enabled, const char *shortcut,
                             int32_t activation_mode, int32_t provider,
                             const char *input_device_id,
-                            bool retain_recordings) {
+                            bool retain_recordings, bool rewrite_enabled,
+                            const char *rewrite_shortcut) {
   NSString *inputDeviceID = input_device_id
       ? [NSString stringWithUTF8String:input_device_id]
       : nil;
+  NSString *shortcutName = shortcut
+      ? [NSString stringWithUTF8String:shortcut]
+      : @"right_command";
+  NSString *rewriteName = rewrite_shortcut
+      ? [NSString stringWithUTF8String:rewrite_shortcut]
+      : @"right_option";
+  FDHotkey parsedShortcut = FDParseHotkey(shortcutName);
+  FDHotkey parsedRewrite = FDParseHotkey(rewriteName);
   dispatch_async(dispatch_get_main_queue(), ^{
     [[FDDictationController sharedController]
         configureEnabled:enabled
-               shortcut:(FDShortcut)shortcut
+               shortcut:parsedShortcut
          activationMode:(FDActivationMode)activation_mode
                 provider:(FDProvider)provider
            inputDeviceID:inputDeviceID
-        retainRecordings:retain_recordings];
+        retainRecordings:retain_recordings
+          rewriteEnabled:rewrite_enabled
+         rewriteShortcut:parsedRewrite];
   });
 }
 

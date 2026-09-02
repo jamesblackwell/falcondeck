@@ -12,6 +12,8 @@ const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
 const COLLAPSED_WORKSPACES_STORAGE_KEY =
   'falcondeck.desktop.collapsed-workspaces.v1'
 const CHATS_COLLAPSED_STORAGE_KEY = 'falcondeck.desktop.chats-collapsed.v1'
+const PROJECTS_COLLAPSED_STORAGE_KEY =
+  'falcondeck.desktop.projects-collapsed.v1'
 
 const THINKING_DISPLAY_VALUES: ThinkingDisplay[] = [
   'auto',
@@ -200,6 +202,29 @@ export function writeStoredChatsCollapsed(value: boolean) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(CHATS_COLLAPSED_STORAGE_KEY, String(value))
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory value
+    // stays authoritative for this session.
+  }
+}
+
+/**
+ * Whether the sidebar Projects list is folded away. Device-local like chats
+ * collapse: a tidied sidebar is about this screen, not the workspace.
+ */
+export function readStoredProjectsCollapsed(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    return window.localStorage.getItem(PROJECTS_COLLAPSED_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+export function writeStoredProjectsCollapsed(value: boolean) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(PROJECTS_COLLAPSED_STORAGE_KEY, String(value))
   } catch {
     // Storage can be unavailable (private mode, quota); the in-memory value
     // stays authoritative for this session.

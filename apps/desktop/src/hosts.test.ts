@@ -1,8 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { DaemonSnapshot } from "@falcondeck/client-core";
+import type { DaemonSnapshot, PersistedRemoteSession, ThreadDetail } from "@falcondeck/client-core";
 
-import { HostConnection, mergeSnapshots, type HostView } from "./hosts";
+import {
+  HostConnection,
+  loadStoredHosts,
+  mergeSnapshots,
+  saveStoredHosts,
+  type HostView,
+} from "./hosts";
+
+beforeEach(() => window.localStorage.clear());
 
 function snapshot(
   workspaceId: string,
@@ -134,6 +142,23 @@ describe("mergeSnapshots", () => {
       "local-thread",
     ]);
   });
+
+  it("does not overwrite local token usage when a restored host reuses a thread id", () => {
+    const local = snapshot("local-workspace", "example.local", "same-thread");
+    const remote = snapshot("remote-workspace", "example.remote", "same-thread");
+    local.thread_token_usage = {
+      "same-thread": { total_tokens: 10 },
+    } as DaemonSnapshot["thread_token_usage"];
+    remote.thread_token_usage = {
+      "same-thread": { total_tokens: 999 },
+    } as DaemonSnapshot["thread_token_usage"];
+
+    const merged = mergeSnapshots(local, [
+      { id: "remote-host", snapshot: remote } as HostView,
+    ]);
+
+    expect(merged?.thread_token_usage["same-thread"]?.total_tokens).toBe(10);
+  });
 });
 
 describe("HostConnection extension actions", () => {
@@ -256,5 +281,73 @@ describe("HostConnection extension actions", () => {
       lastError: expect.any(String),
     });
     expect(onPersist).toHaveBeenCalled();
+  });
+});
+
+describe("desktop host credential persistence", () => {
+  it("keeps remote session secrets out of localStorage", () => {
+    const session = {
+      sessionId: "session-1",
+      clientToken: "token-that-must-not-be-durable",
+      clientSecretKey: "secret-key-that-must-not-be-durable",
+      dataKey: "data-key-that-must-not-be-durable",
+    } as unknown as PersistedRemoteSession;
+
+    saveStoredHosts([
+      {
+        id: "host-1",
+        name: "Remote",
+        sshTarget: null,
+        sshPort: null,
+        relayUrl: "https://connect.example.test",
+        enabled: true,
+        session,
+      },
+    ]);
+
+    const raw = window.localStorage.getItem("falcondeck.desktop.hosts.v1") ?? "";
+    expect(raw).toContain('"hasSession":true');
+    expect(raw).not.toContain("token-that-must-not-be-durable");
+    expect(raw).not.toContain("secret-key-that-must-not-be-durable");
+    expect(raw).not.toContain("data-key-that-must-not-be-durable");
+    expect(loadStoredHosts()[0]).toMatchObject({
+      id: "host-1",
+      session: null,
+      hasStoredSession: true,
+    });
+  });
+});
+
+describe("HostConnection detail cache", () => {
+  it("evicts the least recently used transcript after fifty entries", () => {
+    const connection = new HostConnection(
+      {
+        id: "remote-host",
+        name: "Remote",
+        sshTarget: null,
+        sshPort: null,
+        relayUrl: "https://connect.example.test",
+        enabled: true,
+        session: null,
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+    const detail = (index: number) =>
+      ({
+        workspace: { id: "workspace" },
+        thread: { id: `thread-${index}` },
+        items: [],
+      }) as unknown as ThreadDetail;
+
+    for (let index = 0; index < 50; index += 1) {
+      connection.seedThreadDetail(detail(index));
+    }
+    expect(connection.cachedThreadDetail("workspace", "thread-0")).not.toBeNull();
+    connection.seedThreadDetail(detail(50));
+
+    expect(connection.cachedThreadDetail("workspace", "thread-0")).not.toBeNull();
+    expect(connection.cachedThreadDetail("workspace", "thread-1")).toBeNull();
+    expect(connection.cachedThreadDetail("workspace", "thread-50")).not.toBeNull();
   });
 });

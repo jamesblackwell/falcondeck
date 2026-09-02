@@ -64,10 +64,10 @@ import {
 } from '@falcondeck/client-core'
 import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
-import { activityTailStore } from './activity-tails'
 import { CONNECTION_COPY } from './connection-copy'
 
 const HOSTS_STORAGE_KEY = 'falcondeck.desktop.hosts.v1'
+const MAX_DETAIL_CACHE_ENTRIES = 50
 
 export type StoredHost = {
   id: string
@@ -79,6 +79,8 @@ export type StoredHost = {
   relayUrl: string
   enabled: boolean
   session: PersistedRemoteSession | null
+  /** Durable marker only; the credential itself lives in the OS keychain. */
+  hasStoredSession?: boolean
   // Set when the relay rejected the saved credentials; the host needs
   // re-pairing.
   needsRepair?: boolean
@@ -108,13 +110,37 @@ export function loadStoredHosts(): StoredHost[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (entry): entry is StoredHost =>
+    return parsed
+      .filter(
+        (entry): entry is Record<string, unknown> =>
         typeof entry === 'object' &&
         entry !== null &&
-        typeof (entry as StoredHost).id === 'string' &&
-        typeof (entry as StoredHost).name === 'string',
-    )
+        typeof (entry as Record<string, unknown>).id === 'string' &&
+        typeof (entry as Record<string, unknown>).name === 'string',
+      )
+      .map((entry) => {
+        // A pre-keychain installation may still contain the legacy session.
+        // Keep it in memory only long enough for HostManager.start() to move
+        // it into OS credential storage and rewrite this metadata record.
+        const legacySession =
+          typeof entry.session === 'object' && entry.session !== null
+            ? (entry.session as PersistedRemoteSession)
+            : null
+        return {
+          id: entry.id as string,
+          name: entry.name as string,
+          sshTarget: typeof entry.sshTarget === 'string' ? entry.sshTarget : null,
+          sshPort: typeof entry.sshPort === 'number' ? entry.sshPort : null,
+          relayUrl:
+            typeof entry.relayUrl === 'string'
+              ? entry.relayUrl
+              : DEFAULT_REMOTE_RELAY_URL,
+          enabled: entry.enabled !== false,
+          session: legacySession,
+          hasStoredSession: entry.hasSession === true || legacySession !== null,
+          needsRepair: entry.needsRepair === true,
+        }
+      })
   } catch {
     return []
   }
@@ -123,10 +149,47 @@ export function loadStoredHosts(): StoredHost[] {
 export function saveStoredHosts(hosts: StoredHost[]) {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(HOSTS_STORAGE_KEY, JSON.stringify(hosts))
+    window.localStorage.setItem(
+      HOSTS_STORAGE_KEY,
+      JSON.stringify(
+        hosts.map(({ session, hasStoredSession, ...metadata }) => ({
+          ...metadata,
+          hasSession: hasStoredSession === true || session !== null,
+        })),
+      ),
+    )
   } catch {
     // Keep the in-memory list authoritative when storage fails.
   }
+}
+
+async function writeSecureHostSession(
+  hostId: string,
+  session: PersistedRemoteSession,
+) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('write_host_session_secret', {
+    hostId,
+    payload: JSON.stringify(session),
+  })
+}
+
+async function readSecureHostSession(hostId: string) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  const payload = await invoke<string | null>('read_host_session_secret', {
+    hostId,
+  })
+  if (!payload) return null
+  const parsed = JSON.parse(payload) as unknown
+  if (typeof parsed !== 'object' || parsed === null) {
+    throw new Error('Stored server credentials are invalid.')
+  }
+  return parsed as PersistedRemoteSession
+}
+
+async function deleteSecureHostSession(hostId: string) {
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('delete_host_session_secret', { hostId })
 }
 
 // The subset of the daemon API that App routes per-workspace. Matches
@@ -187,6 +250,7 @@ export type WorkspaceScopedApi = {
   ): Promise<ThreadDetail>
   connectWorkspace(path: string): Promise<WorkspaceSummary>
   removeWorkspace(workspaceId: string): Promise<unknown>
+  closeWorkspace(workspaceId: string): Promise<unknown>
   gitStatus(workspaceId: string, threadId?: string | null): Promise<GitStatusResponse>
   gitCommit(
     workspaceId: string,
@@ -257,6 +321,25 @@ export class HostConnection {
     this.host = host
     this.onChange = onChange
     this.onPersist = onPersist
+  }
+
+  private cachedDetail(key: string): ThreadDetail | undefined {
+    const detail = this.detailCache.get(key)
+    if (detail) {
+      this.detailCache.delete(key)
+      this.detailCache.set(key, detail)
+    }
+    return detail
+  }
+
+  private cacheDetail(key: string, detail: ThreadDetail) {
+    this.detailCache.delete(key)
+    this.detailCache.set(key, detail)
+    while (this.detailCache.size > MAX_DETAIL_CACHE_ENTRIES) {
+      const oldest = this.detailCache.keys().next().value
+      if (oldest === undefined) break
+      this.detailCache.delete(oldest)
+    }
   }
 
   get connected() {
@@ -345,9 +428,6 @@ export class HostConnection {
   }
 
   private applyEvents(events: EventEnvelope[]) {
-    // Activity's tails are host-agnostic: a remote thread's card streams from
-    // this socket exactly as a local one streams from the daemon's.
-    activityTailStore.ingest(events)
     for (const event of events) {
       realtimeAudioPlayer.handleEvent(event)
       this.snapshot = applySnapshotEvent(this.snapshot, event)
@@ -356,10 +436,10 @@ export class HostConnection {
       }
       if (event.workspace_id && event.thread_id) {
         const key = `${event.workspace_id}:${event.thread_id}`
-        const cached = this.detailCache.get(key)
+        const cached = this.cachedDetail(key)
         if (cached) {
           const updated = applyEventToThreadDetail(cached, event)
-          if (updated && updated !== cached) this.detailCache.set(key, updated)
+          if (updated && updated !== cached) this.cacheDetail(key, updated)
         }
       }
     }
@@ -440,7 +520,7 @@ export class HostConnection {
         ...request,
       }),
     )
-    const current = this.detailCache.get(key)
+    const current = this.cachedDetail(key)
     if (
       request.mode === 'before' &&
       current &&
@@ -453,13 +533,13 @@ export class HostConnection {
       : request.mode === 'tail'
         ? mergeThreadDetailPage(current, page, 'refresh')
         : page
-    this.detailCache.set(key, detail)
+    this.cacheDetail(key, detail)
     this.onChange()
     return detail
   }
 
   cachedThreadDetail(workspaceId: string, threadId: string): ThreadDetail | null {
-    return this.detailCache.get(`${workspaceId}:${threadId}`) ?? null
+    return this.cachedDetail(`${workspaceId}:${threadId}`) ?? null
   }
 
   /**
@@ -470,7 +550,7 @@ export class HostConnection {
   seedThreadDetail(detail: ThreadDetail) {
     const key = `${detail.workspace.id}:${detail.thread.id}`
     if (this.detailCache.has(key)) return
-    this.detailCache.set(key, detail)
+    this.cacheDetail(key, detail)
     this.onChange()
   }
 
@@ -482,10 +562,10 @@ export class HostConnection {
    */
   upsertLocalItem(workspaceId: string, threadId: string, item: ConversationItem) {
     const key = `${workspaceId}:${threadId}`
-    const cached = this.detailCache.get(key)
+    const cached = this.cachedDetail(key)
     if (!cached) return
     const items = upsertConversationItem(cached.items, item)
-    this.detailCache.set(key, {
+    this.cacheDetail(key, {
       ...cached,
       items,
       oldest_item_id: items[0]?.id ?? cached.oldest_item_id,
@@ -497,11 +577,11 @@ export class HostConnection {
   /** Removes a client-local item again (send failed or landed in the queue). */
   removeLocalItem(workspaceId: string, threadId: string, itemId: string) {
     const key = `${workspaceId}:${threadId}`
-    const cached = this.detailCache.get(key)
+    const cached = this.cachedDetail(key)
     if (!cached) return
     const items = removeConversationItem(cached.items, itemId)
     if (items === cached.items) return
-    this.detailCache.set(key, {
+    this.cacheDetail(key, {
       ...cached,
       items,
       oldest_item_id: items[0]?.id ?? null,
@@ -624,6 +704,11 @@ export class HostConnection {
         await this.refreshSnapshot()
         return result
       },
+      closeWorkspace: async (workspaceId) => {
+        const result = await this.rpc('workspace.close', { workspaceId })
+        await this.refreshSnapshot()
+        return result
+      },
       gitStatus: (workspaceId, threadId) =>
         this.rpc('git.status', { workspace_id: workspaceId, thread_id: threadId }),
       gitCommit: (workspaceId, threadId, message) =>
@@ -687,7 +772,7 @@ export class HostConnection {
       sshPort: this.host.sshPort,
       relayUrl: this.host.relayUrl,
       enabled: this.host.enabled,
-      paired: this.host.session !== null,
+      paired: this.host.session !== null || this.host.hasStoredSession === true,
       needsRepair: this.host.needsRepair ?? false,
       status: this.status,
       presence: this.presence,
@@ -702,6 +787,7 @@ export class HostManager {
   private connections = new Map<string, HostConnection>()
   private hosts: StoredHost[] = []
   private listeners = new Set<() => void>()
+  private startPromise: Promise<void> | null = null
 
   constructor() {
     this.hosts = loadStoredHosts()
@@ -718,14 +804,57 @@ export class HostManager {
     for (const listener of this.listeners) listener()
   }
 
-  private persist() {
+  private persistMetadata() {
     saveStoredHosts(this.hosts)
     this.notify()
   }
 
   start() {
+    this.startPromise ??= this.startSecureConnections()
+  }
+
+  private async startSecureConnections() {
     for (const host of this.hosts) {
-      this.connectionFor(host).start()
+      try {
+        if (host.session) {
+          await writeSecureHostSession(host.id, host.session)
+          host.hasStoredSession = true
+        } else if (host.hasStoredSession) {
+          host.session = await readSecureHostSession(host.id)
+          if (!host.session) host.needsRepair = true
+        }
+      } catch (error) {
+        host.needsRepair = true
+        const connection = this.connectionFor(host)
+        connection.lastError =
+          error instanceof Error
+            ? error.message
+            : 'Could not load server credentials from OS storage.'
+      }
+    }
+    // This also removes any successfully migrated legacy session from
+    // localStorage. No secret-bearing object is serialized here.
+    this.persistMetadata()
+    for (const host of this.hosts) this.connectionFor(host).start()
+  }
+
+  private async persistSession(host: StoredHost) {
+    try {
+      if (host.session) {
+        await writeSecureHostSession(host.id, host.session)
+        host.hasStoredSession = true
+      } else {
+        await deleteSecureHostSession(host.id)
+        host.hasStoredSession = false
+      }
+      this.persistMetadata()
+    } catch (error) {
+      const connection = this.connectionFor(host)
+      connection.lastError =
+        error instanceof Error
+          ? error.message
+          : 'Could not save server credentials to OS storage.'
+      this.notify()
     }
   }
 
@@ -740,7 +869,9 @@ export class HostManager {
       connection = new HostConnection(
         host,
         () => this.notify(),
-        () => this.persist(),
+        () => {
+          void this.persistSession(host)
+        },
       )
       this.connections.set(host.id, connection)
     }
@@ -788,11 +919,13 @@ export class HostManager {
       relayUrl,
       enabled: true,
       session,
+      hasStoredSession: true,
     }
+    await writeSecureHostSession(host.id, session)
     this.hosts = [...this.hosts, host]
     const connection = this.connectionFor(host)
     connection.start()
-    this.persist()
+    this.persistMetadata()
     return connection.view()
   }
 
@@ -805,13 +938,15 @@ export class HostManager {
       pairingCode,
       deviceLabel: 'FalconDeck Desktop',
     })
+    await writeSecureHostSession(host.id, session)
     this.connections.get(hostId)?.stop()
     this.connections.delete(hostId)
     host.session = session
+    host.hasStoredSession = true
     host.needsRepair = false
     host.enabled = true
     this.connectionFor(host).start()
-    this.persist()
+    this.persistMetadata()
   }
 
   setEnabled(hostId: string, enabled: boolean) {
@@ -821,21 +956,22 @@ export class HostManager {
     const connection = this.connectionFor(host)
     if (enabled) connection.start()
     else connection.stop()
-    this.persist()
+    this.persistMetadata()
   }
 
   removeHost(hostId: string) {
     this.connections.get(hostId)?.stop()
     this.connections.delete(hostId)
     this.hosts = this.hosts.filter((entry) => entry.id !== hostId)
-    this.persist()
+    this.persistMetadata()
+    void deleteSecureHostSession(hostId)
   }
 
   renameHost(hostId: string, name: string) {
     const host = this.hosts.find((entry) => entry.id === hostId)
     if (!host) return
     host.name = name.trim() || host.name
-    this.persist()
+    this.persistMetadata()
   }
 }
 
@@ -877,16 +1013,31 @@ export function mergeSnapshots(
         (snapshot) => snapshot.operational_conditions ?? [],
       ),
     ],
-    thread_token_usage: Object.assign(
-      {},
-      base?.thread_token_usage ?? {},
+    // Preserve the first owner of a thread id (local first, then host order).
+    // Thread/workspace routing still uses the owning snapshot; allowing a
+    // later host to overwrite only the token projection made the sidebar
+    // display usage from a different machine for same-id restored sessions.
+    thread_token_usage: mergeThreadTokenUsage([
+      ...(local ? [local.thread_token_usage ?? {}] : []),
       ...hostSnapshots.map((snapshot) => snapshot.thread_token_usage ?? {}),
-    ),
+    ]),
     extensions: mergeExtensionSnapshots([
       ...(local ? [local.extensions] : []),
       ...hostSnapshots.map((snapshot) => snapshot.extensions),
     ]),
   }
+}
+
+type ThreadTokenUsageMap = NonNullable<DaemonSnapshot['thread_token_usage']>
+
+function mergeThreadTokenUsage(maps: ThreadTokenUsageMap[]): ThreadTokenUsageMap {
+  const merged: ThreadTokenUsageMap = {}
+  for (const usage of maps) {
+    for (const [threadId, value] of Object.entries(usage)) {
+      if (!(threadId in merged)) merged[threadId] = value
+    }
+  }
+  return merged
 }
 
 function mergeExtensionSnapshots(

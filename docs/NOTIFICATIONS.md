@@ -60,6 +60,14 @@ Notification preferences are daemon-owned and included in snapshots and
 - failed turns;
 - suppress pushes while desktop is active.
 
+Desktop also has a device-local turn-complete chime, off by default, under
+Settings → General → Sounds. It plays on this computer when a thread leaves
+`running` for `idle` or `error`, including while the window is focused. It is
+not a push, is not synced through the daemon, and does not replace attention
+notifications. On the packaged Mac app the picker includes native system
+sounds (Glass, Ping, and similar); two small bundled WAVs cover everything
+else.
+
 Mobile additionally keeps a local OS-permission/token registration gate. A
 device with notifications disabled clears its relay token. Disconnecting also
 clears the token before discarding the client credential.

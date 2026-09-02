@@ -35,7 +35,7 @@ describe("typography system", () => {
     }
   });
 
-  it("rations monospace in Activity to the terminal readouts", () => {
+  it("keeps Activity in the same voice as the rest of the UI", () => {
     const activity = readFileSync(
       resolve(
         process.cwd(),
@@ -44,15 +44,8 @@ describe("typography system", () => {
       "utf8",
     );
 
-    // Activity shows a dozen threads at once, so it is the view most tempted
-    // to set its whole chrome in monospace — which is what made it read as a
-    // different application. Section headings, stat labels, host badges, and
-    // timestamps belong to the same voice as the rest of the UI; a monospace
-    // face is reserved for text the machine actually wrote.
-    for (const adHoc of ["font-mono", "fd-readout", "fd-microlabel"]) {
+    for (const adHoc of ["font-mono", "fd-type-mono", "fd-readout", "fd-microlabel"]) {
       expect(activity).not.toContain(adHoc);
     }
-    // The readout lines, its empty state, and the ❯ sigil. Nothing else.
-    expect(activity.match(/fd-type-mono/g) ?? []).toHaveLength(3);
   });
 });

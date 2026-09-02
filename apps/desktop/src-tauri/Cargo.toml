@@ -15,6 +15,7 @@ tauri-build = { version = "2.6.3", features = [] }
 falcondeck-core = { path = "../../../crates/falcondeck-core" }
 falcondeck-daemon = { path = "../../../crates/falcondeck-daemon" }
 base64 = "0.22.1"
+keyring = "4.1.6"
 open = "5.3.3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }
@@ -25,6 +26,7 @@ tauri-plugin-dialog = "2.7.2"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-updater = "2.10.1"
 tokio.workspace = true
+url = "2.5.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-usernotifications = "0.3.1"

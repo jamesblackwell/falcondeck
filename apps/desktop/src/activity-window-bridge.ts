@@ -40,18 +40,6 @@ export const ACTIVITY_WINDOW_EVENTS = {
   respond: "falcondeck://activity-respond",
   /** Main → window: the outcome of one `respond`, by correlation id. */
   respondResult: "falcondeck://activity-respond-result",
-  /** Window → main: send a message into an existing thread. */
-  sendMessage: "falcondeck://activity-send-message",
-  /** Main → window: the outcome of one `sendMessage`, by correlation id. */
-  sendMessageResult: "falcondeck://activity-send-message-result",
-  /**
-   * Main → window: the streaming tails, on their own channel.
-   *
-   * Deliberately not part of `state`: that projection is diffed by
-   * stringifying it, and folding token-rate text into it would turn every
-   * delta into a full re-serialisation of the queue.
-   */
-  tails: "falcondeck://activity-tails",
 } as const;
 
 export type ActivityWindowState = {
@@ -84,18 +72,6 @@ export type ActivityRespondMessage = {
 };
 
 export type ActivityRespondResult = {
-  callId: string;
-  error?: string;
-};
-
-export type ActivitySendMessageMessage = {
-  callId: string;
-  workspaceId: string;
-  threadId: string;
-  text: string;
-};
-
-export type ActivitySendMessageResult = {
   callId: string;
   error?: string;
 };

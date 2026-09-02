@@ -2,7 +2,7 @@ use std::{
     ffi::{CStr, CString},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         LazyLock, OnceLock, RwLock,
     },
     time::Duration,
@@ -23,11 +23,14 @@ const DICTATION_INSERT_EVENT: &str = "falcondeck://dictation-insert";
 const MAX_RECORDING_BYTES: u64 = 8 * 1024 * 1024;
 // Overlay geometry in logical points. The pill is a compact status strip; the
 // failure card needs the wider, taller box so its message and buttons lay out
-// on one line each.
+// on one line each. A paste failure also has to show the transcript itself —
+// the shorter box was sized before that preview existed and clipped the
+// actions behind overflow:hidden.
 const OVERLAY_PILL_WIDTH: f64 = 504.0;
 const OVERLAY_PILL_HEIGHT: f64 = 84.0;
 const OVERLAY_FAILED_WIDTH: f64 = 720.0;
 const OVERLAY_FAILED_HEIGHT: f64 = 156.0;
+const OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT: f64 = 252.0;
 // Client-side ceiling for a short dictation. Long recordings scale this up so
 // the daemon's own (longer) budget is what decides the outcome; see
 // `transcription_timeout`.
@@ -52,6 +55,8 @@ static ACTIVE_OPENROUTER_TRANSCRIPTION: AtomicU64 = AtomicU64::new(0);
 // The most recent transcript, kept so the writer can re-insert it (Cmd+Shift+V
 // in the app) or copy it after a failed paste. Session-scoped on purpose.
 static LAST_TRANSCRIPT: RwLock<Option<String>> = RwLock::new(None);
+static REWRITE_SELECTION: RwLock<Option<String>> = RwLock::new(None);
+static REWRITE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // Timeouts are per request rather than per client: a 30-second dictation and
 // a 30-minute one deserve very different ceilings.
@@ -83,14 +88,8 @@ mod event_kind {
     pub const PASTE_FAILED: i32 = 9;
     pub const CANCELLED_RETAINED: i32 = 11;
     pub const AUDIO_RECORDED: i32 = 10;
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DictationShortcut {
-    #[default]
-    RightCommand,
-    LeftFunction,
+    pub const REWRITE_SELECTION: i32 = 12;
+    pub const REWRITE_INSTRUCTION: i32 = 13;
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -121,7 +120,9 @@ pub enum DictationPermission {
 #[serde(rename_all = "camelCase")]
 pub struct DictationConfiguration {
     pub enabled: bool,
-    pub shortcut: DictationShortcut,
+    /// Modifier-only ids (`right_command`) or chords (`Mod+Shift+D`).
+    #[serde(default = "default_dictation_shortcut")]
+    pub shortcut: String,
     pub activation: DictationActivation,
     pub provider: DictationProvider,
     pub input_device_id: Option<String>,
@@ -134,13 +135,34 @@ pub struct DictationConfiguration {
     /// retried. Zero deletes audio as soon as the transcript is pasted.
     #[serde(default)]
     pub history_retention_hours: u32,
+    /// Hold a second shortcut over selected text and speak how to edit it.
+    #[serde(default)]
+    pub rewrite_enabled: bool,
+    #[serde(default = "default_rewrite_shortcut")]
+    pub rewrite_shortcut: String,
+    #[serde(default = "default_rewrite_model")]
+    pub rewrite_model: String,
+    #[serde(default)]
+    pub rewrite_prompt: Option<String>,
+}
+
+fn default_rewrite_model() -> String {
+    "openai/gpt-5.6-luna".to_string()
+}
+
+fn default_rewrite_shortcut() -> String {
+    "right_option".to_string()
+}
+
+fn default_dictation_shortcut() -> String {
+    "right_command".to_string()
 }
 
 impl Default for DictationConfiguration {
     fn default() -> Self {
         Self {
             enabled: false,
-            shortcut: DictationShortcut::RightCommand,
+            shortcut: default_dictation_shortcut(),
             activation: DictationActivation::Hold,
             provider: DictationProvider::System,
             input_device_id: None,
@@ -148,6 +170,10 @@ impl Default for DictationConfiguration {
             model: "openai/gpt-4o-mini-transcribe".to_string(),
             fallback_model: Some("mistralai/voxtral-mini-transcribe".to_string()),
             history_retention_hours: 6,
+            rewrite_enabled: false,
+            rewrite_shortcut: default_rewrite_shortcut(),
+            rewrite_model: default_rewrite_model(),
+            rewrite_prompt: None,
         }
     }
 }
@@ -161,6 +187,8 @@ struct DictationEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     retained_audio: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,15 +219,27 @@ struct TranscriptionRequest {
     duration_seconds: f64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+struct RewriteRequest {
+    selection: String,
+    instruction: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn fd_dictation_configure(
         enabled: bool,
-        shortcut: i32,
+        shortcut: *const std::ffi::c_char,
         activation_mode: i32,
         provider: i32,
         input_device_id: *const std::ffi::c_char,
         retain_recordings: bool,
+        rewrite_enabled: bool,
+        rewrite_shortcut: *const std::ffi::c_char,
     );
     fn fd_dictation_retained_recording_path() -> *mut std::ffi::c_char;
     fn fd_dictation_retained_recording_duration_seconds() -> f64;
@@ -280,10 +320,14 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn shortcut_code(shortcut: DictationShortcut) -> i32 {
-    match shortcut {
-        DictationShortcut::RightCommand => 0,
-        DictationShortcut::LeftFunction => 1,
+fn rewrite_mode() -> Option<&'static str> {
+    REWRITE_ACTIVE.load(Ordering::Acquire).then_some("rewrite")
+}
+
+fn clear_rewrite_session() {
+    REWRITE_ACTIVE.store(false, Ordering::Release);
+    if let Ok(mut selection) = REWRITE_SELECTION.write() {
+        *selection = None;
     }
 }
 
@@ -328,12 +372,32 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
     if config.model.trim().is_empty() || config.model.len() > 200 {
         return Err("The transcription model is invalid.".to_string());
     }
+    if config.rewrite_model.trim().is_empty() || config.rewrite_model.len() > 200 {
+        return Err("The rewrite model is invalid.".to_string());
+    }
+    if config
+        .rewrite_prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt.chars().count() > 8_000)
+    {
+        return Err("The rewrite prompt is too long.".to_string());
+    }
+    if config.rewrite_enabled {
+        let daemon_url = config.daemon_url.as_deref().unwrap_or_default();
+        validate_local_daemon_url(daemon_url)?;
+    }
     if config
         .fallback_model
         .as_deref()
         .is_some_and(|model| model.trim().is_empty() || model.len() > 200)
     {
         return Err("The fallback transcription model is invalid.".to_string());
+    }
+    if config.shortcut.trim().is_empty() || config.shortcut.len() > 64 {
+        return Err("The dictation shortcut is invalid.".to_string());
+    }
+    if config.rewrite_shortcut.trim().is_empty() || config.rewrite_shortcut.len() > 64 {
+        return Err("The rewrite shortcut is invalid.".to_string());
     }
     // A shortened retention window has to take effect immediately, not at the
     // next dictation: the writer just asked for that audio to be gone. The
@@ -352,15 +416,21 @@ pub fn configure_dictation(config: DictationConfiguration) -> Result<(), String>
             .map(CString::new)
             .transpose()
             .map_err(|_| "The selected microphone identifier is invalid.".to_string())?;
+        let shortcut = CString::new(config.shortcut.trim())
+            .map_err(|_| "The dictation shortcut is invalid.".to_string())?;
+        let rewrite_shortcut = CString::new(config.rewrite_shortcut.trim())
+            .map_err(|_| "The rewrite shortcut is invalid.".to_string())?;
         fd_dictation_configure(
             config.enabled,
-            shortcut_code(config.shortcut),
+            shortcut.as_ptr(),
             activation_code(config.activation),
             provider_code(config.provider),
             input_device_id
                 .as_ref()
                 .map_or(std::ptr::null(), |value| value.as_ptr()),
             config.history_retention_hours > 0,
+            config.rewrite_enabled,
+            rewrite_shortcut.as_ptr(),
         );
     }
     *CONFIG
@@ -488,6 +558,15 @@ pub fn discard_dictation() {
     #[cfg(target_os = "macos")]
     unsafe {
         fd_dictation_discard();
+    }
+}
+
+#[tauri::command]
+pub fn dismiss_dictation_overlay() {
+    if let Some(app) = APP_HANDLE.get() {
+        if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
+            let _ = window.hide();
+        }
     }
 }
 
@@ -670,9 +749,14 @@ pub fn shutdown() {
     }
 }
 
-fn overlay_size(failed: bool) -> (f64, f64) {
-    if failed {
-        (OVERLAY_FAILED_WIDTH, OVERLAY_FAILED_HEIGHT)
+fn overlay_size(state: &str, has_transcript: bool) -> (f64, f64) {
+    if state == "failed" {
+        let height = if has_transcript {
+            OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT
+        } else {
+            OVERLAY_FAILED_HEIGHT
+        };
+        (OVERLAY_FAILED_WIDTH, height)
     } else {
         (OVERLAY_PILL_WIDTH, OVERLAY_PILL_HEIGHT)
     }
@@ -691,11 +775,11 @@ fn overlay_takes_clicks(event: &DictationEvent) -> bool {
 /// transparent padding around the pill land on a FalconDeck window and activate
 /// the app. Every switch into the failure card also re-shows the overlay, so
 /// this never leaves the wider box sitting off-centre.
-fn set_overlay_mode(app: &AppHandle, state: &str, takes_clicks: bool) {
+fn set_overlay_mode(app: &AppHandle, state: &str, takes_clicks: bool, has_transcript: bool) {
     let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) else {
         return;
     };
-    let (width, height) = overlay_size(state == "failed");
+    let (width, height) = overlay_size(state, has_transcript);
     let _ = window.set_size(LogicalSize::new(width, height));
     let _ = window.set_ignore_cursor_events(!takes_clicks);
 }
@@ -728,9 +812,9 @@ fn position_overlay(app: &AppHandle, width: f64) {
     let _ = window.set_position(PhysicalPosition::new(x, y));
 }
 
-fn show_overlay(app: &AppHandle, state: &str) {
-    set_overlay_mode(app, state, state == "failed");
-    position_overlay(app, overlay_size(state == "failed").0);
+fn show_overlay(app: &AppHandle, state: &str, has_transcript: bool) {
+    set_overlay_mode(app, state, state == "failed", has_transcript);
+    position_overlay(app, overlay_size(state, has_transcript).0);
     if let Some(window) = app.get_webview_window(DICTATION_WINDOW_LABEL) {
         let _ = window.show();
     }
@@ -767,7 +851,12 @@ fn close_undo_window_after(app: AppHandle, generation: u64, delay: Duration) {
 }
 
 fn emit_event(app: &AppHandle, event: DictationEvent) {
-    set_overlay_mode(app, event.state, overlay_takes_clicks(&event));
+    set_overlay_mode(
+        app,
+        event.state,
+        overlay_takes_clicks(&event),
+        event.text.is_some(),
+    );
     let _ = app.emit(DICTATION_EVENT, &event);
 }
 
@@ -784,7 +873,8 @@ fn emit_failure_with_transcript(
     transcript: Option<String>,
 ) {
     SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-    show_overlay(app, "failed");
+    show_overlay(app, "failed", transcript.is_some());
+    let mode = rewrite_mode();
     emit_event(
         app,
         DictationEvent {
@@ -792,8 +882,12 @@ fn emit_failure_with_transcript(
             text: transcript,
             error: Some(message),
             retained_audio,
+            mode,
         },
     );
+    if !retained_audio {
+        clear_rewrite_session();
+    }
 }
 
 fn remember_transcript(text: &str) {
@@ -940,6 +1034,67 @@ async fn request_transcription(
     Ok(Transcription { text, model })
 }
 
+async fn request_rewrite(
+    daemon_url: &str,
+    selection: String,
+    instruction: String,
+    model: String,
+    prompt: Option<String>,
+) -> Result<String, String> {
+    let response = OPENROUTER_CLIENT
+        .post(format!("{daemon_url}/api/speech/rewrite"))
+        .timeout(Duration::from_secs(45))
+        .json(&RewriteRequest {
+            selection,
+            instruction,
+            model,
+            prompt,
+        })
+        .send()
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "The rewrite timed out. Your recording is retained, so you can retry.".to_string()
+            } else {
+                format!("Rewrite failed: {error}")
+            }
+        })?;
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        return Err(body
+            .get("error")
+            .and_then(|value| value.as_str())
+            .or_else(|| body.get("message").and_then(|value| value.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Rewrite failed ({})", status.as_u16())));
+    }
+    let text = body
+        .get("text")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err("The rewrite model returned empty text.".to_string());
+    }
+    Ok(text)
+}
+
+fn emit_rewriting(app: &AppHandle) {
+    show_overlay(app, "rewriting", false);
+    emit_event(
+        app,
+        DictationEvent {
+            state: "rewriting",
+            text: None,
+            error: None,
+            retained_audio: true,
+            mode: Some("rewrite"),
+        },
+    );
+}
+
 /// Keeps the recording for the retention window, or deletes it when history
 /// is switched off. Either way the audio stops being the recorder's problem.
 fn file_recording(
@@ -1072,6 +1227,30 @@ async fn transcribe_openrouter(
         }
     };
     let Transcription { text, model } = transcription;
+    let text = if REWRITE_ACTIVE.load(Ordering::Acquire) {
+        let selection = REWRITE_SELECTION
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+            .filter(|value| !value.trim().is_empty());
+        let Some(selection) = selection else {
+            return Err(
+                "Select text first, then hold the rewrite shortcut and say how to edit it."
+                    .to_string(),
+            );
+        };
+        emit_rewriting(&app);
+        request_rewrite(
+            daemon_url,
+            selection,
+            text,
+            config.rewrite_model.clone(),
+            config.rewrite_prompt.clone(),
+        )
+        .await?
+    } else {
+        text
+    };
     remember_transcript(&text);
 
     let finish_app = app.clone();
@@ -1111,8 +1290,13 @@ async fn transcribe_openrouter(
             );
             emit_failure_with_transcript(
                 &finish_app,
-                "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
-                    .to_string(),
+                if rewrite_mode().is_some() {
+                    "The rewrite is ready, but FalconDeck could not paste it. Copy it below or retry."
+                        .to_string()
+                } else {
+                    "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
+                        .to_string()
+                },
                 true,
                 Some(text.clone()),
             );
@@ -1132,6 +1316,10 @@ async fn transcribe_openrouter(
             fd_dictation_mark_completed();
         }
         let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        let mode = rewrite_mode();
+        if mode.is_some() {
+            clear_rewrite_session();
+        }
         emit_event(
             &finish_app,
             DictationEvent {
@@ -1139,6 +1327,7 @@ async fn transcribe_openrouter(
                 text: Some(text),
                 error: None,
                 retained_audio: false,
+                mode,
             },
         );
         hide_overlay_after(finish_app, generation, COMPLETED_FALLBACK_WINDOW);
@@ -1194,8 +1383,15 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
     };
     match kind {
         event_kind::RECORDING => {
+            let rewrite = payload == "rewrite";
+            REWRITE_ACTIVE.store(rewrite, Ordering::Release);
+            if !rewrite {
+                if let Ok(mut selection) = REWRITE_SELECTION.write() {
+                    *selection = None;
+                }
+            }
             SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
-            show_overlay(&app, "recording");
+            show_overlay(&app, "recording", false);
             emit_event(
                 &app,
                 DictationEvent {
@@ -1203,6 +1399,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     text: None,
                     error: None,
                     retained_audio: false,
+                    mode: rewrite.then_some("rewrite"),
                 },
             );
         }
@@ -1213,11 +1410,16 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                 text: None,
                 error: None,
                 retained_audio: true,
+                mode: rewrite_mode(),
             },
         ),
         event_kind::COMPLETED => {
             remember_transcript(&payload);
             file_native_recording(Some(payload.clone()), None);
+            let mode = rewrite_mode();
+            if mode.is_some() {
+                clear_rewrite_session();
+            }
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -1226,6 +1428,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     text: Some(payload),
                     error: None,
                     retained_audio: false,
+                    mode,
                 },
             );
             hide_overlay_after(app, generation, COMPLETED_FALLBACK_WINDOW);
@@ -1235,6 +1438,8 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             // The native side deletes cancelled audio, so there is nothing to
             // keep — just stop tracking it.
             let _ = CURRENT_RECORDING.write().map(|mut current| current.take());
+            let mode = rewrite_mode();
+            clear_rewrite_session();
             let generation = SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
             emit_event(
                 &app,
@@ -1243,6 +1448,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     text: None,
                     error: None,
                     retained_audio: false,
+                    mode,
                 },
             );
             hide_overlay_after(app, generation, Duration::from_millis(650));
@@ -1258,9 +1464,107 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                     text: None,
                     error: None,
                     retained_audio: true,
+                    mode: rewrite_mode(),
                 },
             );
             close_undo_window_after(app, generation, CANCEL_UNDO_WINDOW);
+        }
+        event_kind::REWRITE_SELECTION => {
+            if let Ok(mut selection) = REWRITE_SELECTION.write() {
+                *selection = Some(payload);
+            }
+            REWRITE_ACTIVE.store(true, Ordering::Release);
+        }
+        event_kind::REWRITE_INSTRUCTION => {
+            let instruction = payload;
+            let selection = REWRITE_SELECTION
+                .read()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .filter(|value| !value.trim().is_empty());
+            let Some(selection) = selection else {
+                emit_failure(
+                    &app,
+                    "Select text first, then hold the rewrite shortcut and say how to edit it."
+                        .to_string(),
+                    true,
+                );
+                return;
+            };
+            emit_rewriting(&app);
+            tauri::async_runtime::spawn(async move {
+                let config = match current_dictation_config() {
+                    Ok(config) => config,
+                    Err(error) => {
+                        emit_failure(&app, error, true);
+                        return;
+                    }
+                };
+                let Some(daemon_url) = config.daemon_url.clone() else {
+                    emit_failure(&app, "FalconDeck is not connected.".to_string(), true);
+                    return;
+                };
+                match request_rewrite(
+                    &daemon_url,
+                    selection,
+                    instruction,
+                    config.rewrite_model,
+                    config.rewrite_prompt,
+                )
+                .await
+                {
+                    Ok(text) => {
+                        remember_transcript(&text);
+                        let finish_app = app.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let Ok(c_text) = CString::new(text.as_str()) else {
+                                emit_failure(
+                                    &finish_app,
+                                    "The rewrite contained unsupported text.".to_string(),
+                                    true,
+                                );
+                                return;
+                            };
+                            let pasted = unsafe { fd_dictation_paste_text(c_text.as_ptr()) };
+                            if !pasted {
+                                file_native_recording(Some(text.clone()), None);
+                                emit_failure_with_transcript(
+                                    &finish_app,
+                                    "The rewrite is ready, but FalconDeck could not paste it. Copy it below or retry."
+                                        .to_string(),
+                                    true,
+                                    Some(text.clone()),
+                                );
+                                return;
+                            }
+                            file_native_recording(Some(text.clone()), None);
+                            unsafe {
+                                fd_dictation_mark_completed();
+                            }
+                            let mode = rewrite_mode();
+                            clear_rewrite_session();
+                            let generation =
+                                SESSION_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+                            emit_event(
+                                &finish_app,
+                                DictationEvent {
+                                    state: "completed",
+                                    text: Some(text),
+                                    error: None,
+                                    retained_audio: false,
+                                    mode,
+                                },
+                            );
+                            hide_overlay_after(
+                                finish_app,
+                                generation,
+                                COMPLETED_FALLBACK_WINDOW,
+                            );
+                        });
+                    }
+                    Err(error) => emit_failure(&app, error, true),
+                }
+            });
         }
         event_kind::AUDIO_READY => {
             let recording = native_recorded_audio(PathBuf::from(payload));
@@ -1350,6 +1654,8 @@ mod tests {
             ("PasteFailed", super::event_kind::PASTE_FAILED),
             ("CancelledRetained", super::event_kind::CANCELLED_RETAINED),
             ("AudioRecorded", super::event_kind::AUDIO_RECORDED),
+            ("RewriteSelection", super::event_kind::REWRITE_SELECTION),
+            ("RewriteInstruction", super::event_kind::REWRITE_INSTRUCTION),
         ];
         for (name, value) in expected {
             assert!(
@@ -1390,6 +1696,26 @@ mod tests {
     #[test]
     fn permission_label_preserves_unsupported_platform_state() {
         assert_eq!(permission_label(3), "unsupported");
+    }
+
+    #[test]
+    fn overlay_grows_when_a_failed_paste_still_has_a_transcript() {
+        assert_eq!(
+            super::overlay_size("failed", false),
+            (super::OVERLAY_FAILED_WIDTH, super::OVERLAY_FAILED_HEIGHT)
+        );
+        assert_eq!(
+            super::overlay_size("failed", true),
+            (
+                super::OVERLAY_FAILED_WIDTH,
+                super::OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT
+            )
+        );
+        assert_eq!(
+            super::overlay_size("recording", true),
+            (super::OVERLAY_PILL_WIDTH, super::OVERLAY_PILL_HEIGHT)
+        );
+        assert!(super::OVERLAY_FAILED_WITH_TRANSCRIPT_HEIGHT > super::OVERLAY_FAILED_HEIGHT);
     }
 
     #[test]

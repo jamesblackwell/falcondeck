@@ -17,6 +17,7 @@ import {
   Badge,
   Button,
   ThemeControls,
+  TypographyControls,
   cn,
 } from "@falcondeck/ui";
 import {
@@ -27,7 +28,7 @@ import {
   RefreshCw,
   Terminal,
 } from "lucide-react";
-import { DictationSetup } from "./DictationSetup";
+import { DictationSetup, SpeechCredentialField } from "./DictationSetup";
 
 export type OnboardingToast = {
   variant: "success" | "danger" | "warning" | "default";
@@ -46,24 +47,32 @@ type OnboardingWizardProps = {
   onToast: (toast: OnboardingToast) => void;
   /** Writes the completed flag (skipped=true when the user skips) and closes the wizard. */
   onComplete: (skipped: boolean) => void;
+  /** QA fixtures jump to a step without clicking through. */
+  initialStep?: number;
+  onStepChange?: (step: number) => void;
+  overlayClassName?: string;
 };
 
-const STEPS = [
+export const ONBOARDING_STEPS = [
   "Welcome",
   "Appearance",
   "Dictation",
+  "OpenRouter",
   "Tools",
   "Project",
   "Finish",
 ] as const;
-const STEP_INDEX = {
+export const ONBOARDING_STEP_INDEX = {
   welcome: 0,
   appearance: 1,
   dictation: 2,
-  tools: 3,
-  project: 4,
-  finish: 5,
+  openrouter: 3,
+  tools: 4,
+  project: 5,
+  finish: 6,
 } as const;
+const STEPS = ONBOARDING_STEPS;
+const STEP_INDEX = ONBOARDING_STEP_INDEX;
 const JOB_POLL_INTERVAL_MS = 1500;
 
 type ActiveJob = {
@@ -92,8 +101,13 @@ export function OnboardingWizard({
   onAddProject,
   onToast,
   onComplete,
+  initialStep = 0,
+  onStepChange,
+  overlayClassName,
 }: OnboardingWizardProps) {
-  const [step, setStep] = useState(0);
+  const [step, setStep] = useState(() =>
+    Math.min(Math.max(initialStep, 0), STEPS.length - 1),
+  );
   const [overview, setOverview] = useState<HarnessesOverview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isProbing, setIsProbing] = useState(false);
@@ -104,6 +118,10 @@ export function OnboardingWizard({
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
   const pollRef = useRef<number | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    onStepChange?.(step);
+  }, [step, onStepChange]);
 
   useEffect(() => {
     nextRef.current?.focus();
@@ -259,7 +277,12 @@ export function OnboardingWizard({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[var(--fd-overlay)] px-6 backdrop-blur-sm">
+    <div
+      className={cn(
+        "fixed inset-0 z-40 flex items-center justify-center bg-[var(--fd-overlay)] px-6 backdrop-blur-sm",
+        overlayClassName,
+      )}
+    >
       <div
         role="dialog"
         aria-modal="true"
@@ -307,8 +330,8 @@ export function OnboardingWizard({
               <p className="max-w-md text-[length:var(--fd-text-sm)] text-fg-muted">
                 FalconDeck orchestrates coding agents — Codex, Claude Code,
                 OpenCode, and friends — from this computer. This takes about a
-                minute: check your tools, connect a project, and you&apos;re
-                off.
+                minute: pick a look, optionally set up dictation, check your
+                tools, and connect a project.
               </p>
             </div>
           ) : null}
@@ -323,12 +346,13 @@ export function OnboardingWizard({
                   Choose your appearance
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Pick how FalconDeck looks. Changes apply immediately and can
-                  be adjusted later in Settings → Appearance.
+                  Pick a theme, fonts, and text size. Changes apply immediately
+                  and can be adjusted later in Settings → Appearance.
                 </p>
               </div>
-              <div className="mx-auto w-full max-w-lg rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
+              <div className="mx-auto w-full max-w-lg space-y-6 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
                 <ThemeControls />
+                <TypographyControls />
               </div>
             </div>
           ) : null}
@@ -343,8 +367,9 @@ export function OnboardingWizard({
                   Dictate on this computer
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Apple Speech works without an API key. You can optionally use
-                  an OpenRouter transcription model instead.
+                  Turn on system-wide dictation and pick a shortcut. Voice
+                  rewrite is optional — it needs an OpenRouter key on the next
+                  step.
                 </p>
               </div>
               <DictationSetup
@@ -352,6 +377,32 @@ export function OnboardingWizard({
                 onToast={onToast}
                 compact
               />
+            </div>
+          ) : null}
+
+          {step === STEP_INDEX.openrouter ? (
+            <div className="space-y-4">
+              <div className="text-center">
+                <h2
+                  id="onboarding-title"
+                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
+                >
+                  Optional: OpenRouter
+                </h2>
+                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
+                  One key on this computer unlocks read-aloud, voice rewrite,
+                  and cloud transcription. Apple Speech dictation works without
+                  it — continue to skip.
+                </p>
+              </div>
+              <div className="mx-auto w-full max-w-lg rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
+                <SpeechCredentialField
+                  baseUrl={baseUrl}
+                  onToast={onToast}
+                  id="onboarding-openrouter-key"
+                  hint="Stored only on this computer. Paired devices never see the key."
+                />
+              </div>
             </div>
           ) : null}
 

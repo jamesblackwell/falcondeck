@@ -45,13 +45,24 @@ export async function openActivityWindow() {
 }
 
 function isSafeExternalUrl(url: string) {
-  const lower = url.toLowerCase()
-  return (
-    lower.startsWith('https://') ||
-    lower.startsWith('http://') ||
-    lower.startsWith('mailto:') ||
-    lower.startsWith('tel:')
-  )
+  const hasControlCharacter = Array.from(url).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint < 0x20 || codePoint === 0x7f
+  })
+  if (url !== url.trim() || hasControlCharacter || /%0[ad]/i.test(url)) {
+    return false
+  }
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'https:') {
+      return Boolean(parsed.hostname) && !parsed.username && !parsed.password
+    }
+    if (parsed.protocol === 'mailto:') return Boolean(parsed.pathname)
+    if (parsed.protocol === 'tel:') return /^[+\d(). -]+$/.test(parsed.pathname)
+    return false
+  } catch {
+    return false
+  }
 }
 
 export async function openLocalPath(path: string) {
@@ -122,21 +133,13 @@ export async function saveLocalFileAs(source: string) {
     throw new Error('Saving local files is only available in the FalconDeck desktop app.')
   }
 
-  const { save } = await import('@tauri-apps/plugin-dialog')
-  const defaultName = source.split(/[\\/]/).filter(Boolean).pop() ?? source
-  const dest = await save({ defaultPath: defaultName })
-  if (!dest) {
-    return false
-  }
-
   const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('copy_local_file', { source, dest })
-  return true
+  return invoke<boolean>('save_local_file_as', { source })
 }
 
 export async function openExternalUrl(url: string) {
   if (!isSafeExternalUrl(url)) {
-    throw new Error('FalconDeck can only open http, https, mailto, or tel links.')
+    throw new Error('FalconDeck can only open https, mailto, or tel links.')
   }
 
   if (isTauriDesktop()) {

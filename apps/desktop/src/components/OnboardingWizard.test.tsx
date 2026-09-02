@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { invoke } from '@tauri-apps/api/core'
@@ -11,7 +11,10 @@ import {
   shouldShowFirstRunOnboarding,
   writeStoredOnboarding,
 } from '../preferences'
-import { OnboardingWizard } from './OnboardingWizard'
+import {
+  ONBOARDING_STEP_INDEX,
+  OnboardingWizard,
+} from './OnboardingWizard'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -176,11 +179,7 @@ describe('OnboardingWizard', () => {
   it('probes harnesses when advancing to the tools step', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(overview))
     vi.stubGlobal('fetch', fetchMock)
-    const props = renderWizard()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    const props = renderWizard({ initialStep: ONBOARDING_STEP_INDEX.tools })
 
     expect(await screen.findByText('Codex')).toBeInTheDocument()
     expect(screen.getByText('Update available')).toBeInTheDocument()
@@ -195,9 +194,7 @@ describe('OnboardingWizard', () => {
   })
 
   it('applies and persists an appearance choice immediately', () => {
-    renderWizard()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.appearance })
 
     expect(screen.getByText('Choose your appearance')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'System' })).toHaveAttribute(
@@ -206,6 +203,10 @@ describe('OnboardingWizard', () => {
     )
     expect(screen.getByLabelText('Light theme')).toBeInTheDocument()
     expect(screen.getByLabelText('Dark theme')).toBeInTheDocument()
+    expect(screen.getByLabelText('Interface font')).toBeInTheDocument()
+    expect(screen.getByLabelText('Chat font')).toBeInTheDocument()
+    expect(screen.getByLabelText('Code font')).toBeInTheDocument()
+    expect(screen.getByText('Text size')).toBeInTheDocument()
 
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: 'Dark' }))
@@ -221,18 +222,37 @@ describe('OnboardingWizard', () => {
     })
   })
 
-  it('offers Apple Speech dictation during onboarding', () => {
-    renderWizard()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+  it('offers dictation enable, shortcut, and voice rewrite during onboarding', () => {
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.dictation })
 
     expect(screen.getByText('Dictate on this computer')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Apple Speech' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
+    expect(screen.getByText('System-wide dictation')).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('group', { name: 'Dictation shortcut' })).getByRole(
+        'button',
+        { name: 'Right Command' },
+      ),
+    ).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText('Rewrite selected text')).toBeInTheDocument()
+    expect(
+      within(screen.getByRole('group', { name: 'Rewrite shortcut' })).getByRole(
+        'button',
+        { name: 'Right Option' },
+      ),
+    ).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByRole('button', { name: 'Apple Speech' })).toBeNull()
+    expect(screen.queryByText('Custom prompt')).toBeNull()
+  })
+
+  it('offers an optional OpenRouter key for read-aloud and rewrite', () => {
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.openrouter })
+
+    expect(screen.getByText('Optional: OpenRouter')).toBeInTheDocument()
+    expect(screen.getByLabelText('API key')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /get a key/i })).toHaveAttribute(
+      'href',
+      'https://openrouter.ai/keys',
     )
-    expect(screen.getByLabelText('Shortcut key')).toHaveValue('right_command')
   })
 
   it('refreshes the displayed harness version after an upgrade completes', async () => {
@@ -281,11 +301,8 @@ describe('OnboardingWizard', () => {
       .mockResolvedValueOnce(jsonResponse(updatedPi))
     vi.stubGlobal('fetch', fetchMock)
     const onToast = vi.fn()
-    renderWizard({ onToast })
+    renderWizard({ onToast, initialStep: ONBOARDING_STEP_INDEX.tools })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Update' }))
 
     expect(await screen.findByText('v0.55.1')).toBeInTheDocument()
@@ -297,16 +314,14 @@ describe('OnboardingWizard', () => {
     })
   })
 
-  it('completes from the finish step', () => {
+  it('completes from the finish step', async () => {
     mockedInvoke.mockResolvedValue('granted')
     // Passing through the tools step fires a harness probe; keep it offline.
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
-    const props = renderWizard({ workspacesCount: 1 })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    const props = renderWizard({
+      workspacesCount: 1,
+      initialStep: ONBOARDING_STEP_INDEX.project,
+    })
 
     // Already-connected project renders as done on the project step.
     expect(
@@ -316,6 +331,7 @@ describe('OnboardingWizard', () => {
     ).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByText("You're set")
     fireEvent.click(screen.getByRole('button', { name: 'Start using FalconDeck' }))
     expect(props.onComplete).toHaveBeenCalledWith(false)
   })
@@ -345,11 +361,8 @@ describe('OnboardingWizard', () => {
       )
     vi.stubGlobal('fetch', fetchMock)
     const onToast = vi.fn()
-    renderWizard({ onToast })
+    renderWizard({ onToast, initialStep: ONBOARDING_STEP_INDEX.tools })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Update' }))
 
     await waitFor(() => {
@@ -367,13 +380,7 @@ describe('OnboardingWizard', () => {
   it('reads the macOS notification state when the finish step opens', async () => {
     mockedInvoke.mockResolvedValue('granted')
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
-    renderWizard()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.finish })
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith('macos_notification_permission_state')

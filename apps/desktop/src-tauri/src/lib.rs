@@ -2,6 +2,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     env, fs,
     hash::{Hash, Hasher},
+    io::{Read, Write},
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -18,9 +19,12 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 mod desktop_notifications;
 mod dictation;
 mod dictation_history;
+mod sounds;
 
 /// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
 const ACTIVITY_WINDOW_LABEL: &str = "activity";
+const HOST_SESSION_KEYRING_SERVICE: &str = "com.falcondeck.desktop.remote-host";
+const MAX_HOST_SESSION_SECRET_BYTES: usize = 128 * 1024;
 
 struct DesktopState {
     daemon: Mutex<Option<EmbeddedDaemonHandle>>,
@@ -74,6 +78,28 @@ fn dev_stamp_path() -> PathBuf {
 
 fn daemon_reachable(addr: SocketAddr) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
+fn falcondeck_daemon_healthy(addr: SocketAddr) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    if write!(
+        stream,
+        "GET /api/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    stream.read_to_string(&mut response).is_ok()
+        && response.starts_with("HTTP/1.1 200")
+        && response.contains("\"ok\":true")
+        && response.contains("\"version\":")
+        && response.contains("\"workspaces\":")
 }
 
 fn repo_root() -> Result<PathBuf, String> {
@@ -143,6 +169,12 @@ fn stop_dev_daemon_process() -> Result<(), String> {
         .parse::<u32>()
         .map_err(|error| format!("invalid dev daemon pid file: {error}"))?;
 
+    if dev_daemon_process_alive(pid) && !dev_daemon_process_matches(pid) {
+        return Err(format!(
+            "refusing to stop pid {pid}: it is not the FalconDeck development daemon"
+        ));
+    }
+
     #[cfg(windows)]
     {
         let status = Command::new("taskkill")
@@ -159,10 +191,9 @@ fn stop_dev_daemon_process() -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        // The recorded pid may be the `cargo run` wrapper rather than the
-        // daemon itself, and it may already be dead while its orphaned child
-        // still holds the port. A failed TERM is therefore not an error —
-        // the port-based cleanup below is the authoritative fallback.
+        // Only the recorded, identity-checked pid may be stopped. Never kill
+        // an arbitrary listener merely because it owns FalconDeck's usual
+        // development port.
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .stdin(Stdio::null())
@@ -177,33 +208,10 @@ fn stop_dev_daemon_process() -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
         }
         if daemon_reachable(addr) {
-            // Kill whichever process actually listens on the daemon port —
-            // this catches orphans the pid file doesn't know about.
-            let listener = Command::new("lsof")
-                .args(["-ti", &format!("tcp:{DEFAULT_DAEMON_PORT}"), "-sTCP:LISTEN"])
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output()
-                .ok()
-                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-                .filter(|pids| !pids.is_empty());
-            for listener_pid in listener.iter().flat_map(|pids| pids.lines()) {
-                let _ = Command::new("kill")
-                    .args(["-KILL", listener_pid.trim()])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-            for _ in 0..20 {
-                if !daemon_reachable(addr) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-        if daemon_reachable(addr) {
-            return Err("failed to stop dev daemon: port still in use".to_string());
+            return Err(
+                "the recorded FalconDeck daemon stopped, but its port is still occupied; refusing to kill an unverified listener"
+                    .to_string(),
+            );
         }
     }
 
@@ -233,18 +241,67 @@ fn dev_daemon_process_alive(pid: u32) -> bool {
     }
 }
 
+fn dev_daemon_process_matches(pid: u32) -> bool {
+    let Ok(root) = repo_root() else {
+        return false;
+    };
+    let expected_binary = root.join("target/debug/falcondeck-daemon");
+    let expected = expected_binary.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        let script =
+            format!("(Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}').CommandLine");
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                dev_daemon_command_matches(&String::from_utf8_lossy(&output.stdout), &expected)
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "command="])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| {
+                dev_daemon_command_matches(&String::from_utf8_lossy(&output.stdout), &expected)
+            })
+            .unwrap_or(false)
+    }
+}
+
+fn dev_daemon_command_matches(command: &str, expected_binary: &str) -> bool {
+    command.contains(expected_binary)
+        || (command.contains("cargo")
+            && command.contains("falcondeck-daemon")
+            && command.contains(&format!("--port={DEFAULT_DAEMON_PORT}")))
+}
+
 fn ensure_dev_daemon() -> Result<String, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DAEMON_PORT));
+    if daemon_reachable(addr) && !falcondeck_daemon_healthy(addr) {
+        return Err(format!(
+            "port {DEFAULT_DAEMON_PORT} is occupied by a service that is not FalconDeck; stop it or choose another daemon port"
+        ));
+    }
     let expected_stamp = dev_daemon_source_stamp().ok();
     let running_stamp = read_dev_stamp();
-    let needs_restart =
-        daemon_reachable(addr) && expected_stamp.is_some() && expected_stamp != running_stamp;
+    let needs_restart = falcondeck_daemon_healthy(addr)
+        && expected_stamp.is_some()
+        && expected_stamp != running_stamp;
 
     if needs_restart {
         stop_dev_daemon_process()?;
     }
 
-    if !daemon_reachable(addr) {
+    if !falcondeck_daemon_healthy(addr) {
         // A previously spawned dev daemon may still be compiling under cargo.
         // Don't stack another `cargo run` on top of it (they fight over the
         // build lock and the port) — just fall through and wait for it.
@@ -331,14 +388,14 @@ fn ensure_dev_daemon() -> Result<String, String> {
         // give it a realistic window, not seconds. The frontend keeps showing
         // its connecting state while this blocks.
         for _ in 0..600 {
-            if daemon_reachable(addr) {
+            if falcondeck_daemon_healthy(addr) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(150));
         }
     }
 
-    if !daemon_reachable(addr) {
+    if !falcondeck_daemon_healthy(addr) {
         return Err(
             "dev daemon did not start in time (is `cargo run -p falcondeck-daemon` failing to compile?)"
                 .to_string(),
@@ -495,17 +552,93 @@ async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> R
 }
 
 fn is_safe_external_url(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("https://")
-        || lower.starts_with("http://")
-        || lower.starts_with("mailto:")
-        || lower.starts_with("tel:")
+    let trimmed = url.trim();
+    if trimmed != url || trimmed.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if ["%00", "%0a", "%0d"]
+        .iter()
+        .any(|part| lower.contains(part))
+    {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => {
+            parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+        }
+        "mailto" => !parsed.path().is_empty(),
+        "tel" => {
+            !parsed.path().is_empty()
+                && parsed
+                    .path()
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || "+-(). ".contains(character))
+        }
+        _ => false,
+    }
+}
+
+fn host_session_entry(host_id: &str) -> Result<keyring::Entry, String> {
+    if host_id.is_empty()
+        || host_id.len() > 128
+        || !host_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err("Invalid remote host id.".to_string());
+    }
+    keyring::Entry::new(HOST_SESSION_KEYRING_SERVICE, host_id)
+        .map_err(|error| format!("failed to open OS credential storage: {error}"))
+}
+
+#[tauri::command]
+fn write_host_session_secret(host_id: String, payload: String) -> Result<(), String> {
+    if payload.is_empty() || payload.len() > MAX_HOST_SESSION_SECRET_BYTES {
+        return Err("Remote host credentials have an invalid size.".to_string());
+    }
+    let entry = host_session_entry(&host_id)?;
+    match entry.set_password(&payload) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            entry.delete_credential().map_err(|delete_error| {
+                format!(
+                    "failed to update OS credential storage: {first_error} (replacement failed: {delete_error})"
+                )
+            })?;
+            entry
+                .set_password(&payload)
+                .map_err(|error| format!("failed to write OS credential storage: {error}"))
+        }
+    }
+}
+
+#[tauri::command]
+fn read_host_session_secret(host_id: String) -> Result<Option<String>, String> {
+    match host_session_entry(&host_id)?.get_password() {
+        Ok(payload) => Ok(Some(payload)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!("failed to read OS credential storage: {error}")),
+    }
+}
+
+#[tauri::command]
+fn delete_host_session_secret(host_id: String) -> Result<(), String> {
+    match host_session_entry(&host_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("failed to delete OS credential: {error}")),
+    }
 }
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     if !is_safe_external_url(&url) {
-        return Err("FalconDeck can only open http, https, mailto, or tel links.".to_string());
+        return Err("FalconDeck can only open https, mailto, or tel links.".to_string());
     }
 
     open::that_detached(url).map_err(|error| error.to_string())
@@ -876,19 +1009,112 @@ fn read_text_file_contents(path: &Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not UTF-8 text.".to_string())
 }
 
+async fn current_local_snapshot(
+    state: &tauri::State<'_, DesktopState>,
+) -> Result<falcondeck_core::DaemonSnapshot, String> {
+    let embedded = {
+        let daemon = state.daemon.lock().await;
+        daemon.as_ref().map(|handle| handle.app_state().clone())
+    };
+    if let Some(app_state) = embedded {
+        return Ok(app_state.snapshot().await);
+    }
+
+    reqwest::Client::new()
+        .get(format!(
+            "http://127.0.0.1:{DEFAULT_DAEMON_PORT}/api/snapshot"
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("could not verify the local workspace: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("could not verify the local workspace: {error}"))?
+        .json::<falcondeck_core::DaemonSnapshot>()
+        .await
+        .map_err(|error| format!("could not verify the local workspace: {error}"))
+}
+
+fn snapshot_workspace_roots(snapshot: &falcondeck_core::DaemonSnapshot) -> Vec<PathBuf> {
+    let mut roots = snapshot
+        .workspaces
+        .iter()
+        .map(|workspace| PathBuf::from(&workspace.path))
+        .chain(
+            snapshot
+                .threads
+                .iter()
+                .filter_map(|thread| thread.variant.as_ref())
+                .map(|variant| PathBuf::from(&variant.path)),
+        )
+        .filter_map(|path| path.canonicalize().ok())
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn path_is_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+async fn resolve_workspace_file(
+    raw: &str,
+    state: &tauri::State<'_, DesktopState>,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_existing_local_path(raw)?;
+    if !resolved.is_file() {
+        return Err("Only files can be read or saved.".to_string());
+    }
+    let roots = snapshot_workspace_roots(&current_local_snapshot(state).await?);
+    if !path_is_within_roots(&resolved, &roots) {
+        return Err(
+            "FalconDeck can only read or save files inside an active project or its isolated checkout."
+                .to_string(),
+        );
+    }
+    Ok(resolved)
+}
+
 #[tauri::command]
-fn read_local_text_file(path: String) -> Result<String, String> {
-    let resolved = resolve_existing_local_path(&path)?;
+async fn read_local_text_file(
+    path: String,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<String, String> {
+    let resolved = resolve_workspace_file(&path, &state).await?;
     read_text_file_contents(&resolved)
 }
 
 #[tauri::command]
-fn copy_local_file(source: String, dest: String) -> Result<(), String> {
-    let resolved_source = resolve_existing_local_path(&source)?;
-    if !resolved_source.is_file() {
-        return Err("Only files can be saved to a new location.".to_string());
-    }
-    let resolved_dest = parse_local_path_input(&dest)?;
+async fn save_local_file_as(
+    source: String,
+    app: AppHandle,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<bool, String> {
+    let resolved_source = resolve_workspace_file(&source, &state).await?;
+    let default_name = resolved_source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("FalconDeck file");
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .set_file_name(default_name)
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|_| "The selected save location is not a local path.".to_string())?;
+    let parent = selected
+        .parent()
+        .ok_or_else(|| "The selected save location has no parent folder.".to_string())?
+        .canonicalize()
+        .map_err(|_| "The selected save folder is not available.".to_string())?;
+    let file_name = selected
+        .file_name()
+        .ok_or_else(|| "Pick a file name, not a folder.".to_string())?;
+    let resolved_dest = parent.join(file_name);
     if resolved_dest == resolved_source {
         return Err("Choose a different save location.".to_string());
     }
@@ -896,7 +1122,7 @@ fn copy_local_file(source: String, dest: String) -> Result<(), String> {
         return Err("That location is a folder. Pick a file name.".to_string());
     }
     fs::copy(&resolved_source, &resolved_dest)
-        .map(|_| ())
+        .map(|_| true)
         .map_err(|error| error.to_string())
 }
 
@@ -1004,18 +1230,22 @@ pub fn run() {
             ensure_daemon_running,
             restart_app,
             open_external_url,
+            write_host_session_secret,
+            read_host_session_secret,
+            delete_host_session_secret,
             open_local_path,
             reveal_local_path,
             list_installed_editors,
             open_path_with_editor,
             local_path_kind,
             read_local_text_file,
-            copy_local_file,
+            save_local_file_as,
             open_activity_window,
             focus_main_window,
             desktop_notifications::macos_notification_permission_state,
             desktop_notifications::request_macos_notification_permission,
             desktop_notifications::send_macos_notification,
+            sounds::play_system_sound,
             dictation::configure_dictation,
             dictation::dictation_audio_devices,
             dictation::dictation_permission_status,
@@ -1025,6 +1255,7 @@ pub fn run() {
             dictation::cancel_dictation,
             dictation::retry_dictation,
             dictation::discard_dictation,
+            dictation::dismiss_dictation_overlay,
             dictation::last_dictation_transcript,
             dictation::copy_dictation_transcript,
             dictation::dictation_history,
@@ -1085,7 +1316,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_file_url, expand_tilde, parse_local_path_input, quit_warning_message,
+        decode_file_url, dev_daemon_command_matches, expand_tilde, is_safe_external_url,
+        parse_local_path_input, path_is_within_roots, quit_warning_message,
         resolve_existing_local_path,
     };
     use std::{env, fs};
@@ -1104,6 +1336,46 @@ mod tests {
             quit_warning_message(2),
             "2 threads have active turns. Quitting FalconDeck will stop them. You can resume them after reopening the app."
         );
+    }
+
+    #[test]
+    fn external_url_validation_parses_exact_safe_schemes() {
+        assert!(is_safe_external_url("https://falcondeck.com/docs"));
+        assert!(!is_safe_external_url("http://127.0.0.1:4520/api/health"));
+        assert!(is_safe_external_url("mailto:security@falcondeck.com"));
+        assert!(is_safe_external_url("tel:+44-20-1234-5678"));
+        assert!(!is_safe_external_url("https://user:secret@example.com"));
+        assert!(!is_safe_external_url("https://example.com%0d%0aevil"));
+        assert!(!is_safe_external_url("javascript:alert(1)"));
+        assert!(!is_safe_external_url(" https://example.com"));
+        assert!(!is_safe_external_url(
+            "mailto:security@example.com?body=%0aInjected"
+        ));
+    }
+
+    #[test]
+    fn dev_daemon_identity_never_matches_an_unrelated_listener() {
+        let expected = "/repo/target/debug/falcondeck-daemon";
+        assert!(dev_daemon_command_matches(
+            &format!("{expected} --port={}", falcondeck_core::DEFAULT_DAEMON_PORT),
+            expected,
+        ));
+        assert!(dev_daemon_command_matches(
+            &format!(
+                "cargo run -p falcondeck-daemon -- --port={}",
+                falcondeck_core::DEFAULT_DAEMON_PORT
+            ),
+            expected,
+        ));
+        assert!(!dev_daemon_command_matches(
+            "cargo run -p falcondeck-daemon -- --port=65535",
+            expected,
+        ));
+        assert!(!dev_daemon_command_matches(
+            "python -m http.server 45122",
+            expected,
+        ));
+        assert!(!dev_daemon_command_matches("/usr/bin/cargo", expected));
     }
 
     #[test]
@@ -1157,6 +1429,15 @@ mod tests {
         let resolved = resolve_existing_local_path(&path.display().to_string()).unwrap();
         let _ = fs::remove_file(&path);
         assert!(resolved.ends_with("falcondeck-local-path-open-test.txt"));
+    }
+
+    #[test]
+    fn workspace_file_scope_uses_path_components_not_string_prefixes() {
+        let root = env::temp_dir().join("falcondeck-scope-project");
+        let inside = root.join("src/main.rs");
+        let sibling = env::temp_dir().join("falcondeck-scope-project-secret/key.txt");
+        assert!(path_is_within_roots(&inside, std::slice::from_ref(&root)));
+        assert!(!path_is_within_roots(&sibling, std::slice::from_ref(&root)));
     }
 
     #[test]

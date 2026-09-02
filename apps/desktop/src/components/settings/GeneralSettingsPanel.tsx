@@ -9,14 +9,27 @@ import {
   Badge,
   Button,
   OptionCard,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
   SettingList,
+  SettingRow,
   SettingsPage,
   SettingsPageHeader,
   SettingsSection,
   SwitchRow,
 } from '@falcondeck/ui'
 
-import { Download, FolderSync, RotateCcw } from 'lucide-react'
+import { Download, FolderSync, RotateCcw, Volume2 } from 'lucide-react'
+
+import {
+  availableSounds,
+  playSound,
+  resolveSoundId,
+  updateSoundSettings,
+  useSoundSettings,
+} from '../../sounds'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 import { BackgroundModelsCard } from './BackgroundModelsCard'
@@ -54,6 +67,10 @@ export function GeneralSettingsPanel({
   onShowOnboardingAtNextLaunch,
 }: GeneralSettingsPanelProps) {
   const current = normalizePreferences(preferences)
+  const soundSettings = useSoundSettings()
+  const soundOptions = availableSounds()
+  const selectedSoundId = resolveSoundId(soundSettings.soundId, soundOptions)
+  const selectedSound = soundOptions.find((sound) => sound.id === selectedSoundId)
   const isChecking = updater.status === 'checking'
   const isDownloading = updater.status === 'downloading'
   const primaryAction =
@@ -223,6 +240,70 @@ export function GeneralSettingsPanel({
             checked={current.notifications.suppress_when_desktop_active}
             onCheckedChange={(next) =>
               onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })
+            }
+          />
+        </SettingList>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Sounds"
+        description="Heard on this computer only. Separate from attention notifications, and off until you turn it on."
+        contentClassName="pt-1"
+      >
+        <SettingList>
+          <SwitchRow
+            title="Play a sound when a turn finishes"
+            description="A short chime when an agent stops, even if FalconDeck is already in front."
+            checked={soundSettings.enabled}
+            onCheckedChange={(next) => {
+              updateSoundSettings({ enabled: next })
+              if (next) void playSound(selectedSoundId)
+            }}
+          />
+          <SettingRow
+            title="Sound"
+            description={
+              soundOptions.some((sound) => sound.kind === 'system')
+                ? 'macOS system chimes, plus two small sounds shipped with FalconDeck.'
+                : 'Short chimes shipped with FalconDeck.'
+            }
+            control={
+              <div className="flex items-center gap-2">
+                <Select
+                  value={selectedSoundId}
+                  onValueChange={(next) => {
+                    updateSoundSettings({ soundId: next })
+                    void playSound(next)
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label="Turn complete sound"
+                    className="h-8 w-[10.5rem] text-fg-primary"
+                  >
+                    <span className="truncate">{selectedSound?.label ?? 'Sound'}</span>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {soundOptions.map((sound) => (
+                      <SelectItem
+                        key={sound.id}
+                        value={sound.id}
+                        description={sound.description}
+                      >
+                        {sound.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Play sound"
+                  onClick={() => void playSound(selectedSoundId)}
+                >
+                  <Volume2 className="h-4 w-4" />
+                </Button>
+              </div>
             }
           />
         </SettingList>

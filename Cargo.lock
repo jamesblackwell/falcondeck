@@ -1402,6 +1402,7 @@ dependencies = [
  "cc",
  "falcondeck-core",
  "falcondeck-daemon",
+ "keyring",
  "mac-usernotifications",
  "open",
  "reqwest",
@@ -1414,6 +1415,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-updater",
  "tokio",
+ "url",
 ]
 
 [[package]]

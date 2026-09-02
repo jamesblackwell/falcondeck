@@ -77,6 +77,47 @@ describe("DictationOverlay", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
+  it("labels a rewrite recording as listening for an edit", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "recording",
+      retainedAudio: false,
+      mode: "rewrite",
+    });
+
+    expect(screen.getByText("Listening for edit")).toBeInTheDocument();
+    expect(screen.getByText("Esc to cancel")).toBeInTheDocument();
+  });
+
+  it("shows rewriting while the model is editing the selection", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "rewriting",
+      retainedAudio: true,
+      mode: "rewrite",
+    });
+
+    expect(screen.getByText("Rewriting")).toBeInTheDocument();
+  });
+
+  it("labels a rewrite completion separately from dictation", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "completed",
+      text: "Ship Friday.",
+      retainedAudio: false,
+      mode: "rewrite",
+    });
+
+    expect(screen.getByText("Rewrite pasted")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy rewrite" }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the recording pill free of controls", async () => {
     render(<DictationOverlay />);
 
@@ -106,5 +147,40 @@ describe("DictationOverlay", () => {
 
     expect(invoked).toContain("copy_dictation_transcript");
     expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  });
+
+  it("treats a ready-but-unpasted transcript as a recovery, not a quotation", async () => {
+    const transcript =
+      "Can we design a multi-prompt AI tool for the AI mode?";
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "failed",
+      text: transcript,
+      error:
+        "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry.",
+      retainedAudio: true,
+    });
+
+    expect(screen.getByText("Couldn't paste")).toBeInTheDocument();
+    expect(screen.getByText(transcript)).toBeInTheDocument();
+    expect(screen.queryByText(`“${transcript}”`)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy transcript" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy transcript" }),
+    ).toHaveClass("text-surface-0");
+    expect(
+      screen.getByRole("button", { name: "Retry transcription" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Discard recording" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    });
+    expect(invoked).toContain("dismiss_dictation_overlay");
   });
 });

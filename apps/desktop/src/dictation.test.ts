@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_DICTATION_SETTINGS,
+  DEFAULT_REWRITE_PROMPT,
+  REWRITE_MODEL_CHOICES,
   nextRequiredDictationPermission,
   normalizeDictationSettings,
+  normalizeRewritePrompt,
   readDictationSettings,
   useDictationSettings,
   writeDictationSettings,
@@ -17,7 +20,7 @@ describe("dictation settings", () => {
     expect(
       normalizeDictationSettings({
         enabled: true,
-        shortcut: "caps_lock",
+        shortcut: "Escape",
         activation: "toggle",
         provider: "system",
         inputDeviceId: 42,
@@ -28,6 +31,16 @@ describe("dictation settings", () => {
       enabled: true,
       activation: "toggle",
     });
+  });
+
+  it("persists a recorded chord as the dictation shortcut", () => {
+    writeDictationSettings({
+      ...DEFAULT_DICTATION_SETTINGS,
+      shortcut: "Mod+Shift+D",
+      rewriteShortcut: "F13",
+    });
+    expect(readDictationSettings().shortcut).toBe("Mod+Shift+D");
+    expect(readDictationSettings().rewriteShortcut).toBe("F13");
   });
 
   it("persists normalized settings", () => {
@@ -93,6 +106,71 @@ describe("dictation settings", () => {
         repasteShortcutEnabled: false,
       }).repasteShortcutEnabled,
     ).toBe(false);
+  });
+
+  it("defaults voice rewrite off with Right Option and GPT-5.6 Luna", () => {
+    const upgraded = normalizeDictationSettings({ enabled: true });
+    expect(upgraded.rewriteEnabled).toBe(false);
+    expect(upgraded.rewriteShortcut).toBe("right_option");
+    expect(upgraded.rewriteModel).toBe("openai/gpt-5.6-luna");
+    expect(
+      normalizeDictationSettings({
+        ...DEFAULT_DICTATION_SETTINGS,
+        rewriteEnabled: true,
+        rewriteShortcut: "right_command",
+        rewriteModel: "openai/gpt-5.6-terra",
+      }),
+    ).toMatchObject({
+      rewriteEnabled: true,
+      rewriteShortcut: "right_command",
+      rewriteModel: "openai/gpt-5.6-terra",
+    });
+    expect(upgraded.rewritePrompt).toBeNull();
+  });
+
+  it("treats the built-in rewrite prompt as unset", () => {
+    expect(normalizeRewritePrompt(null)).toBeNull();
+    expect(normalizeRewritePrompt("")).toBeNull();
+    expect(normalizeRewritePrompt(`  ${DEFAULT_REWRITE_PROMPT}  `)).toBeNull();
+    expect(normalizeRewritePrompt("Return only the rewritten text.")).toBe(
+      "Return only the rewritten text.",
+    );
+    expect(DEFAULT_REWRITE_PROMPT).toContain("generic LLM prose");
+    expect(DEFAULT_REWRITE_PROMPT).toContain(
+      "Do not even the prose out into uniform polish",
+    );
+  });
+
+  it("persists a custom rewrite prompt and restores the built-in one", () => {
+    writeDictationSettings({
+      ...DEFAULT_DICTATION_SETTINGS,
+      rewritePrompt: "Return only the rewritten text.",
+    });
+    expect(readDictationSettings().rewritePrompt).toBe(
+      "Return only the rewritten text.",
+    );
+    writeDictationSettings({
+      ...readDictationSettings(),
+      rewritePrompt: DEFAULT_REWRITE_PROMPT,
+    });
+    expect(readDictationSettings().rewritePrompt).toBeNull();
+  });
+
+  it("truncates an oversized rewrite prompt", () => {
+    expect(normalizeRewritePrompt("a".repeat(8_001))?.length).toBe(8_000);
+  });
+
+  it("offers gpt-oss-120b among the fast rewrite models", () => {
+    expect(REWRITE_MODEL_CHOICES.map((model) => model.id)).toEqual(
+      expect.arrayContaining([
+        "openai/gpt-5.6-luna",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "google/gemma-4-31b-it",
+        "inception/mercury-2",
+        "google/gemini-3.5-flash-lite",
+      ]),
+    );
   });
 
   it("gives settings saved before history a fallback model and a retention window", () => {

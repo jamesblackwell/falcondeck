@@ -2,16 +2,28 @@ import { useEffect, useRef, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Button } from "@falcondeck/ui";
 import { Check, Copy, Mic, RotateCcw, Trash2, X } from "lucide-react";
 
 type DictationState =
-  "recording" | "transcribing" | "completed" | "failed" | "cancelled";
+  | "recording"
+  | "transcribing"
+  | "rewriting"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
-type DictationEvent = {
+export type DictationEvent = {
   state: DictationState;
   text?: string;
   error?: string;
   retainedAudio: boolean;
+  mode?: "rewrite" | "dictation";
+};
+
+type DictationOverlayProps = {
+  initialEvent?: DictationEvent;
+  subscribeToEvents?: boolean;
 };
 
 // The window is created hidden and only shown alongside a real event, but if
@@ -144,8 +156,11 @@ function LiveWaveform() {
   );
 }
 
-export function DictationOverlay() {
-  const [event, setEvent] = useState<DictationEvent>(INITIAL_EVENT);
+export function DictationOverlay({
+  initialEvent = INITIAL_EVENT,
+  subscribeToEvents = true,
+}: DictationOverlayProps = {}) {
+  const [event, setEvent] = useState<DictationEvent>(initialEvent);
   const [copied, setCopied] = useState(false);
   const [undoSecondsLeft, setUndoSecondsLeft] = useState(UNDO_WINDOW_SECONDS);
 
@@ -167,6 +182,7 @@ export function DictationOverlay() {
   }, [event]);
 
   useEffect(() => {
+    if (!subscribeToEvents) return;
     let unlisten: UnlistenFn | undefined;
     let cancelled = false;
     void listen<DictationEvent>("falcondeck://dictation-state", (message) => {
@@ -179,32 +195,46 @@ export function DictationOverlay() {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [subscribeToEvents]);
 
   const failed = event.state === "failed";
+  const pasteFailed = failed && Boolean(event.text);
   const copyTranscript = () => {
     void invoke("copy_dictation_transcript").then(
       () => setCopied(true),
       () => setCopied(false),
     );
   };
+  const rewrite = event.mode === "rewrite";
   const label =
     event.state === "recording"
-      ? "Listening"
+      ? rewrite
+        ? "Listening for edit"
+        : "Listening"
       : event.state === "transcribing"
-        ? "Transcribing"
-        : event.state === "completed"
-          ? "Paste sent"
-          : event.state === "cancelled"
-            ? "Cancelled"
-            : "Dictation needs attention";
+        ? rewrite
+          ? "Transcribing instruction"
+          : "Transcribing"
+        : event.state === "rewriting"
+          ? "Rewriting"
+          : event.state === "completed"
+            ? rewrite
+              ? "Rewrite pasted"
+              : "Paste sent"
+            : event.state === "cancelled"
+              ? "Cancelled"
+              : pasteFailed
+                ? "Couldn't paste"
+                : rewrite
+                  ? "Rewrite needs attention"
+                  : "Dictation needs attention";
 
   return (
-    <main className="flex h-full w-full items-start justify-center p-2">
+    <main className="flex h-full w-full items-stretch justify-center p-2">
       <section
         className={
           failed
-            ? "w-full rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 backdrop-blur-xl"
+            ? "flex h-full min-h-0 w-full flex-col overflow-y-auto rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 backdrop-blur-xl"
             : "flex h-14 w-full items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 backdrop-blur-xl"
         }
         role="status"
@@ -212,11 +242,11 @@ export function DictationOverlay() {
       >
         {failed ? (
           <>
-            <div className="flex items-start gap-3">
+            <div className="flex min-h-0 flex-1 items-start gap-3">
               <span className="mt-0.5 rounded-full bg-danger-muted p-1.5 text-danger">
                 <X aria-hidden="true" className="h-4 w-4" />
               </span>
-              <div className="min-w-0 flex-1">
+              <div className="min-h-0 min-w-0 flex-1">
                 <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                   {label}
                 </p>
@@ -224,8 +254,8 @@ export function DictationOverlay() {
                   {event.error}
                 </p>
                 {event.text ? (
-                  <p className="mt-1.5 line-clamp-3 rounded-[var(--fd-radius-md)] bg-surface-2 px-2 py-1.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
-                    “{event.text}”
+                  <p className="mt-1.5 line-clamp-3 whitespace-pre-wrap break-words rounded-[var(--fd-radius-md)] bg-surface-2 px-2 py-1.5 text-[length:var(--fd-text-xs)] text-fg-primary">
+                    {event.text}
                   </p>
                 ) : null}
                 {event.retainedAudio ? (
@@ -234,12 +264,21 @@ export function DictationOverlay() {
                   </p>
                 ) : null}
               </div>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="-mr-1 -mt-1 shrink-0"
+                aria-label="Close"
+                onClick={() => void invoke("dismiss_dictation_overlay")}
+              >
+                <X aria-hidden="true" className="h-4 w-4" />
+              </Button>
             </div>
-            <div className="mt-3 flex justify-end gap-2">
+            <div className="mt-3 flex shrink-0 flex-wrap justify-end gap-2">
               {event.text ? (
-                <button
+                <Button
                   type="button"
-                  className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
                   onClick={copyTranscript}
                 >
                   {copied ? (
@@ -247,26 +286,23 @@ export function DictationOverlay() {
                   ) : (
                     <Copy aria-hidden="true" className="h-4 w-4" />
                   )}
-                  {copied ? "Copied" : "Copy transcript"}
-                </button>
+                  {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
+                </Button>
               ) : null}
               {event.retainedAudio ? (
-                <button
+                <Button
                   type="button"
-                  className={
-                    event.text
-                      ? "fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
-                      : "fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
-                  }
+                  variant={event.text ? "secondary" : "default"}
                   onClick={() => void invoke("retry_dictation")}
                 >
                   <RotateCcw aria-hidden="true" className="h-4 w-4" />
-                  Retry transcription
-                </button>
+                  {rewrite ? "Retry rewrite" : "Retry transcription"}
+                </Button>
               ) : null}
-              <button
+              <Button
                 type="button"
-                className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary hover:bg-surface-3 hover:text-danger"
+                variant="ghost"
+                className="hover:text-danger"
                 aria-label={
                   event.retainedAudio ? "Discard recording" : "Dismiss"
                 }
@@ -278,7 +314,7 @@ export function DictationOverlay() {
                   <X aria-hidden="true" className="h-4 w-4" />
                 )}
                 {event.retainedAudio ? "Discard recording" : "Dismiss"}
-              </button>
+              </Button>
             </div>
           </>
         ) : (
@@ -321,7 +357,7 @@ export function DictationOverlay() {
                 ) : (
                   <Copy aria-hidden="true" className="h-3.5 w-3.5" />
                 )}
-                {copied ? "Copied" : "Copy transcript"}
+                {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
               </button>
             ) : (
               <span className="ml-auto shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">

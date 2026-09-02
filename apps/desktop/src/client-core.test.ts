@@ -891,7 +891,10 @@ describe('client-core relay crypto helpers', () => {
       nacl.sign.detached(payload, new Uint8Array(deriveIdentityKeyPair(daemonKeyPair).secretKey)),
     )
 
-    const sessionCrypto = bootstrapSessionCrypto(clientKeyPair, material)
+    const sessionCrypto = bootstrapSessionCrypto(clientKeyPair, material, {
+      expectedDaemonPublicKey: material.daemon_public_key,
+      expectedDaemonIdentityPublicKey: material.daemon_identity_public_key,
+    })
     const envelope = await encryptJson(sessionCrypto.dataKey, { secure: true })
     await expect(decryptJson<{ secure: boolean }>(sessionCrypto.dataKey, envelope)).resolves.toEqual({ secure: true })
   })
@@ -933,7 +936,10 @@ describe('client-core relay crypto helpers', () => {
       nacl.sign.detached(payload, new Uint8Array(deriveIdentityKeyPair(daemonKeyPair).secretKey)),
     )
 
-    expect(() => bootstrapSessionCrypto(clientKeyPair, material)).toThrow(
+    expect(() => bootstrapSessionCrypto(clientKeyPair, material, {
+      expectedDaemonPublicKey: material.daemon_public_key,
+      expectedDaemonIdentityPublicKey: material.daemon_identity_public_key,
+    })).toThrow(
       'Encrypted session bootstrap is not addressed to this client',
     )
   })
@@ -1010,7 +1016,7 @@ describe('client-core pairing claim challenge signing', () => {
 })
 
 describe('client-core remote session persistence', () => {
-  it('ignores a saved session when a fresh QR pairing code is opened', () => {
+  it('does not let an unreviewed pairing link replace a saved session', () => {
     const persisted = {
       version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: 'https://connect.falcondeck.com',
@@ -1025,7 +1031,7 @@ describe('client-core remote session persistence', () => {
       code: 'NEWPAIR654321',
     })
 
-    expect(shouldReusePersistedRemoteSession(params, persisted)).toBeNull()
+    expect(shouldReusePersistedRemoteSession(params, persisted)).toEqual(persisted)
   })
 
   it('reuses a saved session when the URL does not override it', () => {
@@ -1041,7 +1047,7 @@ describe('client-core remote session persistence', () => {
     expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toEqual(persisted)
   })
 
-  it('ignores a saved custom-relay session when a default-relay pairing link omits relay=', () => {
+  it('does not let an unreviewed default-relay link replace a saved custom-relay session', () => {
     const persisted = {
       version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: 'https://staging-connect.falcondeck.com',
@@ -1055,7 +1061,7 @@ describe('client-core remote session persistence', () => {
       code: 'PAIRCODE1234',
     })
 
-    expect(shouldReusePersistedRemoteSession(params, persisted)).toBeNull()
+    expect(shouldReusePersistedRemoteSession(params, persisted)).toEqual(persisted)
   })
 
   it('ignores a saved session from an older persistence version', () => {

@@ -9,7 +9,6 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
-  ActivityTailLine,
   InteractiveRequest,
   ProjectGroup,
   ThreadSummary,
@@ -176,11 +175,11 @@ describe("ActivityView", () => {
     );
 
     expect(
-      screen.getByRole("heading", { name: "Blocked" }),
+      screen.getByRole("heading", { name: "Needs a response" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Failed" })).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "Ready for you" }),
+      screen.getByRole("heading", { name: "Ready" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { name: "Running" }),
@@ -188,22 +187,15 @@ describe("ActivityView", () => {
     expect(screen.getByText("Process exited 1")).toBeInTheDocument();
     expect(screen.getByText("Implementation complete")).toBeInTheDocument();
     expect(screen.getByText("Running tests")).toBeInTheDocument();
-    expect(
-      document.querySelector('[data-activity-thread="running"]'),
-    ).toHaveClass("h-64", "overflow-hidden");
-    expect(
-      document.querySelector('[data-activity-thread="blocked"]'),
-    ).not.toHaveClass("h-64");
     expect(screen.getByLabelText("Activity summary")).toHaveTextContent(
       "3 need attention",
     );
-    expect(screen.getByText("Needs response")).toBeInTheDocument();
     expect(
-      document.querySelector('[data-activity-grid="running"]'),
-    ).toHaveClass("min-[900px]:grid-cols-2", "min-[1500px]:grid-cols-3");
+      document.querySelector('[data-activity-list="running"]'),
+    ).toBeInTheDocument();
     expect(
-      document.querySelector('[data-activity-grid="blocked"]'),
-    ).not.toHaveClass("2xl:grid-cols-3");
+      document.querySelector('[data-activity-thread="running"]'),
+    ).not.toHaveClass("h-64");
   });
 
   it("answers an approval inline with the exact response payload", async () => {
@@ -438,12 +430,11 @@ describe("ActivityView", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("shows the caught-up state and optional new-thread affordance", () => {
+  it("shows the caught-up state and optional new-task affordance", () => {
     const onNewThread = vi.fn();
     render(<ActivityView {...props({ onNewThread })} />);
     expect(screen.getByText("All caught up")).toBeInTheDocument();
-    expect(screen.getByText("No active work")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+    fireEvent.click(screen.getByRole("button", { name: "New task" }));
     expect(onNewThread).toHaveBeenCalledOnce();
   });
 
@@ -452,6 +443,7 @@ describe("ActivityView", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
 
+      fireEvent.keyDown(window, { key: "j" });
       expect(selectedThreadId()).toBe("first");
       fireEvent.keyDown(window, { key: "j" });
       expect(selectedThreadId()).toBe("second");
@@ -462,8 +454,8 @@ describe("ActivityView", () => {
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "first");
     });
 
-    it("follows the rendered card grid with the arrow keys", () => {
-      const running = ["a", "b", "c", "d"].map((id) =>
+    it("moves through the inbox with the arrow keys", () => {
+      const running = ["a", "b", "c"].map((id) =>
         thread({
           id,
           status: "running",
@@ -475,99 +467,22 @@ describe("ActivityView", () => {
       );
       render(<ActivityView {...props({ groups: groups(running) })} />);
 
-      const positions = [[0, 0], [100, 0], [200, 0], [0, 100]];
-      for (const [index, element] of Array.from(
-        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
-      ).entries()) {
-        const [left, top] = positions[index]!;
-        element.getBoundingClientRect = vi.fn(() => ({
-          left, top, width: 80, height: 60,
-          right: left + 80, bottom: top + 60, x: left, y: top,
-          toJSON: () => ({}),
-        }));
-      }
-
-      expect(selectedThreadId()).toBe("a");
-      fireEvent.keyDown(window, { key: "ArrowRight" });
-      expect(selectedThreadId()).toBe("b");
-      fireEvent.keyDown(window, { key: "ArrowLeft" });
+      fireEvent.keyDown(window, { key: "ArrowDown" });
       expect(selectedThreadId()).toBe("a");
       fireEvent.keyDown(window, { key: "ArrowDown" });
-      expect(selectedThreadId()).toBe("d");
-    });
-
-    it("follows the rendered card grid with WASD", () => {
-      const running = ["a", "b", "c", "d"].map((id) =>
-        thread({
-          id,
-          status: "running",
-          attention: {
-            ...thread({ id: "base" }).attention,
-            level: "running",
-          },
-        }),
-      );
-      render(<ActivityView {...props({ groups: groups(running) })} />);
-
-      const positions = [[0, 0], [100, 0], [200, 0], [0, 100]];
-      for (const [index, element] of Array.from(
-        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
-      ).entries()) {
-        const [left, top] = positions[index]!;
-        element.getBoundingClientRect = vi.fn(() => ({
-          left, top, width: 80, height: 60,
-          right: left + 80, bottom: top + 60, x: left, y: top,
-          toJSON: () => ({}),
-        }));
-      }
-
-      expect(selectedThreadId()).toBe("a");
-      fireEvent.keyDown(window, { key: "d" });
       expect(selectedThreadId()).toBe("b");
-      fireEvent.keyDown(window, { key: "a" });
-      expect(selectedThreadId()).toBe("a");
-      fireEvent.keyDown(window, { key: "s" });
-      expect(selectedThreadId()).toBe("d");
-      fireEvent.keyDown(window, { key: "w" });
+      fireEvent.keyDown(window, { key: "ArrowUp" });
       expect(selectedThreadId()).toBe("a");
     });
 
-    it("opens the selected thread with E", () => {
-      const onOpenThread = vi.fn();
-      render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
-
-      fireEvent.keyDown(window, { key: "e" });
-      expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "first");
-    });
-
-    it("jumps to a lane with its digit", () => {
-      const running = thread({
-        id: "busy",
-        status: "running",
-        attention: { ...thread({ id: "base" }).attention, level: "running" },
-      });
-      render(
-        <ActivityView
-          {...props({ groups: groups([...queue()[0]!.threads, running]) })}
-        />,
-      );
-
-      // 3 is "ready for you", 4 is "running"; 1 and 2 are empty here.
-      fireEvent.keyDown(window, { key: "4" });
-      expect(selectedThreadId()).toBe("busy");
-      fireEvent.keyDown(window, { key: "3" });
-      expect(selectedThreadId()).toBe("first");
-      fireEvent.keyDown(window, { key: "1" });
-      expect(selectedThreadId()).toBe("first");
-    });
-
-    it.each(["q", "r"])("clears the selected thread with %s", (key) => {
+    it("clears the selected thread with R", () => {
       const onMarkThreadRead = vi.fn();
       render(
         <ActivityView {...props({ groups: queue(), onMarkThreadRead })} />,
       );
 
-      fireEvent.keyDown(window, { key });
+      fireEvent.keyDown(window, { key: "j" });
+      fireEvent.keyDown(window, { key: "r" });
       expect(onMarkThreadRead).toHaveBeenCalledWith(workspace.id, "first");
     });
 
@@ -578,17 +493,18 @@ describe("ActivityView", () => {
       const input = document.createElement("input");
       document.body.appendChild(input);
       fireEvent.keyDown(input, { key: "j" });
-      expect(selectedThreadId()).toBe("first");
+      expect(selectedThreadId()).toBeUndefined();
       input.remove();
 
       fireEvent.keyDown(window, { key: "j", metaKey: true });
-      expect(selectedThreadId()).toBe("first");
+      expect(selectedThreadId()).toBeUndefined();
     });
 
     it("steps Escape back through selection before closing", () => {
       const onClose = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onClose })} />);
 
+      fireEvent.keyDown(window, { key: "j" });
       expect(selectedThreadId()).toBe("first");
       fireEvent.keyDown(window, { key: "Escape" });
       expect(selectedThreadId()).toBeUndefined();
@@ -608,6 +524,7 @@ describe("ActivityView", () => {
         />,
       );
 
+      fireEvent.keyDown(window, { key: "j" });
       fireEvent.keyDown(window, { key: "Escape" });
       expect(onReturnFocus).not.toHaveBeenCalled();
       fireEvent.keyDown(window, { key: "Escape" });
@@ -633,177 +550,12 @@ describe("ActivityView", () => {
       const { rerender } = render(
         <ActivityView {...props({ groups: queue() })} windowFocused />,
       );
-      expect(screen.getByText("Keyboard ready")).toBeInTheDocument();
+      expect(screen.getByText("2 need attention")).toBeInTheDocument();
 
       rerender(
         <ActivityView {...props({ groups: queue() })} windowFocused={false} />,
       );
       expect(screen.getByText("Click to focus")).toBeInTheDocument();
-    });
-  });
-
-  describe("thread terminals", () => {
-    const running = () =>
-      groups([
-        thread({
-          id: "busy",
-          status: "running",
-          attention: {
-            ...thread({ id: "base" }).attention,
-            level: "running",
-          },
-        }),
-      ]);
-
-    const tails = (lines: ActivityTailLine[]) => ({
-      [`${workspace.id}:busy`]: { lines, seeded: true },
-    });
-
-    it("renders the tail in order with a cursor on the streaming line", () => {
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          threadTails={tails([
-            { id: "a", role: "user", text: "run the tests", streaming: false },
-            { id: "b", role: "tool", text: "npm test", streaming: false },
-            { id: "c", role: "agent", text: "Three failed", streaming: true },
-          ])}
-        />,
-      );
-
-      expect(screen.getByText("run the tests")).toBeInTheDocument();
-      expect(screen.getByText("npm test")).toBeInTheDocument();
-      const streaming = screen.getByText("Three failed");
-      expect(streaming.querySelector(".fd-caret")).not.toBeNull();
-      expect(
-        screen.getByText("npm test").parentElement?.querySelector(".fd-caret"),
-      ).toBeNull();
-    });
-
-    it("falls back to the summary preview until a tail arrives", () => {
-      const withPreview = running();
-      withPreview[0]!.threads[0]!.last_tool = "rg -n shortcut";
-      render(<ActivityView {...props({ groups: withPreview })} />);
-
-      expect(screen.getByText("rg -n shortcut")).toBeInTheDocument();
-    });
-
-    it("sends from the card and clears the prompt", async () => {
-      const onSendMessage = vi.fn().mockResolvedValue(undefined);
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          onSendMessage={onSendMessage}
-        />,
-      );
-
-      const prompt = screen.getByRole("textbox", { name: "Message busy" });
-      fireEvent.change(prompt, { target: { value: "also run the linter" } });
-      fireEvent.keyDown(prompt, { key: "Enter" });
-
-      await waitFor(() =>
-        expect(onSendMessage).toHaveBeenCalledWith(
-          workspace.id,
-          "busy",
-          "also run the linter",
-        ),
-      );
-      await waitFor(() => expect(prompt).toHaveValue(""));
-    });
-
-    it("keeps Shift-Enter for a newline", () => {
-      const onSendMessage = vi.fn().mockResolvedValue(undefined);
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          onSendMessage={onSendMessage}
-        />,
-      );
-
-      const prompt = screen.getByRole("textbox", { name: "Message busy" });
-      fireEvent.change(prompt, { target: { value: "first line" } });
-      fireEvent.keyDown(prompt, { key: "Enter", shiftKey: true });
-
-      expect(onSendMessage).not.toHaveBeenCalled();
-    });
-
-    it("restores the draft and reports a failed send", async () => {
-      const onSendMessage = vi.fn().mockRejectedValue(new Error("Host offline"));
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          onSendMessage={onSendMessage}
-        />,
-      );
-
-      const prompt = screen.getByRole("textbox", { name: "Message busy" });
-      fireEvent.change(prompt, { target: { value: "carry on" } });
-      fireEvent.keyDown(prompt, { key: "Enter" });
-
-      expect(await screen.findByText("Host offline")).toBeInTheDocument();
-      expect(prompt).toHaveValue("carry on");
-    });
-
-    it("hides the prompt when Activity cannot send", () => {
-      render(<ActivityView {...props({ groups: running() })} />);
-      expect(
-        screen.queryByRole("textbox", { name: "Message busy" }),
-      ).not.toBeInTheDocument();
-    });
-
-    it("hands the keyboard to the selected card on F", () => {
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          onSendMessage={vi.fn().mockResolvedValue(undefined)}
-        />,
-      );
-
-      fireEvent.keyDown(window, { key: "4" });
-      fireEvent.keyDown(window, { key: "f" });
-      expect(screen.getByRole("textbox", { name: "Message busy" })).toHaveFocus();
-    });
-
-    it("says why an offline host's prompt is dead, and keeps F harmless", () => {
-      render(
-        <ActivityView
-          {...props({ groups: running() })}
-          workspaceHosts={{
-            [workspace.id]: { name: "studio-mac", connected: false },
-          }}
-          onSendMessage={vi.fn().mockResolvedValue(undefined)}
-        />,
-      );
-
-      const prompt = screen.getByRole("textbox", { name: "Message busy" });
-      expect(prompt).toBeDisabled();
-      expect(prompt).toHaveAttribute("placeholder", "Host offline");
-
-      fireEvent.keyDown(window, { key: "4" });
-      fireEvent.keyDown(window, { key: "f" });
-      expect(prompt).not.toHaveFocus();
-    });
-
-    it("leaves the view shortcuts alone while typing into a card", () => {
-      const onMarkThreadRead = vi.fn();
-      render(
-        <ActivityView
-          {...props({ groups: queue(), onMarkThreadRead })}
-          onSendMessage={vi.fn().mockResolvedValue(undefined)}
-        />,
-      );
-
-      fireEvent.keyDown(window, { key: "3" });
-      expect(selectedThreadId()).toBe("first");
-
-      // "q" clears a thread and "d" moves right — inside the prompt they are
-      // just letters, or the composer would be unusable.
-      const prompt = screen.getByRole("textbox", { name: "Message first" });
-      fireEvent.keyDown(prompt, { key: "q" });
-      fireEvent.keyDown(prompt, { key: "d" });
-
-      expect(onMarkThreadRead).not.toHaveBeenCalled();
-      expect(selectedThreadId()).toBe("first");
     });
   });
 
@@ -847,6 +599,7 @@ describe("ActivityView", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: finished(), onOpenThread })} />);
 
+      fireEvent.keyDown(window, { key: "j" });
       expect(
         document.querySelector(
           '[data-activity-key="recent:workspace-1:finished"]',
@@ -874,24 +627,7 @@ describe("ActivityView", () => {
     it("navigates down to the recent toggle and activates it with Enter", () => {
       render(<ActivityView {...props({ groups: finished(7) })} />);
 
-      for (const [index, element] of Array.from(
-        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
-      ).entries()) {
-        const top = index * 100;
-        element.getBoundingClientRect = vi.fn(() => ({
-          left: 0,
-          top,
-          width: 800,
-          height: 60,
-          right: 800,
-          bottom: top + 60,
-          x: 0,
-          y: top,
-          toJSON: () => ({}),
-        }));
-      }
-
-      for (let index = 0; index < 5; index += 1) {
+      for (let index = 0; index < 6; index += 1) {
         fireEvent.keyDown(window, { key: "ArrowDown" });
       }
       const showMore = screen.getByRole("button", { name: "Show 2 more" });
@@ -912,7 +648,7 @@ describe("ActivityView", () => {
 
       fireEvent.keyDown(window, { key: "t" });
       expect(screen.getByText("finished-6")).toBeInTheDocument();
-      for (let index = 0; index < 5; index += 1) {
+      for (let index = 0; index < 6; index += 1) {
         fireEvent.keyDown(window, { key: "j" });
       }
       fireEvent.keyDown(window, { key: "Enter" });

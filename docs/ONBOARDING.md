@@ -1,18 +1,18 @@
 # Desktop onboarding
 
-> Status: **Phase 1 implemented** (2026-08-17) — flag + gating
-> (`shouldShowFirstRunOnboarding`), `OnboardingWizard` (welcome / appearance /
-> tools / project / finish), rerun control in Settings → General, and the
-> client-core harness methods (`harnesses`, `refreshHarnesses`,
-> `upgradeHarness`, `harnessUpgradeJob`). Phases 2–4 below remain planned.
+> Status: **Phase 1 implemented** (2026-08-17, extended 2026-09-02) — flag +
+> gating (`shouldShowFirstRunOnboarding`), `OnboardingWizard` (welcome /
+> appearance / dictation / optional OpenRouter speech key / tools / project /
+> finish), rerun control in Settings → General, browser fixture at
+> `/onboarding-qa.html`, and the client-core harness methods (`harnesses`,
+> `refreshHarnesses`, `upgradeHarness`, `harnessUpgradeJob`). Phases 2–4
+> below remain planned. The OpenRouter step in the wizard is the **speech**
+> secret (`/api/speech/openrouter-key`) for read-aloud, voice rewrite, and
+> cloud transcription — not the still-planned OpenCode provider key.
 >
-> The Mac app is the entry point into FalconDeck for most new users. Today a
-> fresh install shows an empty sidebar, the line "Choose a project and let's
-> make something remarkable.", and a disabled composer — no mention of
-> installing a harness, signing in, or what to do first. This document plans a
-> first-run welcome experience: a guided flow that checks the environment,
-> gets at least one working agent, and lands the user in their first
-> conversation.
+> The Mac app is the entry point into FalconDeck for most new users. A fresh
+> install opens this wizard once the daemon is ready. Every step is skippable;
+> Skip setup marks onboarding complete so it does not nag again.
 
 ## Product shape
 
@@ -20,19 +20,27 @@ A full-window overlay on first launch, stepped like a native macOS setup
 assistant. Every step is skippable; the whole flow is skippable. Rough
 sequence:
 
-1. **Welcome** — brand moment, one sentence on what FalconDeck is, "Get
-   started".
-2. **Choose your appearance** — choose System/Light/Dark mode and the named
-   light and dark themes, applying the shared device-local preference live.
-3. **Check your tools** — probe installed harnesses (Claude Code, Codex,
+1. **Welcome** — brand moment, one sentence on what FalconDeck is.
+2. **Choose your appearance** — System/Light/Dark, named light and dark
+   themes, interface/chat/code fonts, and text size. Same device-local
+   `fd-appearance` record as Settings → Appearance; fine-tune stays in
+   Settings.
+3. **Dictate on this computer** — enable system-wide dictation, pick a
+   shortcut (Right Command and fn are suggested; any other key or chord can
+   be recorded), hold/toggle mode, optionally enable voice rewrite and its
+   shortcut. Apple Speech is the zero-key default. Microphone, engine, and
+   rewrite prompt stay in Settings → Speech.
+4. **Optional: OpenRouter** — one speech key on this computer unlocks
+   read-aloud, voice rewrite, and cloud transcription. Continue skips it.
+5. **Check your tools** — probe installed harnesses (Claude Code, Codex,
    OpenCode, Gemini, Pi), show version / update / sign-in state, offer
    one-click install and update.
-4. **Quick path: OpenCode + OpenRouter** — for users with no harness (or who
-   choose it): install OpenCode, register it as an agent, store an OpenRouter
-   API key so models work immediately without another vendor sign-up.
-5. **Add your first project** — directory picker → `connectWorkspace`.
-6. **Finish** — request notification permission explicitly, summary of what
-   was set up, drop into the composer with a starter suggestion.
+6. **Add your first project** — directory picker → `connectWorkspace`.
+7. **Finish** — request notification permission explicitly.
+
+The OpenCode + OpenRouter *provider* quick path (install OpenCode, register
+the agent, store `OPENROUTER_API_KEY` for models) is still Phase 2 and is a
+different secret from the speech key.
 
 Later phases add recommended OpenCode plugin installs (e.g. the image-vision
 plugin so screenshots work with non-vision models) and extension/MCP
@@ -91,16 +99,23 @@ new user would see it.
 This forces a property the wizard needs anyway: **every step is idempotent
 and reads live state**. A harness already installed renders as a green check,
 a key already stored renders as "already configured", an existing project
-list renders step 5 as "add another or continue". Rerunning on a
+list renders the project step as "add another or continue". Rerunning on a
 fully-set-up machine should be a pleasant 30-second review, not an error
 farm.
 
+For UI iteration without a Tauri rebuild, `apps/desktop` also ships
+`/onboarding-qa.html` (`npm run dev` in that package). It mounts the real
+wizard against a mocked harness inventory; `?step=`, `?theme=`,
+`?workspaces=`, and `?baseUrl=` jump around. Appearance and dictation writes
+hit this browser's localStorage, same keys as the app.
+
 ### Step 2 — Choose your appearance
 
-Reuse the shared `ThemeControls` from `@falcondeck/ui` so onboarding and
-Settings → Appearance update the same device-local `fd-appearance` record.
-Mode and palette changes apply immediately; no onboarding-only draft state or
-extra completion write is needed.
+Reuse `ThemeControls` and `TypographyControls` from `@falcondeck/ui` so
+onboarding and Settings → Appearance update the same device-local
+`fd-appearance` record. Mode, palette, font, and text-size changes apply
+immediately; the per-surface fine-tune matrix stays in Settings. No
+onboarding-only draft state or extra completion write is needed.
 
 ### Step 3 — Check your tools
 
@@ -228,8 +243,9 @@ actually offers first).
   client, sequencing (resume dialog + updater suppressed while open).
 - Rust: secret route round-trip, `OPENROUTER_API_KEY` injection precedence
   (secret < providers.json env), upgrade-job flow already covered.
-- Manual: the rerun control *is* the QA loop — reset, relaunch, walk the
-  wizard on a fully-configured machine and on a clean one
+- Manual: `/onboarding-qa.html` is the UI loop (no Tauri rebuild). The
+  Settings → General rerun control is the packaged-app loop — reset, relaunch,
+  walk the wizard on a fully-configured machine and on a clean one
   (`FALCONDECK_STATE_PATH` + scratch `HOME` for the latter).
 
 ## Open questions

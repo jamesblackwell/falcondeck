@@ -1158,7 +1158,8 @@ describe("DesktopSidebar", () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
-  it("collapses and expands every project from the Projects heading", () => {
+  it("collapses the Projects section to hide every folder", () => {
+    const onWorkspaceCollapsedChange = vi.fn();
     const groups: ProjectGroup[] = [
       {
         workspace: workspace(),
@@ -1179,25 +1180,90 @@ describe("DesktopSidebar", () => {
         ],
       },
     ];
-    renderSidebar({ groups });
-
-    const collapseAll = screen.getByRole("button", {
-      name: "Collapse all projects",
+    renderSidebar({
+      groups,
+      collapsedWorkspaceIds: ["workspace-2"],
+      onWorkspaceCollapsedChange,
     });
-    expect(collapseAll).toHaveAttribute("aria-expanded", "true");
 
-    fireEvent.click(collapseAll);
-    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "falcondeck" })).toBeInTheDocument();
+    expect(screen.getByText("Main thread")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "second-project" }),
+    ).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("Second thread")).not.toBeInTheDocument();
 
-    const expandAll = screen.getByRole("button", {
-      name: "Expand all projects",
-    });
-    expect(expandAll).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(expandAll);
+    const collapse = screen.getByRole("button", { name: "Collapse projects" });
+    expect(collapse).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(collapse);
 
+    expect(onWorkspaceCollapsedChange).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "falcondeck" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "second-project" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+
+    const expand = screen.getByRole("button", { name: "Expand projects" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(expand);
+
+    expect(screen.getByRole("button", { name: "falcondeck" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(screen.getByText("Main thread")).toBeInTheDocument();
-    expect(screen.getByText("Second thread")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "second-project" }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Second thread")).not.toBeInTheDocument();
+  });
+
+  it("keeps the add-project action available while projects are collapsed", () => {
+    const onAddProject = vi.fn();
+    renderSidebar({ onAddProject });
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse projects" }));
+    expect(
+      screen.queryByRole("button", { name: "falcondeck" }),
+    ).not.toBeInTheDocument();
+
+    const projects = screen.getByRole("region", { name: "Projects" });
+    fireEvent.click(
+      within(projects).getByRole("button", { name: "Add project" }),
+    );
+    expect(onAddProject).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("button", { name: "falcondeck" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("honors a host-owned projects collapsed flag and reports toggles back to it", () => {
+    const onProjectsCollapsedChange = vi.fn();
+    const { rerenderSidebar } = renderSidebar({
+      projectsCollapsed: true,
+      onProjectsCollapsedChange,
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "falcondeck" }),
+    ).not.toBeInTheDocument();
+    const expand = screen.getByRole("button", { name: "Expand projects" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+
+    fireEvent.click(expand);
+    expect(onProjectsCollapsedChange).toHaveBeenCalledWith(false);
+    expect(
+      screen.queryByRole("button", { name: "falcondeck" }),
+    ).not.toBeInTheDocument();
+
+    rerenderSidebar({ projectsCollapsed: false, onProjectsCollapsedChange });
+    expect(
+      screen.getByRole("button", { name: "Collapse projects" }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "falcondeck" })).toBeInTheDocument();
   });
 
   it("honors a host-owned collapsed set and reports toggles back to it", () => {
@@ -1799,21 +1865,62 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByText("Blue hot")).not.toBeInTheDocument();
   });
 
-  it("removes a project from the right-click menu after confirmation", async () => {
+  it("closes a project from the sidebar without forgetting it", async () => {
+    const onCloseWorkspace = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({ onCloseWorkspace });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Remove from Sidebar" }),
+    );
+
+    await waitFor(() => {
+      expect(onCloseWorkspace).toHaveBeenCalledWith("workspace-1");
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("confirms closing a project that has a running turn", async () => {
+    const onCloseWorkspace = vi.fn().mockResolvedValue(undefined);
+    renderSidebar(
+      {
+        onCloseWorkspace,
+        closeWorkspaceReason: () =>
+          "This project has a running turn. Closing it stops that work until you add the project back.",
+      },
+      { status: "running" },
+    );
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Remove from Sidebar" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("running turn");
+    expect(onCloseWorkspace).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove from Sidebar" }),
+    );
+    await waitFor(() => {
+      expect(onCloseWorkspace).toHaveBeenCalledWith("workspace-1");
+    });
+  });
+
+  it("forgets a project from the right-click menu after confirmation", async () => {
     const { onRemoveWorkspace } = renderSidebar();
 
     fireEvent.contextMenu(screen.getByText("falcondeck"));
     fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Remove project" }),
+      await screen.findByRole("menuitem", { name: "Forget project" }),
     );
 
     const dialog = await screen.findByRole("dialog");
-    expect(dialog).toHaveTextContent(
-      "Threads stay in the provider’s own history",
-    );
+    expect(dialog).toHaveTextContent("FalconDeck will forget this project");
     expect(onRemoveWorkspace).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    fireEvent.click(screen.getByRole("button", { name: "Forget" }));
 
     await waitFor(() => {
       expect(onRemoveWorkspace).toHaveBeenCalledWith("workspace-1");
@@ -1913,13 +2020,19 @@ describe("DesktopSidebar", () => {
     );
   });
 
-  it("leaves the project menu out when removal is unavailable", () => {
-    renderSidebar({ onRemoveWorkspace: undefined });
+  it("leaves the project menu out when membership actions are unavailable", () => {
+    renderSidebar({
+      onRemoveWorkspace: undefined,
+      onCloseWorkspace: undefined,
+    });
 
     fireEvent.contextMenu(screen.getByText("falcondeck"));
 
     expect(
-      screen.queryByRole("menuitem", { name: "Remove project" }),
+      screen.queryByRole("menuitem", { name: "Remove from Sidebar" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Forget project" }),
     ).not.toBeInTheDocument();
   });
 

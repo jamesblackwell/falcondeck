@@ -27,6 +27,7 @@ type ProviderEntry = {
 }
 
 type ProvidersOverview = {
+  revision: string
   providers: Record<string, ProviderEntry>
   resolved: Array<{
     id: string
@@ -86,6 +87,11 @@ const RECOMMENDED_AGENTS = [
   },
 ]
 
+const CUSTOM_AGENT_RESERVED_IDS = [
+  ...BUILT_IN_AGENTS.map((agent) => agent.id),
+  ...RECOMMENDED_AGENTS.map((agent) => agent.id),
+]
+
 export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
   const [overview, setOverview] = useState<ProvidersOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -129,10 +135,19 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
         const response = await fetch(`${baseUrl}/api/providers`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ providers: mutate({ ...overview.providers }) }),
+          body: JSON.stringify({
+            providers: mutate({ ...overview.providers }),
+            expected_revision: overview.revision,
+          }),
         })
         if (!response.ok) {
           const body = await response.text()
+          if (response.status === 409) {
+            await load()
+            throw new Error(
+              'Agents changed elsewhere while this panel was open. The latest list has been loaded; make the change again.',
+            )
+          }
           throw new Error(body || falconDeckHttpError(response.status))
         }
         await load()
@@ -401,7 +416,7 @@ function AddAgentForm({
   const normalizedId = id.trim().toLowerCase()
   const canSubmit =
     normalizedId.length > 0 &&
-    !['codex', 'claude'].includes(normalizedId) &&
+    !CUSTOM_AGENT_RESERVED_IDS.includes(normalizedId) &&
     command.trim().length > 0
 
   return (
