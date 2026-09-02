@@ -1,4 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, OnceLock},
+};
 
 use axum::{
     Json, Router,
@@ -85,6 +88,18 @@ fn relay_cors_layer() -> CorsLayer {
 }
 
 const PAIRING_REQUEST_BODY_LIMIT_BYTES: usize = 16 * 1024;
+const MAX_PENDING_WS_HANDSHAKES: usize = 64;
+const MAX_WS_SESSION_ID_BYTES: usize = 128;
+const MAX_WS_TICKET_BYTES: usize = 256;
+static WS_HANDSHAKE_LIMITER: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn acquire_ws_handshake_permit(
+    limiter: Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, RelayError> {
+    limiter.try_acquire_owned().map_err(|_| {
+        RelayError::TooManyRequests("too many websocket handshakes are pending".to_string())
+    })
+}
 
 #[derive(Debug, Deserialize)]
 struct UpdatesRequestQuery {
@@ -152,16 +167,27 @@ async fn start_pairing(
     Json(request): Json<StartPairingRequest>,
 ) -> Result<Json<falcondeck_core::StartPairingResponse>, RelayError> {
     state
-        .authorize_pairing_creation(pairing_client_ip(peer_addr, &headers))
+        .authorize_pairing_creation(pairing_client_ip(peer_addr, &headers, &trusted_proxy_ips()))
         .await?;
     Ok(Json(state.start_pairing(request).await?))
 }
 
-fn pairing_client_ip(peer_addr: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    // The hosted relay is reached through a loopback reverse proxy. Only that
-    // trusted hop may supply the public origin; a directly connected client
-    // cannot evade its bucket with a forged forwarding header.
-    if peer_addr.ip().is_loopback()
+fn trusted_proxy_ips() -> Vec<IpAddr> {
+    std::env::var("FALCONDECK_RELAY_TRUSTED_PROXY_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|value| value.trim().parse().ok())
+        .collect()
+}
+
+fn pairing_client_ip(
+    peer_addr: SocketAddr,
+    headers: &HeaderMap,
+    trusted_proxies: &[IpAddr],
+) -> IpAddr {
+    // Forwarded identity is trusted only from an explicitly configured proxy.
+    // The default is fail-closed, including for arbitrary loopback processes.
+    if trusted_proxies.contains(&peer_addr.ip())
         && let Some(forwarded_ip) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
@@ -180,7 +206,7 @@ async fn pairing_challenge(
     Json(request): Json<PairingChallengeRequest>,
 ) -> Result<Json<falcondeck_core::PairingChallengeResponse>, RelayError> {
     state
-        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers))
+        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers, &trusted_proxy_ips()))
         .await?;
     Ok(Json(state.create_pairing_challenge(request).await?))
 }
@@ -192,7 +218,7 @@ async fn claim_pairing(
     Json(request): Json<ClaimPairingRequest>,
 ) -> Result<Json<falcondeck_core::ClaimPairingResponse>, RelayError> {
     state
-        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers))
+        .authorize_pairing_attempt(pairing_client_ip(peer_addr, &headers, &trusted_proxy_ips()))
         .await?;
     Ok(Json(state.claim_pairing(request).await?))
 }
@@ -249,17 +275,29 @@ async fn updates_ws(
 ) -> Result<impl IntoResponse, RelayError> {
     // Cheap syntactic validation only: the single-use ticket is consumed
     // inside the upgrade callback, so an aborted handshake cannot burn it.
-    if query.session_id.trim().is_empty() {
+    if query.session_id.trim().is_empty() || query.session_id.len() > MAX_WS_SESSION_ID_BYTES {
         return Err(RelayError::BadRequest("session_id is required".to_string()));
     }
+    if query.ticket.trim().is_empty() || query.ticket.len() > MAX_WS_TICKET_BYTES {
+        return Err(RelayError::BadRequest(
+            "valid ticket is required".to_string(),
+        ));
+    }
+    let limiter = WS_HANDSHAKE_LIMITER
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_WS_HANDSHAKES)))
+        .clone();
+    let handshake_permit = acquire_ws_handshake_permit(limiter)?;
     Ok(ws
         .max_message_size(WS_MAX_MESSAGE_BYTES)
         .max_frame_size(WS_MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
-            match state
+            let authentication = state
                 .consume_ws_ticket(&query.session_id, &query.ticket)
-                .await
-            {
+                .await;
+            // Live peers have their own queue and idle bounds. Release the
+            // unauthenticated-handshake budget before entering that loop.
+            drop(handshake_permit);
+            match authentication {
                 Ok(auth) => socket_loop(socket, state, auth).await,
                 Err(error) => {
                     let _ = send_raw_error(socket, error.to_string()).await;
@@ -513,11 +551,23 @@ mod pairing_rate_limit_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("198.51.100.20"));
 
-        assert_eq!(pairing_client_ip(peer, &headers), peer.ip());
+        assert_eq!(pairing_client_ip(peer, &headers, &[]), peer.ip());
     }
 
     #[test]
-    fn loopback_proxy_uses_the_nearest_forwarded_client_identity() {
+    fn unconfigured_loopback_peer_cannot_spoof_forwarded_identity() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.99, 198.51.100.20"),
+        );
+
+        assert_eq!(pairing_client_ip(peer, &headers, &[]), peer.ip());
+    }
+
+    #[test]
+    fn configured_proxy_uses_the_nearest_forwarded_client_identity() {
         let peer = SocketAddr::from(([127, 0, 0, 1], 40_000));
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -526,7 +576,7 @@ mod pairing_rate_limit_tests {
         );
 
         assert_eq!(
-            pairing_client_ip(peer, &headers),
+            pairing_client_ip(peer, &headers, &[peer.ip()]),
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)),
         );
     }
@@ -537,13 +587,15 @@ mod pairing_rate_limit_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("not-an-ip"));
 
-        assert_eq!(pairing_client_ip(peer, &headers), peer.ip());
+        assert_eq!(pairing_client_ip(peer, &headers, &[peer.ip()]), peer.ip());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WS_MAX_MESSAGE_BYTES, auth_token};
+    use std::sync::Arc;
+
+    use super::{WS_MAX_MESSAGE_BYTES, acquire_ws_handshake_permit, auth_token};
 
     #[test]
     fn websocket_limit_has_headroom_for_an_encrypted_image_turn() {
@@ -552,6 +604,18 @@ mod tests {
         // base64 and a small outer RPC JSON envelope.
         let encrypted_rpc_bytes = (max_turn_json_bytes + 1 + 12 + 16).div_ceil(3) * 4 + 1024;
         assert!(WS_MAX_MESSAGE_BYTES > encrypted_rpc_bytes);
+    }
+
+    #[test]
+    fn pending_websocket_handshakes_are_bounded_before_upgrade() {
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = acquire_ws_handshake_permit(limiter.clone()).unwrap();
+        assert!(matches!(
+            acquire_ws_handshake_permit(limiter.clone()),
+            Err(crate::error::RelayError::TooManyRequests(_))
+        ));
+        drop(permit);
+        assert!(acquire_ws_handshake_permit(limiter).is_ok());
     }
 
     #[test]

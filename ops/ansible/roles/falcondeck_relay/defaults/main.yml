@@ -17,4 +17,5 @@ falcondeck_relay_postgres_user: falcondeck_relay
 falcondeck_relay_postgres_password: ""
 falcondeck_relay_database_url: ""
 falcondeck_relay_cors_origins: "https://app.falcondeck.com"
+falcondeck_relay_trusted_proxy_ips: "127.0.0.1,::1"
 falcondeck_relay_env: {}
