@@ -69,19 +69,23 @@ So agents know they are running inside FalconDeck and how to use the control
 tools, the daemon injects a small amount of context at every provider spawn
 boundary — the same boundaries where the built-in connector is injected:
 
-- **Short always-on append** (~6 lines): tells the agent it is operating via
-  FalconDeck, names the three `falcondeck_*` tools and the
-  search → get → execute workflow, and points at the full guide below. Sent
+- **Short always-on append** (~8 lines): tells the agent it is operating via
+  FalconDeck, nudges it to use session MCP tools (especially
+  `falcondeck_suggest_follow_ups` near the end of a turn when leftover next
+  steps exist), names the three `falcondeck_*` control tools and the
+  search → get → execute workflow, and points at the guides below. Sent
   as Claude `--append-system-prompt`, Codex `developerInstructions`
   (thread/start and thread/resume), and ACP `session/new` `instructions`
-  (omitted when empty so older ACP agents are unaffected).
-- **Bundled `falcondeck-control` skill** staged to
-  `<state dir>/skills/falcondeck-control/SKILL.md`: the full usage guide
-  (core loop, revisions, idempotency, worked examples). Codex receives the
-  skills directory through app-server `skills/extraRoots/set` at process
-  start (failure is tolerated on older app-servers); Claude and ACP agents
-  reach it through the path in the append. Progressive disclosure: the skill
-  costs context only when an agent reads it.
+  (omitted when empty so older ACP agents are unaffected). The follow-up
+  line is omitted when that extension tool is not published.
+- **Bundled skills** staged under `<state dir>/skills/`:
+  `falcondeck-mcp` (use the session MCP tools; next-action and rename
+  heuristics) and `falcondeck-control` (automations, revisions,
+  idempotency, worked examples). Codex receives the skills directory
+  through app-server `skills/extraRoots/set` at process start (failure is
+  tolerated on older app-servers); Claude and ACP agents reach them through
+  the paths in the append. Progressive disclosure: a skill costs context
+  only when an agent reads it.
 
 Both are covered by the `inject_agent_context` setting (default on) in
 **Settings → Agent control** or through `agent_control.settings.update`, and
@@ -174,6 +178,7 @@ their daemon-recorded task origin, never from model-authored arguments.
 ```
 crates/falcondeck-core/src/control.rs          shared wire types + event
 crates/falcondeck-daemon/src/agent_context.rs  append + bundled skill staging
+crates/falcondeck-daemon/src/agent_context/    falcondeck-control + falcondeck-mcp SKILL.md
 crates/falcondeck-daemon/src/control/
   service.rs   ControlService: search/get/execute, revisions, idempotency
   registry.rs  capability catalogue + deterministic search (schemars)

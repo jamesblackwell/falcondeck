@@ -112,5 +112,7 @@ appear only when a single automation is read explicitly.
 - If a control request fails with `interface_disabled` or
   `provider_disabled`, conversational control has been switched off in
   FalconDeck's settings; say so rather than retrying.
-- Only mention or use FalconDeck control when the user asks about it or a
-  task genuinely needs it.
+- Use FalconDeck control when the user asks about automations, schedules, or
+  FalconDeck settings. Session MCP tools such as
+  `falcondeck_suggest_follow_ups` are separate: use those during ordinary
+  turns without waiting to be asked.

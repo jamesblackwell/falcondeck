@@ -6,7 +6,9 @@ It publishes one agent tool — `suggest-follow-ups` — through the built-in
 `falcondeck-extensions` MCP bridge, as `falcondeck_suggest_follow_ups`. An
 agent may call it near the end of a turn to offer the user between one and
 five short next actions. FalconDeck renders them as a single compact pill
-above the composer, and only once that turn has gone idle.
+above the composer, and only once that turn has gone idle. The daemon's
+always-on agent-context append (and the bundled `falcondeck-mcp` skill)
+tells harnesses to call it without waiting to be asked.
 
 ## Why it is shaped this way
 
