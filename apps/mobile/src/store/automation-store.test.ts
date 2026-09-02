@@ -187,6 +187,33 @@ describe('automation store', () => {
     expect(useAutomationStore.getState().automations).toEqual([])
   })
 
+  it('uses cryptographically secure bytes when randomUUID is unavailable', async () => {
+    const originalCrypto = globalThis.crypto
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.fill(0xab)
+        return bytes
+      },
+    })
+    const rpc = vi.fn().mockResolvedValue({
+      ok: true,
+      operation: 'automation.pause',
+      data: { ...automation, state: 'paused', revision: 5 },
+    })
+    useRelayStore.setState({ _callRpc: rpc as never })
+
+    await useAutomationStore.getState().execute({
+      operation: 'automation.pause',
+      arguments: { automation_id: automation.id },
+      expected_revision: automation.revision,
+    })
+
+    expect(rpc.mock.calls[0]?.[1]).toMatchObject({
+      idempotency_key: `mobile-${'ab'.repeat(16)}`,
+    })
+    vi.stubGlobal('crypto', originalCrypto)
+  })
+
   it('refreshes list and settings in parallel and persists them', async () => {
     const rpc = vi.fn(async (_method: string, params: Record<string, unknown>) =>
       params.resource === 'automations'

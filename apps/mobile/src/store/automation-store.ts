@@ -68,6 +68,17 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
 
+function createIdempotencyKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+    throw new Error('Secure randomness is unavailable; refusing to create an automation request.')
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  return `mobile-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
 function readRows<T>(response: ControlGetResponse, normalize: (value: unknown) => T | null) {
   return Array.isArray(response.data)
     ? response.data.map(normalize).filter((value): value is T => value !== null)
@@ -216,8 +227,7 @@ export const useAutomationStore = create<AutomationStore>((set, get) => ({
       ...request,
       // The relay deduplicates by RPC request id. The daemon key also covers
       // a retry that is rebuilt after a reconnect before its response lands.
-      idempotency_key: request.idempotency_key ?? globalThis.crypto?.randomUUID?.()
-        ?? `mobile-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      idempotency_key: request.idempotency_key ?? createIdempotencyKey(),
     }
     const response = await useRelayStore.getState()._callRpc<ControlExecuteResponse>(
       'control.execute',

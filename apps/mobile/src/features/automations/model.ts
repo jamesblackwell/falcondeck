@@ -100,12 +100,16 @@ function commaSeparated(value: string) {
 }
 
 export function automationDraftArguments(draft: AutomationDraft): Record<string, unknown> {
+  const intervalSeconds = Number(draft.everySeconds)
+  if (draft.scheduleKind === 'interval' && !Number.isFinite(intervalSeconds)) {
+    throw new Error('Interval must be a finite number of seconds.')
+  }
   const trigger = draft.scheduleKind === 'cron'
     ? { kind: 'cron', expression: draft.expression.trim(), timezone: draft.timezone.trim() }
     : draft.scheduleKind === 'interval'
       ? {
           kind: 'interval',
-          every_seconds: Number(draft.everySeconds) || 0,
+          every_seconds: intervalSeconds,
           // The persisted anchor is part of the schedule. Re-anchoring an edit
           // to the time it was saved would silently move every future run.
           anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
@@ -153,7 +157,10 @@ export function automationDraftError(draft: AutomationDraft): string | null {
     return 'Cron expressions use exactly five fields.'
   }
   if (draft.scheduleKind === 'cron' && !draft.timezone.trim()) return 'A timezone is required.'
-  if (draft.scheduleKind === 'interval' && Number(draft.everySeconds) < 60) {
+  if (
+    draft.scheduleKind === 'interval' &&
+    (!Number.isFinite(Number(draft.everySeconds)) || Number(draft.everySeconds) < 60)
+  ) {
     return 'Intervals must be at least 60 seconds.'
   }
   if (draft.scheduleKind === 'once' && !draft.runAt.trim()) {

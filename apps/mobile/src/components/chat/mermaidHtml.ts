@@ -11,6 +11,13 @@ export function inlineMermaidScript(source: string): string {
   return source.replace(/<\/(script)/gi, "<\\/$1");
 }
 
+export function safeJsonForInlineScript(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
 export function parseMermaidWebViewMessage(
   data: string,
 ): MermaidWebViewMessage | null {
@@ -44,6 +51,7 @@ export function buildMermaidDocument(options: {
 <html>
 <head>
 <meta charset="utf-8"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
 <style>
   html, body { margin: 0; padding: 0; background: ${background}; }
@@ -56,8 +64,8 @@ export function buildMermaidDocument(options: {
 <script>${inlineMermaidScript(options.mermaidScript)}</script>
 <script>
 (function () {
-  var source = ${JSON.stringify(options.source)};
-  var config = ${JSON.stringify(config)};
+  var source = ${safeJsonForInlineScript(options.source)};
+  var config = ${safeJsonForInlineScript(config)};
   function post(payload) {
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify(payload));

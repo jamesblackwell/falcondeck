@@ -2,14 +2,24 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { draftKeyFor } from '@falcondeck/client-core'
 
 import { storage } from '@/storage/mmkv'
+import {
+  decryptSessionValue,
+  setSessionStorageEncryptionKey,
+} from '@/storage/session-encrypted-storage'
 
 import { flushStoredDrafts, useUIStore } from './ui-store'
 
 const DRAFTS_STORAGE_KEY = 'falcondeck.mobile.composer-drafts.v1'
 
+function decryptedStorage(key: string) {
+  const raw = storage.getString(key)
+  return raw ? decryptSessionValue(JSON.parse(raw)) : null
+}
+
 describe('ui-store', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    setSessionStorageEncryptionKey(new Uint8Array(32).fill(11))
     // Drop any draft burst left pending by an earlier test.
     flushStoredDrafts()
     // Reset to initial state
@@ -75,10 +85,10 @@ describe('ui-store', () => {
 
     expect(useUIStore.getState().isSubmitting).toBe(false)
 
-    setIsSubmitting(true)
+    setIsSubmitting(true, useUIStore.getState().conversationKey)
     expect(useUIStore.getState().isSubmitting).toBe(true)
 
-    setIsSubmitting(false)
+    setIsSubmitting(false, useUIStore.getState().conversationKey)
     expect(useUIStore.getState().isSubmitting).toBe(false)
   })
 
@@ -228,7 +238,8 @@ describe('ui-store', () => {
     const { setDraft } = useUIStore.getState()
 
     setDraft('saved text')
-    expect(storage.getString('falcondeck.mobile.composer-drafts.v1')).toContain('saved text')
+    expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('saved text')
+    expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).toContain('saved text')
 
     vi.spyOn(storage, 'set').mockImplementation(() => {
       throw new Error('disk full')
@@ -247,21 +258,21 @@ describe('ui-store', () => {
 
       setDraft('first')
       // Leading edge of the burst: persisted straight away.
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('first')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).toContain('first')
 
       setDraft('second')
       setDraft('third')
       // Still within the trailing window: only the newest value is queued,
       // and nothing further has been written.
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('second')
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('third')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).not.toContain('second')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).not.toContain('third')
 
       vi.advanceTimersByTime(299)
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('third')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).not.toContain('third')
 
       vi.advanceTimersByTime(1)
       // Trailing final flush carries the settled value.
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('third')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).toContain('third')
     } finally {
       vi.useRealTimers()
     }
@@ -275,9 +286,9 @@ describe('ui-store', () => {
       setDraft('leading')
       setDraft('queued tail')
 
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).not.toContain('queued tail')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).not.toContain('queued tail')
       flushStoredDrafts()
-      expect(storage.getString(DRAFTS_STORAGE_KEY)).toContain('queued tail')
+      expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).toContain('queued tail')
 
       // Nothing remains scheduled — flushing again is a no-op.
       vi.advanceTimersByTime(5_000)
@@ -338,7 +349,10 @@ describe('ui-store', () => {
     expect(useUIStore.getState().drafts[key]).toBeUndefined()
     expect(useUIStore.getState().inFlightSubmissions[key]?.text).toBe('Ship it')
     // Persisted, so a process death mid-request still recovers the message.
-    expect(storage.getString('falcondeck.mobile.composer-in-flight.v1')).toContain('Ship it')
+    expect(storage.getString('falcondeck.mobile.composer-in-flight.v1')).not.toContain('Ship it')
+    expect(JSON.stringify(decryptedStorage('falcondeck.mobile.composer-in-flight.v1'))).toContain(
+      'Ship it',
+    )
 
     restoreFailedSubmission(key, 'Ship it', [])
     endSubmission(key)

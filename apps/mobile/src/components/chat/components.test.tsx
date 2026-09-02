@@ -2,6 +2,7 @@ import React from 'react'
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
 import { AccessibilityInfo } from 'react-native'
+import * as Reanimated from 'react-native-reanimated'
 import { act } from 'react-test-renderer'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderComponent, cleanup, textOf } from '../../test/render'
@@ -762,6 +763,105 @@ describe('ChatInput component', () => {
     expect(style.maxHeight).toBe(219)
     expect(input.props.multiline).toBe(true)
     expect(input.props.scrollEnabled).toBeUndefined()
+  })
+
+  it('pins an empty draft so clearing the composer cannot balloon the input', () => {
+    const onSubmit = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value={'Hello\nworld\nagain'}
+        {...chatInputDefaults}
+        onSubmit={onSubmit}
+      />,
+    )
+    const input = r.root.findByType('TextInput' as any)
+    expect(flattenStyle(input.props.style).height).toBeUndefined()
+
+    act(() => {
+      input.props.onLayout({
+        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 160 } },
+      })
+    })
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Send message' }).props.onPress()
+    })
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    act(() => {
+      r.update(
+        <ChatInput value="" {...chatInputDefaults} onSubmit={onSubmit} />,
+      )
+    })
+
+    const emptyInput = r.root.findByType('TextInput' as any)
+    const style = flattenStyle(emptyInput.props.style)
+    expect(style.height).toBe(48)
+    expect(style.minHeight).toBe(48)
+    act(() => {
+      emptyInput.props.onLayout({
+        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 48 } },
+      })
+    })
+
+    act(() => {
+      r.update(
+        <ChatInput
+          value="Next message"
+          {...chatInputDefaults}
+          onSubmit={onSubmit}
+        />,
+      )
+    })
+    expect(
+      flattenStyle(r.root.findByType('TextInput' as any).props.style).height,
+    ).toBeUndefined()
+
+    act(() => {
+      r.update(
+        <ChatInput value="" {...chatInputDefaults} onSubmit={onSubmit} />,
+      )
+    })
+    expect(
+      flattenStyle(r.root.findByType('TextInput' as any).props.style).height,
+    ).toBe(48)
+  })
+
+  it('skips the collapse animation when the OS requests reduced motion', () => {
+    const setReducedMotion = (
+      Reanimated as unknown as {
+        __setReducedMotionForTests: (value: boolean) => void
+      }
+    ).__setReducedMotionForTests
+    setReducedMotion(true)
+    try {
+      const onSubmit = vi.fn()
+      const r = renderComponent(
+        <ChatInput
+          value={'Hello\nworld\nagain'}
+          {...chatInputDefaults}
+          onSubmit={onSubmit}
+        />,
+      )
+      act(() => {
+        r.root.findByType('TextInput' as any).props.onLayout({
+          nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 160 } },
+        })
+      })
+      act(() => {
+        r.root
+          .findByProps({ accessibilityLabel: 'Send message' })
+          .props.onPress()
+      })
+      act(() => {
+        r.update(
+          <ChatInput value="" {...chatInputDefaults} onSubmit={onSubmit} />,
+        )
+      })
+      expect(
+        flattenStyle(r.root.findByType('TextInput' as any).props.style).height,
+      ).toBe(48)
+    } finally {
+      setReducedMotion(false)
+    }
   })
 })
 

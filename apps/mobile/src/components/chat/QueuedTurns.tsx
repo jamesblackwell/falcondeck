@@ -1,12 +1,20 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, Pressable, View } from 'react-native'
+import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Image } from 'expo-image'
 import { CornerDownRight, Paperclip, Trash2 } from 'lucide-react-native'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
 
-import { ActivityDiamond, OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
+import {
+  ActivityDiamond,
+  Button,
+  Input,
+  NativeSheet,
+  OptionSheet,
+  Text,
+  type OptionSheetItem,
+} from '@/components/ui'
 
 /** Matches the desktop copy for the same disabled action. */
 export const STEER_UNAVAILABLE_REASON = 'This agent cannot take a message mid-turn.'
@@ -196,10 +204,20 @@ export const QueuedTurns = memo(function QueuedTurns({
   getAttachmentPreview,
 }: QueuedTurnsProps) {
   const [openId, setOpenId] = useState<string | null>(null)
+  const [editing, setEditing] = useState<QueuedTurnSummary | null>(null)
+  const [editText, setEditText] = useState('')
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set())
   const pendingIdsRef = useRef(new Set<string>())
 
   const open = queuedTurns.find((queued) => queued.id === openId) ?? null
+
+  useEffect(() => {
+    if (openId && !open) setOpenId(null)
+    if (editing && !queuedTurns.some((queued) => queued.id === editing.id)) {
+      setEditing(null)
+      setEditText('')
+    }
+  }, [editing, open, openId, queuedTurns])
 
   const trackAction = useCallback((queuedId: string, action: () => Promise<void>) => {
     if (pendingIdsRef.current.has(queuedId)) return
@@ -220,25 +238,10 @@ export const QueuedTurns = memo(function QueuedTurns({
     (queued: QueuedTurnSummary, value: string) => {
       setOpenId(null)
       if (value === 'edit') {
-        // Prompt with the full text, not the truncated preview — saving a
+        // Use the full text, not the truncated preview — saving a
         // preview-truncated draft would chop long messages.
-        Alert.prompt(
-          'Edit message',
-          undefined,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Save',
-              onPress: (text?: string) => {
-                const next = text?.trim()
-                if (!next) return
-                trackAction(queued.id, () => onEdit(queued.id, next))
-              },
-            },
-          ],
-          'plain-text',
-          queued.text ?? queued.preview,
-        )
+        setEditing(queued)
+        setEditText(queued.text ?? queued.preview)
         return
       }
       trackAction(
@@ -248,7 +251,7 @@ export const QueuedTurns = memo(function QueuedTurns({
           : () => onRemove(queued.id),
       )
     },
-    [onEdit, onRemove, onSteer, trackAction],
+    [onRemove, onSteer, trackAction],
   )
 
   if (queuedTurns.length === 0) return null
@@ -273,11 +276,57 @@ export const QueuedTurns = memo(function QueuedTurns({
 
       {open ? (
         <OptionSheet
+          key={open.id}
           title={queuedTurnLabel(open)}
           items={queuedTurnActions(canSteer)}
           onSelect={(value) => runAction(open, value)}
           onClose={() => setOpenId(null)}
         />
+      ) : null}
+
+      {editing ? (
+        <NativeSheet
+          accessibilityLabel="Close queued message editor"
+          onClose={() => {
+            setEditing(null)
+            setEditText('')
+          }}
+          contentStyle={styles.editor}
+        >
+          <Text variant="heading" color="primary">Edit message</Text>
+          <Input
+            accessibilityLabel="Queued message text"
+            value={editText}
+            onChangeText={setEditText}
+            multiline
+            autoFocus
+            style={styles.editorInput}
+          />
+          <View style={styles.editorActions}>
+            <Button
+              variant="ghost"
+              label="Cancel"
+              accessibilityLabel="Cancel queued message edit"
+              onPress={() => {
+                setEditing(null)
+                setEditText('')
+              }}
+            />
+            <Button
+              label="Save"
+              accessibilityLabel="Save queued message edit"
+              disabled={!editText.trim()}
+              onPress={() => {
+                const queuedId = editing.id
+                const next = editText.trim()
+                if (!next) return
+                setEditing(null)
+                setEditText('')
+                trackAction(queuedId, () => onEdit(queuedId, next))
+              }}
+            />
+          </View>
+        </NativeSheet>
       ) : null}
     </View>
   )
@@ -297,6 +346,19 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border.default,
     backgroundColor: theme.colors.surface[2],
     overflow: 'hidden',
+  },
+  editor: {
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[4],
+  },
+  editorInput: {
+    minHeight: 120,
+    textAlignVertical: 'top',
+  },
+  editorActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: theme.spacing[2],
   },
   row: {
     flexDirection: 'row',

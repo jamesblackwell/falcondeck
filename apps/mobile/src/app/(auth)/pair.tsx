@@ -14,7 +14,10 @@ import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import { useRelayStore } from '@/store'
 import { CONNECTION_COPY } from '@/lib/connection-copy'
-import { parsePairingQr } from '@/features/pairing/parsePairingQr'
+import {
+  parsePairingQr,
+  type ParsedPairingQr,
+} from '@/features/pairing/parsePairingQr'
 import { DEMO_PAIRING_CODE } from '@/features/demo/demoData'
 import { enterDemoMode } from '@/features/demo/enterDemoMode'
 import { ActivityDiamond, Text, Button, Input } from '@/components/ui'
@@ -47,6 +50,7 @@ export default function PairScreen() {
 
   const [showScanner, setShowScanner] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [pendingScannedPairing, setPendingScannedPairing] = useState<ParsedPairingQr | null>(null)
   const [permission, requestPermission] = useCameraPermissions()
   const hasHandledScanRef = useRef(false)
 
@@ -108,10 +112,14 @@ export default function PairScreen() {
         router.replace('/(app)')
         return
       }
-      // Set store values then claim — zustand updates are synchronous
+      setShowScanner(false)
+      if (parsed.requiresRelayConfirmation) {
+        setPendingScannedPairing(parsed)
+        return
+      }
+      // Set store values then claim — zustand updates are synchronous.
       setRelayUrl(parsed.relayUrl)
       setPairingCode(parsed.pairingCode)
-      setShowScanner(false)
       void claimPairing()
     },
     [setRelayUrl, setPairingCode, claimPairing, _setError, isSecuringSession, router],
@@ -131,9 +139,18 @@ export default function PairScreen() {
 
   const handleStartOver = useCallback(() => {
     setShowScanner(false)
+    setPendingScannedPairing(null)
     hasHandledScanRef.current = false
     void disconnect()
   }, [disconnect])
+
+  const acceptScannedRelay = useCallback(() => {
+    if (!pendingScannedPairing) return
+    setRelayUrl(pendingScannedPairing.relayUrl)
+    setPairingCode(pendingScannedPairing.pairingCode)
+    setPendingScannedPairing(null)
+    void claimPairing()
+  }, [claimPairing, pendingScannedPairing, setPairingCode, setRelayUrl])
 
   if (showScanner) {
     return (
@@ -225,6 +242,33 @@ export default function PairScreen() {
           ) : (
             <>
               <View style={styles.pairPanel}>
+                {pendingScannedPairing ? (
+                  <View style={styles.relayReview} accessibilityRole="alert">
+                    <Text variant="label" color="primary" weight="semibold">
+                      Review self-hosted relay
+                    </Text>
+                    <Text variant="caption" color="muted">
+                      This QR code will connect FalconDeck to {new URL(pendingScannedPairing.relayUrl).host}.
+                      Only continue if you recognise and trust this server.
+                    </Text>
+                    <View style={styles.relayReviewActions}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        label="Cancel"
+                        onPress={() => setPendingScannedPairing(null)}
+                      />
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        label="Use this relay"
+                        accessibilityLabel="Use scanned self-hosted relay"
+                        onPress={acceptScannedRelay}
+                      />
+                    </View>
+                  </View>
+                ) : null}
+
                 <Button
                   variant="default"
                   size="lg"
@@ -376,6 +420,19 @@ const styles = StyleSheet.create((theme) => ({
     width: '100%',
     maxWidth: 320,
     gap: theme.spacing[3],
+  },
+  relayReview: {
+    gap: theme.spacing[2],
+    padding: theme.spacing[3],
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.danger.default,
+    backgroundColor: theme.colors.surface[1],
+  },
+  relayReviewActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: theme.spacing[2],
   },
   /** The demo is a side door, so it sits apart from the pairing controls
       rather than as a fourth button in the same stack. */

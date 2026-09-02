@@ -3,7 +3,10 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { MOBILE_SESSION_CACHE_VERSION, buildProjectGroups } from '@falcondeck/client-core'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
-import { loadMobileSessionCache } from '@/storage/mobile-session-cache'
+import {
+  loadMobileSessionCache,
+  setMobileSessionCacheKey,
+} from '@/storage/mobile-session-cache'
 import { __resetSessionCachePersistThrottleForTests, useSessionStore } from './session-store'
 import {
   workspace,
@@ -584,6 +587,7 @@ describe('session-store', () => {
   describe('cache persistence', () => {
     beforeEach(() => {
       resetMMKV()
+      setMobileSessionCacheKey(new Uint8Array(32).fill(9))
       __resetSessionCachePersistThrottleForTests()
     })
 

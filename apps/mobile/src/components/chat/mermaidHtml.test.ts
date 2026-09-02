@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMermaidDocument,
   inlineMermaidScript,
+  safeJsonForInlineScript,
   parseMermaidWebViewMessage,
 } from "./mermaidHtml";
 import { mermaidPaletteFromTheme } from "./mermaidPalette";
@@ -24,6 +25,17 @@ describe("inlineMermaidScript", () => {
   it("escapes a closing script tag so the bundle cannot break out of the document", () => {
     expect(inlineMermaidScript("foo</script>bar")).toBe("foo<\\/script>bar");
     expect(inlineMermaidScript("foo</SCRIPT>bar")).toBe("foo<\\/SCRIPT>bar");
+  });
+});
+
+describe("safeJsonForInlineScript", () => {
+  it("cannot terminate the script element or inject Unicode line separators", () => {
+    const encoded = safeJsonForInlineScript("</script><script>pwn()</script>\u2028\u2029");
+    expect(encoded).not.toContain("<");
+    expect(encoded).not.toContain("\u2028");
+    expect(encoded).not.toContain("\u2029");
+    expect(encoded).toContain("\\u003c/script>");
+    expect(encoded).toContain("\\u2028\\u2029");
   });
 });
 

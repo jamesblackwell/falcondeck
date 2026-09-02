@@ -99,5 +99,15 @@ describe('automation drafts', () => {
       scheduleKind: 'interval',
       everySeconds: '30',
     })).toBe('Intervals must be at least 60 seconds.')
+
+    const nonNumeric = {
+      ...emptyAutomationDraft(null, '/tmp/project'),
+      name: 'Task',
+      instruction: 'Do it',
+      scheduleKind: 'interval' as const,
+      everySeconds: 'not-a-number',
+    }
+    expect(automationDraftError(nonNumeric)).toBe('Intervals must be at least 60 seconds.')
+    expect(() => automationDraftArguments(nonNumeric)).toThrow(/finite number/)
   })
 })

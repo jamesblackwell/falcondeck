@@ -63,7 +63,7 @@ function SessionListItemInner({
         ) : presentation.level === 'awaiting_response' ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.warning.default }]} />
         ) : presentation.showUnreadDot ? (
-          <View style={[styles.dot, { backgroundColor: theme.colors.info.default }]} />
+          <View style={[styles.dot, { backgroundColor: theme.colors.unread }]} />
         ) : null}
       </View>
       {/* Regular, not label: Geist only ships Regular/Bold, so weight 500

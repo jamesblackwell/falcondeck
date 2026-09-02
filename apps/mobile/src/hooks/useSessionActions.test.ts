@@ -1068,10 +1068,10 @@ describe("isSubmitting state management", () => {
 
     expect(useUIStore.getState().isSubmitting).toBe(false);
 
-    ui.setIsSubmitting(true);
+    ui.setIsSubmitting(true, ui.conversationKey);
     expect(useUIStore.getState().isSubmitting).toBe(true);
 
-    ui.setIsSubmitting(false);
+    ui.setIsSubmitting(false, ui.conversationKey);
     expect(useUIStore.getState().isSubmitting).toBe(false);
   });
 

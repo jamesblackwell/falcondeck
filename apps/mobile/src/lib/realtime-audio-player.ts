@@ -8,16 +8,30 @@ import type { EventEnvelope } from '@falcondeck/client-core'
 
 type PlaybackState = {
   chain: Promise<void>
+  cleanupTimer: ReturnType<typeof setTimeout> | null
   drained: boolean
   ending: boolean
+  lastActivity: number
   node: AudioBufferQueueSourceNode | null
   started: boolean
 }
+
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000
+const DEFAULT_MAX_ACTIVE_THREADS = 8
 
 /** Native low-latency PCM queue for realtime assistant speech. */
 export class NativeRealtimeAudioPlayer {
   private context: AudioContext | null = null
   private readonly threads = new Map<string, PlaybackState>()
+
+  constructor(
+    private readonly idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+    private readonly maxActiveThreads = DEFAULT_MAX_ACTIVE_THREADS,
+  ) {}
+
+  get activePlaybackCount(): number {
+    return this.threads.size
+  }
 
   handleEvent(envelope: EventEnvelope): void {
     const threadId = envelope.thread_id
@@ -25,7 +39,7 @@ export class NativeRealtimeAudioPlayer {
     const event = envelope.event
     if (event.type === 'realtime-audio-started') {
       this.stop(threadId)
-      this.threads.set(threadId, this.createState())
+      this.installState(threadId, this.createState())
       return
     }
     if (event.type === 'realtime-audio-ended') {
@@ -34,6 +48,7 @@ export class NativeRealtimeAudioPlayer {
       } else {
         const state = this.threads.get(threadId)
         if (state) {
+          this.touchState(threadId, state)
           state.ending = true
           state.chain = state.chain.finally(() => {
             // Enqueueing is complete before CoreAudio drains the queue. Keep
@@ -53,7 +68,11 @@ export class NativeRealtimeAudioPlayer {
     if (event.type !== 'realtime-audio-delta') return
 
     const state = this.threads.get(threadId) ?? this.createState()
-    this.threads.set(threadId, state)
+    if (!this.threads.has(threadId)) {
+      this.installState(threadId, state)
+    } else {
+      this.touchState(threadId, state)
+    }
     const chunk = event.audio
     state.chain = state.chain
       .then(async () => {
@@ -93,7 +112,11 @@ export class NativeRealtimeAudioPlayer {
           node.start()
         }
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (this.threads.get(threadId) === state) {
+          this.finishPlayback(threadId, state)
+        }
+      })
   }
 
   stop(threadId?: string): void {
@@ -110,15 +133,42 @@ export class NativeRealtimeAudioPlayer {
   private createState(): PlaybackState {
     return {
       chain: Promise.resolve(),
+      cleanupTimer: null,
       drained: false,
       ending: false,
+      lastActivity: Date.now(),
       node: null,
       started: false,
     }
   }
 
+  private installState(threadId: string, state: PlaybackState): void {
+    while (this.threads.size >= this.maxActiveThreads) {
+      const oldest = [...this.threads.entries()].reduce((candidate, current) =>
+        current[1].lastActivity < candidate[1].lastActivity ? current : candidate,
+      )
+      this.finishPlayback(oldest[0], oldest[1])
+    }
+    this.threads.set(threadId, state)
+    this.touchState(threadId, state)
+  }
+
+  private touchState(threadId: string, state: PlaybackState): void {
+    state.lastActivity = Date.now()
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer)
+    state.cleanupTimer = setTimeout(() => {
+      if (this.threads.get(threadId) === state) {
+        this.finishPlayback(threadId, state)
+      }
+    }, this.idleTimeoutMs)
+  }
+
   private finishPlayback(threadId: string, state: PlaybackState): void {
     if (this.threads.get(threadId) !== state) return
+    if (state.cleanupTimer) {
+      clearTimeout(state.cleanupTimer)
+      state.cleanupTimer = null
+    }
     const node = state.node
     state.node = null
     if (node) {

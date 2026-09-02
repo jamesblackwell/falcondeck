@@ -18,6 +18,10 @@ import {
 } from '@/lib/push-notifications'
 import { clearMobileSessionCache, loadMobileSessionCache } from '@/storage/mobile-session-cache'
 import { useRelayStore, useSessionStore } from '@/store'
+import {
+  clearEncryptedComposerPersistence,
+  hydrateEncryptedComposerPersistence,
+} from '@/store/ui-store'
 import { OtaUpdateBanner } from '@/features/updates/OtaUpdateBanner'
 
 SplashScreen.preventAutoHideAsync()
@@ -67,11 +71,13 @@ export default function RootLayout() {
       try {
         const restored = await useRelayStore.getState().restoreSession()
         sessionRestoredRef.current = restored
+        if (restored) hydrateEncryptedComposerPersistence()
         if (!restored) {
           // Signed out: nothing cached to defer — clear synchronously so the
           // first painted frame already reflects a clean slate.
           useSessionStore.getState().reset()
           clearMobileSessionCache()
+          clearEncryptedComposerPersistence()
         }
         // Restored sessions do NOT block splash on hydrateCache: the offline
         // cache read+parse+normalize runs in the hydration effect below,

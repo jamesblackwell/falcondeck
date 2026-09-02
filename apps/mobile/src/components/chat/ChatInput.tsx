@@ -2,12 +2,27 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type RefObject,
 } from 'react'
-import { View, TextInput, Pressable, useWindowDimensions } from 'react-native'
+import {
+  View,
+  TextInput,
+  Pressable,
+  useWindowDimensions,
+  type LayoutChangeEvent,
+} from 'react-native'
+import Animated, {
+  cancelAnimation,
+  Easing,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { BookOpen, Mic, Plus, Send, Square, Target } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -117,6 +132,80 @@ const MAX_INPUT_HEIGHT = 280
 // to nothing the overflow — the send button — slides under the keyboard.
 // Cap growth to a fraction of the window so the composer always fits.
 const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.25
+const COMPOSER_COLLAPSE_MS = 180
+const COMPOSER_COLLAPSE_TIMING = {
+  duration: COMPOSER_COLLAPSE_MS,
+  easing: Easing.out(Easing.cubic),
+} as const
+
+/**
+ * Empty multiline inputs on the new architecture can report a huge intrinsic
+ * height for a beat after the draft is cleared. Pin the collapsed size, and
+ * ease down from the last measured draft height so a send cannot balloon.
+ */
+function useEmptyComposerCollapse(isEmpty: boolean) {
+  const lastHeight = useSharedValue(MIN_INPUT_HEIGHT)
+  const collapseHeight = useSharedValue(MIN_INPUT_HEIGHT)
+  const collapsing = useSharedValue(false)
+  const reducedMotion = useReducedMotion()
+  const wasEmptyRef = useRef(isEmpty)
+
+  const onInputLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      if (isEmpty) return
+      // Reanimated SharedValues are mutable native animation handles.
+      // eslint-disable-next-line react-hooks/immutability
+      lastHeight.value = event.nativeEvent.layout.height
+    },
+    [isEmpty, lastHeight],
+  )
+
+  const prepareCollapse = useCallback(() => {
+    const from = Math.max(lastHeight.value, MIN_INPUT_HEIGHT)
+    if (reducedMotion || from <= MIN_INPUT_HEIGHT + 1) return
+    collapseHeight.value = from
+    collapsing.value = true
+  }, [collapseHeight, collapsing, lastHeight, reducedMotion])
+
+  useLayoutEffect(() => {
+    const becameEmpty = isEmpty && !wasEmptyRef.current
+    wasEmptyRef.current = isEmpty
+    if (!isEmpty) {
+      cancelAnimation(collapseHeight)
+      collapsing.value = false
+      return
+    }
+    if (!becameEmpty) {
+      if (!collapsing.value) collapseHeight.value = MIN_INPUT_HEIGHT
+      return
+    }
+    if (collapsing.value) {
+      collapseHeight.value = withTiming(MIN_INPUT_HEIGHT, COMPOSER_COLLAPSE_TIMING)
+      return
+    }
+    const from = Math.max(lastHeight.value, MIN_INPUT_HEIGHT)
+    if (reducedMotion || from <= MIN_INPUT_HEIGHT + 1) {
+      collapsing.value = false
+      collapseHeight.value = MIN_INPUT_HEIGHT
+      return
+    }
+    collapseHeight.value = from
+    collapsing.value = true
+    collapseHeight.value = withTiming(MIN_INPUT_HEIGHT, COMPOSER_COLLAPSE_TIMING)
+  }, [collapseHeight, collapsing, isEmpty, lastHeight, reducedMotion])
+
+  const slotStyle = useAnimatedStyle(() =>
+    collapsing.value
+      ? {
+          height: collapseHeight.value,
+          overflow: 'hidden' as const,
+        }
+      : {},
+  )
+
+  return { onInputLayout, prepareCollapse, slotStyle }
+}
+
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
 const CONTROL_SIZE = 40
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
@@ -176,6 +265,9 @@ export const ChatInput = memo(function ChatInput({
       Math.round(windowHeight * MAX_INPUT_HEIGHT_WINDOW_FRACTION),
     ),
   )
+  const draftIsEmpty = value.length === 0
+  const { onInputLayout, prepareCollapse, slotStyle } =
+    useEmptyComposerCollapse(draftIsEmpty)
   const [caretIndex, setCaretIndex] = useState(value.length)
   // An edit we handed to the host: where to put the caret once it echoes the
   // value back, and whether to send it. Keyed by that value so it lands on the
@@ -303,8 +395,16 @@ export const ChatInput = memo(function ChatInput({
     if ((!value.trim() && attachments.length === 0) || disabled || sendDisabled)
       return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+    prepareCollapse()
     onSubmit()
-  }, [attachments.length, value, disabled, onSubmit, sendDisabled])
+  }, [
+    attachments.length,
+    value,
+    disabled,
+    onSubmit,
+    prepareCollapse,
+    sendDisabled,
+  ])
 
   useEffect(() => {
     const pending = pendingEditRef.current
@@ -522,27 +622,33 @@ export const ChatInput = memo(function ChatInput({
             onClose={() => setVoiceProvider(null)}
           />
         ) : null}
-        <TextInput
-          ref={attachInput}
-          style={[
-            styles.input,
-            voiceProvider ? styles.inputHidden : null,
-            { maxHeight: maxInputHeight },
-          ]}
-          value={value}
-          onChangeText={handleChangeText}
-          onSelectionChange={(event) => {
-            const nextSelection = event.nativeEvent.selection
-            selectionRangeRef.current = nextSelection
-            setCaretIndex(nextSelection.start)
-          }}
-          placeholder={placeholder}
-          placeholderTextColor={theme.colors.fg.muted}
-          selectionColor={theme.colors.accent.default}
-          multiline
-          maxLength={100_000}
-          editable={!disabled}
-        />
+        <Animated.View
+          style={[styles.inputSlot, draftIsEmpty ? slotStyle : null]}
+        >
+          <TextInput
+            ref={attachInput}
+            style={[
+              styles.input,
+              voiceProvider ? styles.inputHidden : null,
+              { maxHeight: maxInputHeight },
+              draftIsEmpty ? styles.inputCollapsed : null,
+            ]}
+            value={value}
+            onChangeText={handleChangeText}
+            onLayout={onInputLayout}
+            onSelectionChange={(event) => {
+              const nextSelection = event.nativeEvent.selection
+              selectionRangeRef.current = nextSelection
+              setCaretIndex(nextSelection.start)
+            }}
+            placeholder={placeholder}
+            placeholderTextColor={theme.colors.fg.muted}
+            selectionColor={theme.colors.accent.default}
+            multiline
+            maxLength={100_000}
+            editable={!disabled}
+          />
+        </Animated.View>
         {slashQuery ? (
           <View style={styles.skillMenu}>
             {filteredSkills.length > 0 || showGoalCommand || showCompactCommand ? (
@@ -868,20 +974,27 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
     paddingTop: theme.spacing[3],
   },
+  inputSlot: {
+    justifyContent: 'flex-end',
+  },
   input: {
     fontSize: theme.fontSize.base,
     lineHeight: theme.fontSize.base * theme.lineHeight.normal,
     fontFamily: theme.fontFamily.sans,
     color: theme.colors.fg.primary,
-    // No explicit height: on the new architecture a multiline input sizes
-    // itself to its content, growing to maxHeight and scrolling past it.
-    // Driving height from onContentSizeChange fought that and left the box
-    // stuck at one line with scrolling disabled.
+    // No explicit height while drafting: on the new architecture a multiline
+    // input sizes itself to its content, growing to maxHeight and scrolling
+    // past it. Driving height from onContentSizeChange fought that and left
+    // the box stuck at one line with scrolling disabled.
     minHeight: MIN_INPUT_HEIGHT,
     maxHeight: MAX_INPUT_HEIGHT,
     paddingHorizontal: theme.spacing[4],
     paddingVertical: 0,
     textAlignVertical: 'top',
+    flexGrow: 0,
+  },
+  inputCollapsed: {
+    height: MIN_INPUT_HEIGHT,
   },
   inputHidden: {
     display: 'none',

@@ -16,8 +16,7 @@ import {
   generateBoxKeyPair,
   restoreBoxKeyPair,
   publicKeyToBase64,
-  identityPublicKeyToBase64,
-  deriveIdentityKeyPair,
+  destroySessionCrypto,
   secretKeyToBase64,
   decodeSecurePairingCode,
   signPairingAuthorityClientBundle,
@@ -29,7 +28,6 @@ import {
   base64ToBytes,
   verifyPairingPublicKeyBundle,
   verifyPairingAuthorityDaemonBundle,
-  verifySessionKeyMaterial,
   RELAY_RPC_TIMEOUT_MS,
   relayRpcFailureMessage,
   normalizeRelayUrl,
@@ -67,7 +65,10 @@ import {
   clearDataKey,
   clearSecureSession,
 } from '@/storage/secure'
-import { clearMobileSessionCache } from '@/storage/mobile-session-cache'
+import {
+  clearMobileSessionCache,
+} from '@/storage/mobile-session-cache'
+import { setSessionStorageEncryptionKey } from '@/storage/session-encrypted-storage'
 import {
   abandonConnectionActions,
   beginConnectionAction,
@@ -76,6 +77,7 @@ import {
   logConnection,
 } from './connection-log-store'
 import { useSessionStore } from './session-store'
+import { clearEncryptedComposerPersistence } from './ui-store'
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -210,6 +212,12 @@ let _rpcRequestCounter = 0
 // Keychain writes are expensive (and _persistSession runs on every cursor
 // checkpoint), so the data key is only re-written when its value changes.
 let _persistedDataKeyB64: string | null = null
+
+function replaceSessionCrypto(crypto: SessionCryptoState | null) {
+  if (_sessionCrypto !== crypto) destroySessionCrypto(_sessionCrypto)
+  _sessionCrypto = crypto
+  setSessionStorageEncryptionKey(crypto?.dataKey ?? null)
+}
 
 type PendingRpc = {
   method: string
@@ -404,7 +412,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
       _socket?.close()
       _socket = null
-      _sessionCrypto = null
+      replaceSessionCrypto(null)
       _clientKeyPair = keyPair
       _clientToken = claim.client_token
       _lastReceivedSeq = 0
@@ -462,7 +470,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     if (stored === null) return false
     if (!isPersistedRelay(stored)) {
       _socket = null
-      _sessionCrypto = null
+      replaceSessionCrypto(null)
       _clientKeyPair = null
       _clientToken = null
       _lastReceivedSeq = 0
@@ -480,6 +488,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       })
       removeKey('relay.session')
       clearMobileSessionCache()
+      clearEncryptedComposerPersistence()
       await clearSecureSession()
       return false
     }
@@ -493,7 +502,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
     if (!secretKey || !clientToken) {
       _socket = null
-      _sessionCrypto = null
+      replaceSessionCrypto(null)
       _clientKeyPair = null
       _clientToken = null
       _lastReceivedSeq = 0
@@ -511,6 +520,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       })
       removeKey('relay.session')
       clearMobileSessionCache()
+      clearEncryptedComposerPersistence()
       await clearSecureSession()
       return false
     }
@@ -525,10 +535,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       _trustedDaemonIdentityPublicKey = persisted.daemonIdentityPublicKey
 
       const restoredDataKey = dataKey ? base64ToBytes(dataKey) : null
-      _sessionCrypto =
+      replaceSessionCrypto(
         restoredDataKey?.length === SESSION_DATA_KEY_BYTES
           ? { dataKey: restoredDataKey, material: null }
-          : null
+          : null,
+      )
       _persistedDataKeyB64 = _sessionCrypto ? dataKey : null
       if (dataKey && !_sessionCrypto) {
         await clearDataKey().catch(() => undefined)
@@ -552,7 +563,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       return true
     } catch {
       _socket = null
-      _sessionCrypto = null
+      replaceSessionCrypto(null)
       _clientKeyPair = null
       _clientToken = null
       _lastReceivedSeq = 0
@@ -570,6 +581,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       })
       removeKey('relay.session')
       clearMobileSessionCache()
+      clearEncryptedComposerPersistence()
       await clearSecureSession()
       return false
     }
@@ -593,7 +605,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     const socket = _socket
     _socket = null
     get()._failPendingRpcs('Remote session disconnected')
-    _sessionCrypto = null
+    replaceSessionCrypto(null)
     _clientKeyPair = null
     _clientToken = null
     _lastReceivedSeq = 0
@@ -618,6 +630,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     socket?.close()
     removeKey('relay.session')
     clearMobileSessionCache()
+    clearEncryptedComposerPersistence()
     await clearSecureSession()
   },
 
@@ -743,7 +756,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _setSocket: (socket) => { _socket = socket },
   _getSessionCrypto: () => _sessionCrypto,
   _setSessionCrypto: (crypto) => {
-    _sessionCrypto = crypto
+    replaceSessionCrypto(crypto)
     // New (or cleared) key material must reach the Keychain on the next
     // persist even if it happens to re-derive to a previously seen value.
     _persistedDataKeyB64 = null
@@ -912,7 +925,6 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     }
     /* v8 ignore start — requires module-level _clientKeyPair from claimPairing, tested via E2E */
     const expectedClientPublicKey = publicKeyToBase64(kp)
-    const expectedClientIdentityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(kp))
     if (update.body.material.client_public_key !== expectedClientPublicKey) return
 
     try {
@@ -923,15 +935,15 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       // identity, the session id, and this client's own key material, so
       // adopt the material's pairing id instead of pinning the possibly
       // stale one.
-      verifySessionKeyMaterial(update.body.material, {
+      if (!_trustedDaemonPublicKey || !_trustedDaemonIdentityPublicKey) {
+        throw new Error('Encrypted session bootstrap is missing pinned daemon keys')
+      }
+      _pairingId = update.body.material.pairing_id
+      get()._setSessionCrypto(bootstrapSessionCrypto(kp, update.body.material, {
         expectedSessionId: get().sessionId,
         expectedDaemonPublicKey: _trustedDaemonPublicKey,
         expectedDaemonIdentityPublicKey: _trustedDaemonIdentityPublicKey,
-        expectedClientPublicKey,
-        expectedClientIdentityPublicKey,
-      })
-      _pairingId = update.body.material.pairing_id
-      get()._setSessionCrypto(bootstrapSessionCrypto(kp, update.body.material))
+      }))
       get()._setConnectionStatus('encrypted')
       get()._persistSession()
       // A stale error from an earlier attempt must not linger over a now

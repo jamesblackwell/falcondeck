@@ -347,7 +347,7 @@ const styles = StyleSheet.create((theme) => ({
     height: theme.iconSize.sm,
     alignSelf: 'center',
     borderRadius: theme.iconSize.sm / 2,
-    backgroundColor: theme.colors.info.default,
+    backgroundColor: theme.colors.unread,
     transform: [{ scale: 0.5 }],
   },
   archiveItem: {

@@ -109,4 +109,31 @@ describe('NativeRealtimeAudioPlayer', () => {
     player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-2' }))
     expect(mockQueueNode.stop).toHaveBeenCalledTimes(1)
   })
+
+  it('expires sessions that never receive an ended event', () => {
+    vi.useFakeTimers()
+    const player = new NativeRealtimeAudioPlayer(1_000)
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-1' }))
+
+    expect(player.activePlaybackCount).toBe(1)
+    vi.advanceTimersByTime(1_000)
+    expect(player.activePlaybackCount).toBe(0)
+    vi.useRealTimers()
+  })
+
+  it('bounds active thread state when malformed streams start without ending', () => {
+    const player = new NativeRealtimeAudioPlayer(120_000, 2)
+    player.handleEvent(envelope({ type: 'realtime-audio-started', session_id: 'voice-1' }))
+    player.handleEvent({
+      ...envelope({ type: 'realtime-audio-started', session_id: 'voice-2' }),
+      thread_id: 'thread-2',
+    })
+    player.handleEvent({
+      ...envelope({ type: 'realtime-audio-started', session_id: 'voice-3' }),
+      thread_id: 'thread-3',
+    })
+
+    expect(player.activePlaybackCount).toBe(2)
+    player.stop()
+  })
 })

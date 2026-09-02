@@ -18,6 +18,7 @@ import {
 } from '@falcondeck/client-core';
 
 import { storage } from '@/storage/mmkv';
+import { decryptSessionValue, encryptSessionValue } from '@/storage/session-encrypted-storage';
 
 // Device-local composer memory, matching the desktop/remote-web stores: unsent
 // input keyed per conversation, picker choices remembered per workspace.
@@ -31,7 +32,8 @@ const IN_FLIGHT_STORAGE_KEY = 'falcondeck.mobile.composer-in-flight.v1';
 
 function writeStoredDrafts(drafts: ComposerDrafts) {
   try {
-    storage.set(DRAFTS_STORAGE_KEY, JSON.stringify(drafts));
+    const encrypted = encryptSessionValue(drafts);
+    if (encrypted) storage.set(DRAFTS_STORAGE_KEY, JSON.stringify(encrypted));
   } catch {
     // Ignore storage failures and keep the in-memory drafts authoritative.
   }
@@ -86,7 +88,8 @@ function writeStoredDraftsNow(drafts: ComposerDrafts) {
 
 function writeStoredInFlight(inFlight: ComposerDrafts) {
   try {
-    storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(inFlight))
+    const encrypted = encryptSessionValue(inFlight)
+    if (encrypted) storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(encrypted))
   } catch {
     // Ignore storage failures and keep the in-memory record authoritative.
   }
@@ -170,7 +173,7 @@ interface UIActions {
   moveSubmission: (fromConversationKey: string, toConversationKey: string) => void;
   /** Drops the in-flight copy once its turn is accepted, queued, or restored. */
   endSubmission: (conversationKey: string) => void;
-  setIsSubmitting: (submitting: boolean, conversationKey?: string) => void;
+  setIsSubmitting: (submitting: boolean, conversationKey: string) => void;
   setPendingNewThreadItem: (pending: UIState['pendingNewThreadItem']) => void;
   clearPendingNewThreadItem: (itemId: string) => void;
   clearAttachments: () => void;
@@ -182,20 +185,7 @@ type UIStore = UIState & UIActions;
 // Anything still recorded as in flight belongs to a send this process never
 // saw settle — iOS killed the app mid-request — so it goes back to the
 // composer it was taken from before anything reads the drafts.
-const storedInFlight = parseComposerDrafts(storage.getString(IN_FLIGHT_STORAGE_KEY) ?? null);
-const initialDrafts = Object.entries(storedInFlight).reduce(
-  (drafts, [conversationKey, { text }]) =>
-    upsertComposerDraft(
-      drafts,
-      conversationKey,
-      mergeFailedComposerDraft(text, drafts[conversationKey]?.text ?? ''),
-    ),
-  parseComposerDrafts(storage.getString(DRAFTS_STORAGE_KEY) ?? null),
-);
-if (Object.keys(storedInFlight).length > 0) {
-  writeStoredDraftsNow(initialDrafts);
-  writeStoredInFlight({});
-}
+const initialDrafts: ComposerDrafts = {};
 const initialConversationKey = draftKeyFor(null, null);
 
 export const useUIStore = create<UIStore>((set, get) => ({
@@ -360,9 +350,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
       writeStoredInFlight(inFlightSubmissions);
       return { inFlightSubmissions };
     }),
-  setIsSubmitting: (submitting, requestedConversationKey) =>
+  setIsSubmitting: (submitting, conversationKey) =>
     set((state) => {
-      const conversationKey = requestedConversationKey ?? state.conversationKey;
       const pendingSubmissions = { ...state.pendingSubmissions };
       if (submitting) {
         pendingSubmissions[conversationKey] = true;
@@ -382,3 +371,51 @@ export const useUIStore = create<UIStore>((set, get) => ({
   clearAttachments: () => get().setAttachments([]),
   clearDraft: () => get().setDraft(''),
 }));
+
+function readEncryptedDrafts(key: string): ComposerDrafts {
+  const raw = storage.getString(key)
+  if (!raw) return {}
+  try {
+    const value = decryptSessionValue(JSON.parse(raw))
+    if (value === null) {
+      storage.delete(key)
+      return {}
+    }
+    return parseComposerDrafts(JSON.stringify(value))
+  } catch {
+    storage.delete(key)
+    return {}
+  }
+}
+
+/** Called only after relay restore has installed the session data key. */
+export function hydrateEncryptedComposerPersistence(): void {
+  const storedInFlight = readEncryptedDrafts(IN_FLIGHT_STORAGE_KEY)
+  const drafts = Object.entries(storedInFlight).reduce(
+    (current, [conversationKey, { text }]) =>
+      upsertComposerDraft(
+        current,
+        conversationKey,
+        mergeFailedComposerDraft(text, current[conversationKey]?.text ?? ''),
+      ),
+    readEncryptedDrafts(DRAFTS_STORAGE_KEY),
+  )
+  if (Object.keys(storedInFlight).length > 0) {
+    writeStoredDraftsNow(drafts)
+    writeStoredInFlight({})
+  }
+  useUIStore.setState((state) => ({
+    drafts,
+    draft: drafts[state.conversationKey]?.text ?? '',
+    inFlightSubmissions: {},
+  }))
+}
+
+export function clearEncryptedComposerPersistence(): void {
+  if (draftPersistTimer !== null) clearTimeout(draftPersistTimer)
+  draftPersistTimer = null
+  pendingStoredDrafts = null
+  storage.delete(DRAFTS_STORAGE_KEY)
+  storage.delete(IN_FLIGHT_STORAGE_KEY)
+  useUIStore.setState({ drafts: {}, draft: '', inFlightSubmissions: {} })
+}

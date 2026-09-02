@@ -9,6 +9,7 @@ describe('parsePairingQr', () => {
     expect(parsePairingQr('https://app.falcondeck.com/?code=abcd-1234.AbCd_-90')).toEqual({
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: 'ABCD-1234.AbCd_-90',
+      requiresRelayConfirmation: false,
     })
   })
 
@@ -18,6 +19,7 @@ describe('parsePairingQr', () => {
     ).toEqual({
       relayUrl: 'https://relay.test',
       pairingCode: 'PAIR-9999',
+      requiresRelayConfirmation: true,
     })
   })
 
@@ -25,6 +27,7 @@ describe('parsePairingQr', () => {
     expect(parsePairingQr('abcd1234')).toEqual({
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: 'ABCD1234',
+      requiresRelayConfirmation: false,
     })
   })
 
@@ -32,6 +35,7 @@ describe('parsePairingQr', () => {
     expect(parsePairingQr('abcd1234.AbCd_-90')).toEqual({
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: 'ABCD1234.AbCd_-90',
+      requiresRelayConfirmation: false,
     })
   })
 
@@ -51,6 +55,10 @@ describe('parsePairingQr', () => {
     ).toBeNull()
     expect(
       parsePairingQr('https://app.falcondeck.com/?code=PAIR-9999&relay=http%3A%2F%2F127.0.0.1%3A8787'),
-    ).toEqual({ relayUrl: 'http://127.0.0.1:8787', pairingCode: 'PAIR-9999' })
+    ).toEqual({
+      relayUrl: 'http://127.0.0.1:8787',
+      pairingCode: 'PAIR-9999',
+      requiresRelayConfirmation: true,
+    })
   })
 })

@@ -20,6 +20,12 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
     isEncrypted: false,
     claimPairing: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
+    setRelayUrl: vi.fn((relayUrl: string) => {
+      relayState.relayUrl = relayUrl
+    }),
+    setPairingCode: vi.fn((pairingCode: string) => {
+      relayState.pairingCode = pairingCode
+    }),
     _callRpc: vi.fn().mockImplementation(
       (_method: string, params: { notifications?: { enabled?: boolean } }) =>
         Promise.resolve({ notifications: params.notifications }),
@@ -98,7 +104,7 @@ vi.mock('expo-router', () => {
 })
 
 vi.mock('expo-camera', () => ({
-  CameraView: () => null,
+  CameraView: (props: Record<string, unknown>) => React.createElement('CameraView', props),
   useCameraPermissions: () => [{ granted: true }, vi.fn().mockResolvedValue({ granted: true })],
 }))
 
@@ -231,6 +237,35 @@ describe('mobile app screens', () => {
     expect(text).toContain('or enter the code')
     expect(text).toContain('Just looking around?')
     expect(text).toContain('Explore demo workspace')
+  })
+
+  it('requires an explicit review before a scanned QR can change the relay', async () => {
+    const claimPairing = vi.fn().mockResolvedValue(undefined)
+    useRelayStore.getState().claimPairing = claimPairing
+    const renderer = renderComponent(<PairScreen />)
+
+    await act(async () => {
+      renderer.root.find((node) => node.props.label === 'Scan QR code').props.onPress()
+    })
+    act(() => {
+      renderer.root.findByType('CameraView' as never).props.onBarcodeScanned({
+        data: 'https://app.falcondeck.com/?code=PAIR-9999&relay=https%3A%2F%2Frelay.test',
+      })
+    })
+
+    expect(textOf(renderer)).toContain('Review self-hosted relay')
+    expect(textOf(renderer)).toContain('relay.test')
+    expect(useRelayStore.getState().relayUrl).toBe('https://connect.falcondeck.com')
+    expect(claimPairing).not.toHaveBeenCalled()
+
+    await act(async () => {
+      renderer.root.find(
+        (node) => node.props.accessibilityLabel === 'Use scanned self-hosted relay',
+      ).props.onPress()
+    })
+
+    expect(useRelayStore.getState().relayUrl).toBe('https://relay.test')
+    expect(claimPairing).toHaveBeenCalledTimes(1)
   })
 
   it('enters the demo workspace without pairing', () => {

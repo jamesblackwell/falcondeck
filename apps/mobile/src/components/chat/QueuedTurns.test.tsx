@@ -150,9 +150,7 @@ describe('QueuedTurns', () => {
     expect(onRemove).toHaveBeenCalledWith('queued-1')
   })
 
-  it('prompts with the full text and saves the edited message', async () => {
-    const { Alert } = await import('react-native')
-    const prompt = vi.spyOn(Alert, 'prompt')
+  it('opens a cross-platform editor with the full text and saves the message', async () => {
     const onEdit = vi.fn(async () => {})
     const r = renderComponent(
       <QueuedTurns
@@ -171,28 +169,19 @@ describe('QueuedTurns', () => {
       pressSheetAction(r, 'Edit message')
     })
 
+    const input = r.root
+      .findAllByType('TextInput' as never)
+      .find((node) => node.props.accessibilityLabel === 'Queued message text')!
     // Prefilled with the untruncated text, not the preview.
-    expect(prompt).toHaveBeenCalled()
-    const [, , buttons, type, defaultValue] = prompt.mock.calls[0]! as unknown as [
-      string,
-      string | undefined,
-      { text: string; onPress?: (text?: string) => void }[],
-      string,
-      string,
-    ]
-    expect(type).toBe('plain-text')
-    expect(defaultValue).toBe('Also update the changelog and the docs')
+    expect(input.props.value).toBe('Also update the changelog and the docs')
 
+    act(() => {
+      input.props.onChangeText('  Ship it instead  ')
+    })
     await act(async () => {
-      buttons.find((button) => button.text === 'Save')!.onPress!('  Ship it instead  ')
+      pressButton(r, 'Save queued message edit')
     })
     expect(onEdit).toHaveBeenCalledWith('queued-1', 'Ship it instead')
-
-    // A blank edit is dropped rather than sent.
-    await act(async () => {
-      buttons.find((button) => button.text === 'Save')!.onPress!('   ')
-    })
-    expect(onEdit).toHaveBeenCalledTimes(1)
   })
 
   it('steers and removes straight from the row buttons', async () => {

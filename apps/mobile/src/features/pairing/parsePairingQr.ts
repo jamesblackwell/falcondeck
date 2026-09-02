@@ -7,6 +7,7 @@ import {
 export type ParsedPairingQr = {
   relayUrl: string
   pairingCode: string
+  requiresRelayConfirmation: boolean
 }
 
 function normalizePairingCode(value: string) {
@@ -31,6 +32,7 @@ function parseFromUrl(value: string) {
     return {
       relayUrl,
       pairingCode: code,
+      requiresRelayConfirmation: relayUrl !== DEFAULT_REMOTE_RELAY_URL,
     } satisfies ParsedPairingQr
   } catch {
     return null
@@ -52,6 +54,7 @@ export function parsePairingQr(value: string): ParsedPairingQr | null {
     return {
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: normalizePairingCode(trimmed),
+      requiresRelayConfirmation: false,
     }
   }
 

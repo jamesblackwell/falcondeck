@@ -47,6 +47,12 @@ export const darkColors = {
   warning: { default: '#fbbf24', muted: 'rgba(251, 191, 36, 0.12)' },
   danger: { default: '#f87171', muted: 'rgba(248, 113, 113, 0.12)' },
   info: { default: '#60a5fa', muted: 'rgba(96, 165, 250, 0.12)' },
+  // Dot for a thread whose turn finished but has not been read. It has to stay
+  // clearly apart from the running marker, which is the accent, so each palette
+  // picks whichever of its info or success hue the accent does not occupy —
+  // green where the accent is not green, blue where it is. Mirrors --fd-unread
+  // in packages/ui/src/styles.css.
+  unread: '#60a5fa',
   cat: { 1: '#f87171', 2: '#fb923c', 3: '#fbbf24', 4: '#a3e635', 5: '#34d399', 6: '#2dd4bf', 7: '#22d3ee', 8: '#60a5fa', 9: '#818cf8', 10: '#a78bfa', 11: '#e879f9', 12: '#f472b6' },
 
   // Diff
@@ -107,6 +113,7 @@ export const lightColors: typeof darkColors = {
   warning: { default: '#b45309', muted: 'rgba(180, 83, 9, 0.10)' },
   danger: { default: '#dc2626', muted: 'rgba(220, 38, 38, 0.08)' },
   info: { default: '#2563eb', muted: 'rgba(37, 99, 235, 0.08)' },
+  unread: '#2563eb',
   cat: { 1: '#dc2626', 2: '#ea580c', 3: '#b45309', 4: '#65a30d', 5: '#059669', 6: '#0f766e', 7: '#0891b2', 8: '#2563eb', 9: '#4f46e5', 10: '#7c3aed', 11: '#c026d3', 12: '#db2777' },
 
   diff: {
@@ -146,6 +153,7 @@ export const gruvboxDarkColors: typeof darkColors = {
   warning: { default: '#fabd2f', muted: 'rgba(250, 189, 47, 0.12)' },
   danger: { default: '#fb4934', muted: 'rgba(251, 73, 52, 0.12)' },
   info: { default: '#83a598', muted: 'rgba(131, 165, 152, 0.12)' },
+  unread: '#83a598',
   cat: { 1: '#fb4934', 2: '#fe8019', 3: '#fabd2f', 4: '#b8bb26', 5: '#8ec07c', 6: '#83a598', 7: '#458588', 8: '#d3869b', 9: '#b16286', 10: '#8f3f71', 11: '#d65d0e', 12: '#689d6a' },
   diff: {
     added: 'rgba(184, 187, 38, 0.12)',
@@ -180,6 +188,7 @@ export const gruvboxLightColors: typeof darkColors = {
   warning: { default: '#b57614', muted: 'rgba(181, 118, 20, 0.12)' },
   danger: { default: '#cc241d', muted: 'rgba(204, 36, 29, 0.10)' },
   info: { default: '#076678', muted: 'rgba(7, 102, 120, 0.10)' },
+  unread: '#076678',
   cat: { 1: '#cc241d', 2: '#d65d0e', 3: '#b57614', 4: '#79740e', 5: '#427b58', 6: '#076678', 7: '#458588', 8: '#b16286', 9: '#8f3f71', 10: '#9d0006', 11: '#af3a03', 12: '#689d6a' },
   diff: {
     added: 'rgba(121, 116, 14, 0.12)',
@@ -216,6 +225,7 @@ export const tokyoNightDarkColors: typeof darkColors = {
   warning: { default: '#e0af68', muted: 'rgba(224, 175, 104, 0.12)' },
   danger: { default: '#f7768e', muted: 'rgba(247, 118, 142, 0.12)' },
   info: { default: '#7dcfff', muted: 'rgba(125, 207, 255, 0.12)' },
+  unread: '#9ece6a',
   cat: { 1: '#f7768e', 2: '#ff9e64', 3: '#e0af68', 4: '#9ece6a', 5: '#73daca', 6: '#2ac3de', 7: '#7dcfff', 8: '#7aa2f7', 9: '#bb9af7', 10: '#c0caf5', 11: '#ff007c', 12: '#9d7cd8' },
   diff: {
     added: 'rgba(158, 206, 106, 0.12)',
@@ -250,6 +260,7 @@ export const tokyoNightLightColors: typeof darkColors = {
   warning: { default: '#8f5e15', muted: 'rgba(143, 94, 21, 0.12)' },
   danger: { default: '#c53963', muted: 'rgba(197, 57, 99, 0.10)' },
   info: { default: '#007197', muted: 'rgba(0, 113, 151, 0.10)' },
+  unread: '#587539',
   cat: { 1: '#c53963', 2: '#d15a00', 3: '#8f5e15', 4: '#587539', 5: '#387268', 6: '#007197', 7: '#2e7de9', 8: '#2450b0', 9: '#7847bd', 10: '#5a30c2', 11: '#b8336a', 12: '#8c6c3e' },
   diff: {
     added: 'rgba(88, 117, 57, 0.12)',
@@ -286,6 +297,7 @@ export const catppuccinDarkColors: typeof darkColors = {
   warning: { default: '#f9e2af', muted: 'rgba(249, 226, 175, 0.12)' },
   danger: { default: '#f38ba8', muted: 'rgba(243, 139, 168, 0.12)' },
   info: { default: '#89dceb', muted: 'rgba(137, 220, 235, 0.12)' },
+  unread: '#a6e3a1',
   cat: { 1: '#f5e0dc', 2: '#f2cdcd', 3: '#f5c2e7', 4: '#cba6f7', 5: '#f38ba8', 6: '#eba0ac', 7: '#fab387', 8: '#f9e2af', 9: '#a6e3a1', 10: '#94e2d5', 11: '#89dceb', 12: '#74c7ec' },
   diff: {
     added: 'rgba(166, 227, 161, 0.12)',
@@ -320,6 +332,7 @@ export const catppuccinLightColors: typeof darkColors = {
   warning: { default: '#a86e12', muted: 'rgba(168, 110, 18, 0.11)' },
   danger: { default: '#d20f39', muted: 'rgba(210, 15, 57, 0.11)' },
   info: { default: '#0c7a8f', muted: 'rgba(12, 122, 143, 0.11)' },
+  unread: '#3d8f2b',
   cat: { 1: '#dc8a78', 2: '#dd7878', 3: '#ea76cb', 4: '#8839ef', 5: '#d20f39', 6: '#e64553', 7: '#fe640b', 8: '#df8e1d', 9: '#40a02b', 10: '#179299', 11: '#04a5e5', 12: '#209fb5' },
   diff: {
     added: 'rgba(61, 143, 43, 0.11)',
@@ -356,6 +369,7 @@ export const nordDarkColors: typeof darkColors = {
   warning: { default: '#ebcb8b', muted: 'rgba(235, 203, 139, 0.12)' },
   danger: { default: '#cb7f88', muted: 'rgba(203, 127, 136, 0.12)' },
   info: { default: '#81a1c1', muted: 'rgba(129, 161, 193, 0.12)' },
+  unread: '#a3be8c',
   cat: { 1: '#bf616a', 2: '#d08770', 3: '#ebcb8b', 4: '#a3be8c', 5: '#8fbcbb', 6: '#88c0d0', 7: '#81a1c1', 8: '#5e81ac', 9: '#b48ead', 10: '#eceff4', 11: '#d8dee9', 12: '#e5e9f0' },
   diff: {
     added: 'rgba(163, 190, 140, 0.12)',
@@ -390,6 +404,7 @@ export const nordLightColors: typeof darkColors = {
   warning: { default: '#8a6414', muted: 'rgba(138, 100, 20, 0.11)' },
   danger: { default: '#a3383f', muted: 'rgba(163, 56, 63, 0.11)' },
   info: { default: '#3d6a86', muted: 'rgba(61, 106, 134, 0.11)' },
+  unread: '#55702f',
   cat: { 1: '#a3383f', 2: '#b56a46', 3: '#8a6414', 4: '#55702f', 5: '#3d6a86', 6: '#4c6f96', 7: '#5e81ac', 8: '#3b4252', 9: '#8f6f97', 10: '#2e3440', 11: '#434c5e', 12: '#4c566a' },
   diff: {
     added: 'rgba(85, 112, 47, 0.11)',
@@ -426,6 +441,7 @@ export const draculaDarkColors: typeof darkColors = {
   warning: { default: '#ffb86c', muted: 'rgba(255, 184, 108, 0.12)' },
   danger: { default: '#ff5555', muted: 'rgba(255, 85, 85, 0.12)' },
   info: { default: '#8be9fd', muted: 'rgba(139, 233, 253, 0.12)' },
+  unread: '#50fa7b',
   cat: { 1: '#ff5555', 2: '#ffb86c', 3: '#f1fa8c', 4: '#50fa7b', 5: '#8be9fd', 6: '#bd93f9', 7: '#ff79c6', 8: '#6272a4', 9: '#ff6e6e', 10: '#a4ffff', 11: '#caa9fa', 12: '#f8f8f2' },
   diff: {
     added: 'rgba(80, 250, 123, 0.12)',
@@ -460,6 +476,7 @@ export const draculaLightColors: typeof darkColors = {
   warning: { default: '#a34d14', muted: 'rgba(163, 77, 20, 0.11)' },
   danger: { default: '#cb3a2a', muted: 'rgba(203, 58, 42, 0.11)' },
   info: { default: '#036a96', muted: 'rgba(3, 106, 150, 0.11)' },
+  unread: '#14710a',
   cat: { 1: '#cb3a2a', 2: '#a34d14', 3: '#8a6800', 4: '#14710a', 5: '#036a96', 6: '#644ac9', 7: '#c41c7a', 8: '#4a4e6a', 9: '#b42318', 10: '#0f6f8a', 11: '#4f39a8', 12: '#1f1f1f' },
   diff: {
     added: 'rgba(20, 113, 10, 0.11)',
@@ -496,6 +513,7 @@ export const solarizedDarkColors: typeof darkColors = {
   warning: { default: '#b58900', muted: 'rgba(181, 137, 0, 0.12)' },
   danger: { default: '#e5534e', muted: 'rgba(229, 83, 78, 0.12)' },
   info: { default: '#2aa198', muted: 'rgba(42, 161, 152, 0.12)' },
+  unread: '#859900',
   cat: { 1: '#dc322f', 2: '#cb4b16', 3: '#b58900', 4: '#859900', 5: '#2aa198', 6: '#268bd2', 7: '#6c71c4', 8: '#d33682', 9: '#93a1a1', 10: '#eee8d5', 11: '#fdf6e3', 12: '#2aa198' },
   diff: {
     added: 'rgba(133, 153, 0, 0.12)',
@@ -530,6 +548,7 @@ export const solarizedLightColors: typeof darkColors = {
   warning: { default: '#8a6800', muted: 'rgba(138, 104, 0, 0.11)' },
   danger: { default: '#c62d2a', muted: 'rgba(198, 45, 42, 0.11)' },
   info: { default: '#1f7d76', muted: 'rgba(31, 125, 118, 0.11)' },
+  unread: '#5f6f00',
   cat: { 1: '#c62d2a', 2: '#cb4b16', 3: '#8a6800', 4: '#5f6f00', 5: '#1f7d76', 6: '#1a6c9c', 7: '#6c71c4', 8: '#d33682', 9: '#5b7176', 10: '#002b36', 11: '#073642', 12: '#268bd2' },
   diff: {
     added: 'rgba(95, 111, 0, 0.11)',
@@ -566,6 +585,7 @@ export const oneDarkColors: typeof darkColors = {
   warning: { default: '#e5c07b', muted: 'rgba(229, 192, 123, 0.12)' },
   danger: { default: '#e06c75', muted: 'rgba(224, 108, 117, 0.12)' },
   info: { default: '#56b6c2', muted: 'rgba(86, 182, 194, 0.12)' },
+  unread: '#98c379',
   cat: { 1: '#e06c75', 2: '#d19a66', 3: '#e5c07b', 4: '#98c379', 5: '#56b6c2', 6: '#61afef', 7: '#c678dd', 8: '#be5046', 9: '#abb2bf', 10: '#c24038', 11: '#528bff', 12: '#a9a1e1' },
   diff: {
     added: 'rgba(152, 195, 121, 0.12)',
@@ -600,6 +620,7 @@ export const oneLightColors: typeof darkColors = {
   warning: { default: '#9a6700', muted: 'rgba(154, 103, 0, 0.11)' },
   danger: { default: '#ca1243', muted: 'rgba(202, 18, 67, 0.11)' },
   info: { default: '#0169a0', muted: 'rgba(1, 105, 160, 0.11)' },
+  unread: '#3f7f3e',
   cat: { 1: '#ca1243', 2: '#c18401', 3: '#9a6700', 4: '#3f7f3e', 5: '#0169a0', 6: '#3568d4', 7: '#a626a4', 8: '#e45649', 9: '#383a42', 10: '#a626a4', 11: '#2450b0', 12: '#0184bc' },
   diff: {
     added: 'rgba(63, 127, 62, 0.11)',
@@ -636,6 +657,7 @@ export const rosePineDarkColors: typeof darkColors = {
   warning: { default: '#f6c177', muted: 'rgba(246, 193, 119, 0.12)' },
   danger: { default: '#eb6f92', muted: 'rgba(235, 111, 146, 0.12)' },
   info: { default: '#7fb4cd', muted: 'rgba(127, 180, 205, 0.12)' },
+  unread: '#9ccfd8',
   cat: { 1: '#eb6f92', 2: '#f6c177', 3: '#ebbcba', 4: '#31748f', 5: '#9ccfd8', 6: '#c4a7e7', 7: '#e0def4', 8: '#908caa', 9: '#ea9a97', 10: '#3e8fb0', 11: '#b4637a', 12: '#fad9a1' },
   diff: {
     added: 'rgba(156, 207, 216, 0.12)',
@@ -670,6 +692,7 @@ export const rosePineLightColors: typeof darkColors = {
   warning: { default: '#a3711a', muted: 'rgba(163, 113, 26, 0.11)' },
   danger: { default: '#b4637a', muted: 'rgba(180, 99, 122, 0.11)' },
   info: { default: '#286983', muted: 'rgba(40, 105, 131, 0.11)' },
+  unread: '#43808c',
   cat: { 1: '#b4637a', 2: '#a3711a', 3: '#d7827e', 4: '#286983', 5: '#56949f', 6: '#907aa9', 7: '#575279', 8: '#6e6a86', 9: '#c17a7e', 10: '#3e8fb0', 11: '#907aa9', 12: '#ea9d34' },
   diff: {
     added: 'rgba(67, 128, 140, 0.11)',
@@ -706,6 +729,7 @@ export const matrixDarkColors: typeof darkColors = {
   warning: { default: '#e0dd72', muted: 'rgba(224, 221, 114, 0.12)' },
   danger: { default: '#ff7373', muted: 'rgba(255, 115, 115, 0.12)' },
   info: { default: '#59bff5', muted: 'rgba(89, 191, 245, 0.12)' },
+  unread: '#59bff5',
   cat: { 1: '#ff7373', 2: '#ffb070', 3: '#e0dd72', 4: '#35f477', 5: '#55d982', 6: '#7dffb0', 7: '#59bff5', 8: '#7ec8ff', 9: '#b4a7ff', 10: '#e0aaff', 11: '#ff8ad4', 12: '#a3e635' },
   diff: {
     added: 'rgba(85, 217, 130, 0.12)',
