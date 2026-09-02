@@ -14,10 +14,9 @@ import {
   decryptJson,
   decryptJsonBatch,
   decodeSecurePairingCode,
-  deriveIdentityKeyPair,
+  destroySessionCrypto,
   encryptJson,
   generateBoxKeyPair,
-  identityPublicKeyToBase64,
   publicKeyToBase64,
   restoreBoxKeyPair,
   secretKeyToBase64,
@@ -25,7 +24,6 @@ import {
   signPairingAuthorityClientBundle,
   verifyPairingAuthorityDaemonBundle,
   verifyPairingPublicKeyBundle,
-  verifySessionKeyMaterial,
   type BoxKeyPair,
   type SessionCryptoState,
 } from './crypto'
@@ -717,9 +715,6 @@ export class RemoteHostClient {
 
           if (update.body.t === 'session-bootstrap') {
             const expectedClientPublicKey = publicKeyToBase64(this.keyPair)
-            const expectedClientIdentityPublicKey = identityPublicKeyToBase64(
-              deriveIdentityKeyPair(this.keyPair),
-            )
             if (update.body.material.client_public_key !== expectedClientPublicKey) {
               // Bootstrap addressed to a different device on this session.
               advanceCursor(update.seq)
@@ -730,14 +725,18 @@ export class RemoteHostClient {
               // and data key; trust is anchored in the pinned daemon identity
               // and this client's own key material, so adopt the material's
               // pairing id instead of pinning the possibly stale one.
-              verifySessionKeyMaterial(update.body.material, {
+              const expectedDaemonPublicKey = this.session.daemonPublicKey
+              const expectedDaemonIdentityPublicKey = this.session.daemonIdentityPublicKey
+              if (!expectedDaemonPublicKey || !expectedDaemonIdentityPublicKey) {
+                throw new Error('Encrypted session bootstrap is missing pinned daemon keys')
+              }
+              const nextCrypto = bootstrapSessionCrypto(this.keyPair, update.body.material, {
                 expectedSessionId: this.session.sessionId,
-                expectedDaemonPublicKey: this.session.daemonPublicKey,
-                expectedDaemonIdentityPublicKey: this.session.daemonIdentityPublicKey,
-                expectedClientPublicKey,
-                expectedClientIdentityPublicKey,
+                expectedDaemonPublicKey,
+                expectedDaemonIdentityPublicKey,
               })
-              this.sessionCrypto = bootstrapSessionCrypto(this.keyPair, update.body.material)
+              destroySessionCrypto(this.sessionCrypto)
+              this.sessionCrypto = nextCrypto
               if (this.bootstrapRetryInterval !== null) {
                 clearInterval(this.bootstrapRetryInterval)
                 this.bootstrapRetryInterval = null
@@ -829,7 +828,15 @@ export class RemoteHostClient {
             envelopes.push(nextUpdate.body.envelope)
             index += 1
           }
-          const decryptedRun = await decryptJsonBatch<unknown>(crypto.dataKey, envelopes)
+          const decryptedRun = await decryptJsonBatch<unknown>(
+            crypto.dataKey,
+            envelopes,
+            (reason) => {
+              this.callbacks.onError?.(
+                reason instanceof Error ? reason.message : 'Failed to decrypt relay update',
+              )
+            },
+          )
           if (flushGeneration !== this.generation || !this.running) return
 
           decryptedRun.forEach((result, runIndex) => {
@@ -837,11 +844,6 @@ export class RemoteHostClient {
             if (result.status === 'rejected') {
               // Decryption failed: leave this update behind the cursor unless
               // a later update succeeds, matching the single-update path.
-              this.callbacks.onError?.(
-                result.reason instanceof Error
-                  ? result.reason.message
-                  : 'Failed to decrypt relay update',
-              )
               return
             }
             advanceCursor(encryptedUpdate.seq)

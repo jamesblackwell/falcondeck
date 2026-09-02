@@ -23,6 +23,7 @@ import type {
   ActiveExtensionThreadFilter,
   ExtensionSidebarFilterDefinition,
   ExtensionSnapshot,
+  LibraryWorkspace,
   ProjectGroup,
   ThreadSortMode,
   ThreadSummary,
@@ -40,12 +41,14 @@ import {
   cn,
 } from "@falcondeck/ui";
 
+import { AddProjectMenu } from "./add-project-menu";
 import { AttentionInbox } from "./attention-inbox";
 import { ExtensionSidebarFilters } from "./extension-sidebar-filters";
 import { ThreadStageFilterMenu } from "./thread-stage-filter-menu";
 import { ThreadSortMenu } from "./thread-sort-menu";
 import {
   AddThreadStageDialog,
+  CloseWorkspaceDialog,
   DeleteThreadDialog,
   RemoveWorkspaceDialog,
   RenameThreadDialog,
@@ -139,6 +142,13 @@ export type WorkspaceSidebarProps = {
   addProjectShortcut?: string[];
   searchShortcut?: string[];
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void;
+  /** Closes a project from the sidebar without forgetting it. */
+  onCloseWorkspace?: (workspaceId: string) => Promise<void> | void;
+  /** When set, closing this project needs a confirm dialog with this copy. */
+  closeWorkspaceReason?: (workspaceId: string) => string | null;
+  /** Closed projects that can be reopened without a folder picker. */
+  libraryWorkspaces?: readonly LibraryWorkspace[];
+  onOpenLibraryWorkspace?: (path: string) => Promise<void> | void;
   /** Theme-backed folder colors keyed by workspace id. */
   workspaceColors?: Record<string, string>;
   onWorkspaceColorChange?: (
@@ -157,6 +167,9 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     collapsed: boolean,
   ) => void;
+  /** When true, the Projects list is folded away. Host-owned like chats collapse. */
+  projectsCollapsed?: boolean;
+  onProjectsCollapsedChange?: (collapsed: boolean) => void;
   /** When true, the Chats list is folded away. Host-owned like project collapse. */
   chatsCollapsed?: boolean;
   onChatsCollapsedChange?: (collapsed: boolean) => void;
@@ -587,6 +600,186 @@ const PinnedThreadList = memo(function PinnedThreadList({
   );
 });
 
+/**
+ * Isolated so toggling the Projects heading does not rebuild every folder
+ * row while the section collapse animation is running.
+ */
+const ProjectGroupList = memo(function ProjectGroupList({
+  orderedGroups,
+  draggingWorkspaceId,
+  dropIndex,
+  onWorkspaceOrderChange,
+  workspaceRowRefs,
+  onWorkspacePointerDown,
+  onWorkspacePointerMove,
+  onWorkspacePointerUp,
+  onWorkspaceClickCapture,
+  visualSelectedWorkspaceId,
+  onSelectWorkspace,
+  onNewThread,
+  onSearchProjectThreads,
+  canOpenWorkspaceContextMenu,
+  onOpenWorkspaceContextMenu,
+  workspaceColors,
+  workspaceHosts,
+  collapsedWorkspaces,
+  onWorkspaceOpenChange,
+  threadSort,
+  visualSelectedThreadId,
+  onSelectThread,
+  onArchiveThread,
+  onArchiveConfirm,
+  onArchiveCancel,
+  pendingArchive,
+  onOpenThreadContextMenu,
+  onRequestRenameThread,
+  nowTick,
+  threadTagsById,
+}: {
+  orderedGroups: ProjectGroup[];
+  draggingWorkspaceId: string | null;
+  dropIndex: number | null;
+  onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
+  workspaceRowRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
+  onWorkspacePointerDown: (
+    workspaceId: string,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
+  onWorkspacePointerMove: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onWorkspacePointerUp: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onWorkspaceClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
+  visualSelectedWorkspaceId: string | null;
+  onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
+  onNewThread?: (workspaceId: string) => void;
+  onSearchProjectThreads?: (workspaceId: string) => void;
+  canOpenWorkspaceContextMenu: boolean;
+  onOpenWorkspaceContextMenu: (
+    workspaceId: string,
+    path: string,
+    position: { x: number; y: number },
+  ) => void;
+  workspaceColors?: Record<string, string>;
+  workspaceHosts?: Record<string, WorkspaceHostBadge>;
+  collapsedWorkspaces: ReadonlySet<string>;
+  onWorkspaceOpenChange: (workspaceId: string, open: boolean) => void;
+  threadSort: ThreadSortMode;
+  visualSelectedThreadId: string | null;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onArchiveThread?: ThreadItemArchiveHandler;
+  onArchiveConfirm?: () => void;
+  onArchiveCancel?: () => void;
+  pendingArchive?: { workspaceId: string; threadId: string } | null;
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
+  onRequestRenameThread?: (args: {
+    workspaceId: string;
+    thread: ThreadSummary;
+  }) => void;
+  nowTick: number;
+  threadTagsById?: Record<string, ThreadTag[]>;
+}) {
+  let remainingIndex = 0;
+  const remainingWorkspaceIds = orderedGroups
+    .map((group) => group.workspace.id)
+    .filter((workspaceId) => workspaceId !== draggingWorkspaceId);
+  const lastRemainingWorkspaceId = remainingWorkspaceIds.at(-1);
+
+  return (
+    <div className="space-y-4">
+      {orderedGroups.map((group) => {
+        const workspaceId = group.workspace.id;
+        const isDragged = draggingWorkspaceId === workspaceId;
+        const showDropBefore =
+          draggingWorkspaceId != null &&
+          !isDragged &&
+          dropIndex === remainingIndex;
+        if (!isDragged) remainingIndex += 1;
+        const dragHandleProps = onWorkspaceOrderChange
+          ? {
+              ref: (node: HTMLDivElement | null) => {
+                if (node) workspaceRowRefs.current.set(workspaceId, node);
+                else workspaceRowRefs.current.delete(workspaceId);
+              },
+              onPointerDown: (event: React.PointerEvent<HTMLDivElement>) =>
+                onWorkspacePointerDown(workspaceId, event),
+              onPointerMove: onWorkspacePointerMove,
+              onPointerUp: onWorkspacePointerUp,
+              onPointerCancel: onWorkspacePointerUp,
+              onClickCapture: onWorkspaceClickCapture,
+              "data-workspace-drag-id": workspaceId,
+              "aria-grabbed": isDragged ? true : undefined,
+              className: cn(
+                "cursor-grab select-none",
+                isDragged && "cursor-grabbing opacity-50",
+              ),
+              style: { touchAction: "none" as const },
+            }
+          : undefined;
+
+        return (
+          <React.Fragment key={workspaceId}>
+            {showDropBefore ? <WorkspaceDropIndicator /> : null}
+            <WorkspaceGroup
+              workspace={group.workspace}
+              host={workspaceHosts?.[workspaceId] ?? null}
+              isSelected={visualSelectedWorkspaceId === workspaceId}
+              onSelect={() =>
+                onSelectWorkspace(
+                  workspaceId,
+                  group.workspace.current_thread_id ??
+                    group.threads[0]?.id ??
+                    null,
+                )
+              }
+              onNewThread={
+                onNewThread ? () => onNewThread(workspaceId) : undefined
+              }
+              onSearchThreads={
+                onSearchProjectThreads
+                  ? () => onSearchProjectThreads(workspaceId)
+                  : undefined
+              }
+              onOpenContextMenu={
+                canOpenWorkspaceContextMenu
+                  ? (position) =>
+                      onOpenWorkspaceContextMenu(
+                        workspaceId,
+                        group.workspace.path,
+                        position,
+                      )
+                  : undefined
+              }
+              color={workspaceColors?.[workspaceId] ?? null}
+              dragHandleProps={dragHandleProps}
+              open={!collapsedWorkspaces.has(workspaceId)}
+              onOpenChange={(open) => onWorkspaceOpenChange(workspaceId, open)}
+            >
+              <ThreadList
+                group={group}
+                sortMode={threadSort}
+                selectedThreadId={visualSelectedThreadId}
+                onSelectThread={onSelectThread}
+                onArchiveThread={onArchiveThread}
+                onArchiveConfirm={onArchiveConfirm}
+                onArchiveCancel={onArchiveCancel}
+                pendingArchive={pendingArchive}
+                onOpenThreadContextMenu={onOpenThreadContextMenu}
+                onRequestRenameThread={onRequestRenameThread}
+                nowTick={nowTick}
+                threadTagsById={threadTagsById}
+              />
+            </WorkspaceGroup>
+            {draggingWorkspaceId != null &&
+            workspaceId === lastRemainingWorkspaceId &&
+            dropIndex === remainingWorkspaceIds.length ? (
+              <WorkspaceDropIndicator />
+            ) : null}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+});
+
 export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups,
   workspaceHosts,
@@ -612,6 +805,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   addProjectShortcut,
   searchShortcut,
   onRemoveWorkspace,
+  onCloseWorkspace,
+  closeWorkspaceReason,
+  libraryWorkspaces = [],
+  onOpenLibraryWorkspace,
   workspaceColors,
   onWorkspaceColorChange,
   threadSort = "last_updated",
@@ -619,6 +816,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onWorkspaceOrderChange,
   collapsedWorkspaceIds,
   onWorkspaceCollapsedChange,
+  projectsCollapsed: projectsCollapsedProp,
+  onProjectsCollapsedChange,
   chatsCollapsed: chatsCollapsedProp,
   onChatsCollapsedChange,
   isAddingProject = false,
@@ -656,6 +855,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     uncontrolledCollapsedWorkspaceIds,
     setUncontrolledCollapsedWorkspaceIds,
   ] = useState<Set<string>>(() => new Set());
+  const [uncontrolledProjectsCollapsed, setUncontrolledProjectsCollapsed] =
+    useState(false);
   const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
     useState(false);
   const [selectedExtensionFilterValues, setSelectedExtensionFilterValues] =
@@ -701,6 +902,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   } | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false);
+  const [closeTarget, setCloseTarget] = useState<{
+    workspaceId: string;
+    path: string;
+    reason: string | null;
+  } | null>(null);
+  const [closeError, setCloseError] = useState<string | null>(null);
+  const [isClosingWorkspace, setIsClosingWorkspace] = useState(false);
   const [createStageTarget, setCreateStageTarget] = useState<{
     workspaceId: string;
     thread: ThreadSummary;
@@ -888,13 +1096,28 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     ],
   );
 
-  const allProjectsCollapsed =
-    workspaceOrder.length > 0 &&
-    workspaceOrder.every((workspaceId) => collapsedWorkspaces.has(workspaceId));
+  const projectsCollapsed = onProjectsCollapsedChange
+    ? Boolean(projectsCollapsedProp)
+    : uncontrolledProjectsCollapsed;
 
   const chatsCollapsed = onChatsCollapsedChange
     ? Boolean(chatsCollapsedProp)
     : uncontrolledChatsCollapsed;
+
+  const handleProjectsCollapsedChange = useCallback(
+    (collapsed: boolean) => {
+      if (onProjectsCollapsedChange) {
+        onProjectsCollapsedChange(collapsed);
+        return;
+      }
+      setUncontrolledProjectsCollapsed(collapsed);
+    },
+    [onProjectsCollapsedChange],
+  );
+
+  const handleToggleProjects = useCallback(() => {
+    handleProjectsCollapsedChange(!projectsCollapsed);
+  }, [handleProjectsCollapsedChange, projectsCollapsed]);
 
   const handleChatsCollapsedChange = useCallback(
     (collapsed: boolean) => {
@@ -926,24 +1149,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     },
     [onWorkspaceCollapsedChange],
   );
-
-  const handleToggleAllProjects = useCallback(() => {
-    const collapse = !allProjectsCollapsed;
-    if (onWorkspaceCollapsedChange) {
-      workspaceOrder.forEach((workspaceId) => {
-        onWorkspaceCollapsedChange(workspaceId, collapse);
-      });
-      return;
-    }
-    setUncontrolledCollapsedWorkspaceIds((current) => {
-      const next = new Set(current);
-      workspaceOrder.forEach((workspaceId) => {
-        if (collapse) next.add(workspaceId);
-        else next.delete(workspaceId);
-      });
-      return next;
-    });
-  }, [allProjectsCollapsed, onWorkspaceCollapsedChange, workspaceOrder]);
 
   const updateWorkspaceDropIndex = useCallback(
     (clientY: number, workspaceId: string) => {
@@ -1440,7 +1645,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
-      if (!onRemoveWorkspace && !onWorkspaceColorChange) return;
+      if (!onRemoveWorkspace && !onCloseWorkspace && !onWorkspaceColorChange)
+        return;
       setThreadContextMenu(null);
       setWorkspaceContextMenu({
         workspaceId,
@@ -1449,7 +1655,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         y: position.y,
       });
     },
-    [onRemoveWorkspace, onWorkspaceColorChange],
+    [onCloseWorkspace, onRemoveWorkspace, onWorkspaceColorChange],
   );
 
   const handleSetWorkspaceColor = useCallback(
@@ -1461,6 +1667,41 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     },
     [onWorkspaceColorChange, workspaceContextMenu],
   );
+
+  const requestCloseWorkspace = useCallback(() => {
+    if (!workspaceContextMenu || !onCloseWorkspace) return;
+    const { workspaceId, path } = workspaceContextMenu;
+    setWorkspaceContextMenu(null);
+    const reason = closeWorkspaceReason?.(workspaceId) ?? null;
+    if (reason) {
+      setCloseError(null);
+      setCloseTarget({ workspaceId, path, reason });
+      return;
+    }
+    void Promise.resolve(onCloseWorkspace(workspaceId)).catch(() => {});
+  }, [closeWorkspaceReason, onCloseWorkspace, workspaceContextMenu]);
+
+  const closeCloseDialog = useCallback(() => {
+    if (isClosingWorkspace) return;
+    setCloseTarget(null);
+    setCloseError(null);
+  }, [isClosingWorkspace]);
+
+  const handleConfirmCloseWorkspace = useCallback(async () => {
+    if (!closeTarget || !onCloseWorkspace) return;
+    setIsClosingWorkspace(true);
+    setCloseError(null);
+    try {
+      await onCloseWorkspace(closeTarget.workspaceId);
+      setCloseTarget(null);
+    } catch (error) {
+      setCloseError(
+        error instanceof Error ? error.message : "Failed to close project",
+      );
+    } finally {
+      setIsClosingWorkspace(false);
+    }
+  }, [closeTarget, onCloseWorkspace]);
 
   const openRemoveDialog = useCallback(() => {
     if (!workspaceContextMenu) return;
@@ -1862,35 +2103,36 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               gutter is pr-2. */}
           <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-2">
             <h2 id="fd-projects-heading">
-              <button
-                type="button"
-                className={cn(
-                  "group/projects",
-                  SIDEBAR_SECTION_HEADING_BUTTON_CLASS,
-                )}
-                onClick={handleToggleAllProjects}
-                disabled={workspaceOrder.length === 0}
-                aria-expanded={!allProjectsCollapsed}
-                aria-label={
-                  allProjectsCollapsed
-                    ? "Expand all projects"
-                    : "Collapse all projects"
-                }
-                title={
-                  allProjectsCollapsed
-                    ? "Expand all projects"
-                    : "Collapse all projects"
-                }
-              >
-                Projects
-                <ChevronDown
-                  aria-hidden="true"
+              {orderedGroups.length > 0 ? (
+                <button
+                  type="button"
                   className={cn(
-                    "absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 opacity-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)] group-hover/projects:opacity-100 group-focus-visible/projects:opacity-100",
-                    allProjectsCollapsed && "-rotate-90",
+                    "group/projects",
+                    SIDEBAR_SECTION_HEADING_BUTTON_CLASS,
                   )}
-                />
-              </button>
+                  onClick={handleToggleProjects}
+                  aria-expanded={!projectsCollapsed}
+                  aria-label={
+                    projectsCollapsed ? "Expand projects" : "Collapse projects"
+                  }
+                  title={
+                    projectsCollapsed ? "Expand projects" : "Collapse projects"
+                  }
+                >
+                  Projects
+                  <ChevronDown
+                    aria-hidden="true"
+                    className={cn(
+                      "absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 opacity-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)] group-hover/projects:opacity-100 group-focus-visible/projects:opacity-100",
+                      projectsCollapsed && "-rotate-90",
+                    )}
+                  />
+                </button>
+              ) : (
+                <span className={SIDEBAR_SECTION_HEADING_LABEL_CLASS}>
+                  Projects
+                </span>
+              )}
             </h2>
             <div className="flex items-center gap-1">
               {dedicatedStageFilter ? (
@@ -1916,139 +2158,84 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               ) : null}
               {/* Adding a project belongs beside the projects it adds to. */}
               {onAddProject ? (
-                <Tooltip label="Add project" shortcut={addProjectShortcut}>
-                  <button
-                    type="button"
-                    className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
-                    onClick={onAddProject}
-                    disabled={isAddingProject}
-                    aria-label="Add project"
-                    aria-busy={isAddingProject}
-                  >
-                    {isAddingProject ? (
-                      <ActivityDiamond size="sm" tone="current" />
-                    ) : (
-                      <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                </Tooltip>
+                libraryWorkspaces.length > 0 && onOpenLibraryWorkspace ? (
+                  <AddProjectMenu
+                    libraryWorkspaces={libraryWorkspaces}
+                    onOpenLibraryWorkspace={onOpenLibraryWorkspace}
+                    onAddProject={onAddProject}
+                    isAddingProject={isAddingProject}
+                    shortcut={addProjectShortcut}
+                  />
+                ) : (
+                  <Tooltip label="Add project" shortcut={addProjectShortcut}>
+                    <button
+                      type="button"
+                      className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
+                      onClick={onAddProject}
+                      disabled={isAddingProject}
+                      aria-label="Add project"
+                      aria-busy={isAddingProject}
+                    >
+                      {isAddingProject ? (
+                        <ActivityDiamond size="sm" tone="current" />
+                      ) : (
+                        <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </Tooltip>
+                )
               ) : null}
             </div>
           </div>
-          <div className="space-y-4">
-            {(() => {
-              let remainingIndex = 0;
-              const remainingWorkspaceIds = orderedGroups
-                .map((group) => group.workspace.id)
-                .filter((workspaceId) => workspaceId !== draggingWorkspaceId);
-              const lastRemainingWorkspaceId = remainingWorkspaceIds.at(-1);
-              return orderedGroups.map((group) => {
-                const workspaceId = group.workspace.id;
-                const isDragged = draggingWorkspaceId === workspaceId;
-                const showDropBefore =
-                  draggingWorkspaceId != null &&
-                  !isDragged &&
-                  dropIndex === remainingIndex;
-                if (!isDragged) remainingIndex += 1;
-                const dragHandleProps = onWorkspaceOrderChange
-                  ? {
-                      ref: (node: HTMLDivElement | null) => {
-                        if (node)
-                          workspaceRowRefs.current.set(workspaceId, node);
-                        else workspaceRowRefs.current.delete(workspaceId);
-                      },
-                      onPointerDown: (
-                        event: React.PointerEvent<HTMLDivElement>,
-                      ) => handleWorkspacePointerDown(workspaceId, event),
-                      onPointerMove: handleWorkspacePointerMove,
-                      onPointerUp: finishWorkspaceDrag,
-                      onPointerCancel: finishWorkspaceDrag,
-                      onClickCapture: handleWorkspaceClickCapture,
-                      "data-workspace-drag-id": workspaceId,
-                      "aria-grabbed": isDragged ? true : undefined,
-                      className: cn(
-                        "cursor-grab select-none",
-                        isDragged && "cursor-grabbing opacity-50",
-                      ),
-                      style: { touchAction: "none" },
-                    }
-                  : undefined;
-
-                return (
-                  <React.Fragment key={workspaceId}>
-                    {showDropBefore ? <WorkspaceDropIndicator /> : null}
-                    <WorkspaceGroup
-                      workspace={group.workspace}
-                      host={workspaceHosts?.[workspaceId] ?? null}
-                      isSelected={visualSelectedWorkspaceId === workspaceId}
-                      onSelect={() =>
-                        handleSelectWorkspace(
-                          workspaceId,
-                          groupMetadata.get(workspaceId)?.initialThreadId ??
-                            null,
-                        )
-                      }
-                      onNewThread={
-                        onNewThread
-                          ? () => handleNewThread(workspaceId)
-                          : undefined
-                      }
-                      onSearchThreads={
-                        onSearchProjectThreads
-                          ? () => onSearchProjectThreads(workspaceId)
-                          : undefined
-                      }
-                      onOpenContextMenu={
-                        onRemoveWorkspace || onWorkspaceColorChange
-                          ? (position) =>
-                              handleOpenWorkspaceContextMenu(
-                                workspaceId,
-                                group.workspace.path,
-                                position,
-                              )
-                          : undefined
-                      }
-                      color={workspaceColors?.[workspaceId] ?? null}
-                      dragHandleProps={dragHandleProps}
-                      open={!collapsedWorkspaces.has(workspaceId)}
-                      onOpenChange={(open) =>
-                        handleWorkspaceOpenChange(workspaceId, open)
-                      }
-                    >
-                      <ThreadList
-                        group={group}
-                        sortMode={threadSort}
-                        selectedThreadId={visualSelectedThreadId}
-                        onSelectThread={handleSelectThread}
-                        onArchiveThread={requestArchiveConfirm}
-                        onArchiveConfirm={confirmArchive}
-                        onArchiveCancel={cancelArchiveConfirm}
-                        pendingArchive={pendingArchive}
-                        onOpenThreadContextMenu={handleOpenThreadContextMenu}
-                        onRequestRenameThread={handleRequestRenameThread}
-                        nowTick={nowTick}
-                        threadTagsById={threadTagsById}
-                      />
-                    </WorkspaceGroup>
-                    {draggingWorkspaceId != null &&
-                    workspaceId === lastRemainingWorkspaceId &&
-                    dropIndex === remainingWorkspaceIds.length ? (
-                      <WorkspaceDropIndicator />
-                    ) : null}
-                  </React.Fragment>
-                );
-              });
-            })()}
-            {orderedGroups.length === 0 && chatGroups.length === 0 ? (
-              <EmptyState
-                icon={
-                  onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined
-                }
-                title={emptyState.title}
-                description={emptyState.description}
+          <Collapsible.Root open={!projectsCollapsed}>
+            <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+              <ProjectGroupList
+                orderedGroups={orderedGroups}
+                draggingWorkspaceId={draggingWorkspaceId}
+                dropIndex={dropIndex}
+                onWorkspaceOrderChange={onWorkspaceOrderChange}
+                workspaceRowRefs={workspaceRowRefs}
+                onWorkspacePointerDown={handleWorkspacePointerDown}
+                onWorkspacePointerMove={handleWorkspacePointerMove}
+                onWorkspacePointerUp={finishWorkspaceDrag}
+                onWorkspaceClickCapture={handleWorkspaceClickCapture}
+                visualSelectedWorkspaceId={visualSelectedWorkspaceId}
+                onSelectWorkspace={handleSelectWorkspace}
+                onNewThread={onNewThread ? handleNewThread : undefined}
+                onSearchProjectThreads={onSearchProjectThreads}
+                canOpenWorkspaceContextMenu={Boolean(
+                  onRemoveWorkspace ||
+                    onCloseWorkspace ||
+                    onWorkspaceColorChange,
+                )}
+                onOpenWorkspaceContextMenu={handleOpenWorkspaceContextMenu}
+                workspaceColors={workspaceColors}
+                workspaceHosts={workspaceHosts}
+                collapsedWorkspaces={collapsedWorkspaces}
+                onWorkspaceOpenChange={handleWorkspaceOpenChange}
+                threadSort={threadSort}
+                visualSelectedThreadId={visualSelectedThreadId}
+                onSelectThread={handleSelectThread}
+                onArchiveThread={requestArchiveConfirm}
+                onArchiveConfirm={confirmArchive}
+                onArchiveCancel={cancelArchiveConfirm}
+                pendingArchive={pendingArchive}
+                onOpenThreadContextMenu={handleOpenThreadContextMenu}
+                onRequestRenameThread={handleRequestRenameThread}
+                nowTick={nowTick}
+                threadTagsById={threadTagsById}
               />
-            ) : null}
-          </div>
+            </Collapsible.Content>
+          </Collapsible.Root>
+          {orderedGroups.length === 0 && chatGroups.length === 0 ? (
+            <EmptyState
+              icon={
+                onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined
+              }
+              title={emptyState.title}
+              description={emptyState.description}
+            />
+          ) : null}
         </section>
         {onNewChat || chatEntries.length > 0 ? (
           <section aria-labelledby="fd-chats-heading" className="mt-4">
@@ -2210,7 +2397,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             : null
         }
         onSetColor={onWorkspaceColorChange ? handleSetWorkspaceColor : undefined}
+        onCloseFromSidebar={
+          onCloseWorkspace ? requestCloseWorkspace : undefined
+        }
         onRemove={onRemoveWorkspace ? openRemoveDialog : undefined}
+      />
+      <CloseWorkspaceDialog
+        target={closeTarget}
+        reason={closeTarget?.reason ?? null}
+        error={closeError}
+        pending={isClosingWorkspace}
+        onClose={closeCloseDialog}
+        onConfirm={handleConfirmCloseWorkspace}
       />
       <RemoveWorkspaceDialog
         target={removeTarget}

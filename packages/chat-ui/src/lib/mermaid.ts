@@ -15,7 +15,6 @@ const RENDER_TIMEOUT_MS = 12_000
 
 let mermaidPromise: Promise<MermaidApi> | null = null
 let renderChain: Promise<void> = Promise.resolve()
-let diagramSeq = 0
 
 function mermaidApiFromModule(module: unknown): MermaidApi {
   const record = module as { default?: unknown }
@@ -37,9 +36,14 @@ function mermaidApiFromModule(module: unknown): MermaidApi {
   return api
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  onTimeout: () => void,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
+      onTimeout()
       reject(new Error('Could not render diagram'))
     }, ms)
     promise.then(
@@ -106,8 +110,20 @@ export function loadMermaid(): Promise<MermaidApi> {
 }
 
 export function nextMermaidId(): string {
-  diagramSeq += 1
-  return `fdm${diagramSeq}`
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return `fdm-${globalThis.crypto.randomUUID()}`
+  }
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') {
+    throw new Error('Secure diagram identifiers are unavailable')
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16))
+  return `fdm-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function removeMermaidArtifacts(id: string): void {
+  document.getElementById(id)?.remove()
+  document.getElementById(`d${id}`)?.remove()
+  document.getElementById(`i${id}`)?.remove()
 }
 
 export async function renderMermaidSvg(
@@ -115,18 +131,29 @@ export async function renderMermaidSvg(
   palette: MermaidPalette = readMermaidPalette(),
 ): Promise<string> {
   const mermaid = await loadMermaid()
-  return enqueueMermaidRender(() =>
-    withTimeout(
-      (async () => {
-        mermaid.initialize(mermaidRenderOptions(palette))
-        const result = await mermaid.render(nextMermaidId(), source)
-        const svg = result?.svg
-        if (typeof svg !== 'string' || !svg.includes('<svg')) {
-          throw new Error('Could not render diagram')
-        }
-        return svg
-      })(),
-      RENDER_TIMEOUT_MS,
-    ),
-  )
+  return enqueueMermaidRender(async () => {
+    const id = nextMermaidId()
+    const render = (async () => {
+      mermaid.initialize(mermaidRenderOptions(palette))
+      const result = await mermaid.render(id, source)
+      const svg = result?.svg
+      if (typeof svg !== 'string' || !svg.includes('<svg')) {
+        throw new Error('Could not render diagram')
+      }
+      return svg
+    })()
+    // Mermaid normally removes its temporary div. Clean all documented id
+    // variants both immediately and if a timed-out render settles later.
+    void render.then(
+      () => removeMermaidArtifacts(id),
+      () => removeMermaidArtifacts(id),
+    )
+    try {
+      return await withTimeout(render, RENDER_TIMEOUT_MS, () =>
+        removeMermaidArtifacts(id),
+      )
+    } finally {
+      removeMermaidArtifacts(id)
+    }
+  })
 }

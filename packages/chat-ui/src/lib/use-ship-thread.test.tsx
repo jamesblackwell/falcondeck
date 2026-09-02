@@ -1,7 +1,12 @@
 import { act, render, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { GitStatusResponse, ShipThreadMode, ThreadSummary } from "@falcondeck/client-core";
+import type {
+  GitStatusResponse,
+  ShipThreadMode,
+  ShipThreadResponse,
+  ThreadSummary,
+} from "@falcondeck/client-core";
 
 import { useShipThread, type UseShipThreadOptions } from "./use-ship-thread";
 
@@ -73,6 +78,7 @@ function setup(options: Partial<UseShipThreadOptions> = {}) {
   };
   const toast = vi.fn();
   const openUrl = vi.fn().mockResolvedValue(undefined);
+  let liveOptions = options;
 
   function Probe() {
     result.current = useShipThread({
@@ -81,13 +87,22 @@ function setup(options: Partial<UseShipThreadOptions> = {}) {
       thread: thread(),
       toast,
       openUrl,
-      ...options,
+      ...liveOptions,
     });
     return null;
   }
 
-  render(<Probe />);
-  return { result, api, toast, openUrl };
+  const rendered = render(<Probe />);
+  return {
+    result,
+    api,
+    toast,
+    openUrl,
+    rerenderOptions(next: Partial<UseShipThreadOptions>) {
+      liveOptions = { ...liveOptions, ...next };
+      rendered.rerender(<Probe />);
+    },
+  };
 }
 
 describe("useShipThread", () => {
@@ -194,5 +209,69 @@ describe("useShipThread", () => {
 
     await waitFor(() => expect(result.current?.projectFolderDirty).toBe(false));
     expect(api.gitStatus).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the project-folder status after a successful merge", async () => {
+    const api = {
+      gitStatus: vi
+        .fn()
+        .mockResolvedValueOnce({
+          branch: "main",
+          entries: [{ path: "src/main.rs", status: "modified", insertions: 2, deletions: 0 }],
+        })
+        .mockResolvedValue(cleanStatus()),
+      shipThread: vi.fn().mockResolvedValue({
+        mode: "merge" as ShipThreadMode,
+        branch: variant.branch,
+        base: "main",
+        committed: false,
+        pushed: true,
+        url: null,
+      }),
+    };
+    const { result } = setup({ api });
+    await waitFor(() => expect(result.current?.projectFolderDirty).toBe(true));
+
+    await act(async () => {
+      await result.current?.ship("merge");
+    });
+
+    await waitFor(() => expect(api.gitStatus).toHaveBeenCalledTimes(2));
+    expect(result.current?.projectFolderDirty).toBe(false);
+  });
+
+  it("drops a ship result after navigation changes the active thread", async () => {
+    let resolveShip!: (value: ShipThreadResponse) => void;
+    const response = new Promise<ShipThreadResponse>((resolve) => {
+      resolveShip = resolve;
+    });
+    const onShipped = vi.fn();
+    const api = {
+      gitStatus: vi.fn().mockResolvedValue(cleanStatus()),
+      shipThread: vi.fn().mockReturnValue(response),
+    };
+    const { result, toast, openUrl, rerenderOptions } = setup({ api, onShipped });
+    let shipping!: Promise<void>;
+    act(() => {
+      shipping = result.current!.ship("pr");
+    });
+    rerenderOptions({ thread: thread({ id: "thread-2" }) });
+
+    resolveShip({
+      mode: "pr",
+      branch: variant.branch,
+      base: "main",
+      committed: false,
+      pushed: true,
+      url: "https://github.com/example/repo/pull/8",
+    });
+    await act(async () => {
+      await shipping;
+    });
+
+    expect(toast).not.toHaveBeenCalled();
+    expect(openUrl).not.toHaveBeenCalled();
+    expect(onShipped).not.toHaveBeenCalled();
+    expect(result.current?.pending).toBe(false);
   });
 });

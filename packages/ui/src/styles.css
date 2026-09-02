@@ -80,6 +80,7 @@
   --color-danger-muted: var(--fd-danger-muted);
   --color-info: var(--fd-info);
   --color-info-muted: var(--fd-info-muted);
+  --color-unread: var(--fd-unread);
 
   --color-cat-1: var(--fd-cat-1);
   --color-cat-2: var(--fd-cat-2);
@@ -1283,6 +1284,26 @@
   --fd-shadow-glow: 0 0 24px rgba(144, 122, 169, 0.08);
 }
 
+/* === Finished-turn marker ===
+   The dot on a thread whose turn finished but has not been read yet. It has to
+   stay clearly apart from the running marker, which is the accent, so it cannot
+   just be a fixed hue: --fd-info is a blue in most palettes and so is the
+   accent in half of them, which left the two dots nearly identical. Green
+   reads as done and clears every accent except the green ones, where the blue
+   info dot is the one that stands apart. Keep the palette lists below in sync
+   with the accent hues, and mirror any change in colors.unread in
+   apps/mobile/src/theme/tokens.ts. */
+:root {
+  --fd-unread: var(--fd-success);
+}
+
+/* Palettes whose accent is already green. */
+:root:not([data-palette]),
+:root[data-palette="gruvbox"],
+:root[data-palette="matrix"] {
+  --fd-unread: var(--fd-info);
+}
+
 body {
   background: var(--fd-bg-0);
   color: var(--fd-fg-0);
@@ -1685,34 +1706,6 @@ body {
   }
 }
 
-/* ================================================================
-   Control room — Activity surfaces
-   The Activity view is the app's instrument panel: a hairline grid
-   canvas behind terminal-style cards. Every accent reads from
-   --fd-tone, set per section on the element, so palettes and light
-   mode carry through without a single hard-coded color.
-   ================================================================ */
-
-/* Faint engineering grid on the canvas. Masked to a top-anchored ellipse so
-   it never competes with content further down the scroll. */
-.fd-grid-canvas::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(to right, var(--fd-border-0) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--fd-border-0) 1px, transparent 1px);
-  background-size: 40px 40px;
-  -webkit-mask-image: radial-gradient(
-    ellipse 65% 55% at 50% 0%,
-    #000,
-    transparent 78%
-  );
-  mask-image: radial-gradient(ellipse 65% 55% at 50% 0%, #000, transparent 78%);
-}
-
 /* Two mono treatments, applied by role and never mixed:
    `fd-microlabel` is chrome the app authored (section headings, stat labels);
    `fd-readout` is data the system reported (project, host, age, payload),
@@ -1742,94 +1735,6 @@ body {
 .fd-microlabel--md {
   font-size: var(--fd-text-xs);
   letter-spacing: var(--fd-tracking-wide);
-}
-
-/* Hairline of tone along the top edge of a toned panel — the one piece of
-   color a card carries at rest. */
-.fd-tone-edge {
-  --fd-tone: var(--fd-fg-3);
-  position: relative;
-}
-.fd-tone-edge::after {
-  content: "";
-  position: absolute;
-  inset: 0 0 auto;
-  height: 1px;
-  pointer-events: none;
-  background: linear-gradient(90deg, var(--fd-tone), transparent 60%);
-  opacity: 0.35;
-  transition: opacity var(--fd-duration-normal) var(--fd-ease-default);
-}
-
-/* Hover is a border and an edge, no shadow and no lift: the grid of cards
-   should stay flat, so the only thing that moves is the pointer. */
-.fd-terminal-card {
-  transition: border-color var(--fd-duration-normal) var(--fd-ease-default);
-}
-.fd-terminal-card:hover {
-  border-color: color-mix(in srgb, var(--fd-tone) 30%, var(--fd-border-1));
-}
-.fd-terminal-card:hover::after {
-  opacity: 0.8;
-}
-
-/* Card chrome fill. Derived from the foreground so it steps away from the
-   card body in both light and dark — a fixed surface step only separates in
-   one — and kept shallow so a grid of cards reads as one field, not stripes. */
-.fd-chrome-fill {
-  background-color: color-mix(in srgb, var(--fd-fg-0) 6%, var(--fd-bg-1));
-}
-
-/* Status dot. Static — the section already says whether a run is live, and a
-   wall of pulsing dots is noise, not information. */
-.fd-led {
-  display: block;
-  height: 5px;
-  width: 5px;
-  border-radius: var(--fd-radius-full);
-  background: var(--fd-tone);
-}
-
-/* Streaming cursor for a card's tail readout. A block that blinks where the
-   next token will land — the one piece of motion in Activity, and the only
-   honest way to tell "still writing" from "stopped mid-sentence". */
-.fd-caret {
-  display: inline-block;
-  width: 0.45em;
-  height: 0.95em;
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  background: var(--fd-accent);
-  opacity: 0.75;
-  animation: fd-caret-blink 1.1s steps(1, end) infinite;
-}
-@keyframes fd-caret-blink {
-  50% {
-    opacity: 0;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .fd-caret {
-    animation: none;
-  }
-}
-
-/* Hairline scrollbar for the tail readouts. A dozen cards each showing a
-   default scrollbar turns the grid into gutters. */
-.fd-scrollbar-thin {
-  scrollbar-width: thin;
-  scrollbar-color: var(--fd-border-2) transparent;
-}
-.fd-scrollbar-thin::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.fd-scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
-}
-.fd-scrollbar-thin::-webkit-scrollbar-thumb {
-  border-radius: var(--fd-radius-full);
-  background: var(--fd-border-2);
 }
 
 /* Older blocks in long transcripts should not pay layout and paint costs while

@@ -11,6 +11,7 @@ import type {
   ConversationPreferences,
   SkillSummary,
   DaemonSnapshot,
+  LibraryWorkspace,
   EventEnvelope,
   FalconDeckPreferences,
   HarnessesOverview,
@@ -468,7 +469,9 @@ function skillProvidersFromAvailability(
 }
 
 export function normalizeSkillSummaries(value: unknown): SkillSummary[] {
-  return Array.isArray(value) ? value.map((entry) => normalizeSkill(entry)) : []
+  return Array.isArray(value)
+    ? value.map((entry) => normalizeSkill(entry))
+    : [];
 }
 
 function normalizeSkill(value: unknown): SkillSummary {
@@ -682,6 +685,34 @@ export function normalizeThreadSummary(
                 : null,
           }
         : null,
+  };
+}
+
+export function normalizeLibraryWorkspace(
+  value: LibraryWorkspace | unknown,
+): LibraryWorkspace | null {
+  if (!value || typeof value !== "object") return null;
+  const workspace = value as Partial<LibraryWorkspace>;
+  if (typeof workspace.id !== "string" || workspace.id.trim().length === 0) {
+    return null;
+  }
+  if (
+    typeof workspace.path !== "string" ||
+    workspace.path.trim().length === 0
+  ) {
+    return null;
+  }
+  if (
+    typeof workspace.last_opened_at !== "string" ||
+    workspace.last_opened_at.trim().length === 0
+  ) {
+    return null;
+  }
+  return {
+    id: workspace.id,
+    path: workspace.path,
+    kind: workspace.kind === "casual" ? "casual" : "project",
+    last_opened_at: workspace.last_opened_at,
   };
 }
 
@@ -1508,6 +1539,12 @@ export function normalizeDaemonSnapshot(
           normalizeWorkspaceSummary(workspace),
         )
       : [],
+    library_workspaces: Array.isArray(snapshot.library_workspaces)
+      ? snapshot.library_workspaces.flatMap((workspace) => {
+          const normalized = normalizeLibraryWorkspace(workspace);
+          return normalized ? [normalized] : [];
+        })
+      : [],
     threads: Array.isArray(snapshot.threads)
       ? snapshot.threads.map((thread) => normalizeThreadSummary(thread))
       : [],
@@ -1703,7 +1740,11 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
       threadMenuActions: actions,
       panelActions: Array.isArray(contributions.panelActions)
         ? contributions.panelActions.flatMap((candidate) => {
-            if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+            if (
+              !candidate ||
+              typeof candidate !== "object" ||
+              Array.isArray(candidate)
+            )
               return [];
             const action = candidate as Record<string, unknown>;
             const id = normalizeId(action.id);
@@ -2257,6 +2298,43 @@ function normalizeUtilityModelPreferences(
 }
 
 const HARNESS_KINDS = new Set(["builtin", "acp", "detected"]);
+const HARNESS_EXECUTABLE_SOURCES = new Set([
+  "configured",
+  "path",
+  "known_location",
+  "login_shell",
+  "unknown",
+]);
+const HARNESS_VERSION_STATES = new Set([
+  "detected",
+  "current",
+  "update_available",
+  "unavailable",
+]);
+const HARNESS_AUTH_VERDICTS = new Set([
+  "authenticated",
+  "unauthenticated",
+  "unavailable",
+  "unsupported",
+]);
+const HARNESS_COMPATIBILITY_VERDICTS = new Set([
+  "compatible",
+  "incompatible",
+  "unknown",
+  "unsupported",
+]);
+const HARNESS_PROVIDER_USAGE_STATES = new Set([
+  "supported",
+  "unavailable",
+  "unsupported",
+]);
+const USAGE_CAPABLE_HARNESSES = new Set([
+  "codex",
+  "claude",
+  "grok",
+  "cursor",
+  "agy",
+]);
 const HARNESS_UPGRADE_STATUSES = new Set(["running", "completed", "failed"]);
 
 function optionalTrimmedString(value: unknown): string | null {
@@ -2275,20 +2353,64 @@ export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
   const kind = HARNESS_KINDS.has(String(raw.kind))
     ? (raw.kind as HarnessSummary["kind"])
     : "detected";
+  const installed = raw.installed === true;
+  const version = optionalTrimmedString(raw.version);
+  const latestVersion = optionalTrimmedString(raw.latest_version);
+  const updateAvailable =
+    typeof raw.update_available === "boolean" ? raw.update_available : null;
+  const inferredVersionState = !version
+    ? "unavailable"
+    : !latestVersion || updateAvailable === null
+      ? "detected"
+      : updateAvailable
+        ? "update_available"
+        : "current";
   return {
     id,
     label: typeof raw.label === "string" && raw.label.trim() ? raw.label : id,
     kind,
     bin,
     resolved_path: optionalTrimmedString(raw.resolved_path),
-    installed: raw.installed === true,
-    version: optionalTrimmedString(raw.version),
-    latest_version: optionalTrimmedString(raw.latest_version),
-    update_available:
-      typeof raw.update_available === "boolean" ? raw.update_available : null,
+    installed,
+    install_state:
+      raw.install_state === "installed" || raw.install_state === "missing"
+        ? raw.install_state
+        : installed
+          ? "installed"
+          : "missing",
+    executable_source: HARNESS_EXECUTABLE_SOURCES.has(
+      String(raw.executable_source),
+    )
+      ? (raw.executable_source as HarnessSummary["executable_source"])
+      : "unknown",
+    version,
+    latest_version: latestVersion,
+    update_available: updateAvailable,
+    version_state: HARNESS_VERSION_STATES.has(String(raw.version_state))
+      ? (raw.version_state as HarnessSummary["version_state"])
+      : inferredVersionState,
     install_source: optionalTrimmedString(raw.install_source),
     upgrade_command: optionalTrimmedString(raw.upgrade_command),
     account_status: optionalTrimmedString(raw.account_status),
+    auth_verdict: HARNESS_AUTH_VERDICTS.has(String(raw.auth_verdict))
+      ? (raw.auth_verdict as HarnessSummary["auth_verdict"])
+      : "unsupported",
+    compatibility_verdict: HARNESS_COMPATIBILITY_VERDICTS.has(
+      String(raw.compatibility_verdict),
+    )
+      ? (raw.compatibility_verdict as HarnessSummary["compatibility_verdict"])
+      : "unknown",
+    provider_usage_state: HARNESS_PROVIDER_USAGE_STATES.has(
+      String(raw.provider_usage_state),
+    )
+      ? (raw.provider_usage_state as HarnessSummary["provider_usage_state"])
+      : USAGE_CAPABLE_HARNESSES.has(id)
+        ? installed
+          ? "supported"
+          : "unavailable"
+        : "unsupported",
+    last_checked_at: optionalTrimmedString(raw.last_checked_at),
+    failure: optionalTrimmedString(raw.failure),
   };
 }
 

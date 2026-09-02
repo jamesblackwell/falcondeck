@@ -124,6 +124,42 @@ describe("createDaemonApiClient sendTurn", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("PUT");
   });
 
+  it("posts a selection rewrite to the daemon speech endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
+        new Response(
+          JSON.stringify({
+            text: "Ship Friday.",
+            model: "openai/gpt-5.6-luna",
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient(
+      "http://daemon.test",
+    ).rewriteSelectedText({
+      selection: "Ship it on Friday.",
+      instruction: "make this shorter",
+      model: "openai/gpt-5.6-luna",
+    });
+
+    expect(result).toEqual({
+      text: "Ship Friday.",
+      model: "openai/gpt-5.6-luna",
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/speech/rewrite",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      selection: "Ship it on Friday.",
+      instruction: "make this shorter",
+      model: "openai/gpt-5.6-luna",
+    });
+  });
+
   it("serializes the one-shot steer flag for a running follow-up", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

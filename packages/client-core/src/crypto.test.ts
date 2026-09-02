@@ -7,6 +7,7 @@ import {
   decryptJson,
   decryptJsonBatch,
   decryptToUtf8,
+  destroySessionCrypto,
   encryptJson,
   generateBoxKeyPair,
   normalizePairingCodeInput,
@@ -52,15 +53,18 @@ describe('AES session key reuse', () => {
       encryptJson(key, { value: 1 }),
       encryptJson(key, { value: 3 }),
     ])
-    const results = await decryptJsonBatch<{ value: number }>(key, [
-      first,
-      { ...first, ciphertext: 'malformed' },
-      third,
-    ])
+    const failures: Array<{ error: unknown; index: number }> = []
+    const results = await decryptJsonBatch<{ value: number }>(
+      key,
+      [first, { ...first, ciphertext: 'malformed' }, third],
+      (error, index) => failures.push({ error, index }),
+    )
 
     expect(results[0]).toMatchObject({ status: 'fulfilled', value: { value: 1 } })
     expect(results[1]).toMatchObject({ status: 'rejected' })
     expect(results[2]).toMatchObject({ status: 'fulfilled', value: { value: 3 } })
+    expect(failures).toHaveLength(1)
+    expect(failures[0]?.index).toBe(1)
   })
 
   it('decrypts to utf8 so callers can skip JSON.parse of a sole snapshot', async () => {
@@ -75,6 +79,16 @@ describe('AES session key reuse', () => {
       kind: 'daemon-event',
       event: { event: { type: 'snapshot' } },
     })
+  })
+
+  it('zeroes session-owned key bytes on teardown', async () => {
+    const dataKey = new Uint8Array(32).fill(57)
+    const state = { dataKey, material: null }
+    await encryptJson(dataKey, { imported: true })
+
+    destroySessionCrypto(state)
+
+    expect([...dataKey]).toEqual(new Array(32).fill(0))
   })
 })
 

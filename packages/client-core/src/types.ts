@@ -196,6 +196,17 @@ export type WorkspaceAgentSummary = {
 
 /** How FalconDeck knows about a coding harness (agent CLI). */
 export type HarnessKind = "builtin" | "acp" | "detected";
+export type HarnessInstallState = "installed" | "missing";
+export type HarnessExecutableSource =
+  "configured" | "path" | "known_location" | "login_shell" | "unknown";
+export type HarnessVersionState =
+  "detected" | "current" | "update_available" | "unavailable";
+export type HarnessAuthVerdict =
+  "authenticated" | "unauthenticated" | "unavailable" | "unsupported";
+export type HarnessCompatibilityVerdict =
+  "compatible" | "incompatible" | "unknown" | "unsupported";
+export type HarnessProviderUsageState =
+  "supported" | "unavailable" | "unsupported";
 
 /**
  * Install status of one coding harness on one host (local machine or an SSH
@@ -210,15 +221,25 @@ export type HarnessSummary = {
   bin: string;
   resolved_path?: string | null;
   installed?: boolean;
+  install_state?: HarnessInstallState;
+  executable_source?: HarnessExecutableSource;
   version?: string | null;
   latest_version?: string | null;
   update_available?: boolean | null;
+  version_state?: HarnessVersionState;
   /** Best-effort install classification (npm/homebrew/cargo/local/unknown). */
   install_source?: string | null;
   /** Command FalconDeck can run to install/upgrade, when managed. */
   upgrade_command?: string | null;
   /** Auth/subscription state line reported by the harness, when probed. */
   account_status?: string | null;
+  auth_verdict?: HarnessAuthVerdict;
+  compatibility_verdict?: HarnessCompatibilityVerdict;
+  provider_usage_state?: HarnessProviderUsageState;
+  /** RFC 3339 time when this entry was last probed. */
+  last_checked_at?: string | null;
+  /** Sanitized plain-English probe failure; never raw process output. */
+  failure?: string | null;
 };
 
 /** Response for the harness overview endpoints. */
@@ -534,6 +555,13 @@ export type ToolCallDetail =
       decision_source: string | null;
       duration_ms: number | null;
     };
+
+export type LibraryWorkspace = {
+  id: string;
+  path: string;
+  kind?: "project" | "casual";
+  last_opened_at: string;
+};
 
 export type WorkspaceSummary = {
   id: string;
@@ -1005,9 +1033,7 @@ export type ThreadDetail = {
 };
 
 export type DaemonRestorePhase =
-  | "loading_persisted_state"
-  | "hydrating_workspaces"
-  | "ready";
+  "loading_persisted_state" | "hydrating_workspaces" | "ready";
 
 export type DaemonSnapshot = {
   daemon: {
@@ -1020,6 +1046,11 @@ export type DaemonSnapshot = {
   /** Whether persisted session summaries are complete enough for recovery UX. */
   restore_phase?: DaemonRestorePhase;
   workspaces: WorkspaceSummary[];
+  /**
+   * Projects known to the daemon but not currently open. Older daemons omit
+   * this; normalization always supplies an array.
+   */
+  library_workspaces?: LibraryWorkspace[];
   threads: ThreadSummary[];
   interactive_requests: InteractiveRequest[];
   /** Older daemons omit workspace notices; normalization always supplies an array. */
@@ -1889,6 +1920,18 @@ export type SpeechCredentialStatus = {
   storage: "daemon_secret_store";
 };
 
+export type SpeechRewriteRequest = {
+  selection: string;
+  instruction: string;
+  model?: string | null;
+  prompt?: string | null;
+};
+
+export type SpeechRewriteResponse = {
+  text: string;
+  model: string;
+};
+
 export type TerminalSessionInfo = {
   id: string;
   workspace_id: string;
@@ -1925,7 +1968,11 @@ export type TerminalClientFrame =
   | { type: "terminal_ping" };
 
 export type TerminalServerFrame =
-  | { type: "terminal_attached"; session: TerminalSessionInfo; next_seq: number }
+  | {
+      type: "terminal_attached";
+      session: TerminalSessionInfo;
+      next_seq: number;
+    }
   | { type: "terminal_replay"; chunk: TerminalChunk }
   | { type: "terminal_output"; chunk: TerminalChunk }
   | { type: "terminal_exited"; exit_code: number | null }

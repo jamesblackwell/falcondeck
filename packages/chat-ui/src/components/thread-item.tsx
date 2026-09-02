@@ -174,7 +174,7 @@ export const ThreadItem = memo(
             ) : attention.level === 'awaiting_response' ? (
               <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
             ) : attention.showUnreadDot ? (
-              <span className="h-2.5 w-2.5 rounded-full bg-info" />
+              <span className="h-2.5 w-2.5 rounded-full bg-unread" />
             ) : null}
           </span>
           <span

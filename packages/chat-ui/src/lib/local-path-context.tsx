@@ -107,8 +107,9 @@ export function LocalPathProvider({
 
   const closeMenu = useCallback(() => setMenu(null), [])
 
-  // File-only rows render optimistically and retract once the path is known
-  // to be a directory; most transcript paths are files, and the stat is fast.
+  // File-only rows appear only after the host confirms the path is a file.
+  // Transcript content is untrusted, so an unresolved path must not be able
+  // to race a directory into a file-only host command.
   useEffect(() => {
     if (!menu || !describePath) return
     let cancelled = false
@@ -229,9 +230,7 @@ function LocalPathMenu({
   onClose: () => void
 }) {
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
-  // Directories never gain file-only rows, but until the stat answers the
-  // menu behaves like the common case: a file.
-  const isFile = kind !== 'directory'
+  const isFile = kind === 'file'
   const runAction = (action: LocalPathAction, editorId?: string) => {
     onClose()
     if (editorId) {

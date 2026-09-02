@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  REMOTE_SESSION_STORAGE_VERSION,
   MAX_PENDING_RELAY_UPDATES,
   relayBacklogWouldOverflow,
   relayReconnectDelayMs,
   resolveRelayTruncationCursor,
+  shouldReusePersistedRemoteSession,
+  type PersistedRemoteSession,
 } from './remote-session'
 
 describe('relayReconnectDelayMs', () => {
@@ -49,5 +52,24 @@ describe('resolveRelayTruncationCursor', () => {
 
   it('does nothing when replay history is continuous', () => {
     expect(resolveRelayTruncationCursor(null, 0)).toBeNull()
+  })
+})
+
+describe('shouldReusePersistedRemoteSession', () => {
+  const session: PersistedRemoteSession = {
+    version: REMOTE_SESSION_STORAGE_VERSION,
+    relayUrl: 'https://connect.falcondeck.com',
+    pairingCode: '',
+    sessionId: 'session-1',
+    clientToken: 'token',
+    clientSecretKey: 'secret',
+  }
+
+  it('does not let a pairing link replace an authenticated tab session', () => {
+    const params = new URLSearchParams({
+      code: 'ATTACKER-CODE',
+      relay: 'https://relay.attacker.example',
+    })
+    expect(shouldReusePersistedRemoteSession(params, session)).toBe(session)
   })
 })

@@ -54,17 +54,23 @@ describe("LocalPathProvider menu", () => {
     expect(handler).toHaveBeenCalledWith("open-with", FILE, "zed");
   });
 
-  it("offers save and copy-contents actions for files", () => {
+  it("offers save and copy-contents actions for files", async () => {
     const handler = vi.fn();
     renderPathMenu(handler, {
       describePath: () => Promise.resolve("file"),
     });
 
     openContextMenu();
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: "Save As…" })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: "Save As…" }));
     expect(handler).toHaveBeenCalledWith("save-as", FILE);
 
     openContextMenu();
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: "Copy File Contents" })).toBeInTheDocument();
+    });
     fireEvent.click(
       screen.getByRole("menuitem", { name: "Copy File Contents" }),
     );
@@ -94,15 +100,15 @@ describe("LocalPathProvider menu", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows file-only actions optimistically without a kind resolver", () => {
+  it("withholds file-only actions when no host can confirm the path kind", () => {
     const handler = vi.fn();
     renderPathMenu(handler);
 
     openContextMenu();
-    expect(screen.getByRole("menuitem", { name: "Save As…" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Save As…" })).toBeNull();
     expect(
-      screen.getByRole("menuitem", { name: "Copy File Contents" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("menuitem", { name: "Copy File Contents" }),
+    ).toBeNull();
   });
 
   it("keeps paths inert when no host handles them", () => {

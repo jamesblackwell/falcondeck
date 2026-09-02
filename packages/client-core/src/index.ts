@@ -2,7 +2,6 @@ export * from "./types";
 export * from "./control";
 export * from "./grouping";
 export * from "./activity";
-export * from "./activity-tail";
 export * from "./conversation";
 export * from "./relative-time";
 export * from "./daemon-client";

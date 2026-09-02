@@ -85,7 +85,7 @@ export type MobileSessionCache = {
 }
 
 export function shouldReusePersistedRemoteSession(
-  params: URLSearchParams,
+  _params: URLSearchParams,
   persistedSession: PersistedRemoteSession | null,
 ) {
   if (!persistedSession) return null
@@ -97,21 +97,7 @@ export function shouldReusePersistedRemoteSession(
     return null
   }
 
-  const queryRelayUrl = params.get('relay')
-  const queryPairingCode = params.get('code')
-  const effectiveQueryRelayUrl =
-    queryPairingCode && !queryRelayUrl ? DEFAULT_REMOTE_RELAY_URL : queryRelayUrl
-
-  if (queryPairingCode && queryPairingCode !== persistedSession.pairingCode) {
-    return null
-  }
-
-  if (
-    effectiveQueryRelayUrl &&
-    tryNormalizeRelayUrl(effectiveQueryRelayUrl) !== persistedRelayUrl
-  ) {
-    return null
-  }
-
+  // Pairing-link parameters are untrusted suggestions. They must never
+  // replace or invalidate a tab's already-authenticated session.
   return persistedSession
 }

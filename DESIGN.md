@@ -83,6 +83,7 @@ Semantic colors:
 - Warning: amber
 - Danger: red
 - Info: blue
+- Unread (`--fd-unread`, `bg-unread`): the finished-turn dot. Resolves per palette to whichever of success or info the accent does not already occupy, so it never reads as the running marker.
 
 Rules:
 

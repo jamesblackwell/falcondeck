@@ -14,6 +14,7 @@ import {
   Sparkles,
   SquarePen,
   Trash2,
+  X,
 } from 'lucide-react'
 
 import type { ThreadSummary, ThreadTag, WorkspaceColorId } from '@falcondeck/client-core'
@@ -393,7 +394,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
             <span
               className={cn(iconClassName, 'flex items-center justify-center')}
             >
-              <span className="h-2 w-2 rounded-full bg-info" />
+              <span className="h-2 w-2 rounded-full bg-unread" />
             </span>
           }
           label="Mark as unread"
@@ -622,12 +623,14 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
   selectedColor = null,
   onSetColor,
+  onCloseFromSidebar,
   onRemove,
   menuRef,
 }: {
   target: WorkspaceContextMenuState | null
   selectedColor?: string | null
   onSetColor?: (color: WorkspaceColorId | null) => void
+  onCloseFromSidebar?: () => void
   onRemove?: () => void
   menuRef: React.RefObject<HTMLDivElement | null>
 }) {
@@ -637,11 +640,15 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
 
   const projectLabel = target.path.split('/').pop() || target.path
   const showColors = Boolean(onSetColor)
+  const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
+  const showMembership = showClose || showRemove
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
     (showColors ? WORKSPACE_COLOR_SECTION_HEIGHT_PX : 0) +
-    (showColors && showRemove ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
+    (showColors && showMembership ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
+    (showClose ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
+    (showClose && showRemove ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showRemove ? THREAD_MENU_ROW_HEIGHT_PX : 0)
   const left = Math.max(
     THREAD_MENU_VIEWPORT_PADDING_PX,
@@ -712,7 +719,20 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           </div>
         </div>
       ) : null}
-      {showColors && showRemove ? (
+      {showColors && showMembership ? (
+        <div
+          role="separator"
+          className="mx-2 my-1 border-t border-border-subtle"
+        />
+      ) : null}
+      {showClose && onCloseFromSidebar ? (
+        <ThreadMenuItem
+          icon={<X className="h-3.5 w-3.5" />}
+          label="Remove from Sidebar"
+          onClick={onCloseFromSidebar}
+        />
+      ) : null}
+      {showClose && showRemove ? (
         <div
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"
@@ -721,11 +741,96 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
       {showRemove && onRemove ? (
         <ThreadMenuItem
           icon={<Trash2 className="h-3.5 w-3.5" />}
-          label="Remove project"
+          label="Forget project"
           destructive
           onClick={onRemove}
         />
       ) : null}
+    </div>,
+    document.body,
+  )
+})
+
+export const CloseWorkspaceDialog = memo(function CloseWorkspaceDialog({
+  target,
+  reason,
+  error,
+  pending,
+  onClose,
+  onConfirm,
+}: {
+  target: { workspaceId: string; path: string } | null
+  reason: string | null
+  error: string | null
+  pending: boolean
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const projectLabel = target.path.split('/').pop() || target.path
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-close-workspace-title"
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <div className="space-y-1">
+          <h2
+            id="fd-close-workspace-title"
+            className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+          >
+            Remove {projectLabel} from the sidebar?
+          </h2>
+          <p
+            className="truncate text-[length:var(--fd-text-sm)] text-fg-muted"
+            title={target.path}
+          >
+            {target.path}
+          </p>
+        </div>
+
+        <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          {reason ??
+            'The folder and its chats stay. It leaves the sidebar and will not sync until you add it back.'}
+        </p>
+        {error ? (
+          <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
+            {error}
+          </p>
+        ) : null}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            autoFocus
+            onClick={onClose}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            onClick={onConfirm}
+            aria-busy={pending}
+            disabled={pending}
+          >
+            {pending ? 'Removing…' : 'Remove from Sidebar'}
+          </Button>
+        </div>
+      </div>
     </div>,
     document.body,
   )
@@ -769,7 +874,7 @@ export const RemoveWorkspaceDialog = memo(function RemoveWorkspaceDialog({
             id="fd-remove-workspace-title"
             className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
           >
-            Remove {projectLabel}?
+            Forget {projectLabel}?
           </h2>
           <p
             className="truncate text-[length:var(--fd-text-sm)] text-fg-muted"
@@ -780,8 +885,8 @@ export const RemoveWorkspaceDialog = memo(function RemoveWorkspaceDialog({
         </div>
 
         <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
-          Threads stay in the provider&rsquo;s own history; re-add the folder to
-          restore them.
+          FalconDeck will forget this project. Threads stay in the
+          provider&rsquo;s own history; add the folder again to restore them.
         </p>
         {error ? (
           <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
@@ -809,7 +914,7 @@ export const RemoveWorkspaceDialog = memo(function RemoveWorkspaceDialog({
             aria-busy={pending}
             disabled={pending}
           >
-            {pending ? 'Removing…' : 'Remove'}
+            {pending ? 'Forgetting…' : 'Forget'}
           </Button>
         </div>
       </div>

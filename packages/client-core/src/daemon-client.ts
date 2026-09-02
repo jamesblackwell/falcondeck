@@ -31,6 +31,8 @@ import type {
   ThreadMessageSearchRequest,
   ThreadMessageSearchResponse,
   SpeechCredentialStatus,
+  SpeechRewriteRequest,
+  SpeechRewriteResponse,
   ProviderUsageOverview,
   SelectedSkillReference,
   SkillSummary,
@@ -229,6 +231,15 @@ export function createDaemonApiClient(baseUrl: string) {
       return parseJson<SpeechCredentialStatus>(
         await fetch(`${baseUrl}/api/speech/openrouter-key`, {
           method: "DELETE",
+        }),
+      );
+    },
+    async rewriteSelectedText(payload: SpeechRewriteRequest) {
+      return parseJson<SpeechRewriteResponse>(
+        await fetch(`${baseUrl}/api/speech/rewrite`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
         }),
       );
     },
@@ -472,6 +483,16 @@ export function createDaemonApiClient(baseUrl: string) {
           `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}`,
           {
             method: "DELETE",
+          },
+        ),
+      );
+    },
+    async closeWorkspace(workspaceId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/close`,
+          {
+            method: "POST",
           },
         ),
       );

@@ -24,6 +24,7 @@ import {
   deriveThreadAttentionPresentation,
   projectLabel as getProjectLabel,
   wasTurnInterruptedByShutdown,
+  type LibraryWorkspace,
   type ProjectGroup,
   type ThreadAttentionPresentation,
   type ThreadMessageMatch,
@@ -80,14 +81,14 @@ type PaletteItem = {
 
 type PaletteThreadStatus = {
   label: string
-  tone: 'accent' | 'warning' | 'danger' | 'info' | 'muted'
+  tone: 'accent' | 'warning' | 'danger' | 'unread' | 'muted'
 }
 
 const STATUS_TONE_CLASS: Record<PaletteThreadStatus['tone'], string> = {
   accent: 'text-accent',
   warning: 'text-warning',
   danger: 'text-danger',
-  info: 'text-info',
+  unread: 'text-unread',
   muted: 'text-fg-muted',
 }
 
@@ -108,7 +109,7 @@ function threadPaletteStatus(
     case 'running':
       return { label: 'Running', tone: 'accent' }
     case 'unread':
-      return { label: 'Unread', tone: 'info' }
+      return { label: 'Unread', tone: 'unread' }
     default:
       return { label: 'Idle', tone: 'muted' }
   }
@@ -220,8 +221,8 @@ function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
       return (
         <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
       )
-    case 'info':
-      return <span className="h-2.5 w-2.5 rounded-full bg-info" />
+    case 'unread':
+      return <span className="h-2.5 w-2.5 rounded-full bg-unread" />
     default:
       return <MessageSquare className="h-3.5 w-3.5" />
   }
@@ -466,6 +467,8 @@ export type SearchThreadMessages = (
 
 export type CommandPaletteProps = {
   groups: ProjectGroup[]
+  libraryWorkspaces?: readonly LibraryWorkspace[]
+  onOpenLibraryWorkspace?: (path: string) => Promise<void> | void
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
@@ -491,6 +494,8 @@ export type CommandPaletteProps = {
  */
 export const CommandPalette = memo(function CommandPalette({
   groups,
+  libraryWorkspaces = [],
+  onOpenLibraryWorkspace,
   onSelectThread,
   onNewThread,
   onOpenSettings,
@@ -680,6 +685,29 @@ export const CommandPalette = memo(function CommandPalette({
       }
     }
 
+    if (onOpenLibraryWorkspace) {
+      for (const workspace of libraryWorkspaces) {
+        if (workspace.kind === 'casual') continue
+        const label = getProjectLabel(workspace.path)
+        result.push({
+          id: `library:${workspace.id}`,
+          kind: 'action',
+          section: 'Projects',
+          label: `Open ${label}`,
+          sublabel: workspace.path,
+          icon: { kind: 'glyph', Glyph: FolderClosed },
+          search: normalizeSearchFields({
+            primary: label,
+            secondary: workspace.path,
+            keywords: 'open project folder library recent',
+          }),
+          run: () => {
+            void onOpenLibraryWorkspace(workspace.path)
+          },
+        })
+      }
+    }
+
     if (onNewThread) {
       // One action for what used to be a row per project: choosing it keeps
       // the palette open and steps into the project picker above.
@@ -816,7 +844,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, mode, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.

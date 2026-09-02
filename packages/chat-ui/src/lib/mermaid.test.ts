@@ -55,7 +55,7 @@ describe('renderMermaidSvg', () => {
     expect(initialize).toHaveBeenCalledOnce()
     expect(render).toHaveBeenCalledOnce()
     const id = render.mock.calls[0]?.[0] as string
-    expect(id).toMatch(/^fdm\d+$/)
+    expect(id).toMatch(/^fdm-[a-f0-9-]+$/)
     expect(id).not.toBe(first)
   })
 
@@ -82,5 +82,36 @@ describe('renderMermaidSvg', () => {
       renderMermaidSvg('flowchart TD\n  C-->D'),
     ])
     expect(peak).toBe(1)
+  })
+
+  it('cleans failed render artifacts', async () => {
+    render.mockImplementationOnce(async (id: string) => {
+      const div = document.createElement('div')
+      div.id = `d${id}`
+      document.body.appendChild(div)
+      throw new Error('bad diagram')
+    })
+
+    await expect(renderMermaidSvg('not a diagram')).rejects.toMatchObject({
+      message: 'bad diagram',
+    })
+    const id = render.mock.calls[0]?.[0] as string
+    expect(document.getElementById(`d${id}`)).toBeNull()
+  })
+
+  it('advances the queue after a render times out', async () => {
+    vi.useFakeTimers()
+    render.mockImplementationOnce(() => new Promise(() => {}))
+    const timedOut = renderMermaidSvg('flowchart TD\n  A-->B')
+    const timedOutExpectation = expect(timedOut).rejects.toMatchObject({
+      message: 'Could not render diagram',
+    })
+    await vi.advanceTimersByTimeAsync(12_000)
+    await timedOutExpectation
+
+    render.mockResolvedValueOnce({ svg: '<svg data-testid="recovered"></svg>' })
+    await expect(renderMermaidSvg('flowchart TD\n  C-->D')).resolves.toContain('recovered')
+    expect(render).toHaveBeenCalledTimes(2)
+    vi.useRealTimers()
   })
 })

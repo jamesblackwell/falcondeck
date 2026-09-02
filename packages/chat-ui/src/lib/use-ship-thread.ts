@@ -67,10 +67,16 @@ export function useShipThread({
   const [pending, setPending] = useState(false)
   const [projectFolderDirty, setProjectFolderDirty] = useState(false)
   const [mergeFailure, setMergeFailure] = useState<string | null>(null)
+  const [statusRefreshRevision, setStatusRefreshRevision] = useState(0)
   const isIsolated = Boolean(thread?.variant)
   // A slow reply for a thread we have since left must not disable the menu for
   // whatever is on screen now.
   const generationRef = useRef(0)
+
+  useEffect(() => {
+    generationRef.current += 1
+    setPending(false)
+  }, [api, thread?.id, workspaceId])
 
   useEffect(() => {
     setMergeFailure(null)
@@ -95,15 +101,17 @@ export function useShipThread({
         if (generationRef.current !== generation) return
         setProjectFolderDirty(false)
       })
-  }, [api, isIsolated, workspaceId, thread?.id])
+  }, [api, isIsolated, statusRefreshRevision, workspaceId, thread?.id])
 
   const ship = useCallback(
     async (mode: ShipThreadMode) => {
       if (!api || !workspaceId || !thread) return
+      const generation = generationRef.current
       setPending(true)
       if (mode === 'merge') setMergeFailure(null)
       try {
         const result = await api.shipThread(workspaceId, thread.id, mode)
+        if (generationRef.current !== generation) return
         const incomplete = result.mode === 'merge' && !result.pushed
         toast({
           variant: incomplete ? 'warning' : 'success',
@@ -111,8 +119,11 @@ export function useShipThread({
           description: describeSuccess(result),
         })
         if (result.url) await openUrl(result.url)
+        if (generationRef.current !== generation) return
         onShipped?.()
+        if (mode === 'merge') setStatusRefreshRevision((revision) => revision + 1)
       } catch (error) {
+        if (generationRef.current !== generation) return
         const message =
           error instanceof Error ? error.message : 'The daemon did not say why this failed.'
         if (mode === 'merge') {
@@ -125,7 +136,7 @@ export function useShipThread({
           })
         }
       } finally {
-        setPending(false)
+        if (generationRef.current === generation) setPending(false)
       }
     },
     [api, onShipped, openUrl, thread, toast, workspaceId],

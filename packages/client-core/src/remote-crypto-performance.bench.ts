@@ -13,6 +13,8 @@ describe('remote replay decryption', () => {
   })
 
   bench('decrypts 128 updates concurrently', async () => {
-    await decryptJsonBatch(key, envelopes)
+    await decryptJsonBatch(key, envelopes, () => {
+      throw new Error('benchmark envelope decryption failed')
+    })
   })
 })

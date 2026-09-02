@@ -482,6 +482,30 @@ describe("interactive request boundary normalization", () => {
     ).toEqual(["valid"]);
   });
 
+  it("normalizes library workspaces and drops malformed catalog rows", () => {
+    const snapshot = normalizeDaemonSnapshot({
+      library_workspaces: [
+        {
+          id: "workspace-1",
+          path: "/Users/james/falcondeck",
+          last_opened_at: "2026-08-13T09:00:00Z",
+        },
+        { id: "", path: "/missing-id", last_opened_at: "2026-08-13T09:00:00Z" },
+        { id: "workspace-2", path: "", last_opened_at: "2026-08-13T09:00:00Z" },
+      ],
+    });
+
+    expect(snapshot.library_workspaces).toEqual([
+      {
+        id: "workspace-1",
+        path: "/Users/james/falcondeck",
+        kind: "project",
+        last_opened_at: "2026-08-13T09:00:00Z",
+      },
+    ]);
+    expect(normalizeDaemonSnapshot({}).library_workspaces).toEqual([]);
+  });
+
   it("normalizes daemon restore phases and preserves the legacy fallback", () => {
     expect(
       normalizeDaemonSnapshot({ restore_phase: "hydrating_workspaces" })
@@ -988,12 +1012,20 @@ describe("harness normalization", () => {
           bin: "codex",
           resolved_path: "/usr/local/lib/node_modules/@openai/codex/bin/codex",
           installed: true,
+          install_state: "installed",
+          executable_source: "path",
           version: "0.12.0",
           latest_version: "0.13.0",
           update_available: true,
+          version_state: "update_available",
           install_source: "npm",
-          upgrade_command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+          upgrade_command:
+            "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
           account_status: "Logged in using ChatGPT",
+          auth_verdict: "authenticated",
+          compatibility_verdict: "unknown",
+          provider_usage_state: "supported",
+          last_checked_at: "2026-09-01T10:00:00.000Z",
         },
         {
           id: "custom-agent",
@@ -1009,10 +1041,35 @@ describe("harness normalization", () => {
     const codex = normalized.harnesses[0];
     expect(codex?.update_available).toBe(true);
     expect(codex?.install_source).toBe("npm");
+    expect(codex?.version_state).toBe("update_available");
+    expect(codex?.provider_usage_state).toBe("supported");
     const customAgent = normalized.harnesses[1];
     expect(customAgent?.kind).toBe("detected");
     expect(customAgent?.resolved_path).toBeNull();
     expect(customAgent?.installed).toBe(false);
+    expect(customAgent?.install_state).toBe("missing");
+    expect(customAgent?.provider_usage_state).toBe("unsupported");
+  });
+
+  it("derives doctor states from legacy harness fields", () => {
+    const current = normalizeHarnessSummary({
+      id: "codex",
+      bin: "codex",
+      installed: true,
+      version: "1.2.3",
+      latest_version: "1.2.3",
+      update_available: false,
+    });
+    const missing = normalizeHarnessSummary({
+      id: "codex",
+      bin: "codex",
+      installed: false,
+    });
+
+    expect(current?.version_state).toBe("current");
+    expect(current?.provider_usage_state).toBe("supported");
+    expect(missing?.install_state).toBe("missing");
+    expect(missing?.provider_usage_state).toBe("unavailable");
   });
 
   it("drops malformed harness entries and falls back to defaults", () => {
@@ -1041,7 +1098,10 @@ describe("harness normalization", () => {
       label: "Codex",
       host: "local",
       status: "failed",
-      log: ["Running: curl -fsSL https://chatgpt.com/codex/install.sh | sh", 42],
+      log: [
+        "Running: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+        42,
+      ],
       error: "exit code 1",
     });
     expect(job?.status).toBe("failed");

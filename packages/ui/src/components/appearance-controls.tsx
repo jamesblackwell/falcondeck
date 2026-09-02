@@ -352,17 +352,15 @@ const SURFACE_TWEAK_ROWS: SurfaceTweakRow[] = [
 ]
 
 /**
- * Theme, font, and text-size pickers backed by the shared appearance store.
- * Presentation-free at the edges so both the desktop settings page and the
- * remote web preferences modal can embed it.
+ * Font and text-size pickers backed by the shared appearance store.
+ * Kept separate from ThemeControls so onboarding can offer type without the
+ * per-surface fine-tune matrix that belongs in Settings.
  */
-export function AppearanceControls() {
+export function TypographyControls() {
   const appearance = usePersistedAppearance()
 
   return (
     <div className="space-y-6">
-      <ThemeControls />
-
       <FontFamilyPicker
         title="Interface font"
         hint="Used for all app text outside of code."
@@ -425,6 +423,22 @@ export function AppearanceControls() {
           })}
         </div>
       </section>
+    </div>
+  )
+}
+
+/**
+ * Theme, font, and text-size pickers backed by the shared appearance store.
+ * Presentation-free at the edges so both the desktop settings page and the
+ * remote web preferences modal can embed it.
+ */
+export function AppearanceControls() {
+  const appearance = usePersistedAppearance()
+
+  return (
+    <div className="space-y-6">
+      <ThemeControls />
+      <TypographyControls />
 
       <section className="space-y-3">
         <GroupLabel

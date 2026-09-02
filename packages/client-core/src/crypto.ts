@@ -18,12 +18,10 @@ const SIGNING_PUBLIC_KEY_BYTES = 32
 const SIGNATURE_BYTES = 64
 const CONTENT_VERSION = 0
 const WRAPPED_KEY_VERSION = 0
-const MAX_CACHED_AES_KEYS = 4
-
-// The relay uses one data key for a session, so importing the same raw key for
-// every streamed update is redundant WebCrypto work. Cache promises (rather
-// than only resolved keys) so concurrent token bursts share one import too.
-const aesKeyCache = new Map<string, Promise<CryptoKey>>()
+// Cache by the session-owned byte-array identity rather than a base64 copy of
+// raw key material. Weak keys disappear with the session, and teardown can
+// explicitly delete and zero the only JS-owned key bytes.
+const aesKeyCache = new WeakMap<Uint8Array, Promise<CryptoKey>>()
 
 function getWebCrypto() {
   const webCrypto = globalThis.crypto
@@ -110,8 +108,7 @@ function ensureWrappedBundle(bundle: Uint8Array) {
 }
 
 async function importAesKey(dataKey: Uint8Array) {
-  const cacheKey = bytesToBase64(dataKey)
-  const cached = aesKeyCache.get(cacheKey)
+  const cached = aesKeyCache.get(dataKey)
   if (cached) return cached
 
   const rawKey = toArrayBuffer(dataKey)
@@ -119,15 +116,10 @@ async function importAesKey(dataKey: Uint8Array) {
   imported = getSubtleCrypto()
     .importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt'])
     .catch((error: unknown) => {
-      if (aesKeyCache.get(cacheKey) === imported) aesKeyCache.delete(cacheKey)
+      if (aesKeyCache.get(dataKey) === imported) aesKeyCache.delete(dataKey)
       throw error
     })
-
-  if (aesKeyCache.size >= MAX_CACHED_AES_KEYS) {
-    const oldest = aesKeyCache.keys().next().value
-    if (oldest) aesKeyCache.delete(oldest)
-  }
-  aesKeyCache.set(cacheKey, imported)
+  aesKeyCache.set(dataKey, imported)
   return imported
 }
 
@@ -167,6 +159,13 @@ export type IdentityKeyPair = ReturnType<typeof nacl.sign.keyPair.fromSeed>
 export type SessionCryptoState = {
   dataKey: Uint8Array
   material: SessionKeyMaterial | null
+}
+
+export function destroySessionCrypto(state: SessionCryptoState | null | undefined) {
+  if (!state) return
+  aesKeyCache.delete(state.dataKey)
+  state.dataKey.fill(0)
+  state.material = null
 }
 
 export function generateBoxKeyPair() {
@@ -398,16 +397,18 @@ export function verifyPairingPublicKeyBundle(bundle: PairingPublicKeyBundle) {
   }
 }
 
+export type SessionKeyVerificationOptions = {
+  expectedDaemonPublicKey: string
+  expectedDaemonIdentityPublicKey: string
+  expectedSessionId?: string | null
+  expectedPairingId?: string | null
+  expectedClientPublicKey?: string | null
+  expectedClientIdentityPublicKey?: string | null
+}
+
 export function verifySessionKeyMaterial(
   material: SessionKeyMaterial,
-  options?: {
-    expectedSessionId?: string | null
-    expectedPairingId?: string | null
-    expectedDaemonPublicKey?: string | null
-    expectedDaemonIdentityPublicKey?: string | null
-    expectedClientPublicKey?: string | null
-    expectedClientIdentityPublicKey?: string | null
-  },
+  options: SessionKeyVerificationOptions,
 ) {
   ensureVariant(material.encryption_variant)
   if (material.identity_variant !== 'ed25519_v1') {
@@ -416,26 +417,28 @@ export function verifySessionKeyMaterial(
   if (!material.signature) {
     throw new Error('Encrypted session bootstrap signature is missing')
   }
-  if (options?.expectedSessionId && material.session_id !== options.expectedSessionId) {
+  if (!options?.expectedDaemonPublicKey || !options.expectedDaemonIdentityPublicKey) {
+    throw new Error('Encrypted session bootstrap requires pinned daemon keys')
+  }
+  if (options.expectedSessionId && material.session_id !== options.expectedSessionId) {
     throw new Error('Encrypted session bootstrap has an unexpected session id')
   }
-  if (options?.expectedPairingId && material.pairing_id !== options.expectedPairingId) {
+  if (options.expectedPairingId && material.pairing_id !== options.expectedPairingId) {
     throw new Error('Encrypted session bootstrap has an unexpected pairing id')
   }
-  if (options?.expectedDaemonPublicKey && material.daemon_public_key !== options.expectedDaemonPublicKey) {
+  if (material.daemon_public_key !== options.expectedDaemonPublicKey) {
     throw new Error('Encrypted session bootstrap has an unexpected daemon key')
   }
   if (
-    options?.expectedDaemonIdentityPublicKey &&
     material.daemon_identity_public_key !== options.expectedDaemonIdentityPublicKey
   ) {
     throw new Error('Encrypted session bootstrap has an unexpected daemon identity key')
   }
-  if (options?.expectedClientPublicKey && material.client_public_key !== options.expectedClientPublicKey) {
+  if (options.expectedClientPublicKey && material.client_public_key !== options.expectedClientPublicKey) {
     throw new Error('Encrypted session bootstrap is not addressed to this client')
   }
   if (
-    options?.expectedClientIdentityPublicKey &&
+    options.expectedClientIdentityPublicKey &&
     material.client_identity_public_key !== options.expectedClientIdentityPublicKey
   ) {
     throw new Error('Encrypted session bootstrap is not addressed to this client identity')
@@ -481,12 +484,28 @@ export async function decryptJson<T>(dataKey: Uint8Array, envelope: EncryptedEnv
   return JSON.parse(await decryptToUtf8(dataKey, envelope)) as T
 }
 
-export function decryptUtf8Batch(dataKey: Uint8Array, envelopes: EncryptedEnvelope[]) {
-  return Promise.allSettled(envelopes.map((envelope) => decryptToUtf8(dataKey, envelope)))
+export async function decryptUtf8Batch(
+  dataKey: Uint8Array,
+  envelopes: EncryptedEnvelope[],
+  onRejected: (error: unknown, index: number) => void,
+) {
+  const results = await Promise.allSettled(envelopes.map((envelope) => decryptToUtf8(dataKey, envelope)))
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') onRejected(result.reason, index)
+  })
+  return results
 }
 
-export function decryptJsonBatch<T>(dataKey: Uint8Array, envelopes: EncryptedEnvelope[]) {
-  return Promise.allSettled(envelopes.map((envelope) => decryptJson<T>(dataKey, envelope)))
+export async function decryptJsonBatch<T>(
+  dataKey: Uint8Array,
+  envelopes: EncryptedEnvelope[],
+  onRejected: (error: unknown, index: number) => void,
+) {
+  const results = await Promise.allSettled(envelopes.map((envelope) => decryptJson<T>(dataKey, envelope)))
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') onRejected(result.reason, index)
+  })
+  return results
 }
 
 export function unwrapDataKey(keyPair: BoxKeyPair, wrapped: WrappedDataKey) {
@@ -506,10 +525,18 @@ export function unwrapDataKey(keyPair: BoxKeyPair, wrapped: WrappedDataKey) {
   return opened
 }
 
-export function bootstrapSessionCrypto(keyPair: BoxKeyPair, material: SessionKeyMaterial): SessionCryptoState {
+export function bootstrapSessionCrypto(
+  keyPair: BoxKeyPair,
+  material: SessionKeyMaterial,
+  options: Omit<
+    SessionKeyVerificationOptions,
+    'expectedClientPublicKey' | 'expectedClientIdentityPublicKey'
+  >,
+): SessionCryptoState {
   const localPublicKey = publicKeyToBase64(keyPair)
   const localIdentityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(keyPair))
   verifySessionKeyMaterial(material, {
+    ...options,
     expectedClientPublicKey: localPublicKey,
     expectedClientIdentityPublicKey: localIdentityPublicKey,
   })
