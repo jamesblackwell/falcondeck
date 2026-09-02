@@ -97,6 +97,28 @@ describe("Missions v2 trusted frontend", () => {
     ).toBeNull();
   });
 
+  it("accepts empty optional Automation fields serialized by the daemon", () => {
+    const projected = structuredClone(panelState) as unknown as Record<
+      string,
+      unknown
+    >;
+    const missions = projected.missions as Array<Record<string, unknown>>;
+    missions[0]!.automations = [
+      {
+        id: "automation-1",
+        revision: 1,
+        name: "Launch and observe the release — review",
+        state: "enabled",
+        provider: "codex",
+        resolvedSchedule: "Every 10 minutes",
+        nextRunAt: null,
+        latestOutcome: null,
+      },
+    ];
+
+    expect(parseMissionPanelState(projected)).not.toBeNull();
+  });
+
   it("shows the permissions Missions v2 uses", () => {
     const invokeAction = vi.fn(async () => response());
     renderMissions({

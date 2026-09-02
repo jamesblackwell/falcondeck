@@ -171,9 +171,9 @@ pub struct ExtensionOwnedAutomationSummary {
     pub state: AutomationState,
     pub provider: AgentProvider,
     pub resolved_schedule: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_outcome: Option<ExtensionAutomationOutcomeSummary>,
 }
 
@@ -184,7 +184,7 @@ pub struct ExtensionOwnedAutomationSummary {
 pub struct ExtensionAutomationOutcomeSummary {
     pub status: AutomationRunStatus,
     pub finished_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
 }
 
@@ -875,4 +875,36 @@ pub struct ControlExecuteResponse {
     /// Structured error on failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ControlErrorDetail>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_automation_summary_omits_empty_optional_fields() {
+        let mut summary = ExtensionOwnedAutomationSummary {
+            id: "automation-1".to_string(),
+            resource_id: "mission-1".to_string(),
+            revision: 1,
+            name: "Mission review".to_string(),
+            state: AutomationState::Enabled,
+            provider: AgentProvider::CODEX,
+            resolved_schedule: "Every 10 minutes".to_string(),
+            next_run_at: None,
+            latest_outcome: None,
+        };
+
+        let empty = serde_json::to_value(&summary).unwrap();
+        assert!(empty.get("nextRunAt").is_none());
+        assert!(empty.get("latestOutcome").is_none());
+
+        summary.latest_outcome = Some(ExtensionAutomationOutcomeSummary {
+            status: AutomationRunStatus::Succeeded,
+            finished_at: Utc::now(),
+            preview: None,
+        });
+        let completed = serde_json::to_value(summary).unwrap();
+        assert!(completed["latestOutcome"].get("preview").is_none());
+    }
 }

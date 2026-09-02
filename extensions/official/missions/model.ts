@@ -161,20 +161,21 @@ function parseAutomation(value: unknown): MissionPanelAutomation | null {
     typeof automation.provider !== "string" ||
     typeof automation.resolvedSchedule !== "string" ||
     (automation.nextRunAt !== undefined &&
+      automation.nextRunAt !== null &&
       typeof automation.nextRunAt !== "string")
   ) {
     return null;
   }
-  const latest =
-    automation.latestOutcome === undefined
-      ? null
-      : record(automation.latestOutcome);
+  const latest = record(automation.latestOutcome);
   if (
     automation.latestOutcome !== undefined &&
+    automation.latestOutcome !== null &&
     (!latest ||
       typeof latest.status !== "string" ||
       typeof latest.finishedAt !== "string" ||
-      (latest.preview !== undefined && typeof latest.preview !== "string"))
+      (latest.preview !== undefined &&
+        latest.preview !== null &&
+        typeof latest.preview !== "string"))
   ) {
     return null;
   }
