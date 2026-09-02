@@ -61,7 +61,7 @@ async function create(testHost = host()) {
         "Release is published",
         "Post-release evidence is recorded",
       ],
-      checkInDays: 7,
+      checkInSeconds: 600,
     },
   });
   return {
@@ -88,7 +88,7 @@ describe("official Missions extension v2", () => {
       missionId,
       status: "active",
       firstCheckInQueued: true,
-      checkInDays: 7,
+      checkInSeconds: 600,
     });
     expect(testHost.storageSnapshot()).toEqual({
       missions: {
@@ -108,6 +108,35 @@ describe("official Missions extension v2", () => {
         ],
       },
     });
+  });
+
+  it("uses the scheduler's one-minute floor instead of a Mission day floor", async () => {
+    const testHost = host();
+
+    await expect(
+      testHost.invokeTool("create-mission", {
+        threadId: "thread-1",
+        workspaceId: "workspace-1",
+        input: {
+          title: "Watch production",
+          brief: "Check production repeatedly for one hour.",
+          successCriteria: ["Six checks are recorded"],
+          checkInSeconds: 59,
+        },
+      }),
+    ).rejects.toThrow("checkInSeconds must be a whole number of at least 60");
+
+    const { response } = await create(testHost);
+    expect(response.automationEffects[0]).toEqual(
+      expect.objectContaining({
+        trigger: expect.objectContaining({ every_seconds: 600 }),
+        task: expect.objectContaining({
+          instruction: expect.stringContaining(
+            "Never sleep, poll, or build an interval loop",
+          ),
+        }),
+      }),
+    );
   });
 
   it("publishes a compact attention view with linked native task metadata", async () => {
@@ -225,7 +254,7 @@ describe("official Missions extension v2", () => {
     const { testHost, missionId } = await create();
 
     const scheduled = await testHost.invokeAction("schedule-mission-review", {
-      input: { missionId, cadenceDays: 7 },
+      input: { missionId, checkInSeconds: 600 },
     });
 
     expect(scheduled.automationEffects).toEqual([
@@ -236,7 +265,7 @@ describe("official Missions extension v2", () => {
         sourceThreadId: "thread-1",
         trigger: expect.objectContaining({
           kind: "interval",
-          every_seconds: 604800,
+          every_seconds: 600,
         }),
         misfirePolicy: "run_once",
       }),
@@ -295,5 +324,24 @@ describe("official Missions extension v2", () => {
         input: { missionId },
       }),
     ).rejects.toThrow("reactivate the Mission before requesting a review");
+  });
+
+  it("pauses future check-ins when an agent moves the Mission to review", async () => {
+    const { testHost, missionId } = await create();
+
+    const result = await testHost.invokeTool("update-mission", {
+      threadId: "thread-1",
+      workspaceId: "workspace-1",
+      input: {
+        missionId,
+        operation: "set_status",
+        status: "review",
+        body: "The deadline passed; six checks are recorded for human review.",
+      },
+    });
+
+    expect(result.automationEffects).toEqual([
+      { type: "pause_resource", resourceId: missionId },
+    ]);
   });
 });

@@ -49,6 +49,15 @@ const REQUIRED_PERMISSIONS = [
 
 type BadgeVariant = "default" | "success" | "warning" | "danger" | "info";
 type ButtonVariant = "default" | "outline" | "ghost" | "danger";
+type CheckInUnit = "seconds" | "minutes" | "hours" | "days" | "weeks";
+
+const CHECK_IN_UNIT_SECONDS: Record<CheckInUnit, number> = {
+  seconds: 1,
+  minutes: 60,
+  hours: 60 * 60,
+  days: 24 * 60 * 60,
+  weeks: 7 * 24 * 60 * 60,
+};
 
 function classes(...values: Array<string | false | undefined>): string {
   return values.filter(Boolean).join(" ");
@@ -164,6 +173,20 @@ function formatDate(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function formatCheckInInterval(seconds: number): string {
+  const units = Object.entries(CHECK_IN_UNIT_SECONDS).reverse() as Array<
+    [CheckInUnit, number]
+  >;
+  for (const [unit, unitSeconds] of units) {
+    if (seconds % unitSeconds === 0) {
+      const amount = seconds / unitSeconds;
+      const singular = unit.slice(0, -1);
+      return `every ${amount} ${amount === 1 ? singular : unit}`;
+    }
+  }
+  return `every ${seconds} seconds`;
 }
 
 function statusVariant(status: MissionStatus): BadgeVariant {
@@ -292,7 +315,10 @@ function MissionCard({
 }) {
   const [message, setMessage] = useState("");
   const [runNow, setRunNow] = useState(false);
-  const [cadenceDays, setCadenceDays] = useState("7");
+  const [checkInAmount, setCheckInAmount] = useState("1");
+  const [checkInUnit, setCheckInUnit] = useState<CheckInUnit>("hours");
+  const checkInSeconds =
+    Number(checkInAmount) * CHECK_IN_UNIT_SECONDS[checkInUnit];
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -440,9 +466,12 @@ function MissionCard({
                         disabled={
                           busy ||
                           automation.state !== "enabled" ||
-                          ["paused", "completed", "cancelled"].includes(
-                            mission.status,
-                          )
+                          [
+                            "review",
+                            "paused",
+                            "completed",
+                            "cancelled",
+                          ].includes(mission.status)
                         }
                         onClick={() =>
                           void invoke("run-mission-review", {
@@ -457,9 +486,12 @@ function MissionCard({
                         disabled={
                           busy ||
                           (automation.state !== "enabled" &&
-                            ["paused", "completed", "cancelled"].includes(
-                              mission.status,
-                            ))
+                            [
+                              "review",
+                              "paused",
+                              "completed",
+                              "cancelled",
+                            ].includes(mission.status))
                         }
                         onClick={() =>
                           void invoke("control-mission-automation", {
@@ -488,7 +520,9 @@ function MissionCard({
                 </div>
               ))}
             </div>
-          ) : !["paused", "completed", "cancelled"].includes(mission.status) ? (
+          ) : !["review", "paused", "completed", "cancelled"].includes(
+              mission.status,
+            ) ? (
             <div className="mt-1.5 rounded-[var(--fd-radius-lg)] border border-warning bg-warning-muted px-4 py-3">
               <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                 No agent has started
@@ -501,22 +535,39 @@ function MissionCard({
                 <span className="text-[length:var(--fd-text-xs)] text-fg-secondary">
                   Start now, then check again every
                 </span>
+                <input
+                  aria-label={`Check-in interval for ${mission.title}`}
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={checkInAmount}
+                  onChange={(event) => setCheckInAmount(event.target.value)}
+                  className="fd-focus h-8 w-20 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2 text-[length:var(--fd-text-xs)] text-fg-primary"
+                />
                 <select
-                  aria-label={`Check-in cadence for ${mission.title}`}
-                  value={cadenceDays}
-                  onChange={(event) => setCadenceDays(event.target.value)}
+                  aria-label={`Check-in unit for ${mission.title}`}
+                  value={checkInUnit}
+                  onChange={(event) =>
+                    setCheckInUnit(event.target.value as CheckInUnit)
+                  }
                   className="fd-focus h-8 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2 text-[length:var(--fd-text-xs)] text-fg-primary"
                 >
-                  <option value="1">day</option>
-                  <option value="7">week</option>
-                  <option value="30">30 days</option>
+                  <option value="seconds">seconds</option>
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                  <option value="days">days</option>
+                  <option value="weeks">weeks</option>
                 </select>
                 <Button
-                  disabled={busy}
+                  disabled={
+                    busy ||
+                    !Number.isSafeInteger(checkInSeconds) ||
+                    checkInSeconds < 60
+                  }
                   onClick={() =>
                     void invoke("schedule-mission-review", {
                       missionId: mission.id,
-                      cadenceDays: Number(cadenceDays),
+                      checkInSeconds,
                       runImmediately: true,
                     })
                   }
@@ -747,8 +798,8 @@ function MissionStartedToolResult({
         (candidate) => candidate.id === missionId,
       )
     : null;
-  const checkInDays =
-    typeof inner?.checkInDays === "number" ? inner.checkInDays : null;
+  const checkInSeconds =
+    typeof inner?.checkInSeconds === "number" ? inner.checkInSeconds : null;
   const detailed = presentation === "detail";
 
   if (!missionId) return null;
@@ -770,8 +821,8 @@ function MissionStartedToolResult({
       </h3>
       <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
         An agent check-in is queued now
-        {checkInDays
-          ? `, with future check-ins every ${checkInDays} ${checkInDays === 1 ? "day" : "days"}`
+        {checkInSeconds
+          ? `, with future check-ins ${formatCheckInInterval(checkInSeconds)}`
           : ""}
         . You can leave this task; the Mission will keep its brief and progress.
       </p>

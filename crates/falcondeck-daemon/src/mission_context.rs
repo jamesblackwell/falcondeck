@@ -27,7 +27,7 @@ pub(crate) fn append_instructions(text: &mut String, skill_path: Option<&Path>) 
         text.push('\n');
     }
     text.push_str(
-        "- When the user explicitly asks to start or create a FalconDeck Mission, call `falcondeck_missions-create_mission` before doing the requested work. Create a durable brief with concrete success criteria, choose the least-frequent useful check-in cadence, and only include a deadline when the user wants one. Do not substitute a harness goal or merely describe a Mission. The tool links this task, starts the Mission, and queues its first agent check-in immediately; never ask the user to activate it again.",
+        "- When the user explicitly asks to start or create a FalconDeck Mission, call `falcondeck_missions-create_mission` before doing the requested work. Create a durable brief with concrete success criteria, set `checkInSeconds` to the interval the work actually needs (minimum 60), and only include a deadline when the user wants one. Do not substitute a harness goal or merely describe a Mission. The tool links this task, starts the Mission, and queues its first agent check-in immediately; never ask the user to activate it again.",
     );
     if let Some(path) = skill_path {
         text.push_str(&format!(

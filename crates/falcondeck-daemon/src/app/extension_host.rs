@@ -724,7 +724,7 @@ mod tests {
                     "title": "Mission test",
                     "brief": "Prove the public extension contract",
                     "successCriteria": ["A durable Mission is stored"],
-                    "checkInDays": 7
+                    "checkInSeconds": 600
                 }),
                 Some("thread-1"),
                 Some("workspace-1"),

@@ -19,6 +19,8 @@ Starting creates an extension-owned Automation in FalconDeck's existing Agent
 Control scheduler and queues its first run immediately, using the source task's
 workspace, provider, model, and authority settings. Each check-in starts or
 reuses an ordinary native task, which receives verified Mission provenance and
-reads the durable brief before working. Pausing or closing the Mission pauses
-future reviews; there is no Mission-specific agent loop or default lifespan.
+reads the durable brief before working. Check-ins may recur at any whole-second
+interval of 60 seconds or more; Missions adds no day-based floor or arbitrary
+maximum. Moving the Mission to review, pausing it, or closing it pauses future
+check-ins; there is no Mission-specific agent loop or default lifespan.
 See `docs/MISSIONS.md`.

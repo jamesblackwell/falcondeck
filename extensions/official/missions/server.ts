@@ -110,6 +110,22 @@ function compact(value: string, max: number): string {
     : value;
 }
 
+function formatCheckInInterval(seconds: number): string {
+  const units = [
+    [7 * 24 * 60 * 60, "week"],
+    [24 * 60 * 60, "day"],
+    [60 * 60, "hour"],
+    [60, "minute"],
+  ] as const;
+  for (const [unitSeconds, label] of units) {
+    if (seconds % unitSeconds === 0) {
+      const amount = seconds / unitSeconds;
+      return `every ${amount} ${label}${amount === 1 ? "" : "s"}`;
+    }
+  }
+  return `every ${seconds} seconds`;
+}
+
 function isMission(value: unknown): value is Mission {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const mission = value as Partial<Mission>;
@@ -342,6 +358,8 @@ function reviewInstruction(missionId: string): string {
     `Review FalconDeck Mission ${missionId}.`,
     `First call read-mission with missionId ${missionId}; treat that durable brief, its success criteria, updates, and linked tasks as authoritative.`,
     "Decide the cheapest useful next step. Reuse a healthy linked task where practical; create or delegate to another task only for clean context, a distinct harness capability, independent work, or independent review.",
+    "Perform one bounded check-in only. Never sleep, poll, or build an interval loop inside this task; FalconDeck's Automation supplies the recurrence.",
+    "If the Mission deadline has passed or its success criteria are satisfied, post final evidence, set the Mission to review, and stop. Setting review pauses future check-ins until the human decides what comes next.",
     "Use native Goals for bounded execution inside a task when helpful. Do not spend tokens while waiting for an external condition.",
     "Before finishing, call update-mission with meaningful evidence, a decision, a concrete human question, or the appropriate non-terminal status. Never mark the Mission completed or cancelled.",
   ].join("\n\n");
@@ -358,16 +376,16 @@ function addUpdate(
 
 function createMissionInput(input: unknown) {
   const args = record(input);
-  const checkInDays = Number(args.checkInDays);
-  if (!Number.isInteger(checkInDays) || checkInDays < 1 || checkInDays > 90) {
-    throw new Error("checkInDays must be a whole number from 1 to 90");
+  const checkInSeconds = Number(args.checkInSeconds);
+  if (!Number.isSafeInteger(checkInSeconds) || checkInSeconds < 60) {
+    throw new Error("checkInSeconds must be a whole number of at least 60");
   }
   return {
     title: requiredString(args.title, "title", 120),
     brief: requiredString(args.brief, "brief", 4_000),
     successCriteria: stringList(args.successCriteria, "successCriteria"),
     deadline: isoDeadline(args.deadline),
-    checkInDays,
+    checkInSeconds,
   };
 }
 
@@ -393,7 +411,7 @@ export default defineExtension({
       );
       if (
         args.runNow === true &&
-        ["paused", "completed", "cancelled"].includes(mission.status)
+        ["review", "paused", "completed", "cancelled"].includes(mission.status)
       ) {
         throw new Error("reactivate the Mission before requesting a review");
       }
@@ -440,7 +458,7 @@ export default defineExtension({
       });
       await saveStore(context, store);
       await publish(context, store);
-      if (["paused", "completed", "cancelled"].includes(status)) {
+      if (["review", "paused", "completed", "cancelled"].includes(status)) {
         await context.automations.apply({
           type: "pause_resource",
           resourceId: mission.id,
@@ -456,16 +474,14 @@ export default defineExtension({
         store,
         requiredString(args.missionId, "missionId", 128),
       );
-      if (["paused", "completed", "cancelled"].includes(mission.status)) {
+      if (
+        ["review", "paused", "completed", "cancelled"].includes(mission.status)
+      ) {
         throw new Error("reactivate the Mission before scheduling check-ins");
       }
-      const cadenceDays = Number(args.cadenceDays);
-      if (
-        !Number.isInteger(cadenceDays) ||
-        cadenceDays < 1 ||
-        cadenceDays > 90
-      ) {
-        throw new Error("cadenceDays must be a whole number from 1 to 90");
+      const checkInSeconds = Number(args.checkInSeconds);
+      if (!Number.isSafeInteger(checkInSeconds) || checkInSeconds < 60) {
+        throw new Error("checkInSeconds must be a whole number of at least 60");
       }
       const existing = (await context.automations.list()).find(
         (automation) => automation.resourceId === mission.id,
@@ -486,7 +502,7 @@ export default defineExtension({
         description: "Periodic review owned by FalconDeck Missions.",
         trigger: {
           kind: "interval",
-          every_seconds: cadenceDays * 24 * 60 * 60,
+          every_seconds: checkInSeconds,
           anchor_at: new Date().toISOString(),
         },
         task: { kind: "prompt", instruction: reviewInstruction(mission.id) },
@@ -506,7 +522,9 @@ export default defineExtension({
         const mission = missionById(await loadStore(context), missionId);
         if (
           operation === "resume" &&
-          ["paused", "completed", "cancelled"].includes(mission.status)
+          ["review", "paused", "completed", "cancelled"].includes(
+            mission.status,
+          )
         ) {
           throw new Error("reactivate the Mission before resuming its reviews");
         }
@@ -536,7 +554,9 @@ export default defineExtension({
       const args = record(input);
       const missionId = requiredString(args.missionId, "missionId", 128);
       const mission = missionById(await loadStore(context), missionId);
-      if (["paused", "completed", "cancelled"].includes(mission.status)) {
+      if (
+        ["review", "paused", "completed", "cancelled"].includes(mission.status)
+      ) {
         throw new Error("reactivate the Mission before requesting a review");
       }
       const automation = (await context.automations.list()).find(
@@ -578,7 +598,7 @@ export default defineExtension({
               id: crypto.randomUUID(),
               actor: "agent",
               kind: "status",
-              body: `Mission started. The first agent check-in was queued, with future check-ins every ${args.checkInDays} ${args.checkInDays === 1 ? "day" : "days"}.`,
+              body: `Mission started. The first agent check-in was queued, with future check-ins ${formatCheckInInterval(args.checkInSeconds)}.`,
               threadId,
               createdAt: now,
             },
@@ -599,7 +619,7 @@ export default defineExtension({
           description: "Periodic review owned by FalconDeck Missions.",
           trigger: {
             kind: "interval",
-            every_seconds: args.checkInDays * 24 * 60 * 60,
+            every_seconds: args.checkInSeconds,
             anchor_at: now,
           },
           task: { kind: "prompt", instruction: reviewInstruction(mission.id) },
@@ -611,7 +631,7 @@ export default defineExtension({
           missionId: mission.id,
           status: mission.status,
           firstCheckInQueued: true,
-          checkInDays: args.checkInDays,
+          checkInSeconds: args.checkInSeconds,
         };
       },
     );
@@ -697,7 +717,7 @@ export default defineExtension({
               `Mission marked ${status.replaceAll("_", " ")}.`,
             threadId,
           });
-          if (status === "paused") {
+          if (status === "review" || status === "paused") {
             await context.automations.apply({
               type: "pause_resource",
               resourceId: mission.id,

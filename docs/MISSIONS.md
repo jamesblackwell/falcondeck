@@ -172,10 +172,12 @@ The extension exposes three conceptual tools.
 ### `create-mission`
 
 Starts a Mission from the current task and links that task with role `source`.
-Required input is a title, brief, success criteria, and check-in cadence. A
-deadline is optional. Creation also creates the primary review Automation and
-queues its first run. The inline result confirms that work has started; it does
-not ask the user to approve the same decision twice.
+Required input is a title, brief, success criteria, and `checkInSeconds`. A
+deadline is optional. The interval uses the scheduler's native 60-second
+minimum; Missions imposes no day-based cadence or arbitrary upper bound.
+Creation also creates the primary review Automation and queues its first run.
+The inline result confirms that work has started; it does not ask the user to
+approve the same decision twice.
 
 ### `read-mission`
 
@@ -254,6 +256,13 @@ be conservative and visible:
 - no default worker count or instruction to spawn agents; and
 - `run_once` misfire so a sleeping local daemon performs one useful review on
   return rather than replaying every missed interval.
+
+Each Automation run performs one bounded check-in. It must not implement its
+own sleep or polling loop. For example, “every 10 minutes for the next hour” is
+a 600-second interval plus a one-hour Mission deadline, not one agent turn that
+sleeps for an hour. Once the deadline passes or the success criteria are met,
+the reviewing agent records final evidence and moves the Mission to `review`;
+that transition pauses future check-ins.
 
 The review prompt contains the Mission id and tells the agent to call
 `read-mission`. The brief itself remains in the Mission record, so fresh tasks

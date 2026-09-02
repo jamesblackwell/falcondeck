@@ -18,9 +18,11 @@ When the user explicitly requests a Mission:
    Treat the agreed definition as final for creation.
 3. Include `deadline` only when the user requests or agrees to one. Missions
    have no default lifespan, worker count, or automatic-turn limit.
-4. Choose the least-frequent `checkInDays` cadence that can still make useful
-   progress. Ask the user only when that choice materially affects cost or
-   timing. The first check-in runs immediately regardless of cadence.
+4. Set `checkInSeconds` to the interval the work actually needs. The scheduler
+   accepts any whole number from 60 seconds upward. Choose the least-frequent
+   cadence that can still make useful progress, and ask the user only when that
+   choice materially affects cost or timing. The first check-in runs
+   immediately regardless of cadence.
 5. Report that the Mission started and its first agent check-in is queued. Do
    not ask the user to activate or approve it again.
 6. Do not silently substitute a native harness goal. A linked task may use its
@@ -48,3 +50,8 @@ When this task is linked to a Mission:
   required;
 - mark it `review` with evidence when the criteria appear satisfied; and
 - never mark it complete or cancelled. Those are human decisions.
+
+Each scheduled task performs one bounded check-in. Never sleep, poll, or build
+an interval loop inside a task; the Mission Automation supplies recurrence. If
+the deadline has passed or the criteria are satisfied, post final evidence and
+set `review`, which pauses future check-ins.

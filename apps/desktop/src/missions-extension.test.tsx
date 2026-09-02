@@ -190,17 +190,23 @@ describe("Missions v2 trusted frontend", () => {
     });
 
     fireEvent.change(
-      screen.getByRole("combobox", {
-        name: "Check-in cadence for Launch and observe the release",
+      screen.getByRole("spinbutton", {
+        name: "Check-in interval for Launch and observe the release",
       }),
-      { target: { value: "30" } },
+      { target: { value: "10" } },
+    );
+    fireEvent.change(
+      screen.getByRole("combobox", {
+        name: "Check-in unit for Launch and observe the release",
+      }),
+      { target: { value: "minutes" } },
     );
     expect(screen.getByText("No agent has started")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Start agent now" }));
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith("schedule-mission-review", {
         missionId: "mission-1",
-        cadenceDays: 30,
+        checkInSeconds: 600,
         runImmediately: true,
       }),
     );
@@ -247,7 +253,7 @@ describe("Missions v2 trusted frontend", () => {
             missionId: "mission-1",
             status: "active",
             firstCheckInQueued: true,
-            checkInDays: 7,
+            checkInSeconds: 600,
           },
         }}
         views={response(panelState).updatedViews}
@@ -259,6 +265,7 @@ describe("Missions v2 trusted frontend", () => {
 
     expect(screen.getByText("Mission started")).toBeVisible();
     expect(screen.getByText(/agent check-in is queued now/)).toBeVisible();
+    expect(screen.getByText(/every 10 minutes/)).toBeVisible();
     expect(screen.getByText("No deadline")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Open details" }));
     expect(openDetails).toHaveBeenCalledOnce();

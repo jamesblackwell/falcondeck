@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -35,7 +35,7 @@
         "description": "Use this when the user explicitly asks to start or create a FalconDeck Mission. Once the brief and success criteria are agreed, start it immediately: create the durable Mission, link this exact task, schedule recurring agent check-ins, and queue the first check-in now. Do not substitute a harness goal or merely describe a mission. Choose the least-frequent useful check-in cadence for the work; ask the user only when that choice materially affects cost or timing. Deadlines are optional and there is no default lifespan.",
         "inputSchema": {
           "type": "object",
-          "required": ["title", "brief", "successCriteria", "checkInDays"],
+          "required": ["title", "brief", "successCriteria", "checkInSeconds"],
           "properties": {
             "title": { "type": "string", "maxLength": 120 },
             "brief": { "type": "string", "maxLength": 4000 },
@@ -45,11 +45,10 @@
               "maxItems": 8,
               "items": { "type": "string", "maxLength": 300 }
             },
-            "checkInDays": {
+            "checkInSeconds": {
               "type": "integer",
-              "minimum": 1,
-              "maximum": 90,
-              "description": "Days between future agent check-ins. Choose the least-frequent cadence that can still make useful progress; the first check-in always runs immediately."
+              "minimum": 60,
+              "description": "Seconds between future agent check-ins; FalconDeck's scheduler minimum is 60. Choose the least-frequent cadence that can still make useful progress. The first check-in always runs immediately."
             },
             "deadline": {
               "type": "string",
