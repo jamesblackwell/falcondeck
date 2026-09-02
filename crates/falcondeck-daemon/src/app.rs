@@ -200,6 +200,14 @@ impl std::ops::Deref for CachedEnvelope {
     }
 }
 
+/// How long an extensions bridge capability stays valid without use. Renewed
+/// on every accepted call, so only an abandoned bridge ever expires.
+const EXTENSION_BRIDGE_CAPABILITY_TTL: chrono::Duration = chrono::Duration::days(7);
+/// Bounded wait for a harness's `mcpToolCall` item to reach the daemon before
+/// a workspace-wide bridge call gives up on binding to its thread.
+const IN_FLIGHT_BRIDGE_CALL_ATTEMPTS: usize = 6;
+const IN_FLIGHT_BRIDGE_CALL_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
+
 #[derive(Debug, Clone)]
 struct ExtensionBridgeCapability {
     provider: AgentProvider,
@@ -1047,7 +1055,7 @@ impl AppState {
                 provider: provider.clone(),
                 workspace_path: workspace_path.to_string(),
                 thread_id: thread_id.map(str::to_string),
-                expires_at: now + chrono::Duration::hours(12),
+                expires_at: now + EXTENSION_BRIDGE_CAPABILITY_TTL,
             },
         );
         drop(capabilities);
@@ -2421,9 +2429,11 @@ impl AppState {
             .await;
         let inferred_bridge_thread = match trusted_bridge.as_ref() {
             Some(context) if context.thread_id.is_none() => {
-                self.unambiguous_running_extension_thread(
+                self.resolve_workspace_bridge_thread(
                     &context.workspace_path,
                     &context.provider,
+                    &request.name,
+                    &request.arguments,
                 )
                 .await
             }
@@ -2443,28 +2453,12 @@ impl AppState {
             .map(|context| context.workspace_path.as_str())
             .or(request.workspace_path.as_deref());
         if request.name == BUILTIN_RENAME_THREAD_TOOL {
-            // Some harnesses keep one MCP bridge for the whole workspace
-            // rather than creating it per thread. Rename is safe to bind when
-            // that provider has exactly one running thread in the capability-
-            // bound workspace; ambiguity still fails closed.
-            let inferred_rename_thread = if effective_thread_id.is_none() {
-                match trusted_bridge.as_ref() {
-                    Some(context) => {
-                        self.unambiguous_running_extension_thread(
-                            &context.workspace_path,
-                            &context.provider,
-                        )
-                        .await
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
+            // Workspace-wide bridges already resolved their thread above, so
+            // rename binds to the same in-flight call or unambiguous task.
             return self
                 .invoke_builtin_rename_thread_tool(
                     &request.arguments,
-                    effective_thread_id.or(inferred_rename_thread.as_deref()),
+                    effective_thread_id,
                     effective_workspace_path,
                 )
                 .await;
@@ -2697,30 +2691,65 @@ impl AppState {
         let now = Utc::now();
         let mut capabilities = self.inner.extension_bridge_capabilities.lock().await;
         capabilities.retain(|_, capability| capability.expires_at > now);
-        capabilities.get(token).cloned()
+        let capability = capabilities.get_mut(token)?;
+        // Workspace-scoped harnesses (Codex app-server, shared ACP runtimes)
+        // keep one process alive for days; every accepted call renews the
+        // capability so a long-lived bridge never silently loses its binding.
+        capability.expires_at = now + EXTENSION_BRIDGE_CAPABILITY_TTL;
+        Some(capability.clone())
     }
 
-    /// Resolves a workspace-wide bridge to a task only when provider state
-    /// makes the caller unambiguous. Some harnesses own one MCP bridge per
-    /// workspace, so the daemon fails closed when two matching tasks are
-    /// running instead of trusting model-supplied request fields.
-    async fn unambiguous_running_extension_thread(
+    /// Binds a workspace-wide bridge call to the thread whose transcript is
+    /// currently executing that exact MCP call. Harnesses that own one bridge
+    /// per workspace (Codex app-server) report each `mcpToolCall` item to the
+    /// daemon before the bridge forwards the request, so the in-flight item is
+    /// the ground truth for which thread is calling. When several threads run
+    /// concurrently and no item matches yet, the daemon briefly waits for the
+    /// item notification before falling back to the single-running-thread
+    /// rule; ambiguity still fails closed.
+    async fn resolve_workspace_bridge_thread(
         &self,
         workspace_path: &str,
         provider: &AgentProvider,
+        tool_name: &str,
+        arguments: &Value,
     ) -> Option<String> {
         let canonical = std::path::PathBuf::from(workspace_path)
             .canonicalize()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| workspace_path.to_string());
-        let workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .values()
-            .find(|workspace| workspace.summary.path == canonical)?;
-        unambiguous_running_thread_id(
-            workspace.threads.values().map(|thread| &thread.summary),
-            provider,
-        )
+        for attempt in 0..IN_FLIGHT_BRIDGE_CALL_ATTEMPTS {
+            let (matched, unambiguous) = {
+                let workspaces = self.inner.workspaces.lock().await;
+                let workspace = workspaces
+                    .values()
+                    .find(|workspace| workspace.summary.path == canonical)?;
+                let matched = thread_with_in_flight_bridge_call(
+                    workspace
+                        .threads
+                        .values()
+                        .map(|thread| (&thread.summary, thread.items.as_slice())),
+                    provider,
+                    tool_name,
+                    arguments,
+                );
+                let unambiguous = unambiguous_running_thread_id(
+                    workspace.threads.values().map(|thread| &thread.summary),
+                    provider,
+                );
+                (matched, unambiguous)
+            };
+            if matched.is_some() {
+                return matched;
+            }
+            if unambiguous.is_some() {
+                return unambiguous;
+            }
+            if attempt + 1 < IN_FLIGHT_BRIDGE_CALL_ATTEMPTS {
+                tokio::time::sleep(IN_FLIGHT_BRIDGE_CALL_RETRY).await;
+            }
+        }
+        None
     }
 
     /// Broadcasts changed projections so every connected client re-renders.
@@ -3663,11 +3692,67 @@ fn unambiguous_running_thread_id<'a>(
     threads: impl Iterator<Item = &'a ThreadSummary>,
     provider: &AgentProvider,
 ) -> Option<String> {
-    let mut candidates = threads.filter(|thread| {
-        thread.provider == *provider && thread.status == ThreadStatus::Running
-    });
+    let mut candidates = threads
+        .filter(|thread| thread.provider == *provider && thread.status == ThreadStatus::Running);
     let only = candidates.next()?.id.clone();
     candidates.next().is_none().then_some(only)
+}
+
+/// Picks the one running thread whose transcript holds a still-running MCP
+/// call to the extensions bridge for `tool_name`. An exact argument match wins;
+/// when the harness reports arguments differently from what the bridge
+/// received, a unique tool-name match is accepted instead. Two threads
+/// executing the same call are ambiguous and yield `None`.
+fn thread_with_in_flight_bridge_call<'a>(
+    threads: impl Iterator<Item = (&'a ThreadSummary, &'a [ConversationItem])>,
+    provider: &AgentProvider,
+    tool_name: &str,
+    arguments: &Value,
+) -> Option<String> {
+    let mut exact: Vec<&str> = Vec::new();
+    let mut by_name: Vec<&str> = Vec::new();
+    for (summary, items) in threads {
+        if summary.provider != *provider || summary.status != ThreadStatus::Running {
+            continue;
+        }
+        let mut has_exact = false;
+        let mut has_name = false;
+        for item in items.iter().rev() {
+            let ConversationItem::ToolCall { status, detail, .. } = item else {
+                continue;
+            };
+            if status != "running" {
+                continue;
+            }
+            let Some(falcondeck_core::ToolCallDetail::Mcp {
+                server,
+                tool,
+                arguments: call_arguments,
+                ..
+            }) = detail.as_deref()
+            else {
+                continue;
+            };
+            if server != crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME || tool != tool_name {
+                continue;
+            }
+            has_name = true;
+            if call_arguments == arguments {
+                has_exact = true;
+                break;
+            }
+        }
+        if has_exact {
+            exact.push(summary.id.as_str());
+        }
+        if has_name {
+            by_name.push(summary.id.as_str());
+        }
+    }
+    match (exact.as_slice(), by_name.as_slice()) {
+        ([only], _) | ([], [only]) => Some((*only).to_string()),
+        _ => None,
+    }
 }
 
 trait IntoWorkspaceAgentUpdate {

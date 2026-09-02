@@ -2664,6 +2664,356 @@ fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
 }
 
 #[test]
+fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
+    let make_thread = |id: &str, status: ThreadStatus| ThreadSummary {
+        id: id.to_string(),
+        workspace_id: "workspace-1".to_string(),
+        title: id.to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    let bridge_call =
+        |tool: &str, arguments: serde_json::Value, status: &str| ConversationItem::ToolCall {
+            id: format!("{tool}-{status}"),
+            title: format!("falcondeck-extensions · {tool}"),
+            tool_kind: "mcpToolCall".to_string(),
+            status: status.to_string(),
+            output: None,
+            exit_code: None,
+            display: Box::new(super::conversation_helpers::tool_display_metadata(
+                "MCP tool call",
+                "mcpToolCall",
+                "running",
+                None,
+                None,
+            )),
+            detail: Some(Box::new(falcondeck_core::ToolCallDetail::Mcp {
+                server: "falcondeck-extensions".to_string(),
+                tool: tool.to_string(),
+                arguments,
+                result: None,
+                error: None,
+                duration_ms: None,
+                app_context: None,
+            })),
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+    let first = make_thread("first", ThreadStatus::Running);
+    let second = make_thread("second", ThreadStatus::Running);
+    let idle = make_thread("idle", ThreadStatus::Idle);
+    let title_a = json!({ "title": "A" });
+    let title_b = json!({ "title": "B" });
+
+    // The thread executing the exact call wins even though two Codex threads
+    // run concurrently in the workspace.
+    let first_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_a.clone(),
+        "running",
+    )];
+    let second_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_b.clone(),
+        "running",
+    )];
+    let idle_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_a.clone(),
+        "running",
+    )];
+    let threads = [
+        (&first, first_items.as_slice()),
+        (&second, second_items.as_slice()),
+        (&idle, idle_items.as_slice()),
+    ];
+    assert_eq!(
+        super::thread_with_in_flight_bridge_call(
+            threads.into_iter(),
+            &AgentProvider::CODEX,
+            "falcondeck_rename_thread",
+            &title_b,
+        )
+        .as_deref(),
+        Some("second")
+    );
+
+    // Completed calls no longer identify a thread; a unique tool-name match
+    // still binds when the harness reports arguments differently.
+    let first_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_a.clone(),
+        "completed",
+    )];
+    let second_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        json!({ "title": "B", "extra": true }),
+        "running",
+    )];
+    let threads = [
+        (&first, first_items.as_slice()),
+        (&second, second_items.as_slice()),
+    ];
+    assert_eq!(
+        super::thread_with_in_flight_bridge_call(
+            threads.into_iter(),
+            &AgentProvider::CODEX,
+            "falcondeck_rename_thread",
+            &title_b,
+        )
+        .as_deref(),
+        Some("second")
+    );
+
+    // Two threads mid-way through the same call stay ambiguous.
+    let first_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_a.clone(),
+        "running",
+    )];
+    let second_items = vec![bridge_call(
+        "falcondeck_rename_thread",
+        title_a.clone(),
+        "running",
+    )];
+    let threads = [
+        (&first, first_items.as_slice()),
+        (&second, second_items.as_slice()),
+    ];
+    assert!(
+        super::thread_with_in_flight_bridge_call(
+            threads.into_iter(),
+            &AgentProvider::CODEX,
+            "falcondeck_rename_thread",
+            &title_a,
+        )
+        .is_none()
+    );
+
+    // Other bridge tools and other MCP servers never match.
+    let first_items = vec![bridge_call(
+        "falcondeck_suggest_follow_ups",
+        title_a.clone(),
+        "running",
+    )];
+    let threads = [(&first, first_items.as_slice())];
+    assert!(
+        super::thread_with_in_flight_bridge_call(
+            threads.into_iter(),
+            &AgentProvider::CODEX,
+            "falcondeck_rename_thread",
+            &title_a,
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn workspace_bridge_rename_binds_the_calling_thread_among_concurrent_codex_threads() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let workspace_path = workspace_path.canonicalize().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    let workspace_id = "workspace-1".to_string();
+    let make_thread = |id: &str| {
+        super::ManagedThread::new(ThreadSummary {
+            id: id.to_string(),
+            workspace_id: workspace_id.clone(),
+            title: id.to_string(),
+            provider: AgentProvider::CODEX,
+            native_session_id: None,
+            provider_transport: None,
+            handoff_from: None,
+            origin: None,
+            status: ThreadStatus::Running,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+            is_pinned: false,
+            is_pinned_in_project: false,
+            goal: None,
+            queued_turns: Vec::new(),
+            variant: None,
+        })
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
+                id: workspace_id.clone(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some("thread-a".to_string()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [
+                ("thread-a".to_string(), make_thread("thread-a")),
+                ("thread-b".to_string(), make_thread("thread-b")),
+            ]
+            .into_iter()
+            .collect(),
+        },
+    );
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "workspace-capability".to_string(),
+        super::ExtensionBridgeCapability {
+            provider: AgentProvider::CODEX,
+            workspace_path: workspace_path.to_string_lossy().to_string(),
+            thread_id: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        },
+    );
+    let rename = |title: &str| falcondeck_core::InvokeExtensionToolRequest {
+        name: super::BUILTIN_RENAME_THREAD_TOOL.to_string(),
+        arguments: json!({ "title": title }),
+        thread_id: None,
+        workspace_path: Some(workspace_path.to_string_lossy().to_string()),
+        bridge_capability: Some("workspace-capability".to_string()),
+    };
+
+    // Two running Codex threads and no in-flight call: ambiguous, fails closed.
+    let error = app
+        .invoke_extension_tool(rename("Nobody"))
+        .await
+        .expect_err("ambiguous workspace bridge must not guess a thread");
+    assert!(error.to_string().contains("not attached to a thread"));
+
+    // Thread B's transcript shows the rename call in flight, exactly as Codex
+    // reports `item/started` before the bridge forwards the request.
+    app.push_conversation_item(
+        &workspace_id,
+        "thread-b",
+        ConversationItem::ToolCall {
+            id: "mcp-1".to_string(),
+            title: "falcondeck-extensions · falcondeck_rename_thread".to_string(),
+            tool_kind: "mcpToolCall".to_string(),
+            status: "running".to_string(),
+            output: None,
+            exit_code: None,
+            display: Box::new(super::conversation_helpers::tool_display_metadata(
+                "MCP tool call",
+                "mcpToolCall",
+                "running",
+                None,
+                None,
+            )),
+            detail: Some(Box::new(falcondeck_core::ToolCallDetail::Mcp {
+                server: "falcondeck-extensions".to_string(),
+                tool: super::BUILTIN_RENAME_THREAD_TOOL.to_string(),
+                arguments: json!({ "title": "Second lane" }),
+                result: None,
+                error: None,
+                duration_ms: None,
+                app_context: None,
+            })),
+            created_at: Utc::now(),
+            completed_at: None,
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    let response = app
+        .invoke_extension_tool(rename("Second lane"))
+        .await
+        .expect("in-flight call identifies the calling thread");
+    assert_eq!(response.result["renamed"], true);
+    assert_eq!(
+        app.thread_summary(&workspace_id, "thread-b")
+            .await
+            .unwrap()
+            .title,
+        "Second lane"
+    );
+    assert_eq!(
+        app.thread_summary(&workspace_id, "thread-a")
+            .await
+            .unwrap()
+            .title,
+        "thread-a"
+    );
+}
+
+#[tokio::test]
+async fn extension_bridge_capability_renews_on_every_accepted_call() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("state.json"),
+    );
+    app.inner.extension_bridge_capabilities.lock().await.insert(
+        "long-lived".to_string(),
+        super::ExtensionBridgeCapability {
+            provider: AgentProvider::CODEX,
+            workspace_path: "/tmp/project".to_string(),
+            thread_id: None,
+            expires_at: Utc::now() + Duration::minutes(1),
+        },
+    );
+    app.extension_bridge_context(Some("long-lived"))
+        .await
+        .expect("capability should resolve");
+    let renewed = app
+        .inner
+        .extension_bridge_capabilities
+        .lock()
+        .await
+        .get("long-lived")
+        .unwrap()
+        .expires_at;
+    assert!(
+        renewed > Utc::now() + Duration::days(6),
+        "a Codex app-server outlives any fixed TTL, so use must renew the capability"
+    );
+}
+
+#[test]
 fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
     // Native OpenCode projects its whole transcript once the turn goes idle,
     // so the opening-prompt preview would otherwise stand for the entire turn.
