@@ -408,13 +408,29 @@ async function dispatchEvent(request: EventRequest): Promise<JsonObject> {
   const handlers = [
     ...(runtime.eventHandlers.get(request.event.type)?.values() ?? []),
   ];
-  for (const handler of handlers) await handler(request.event);
+  const handlerErrors: string[] = [];
+  for (const handler of handlers) {
+    try {
+      await handler(request.event);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      handlerErrors.push(message.slice(0, 1_024));
+      writeStructuredDiagnostic(
+        "error",
+        request.extensionId,
+        "extension event handler failed",
+        { eventType: request.event.type, error: message.slice(0, 1_024) },
+      );
+    }
+  }
   return {
     requestId: request.requestId,
     ok: true,
     result: null,
     storage: Object.fromEntries(runtime.storage),
     publishedViews: runtime.publishedViews,
+    automationEffects: runtime.automationEffects,
+    handlerErrors,
   };
 }
 

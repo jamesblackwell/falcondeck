@@ -125,13 +125,11 @@ function sortNotes(notes: Note[]): Note[] {
   );
 }
 
-function nextNoteId(notes: readonly Note[]): string {
-  const highest = notes.reduce((carry, note) => {
-    const match = /^note-(\d+)$/.exec(note.id);
-    const value = match ? Number.parseInt(match[1]!, 10) : 0;
-    return Number.isFinite(value) && value > carry ? value : carry;
-  }, 0);
-  return `note-${highest + 1}`;
+function nextNoteId(): string {
+  if (typeof globalThis.crypto?.randomUUID !== "function") {
+    throw new Error("secure note identifiers are unavailable");
+  }
+  return `note-${globalThis.crypto.randomUUID()}`;
 }
 
 function legacyNotes(value: unknown, now: string): Note[] {
@@ -182,7 +180,7 @@ async function readLibrary(context: StorageContext): Promise<Note[]> {
     now,
   );
   for (const note of legacy) {
-    migrated.push({ ...note, id: nextNoteId(migrated) });
+    migrated.push({ ...note, id: nextNoteId() });
   }
   if (migrated.length === 0) return [];
   const library = sortNotes(migrated).slice(0, MAX_NOTES);
@@ -239,7 +237,17 @@ function withTitles(notes: Note[]) {
 
 export default defineExtension({
   activate(context) {
-    context.actions.register("notes", async ({ input }) => {
+    let actionQueue: Promise<void> = Promise.resolve();
+    const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+      const run = actionQueue.then(task, task);
+      actionQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    };
+
+    context.actions.register("notes", ({ input }) => serialize(async () => {
       const request = parseInput(input);
       let notes = await readLibrary(context);
 
@@ -254,7 +262,7 @@ export default defineExtension({
         const now = new Date().toISOString();
         notes = sortNotes([
           ...notes,
-          { id: nextNoteId(notes), body, createdAt: now, updatedAt: now },
+          { id: nextNoteId(), body, createdAt: now, updatedAt: now },
         ]);
         await writeLibrary(context, notes);
       } else if (request.operation === "save") {
@@ -290,6 +298,6 @@ export default defineExtension({
         value: libraryView(notes),
       });
       return { notes: withTitles(notes) };
-    });
+    }));
   },
 });

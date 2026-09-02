@@ -90,6 +90,16 @@ function attentionPanel(
 export default defineExtension({
   activate(context) {
     context.log.info("Mini Zen activated");
+    let mutationQueue: Promise<void> = Promise.resolve();
+
+    const serialize = <T>(task: () => Promise<T>): Promise<T> => {
+      const run = mutationQueue.then(task, task);
+      mutationQueue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    };
 
     const publish = async (pending: readonly PendingAttention[]) => {
       let threads: ExtensionThreadSummary[] = [];
@@ -106,7 +116,7 @@ export default defineExtension({
       });
     };
 
-    context.events.on("attention.opened", async (event) => {
+    context.events.on("attention.opened", (event) => serialize(async () => {
       const current = await context.storage.get<PendingAttention[]>(
         "pendingAttention",
         [],
@@ -126,23 +136,22 @@ export default defineExtension({
             },
           ].slice(-MAX_PENDING_ATTENTION);
       await publish(next);
-    });
+    }));
 
-    context.events.on("attention.resolved", async (event) => {
+    context.events.on("attention.resolved", (event) => serialize(async () => {
       const current = await context.storage.get<PendingAttention[]>(
         "pendingAttention",
         [],
       );
-      await publish(
-        current.filter(
-          (item) =>
-            item.workspaceId !== event.workspaceId ||
-            item.requestId !== event.requestId,
-        ),
+      const next = current.filter(
+        (item) =>
+          item.workspaceId !== event.workspaceId ||
+          item.requestId !== event.requestId,
       );
-    });
+      if (next.length !== current.length) await publish(next);
+    }));
 
-    context.events.on("thread.updated", async (event) => {
+    context.events.on("thread.updated", (event) => serialize(async () => {
       const current = await context.storage.get<PendingAttention[]>(
         "pendingAttention",
         [],
@@ -156,6 +165,6 @@ export default defineExtension({
       ) {
         await publish(current);
       }
-    });
+    }));
   },
 });

@@ -91,4 +91,28 @@ describe("official Mini Zen extension", () => {
       "A thread needs attention",
     );
   });
+
+  it("serializes concurrent attention changes without losing an item", async () => {
+    const host = createExtensionTestHost(miniZen, {
+      extensionId: "falcondeck.mini-zen",
+      declaredViews: ["attention-panel"],
+    });
+
+    await Promise.all([
+      host.dispatchEvent({
+        type: "attention.opened",
+        workspaceId: "workspace-1",
+        threadId: "thread-1",
+        requestId: "request-1",
+      }),
+      host.dispatchEvent({
+        type: "attention.opened",
+        workspaceId: "workspace-1",
+        threadId: "thread-2",
+        requestId: "request-2",
+      }),
+    ]);
+
+    expect(host.storageSnapshot().pendingAttention).toHaveLength(2);
+  });
 });

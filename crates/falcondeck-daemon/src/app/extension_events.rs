@@ -227,6 +227,7 @@ async fn run_extension_event_worker(
             .await;
             continue;
         }
+        let handler_errors = result.handler_errors;
         let updated_views = match app
             .inner
             .extensions
@@ -256,6 +257,18 @@ async fn run_extension_event_worker(
                     view: Some(view),
                 },
             );
+        }
+        if !handler_errors.is_empty() {
+            mark_extension_event_error(
+                &app,
+                &package.id,
+                &format!(
+                    "{} event handler(s) failed: {}",
+                    handler_errors.len(),
+                    handler_errors.join("; ")
+                ),
+            )
+            .await;
         }
     }
 }
@@ -333,7 +346,6 @@ mod tests {
                 "requestId": "request-1",
             })
         );
-
     }
 
     #[tokio::test]

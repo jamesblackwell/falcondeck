@@ -142,4 +142,43 @@ describe("Notes public backend SDK contract", () => {
     ).rejects.toThrow("note not found");
     expect(testHost.storageSnapshot()).toEqual({});
   });
+
+  it("serializes concurrent creates so neither update is lost", async () => {
+    const testHost = host();
+    await testHost.invokeAction("notes", { input: { operation: "read" } });
+
+    await Promise.all([
+      testHost.invokeAction("notes", {
+        input: { operation: "create", body: "First" },
+      }),
+      testHost.invokeAction("notes", {
+        input: { operation: "create", body: "Second" },
+      }),
+    ]);
+
+    const all = listed(
+      (await testHost.invokeAction("notes", { input: { operation: "read" } }))
+        .result,
+    );
+    expect(all.map((note) => note.body).sort()).toEqual(["First", "Second"]);
+  });
+
+  it("never reuses the identifier of a deleted note", async () => {
+    const testHost = host();
+    const deleted = listed(
+      await testHost.invokeAction("notes", {
+        input: { operation: "create", body: "Delete me" },
+      }).then((result) => result.result),
+    )[0]!;
+    await testHost.invokeAction("notes", {
+      input: { operation: "delete", id: deleted.id },
+    });
+    const replacement = listed(
+      await testHost.invokeAction("notes", {
+        input: { operation: "create", body: "Replacement" },
+      }).then((result) => result.result),
+    )[0]!;
+
+    expect(replacement.id).not.toBe(deleted.id);
+  });
 });
