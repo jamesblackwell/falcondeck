@@ -33,7 +33,7 @@ import {
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
-  deriveIdentityKeyPair,
+  destroySessionCrypto,
   encryptJson,
   fetchWithTimeout,
   filesToImageInputs,
@@ -46,7 +46,6 @@ import {
   generateUserItemId,
   imageAttachmentSendBlockReason,
   isDaemonRpcReady,
-  identityPublicKeyToBase64,
   operationalConditionDismissalKey,
   parseCompactThreadCommand,
   workspaceOperationalConditions,
@@ -105,7 +104,6 @@ import {
   REMOTE_SESSION_STORAGE_VERSION,
   verifyPairingPublicKeyBundle,
   verifyPairingAuthorityDaemonBundle,
-  verifySessionKeyMaterial,
   workspaceAgentCapabilities,
   threadAgentCapabilities,
   workspaceCollaborationModes,
@@ -232,6 +230,7 @@ import {
   markInteractiveRequestResolved,
   maskIdentifier,
   parseDaemonEvents,
+  parsePairingLinkSuggestion,
   persistClientKeyPairSecret,
   persistNotificationPreference,
   persistPendingActionIds,
@@ -338,6 +337,9 @@ export default function App() {
 function RemoteApp() {
   const { toast } = useToast();
   const params = new URLSearchParams(window.location.search);
+  const [pairingLinkSuggestion, setPairingLinkSuggestion] = useState(() =>
+    parsePairingLinkSuggestion(params),
+  );
   const persistedSession = shouldReusePersistedRemoteSession(
     params,
     loadPersistedRemoteSession(),
@@ -360,15 +362,20 @@ function RemoteApp() {
   const [relayUrl, setRelayUrl] = useState(
     () =>
       tryNormalizeRelayUrl(
-        params.get("relay") ??
-          persistedSession?.relayUrl ??
+        persistedSession?.relayUrl ??
           import.meta.env.VITE_FALCONDECK_RELAY_URL ??
           DEFAULT_REMOTE_RELAY_URL,
       ) ?? DEFAULT_REMOTE_RELAY_URL,
   );
   const [pairingCode, setPairingCode] = useState(
-    params.get("code") ?? persistedSession?.pairingCode ?? "",
+    persistedSession?.pairingCode ?? "",
   );
+
+  useEffect(() => {
+    // Capture pairing-link values into inert state, then remove credentials
+    // and relay overrides from history before any network request occurs.
+    clearPairingParamsFromUrl();
+  }, []);
   const [pairingId, setPairingId] = useState<string | null>(
     persistedSession?.pairingId ?? null,
   );
@@ -820,6 +827,7 @@ function RemoteApp() {
     pendingRpc.current.clear();
     socketRef.current?.close();
     socketRef.current = null;
+    destroySessionCrypto(sessionCryptoRef.current);
     sessionCryptoRef.current = null;
     clientKeyPairRef.current = null;
     trustedDaemonPublicKeyRef.current = null;
@@ -1863,9 +1871,6 @@ function RemoteApp() {
             continue;
           }
           const expectedClientPublicKey = publicKeyToBase64(kp);
-          const expectedClientIdentityPublicKey = identityPublicKeyToBase64(
-            deriveIdentityKeyPair(kp),
-          );
           if (
             update.body.material.client_public_key !== expectedClientPublicKey
           ) {
@@ -1880,18 +1885,29 @@ function RemoteApp() {
             // anchored in the pinned daemon identity, the session id, and
             // this client's own key material, so adopt the material's
             // pairing id instead of pinning the possibly stale one.
-            verifySessionKeyMaterial(update.body.material, {
-              expectedSessionId: sessionId,
-              expectedDaemonPublicKey: trustedDaemonPublicKeyRef.current,
-              expectedDaemonIdentityPublicKey:
-                trustedDaemonIdentityPublicKeyRef.current,
-              expectedClientPublicKey,
-              expectedClientIdentityPublicKey,
-            });
-            sessionCryptoRef.current = bootstrapSessionCrypto(
+            const expectedDaemonPublicKey =
+              trustedDaemonPublicKeyRef.current;
+            const expectedDaemonIdentityPublicKey =
+              trustedDaemonIdentityPublicKeyRef.current;
+            if (
+              !expectedDaemonPublicKey ||
+              !expectedDaemonIdentityPublicKey
+            ) {
+              throw new Error(
+                "Encrypted session bootstrap is missing pinned daemon keys",
+              );
+            }
+            const nextCrypto = bootstrapSessionCrypto(
               kp,
               update.body.material,
+              {
+                expectedSessionId: sessionId,
+                expectedDaemonPublicKey,
+                expectedDaemonIdentityPublicKey,
+              },
             );
+            destroySessionCrypto(sessionCryptoRef.current);
+            sessionCryptoRef.current = nextCrypto;
             trustedDaemonPublicKeyRef.current ??=
               update.body.material.daemon_public_key;
             trustedDaemonIdentityPublicKeyRef.current ??=
@@ -2003,7 +2019,17 @@ function RemoteApp() {
           envelopes.push(nextUpdate.body.envelope);
           index += 1;
         }
-        const decryptedRun = await decryptUtf8Batch(sc.dataKey, envelopes);
+        const decryptedRun = await decryptUtf8Batch(
+          sc.dataKey,
+          envelopes,
+          (reason) => {
+            setError(
+              reason instanceof Error
+                ? reason.message
+                : "Failed to decrypt relay update",
+            );
+          },
+        );
         if (flushGeneration !== relayFlushGenerationRef.current) return;
 
         const skipReplaySnapshots = snapshotRequestInFlightRef.current;
@@ -2012,11 +2038,6 @@ function RemoteApp() {
           if (result.status === "rejected") {
             // Leave this update behind the cursor unless a later update
             // succeeds, matching the single-update failure behavior.
-            setError(
-              result.reason instanceof Error
-                ? result.reason.message
-                : "Failed to decrypt relay update",
-            );
             return;
           }
           const text = result.value;
@@ -2626,6 +2647,7 @@ function RemoteApp() {
     }
     clientKeyPairRef.current = keyPair;
     persistClientKeyPairSecret(secretKeyToBase64(keyPair));
+    destroySessionCrypto(sessionCryptoRef.current);
     sessionCryptoRef.current = null;
     pendingEncryptedUpdatesRef.current = [];
     evictedWhileParkedRef.current = false;
@@ -4063,6 +4085,43 @@ function RemoteApp() {
     }
   }
 
+  async function handleCloseWorkspace(workspaceId: string) {
+    try {
+      await callRpc("workspace.close", { workspace_id: workspaceId });
+      if (selectedWorkspaceId === workspaceId) {
+        setThreadDetail(null);
+        setSelectedWorkspaceId(null);
+        setSelectedThreadId(null);
+      }
+      setError(null);
+    } catch (e) {
+      reportError(e, "Failed to close project");
+      throw e instanceof Error ? e : new Error("Failed to close project");
+    }
+  }
+
+  function closeWorkspaceReason(workspaceId: string) {
+    const group = groups.find(
+      (candidate) => candidate.workspace.id === workspaceId,
+    );
+    if (
+      group?.threads.some(
+        (thread) =>
+          thread.status === "running" || thread.status === "waiting_for_input",
+      )
+    ) {
+      return "This project has a running turn. Closing it stops that work until you add the project back.";
+    }
+    if (
+      (snapshot?.scheduled_tasks ?? []).some(
+        (task) => task.workspace_id === workspaceId && task.status === "active",
+      )
+    ) {
+      return "Scheduled tasks for this project will not run until you add it back.";
+    }
+    return null;
+  }
+
   async function handleArchiveThread(workspaceId: string, threadId: string) {
     try {
       await callRpc("thread.archive", {
@@ -4826,9 +4885,23 @@ function RemoteApp() {
         isConnecting={isClaimingPairing}
         connectionHelp={connectionHelp}
         connectionDebugRows={connectionDebugRows}
+        pairingLinkSuggestion={
+          pairingLinkSuggestion
+            ? {
+                relayUrl: pairingLinkSuggestion.relayUrl,
+                relayHost: pairingLinkSuggestion.relayHost,
+              }
+            : null
+        }
         onRelayUrlChange={setRelayUrl}
         onPairingCodeChange={setPairingCode}
         onConnect={() => void handleClaimPairing()}
+        onAcceptPairingLink={() => {
+          if (!pairingLinkSuggestion) return;
+          setRelayUrl(pairingLinkSuggestion.relayUrl);
+          setPairingCode(pairingLinkSuggestion.pairingCode);
+          setPairingLinkSuggestion(null);
+        }}
         onResetSavedConnection={resetSavedRemoteConnection}
       />
     );
@@ -5000,6 +5073,8 @@ function RemoteApp() {
                 onMarkThreadRead={handleMarkThreadRead}
                 onMarkThreadUnread={handleMarkThreadUnread}
                 onRemoveWorkspace={handleRemoveWorkspace}
+                onCloseWorkspace={handleCloseWorkspace}
+                closeWorkspaceReason={closeWorkspaceReason}
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
@@ -5062,6 +5137,8 @@ function RemoteApp() {
           onMarkThreadRead={handleMarkThreadRead}
           onMarkThreadUnread={handleMarkThreadUnread}
           onRemoveWorkspace={handleRemoveWorkspace}
+          onCloseWorkspace={handleCloseWorkspace}
+          closeWorkspaceReason={closeWorkspaceReason}
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
           onWorkspaceOrderChange={handleWorkspaceOrderChange}

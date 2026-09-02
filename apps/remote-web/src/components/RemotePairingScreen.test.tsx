@@ -11,9 +11,11 @@ function renderScreen(overrides: Partial<Parameters<typeof RemotePairingScreen>[
     isConnecting: false,
     connectionHelp: null,
     connectionDebugRows: [] as ReadonlyArray<readonly [string, string]>,
+    pairingLinkSuggestion: null,
     onRelayUrlChange: vi.fn(),
     onPairingCodeChange: vi.fn(),
     onConnect,
+    onAcceptPairingLink: vi.fn(),
     onResetSavedConnection: vi.fn(),
     ...overrides,
   }
@@ -73,5 +75,20 @@ describe('RemotePairingScreen', () => {
 
     expect(screen.getByLabelText('Relay server URL')).toHaveValue('https://connect.falcondeck.com')
     expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('requires an explicit choice before using relay details from a link', () => {
+    const onAcceptPairingLink = vi.fn()
+    renderScreen({
+      pairingLinkSuggestion: {
+        relayUrl: 'https://selfhost.example',
+        relayHost: 'selfhost.example',
+      },
+      onAcceptPairingLink,
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent('selfhost.example')
+    fireEvent.click(screen.getByRole('button', { name: 'Use this pairing link' }))
+    expect(onAcceptPairingLink).toHaveBeenCalledTimes(1)
   })
 })

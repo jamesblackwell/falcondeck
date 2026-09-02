@@ -33,6 +33,7 @@ import {
   persistNotificationPreference,
   persistRemoteSession,
   persistRemoteSnapshot,
+  parsePairingLinkSuggestion,
   persistSelection,
   postThreadNotification,
   resumePendingActions,
@@ -66,10 +67,12 @@ describe('remote session secret persistence', () => {
     expect(durable).not.toBe('')
     expect(durable).not.toContain(clientSecretKey)
     expect(durable).not.toContain(dataKey)
+    expect(durable).not.toContain('client-token')
     expect(durable).not.toContain('PAIR-CODE')
     expect(loadPersistedRemoteSession()).toMatchObject({
       clientSecretKey,
       dataKey,
+      clientToken: 'client-token',
     })
   })
 
@@ -774,6 +777,28 @@ describe('urlWithoutPairingParams', () => {
     clearPairingParamsFromUrl()
     expect(replaceState).toHaveBeenCalledTimes(1)
     expect(window.location.search).toBe('')
+  })
+})
+
+describe('parsePairingLinkSuggestion', () => {
+  it('keeps link values inert until the UI explicitly accepts them', () => {
+    expect(
+      parsePairingLinkSuggestion(
+        new URLSearchParams({ code: 'PAIR.secure', relay: 'https://selfhost.example/' }),
+      ),
+    ).toEqual({
+      pairingCode: 'PAIR.secure',
+      relayUrl: 'https://selfhost.example',
+      relayHost: 'selfhost.example',
+    })
+  })
+
+  it('rejects an unsupported relay scheme', () => {
+    expect(
+      parsePairingLinkSuggestion(
+        new URLSearchParams({ code: 'PAIR.secure', relay: 'ftp://selfhost.example' }),
+      ),
+    ).toBeNull()
   })
 })
 

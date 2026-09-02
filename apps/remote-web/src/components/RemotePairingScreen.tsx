@@ -14,9 +14,11 @@ type RemotePairingScreenProps = {
   isConnecting: boolean
   connectionHelp: ConnectionHelpState | null
   connectionDebugRows: ReadonlyArray<readonly [string, string]>
+  pairingLinkSuggestion: { relayUrl: string; relayHost: string } | null
   onRelayUrlChange: (value: string) => void
   onPairingCodeChange: (value: string) => void
   onConnect: () => void
+  onAcceptPairingLink: () => void
   onResetSavedConnection: () => void
 }
 
@@ -26,9 +28,11 @@ export function RemotePairingScreen({
   isConnecting,
   connectionHelp,
   connectionDebugRows,
+  pairingLinkSuggestion,
   onRelayUrlChange,
   onPairingCodeChange,
   onConnect,
+  onAcceptPairingLink,
   onResetSavedConnection,
 }: RemotePairingScreenProps) {
   const relayFieldId = useId()
@@ -62,6 +66,21 @@ export function RemotePairingScreen({
             onConnect()
           }}
         >
+          {pairingLinkSuggestion ? (
+            <div
+              role="alert"
+              className="space-y-2 rounded-[var(--fd-radius-lg)] border border-warning/35 bg-warning-muted p-3 text-[length:var(--fd-text-sm)] text-fg-secondary"
+            >
+              <p className="font-medium text-fg-primary">Review this pairing link</p>
+              <p>
+                It wants to pair through <strong>{pairingLinkSuggestion.relayHost}</strong>. Only
+                continue if you opened the link from your own FalconDeck desktop.
+              </p>
+              <Button type="button" size="sm" variant="secondary" onClick={onAcceptPairingLink}>
+                Use this pairing link
+              </Button>
+            </div>
+          ) : null}
           <div className="space-y-1.5">
             <label
               htmlFor={codeFieldId}

@@ -6,6 +6,8 @@ import {
   interactiveResolutionFromResponse,
   normalizeEventEnvelope,
   normalizeDaemonSnapshot,
+  DEFAULT_REMOTE_RELAY_URL,
+  tryNormalizeRelayUrl,
   parseDaemonEvents as parseRemoteDaemonEvents,
   REMOTE_SESSION_STORAGE_VERSION,
   restoreBoxKeyPair,
@@ -386,6 +388,7 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
       // forcing an already-open client to pair again.
       secretsRaw = JSON.stringify({
         sessionId: legacySession.sessionId,
+        clientToken: legacySession.clientToken,
         clientSecretKey: legacySession.clientSecretKey,
         dataKey: typeof legacySession.dataKey === 'string' ? legacySession.dataKey : null,
       })
@@ -398,6 +401,7 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
     }
     let secrets: {
       sessionId?: unknown
+      clientToken?: unknown
       clientSecretKey?: unknown
       dataKey?: unknown
     }
@@ -410,12 +414,8 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
       window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
       return null
     }
-    if (
-      typeof secrets.sessionId !== 'string' ||
-      !secrets.sessionId ||
-      typeof secrets.clientSecretKey !== 'string' ||
-      !secrets.clientSecretKey
-    ) {
+    if (typeof secrets.sessionId !== 'string' || !secrets.sessionId ||
+        typeof secrets.clientSecretKey !== 'string' || !secrets.clientSecretKey) {
       window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
       return null
     }
@@ -439,17 +439,39 @@ export function loadPersistedRemoteSession(): PersistedRemoteSession | null {
       return null
     }
 
-    if (!scopedRaw) {
+    const clientToken =
+      typeof secrets.clientToken === 'string' && secrets.clientToken
+        ? secrets.clientToken
+        : typeof parsed.clientToken === 'string' && parsed.clientToken
+          ? parsed.clientToken
+          : null
+    if (!clientToken) {
+      window.sessionStorage.removeItem(SESSION_SECRETS_STORAGE_KEY)
+      return null
+    }
+
+    if (!scopedRaw || 'clientToken' in parsed || 'clientSecretKey' in parsed || 'dataKey' in parsed) {
       const metadata: Partial<PersistedRemoteSession> = { ...parsed }
+      delete metadata.clientToken
       delete metadata.clientSecretKey
       delete metadata.dataKey
       window.localStorage.setItem(scopedKey, JSON.stringify(metadata))
       if (storedSessionId(legacyRaw) === parsed.sessionId) {
         window.localStorage.removeItem(STORAGE_KEY)
       }
+      window.sessionStorage.setItem(
+        SESSION_SECRETS_STORAGE_KEY,
+        JSON.stringify({
+          sessionId: parsed.sessionId,
+          clientToken,
+          clientSecretKey: secrets.clientSecretKey,
+          dataKey: typeof secrets.dataKey === 'string' ? secrets.dataKey : null,
+        }),
+      )
     }
     return {
       ...parsed,
+      clientToken,
       clientSecretKey: secrets.clientSecretKey,
       dataKey: typeof secrets.dataKey === 'string' ? secrets.dataKey : null,
     }
@@ -466,11 +488,12 @@ export function persistRemoteSession(value: PersistedRemoteSession | null) {
       return
     }
 
-    const { clientSecretKey, dataKey, ...metadata } = value
+    const { clientToken, clientSecretKey, dataKey, ...metadata } = value
     window.sessionStorage.setItem(
       SESSION_SECRETS_STORAGE_KEY,
       JSON.stringify({
         sessionId: value.sessionId,
+        clientToken,
         clientSecretKey,
         dataKey: dataKey ?? null,
       }),
@@ -1064,6 +1087,26 @@ export function clearPairingParamsFromUrl() {
     window.history.replaceState(window.history.state, '', next)
   } catch {
     // A blocked history write is not worth failing the pairing over.
+  }
+}
+
+export type PairingLinkSuggestion = {
+  pairingCode: string
+  relayUrl: string
+  relayHost: string
+}
+
+/** Pairing links are suggestions only; callers must require an explicit user
+ * confirmation before copying these values into live pairing state. */
+export function parsePairingLinkSuggestion(params: URLSearchParams): PairingLinkSuggestion | null {
+  const pairingCode = params.get('code')?.trim()
+  if (!pairingCode) return null
+  const relayUrl = tryNormalizeRelayUrl(params.get('relay') ?? DEFAULT_REMOTE_RELAY_URL)
+  if (!relayUrl) return null
+  return {
+    pairingCode,
+    relayUrl,
+    relayHost: new URL(relayUrl).host,
   }
 }
 

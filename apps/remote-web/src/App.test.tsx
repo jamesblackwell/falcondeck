@@ -103,9 +103,16 @@ describe("App", () => {
     expect(screen.getByLabelText("Secure pairing code")).toHaveValue("");
   });
 
-  it("prefills the code from a pairing link", () => {
+  it("requires review before applying a code from a pairing link", () => {
     window.history.replaceState({}, "", "/?code=ABCD1234");
     render(<App />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "connect.falcondeck.com",
+    );
+    expect(screen.getByLabelText("Secure pairing code")).toHaveValue("");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use this pairing link" }),
+    );
     expect(screen.getByLabelText("Secure pairing code")).toHaveValue("ABCD1234");
     window.history.replaceState({}, "", "/");
   });
