@@ -1069,6 +1069,15 @@ impl ControlService {
         if !std::path::Path::new(&target.workspace_path).is_dir() {
             return Err(ControlError::workspace_unavailable(&target.workspace_path));
         }
+        if !app
+            .is_registered_workspace_path(&target.workspace_path)
+            .await
+        {
+            return Err(ControlError::field(
+                "target.workspace_path",
+                "workspace_path must resolve to a workspace already registered with this daemon",
+            ));
+        }
         if !app.is_known_provider(&target.provider).await {
             return Err(ControlError::provider_unavailable(target.provider.as_str()));
         }

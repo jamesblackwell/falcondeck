@@ -15,7 +15,17 @@ const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct AgentBinaryResolution {
     pub executable: String,
+    pub source: BinaryResolutionSource,
     pub diagnostics: ResolutionDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryResolutionSource {
+    Configured,
+    Path,
+    KnownLocation,
+    LoginShell,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +77,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     if let Some(path) = normalize_existing_path(Path::new(configured)) {
         return AgentBinaryResolution {
             executable: path,
+            source: BinaryResolutionSource::Configured,
             diagnostics,
         };
     }
@@ -75,6 +86,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     if !should_autodetect {
         return AgentBinaryResolution {
             executable: configured.to_string(),
+            source: BinaryResolutionSource::Configured,
             diagnostics,
         };
     }
@@ -90,6 +102,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     {
         return AgentBinaryResolution {
             executable: path,
+            source: BinaryResolutionSource::KnownLocation,
             diagnostics,
         };
     }
@@ -98,6 +111,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
         diagnostics.searched_path = true;
         return AgentBinaryResolution {
             executable: path,
+            source: BinaryResolutionSource::Path,
             diagnostics,
         };
     }
@@ -108,6 +122,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     {
         return AgentBinaryResolution {
             executable: path,
+            source: BinaryResolutionSource::KnownLocation,
             diagnostics,
         };
     }
@@ -116,6 +131,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
         diagnostics.searched_login_shell = true;
         return AgentBinaryResolution {
             executable: path,
+            source: BinaryResolutionSource::LoginShell,
             diagnostics,
         };
     }
@@ -123,6 +139,7 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
 
     AgentBinaryResolution {
         executable: configured.to_string(),
+        source: BinaryResolutionSource::Unknown,
         diagnostics,
     }
 }

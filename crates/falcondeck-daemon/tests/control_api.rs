@@ -6,6 +6,7 @@ use falcondeck_core::control::{ControlExecuteResponse, ControlGetResponse, Contr
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
+use std::path::Path;
 
 fn config_with_state_path(path: std::path::PathBuf) -> DaemonConfig {
     DaemonConfig {
@@ -21,6 +22,24 @@ async fn spawn() -> (falcondeck_daemon::EmbeddedDaemonHandle, tempfile::TempDir)
     let mut daemon = spawn_embedded(config).await.unwrap();
     daemon.wait_until_restored().await.unwrap();
     (daemon, dir)
+}
+
+async fn register_workspace(
+    daemon: &falcondeck_daemon::EmbeddedDaemonHandle,
+    client: &Client,
+    workspace: &Path,
+) {
+    let response = client
+        .post(format!("{}/api/workspaces/connect", daemon.base_url()))
+        .json(&json!({ "path": workspace.display().to_string() }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "workspace registration failed: {}",
+        response.text().await.unwrap_or_default()
+    );
 }
 
 #[tokio::test]
@@ -50,6 +69,7 @@ async fn get_route_reads_settings_and_automations() {
     let client = Client::new();
     let workspace = dir.path().join("quizgecko");
     std::fs::create_dir_all(&workspace).unwrap();
+    register_workspace(&daemon, &client, &workspace).await;
 
     let settings: ControlGetResponse = client
         .post(format!("{}/api/control/get", daemon.base_url()))
@@ -135,6 +155,7 @@ async fn execute_route_runs_lifecycle_with_revisions() {
     let client = Client::new();
     let workspace = dir.path().join("repo");
     std::fs::create_dir_all(&workspace).unwrap();
+    register_workspace(&daemon, &client, &workspace).await;
     let url = format!("{}/api/control/execute", daemon.base_url());
 
     let create: ControlExecuteResponse = client
@@ -242,6 +263,7 @@ async fn control_state_survives_a_daemon_restart() {
             .unwrap();
         daemon.wait_until_restored().await.unwrap();
         let client = Client::new();
+        register_workspace(&daemon, &client, &workspace).await;
         let create: ControlExecuteResponse = client
             .post(format!("{}/api/control/execute", daemon.base_url()))
             .json(&json!({
@@ -293,6 +315,7 @@ async fn mcp_origin_headers_are_enforced_against_settings() {
     let client = Client::new();
     let workspace = dir.path().join("repo");
     std::fs::create_dir_all(&workspace).unwrap();
+    register_workspace(&daemon, &client, &workspace).await;
     let url = format!("{}/api/control", daemon.base_url());
 
     let workspace_path = workspace.display().to_string();
@@ -423,11 +446,64 @@ async fn unknown_operations_cannot_be_executed_by_guessing_paths() {
 }
 
 #[tokio::test]
+async fn automation_targets_must_be_registered_workspaces() {
+    let (daemon, dir) = spawn().await;
+    let client = Client::new();
+    let workspace = dir.path().join("unregistered-repo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let url = format!("{}/api/control/execute", daemon.base_url());
+    let request = json!({
+        "operation": "automation.create",
+        "arguments": {
+            "name": "Workspace boundary",
+            "trigger": {
+                "kind": "interval",
+                "every_seconds": 3600,
+                "anchor_at": "2026-08-16T00:00:00Z"
+            },
+            "task": { "kind": "prompt", "instruction": "Check." },
+            "target": {
+                "workspace_path": workspace.display().to_string(),
+                "provider": "codex",
+                "thread": { "kind": "managed" }
+            }
+        }
+    });
+
+    let rejected: ControlExecuteResponse = client
+        .post(&url)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!rejected.ok);
+    let error = rejected.error.unwrap();
+    assert_eq!(error.code, "invalid_arguments");
+    assert!(error.message.contains("already registered"));
+
+    register_workspace(&daemon, &client, &workspace).await;
+    let accepted: ControlExecuteResponse = client
+        .post(&url)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(accepted.ok, "{:?}", accepted.error);
+}
+
+#[tokio::test]
 async fn pagination_and_filters_over_the_http_route() {
     let (daemon, dir) = spawn().await;
     let client = Client::new();
     let workspace = dir.path().join("repo");
     std::fs::create_dir_all(&workspace).unwrap();
+    register_workspace(&daemon, &client, &workspace).await;
     let url = format!("{}/api/control", daemon.base_url());
 
     for index in 0..3 {

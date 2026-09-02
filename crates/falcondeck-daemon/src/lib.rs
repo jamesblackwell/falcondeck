@@ -42,7 +42,9 @@ use std::path::PathBuf;
 
 use falcondeck_core::AgentProvider;
 
-pub use agent_binary::{AgentBinaryResolution, ResolutionDiagnostics, resolve_agent_binary};
+pub use agent_binary::{
+    AgentBinaryResolution, BinaryResolutionSource, ResolutionDiagnostics, resolve_agent_binary,
+};
 pub use app::AppState;
 pub use error::DaemonError;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};

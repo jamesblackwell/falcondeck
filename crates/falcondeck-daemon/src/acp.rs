@@ -14,11 +14,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -538,6 +539,22 @@ struct ProvidersFile {
     providers: HashMap<String, AcpProviderConfig>,
 }
 
+static PROVIDERS_WRITE_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+fn providers_entries(state_dir: &Path) -> serde_json::Map<String, Value> {
+    let path = state_dir.join("providers.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|raw| raw.get("providers").and_then(Value::as_object).cloned())
+        .unwrap_or_default()
+}
+
+fn providers_revision(entries: &serde_json::Map<String, Value>) -> String {
+    let encoded = serde_json::to_vec(entries).unwrap_or_default();
+    format!("{:x}", Sha256::digest(encoded))
+}
+
 /// Provider ids configured in `providers.json`. Reserved ids are excluded;
 /// Codex and Claude are never ACP-file providers.
 pub fn known_provider_ids(state_path: &Path) -> Vec<String> {
@@ -563,16 +580,8 @@ pub fn known_provider_ids(state_path: &Path) -> Vec<String> {
 /// binary is missing are included with `binary_found: false` so the panel can
 /// explain why a configured provider is hidden from pickers.
 pub fn providers_overview(state_dir: &Path) -> Value {
-    let path = state_dir.join("providers.json");
-    let raw: Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_else(|| json!({ "providers": {} }));
-    let entries = raw
-        .get("providers")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let entries = providers_entries(state_dir);
+    let revision = providers_revision(&entries);
     let resolved = entries
         .iter()
         .map(|(id, entry)| {
@@ -601,11 +610,38 @@ pub fn providers_overview(state_dir: &Path) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({ "providers": entries, "resolved": resolved })
+    json!({ "providers": entries, "resolved": resolved, "revision": revision })
 }
 
 /// Validates and atomically writes `providers.json` (`{"providers": …}`).
 pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), String> {
+    let lock = PROVIDERS_WRITE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "providers write lock is poisoned".to_string())?;
+    write_providers_file_locked(state_dir, providers)
+}
+
+/// Optimistic-concurrency variant used by settings clients. The comparison
+/// and atomic rename share one owner lock with daemon/RPC writes, so a stale
+/// panel can never replace a provider update that landed after its GET.
+pub fn write_providers_file_if_revision(
+    state_dir: &Path,
+    providers: &Value,
+    expected_revision: &str,
+) -> Result<(), String> {
+    let lock = PROVIDERS_WRITE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "providers write lock is poisoned".to_string())?;
+    let current_revision = providers_revision(&providers_entries(state_dir));
+    if expected_revision != current_revision {
+        return Err("providers changed since they were loaded".to_string());
+    }
+    write_providers_file_locked(state_dir, providers)
+}
+
+fn write_providers_file_locked(state_dir: &Path, providers: &Value) -> Result<(), String> {
     let entries = providers
         .as_object()
         .ok_or("invalid providers payload: expected an object of provider entries")?;
@@ -5404,6 +5440,33 @@ mod tests {
     fn missing_config_file_yields_no_providers() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_acp_provider_configs(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn provider_revision_rejects_a_stale_read_modify_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = providers_overview(dir.path());
+        let initial_revision = initial["revision"].as_str().unwrap();
+
+        write_providers_file_if_revision(
+            dir.path(),
+            &json!({ "first": { "label": "First", "command": ["echo"] } }),
+            initial_revision,
+        )
+        .unwrap();
+
+        let stale = write_providers_file_if_revision(
+            dir.path(),
+            &json!({ "second": { "label": "Second", "command": ["echo"] } }),
+            initial_revision,
+        )
+        .unwrap_err();
+        assert_eq!(stale, "providers changed since they were loaded");
+
+        let overview = providers_overview(dir.path());
+        assert!(overview["providers"].get("first").is_some());
+        assert!(overview["providers"].get("second").is_none());
+        assert_ne!(overview["revision"].as_str().unwrap(), initial_revision);
     }
 
     #[test]

@@ -106,6 +106,7 @@ where
                 pinned_thread_ids: Vec::new(),
                 project_pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
+                in_sidebar: true,
             },
             PersistedWorkspaceEntry::State(workspace) => *workspace,
         })
@@ -924,6 +925,7 @@ mod tests {
                     pinned_thread_ids: Vec::new(),
                     project_pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
+                    in_sidebar: true,
                 },
                 PersistedWorkspaceState {
                     path: "/tmp/project-b".to_string(),
@@ -936,6 +938,7 @@ mod tests {
                     pinned_thread_ids: Vec::new(),
                     project_pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
+                    in_sidebar: true,
                 },
             ]
         );

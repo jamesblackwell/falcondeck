@@ -317,8 +317,7 @@ impl TerminalManager {
         session: Arc<TerminalSession>,
         mut reader: Box<dyn Read + Send>,
     ) -> std::sync::mpsc::Receiver<()> {
-        let (raw_tx, mut raw_rx) =
-            tokio::sync::mpsc::channel::<Vec<u8>>(RAW_OUTPUT_QUEUE_CAPACITY);
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(RAW_OUTPUT_QUEUE_CAPACITY);
         let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
         // Blocking PTY reads need an OS thread; the bounded channel hands
         // batches to a tokio task that coalesces bursts before fan-out and
@@ -651,7 +650,9 @@ mod tests {
 
         let frames = std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>();
         assert!(
-            frames.iter().any(|frame| frame_text(frame).contains("output-during-attach")),
+            frames
+                .iter()
+                .any(|frame| frame_text(frame).contains("output-during-attach")),
             "output committed during attach was neither replayed nor delivered live"
         );
         manager.close(&info.id);
@@ -817,13 +818,12 @@ mod tests {
         manager.handle_client_frame(
             &info.id,
             &TerminalClientFrame::TerminalInput {
-                data_base64: base64::engine::general_purpose::STANDARD
-                    .encode(concat!(
-                        "stty -echo -icanon min 1 time 0; ",
-                        "printf '\\033[0c'; ",
-                        "dd bs=1 count=7 2>/dev/null | od -An -tx1; ",
-                        "stty sane; echo DA1-DONE\n"
-                    )),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(concat!(
+                    "stty -echo -icanon min 1 time 0; ",
+                    "printf '\\033[0c'; ",
+                    "dd bs=1 count=7 2>/dev/null | od -An -tx1; ",
+                    "stty sane; echo DA1-DONE\n"
+                )),
             },
         );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);

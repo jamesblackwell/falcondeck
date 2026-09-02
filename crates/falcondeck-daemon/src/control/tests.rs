@@ -837,7 +837,8 @@ async fn idempotency_scopes_include_the_provider() {
 async fn expired_idempotency_record_does_not_replay_while_the_service_is_idle() {
     let (_dir, service) = service().await;
     let key = "expired-create-key";
-    let request = |name: &str| ControlExecuteRequest {
+    let request = |name: &str| {
+        ControlExecuteRequest {
         operation: registry::ops::AUTOMATION_CREATE.to_string(),
         arguments: serde_json::from_value(json!({
             "name": name,
@@ -848,6 +849,7 @@ async fn expired_idempotency_record_does_not_replay_while_the_service_is_idle() 
         .unwrap(),
         expected_revision: None,
         idempotency_key: Some(key.to_string()),
+    }
     };
 
     let (first, _) = service
@@ -903,7 +905,10 @@ async fn concurrent_idempotent_creates_execute_only_once() {
         service.execute(request, &right_context, &right_deps),
     );
     assert!(left.0.ok && right.0.ok);
-    assert_eq!(left.0.data.as_ref().unwrap()["id"], right.0.data.as_ref().unwrap()["id"]);
+    assert_eq!(
+        left.0.data.as_ref().unwrap()["id"],
+        right.0.data.as_ref().unwrap()["id"]
+    );
     let automations = service
         .get(
             ControlGetRequest {
@@ -921,11 +926,8 @@ async fn concurrent_idempotent_creates_execute_only_once() {
 async fn execute_rejects_idempotency_keys_outside_the_public_bounds() {
     for key in ["short".to_string(), "x".repeat(129)] {
         let (_dir, service) = service().await;
-        let mut request = execute_request(
-            registry::ops::AUTOMATION_CREATE,
-            create_arguments(),
-            None,
-        );
+        let mut request =
+            execute_request(registry::ops::AUTOMATION_CREATE, create_arguments(), None);
         request.idempotency_key = Some(key);
 
         let (response, _) = service

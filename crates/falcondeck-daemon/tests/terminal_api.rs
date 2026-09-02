@@ -3,7 +3,7 @@ use std::time::Duration;
 use falcondeck_core::terminal::{TerminalClientFrame, TerminalServerFrame};
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 fn test_config() -> DaemonConfig {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -20,6 +20,40 @@ fn workspace_dir() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_str().unwrap().to_string();
     (dir, path)
+}
+
+async fn assert_websocket_forbidden(url: String, origin: Option<&str>) {
+    let mut request = url.into_client_request().unwrap();
+    if let Some(origin) = origin {
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+    }
+    let error = tokio_tungstenite::connect_async(request)
+        .await
+        .expect_err("untrusted websocket origin was accepted");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("expected HTTP rejection, got {error}");
+    };
+    assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn local_websockets_reject_missing_and_untrusted_origins() {
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let ws_base = daemon.base_url().replace("http://", "ws://");
+
+    assert_websocket_forbidden(format!("{ws_base}/api/events"), None).await;
+    assert_websocket_forbidden(
+        format!("{ws_base}/api/events"),
+        Some("https://attacker.example"),
+    )
+    .await;
+    assert_websocket_forbidden(
+        format!("{ws_base}/api/terminals/missing/ws"),
+        Some("https://app.falcondeck.com"),
+    )
+    .await;
 }
 
 async fn next_frame(
@@ -154,13 +188,17 @@ async fn terminal_http_and_websocket_round_trip() {
     assert_eq!(listed.sessions.len(), 1);
     assert_eq!(listed.sessions[0].id, opened.session.id);
 
-    let (mut socket, _response) = tokio_tungstenite::connect_async(format!(
+    let mut request = format!(
         "{}/api/terminals/{}/ws?since_seq=0",
         daemon.base_url().replace("http://", "ws://"),
         opened.session.id
-    ))
-    .await
+    )
+    .into_client_request()
     .unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", "http://localhost:1420".parse().unwrap());
+    let (mut socket, _response) = tokio_tungstenite::connect_async(request).await.unwrap();
     assert!(matches!(
         next_protocol_frame(&mut socket).await,
         TerminalServerFrame::TerminalAttached { .. }

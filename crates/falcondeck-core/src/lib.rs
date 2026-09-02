@@ -848,6 +848,10 @@ pub struct DaemonSnapshot {
     pub restore_phase: DaemonRestorePhase,
     /// Known connected workspaces.
     pub workspaces: Vec<WorkspaceSummary>,
+    /// Projects that are known but not open in the sidebar. Thin catalog only:
+    /// no threads, skills, or live runtimes. Older daemons omit this.
+    #[serde(default)]
+    pub library_workspaces: Vec<LibraryWorkspace>,
     /// Known threads across all workspaces.
     pub threads: Vec<ThreadSummary>,
     /// Outstanding approvals or questions awaiting user input.
@@ -872,6 +876,24 @@ pub struct DaemonSnapshot {
     /// Bounded summaries for automation owned by this daemon.
     #[serde(default)]
     pub scheduled_tasks: Vec<ScheduledTaskSummary>,
+}
+
+/// A project that is known to the daemon but not currently open.
+///
+/// Closing a project leaves this catalog entry so clients can reopen it
+/// without a folder picker. It is not restored on boot and is not part of
+/// the live workspace or thread lists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryWorkspace {
+    /// Stable workspace identifier reused when the project is reopened.
+    pub id: String,
+    /// Filesystem path for the workspace root.
+    pub path: String,
+    /// Presentation category; library entries are user projects.
+    #[serde(default)]
+    pub kind: WorkspaceKind,
+    /// When the project was last open, used to sort recents.
+    pub last_opened_at: DateTime<Utc>,
 }
 
 /// Current lifecycle of a scheduled task definition.
@@ -3178,6 +3200,93 @@ pub enum HarnessKind {
     Detected,
 }
 
+/// Whether FalconDeck found the harness executable during the last probe.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInstallState {
+    /// The executable resolved to a file.
+    Installed,
+    /// The executable could not be found.
+    #[default]
+    Missing,
+}
+
+/// Resolver path that produced the executable used by FalconDeck.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessExecutableSource {
+    /// An explicit configured path or command.
+    Configured,
+    /// The executable was found on the daemon's inherited `PATH`.
+    Path,
+    /// The executable was found in a curated common install location.
+    KnownLocation,
+    /// The executable was found through the user's login shell.
+    LoginShell,
+    /// The source is unavailable (including older daemon responses).
+    #[default]
+    Unknown,
+}
+
+/// Version/update state derived only from completed version probes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessVersionState {
+    /// A local version was detected but no latest-version result is known.
+    Detected,
+    /// The detected version matches or is newer than the published latest.
+    Current,
+    /// A newer published version is available.
+    UpdateAvailable,
+    /// No readable local version was reported.
+    #[default]
+    Unavailable,
+}
+
+/// Authentication verdict from the harness's own status command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessAuthVerdict {
+    /// The harness reported an authenticated account.
+    Authenticated,
+    /// The harness status command reported that sign-in is required.
+    Unauthenticated,
+    /// The auth probe could not run or did not return a verdict.
+    Unavailable,
+    /// This harness has no auth probe.
+    #[default]
+    Unsupported,
+}
+
+/// Compatibility verdict. The harness manager does not run live conformance
+/// checks, so it must not infer compatibility from a version string.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessCompatibilityVerdict {
+    /// A compatibility probe completed successfully.
+    Compatible,
+    /// A compatibility probe found an unsupported harness contract.
+    Incompatible,
+    /// No user-safe compatibility probe has run.
+    #[default]
+    Unknown,
+    /// FalconDeck has no compatibility probe for this custom harness.
+    Unsupported,
+}
+
+/// Whether subscription usage can be requested for this harness now.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessProviderUsageState {
+    /// FalconDeck implements usage and the harness/auth probe is available.
+    Supported,
+    /// FalconDeck implements usage, but the local install/auth state prevents it.
+    Unavailable,
+    /// FalconDeck has no provider-usage implementation for this harness.
+    #[default]
+    Unsupported,
+}
+
 /// Install status of one coding harness on one host (local or SSH).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HarnessSummary {
@@ -3196,6 +3305,12 @@ pub struct HarnessSummary {
     /// Whether the binary currently exists on the host.
     #[serde(default)]
     pub installed: bool,
+    /// Structured install verdict for Harness Doctor clients.
+    #[serde(default)]
+    pub install_state: HarnessInstallState,
+    /// How the executable was resolved, when known.
+    #[serde(default)]
+    pub executable_source: HarnessExecutableSource,
     /// Version reported by the binary (`<bin> --version`), when probed.
     #[serde(default)]
     pub version: Option<String>,
@@ -3206,6 +3321,9 @@ pub struct HarnessSummary {
     /// True when `version` and `latest_version` are both known and differ.
     #[serde(default)]
     pub update_available: Option<bool>,
+    /// Structured version/update verdict for Harness Doctor clients.
+    #[serde(default)]
+    pub version_state: HarnessVersionState,
     /// Best-effort classification of how the binary was installed
     /// (npm, homebrew, cargo, local, unknown) based on its resolved path.
     #[serde(default)]
@@ -3218,6 +3336,22 @@ pub struct HarnessSummary {
     /// (e.g. Codex `codex login status`, Claude `claude auth status`).
     #[serde(default)]
     pub account_status: Option<String>,
+    /// Structured authentication verdict from the auth status probe.
+    #[serde(default)]
+    pub auth_verdict: HarnessAuthVerdict,
+    /// Compatibility verdict. Currently unknown for curated harnesses because
+    /// conformance checks are not part of the lightweight inventory probe.
+    #[serde(default)]
+    pub compatibility_verdict: HarnessCompatibilityVerdict,
+    /// Availability of FalconDeck's provider-usage integration.
+    #[serde(default)]
+    pub provider_usage_state: HarnessProviderUsageState,
+    /// RFC 3339 time when this harness entry was last probed.
+    #[serde(default)]
+    pub last_checked_at: Option<String>,
+    /// Sanitized, plain-English reason the most important probe failed.
+    #[serde(default)]
+    pub failure: Option<String>,
 }
 
 /// Response for `GET /api/harnesses` and `POST /api/harnesses/refresh`.
@@ -5332,6 +5466,7 @@ mod tests {
             },
             restore_phase: DaemonRestorePhase::Ready,
             workspaces: Vec::new(),
+            library_workspaces: Vec::new(),
             threads: Vec::new(),
             interactive_requests: Vec::new(),
             service_notices: Vec::new(),

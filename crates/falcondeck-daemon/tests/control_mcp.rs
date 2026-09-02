@@ -399,6 +399,17 @@ async fn full_conversation_creates_an_automation_through_the_tools() {
     let workspace = dir.path().join("quizgecko");
     std::fs::create_dir_all(&workspace).unwrap();
     let daemon = spawn_daemon(&dir).await;
+    let registration = reqwest::Client::new()
+        .post(format!("{}/api/workspaces/connect", daemon.base_url()))
+        .json(&json!({ "path": workspace.display().to_string() }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        registration.status().is_success(),
+        "workspace registration failed: {}",
+        registration.text().await.unwrap_or_default()
+    );
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
 
     // The intended agent flow: search for the capability, read the schema,

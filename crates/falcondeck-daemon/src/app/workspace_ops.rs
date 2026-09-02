@@ -79,6 +79,17 @@ pub(super) async fn connect_workspace(
     let summary = app
         .restore_workspace_placeholder(&persisted_workspace, WorkspaceStatus::Connecting, None)
         .await?;
+    {
+        let mut saved = app.inner.saved_workspaces.lock().await;
+        let entry = saved.entry(path_string.clone()).or_insert_with(|| {
+            let mut workspace = persisted_workspace.clone();
+            workspace.path = path_string.clone();
+            workspace
+        });
+        entry.in_sidebar = true;
+        entry.id = Some(summary.id.clone());
+    }
+    append_workspace_to_order(app, &summary.id).await;
     app.persist_local_state().await?;
     app.emit(
         Some(summary.id.clone()),
@@ -148,6 +159,7 @@ pub(super) async fn create_chat_at(
         pinned_thread_ids: Vec::new(),
         project_pinned_thread_ids: Vec::new(),
         thread_states: Vec::new(),
+        in_sidebar: true,
     };
     let summary = app
         .restore_workspace_placeholder(&persisted_workspace, WorkspaceStatus::Connecting, None)
@@ -623,15 +635,18 @@ pub(super) async fn connect_workspace_internal(
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
             thread_states: Vec::new(),
+            in_sidebar: true,
         });
     // The saved record must carry the id the workspace actually connected
     // under, not whatever a pre-migration state file had.
     saved_workspace.id = Some(workspace_id.clone());
+    saved_workspace.in_sidebar = true;
     app.inner
         .saved_workspaces
         .lock()
         .await
         .insert(path_string, saved_workspace);
+    append_workspace_to_order(app, &workspace_id).await;
 
     app.emit(
         Some(workspace_id.clone()),
@@ -3283,6 +3298,7 @@ pub(super) async fn remove_workspace(
         .lock()
         .await
         .remove(&normalized_path);
+    drop_workspace_from_order(app, workspace_id).await;
     app.inner
         .interactive_requests
         .lock()
@@ -3310,6 +3326,132 @@ pub(super) async fn remove_workspace(
         ok: true,
         message: Some("workspace removed".to_string()),
     })
+}
+
+/// Closes a project without forgetting it: runtimes stop, it leaves the live
+/// snapshot, and the persist catalog keeps it so a later connect can reopen
+/// the same id without a folder picker.
+pub(super) async fn close_workspace(
+    app: &AppState,
+    workspace_id: &str,
+) -> Result<CommandResponse, DaemonError> {
+    let summary = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .map(|workspace| workspace.summary.clone())
+    };
+    let Some(summary) = summary else {
+        return Err(DaemonError::NotFound("workspace not found".to_string()));
+    };
+    if summary.kind == falcondeck_core::WorkspaceKind::Casual {
+        return Err(DaemonError::BadRequest(
+            "casual chats cannot be removed from the sidebar".to_string(),
+        ));
+    }
+
+    let _ = app.persist_local_state().await;
+
+    let removed = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        workspaces.remove(workspace_id)
+    };
+    let Some(removed) = removed else {
+        return Err(DaemonError::NotFound("workspace not found".to_string()));
+    };
+
+    if let Some(session) = removed.codex_session {
+        let _ = session.shutdown().await;
+    }
+    if let Some(runtime) = removed.claude_runtime {
+        let _ = runtime.shutdown().await;
+    }
+    if let Some(runtime) = removed.opencode_runtime {
+        runtime.shutdown().await;
+    }
+    for (_, runtime) in removed.acp_runtimes {
+        runtime.shutdown().await;
+    }
+
+    let normalized_path = normalize_workspace_path(&removed.summary.path);
+    {
+        let mut saved = app.inner.saved_workspaces.lock().await;
+        if let Some(entry) = saved.get_mut(&normalized_path) {
+            entry.id = Some(workspace_id.to_string());
+            entry.in_sidebar = false;
+            entry.updated_at = Some(Utc::now());
+        } else {
+            saved.insert(
+                normalized_path,
+                PersistedWorkspaceState {
+                    path: removed.summary.path.clone(),
+                    id: Some(workspace_id.to_string()),
+                    in_sidebar: false,
+                    updated_at: Some(Utc::now()),
+                    ..PersistedWorkspaceState::default()
+                },
+            );
+        }
+    }
+    drop_workspace_from_order(app, workspace_id).await;
+    app.inner
+        .interactive_requests
+        .lock()
+        .await
+        .retain(|(request_workspace, _), _| request_workspace != workspace_id);
+    app.inner
+        .operational_conditions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(condition_workspace, _), _| condition_workspace != workspace_id);
+    app.inner
+        .service_notices
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|notice| notice.workspace_id != workspace_id);
+    let _ = app.persist_local_state().await;
+    app.emit(
+        None,
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("workspace closed".to_string()),
+    })
+}
+
+async fn drop_workspace_from_order(app: &AppState, workspace_id: &str) {
+    let updated = {
+        let mut preferences = app.inner.preferences.lock().await;
+        let before = preferences.workspace_order.len();
+        preferences
+            .workspace_order
+            .retain(|existing| existing != workspace_id);
+        if preferences.workspace_order.len() == before {
+            return;
+        }
+        preferences.clone()
+    };
+    let _ = persist_preferences(&app.inner.preferences_path, &updated).await;
+}
+
+async fn append_workspace_to_order(app: &AppState, workspace_id: &str) {
+    let updated = {
+        let mut preferences = app.inner.preferences.lock().await;
+        if preferences
+            .workspace_order
+            .iter()
+            .any(|existing| existing == workspace_id)
+        {
+            return;
+        }
+        preferences.workspace_order.push(workspace_id.to_string());
+        preferences.clone()
+    };
+    let _ = persist_preferences(&app.inner.preferences_path, &updated).await;
 }
 
 /// Whether any still-pending interactive request targets this thread. Checked

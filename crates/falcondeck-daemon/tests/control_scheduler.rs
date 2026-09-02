@@ -39,6 +39,18 @@ async fn create_automation(
     workspace: &str,
     extra: Value,
 ) -> Value {
+    let registration = client
+        .post(format!("{base_url}/api/workspaces/connect"))
+        .json(&json!({ "path": workspace }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        registration.status().is_success(),
+        "workspace registration failed: {}",
+        registration.text().await.unwrap_or_default()
+    );
+
     let mut arguments = json!({
         "name": "Scheduler probe",
         "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
@@ -361,7 +373,7 @@ async fn scheduler_does_not_dispatch_paused_automations() {
     let workspace = workspace.display().to_string();
     let base = daemon.base_url();
 
-    let automation = create_automation(&client, &base, &workspace, due_in(1)).await;
+    let automation = create_automation(&client, &base, &workspace, due_in(2)).await;
     let id = automation["id"].as_str().unwrap().to_string();
 
     // Pause before the occurrence is due.
@@ -380,7 +392,7 @@ async fn scheduler_does_not_dispatch_paused_automations() {
         .unwrap();
     assert!(paused.ok, "{:?}", paused.error);
 
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     let runs = runs_for(&client, &base, &id).await;
     assert!(
         runs.is_empty(),

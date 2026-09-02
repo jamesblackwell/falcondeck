@@ -5,7 +5,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -100,6 +100,18 @@ fn is_loopback_host(host: &str) -> bool {
     name.eq_ignore_ascii_case("localhost") || matches!(name, "127.0.0.1" | "::1")
 }
 
+/// Local WebSockets are browser-facing capabilities, not public loopback
+/// sockets. CORS does not protect a WebSocket handshake, so require the same
+/// exact Tauri/dev origin policy before upgrading either event or terminal
+/// connections. FalconDeck's remote and self-hosted web clients connect via
+/// the relay and must never be added to this local-daemon allowlist.
+fn has_allowed_websocket_origin(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| ALLOWED_BROWSER_ORIGINS.contains(&origin))
+}
+
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -145,6 +157,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/chats", post(create_chat))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
+        .route(
+            "/api/workspaces/{workspace_id}/close",
+            post(close_workspace),
+        )
         .route(
             "/api/workspaces/{workspace_id}/collaboration-modes",
             get(collaboration_modes),
@@ -272,6 +288,7 @@ pub fn router(state: AppState) -> Router {
             post(speech_transcribe).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
         )
         .route("/api/speech/synthesize", post(speech_synthesize))
+        .route("/api/speech/rewrite", post(speech_rewrite))
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/tools", get(extension_tools))
         .route("/api/extensions/tools/invoke", post(invoke_extension_tool))
@@ -397,6 +414,13 @@ async fn speech_synthesize(
     Json(request): Json<crate::app::SpeechSynthesisRequest>,
 ) -> Result<Json<crate::app::SpeechSynthesisResponse>, DaemonError> {
     Ok(Json(state.synthesize_speech(request).await?))
+}
+
+async fn speech_rewrite(
+    State(state): State<AppState>,
+    Json(request): Json<crate::app::SpeechRewriteRequest>,
+) -> Result<Json<crate::app::SpeechRewriteResponse>, DaemonError> {
+    Ok(Json(state.rewrite_selected_text(request).await?))
 }
 
 async fn extensions(State(state): State<AppState>) -> Json<falcondeck_core::ExtensionSnapshot> {
@@ -560,6 +584,13 @@ async fn remove_workspace(
     Path(workspace_id): Path<String>,
 ) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
     Ok(Json(state.remove_workspace(&workspace_id).await?))
+}
+
+async fn close_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.close_workspace(&workspace_id).await?))
 }
 
 async fn connect_workspace(
@@ -987,14 +1018,24 @@ async fn read_providers(
 #[derive(serde::Deserialize)]
 struct UpdateProvidersRequest {
     providers: serde_json::Value,
+    expected_revision: String,
 }
 
 async fn update_providers(
     State(state): State<AppState>,
     Json(request): Json<UpdateProvidersRequest>,
 ) -> Result<Json<serde_json::Value>, DaemonError> {
-    crate::acp::write_providers_file(&providers_state_dir(&state)?, &request.providers)
-        .map_err(DaemonError::BadRequest)?;
+    if let Err(error) = crate::acp::write_providers_file_if_revision(
+        &providers_state_dir(&state)?,
+        &request.providers,
+        &request.expected_revision,
+    ) {
+        return Err(if error == "providers changed since they were loaded" {
+            DaemonError::Conflict(error)
+        } else {
+            DaemonError::BadRequest(error)
+        });
+    }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -1162,6 +1203,9 @@ struct PluginLogoQuery {
 }
 
 async fn read_plugin_logo(Query(query): Query<PluginLogoQuery>) -> Response {
+    if !crate::connector_catalog::is_catalog_domain(&query.domain) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     match crate::connector_logos::load(&query.domain).await {
         Ok((bytes, content_type)) => {
             let content_type = HeaderValue::from_str(&content_type)
@@ -1322,8 +1366,16 @@ async fn write_workspace_file(
     ))
 }
 
-async fn events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+async fn events(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    if !has_allowed_websocket_origin(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     ws.on_upgrade(move |socket| event_socket(socket, state))
+        .into_response()
 }
 
 async fn event_socket(mut socket: WebSocket, state: AppState) {
@@ -1434,14 +1486,19 @@ struct TerminalWsQuery {
 }
 
 async fn terminal_ws(
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(terminal_id): Path<String>,
     Query(query): Query<TerminalWsQuery>,
-) -> impl IntoResponse {
+) -> Response {
+    if !has_allowed_websocket_origin(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     ws.on_upgrade(move |socket| {
         terminal_socket(socket, state, terminal_id, query.since_seq.unwrap_or(0))
     })
+    .into_response()
 }
 
 /// Streams one terminal session: daemon frames out, client frames in. A
@@ -1618,7 +1675,12 @@ async fn control_execute(
 
 #[cfg(test)]
 mod tests {
-    use super::{TURN_REQUEST_BODY_LIMIT_BYTES, is_loopback_host};
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{
+        ALLOWED_BROWSER_ORIGINS, TURN_REQUEST_BODY_LIMIT_BYTES, has_allowed_websocket_origin,
+        is_loopback_host,
+    };
 
     #[test]
     fn turn_request_limit_has_headroom_for_the_image_budget() {
@@ -1647,5 +1709,30 @@ mod tests {
         assert!(!is_loopback_host("[2001:db8::1]:4520"));
         assert!(!is_loopback_host("[::1]evil"));
         assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn accepts_only_exact_local_websocket_origins() {
+        for origin in ALLOWED_BROWSER_ORIGINS {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+            assert!(has_allowed_websocket_origin(&headers), "{origin}");
+        }
+    }
+
+    #[test]
+    fn rejects_missing_or_untrusted_websocket_origins() {
+        assert!(!has_allowed_websocket_origin(&HeaderMap::new()));
+        for origin in [
+            "null",
+            "https://falcondeck.com",
+            "https://app.falcondeck.com",
+            "http://localhost:1420.evil.example",
+            "http://localhost:1421",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ORIGIN, HeaderValue::from_str(origin).unwrap());
+            assert!(!has_allowed_websocket_origin(&headers), "{origin}");
+        }
     }
 }

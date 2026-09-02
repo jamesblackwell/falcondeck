@@ -5,14 +5,48 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use falcondeck_core::{
-    AgentProvider, ContentLifecycle, ConversationItem, DaemonRestorePhase,
-    ExtensionThreadSummary, ImageInput, InteractiveRequest, InteractiveRequestKind,
-    InteractiveRequestOutcome, InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel,
-    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
-    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
-    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    AgentProvider, ContentLifecycle, ConversationItem, DaemonRestorePhase, ExtensionThreadSummary,
+    ImageInput, InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome,
+    InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel, SnapshotRequest,
+    ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary, ToolActivityKind,
+    ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem, UnifiedEvent,
+    UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
+
+#[tokio::test]
+async fn snapshots_expose_the_local_restore_boundary() {
+    let temp = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::Ready
+    );
+    app.begin_local_restore();
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::LoadingPersistedState
+    );
+    app.mark_persisted_state_loaded();
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::HydratingWorkspaces
+    );
+    app.finish_local_restore();
+    assert_eq!(
+        app.snapshot().await.restore_phase,
+        DaemonRestorePhase::Ready
+    );
+}
+use serde_json::{Value, json};
+use tempfile::tempdir;
+use tokio::sync::mpsc;
+use tokio::time::{Duration as TokioDuration, sleep};
 
 #[cfg(unix)]
 #[tokio::test]
@@ -80,34 +114,6 @@ async fn claude_harness_upgrade_refreshes_connected_workspace_models() {
         .expect("event channel should remain open");
     assert!(matches!(event.event, UnifiedEvent::Snapshot { .. }));
 }
-
-#[tokio::test]
-async fn snapshots_expose_the_local_restore_boundary() {
-    let temp = tempdir().unwrap();
-    let app = AppState::new_with_state_path(
-        "test".to_string(),
-        HashMap::new(),
-        temp.path().join("state.json"),
-    );
-
-    assert_eq!(app.snapshot().await.restore_phase, DaemonRestorePhase::Ready);
-    app.begin_local_restore();
-    assert_eq!(
-        app.snapshot().await.restore_phase,
-        DaemonRestorePhase::LoadingPersistedState
-    );
-    app.mark_persisted_state_loaded();
-    assert_eq!(
-        app.snapshot().await.restore_phase,
-        DaemonRestorePhase::HydratingWorkspaces
-    );
-    app.finish_local_restore();
-    assert_eq!(app.snapshot().await.restore_phase, DaemonRestorePhase::Ready);
-}
-use serde_json::{Value, json};
-use tempfile::tempdir;
-use tokio::sync::mpsc;
-use tokio::time::{Duration as TokioDuration, sleep};
 
 use super::{
     AppState, MAX_EXTENSION_THREAD_SUMMARIES, MAX_EXTENSION_THREAD_SUMMARY_BYTES,
@@ -2163,6 +2169,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 project_pinned_thread_ids: Vec::new(),
+                in_sidebar: true,
                 thread_states: Vec::new(),
             },
             super::PersistedWorkspaceState {
@@ -2175,6 +2182,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 project_pinned_thread_ids: Vec::new(),
+                in_sidebar: true,
                 thread_states: Vec::new(),
             },
         ]
@@ -2205,6 +2213,7 @@ fn persisted_state_reads_workspace_thread_selection() {
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: Vec::new(),
         }]
     );
@@ -2650,8 +2659,7 @@ fn workspace_bridge_binds_only_one_running_task_for_the_same_provider() {
     let threads = [&idle, &running, &claude];
 
     assert_eq!(
-        super::unambiguous_running_thread_id(threads.into_iter(), &AgentProvider::CODEX)
-            .as_deref(),
+        super::unambiguous_running_thread_id(threads.into_iter(), &AgentProvider::CODEX).as_deref(),
         Some("running")
     );
 
@@ -3772,6 +3780,7 @@ async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -3866,6 +3875,7 @@ async fn restored_caught_up_thread_app(
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -4075,6 +4085,7 @@ async fn restore_seeds_sequence_counter_past_persisted_attention_seqs() {
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -4141,6 +4152,7 @@ async fn transcript_replay_does_not_flip_a_read_thread_unread() {
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(Utc::now()),
@@ -4268,6 +4280,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             archived_thread_ids: vec!["thread-1".to_string()],
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(thread_updated_at),
@@ -4394,6 +4407,7 @@ async fn workspace_id_survives_daemon_restarts() {
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
             project_pinned_thread_ids: Vec::new(),
+            in_sidebar: true,
             thread_states: Vec::new(),
         }],
         remote: None,
@@ -4475,6 +4489,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 project_pinned_thread_ids: Vec::new(),
+                in_sidebar: true,
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-a".to_string(),
                     updated_at: None,
@@ -4509,6 +4524,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 project_pinned_thread_ids: Vec::new(),
+                in_sidebar: true,
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-b".to_string(),
                     updated_at: None,
@@ -4633,6 +4649,108 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
     assert_eq!(
         restored_b.thread_states[0].status,
         Some(ThreadStatus::Error)
+    );
+}
+
+#[tokio::test]
+async fn close_workspace_keeps_persist_and_lists_it_in_the_library() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let workspace_id = "workspace-1".to_string();
+    let path_string = workspace_path.to_string_lossy().to_string();
+    let thread = ThreadSummary {
+        id: "thread-1".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Idle thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: true,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
+                id: workspace_id.clone(),
+                path: path_string.clone(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some("thread-1".to_string()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+    {
+        let mut preferences = app.inner.preferences.lock().await;
+        preferences.workspace_order = vec![workspace_id.clone()];
+    }
+
+    app.close_workspace(&workspace_id).await.unwrap();
+
+    let snapshot = app.snapshot().await;
+    assert!(snapshot.workspaces.is_empty());
+    assert!(snapshot.threads.is_empty());
+    assert_eq!(snapshot.library_workspaces.len(), 1);
+    assert_eq!(snapshot.library_workspaces[0].id, workspace_id);
+    assert!(
+        snapshot.library_workspaces[0].path.ends_with("project-a"),
+        "{}",
+        snapshot.library_workspaces[0].path
+    );
+    assert!(snapshot.preferences.workspace_order.is_empty());
+    assert!(app.inner.workspaces.lock().await.is_empty());
+
+    let saved = app.inner.saved_workspaces.lock().await;
+    let persisted = saved
+        .values()
+        .find(|workspace| workspace.id.as_deref() == Some(workspace_id.as_str()))
+        .unwrap();
+    assert!(!persisted.in_sidebar);
+    assert!(
+        persisted
+            .pinned_thread_ids
+            .contains(&"thread-1".to_string())
     );
 }
 

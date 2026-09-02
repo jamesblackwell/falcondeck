@@ -12,6 +12,8 @@ pub enum DaemonError {
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
     Rpc(String),
     #[error("{0}")]
     Process(String),
@@ -39,6 +41,7 @@ impl IntoResponse for DaemonError {
         let status = match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Rpc(_)
             | Self::Process(_)
             | Self::AcpRequestTimeout { .. }

@@ -345,6 +345,14 @@ pub fn get(id: &str) -> Option<&'static CatalogServer> {
     CATALOG.iter().find(|server| server.id == id)
 }
 
+pub fn is_catalog_domain(domain: &str) -> bool {
+    CATALOG.iter().any(|server| {
+        server
+            .domain
+            .eq_ignore_ascii_case(domain.trim().trim_end_matches('.'))
+    })
+}
+
 /// Catalog plus whether each card is already installed and signed in.
 pub fn overview() -> Value {
     let installed_names = connectors::global_server_names();
@@ -410,5 +418,12 @@ mod tests {
             }
         }
         assert!(featured >= 4, "featured row needs a handful of servers");
+    }
+
+    #[test]
+    fn logo_domains_are_limited_to_the_curated_catalog() {
+        assert!(is_catalog_domain("github.com"));
+        assert!(is_catalog_domain("GitHub.COM."));
+        assert!(!is_catalog_domain("attacker.example"));
     }
 }

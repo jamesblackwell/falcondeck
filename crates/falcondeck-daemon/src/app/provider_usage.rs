@@ -2062,6 +2062,10 @@ async fn fetch_zai_usage() -> ProviderUsage {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+pub(super) fn harness_provider_usage_supported(id: &str) -> bool {
+    matches!(id, "codex" | "claude" | "grok" | "cursor" | "agy")
+}
+
 fn usage_cache_ttl(overview: &ProviderUsageOverview) -> Duration {
     let any_error = [
         &overview.codex,

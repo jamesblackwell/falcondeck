@@ -23,9 +23,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{SecondsFormat, Utc};
 use falcondeck_core::{
-    HarnessKind, HarnessRefreshRequest, HarnessSummary, HarnessUpgradeJob, HarnessUpgradeRequest,
-    HarnessUpgradeStatus, HarnessesOverview,
+    HarnessAuthVerdict, HarnessCompatibilityVerdict, HarnessExecutableSource, HarnessInstallState,
+    HarnessKind, HarnessProviderUsageState, HarnessRefreshRequest, HarnessSummary,
+    HarnessUpgradeJob, HarnessUpgradeRequest, HarnessUpgradeStatus, HarnessVersionState,
+    HarnessesOverview,
 };
 use futures_util::future::join_all;
 use tokio::{process::Command as TokioCommand, time::timeout};
@@ -165,12 +168,24 @@ impl KnownHarness {
             bin: self.bin.to_string(),
             resolved_path: None,
             installed: false,
+            install_state: HarnessInstallState::Missing,
+            executable_source: HarnessExecutableSource::Unknown,
             version: None,
             latest_version: None,
             update_available: None,
+            version_state: HarnessVersionState::Unavailable,
             install_source: None,
             upgrade_command: self.upgrade_command.map(str::to_string),
             account_status: None,
+            auth_verdict: if self.auth_probe.is_some() {
+                HarnessAuthVerdict::Unavailable
+            } else {
+                HarnessAuthVerdict::Unsupported
+            },
+            compatibility_verdict: HarnessCompatibilityVerdict::Unknown,
+            provider_usage_state: HarnessProviderUsageState::Unsupported,
+            last_checked_at: None,
+            failure: None,
         }
     }
 }
@@ -407,12 +422,20 @@ impl AppState {
                     bin: bin.clone(),
                     resolved_path: None,
                     installed: false,
+                    install_state: HarnessInstallState::Missing,
+                    executable_source: HarnessExecutableSource::Unknown,
                     version: None,
                     latest_version: None,
                     update_available: None,
+                    version_state: HarnessVersionState::Unavailable,
                     install_source: None,
                     upgrade_command: None,
                     account_status: None,
+                    auth_verdict: HarnessAuthVerdict::Unsupported,
+                    compatibility_verdict: HarnessCompatibilityVerdict::Unsupported,
+                    provider_usage_state: HarnessProviderUsageState::Unsupported,
+                    last_checked_at: None,
+                    failure: None,
                 };
                 probe_configured_bin(&mut summary, &bin).await;
                 summaries.push(summary);
@@ -451,6 +474,10 @@ impl AppState {
                     }
                 }
             }
+        }
+
+        for summary in &mut summaries {
+            finalize_doctor_state(summary);
         }
 
         summaries.sort_by(|left, right| left.label.cmp(&right.label));
@@ -579,40 +606,85 @@ async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
 async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
     let resolution = crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
     let mut summary = harness.summary();
-    apply_resolution(&mut summary, &resolution.executable);
+    apply_resolution(&mut summary, &resolution.executable, resolution.source);
     if !summary.installed {
         // Auth probes read harness config; keep them lazy so a missing
         // binary never spawns a shell.
+        summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
+        summary.last_checked_at = Some(checked_at());
         return summary;
     }
     // Version and auth probes are independent; run them concurrently.
     let version = probe_binary_version(&resolution.executable);
     let account = async {
         match harness.auth_probe {
-            Some(args) => probe_auth_status(&resolution.executable, args).await,
+            Some(args) => Some(probe_auth_status(&resolution.executable, args).await),
             None => None,
         }
     };
     let (version, account) = tokio::join!(version, account);
-    summary.version = version;
-    summary.account_status = account;
+    match version {
+        Ok(version) => summary.version = version,
+        Err(failure) => {
+            summary.failure = Some(version_probe_failure(&summary.label, failure));
+        }
+    }
+    if let Some(account) = account {
+        summary.auth_verdict = account.verdict;
+        summary.account_status = account.status;
+        if let Some(failure) = account.failure {
+            summary.failure = Some(failure);
+        }
+    }
+    summary.last_checked_at = Some(checked_at());
     summary
 }
 
 /// Re-probes a summary whose bin was replaced by a providers.json command.
 async fn probe_configured_bin(summary: &mut HarnessSummary, bin: &str) {
     let resolution = crate::agent_binary::resolve_agent_binary(bin, bin);
-    apply_resolution(summary, &resolution.executable);
-    summary.version = probe_binary_version(&resolution.executable).await;
+    apply_resolution(summary, &resolution.executable, resolution.source);
+    if !summary.installed {
+        summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
+        summary.last_checked_at = Some(checked_at());
+        return;
+    }
+    match probe_binary_version(&resolution.executable).await {
+        Ok(version) => summary.version = version,
+        Err(failure) => summary.failure = Some(version_probe_failure(&summary.label, failure)),
+    }
+    summary.last_checked_at = Some(checked_at());
 }
 
 /// Applies a resolved executable path to a summary, classifying the install
 /// source from the canonicalized location (npm symlinks point into
 /// node_modules, Homebrew into /opt/homebrew, …).
-fn apply_resolution(summary: &mut HarnessSummary, executable: &str) {
+fn apply_resolution(
+    summary: &mut HarnessSummary,
+    executable: &str,
+    source: crate::agent_binary::BinaryResolutionSource,
+) {
     let installed = Path::new(executable).is_file();
     summary.installed = installed;
+    summary.install_state = if installed {
+        HarnessInstallState::Installed
+    } else {
+        HarnessInstallState::Missing
+    };
     summary.resolved_path = installed.then(|| executable.to_string());
+    summary.executable_source = match source {
+        crate::agent_binary::BinaryResolutionSource::Configured => {
+            HarnessExecutableSource::Configured
+        }
+        crate::agent_binary::BinaryResolutionSource::Path => HarnessExecutableSource::Path,
+        crate::agent_binary::BinaryResolutionSource::KnownLocation => {
+            HarnessExecutableSource::KnownLocation
+        }
+        crate::agent_binary::BinaryResolutionSource::LoginShell => {
+            HarnessExecutableSource::LoginShell
+        }
+        crate::agent_binary::BinaryResolutionSource::Unknown => HarnessExecutableSource::Unknown,
+    };
     if installed {
         summary.install_source = Some(classify_install_source(executable).to_string());
     }
@@ -636,31 +708,118 @@ fn classify_install_source(path: &str) -> &'static str {
     }
 }
 
-async fn probe_binary_version(executable: &str) -> Option<String> {
-    let output = run_with_timeout(executable, &["--version"]).await?;
-    parse_version(&output)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailure {
+    TimedOut,
+    CouldNotStart,
+    Rejected,
+    Unreadable,
 }
 
-/// Flattens an auth probe's output into one status line.
-async fn probe_auth_status(executable: &str, args: &[&str]) -> Option<String> {
-    let output = run_with_timeout(executable, args).await?;
+struct ProbeOutput {
+    success: bool,
+    text: String,
+}
+
+struct AuthProbeResult {
+    verdict: HarnessAuthVerdict,
+    status: Option<String>,
+    failure: Option<String>,
+}
+
+async fn probe_binary_version(executable: &str) -> Result<Option<String>, ProbeFailure> {
+    let output = run_with_timeout(executable, &["--version"]).await?;
+    if !output.success {
+        return Err(ProbeFailure::Rejected);
+    }
+    parse_version(&output.text)
+        .map(Some)
+        .ok_or(ProbeFailure::Unreadable)
+}
+
+/// Flattens a successful auth probe into one status line. Failed output is
+/// deliberately discarded so credentials, paths, and provider diagnostics
+/// cannot leak into the Harness Doctor contract.
+async fn probe_auth_status(executable: &str, args: &[&str]) -> AuthProbeResult {
+    match run_with_timeout(executable, args).await {
+        Ok(output) => interpret_auth_probe(output.success, &output.text),
+        Err(failure) => AuthProbeResult {
+            verdict: HarnessAuthVerdict::Unavailable,
+            status: None,
+            failure: Some(auth_probe_failure(failure)),
+        },
+    }
+}
+
+fn interpret_auth_probe(success: bool, output: &str) -> AuthProbeResult {
+    if !success {
+        return AuthProbeResult {
+            verdict: HarnessAuthVerdict::Unauthenticated,
+            status: None,
+            failure: Some(
+                "Authentication check failed. Sign in with the harness CLI, then check again."
+                    .to_string(),
+            ),
+        };
+    }
     let flat = truncate(
         &output.lines().map(str::trim).collect::<Vec<_>>().join(" "),
         300,
     );
-    (!flat.is_empty()).then_some(flat)
+    AuthProbeResult {
+        verdict: HarnessAuthVerdict::Authenticated,
+        status: (!flat.is_empty()).then_some(flat),
+        failure: None,
+    }
 }
 
-async fn run_with_timeout(executable: &str, args: &[&str]) -> Option<String> {
+async fn run_with_timeout(executable: &str, args: &[&str]) -> Result<ProbeOutput, ProbeFailure> {
     let mut command = TokioCommand::new(executable);
     command.args(args).kill_on_drop(true);
-    let output = timeout(PROBE_TIMEOUT, command.output()).await.ok()?.ok()?;
+    let output = timeout(PROBE_TIMEOUT, command.output())
+        .await
+        .map_err(|_| ProbeFailure::TimedOut)?
+        .map_err(|_| ProbeFailure::CouldNotStart)?;
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
     if combined.trim().is_empty() && !stderr.trim().is_empty() {
         combined = stderr.into_owned();
     }
-    Some(combined)
+    Ok(ProbeOutput {
+        success: output.status.success(),
+        text: combined,
+    })
+}
+
+fn checked_at() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn missing_binary_failure(label: &str, bin: &str) -> String {
+    format!("{label} is not installed or the `{bin}` executable could not be found.")
+}
+
+fn version_probe_failure(label: &str, failure: ProbeFailure) -> String {
+    match failure {
+        ProbeFailure::TimedOut => format!("{label} did not answer the version check in time."),
+        ProbeFailure::CouldNotStart => format!("{label} could not be started for a version check."),
+        ProbeFailure::Rejected | ProbeFailure::Unreadable => {
+            format!("{label} did not report a readable version.")
+        }
+    }
+}
+
+fn auth_probe_failure(failure: ProbeFailure) -> String {
+    match failure {
+        ProbeFailure::TimedOut => "Authentication check timed out. Try again.".to_string(),
+        ProbeFailure::CouldNotStart => {
+            "Authentication check could not be started. Try the harness CLI directly.".to_string()
+        }
+        ProbeFailure::Rejected | ProbeFailure::Unreadable => {
+            "Authentication check failed. Sign in with the harness CLI, then check again."
+                .to_string()
+        }
+    }
 }
 
 /// Extracts the first `x.y[…]` version-looking token from CLI output
@@ -698,6 +857,42 @@ fn is_update_available(current: &str, latest: &str) -> bool {
     }
 }
 
+fn finalize_doctor_state(summary: &mut HarnessSummary) {
+    summary.install_state = if summary.installed {
+        HarnessInstallState::Installed
+    } else {
+        HarnessInstallState::Missing
+    };
+    summary.version_state = match (
+        summary.version.is_some(),
+        summary.latest_version.is_some(),
+        summary.update_available,
+    ) {
+        (false, _, _) => HarnessVersionState::Unavailable,
+        (true, true, Some(true)) => HarnessVersionState::UpdateAvailable,
+        (true, true, Some(false)) => HarnessVersionState::Current,
+        (true, _, _) => HarnessVersionState::Detected,
+    };
+    summary.provider_usage_state =
+        if super::provider_usage::harness_provider_usage_supported(&summary.id) {
+            if summary.installed
+                && !matches!(
+                    summary.auth_verdict,
+                    HarnessAuthVerdict::Unauthenticated | HarnessAuthVerdict::Unavailable
+                )
+            {
+                HarnessProviderUsageState::Supported
+            } else {
+                HarnessProviderUsageState::Unavailable
+            }
+        } else {
+            HarnessProviderUsageState::Unsupported
+        };
+    if summary.last_checked_at.is_none() {
+        summary.last_checked_at = Some(checked_at());
+    }
+}
+
 async fn fetch_latest_version(client: &reqwest::Client, package: &str) -> Option<String> {
     let url = format!("https://registry.npmjs.org/{package}/latest");
     let value: serde_json::Value = client
@@ -717,7 +912,8 @@ async fn fetch_latest_version(client: &reqwest::Client, package: &str) -> Option
 /// a single `split_once(':')` so paths containing colons survive.
 const REMOTE_BIN: &str = "FD_BIN:";
 const REMOTE_VERSION: &str = "FD_VER:";
-const REMOTE_AUTH: &str = "FD_AUTH:";
+const REMOTE_AUTH_OK: &str = "FD_AUTH_OK:";
+const REMOTE_AUTH_FAILED: &str = "FD_AUTH_FAILED:";
 
 /// Probes every known harness on a remote host through one ssh invocation.
 /// A missing `ssh` binary or unreachable host fails the whole overview with
@@ -744,6 +940,7 @@ async fn probe_remote_harnesses(
     let mut paths: HashMap<String, String> = HashMap::new();
     let mut versions: HashMap<String, String> = HashMap::new();
     let mut auths: HashMap<String, String> = HashMap::new();
+    let mut auth_failures = std::collections::HashSet::new();
     for line in output.stdout.lines() {
         if let Some(rest) = line.strip_prefix(REMOTE_BIN) {
             if let Some((bin, path)) = rest.split_once(':') {
@@ -755,11 +952,13 @@ async fn probe_remote_harnesses(
             {
                 versions.insert(bin.to_string(), version);
             }
-        } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH)
+        } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH_OK)
             && let Some((bin, status)) = rest.split_once(':')
             && !status.trim().is_empty()
         {
             auths.insert(bin.to_string(), truncate(status.trim(), 300));
+        } else if let Some(bin) = line.strip_prefix(REMOTE_AUTH_FAILED) {
+            auth_failures.insert(bin.to_string());
         }
     }
 
@@ -770,10 +969,26 @@ async fn probe_remote_harnesses(
             if let Some(path) = paths.get(harness.bin) {
                 summary.resolved_path = Some(path.clone());
                 summary.installed = true;
+                summary.install_state = HarnessInstallState::Installed;
+                summary.executable_source = HarnessExecutableSource::Path;
                 summary.install_source = Some(classify_install_source(path).to_string());
+            } else {
+                summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
             }
             summary.version = versions.get(harness.bin).cloned();
-            summary.account_status = auths.get(harness.bin).cloned();
+            if harness.auth_probe.is_some() && summary.installed {
+                if let Some(status) = auths.get(harness.bin) {
+                    summary.account_status = Some(status.clone());
+                    summary.auth_verdict = HarnessAuthVerdict::Authenticated;
+                } else if auth_failures.contains(harness.bin) {
+                    summary.auth_verdict = HarnessAuthVerdict::Unauthenticated;
+                    summary.failure = Some(
+                        "Authentication check failed. Sign in with the harness CLI, then check again."
+                            .to_string(),
+                    );
+                }
+            }
+            summary.last_checked_at = Some(checked_at());
             summary
         })
         .collect())
@@ -795,7 +1010,7 @@ fn remote_probe_script() -> String {
     for harness in KNOWN_HARNESSES.iter().filter(|h| h.auth_probe.is_some()) {
         let args = harness.auth_probe.unwrap_or_default().join(" ");
         script.push_str(&format!(
-            "if command -v {bin} >/dev/null 2>&1; then\n  a=$(\"{bin}\" {args} 2>&1 | head -n 2 | tr '\\n' ' ')\n  echo \"FD_AUTH:{bin}:$a\"\nfi\n",
+            "if command -v {bin} >/dev/null 2>&1; then\n  if a=$(\"{bin}\" {args} 2>&1); then\n    a=$(printf '%s' \"$a\" | head -n 2 | tr '\\n' ' ')\n    echo \"FD_AUTH_OK:{bin}:$a\"\n  else\n    echo \"FD_AUTH_FAILED:{bin}\"\n  fi\nfi\n",
             bin = harness.bin
         ));
     }
@@ -856,6 +1071,73 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_current_version_when_latest_matches() {
+        let mut summary = KNOWN_HARNESSES[0].summary();
+        summary.installed = true;
+        summary.version = Some("1.2.3".to_string());
+        summary.latest_version = Some("1.2.3".to_string());
+        summary.update_available = Some(false);
+
+        finalize_doctor_state(&mut summary);
+
+        assert_eq!(summary.version_state, HarnessVersionState::Current);
+    }
+
+    #[test]
+    fn doctor_reports_update_available_when_latest_is_newer() {
+        let mut summary = KNOWN_HARNESSES[0].summary();
+        summary.installed = true;
+        summary.version = Some("1.2.3".to_string());
+        summary.latest_version = Some("1.3.0".to_string());
+        summary.update_available = Some(true);
+
+        finalize_doctor_state(&mut summary);
+
+        assert_eq!(summary.version_state, HarnessVersionState::UpdateAvailable);
+    }
+
+    #[test]
+    fn doctor_reports_missing_binary_without_exposing_search_paths() {
+        let mut summary = KNOWN_HARNESSES[0].summary();
+        apply_resolution(
+            &mut summary,
+            "/definitely/not/a/falcondeck-harness",
+            crate::agent_binary::BinaryResolutionSource::Unknown,
+        );
+        summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
+        finalize_doctor_state(&mut summary);
+
+        assert_eq!(summary.install_state, HarnessInstallState::Missing);
+        assert_eq!(
+            summary.failure.as_deref(),
+            Some("Codex is not installed or the `codex` executable could not be found.")
+        );
+    }
+
+    #[test]
+    fn failed_auth_probe_returns_unauthenticated_and_redacts_raw_output() {
+        let raw = "token=secret-value /Users/private/.codex/auth.json";
+
+        let result = interpret_auth_probe(false, raw);
+
+        assert_eq!(result.verdict, HarnessAuthVerdict::Unauthenticated);
+        assert_eq!(result.status, None);
+        assert!(!result.failure.unwrap_or_default().contains("secret-value"));
+    }
+
+    #[test]
+    fn provider_usage_is_unavailable_when_supported_harness_is_missing() {
+        let mut summary = KNOWN_HARNESSES[0].summary();
+
+        finalize_doctor_state(&mut summary);
+
+        assert_eq!(
+            summary.provider_usage_state,
+            HarnessProviderUsageState::Unavailable
+        );
+    }
+
+    #[test]
     fn install_source_classification() {
         assert_eq!(
             classify_install_source("/usr/local/lib/node_modules/@openai/codex/bin/codex.js"),
@@ -910,9 +1192,10 @@ mod tests {
             assert!(script.contains(harness.bin), "missing {}", harness.bin);
         }
         // Auth probes only for harnesses that define them.
-        assert!(script.contains("FD_AUTH:codex:"));
-        assert!(script.contains("FD_AUTH:claude:"));
-        assert!(script.contains("FD_AUTH:cursor-agent:"));
+        assert!(script.contains("FD_AUTH_OK:codex:"));
+        assert!(script.contains("FD_AUTH_OK:claude:"));
+        assert!(script.contains("FD_AUTH_OK:cursor-agent:"));
+        assert!(script.contains("FD_AUTH_FAILED:codex"));
     }
 
     #[test]

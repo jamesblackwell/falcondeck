@@ -617,7 +617,11 @@ struct PersistedAppState {
     remote: Option<PersistedRemoteState>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+fn default_in_sidebar() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PersistedWorkspaceState {
     path: String,
     /// Workspace id reused across daemon restarts. Remote clients cache
@@ -639,6 +643,29 @@ struct PersistedWorkspaceState {
     project_pinned_thread_ids: Vec<String>,
     #[serde(default)]
     thread_states: Vec<PersistedThreadState>,
+    /// Open projects are restored on boot and appear in the live snapshot.
+    /// Closed ones stay in this catalog so they can be reopened without a
+    /// folder picker. Missing from older state files means open.
+    #[serde(default = "default_in_sidebar")]
+    in_sidebar: bool,
+}
+
+impl Default for PersistedWorkspaceState {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            id: None,
+            current_thread_id: None,
+            updated_at: None,
+            default_provider: Some(AgentProvider::CODEX),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            project_pinned_thread_ids: Vec::new(),
+            thread_states: Vec::new(),
+            in_sidebar: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1088,15 +1115,31 @@ impl AppState {
     }
 
     /// The short always-on instruction append for one provider spawn, or
-    /// `None` when agent context injection is disabled.
+    /// `None` when agent context injection is disabled. Includes a nudge to
+    /// use session MCP tools such as follow-up suggestions when that tool is
+    /// currently published.
     pub async fn agent_context_instructions(&self, provider: &AgentProvider) -> Option<String> {
         self.agent_context_enabled(provider).await?;
-        let staged = crate::agent_context::stage_skill(&self.inner.state_path);
+        let staged = crate::agent_context::stage_bundled_skills(&self.inner.state_path);
         if let Err(error) = &staged {
-            tracing::warn!(%error, "failed to stage falcondeck-control skill");
+            tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
         }
+        let suggest_follow_ups = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .agent_tools()
+            .iter()
+            .any(|tool| tool.name == crate::agent_context::SUGGEST_FOLLOW_UPS_TOOL);
+        let (control, mcp) = match &staged {
+            Ok(paths) => (Some(paths.control.as_path()), Some(paths.mcp.as_path())),
+            Err(_) => (None, None),
+        };
         Some(crate::agent_context::append_instructions(
-            staged.as_deref().ok(),
+            control,
+            mcp,
+            suggest_follow_ups,
         ))
     }
 
@@ -1104,10 +1147,10 @@ impl AppState {
     /// skill directories natively (Codex `skills/extraRoots`).
     pub async fn agent_skill_root(&self, provider: &AgentProvider) -> Option<std::path::PathBuf> {
         self.agent_context_enabled(provider).await?;
-        match crate::agent_context::stage_skill(&self.inner.state_path) {
+        match crate::agent_context::stage_bundled_skills(&self.inner.state_path) {
             Ok(_) => Some(crate::agent_context::skills_root(&self.inner.state_path)),
             Err(error) => {
-                tracing::warn!(%error, "failed to stage falcondeck-control skill");
+                tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
                 None
             }
         }
@@ -1142,6 +1185,23 @@ impl AppState {
             None,
         )
         .await
+    }
+
+    /// Whether an existing directory resolves to a workspace already
+    /// registered with this daemon. Remote automation authoring may select a
+    /// connected project, but cannot use a client-supplied path to make the
+    /// daemon adopt an arbitrary directory on the host.
+    pub async fn is_registered_workspace_path(&self, workspace_path: &str) -> bool {
+        let Ok(canonical) = std::path::PathBuf::from(workspace_path).canonicalize() else {
+            return false;
+        };
+        let canonical = canonical.to_string_lossy();
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .any(|workspace| workspace.summary.path == canonical)
     }
 
     /// Executes one control operation and broadcasts the resulting
@@ -1209,6 +1269,9 @@ impl AppState {
         let mut workspaces_to_restore = Vec::new();
         for mut workspace in persisted.workspaces {
             workspace.path = normalize_workspace_path(&workspace.path);
+            if !workspace.in_sidebar {
+                continue;
+            }
             self.restore_workspace_placeholder(
                 &workspace,
                 WorkspaceStatus::Connecting,
@@ -1983,6 +2046,7 @@ impl AppState {
             .map(|agent| agent.provider.clone())
             .collect::<std::collections::HashSet<_>>();
 
+        let saved_workspaces = self.inner.saved_workspaces.lock().await.clone();
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
@@ -2044,6 +2108,32 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         workspace_list.sort_by(|left, right| left.path.cmp(&right.path));
+        let live_ids = workspaces
+            .values()
+            .map(|workspace| workspace.summary.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut library_workspaces = saved_workspaces
+            .into_values()
+            .filter(|workspace| !workspace.in_sidebar)
+            .filter_map(|workspace| {
+                let id = workspace.id.clone()?;
+                if live_ids.contains(&id) {
+                    return None;
+                }
+                Some(falcondeck_core::LibraryWorkspace {
+                    id,
+                    kind: workspace_kind_for_path(&workspace.path),
+                    path: workspace.path,
+                    last_opened_at: workspace.updated_at.unwrap_or(self.inner.daemon.started_at),
+                })
+            })
+            .collect::<Vec<_>>();
+        library_workspaces.sort_by(|left, right| {
+            right
+                .last_opened_at
+                .cmp(&left.last_opened_at)
+                .then_with(|| left.path.cmp(&right.path))
+        });
 
         let mut threads = workspaces
             .values()
@@ -2073,6 +2163,7 @@ impl AppState {
             daemon: self.inner.daemon.clone(),
             restore_phase: self.local_restore_phase(),
             workspaces: workspace_list,
+            library_workspaces,
             threads,
             interactive_requests: interactive_request_list,
             service_notices,
@@ -2910,6 +3001,13 @@ impl AppState {
         workspace_ops::remove_workspace(self, workspace_id).await
     }
 
+    pub async fn close_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
+        workspace_ops::close_workspace(self, workspace_id).await
+    }
+
     async fn connect_workspace_internal(
         &self,
         request: ConnectWorkspaceRequest,
@@ -3238,6 +3336,7 @@ impl AppState {
                     pinned_thread_ids,
                     project_pinned_thread_ids,
                     thread_states,
+                    in_sidebar: true,
                 },
             );
         }
@@ -3266,6 +3365,14 @@ impl AppState {
             // secure-storage error cannot erase it.
             None => (unresumed_remote.map(|remote| *remote), None),
         };
+        {
+            let mut saved = self.inner.saved_workspaces.lock().await;
+            saved.clear();
+            for workspace in &persisted_workspaces {
+                saved.insert(workspace.path.clone(), workspace.clone());
+            }
+        }
+
         let persisted = PersistedAppState {
             workspaces: persisted_workspaces,
             remote: persisted_remote,

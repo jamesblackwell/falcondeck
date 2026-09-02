@@ -294,6 +294,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "chat.create",
     "workspace.connect",
     "workspace.remove",
+    "workspace.close",
     "provider.hydrate",
     "workspace.skills",
     "workspace.files",
@@ -1485,6 +1486,15 @@ impl AppState {
                 "workspace.remove" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     self.remove_workspace(&workspace_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.close" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    self.close_workspace(&workspace_id)
                         .await
                         .and_then(|response| {
                             serde_json::to_value(response).map_err(DaemonError::from)
