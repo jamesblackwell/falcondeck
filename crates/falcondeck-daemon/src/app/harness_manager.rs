@@ -298,6 +298,12 @@ impl AppState {
                     app.inner.harness_cache.lock().unwrap().remove(&host);
                     app.finish_harness_job(&background_job_id, None).await;
                     tracing::info!("harness upgrade on {host} finished: {}", harness.id);
+                    if host == LOCAL_HOST {
+                        super::workspace_ops::refresh_metadata_after_harness_upgrade(
+                            &app, harness.id,
+                        )
+                        .await;
+                    }
                 }
                 Err(error) => {
                     tracing::warn!("harness upgrade on {host} failed: {error}");

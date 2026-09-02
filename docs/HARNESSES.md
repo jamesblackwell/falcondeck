@@ -166,6 +166,11 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   daemon restart, pruned after 32 retained entries.
 - On start and on completion the host's cache entry is invalidated so the
   panel never serves a pre-upgrade answer.
+- After a successful local Claude upgrade, the daemon re-resolves the stable
+  CLI reference, refreshes the account/model catalog once, applies it to every
+  connected workspace, and emits a snapshot. Existing turns keep their
+  original child process; the next turn and every open model picker use the
+  upgraded CLI without an app reload.
 
 ## Client notes
 

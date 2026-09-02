@@ -10,9 +10,76 @@ use falcondeck_core::{
     InteractiveRequestOutcome, InteractiveResponsePayload, PlanApprovalOutcome, ServiceLevel,
     SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
     ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle,
-    TurnInputItem, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_harness_upgrade_refreshes_connected_workspace_models() {
+    let temp = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+    let workspace_id = "workspace-claude-upgrade".to_string();
+    let runtime = crate::claude::ClaudeRuntime::for_test(
+        temp.path().to_string_lossy().to_string(),
+        "/usr/bin/false".to_string(),
+    );
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: temp.path().to_string_lossy().to_string(),
+                kind: falcondeck_core::WorkspaceKind::Project,
+                status: WorkspaceStatus::Ready,
+                agents: vec![falcondeck_core::WorkspaceAgentSummary {
+                    provider: AgentProvider::CLAUDE,
+                    label: "Claude".to_string(),
+                    account: falcondeck_core::AccountSummary::default(),
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    skills: Vec::new(),
+                    capabilities: falcondeck_core::AgentCapabilitySummary::claude(),
+                }],
+                skills: Vec::new(),
+                default_provider: AgentProvider::CLAUDE,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: None,
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: Some(runtime),
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: HashMap::new(),
+        },
+    );
+    let mut events = app.subscribe();
+
+    super::workspace_ops::refresh_metadata_after_harness_upgrade(&app, "claude").await;
+
+    let snapshot = app.snapshot().await;
+    let claude = snapshot.workspaces[0]
+        .agents
+        .iter()
+        .find(|agent| agent.provider == AgentProvider::CLAUDE)
+        .unwrap();
+    assert!(!claude.models.is_empty());
+    let event = tokio::time::timeout(TokioDuration::from_secs(1), events.recv())
+        .await
+        .expect("metadata refresh should publish an event")
+        .expect("event channel should remain open");
+    assert!(matches!(event.event, UnifiedEvent::Snapshot { .. }));
+}
 
 #[tokio::test]
 async fn snapshots_expose_the_local_restore_boundary() {

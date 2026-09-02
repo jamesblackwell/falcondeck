@@ -4122,6 +4122,64 @@ pub(super) async fn refresh_connected_workspace_metadata(
     Ok(summary)
 }
 
+/// Re-publishes provider metadata after FalconDeck upgrades a local harness.
+///
+/// Claude's model catalog is machine/account scoped, so one fresh probe can
+/// update every connected workspace. A full snapshot event makes the new
+/// catalog visible to every client without reconnecting the workspace or
+/// replacing its runtime (which could orphan an active turn).
+pub(super) async fn refresh_metadata_after_harness_upgrade(app: &AppState, harness_id: &str) {
+    if harness_id != AgentProvider::CLAUDE.as_str() {
+        return;
+    }
+
+    let runtime = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .values()
+            .find_map(|workspace| workspace.claude_runtime.clone())
+    };
+    let Some(runtime) = runtime else {
+        return;
+    };
+
+    let metadata = runtime.provider_metadata().await;
+    let changed = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let mut changed = false;
+        for workspace in workspaces.values_mut() {
+            if workspace.claude_runtime.is_none() {
+                continue;
+            }
+            let skills = workspace
+                .summary
+                .agents
+                .iter()
+                .find(|agent| agent.provider == AgentProvider::CLAUDE)
+                .map(|agent| agent.skills.clone())
+                .unwrap_or_default();
+            update_workspace_agent_summary(
+                &mut workspace.summary.agents,
+                AgentProvider::CLAUDE,
+                metadata.clone(),
+                skills,
+            );
+            changed = true;
+        }
+        changed
+    };
+
+    if changed {
+        app.emit(
+            None,
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+    }
+}
+
 const CODEX_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 
 fn codex_reconnect_delay(attempt: u32) -> Duration {
