@@ -135,7 +135,21 @@ function stateFromResponse(
 
 function friendlyError(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : "";
-  if (message.toLowerCase().includes("permission")) {
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes("elevated_permissions_disabled") ||
+    normalized.includes("elevated permission or sandbox mode") ||
+    normalized.includes("elevated automations are disabled")
+  ) {
+    return "This check-in inherits bypass or full-access authority from its source task. Enable ‘Allow elevated automations’ in Settings → Agent Control, then add the check-in again.";
+  }
+  if (
+    normalized.includes("threads:read permission is not granted") ||
+    normalized.includes("agent-tools:register permission is not granted") ||
+    normalized.includes(
+      "automations:manage-owned permission is not granted",
+    )
+  ) {
     return "Missions still needs permission setup. Review it in Extension settings.";
   }
   return message || "Missions could not update. Try again.";

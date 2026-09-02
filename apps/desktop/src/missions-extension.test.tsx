@@ -203,6 +203,31 @@ describe("Missions v2 trusted frontend", () => {
     );
   });
 
+  it("explains the separate elevated-Automation gate without blaming extension permissions", async () => {
+    const invokeAction = vi.fn(async (actionId: string) => {
+      if (actionId === "schedule-mission-review") {
+        throw new Error(
+          "This automation uses an elevated permission or sandbox mode, and elevated automations are disabled.",
+        );
+      }
+      return response();
+    });
+    renderMissions({
+      hasPermission: (permission) => permissions.includes(permission),
+      invokeAction,
+      views: response().updatedViews,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add check-in" }));
+
+    expect(
+      await screen.findByText(/Enable ‘Allow elevated automations’/),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(/still needs permission setup/),
+    ).not.toBeInTheDocument();
+  });
+
   it("lets the human activate a draft inline", async () => {
     const registration = collectExtensionApp(missionsApp).agentToolResults[0]!;
     const Component = registration.component;
