@@ -1,3 +1,4 @@
+import React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -86,7 +87,7 @@ describe("Missions v2 trusted frontend", () => {
     expect(registration.panels[0]!.title).toBe("Missions");
     expect(registration.agentToolResults[0]!.toolId).toBe("create-mission");
     expect(registration.agentToolResults[0]!.detail).toEqual({
-      title: "Mission draft",
+      title: "Mission",
     });
   });
 
@@ -180,7 +181,7 @@ describe("Missions v2 trusted frontend", () => {
     );
   });
 
-  it("lets the human add a periodic Mission check-in", async () => {
+  it("makes the recovery action start an agent and schedule future check-ins", async () => {
     const invokeAction = vi.fn(async () => response());
     renderMissions({
       hasPermission: (permission) => permissions.includes(permission),
@@ -190,15 +191,17 @@ describe("Missions v2 trusted frontend", () => {
 
     fireEvent.change(
       screen.getByRole("combobox", {
-        name: "Review cadence for Launch and observe the release",
+        name: "Check-in cadence for Launch and observe the release",
       }),
       { target: { value: "30" } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "Add check-in" }));
+    expect(screen.getByText("No agent has started")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Start agent now" }));
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith("schedule-mission-review", {
         missionId: "mission-1",
         cadenceDays: 30,
+        runImmediately: true,
       }),
     );
   });
@@ -218,7 +221,7 @@ describe("Missions v2 trusted frontend", () => {
       views: response().updatedViews,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Add check-in" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start agent now" }));
 
     expect(
       await screen.findByText(/Enable ‘Allow elevated automations’/),
@@ -228,14 +231,10 @@ describe("Missions v2 trusted frontend", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("lets the human activate a draft inline", async () => {
+  it("shows that a Mission created in chat has already started", async () => {
     const registration = collectExtensionApp(missionsApp).agentToolResults[0]!;
     const Component = registration.component;
-    const draftState: MissionPanelState = {
-      ...panelState,
-      missions: [{ ...panelState.missions[0]!, status: "draft" }],
-    };
-    const invokeAction = vi.fn(async () => response(draftState));
+    const invokeAction = vi.fn(async () => response(panelState));
     const openDetails = vi.fn();
     render(
       <Component
@@ -244,24 +243,25 @@ describe("Missions v2 trusted frontend", () => {
         arguments={{}}
         result={{
           ok: true,
-          result: { missionId: "mission-1", status: "draft" },
+          result: {
+            missionId: "mission-1",
+            status: "active",
+            firstCheckInQueued: true,
+            checkInDays: 7,
+          },
         }}
-        views={response(draftState).updatedViews}
+        views={response(panelState).updatedViews}
         presentation="inline"
         openDetails={openDetails}
         invokeAction={invokeAction}
       />,
     );
 
-    expect(screen.getByText("Mission draft ready")).toBeVisible();
+    expect(screen.getByText("Mission started")).toBeVisible();
+    expect(screen.getByText(/agent check-in is queued now/)).toBeVisible();
     expect(screen.getByText("No deadline")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Open details" }));
     expect(openDetails).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "Activate mission" }));
-    await waitFor(() =>
-      expect(invokeAction).toHaveBeenCalledWith("activate-mission", {
-        missionId: "mission-1",
-      }),
-    );
+    expect(invokeAction).not.toHaveBeenCalled();
   });
 });

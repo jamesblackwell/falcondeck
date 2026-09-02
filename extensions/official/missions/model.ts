@@ -1,5 +1,4 @@
 export type MissionStatus =
-  | "draft"
   | "active"
   | "waiting"
   | "needs_human"
@@ -74,7 +73,6 @@ export type MissionPanelState = {
 };
 
 const MISSION_STATUSES = new Set<MissionStatus>([
-  "draft",
   "active",
   "waiting",
   "needs_human",

@@ -210,6 +210,8 @@ pub enum ExtensionAutomationEffect {
         trigger: AutomationTrigger,
         task: AutomationTask,
         #[serde(default)]
+        run_immediately: bool,
+        #[serde(default)]
         required_connectors: Vec<String>,
         #[serde(default)]
         concurrency_policy: AutomationConcurrencyPolicy,

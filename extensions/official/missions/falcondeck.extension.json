@@ -2,7 +2,7 @@
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.missions",
   "name": "Missions",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -11,12 +11,13 @@
   "contributes": {
     "panelActions": [
       { "id": "refresh-missions", "title": "Refresh missions" },
-      { "id": "activate-mission", "title": "Activate mission" },
-      { "id": "edit-mission", "title": "Edit mission draft" },
       { "id": "add-mission-update", "title": "Message mission" },
       { "id": "set-mission-status", "title": "Change mission status" },
       { "id": "schedule-mission-review", "title": "Schedule mission review" },
-      { "id": "control-mission-automation", "title": "Control mission automation" },
+      {
+        "id": "control-mission-automation",
+        "title": "Control mission automation"
+      },
       { "id": "run-mission-review", "title": "Run mission review now" }
     ],
     "panels": [
@@ -30,11 +31,11 @@
     "agentTools": [
       {
         "id": "create-mission",
-        "title": "Create a FalconDeck Mission draft",
-        "description": "Use this when the user explicitly asks to start or create a FalconDeck Mission. Create a durable project brief linked to this exact task; do not substitute a harness goal or merely describe a mission. A human reviews and activates the draft. Deadlines are optional and there is no default lifespan.",
+        "title": "Start a FalconDeck Mission",
+        "description": "Use this when the user explicitly asks to start or create a FalconDeck Mission. Once the brief and success criteria are agreed, start it immediately: create the durable Mission, link this exact task, schedule recurring agent check-ins, and queue the first check-in now. Do not substitute a harness goal or merely describe a mission. Choose the least-frequent useful check-in cadence for the work; ask the user only when that choice materially affects cost or timing. Deadlines are optional and there is no default lifespan.",
         "inputSchema": {
           "type": "object",
-          "required": ["title", "brief", "successCriteria"],
+          "required": ["title", "brief", "successCriteria", "checkInDays"],
           "properties": {
             "title": { "type": "string", "maxLength": 120 },
             "brief": { "type": "string", "maxLength": 4000 },
@@ -43,6 +44,12 @@
               "minItems": 1,
               "maxItems": 8,
               "items": { "type": "string", "maxLength": 300 }
+            },
+            "checkInDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90,
+              "description": "Days between future agent check-ins. Choose the least-frequent cadence that can still make useful progress; the first check-in always runs immediately."
             },
             "deadline": {
               "type": "string",
@@ -67,7 +74,7 @@
       {
         "id": "update-mission",
         "title": "Update a linked FalconDeck Mission",
-        "description": "Append a meaningful update, change a non-terminal status, link an existing FalconDeck task, or replace a draft definition. Read the Mission first. edit_definition is a full replacement and works only while the Mission is still a draft. Agents cannot activate, complete, or cancel Missions.",
+        "description": "Append a meaningful update, change a non-terminal status, or link an existing FalconDeck task. Read the Mission first. Agents cannot complete or cancel Missions.",
         "inputSchema": {
           "type": "object",
           "required": ["operation"],
@@ -75,12 +82,7 @@
             "missionId": { "type": "string", "maxLength": 128 },
             "operation": {
               "type": "string",
-              "enum": [
-                "add_update",
-                "set_status",
-                "link_thread",
-                "edit_definition"
-              ]
+              "enum": ["add_update", "set_status", "link_thread"]
             },
             "kind": {
               "type": "string",
@@ -96,16 +98,7 @@
             "role": {
               "type": "string",
               "enum": ["source", "work", "review"]
-            },
-            "title": { "type": "string", "maxLength": 120 },
-            "brief": { "type": "string", "maxLength": 4000 },
-            "successCriteria": {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 8,
-              "items": { "type": "string", "maxLength": 300 }
-            },
-            "deadline": { "type": "string" }
+            }
           },
           "oneOf": [
             {
@@ -125,12 +118,6 @@
                 "operation": { "const": "link_thread" }
               },
               "required": ["operation", "threadId"]
-            },
-            {
-              "properties": {
-                "operation": { "const": "edit_definition" }
-              },
-              "required": ["operation", "title", "brief", "successCriteria"]
             }
           ],
           "additionalProperties": false
@@ -138,5 +125,9 @@
       }
     ]
   },
-  "permissions": ["threads:read", "agent-tools:register", "automations:manage-owned"]
+  "permissions": [
+    "threads:read",
+    "agent-tools:register",
+    "automations:manage-owned"
+  ]
 }

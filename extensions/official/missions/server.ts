@@ -45,7 +45,6 @@ const UPDATE_KINDS = new Set<MissionUpdateKind>([
 ]);
 const THREAD_ROLES = new Set<MissionThreadRole>(["source", "work", "review"]);
 const MISSION_STATUSES = new Set<MissionStatus>([
-  "draft",
   "active",
   "waiting",
   "needs_human",
@@ -200,7 +199,7 @@ function attentionRank(mission: Mission): number {
     return 1;
   }
   if (mission.status === "review") return 2;
-  if (["active", "waiting", "draft"].includes(mission.status)) return 3;
+  if (["active", "waiting"].includes(mission.status)) return 3;
   if (mission.status === "paused") return 4;
   return 5;
 }
@@ -313,8 +312,7 @@ function linkAutomationTask(
 ): boolean {
   if (
     mission.threads.some(
-      (link) =>
-        link.workspaceId === workspaceId && link.threadId === threadId,
+      (link) => link.workspaceId === workspaceId && link.threadId === threadId,
     )
   ) {
     return false;
@@ -360,11 +358,16 @@ function addUpdate(
 
 function createMissionInput(input: unknown) {
   const args = record(input);
+  const checkInDays = Number(args.checkInDays);
+  if (!Number.isInteger(checkInDays) || checkInDays < 1 || checkInDays > 90) {
+    throw new Error("checkInDays must be a whole number from 1 to 90");
+  }
   return {
     title: requiredString(args.title, "title", 120),
     brief: requiredString(args.brief, "brief", 4_000),
     successCriteria: stringList(args.successCriteria, "successCriteria"),
     deadline: isoDeadline(args.deadline),
+    checkInDays,
   };
 }
 
@@ -381,47 +384,6 @@ export default defineExtension({
       return { refreshed: true };
     });
 
-    context.actions.register("activate-mission", async ({ input }) => {
-      const args = record(input);
-      const store = await loadStore(context);
-      const mission = missionById(
-        store,
-        requiredString(args.missionId, "missionId", 128),
-      );
-      if (mission.status !== "draft")
-        throw new Error("only a draft Mission can be activated");
-      mission.status = "active";
-      addUpdate(mission, {
-        actor: "human",
-        kind: "status",
-        body: "Mission activated.",
-      });
-      await saveStore(context, store);
-      await publish(context, store);
-      return { missionId: mission.id, status: mission.status };
-    });
-
-    context.actions.register("edit-mission", async ({ input }) => {
-      const args = record(input);
-      const store = await loadStore(context);
-      const mission = missionById(
-        store,
-        requiredString(args.missionId, "missionId", 128),
-      );
-      if (mission.status !== "draft")
-        throw new Error("only a draft Mission can be edited here");
-      const edited = createMissionInput(args);
-      mission.title = edited.title;
-      mission.brief = edited.brief;
-      mission.successCriteria = edited.successCriteria;
-      if (edited.deadline) mission.deadline = edited.deadline;
-      else delete mission.deadline;
-      mission.updatedAt = new Date().toISOString();
-      await saveStore(context, store);
-      await publish(context, store);
-      return { missionId: mission.id, updated: true };
-    });
-
     context.actions.register("add-mission-update", async ({ input }) => {
       const args = record(input);
       const store = await loadStore(context);
@@ -431,9 +393,9 @@ export default defineExtension({
       );
       if (
         args.runNow === true &&
-        ["draft", "paused", "completed", "cancelled"].includes(mission.status)
+        ["paused", "completed", "cancelled"].includes(mission.status)
       ) {
-        throw new Error("activate the Mission before requesting a review");
+        throw new Error("reactivate the Mission before requesting a review");
       }
       addUpdate(mission, {
         actor: "human",
@@ -470,13 +432,6 @@ export default defineExtension({
       if (["completed", "cancelled"].includes(mission.status)) {
         throw new Error("a completed or cancelled Mission is terminal");
       }
-      if (
-        mission.status === "draft" &&
-        status !== "active" &&
-        status !== "cancelled"
-      ) {
-        throw new Error("a draft Mission must be activated or cancelled first");
-      }
       mission.status = status;
       addUpdate(mission, {
         actor: "human",
@@ -501,19 +456,25 @@ export default defineExtension({
         store,
         requiredString(args.missionId, "missionId", 128),
       );
-      if (["draft", "paused", "completed", "cancelled"].includes(mission.status)) {
-        throw new Error("activate the Mission before scheduling reviews");
+      if (["paused", "completed", "cancelled"].includes(mission.status)) {
+        throw new Error("reactivate the Mission before scheduling check-ins");
       }
       const cadenceDays = Number(args.cadenceDays);
-      if (!Number.isInteger(cadenceDays) || cadenceDays < 1 || cadenceDays > 90) {
+      if (
+        !Number.isInteger(cadenceDays) ||
+        cadenceDays < 1 ||
+        cadenceDays > 90
+      ) {
         throw new Error("cadenceDays must be a whole number from 1 to 90");
       }
       const existing = (await context.automations.list()).find(
         (automation) => automation.resourceId === mission.id,
       );
-      if (existing) throw new Error("this Mission already has a review Automation");
-      const source = mission.threads.find((thread) => thread.role === "source")
-        ?? mission.threads[0];
+      if (existing)
+        throw new Error("this Mission already has a review Automation");
+      const source =
+        mission.threads.find((thread) => thread.role === "source") ??
+        mission.threads[0];
       if (!source) throw new Error("the Mission has no linked source task");
       await context.automations.apply({
         type: "create_from_thread",
@@ -529,45 +490,54 @@ export default defineExtension({
           anchor_at: new Date().toISOString(),
         },
         task: { kind: "prompt", instruction: reviewInstruction(mission.id) },
+        runImmediately: args.runImmediately === true,
         concurrencyPolicy: "queue_one",
         misfirePolicy: "run_once",
       });
       return { missionId: mission.id, scheduled: true };
     });
 
-    context.actions.register("control-mission-automation", async ({ input }) => {
-      const args = record(input);
-      const missionId = requiredString(args.missionId, "missionId", 128);
-      const operation = requiredString(args.operation, "operation", 16);
-      const mission = missionById(await loadStore(context), missionId);
-      if (
-        operation === "resume" &&
-        ["draft", "paused", "completed", "cancelled"].includes(mission.status)
-      ) {
-        throw new Error("activate the Mission before resuming its reviews");
-      }
-      const automation = (await context.automations.list()).find(
-        (candidate) => candidate.resourceId === missionId,
-      );
-      if (!automation) throw new Error("the Mission has no review Automation");
-      if (operation === "pause" || operation === "resume" || operation === "delete") {
-        await context.automations.apply({
-          type: operation,
-          automationId: automation.id,
-          expectedRevision: automation.revision,
-        });
-      } else {
-        throw new Error("unsupported Automation operation");
-      }
-      return { missionId, operation };
-    });
+    context.actions.register(
+      "control-mission-automation",
+      async ({ input }) => {
+        const args = record(input);
+        const missionId = requiredString(args.missionId, "missionId", 128);
+        const operation = requiredString(args.operation, "operation", 16);
+        const mission = missionById(await loadStore(context), missionId);
+        if (
+          operation === "resume" &&
+          ["paused", "completed", "cancelled"].includes(mission.status)
+        ) {
+          throw new Error("reactivate the Mission before resuming its reviews");
+        }
+        const automation = (await context.automations.list()).find(
+          (candidate) => candidate.resourceId === missionId,
+        );
+        if (!automation)
+          throw new Error("the Mission has no review Automation");
+        if (
+          operation === "pause" ||
+          operation === "resume" ||
+          operation === "delete"
+        ) {
+          await context.automations.apply({
+            type: operation,
+            automationId: automation.id,
+            expectedRevision: automation.revision,
+          });
+        } else {
+          throw new Error("unsupported Automation operation");
+        }
+        return { missionId, operation };
+      },
+    );
 
     context.actions.register("run-mission-review", async ({ input }) => {
       const args = record(input);
       const missionId = requiredString(args.missionId, "missionId", 128);
       const mission = missionById(await loadStore(context), missionId);
-      if (["draft", "paused", "completed", "cancelled"].includes(mission.status)) {
-        throw new Error("activate the Mission before requesting a review");
+      if (["paused", "completed", "cancelled"].includes(mission.status)) {
+        throw new Error("reactivate the Mission before requesting a review");
       }
       const automation = (await context.automations.list()).find(
         (candidate) => candidate.resourceId === missionId,
@@ -600,7 +570,7 @@ export default defineExtension({
           title: args.title,
           brief: args.brief,
           successCriteria: args.successCriteria,
-          status: "draft",
+          status: "active",
           ...(args.deadline ? { deadline: args.deadline } : {}),
           threads: [{ workspaceId, threadId, role: "source", linkedAt: now }],
           updates: [
@@ -608,7 +578,7 @@ export default defineExtension({
               id: crypto.randomUUID(),
               actor: "agent",
               kind: "status",
-              body: "Mission draft created for human review.",
+              body: `Mission started. The first agent check-in was queued, with future check-ins every ${args.checkInDays} ${args.checkInDays === 1 ? "day" : "days"}.`,
               threadId,
               createdAt: now,
             },
@@ -619,7 +589,30 @@ export default defineExtension({
         store.missions.unshift(mission);
         await saveStore(context, store);
         await publish(context, store);
-        return { missionId: mission.id, status: mission.status };
+        await context.automations.apply({
+          type: "create_from_thread",
+          resourceId: mission.id,
+          sourceWorkspaceId: workspaceId,
+          sourceThreadId: threadId,
+          idempotencyKey: `mission-start-${mission.id}`,
+          name: `${mission.title} — review`,
+          description: "Periodic review owned by FalconDeck Missions.",
+          trigger: {
+            kind: "interval",
+            every_seconds: args.checkInDays * 24 * 60 * 60,
+            anchor_at: now,
+          },
+          task: { kind: "prompt", instruction: reviewInstruction(mission.id) },
+          runImmediately: true,
+          concurrencyPolicy: "queue_one",
+          misfirePolicy: "run_once",
+        });
+        return {
+          missionId: mission.id,
+          status: mission.status,
+          firstCheckInQueued: true,
+          checkInDays: args.checkInDays,
+        };
       },
     );
 
@@ -693,12 +686,8 @@ export default defineExtension({
             32,
           ) as MissionStatus;
           if (!AGENT_STATUSES.has(status)) {
-            throw new Error(
-              "agents cannot activate, complete, or cancel a Mission",
-            );
+            throw new Error("agents cannot complete or cancel a Mission");
           }
-          if (mission.status === "draft")
-            throw new Error("a human must activate this Mission first");
           mission.status = status;
           addUpdate(mission, {
             actor: "agent",
@@ -753,16 +742,6 @@ export default defineExtension({
               threadId,
             });
           }
-        } else if (operation === "edit_definition") {
-          if (mission.status !== "draft")
-            throw new Error("agents may edit only draft Missions");
-          const edited = createMissionInput(args);
-          mission.title = edited.title;
-          mission.brief = edited.brief;
-          mission.successCriteria = edited.successCriteria;
-          if (edited.deadline) mission.deadline = edited.deadline;
-          else delete mission.deadline;
-          mission.updatedAt = new Date().toISOString();
         } else {
           throw new Error("unsupported Mission update operation");
         }

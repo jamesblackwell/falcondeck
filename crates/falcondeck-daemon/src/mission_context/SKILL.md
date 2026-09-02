@@ -15,18 +15,16 @@ When the user explicitly requests a Mission:
 
 1. Call `falcondeck_missions-create_mission` before doing the requested work.
 2. Supply a concise title, the durable brief, and concrete success criteria.
-   Make the first draft complete rather than creating it and immediately
-   rewriting it with `update-mission`.
+   Treat the agreed definition as final for creation.
 3. Include `deadline` only when the user requests or agrees to one. Missions
    have no default lifespan, worker count, or automatic-turn limit.
-4. Report that the draft awaits human review and activation. Supported clients
-   show the controls in the conversation and on the Missions page.
-5. Do not silently substitute a native harness goal. A linked task may use its
-   own Goal after the Mission is active.
-
-If the user asks to correct a draft before activation, read the Mission again,
-then use `edit_definition` with the complete replacement `title`, `brief`, and
-`successCriteria`. It is not a partial update and cannot edit an active Mission.
+4. Choose the least-frequent `checkInDays` cadence that can still make useful
+   progress. Ask the user only when that choice materially affects cost or
+   timing. The first check-in runs immediately regardless of cadence.
+5. Report that the Mission started and its first agent check-in is queued. Do
+   not ask the user to activate or approve it again.
+6. Do not silently substitute a native harness goal. A linked task may use its
+   own Goal for focused work inside the Mission.
 
 ## Work
 
@@ -39,8 +37,7 @@ When this task is linked to a Mission:
   evidence, questions, decisions, task links, or status changes;
 - supply the fields required by the selected update operation:
   `add_update` needs `kind` and `body`, `set_status` needs `status`,
-  `link_thread` needs `threadId`, and draft-only `edit_definition` needs the
-  complete `title`, `brief`, and `successCriteria`;
+  and `link_thread` needs `threadId`;
 - after a failed Mission call or a human action, read the Mission again before
   retrying. Do not repeat an edit against stale status;
 - prefer an existing linked task and create another only for clean context, a

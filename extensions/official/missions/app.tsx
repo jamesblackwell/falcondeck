@@ -26,7 +26,7 @@ import {
 
 const PANEL_VIEW = "missions-panel";
 const MISSION_CREATION_PROMPT =
-  "Let’s create a FalconDeck Mission for a piece of work that may span multiple tasks or periods of waiting. Help me define a durable brief and concrete success criteria. Ask only for details that materially affect them. Include a deadline only if I choose one. Once agreed, call the FalconDeck create-mission tool to create a draft linked to this task for my review. Do not substitute a harness goal.";
+  "Let’s start a FalconDeck Mission for a piece of work that may span multiple tasks or periods of waiting. Help me define a durable brief and concrete success criteria. Ask only for details that materially affect them. Include a deadline only if I choose one. Choose the least-frequent useful agent check-in cadence, asking me only if that materially affects cost or timing. Once agreed, call the FalconDeck create-mission tool. That call starts the Mission and queues its first agent check-in immediately; do not create a draft, substitute a harness goal, or merely describe a mission.";
 const REQUIRED_PERMISSIONS = [
   {
     id: "threads:read",
@@ -141,14 +141,12 @@ function friendlyError(reason: unknown): string {
     normalized.includes("elevated permission or sandbox mode") ||
     normalized.includes("elevated automations are disabled")
   ) {
-    return "This check-in inherits bypass or full-access authority from its source task. Enable ‘Allow elevated automations’ in Settings → Agent Control, then add the check-in again.";
+    return "This check-in inherits bypass or full-access authority from its source task. Enable ‘Allow elevated automations’ in Settings → Agent Control, then choose ‘Start agent now’ again.";
   }
   if (
     normalized.includes("threads:read permission is not granted") ||
     normalized.includes("agent-tools:register permission is not granted") ||
-    normalized.includes(
-      "automations:manage-owned permission is not granted",
-    )
+    normalized.includes("automations:manage-owned permission is not granted")
   ) {
     return "Missions still needs permission setup. Review it in Extension settings.";
   }
@@ -176,6 +174,13 @@ function statusVariant(status: MissionStatus): BadgeVariant {
   return "default";
 }
 
+function statusLabel(status: MissionStatus): string {
+  if (status === "active") return "In progress";
+  if (status === "needs_human") return "Needs you";
+  if (status === "review") return "Ready for review";
+  return status.replaceAll("_", " ");
+}
+
 function SetupState({
   hasPermission,
   openExtensionSettings,
@@ -188,8 +193,8 @@ function SetupState({
           Finish setting up Missions
         </h2>
         <p className="mt-1.5 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
-          Missions is off by default. Grant these capabilities before agents
-          can create or update Mission projects.
+          Missions is off by default. Grant these capabilities before agents can
+          create or update Mission projects.
         </p>
         <div className="mt-5 divide-y divide-border-default rounded-[var(--fd-radius-lg)] border border-border-default">
           {REQUIRED_PERMISSIONS.map((permission) => {
@@ -239,22 +244,6 @@ function StatusActions({
 }) {
   if (mission.status === "completed" || mission.status === "cancelled")
     return null;
-  if (mission.status === "draft") {
-    return (
-      <>
-        <Button disabled={pending} onClick={() => act("active")}>
-          Activate
-        </Button>
-        <Button
-          disabled={pending}
-          variant="ghost"
-          onClick={() => act("cancelled")}
-        >
-          Cancel
-        </Button>
-      </>
-    );
-  }
   return (
     <>
       {mission.status === "paused" ? (
@@ -321,10 +310,6 @@ function MissionCard({
   };
 
   const setStatus = (status: MissionStatus) => {
-    if (mission.status === "draft" && status === "active") {
-      void invoke("activate-mission", { missionId: mission.id });
-      return;
-    }
     void invoke("set-mission-status", { missionId: mission.id, status });
   };
 
@@ -338,7 +323,7 @@ function MissionCard({
             </h2>
             <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
               <Badge variant={statusVariant(mission.status)}>
-                {mission.status.replaceAll("_", " ")}
+                {statusLabel(mission.status)}
               </Badge>
               {mission.deadline ? (
                 <span>Deadline {formatDate(mission.deadline)}</span>
@@ -426,7 +411,7 @@ function MissionCard({
 
         <div className="mt-4">
           <p className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-tertiary">
-            Review automation
+            Agent check-ins
           </p>
           {mission.automations.length > 0 ? (
             <div className="mt-1.5 space-y-2">
@@ -440,7 +425,9 @@ function MissionCard({
                       {automation.resolvedSchedule}
                     </span>
                     <Badge
-                      variant={automation.state === "enabled" ? "success" : "default"}
+                      variant={
+                        automation.state === "enabled" ? "success" : "default"
+                      }
                     >
                       {automation.state}
                     </Badge>
@@ -453,7 +440,7 @@ function MissionCard({
                         disabled={
                           busy ||
                           automation.state !== "enabled" ||
-                          ["draft", "paused", "completed", "cancelled"].includes(
+                          ["paused", "completed", "cancelled"].includes(
                             mission.status,
                           )
                         }
@@ -463,14 +450,14 @@ function MissionCard({
                           })
                         }
                       >
-                        Review now
+                        Run agent now
                       </Button>
                       <Button
                         variant="ghost"
                         disabled={
                           busy ||
                           (automation.state !== "enabled" &&
-                            ["draft", "paused", "completed", "cancelled"].includes(
+                            ["paused", "completed", "cancelled"].includes(
                               mission.status,
                             ))
                         }
@@ -478,7 +465,9 @@ function MissionCard({
                           void invoke("control-mission-automation", {
                             missionId: mission.id,
                             operation:
-                              automation.state === "enabled" ? "pause" : "resume",
+                              automation.state === "enabled"
+                                ? "pause"
+                                : "resume",
                           })
                         }
                       >
@@ -488,53 +477,61 @@ function MissionCard({
                   </div>
                   <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
                     {automation.nextRunAt
-                      ? `Next review ${formatDate(automation.nextRunAt)}`
-                      : "No scheduled review"}
+                      ? `Next check-in ${formatDate(automation.nextRunAt)}`
+                      : "No scheduled check-in"}
                     {automation.latestOutcome
                       ? ` · Last ${automation.latestOutcome.status} ${formatDate(
                           automation.latestOutcome.finishedAt,
                         )}`
-                      : " · Never run"}
+                      : " · First agent run queued"}
                   </p>
                 </div>
               ))}
             </div>
-          ) : !["draft", "paused", "completed", "cancelled"].includes(
-              mission.status,
-            ) ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-[var(--fd-radius-md)] border border-dashed border-border-default px-3 py-2.5">
-              <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                Check this Mission every
-              </span>
-              <select
-                aria-label={`Review cadence for ${mission.title}`}
-                value={cadenceDays}
-                onChange={(event) => setCadenceDays(event.target.value)}
-                className="fd-focus h-8 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2 text-[length:var(--fd-text-xs)] text-fg-primary"
-              >
-                <option value="1">day</option>
-                <option value="7">week</option>
-                <option value="30">30 days</option>
-              </select>
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() =>
-                  void invoke("schedule-mission-review", {
-                    missionId: mission.id,
-                    cadenceDays: Number(cadenceDays),
-                  })
-                }
-              >
-                Add check-in
-              </Button>
-              <span className="text-[length:var(--fd-text-xs)] text-fg-tertiary">
-                Uses the source task&apos;s provider, model, and authority settings.
-              </span>
+          ) : !["paused", "completed", "cancelled"].includes(mission.status) ? (
+            <div className="mt-1.5 rounded-[var(--fd-radius-lg)] border border-warning bg-warning-muted px-4 py-3">
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                No agent has started
+              </p>
+              <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+                This Mission is saved, but it will stay idle until an agent
+                check-in is started.
+              </p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-[length:var(--fd-text-xs)] text-fg-secondary">
+                  Start now, then check again every
+                </span>
+                <select
+                  aria-label={`Check-in cadence for ${mission.title}`}
+                  value={cadenceDays}
+                  onChange={(event) => setCadenceDays(event.target.value)}
+                  className="fd-focus h-8 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2 text-[length:var(--fd-text-xs)] text-fg-primary"
+                >
+                  <option value="1">day</option>
+                  <option value="7">week</option>
+                  <option value="30">30 days</option>
+                </select>
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void invoke("schedule-mission-review", {
+                      missionId: mission.id,
+                      cadenceDays: Number(cadenceDays),
+                      runImmediately: true,
+                    })
+                  }
+                >
+                  Start agent now
+                </Button>
+              </div>
+              <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                Uses the source task&apos;s provider, model, and authority
+                settings.
+              </p>
             </div>
           ) : (
             <p className="mt-1.5 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-              No automatic reviews.
+              Agent check-ins are paused with this Mission.
             </p>
           )}
         </div>
@@ -727,10 +724,9 @@ function MissionDashboard({
   );
 }
 
-function MissionDraftToolResult({
+function MissionStartedToolResult({
   result,
   views,
-  invokeAction,
   presentation,
   openDetails,
 }: ExtensionAppAgentToolResultProps) {
@@ -751,32 +747,18 @@ function MissionDraftToolResult({
         (candidate) => candidate.id === missionId,
       )
     : null;
-  const [pending, setPending] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const checkInDays =
+    typeof inner?.checkInDays === "number" ? inner.checkInDays : null;
   const detailed = presentation === "detail";
 
   if (!missionId) return null;
-
-  const activate = async () => {
-    setPending(true);
-    try {
-      await invokeAction("activate-mission", { missionId });
-      setMessage(
-        "Mission activated. This task is linked, and the Mission now persists independently of it.",
-      );
-    } catch (reason) {
-      setMessage(friendlyError(reason));
-    } finally {
-      setPending(false);
-    }
-  };
 
   return (
     <Card
       className={classes(detailed ? "border-0 bg-transparent p-0" : "my-3 p-4")}
     >
       <div className="flex items-center justify-between gap-3">
-        <Badge variant="warning">Draft</Badge>
+        <Badge variant="info">Started</Badge>
         {!detailed && openDetails ? (
           <Button variant="ghost" onClick={openDetails}>
             Open details
@@ -784,8 +766,15 @@ function MissionDraftToolResult({
         ) : null}
       </div>
       <h3 className="mt-2 text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-        Mission draft ready
+        Mission started
       </h3>
+      <p className="mt-1 text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+        An agent check-in is queued now
+        {checkInDays
+          ? `, with future check-ins every ${checkInDays} ${checkInDays === 1 ? "day" : "days"}`
+          : ""}
+        . You can leave this task; the Mission will keep its brief and progress.
+      </p>
       {mission ? (
         <>
           <p className="mt-1 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
@@ -823,18 +812,6 @@ function MissionDraftToolResult({
           </p>
         </>
       ) : null}
-      {message ? (
-        <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-secondary">
-          {message}
-        </p>
-      ) : null}
-      {!message ? (
-        <div className="mt-3 flex justify-end">
-          <Button disabled={pending} onClick={() => void activate()}>
-            {pending ? "Activating…" : "Activate mission"}
-          </Button>
-        </div>
-      ) : null}
     </Card>
   );
 }
@@ -848,7 +825,7 @@ export default defineExtensionApp("falcondeck.missions", (app) => {
   });
   app.agentToolResults.register({
     toolId: "create-mission",
-    component: MissionDraftToolResult,
-    detail: { title: "Mission draft" },
+    component: MissionStartedToolResult,
+    detail: { title: "Mission" },
   });
 });

@@ -156,10 +156,7 @@ export type ExtensionThreadSummary = {
 };
 
 export type ExtensionAutomationState =
-  | "enabled"
-  | "paused"
-  | "completed"
-  | "failed";
+  "enabled" | "paused" | "completed" | "failed";
 
 export type ExtensionAutomationTrigger =
   | { kind: "once"; run_at: string }
@@ -202,6 +199,8 @@ export type ExtensionAutomationEffect =
       description?: string;
       trigger: ExtensionAutomationTrigger;
       task: ExtensionAutomationTask;
+      /** Queue the first run as part of creating the Automation. */
+      runImmediately?: boolean;
       requiredConnectors?: string[];
       concurrencyPolicy?: "skip" | "queue_one" | "allow";
       misfirePolicy?: "skip" | "run_once";

@@ -43,7 +43,9 @@ A user can discover a larger piece of work in any ordinary conversation and
 ask the agent to create a Mission. That task becomes the first linked task, not
 a permanent coordinator.
 
-The user reviews and activates the draft. After activation:
+Once the user and agent agree the brief, creating the Mission starts it. The
+same operation saves the Mission, schedules its recurring check-in, and queues
+the first agent check-in immediately. After that:
 
 - agents post progress, evidence, questions, and status changes to the Mission;
 - FalconDeck shows every linked native task and Mission-owned Automation;
@@ -87,7 +89,6 @@ The extension stores the following entity:
 
 ```ts
 type MissionStatus =
-  | "draft"
   | "active"
   | "waiting"
   | "needs_human"
@@ -146,7 +147,6 @@ extension-resource store rather than a Mission-specific database.
 
 ## 5. State semantics
 
-- `draft`: created by an agent or human but not yet approved to drive work.
 - `active`: work can proceed now.
 - `waiting`: no action is useful until an external condition or future review.
 - `needs_human`: a concrete decision or authority is required.
@@ -156,8 +156,8 @@ extension-resource store rather than a Mission-specific database.
 - `cancelled`: a human ended the Mission without completion.
 
 An agent may move a Mission among `active`, `waiting`, `needs_human`, `review`,
-and `paused`. Only a human may activate the initial draft, mark it completed,
-or cancel it. Ending an agent turn has no effect on Mission status.
+and `paused`. Only a human may mark it completed or cancel it. Ending an agent
+turn has no effect on Mission status.
 
 The optional deadline is a user constraint, not a default lifespan. A Mission
 without a deadline remains active until a human completes, pauses, or cancels
@@ -171,9 +171,11 @@ The extension exposes three conceptual tools.
 
 ### `create-mission`
 
-Creates a draft from the current task and links that task with role `source`.
-Required input is a title, brief, and success criteria. A deadline is optional.
-The result renders an inline review/activation card in capable clients.
+Starts a Mission from the current task and links that task with role `source`.
+Required input is a title, brief, success criteria, and check-in cadence. A
+deadline is optional. Creation also creates the primary review Automation and
+queues its first run. The inline result confirms that work has started; it does
+not ask the user to approve the same decision twice.
 
 ### `read-mission`
 
@@ -187,7 +189,6 @@ Performs one bounded mutation:
 
 - append a comment, evidence item, question, or status update;
 - link another existing native task;
-- edit the draft brief, criteria, title, or deadline; or
 - change a non-terminal status.
 
 The daemon supplies the calling task identity. A tool caller may update only a
@@ -240,16 +241,16 @@ When a Mission becomes paused, completed, or cancelled, the host pauses its
 enabled owned Automations. It does not interrupt a currently running native
 task. Reactivation or a human decision can resume them explicitly.
 
-### Default review Automation
+### Primary review Automation
 
-Activation may offer, but does not require, one primary review Automation. Its
-defaults should be conservative and visible:
+Starting a Mission creates one primary review Automation. Its settings should
+be conservative and visible:
 
 - managed reusable task;
 - no arbitrary Mission deadline;
-- a review cadence chosen from the brief or by the human;
+- a review cadence chosen from the brief or by the human before creation;
 - provider/model left at user or Automation defaults unless specified;
-- captured permission and sandbox settings shown before activation;
+- inherited permission and sandbox settings made clear before starting;
 - no default worker count or instruction to spawn agents; and
 - `run_once` misfire so a sleeping local daemon performs one useful review on
   return rather than replaying every missed interval.
@@ -343,7 +344,7 @@ The implemented surface is:
 
 - durable Mission brief, status, criteria, updates, and task links;
 - task-bound create/read/update tools;
-- human activation, guidance, pause, completion, and cancellation;
+- human guidance, pause, reactivation, completion, and cancellation;
 - owner-scoped Automation create, update, pause, resume, delete, and run-now;
 - daemon-observed provenance for Automation-created review tasks;
 - Mission-owned Automation state on Mission and Scheduled surfaces; and
@@ -356,12 +357,13 @@ review prompt and verified Mission provenance. That task reads the current
 brief and updates, performs only the useful work available at that moment, and
 posts evidence, a decision, or a concrete human question back to the Mission.
 
-The initial UI deliberately creates review Automations only after a human
-chooses a cadence. It copies execution settings from the Mission's source task,
-uses `queue_one` concurrency and `run_once` misfire handling, and exposes pause,
-resume, run-now, next-run, and latest-outcome state. Pausing or closing a
-Mission pauses future owned reviews but does not interrupt a task already
-running.
+Creation copies execution settings from the Mission's source task, queues the
+first run immediately, uses `queue_one` concurrency and `run_once` misfire
+handling, and exposes pause, resume, run-now, next-run, and latest-outcome
+state. If creating the Automation fails after the Mission record is saved, the
+Mission card says that no agent has started and offers one recovery action:
+`Start agent now`. Pausing or closing a Mission pauses future owned reviews but
+does not interrupt a task already running.
 
 ## 12. Explicitly deferred
 
@@ -376,11 +378,11 @@ running.
 
 ## 13. Acceptance criteria
 
-1. Any eligible ordinary task can create a Mission draft through the declared
-   extension tool.
+1. Any eligible ordinary task can start a Mission through the declared
+   extension tool, which queues the first check-in immediately.
 2. The task is linked as the source and can read/update only that Mission.
-3. A human can activate, guide, pause, complete, and cancel the Mission from the
-   Missions UI.
+3. A human can guide, pause, reactivate, complete, and cancel the Mission from
+   the Missions UI.
 4. Agents can add evidence/questions/status and link verified existing tasks.
 5. The dashboard remains useful with no agent task running.
 6. Mission work uses ordinary tasks and the existing Automation scheduler.
@@ -389,9 +391,9 @@ running.
 8. Focused extension-host, fake-host, client-core, and desktop tests pass.
 9. Only the owning extension can manage an owned Automation.
 10. Mission-owned Automations use the existing scheduler and appear grouped in
-   both Mission and Scheduled UI.
+    both Mission and Scheduled UI.
 11. A task produced by an owned Automation can read/update its Mission through
-   daemon-observed provenance.
+    daemon-observed provenance.
 12. Pausing or closing a Mission prevents future owned Automation runs.
 13. Restart, misfire, revision, elevated-authority, and unknown-outcome semantics
-   remain those of Agent Control rather than a Mission-specific copy.
+    remain those of Agent Control rather than a Mission-specific copy.

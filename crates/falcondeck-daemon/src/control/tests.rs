@@ -194,6 +194,61 @@ async fn owned_run_now_is_owner_scoped_and_idempotent() {
 }
 
 #[tokio::test]
+async fn owned_create_can_queue_its_first_run_atomically() {
+    let (_dir, service) = service().await;
+    let data = create_valid_automation(&service).await;
+    let automation_id = data["id"].as_str().unwrap().to_string();
+    service
+        .set_automation_owner_for_test(
+            &automation_id,
+            AutomationOwner {
+                extension_id: "falcondeck.missions".to_string(),
+                resource_id: "mission-1".to_string(),
+            },
+        )
+        .await;
+
+    let effect = || {
+        serde_json::from_value::<ExtensionAutomationEffect>(json!({
+            "type": "create_from_thread",
+            "resourceId": "mission-1",
+            "sourceWorkspaceId": "workspace-1",
+            "sourceThreadId": "thread-1",
+            "idempotencyKey": "mission-start-mission-1",
+            "name": "Weekday inbox review",
+            "trigger": {
+                "kind": "interval",
+                "every_seconds": 86400,
+                "anchor_at": "2026-08-16T00:00:00Z",
+            },
+            "task": { "kind": "prompt", "instruction": "Review the Mission" },
+            "runImmediately": true,
+        }))
+        .unwrap()
+    };
+    service
+        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .await
+        .unwrap();
+    service
+        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .await
+        .unwrap();
+
+    let runs = service
+        .get(
+            ControlGetRequest {
+                resource: "automation.runs".to_string(),
+                ..Default::default()
+            },
+            &desktop(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runs.data.as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
 async fn create_rejects_invalid_definitions_with_field_errors() {
     let (_dir, service) = service().await;
     let valid_target = json!({

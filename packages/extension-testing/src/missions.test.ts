@@ -5,8 +5,6 @@ import { createExtensionTestHost } from "./index";
 
 const actions = [
   "refresh-missions",
-  "activate-mission",
-  "edit-mission",
   "add-mission-update",
   "set-mission-status",
   "schedule-mission-review",
@@ -63,6 +61,7 @@ async function create(testHost = host()) {
         "Release is published",
         "Post-release evidence is recorded",
       ],
+      checkInDays: 7,
     },
   });
   return {
@@ -73,18 +72,31 @@ async function create(testHost = host()) {
 }
 
 describe("official Missions extension v2", () => {
-  it("creates a durable draft linked to the daemon-verified calling task", async () => {
+  it("starts a durable Mission and queues its first agent check-in", async () => {
     const { testHost, missionId, response } = await create();
 
-    expect(response.automationEffects).toEqual([]);
-    expect(response.result).toEqual({ missionId, status: "draft" });
+    expect(response.automationEffects).toEqual([
+      expect.objectContaining({
+        type: "create_from_thread",
+        resourceId: missionId,
+        sourceWorkspaceId: "workspace-1",
+        sourceThreadId: "thread-1",
+        runImmediately: true,
+      }),
+    ]);
+    expect(response.result).toEqual({
+      missionId,
+      status: "active",
+      firstCheckInQueued: true,
+      checkInDays: 7,
+    });
     expect(testHost.storageSnapshot()).toEqual({
       missions: {
         schemaVersion: 2,
         missions: [
           expect.objectContaining({
             id: missionId,
-            status: "draft",
+            status: "active",
             threads: [
               expect.objectContaining({
                 workspaceId: "workspace-1",
@@ -123,7 +135,7 @@ describe("official Missions extension v2", () => {
     ]);
   });
 
-  it("requires a human action to activate and complete a Mission", async () => {
+  it("requires a human action to complete a Mission", async () => {
     const { testHost, missionId } = await create();
 
     await expect(
@@ -132,12 +144,7 @@ describe("official Missions extension v2", () => {
         workspaceId: "workspace-1",
         input: { missionId, operation: "set_status", status: "completed" },
       }),
-    ).rejects.toThrow("agents cannot activate, complete, or cancel");
-
-    const activated = await testHost.invokeAction("activate-mission", {
-      input: { missionId },
-    });
-    expect(activated.result).toEqual({ missionId, status: "active" });
+    ).rejects.toThrow("agents cannot complete or cancel");
 
     const completed = await testHost.invokeAction("set-mission-status", {
       input: { missionId, status: "completed" },
@@ -145,7 +152,7 @@ describe("official Missions extension v2", () => {
     expect(completed.result).toEqual({ missionId, status: "completed" });
   });
 
-  it("treats definition edits as complete draft-only replacements", async () => {
+  it("does not expose definition replacement after a Mission starts", async () => {
     const { testHost, missionId } = await create();
 
     await expect(
@@ -154,51 +161,11 @@ describe("official Missions extension v2", () => {
         workspaceId: "workspace-1",
         input: { missionId, operation: "edit_definition" },
       }),
-    ).rejects.toThrow("title is required");
-
-    await testHost.invokeTool("update-mission", {
-      threadId: "thread-1",
-      workspaceId: "workspace-1",
-      input: {
-        missionId,
-        operation: "edit_definition",
-        title: "Ship and assess the release",
-        brief:
-          "Publish the release, then collect enough evidence to assess it.",
-        successCriteria: ["Release is live", "Evidence is attached"],
-      },
-    });
-    const edited = await testHost.invokeTool("read-mission", {
-      threadId: "thread-1",
-      workspaceId: "workspace-1",
-      input: { missionId },
-    });
-    expect(edited.result).toEqual(
-      expect.objectContaining({
-        title: "Ship and assess the release",
-        successCriteria: ["Release is live", "Evidence is attached"],
-      }),
-    );
-
-    await testHost.invokeAction("activate-mission", { input: { missionId } });
-    await expect(
-      testHost.invokeTool("update-mission", {
-        threadId: "thread-1",
-        workspaceId: "workspace-1",
-        input: {
-          missionId,
-          operation: "edit_definition",
-          title: "A stale replacement",
-          brief: "This edit should not be applied after activation.",
-          successCriteria: ["Nothing changed"],
-        },
-      }),
-    ).rejects.toThrow("agents may edit only draft Missions");
+    ).rejects.toThrow("unsupported Mission update operation");
   });
 
   it("lets a linked agent post evidence and link a verified existing task", async () => {
     const { testHost, missionId } = await create();
-    await testHost.invokeAction("activate-mission", { input: { missionId } });
 
     await testHost.invokeTool("update-mission", {
       threadId: "thread-1",
@@ -256,7 +223,6 @@ describe("official Missions extension v2", () => {
 
   it("creates a review Automation from a verified linked task", async () => {
     const { testHost, missionId } = await create();
-    await testHost.invokeAction("activate-mission", { input: { missionId } });
 
     const scheduled = await testHost.invokeAction("schedule-mission-review", {
       input: { missionId, cadenceDays: 7 },
@@ -301,7 +267,6 @@ describe("official Missions extension v2", () => {
 
   it("does not resume or run reviews while the Mission is paused", async () => {
     const { testHost, missionId } = await create();
-    await testHost.invokeAction("activate-mission", { input: { missionId } });
     testHost.setOwnedAutomations([
       {
         id: "automation-1",
@@ -324,12 +289,11 @@ describe("official Missions extension v2", () => {
       testHost.invokeAction("control-mission-automation", {
         input: { missionId, operation: "resume" },
       }),
-    ).rejects.toThrow("activate the Mission before resuming its reviews");
+    ).rejects.toThrow("reactivate the Mission before resuming its reviews");
     await expect(
       testHost.invokeAction("run-mission-review", {
         input: { missionId },
       }),
-    ).rejects.toThrow("activate the Mission before requesting a review");
+    ).rejects.toThrow("reactivate the Mission before requesting a review");
   });
-
 });

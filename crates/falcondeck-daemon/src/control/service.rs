@@ -1634,61 +1634,85 @@ impl ControlService {
                 description,
                 trigger,
                 task,
+                run_immediately,
                 required_connectors,
                 concurrency_policy,
                 misfire_policy,
             } => {
                 validate_owner_reference(extension_id, &resource_id)?;
-                let duplicate = self
-                    .state
-                    .lock()
-                    .await
-                    .automations
-                    .iter()
-                    .any(|automation| {
-                        automation.owner.as_ref().is_some_and(|owner| {
-                            owner.extension_id == extension_id
-                                && owner.resource_id == resource_id
-                                && automation.name == name.trim()
-                        })
-                    });
-                if duplicate {
+                let duplicate_id =
+                    self.state
+                        .lock()
+                        .await
+                        .automations
+                        .iter()
+                        .find_map(|automation| {
+                            automation
+                                .owner
+                                .as_ref()
+                                .is_some_and(|owner| {
+                                    owner.extension_id == extension_id
+                                        && owner.resource_id == resource_id
+                                        && automation.name == name.trim()
+                                })
+                                .then(|| automation.id.clone())
+                        });
+                if duplicate_id.is_some() && !run_immediately {
                     return Ok(None);
                 }
-                let target = app
-                    .ok_or_else(|| {
-                        ControlError::new(
-                            "daemon_unavailable",
-                            "FalconDeck could not verify the source task for this Automation.",
-                            true,
+                let automation_id = if let Some(duplicate_id) = duplicate_id {
+                    duplicate_id
+                } else {
+                    let target = app
+                        .ok_or_else(|| {
+                            ControlError::new(
+                                "daemon_unavailable",
+                                "FalconDeck could not verify the source task for this Automation.",
+                                true,
+                            )
+                        })?
+                        .automation_target_from_thread(&source_workspace_id, &source_thread_id)
+                        .await?;
+                    let arguments = json!({
+                        "name": name,
+                        "description": description,
+                        "trigger": trigger,
+                        "task": task,
+                        "target": target,
+                        "required_connectors": required_connectors,
+                        "concurrency_policy": concurrency_policy,
+                        "misfire_policy": misfire_policy,
+                    });
+                    let map = arguments.as_object().expect("automation arguments object");
+                    let (data, changed) = self
+                        .create_automation(
+                            map,
+                            &deps,
+                            &settings,
+                            Some(AutomationOwner {
+                                extension_id: extension_id.to_string(),
+                                resource_id,
+                            }),
                         )
-                    })?
-                    .automation_target_from_thread(&source_workspace_id, &source_thread_id)
-                    .await?;
-                let arguments = json!({
-                    "name": name,
-                    "description": description,
-                    "trigger": trigger,
-                    "task": task,
-                    "target": target,
-                    "required_connectors": required_connectors,
-                    "concurrency_policy": concurrency_policy,
-                    "misfire_policy": misfire_policy,
-                });
-                let map = arguments.as_object().expect("automation arguments object");
-                let (data, changed) = self
-                    .create_automation(
-                        map,
-                        &deps,
-                        &settings,
-                        Some(AutomationOwner {
-                            extension_id: extension_id.to_string(),
-                            resource_id,
-                        }),
-                    )
-                    .await?;
-                audit_resource_id = data.get("id").and_then(Value::as_str).map(str::to_string);
-                domains.extend(changed);
+                        .await?;
+                    domains.extend(changed);
+                    data.get("id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| ControlError::internal("created Automation had no id"))?
+                        .to_string()
+                };
+                audit_resource_id = Some(automation_id.clone());
+                if run_immediately {
+                    let arguments = json!({ "automation_id": automation_id });
+                    let (_, changed) = self
+                        .run_automation_now(
+                            arguments.as_object().expect("automation arguments object"),
+                            ControlOrigin::System,
+                            Some(extension_id),
+                        )
+                        .await?;
+                    domains.extend(changed);
+                }
             }
             ExtensionAutomationEffect::Update {
                 automation_id,

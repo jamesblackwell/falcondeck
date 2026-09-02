@@ -323,19 +323,19 @@ The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
 `threads` summary reader, agent `tools`, `composer`, and the owner-only
 `automations` reducer. The remaining rows are planned capabilities:
 
-| Facet           | Purpose                                                           |
-| --------------- | ----------------------------------------------------------------- |
-| `extension`     | Identity, installed version, API version, lifecycle signal        |
-| `log`           | Structured, attributed diagnostics with redaction                 |
-| `storage`       | Namespaced private storage and transactions                       |
-| `views`         | Publish bounded synchronized state declared by the manifest       |
-| `actions`       | Handle invocations from declared UI actions                       |
-| `events`        | Subscribe to bounded identifier-only lifecycle events             |
-| `threads`       | List summary-only threads with a `threads:read` grant             |
-| `tools`         | Handle agent tool calls with an `agent-tools:register` grant      |
-| `composer`      | Publish or clear a thread's bounded next-action offers            |
-| `automations`   | Manage only Automation resources owned by this extension          |
-| `commands`      | Planned: slash or command-palette commands                        |
+| Facet         | Purpose                                                      |
+| ------------- | ------------------------------------------------------------ |
+| `extension`   | Identity, installed version, API version, lifecycle signal   |
+| `log`         | Structured, attributed diagnostics with redaction            |
+| `storage`     | Namespaced private storage and transactions                  |
+| `views`       | Publish bounded synchronized state declared by the manifest  |
+| `actions`     | Handle invocations from declared UI actions                  |
+| `events`      | Subscribe to bounded identifier-only lifecycle events        |
+| `threads`     | List summary-only threads with a `threads:read` grant        |
+| `tools`       | Handle agent tool calls with an `agent-tools:register` grant |
+| `composer`    | Publish or clear a thread's bounded next-action offers       |
+| `automations` | Manage only Automation resources owned by this extension     |
+| `commands`    | Planned: slash or command-palette commands                   |
 
 Later facets may add schedules, notifications, turn control, workspace files,
 and mediated network access. Plausibility alone does not put a facet into v1.
@@ -673,14 +673,19 @@ task, the daemon supplies the matching opaque owner resource as trusted tool
 provenance. This lets that task read or update the owning resource without
 trusting a resource id supplied by the model.
 
+Creation may set `runImmediately` to queue the first run in the same
+idempotent owner-scoped operation. This is intended for flows where “create”
+means “start,” and avoids exposing a misleading saved-but-idle intermediate
+state.
+
 Trusted extension frontends may register a renderer for one of their own
 manifest-declared `agentTools`. The bridge attaches non-model-authored
 extension/tool identity metadata to successful MCP results. Desktop and remote
 web then render the newest matching result at transcript level, even when the
 provider's ordinary work session is folded. The component receives only that
 extension's synchronized views and the existing permission-checked action
-route. It cannot approve itself: Missions uses the slot to show human-only
-review and activation controls for a draft. Mobile, older clients, disabled
+route. Missions uses the slot to confirm that the Mission and its first agent
+check-in started. Mobile, older clients, disabled
 extensions, undeclared tools, and frontend failures retain the ordinary MCP
 result as a visible fallback.
 

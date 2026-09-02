@@ -723,7 +723,8 @@ mod tests {
                 &serde_json::json!({
                     "title": "Mission test",
                     "brief": "Prove the public extension contract",
-                    "successCriteria": ["A durable draft is stored"]
+                    "successCriteria": ["A durable Mission is stored"],
+                    "checkInDays": 7
                 }),
                 Some("thread-1"),
                 Some("workspace-1"),
@@ -733,43 +734,18 @@ mod tests {
                 Some(&[]),
             )
             .await
-            .expect("Mission draft should be created through the public host");
+            .expect("Mission should start through the public host");
         assert_eq!(created.published_views[0].view_id, "missions-panel");
-        assert!(created.automation_effects.is_empty());
         let mission_id = created.result["missionId"]
             .as_str()
             .expect("create result should identify the Mission");
-
-        let activated = host
-            .invoke(
-                &package,
-                "activate-mission",
-                None,
-                &serde_json::json!({ "missionId": mission_id }),
-                &created.storage,
-                Some(&threads),
-                Some(&[]),
-            )
-            .await
-            .expect("Mission should activate through the public host");
-        let scheduled = host
-            .invoke(
-                &package,
-                "schedule-mission-review",
-                None,
-                &serde_json::json!({ "missionId": mission_id, "cadenceDays": 7 }),
-                &activated.storage,
-                Some(&threads),
-                Some(&[]),
-            )
-            .await
-            .expect("Mission should request an owned review Automation");
         assert!(matches!(
-            scheduled.automation_effects.as_slice(),
+            created.automation_effects.as_slice(),
             [ExtensionAutomationEffect::CreateFromThread {
                 resource_id,
                 source_workspace_id,
                 source_thread_id,
+                run_immediately: true,
                 ..
             }] if resource_id == mission_id
                 && source_workspace_id == "workspace-1"
@@ -784,7 +760,7 @@ mod tests {
                 Some("thread-1"),
                 Some("workspace-1"),
                 None,
-                &activated.storage,
+                &created.storage,
                 Some(&threads),
                 Some(&[]),
             )
@@ -799,7 +775,7 @@ mod tests {
                 Some("thread-review"),
                 Some("workspace-1"),
                 Some(mission_id),
-                &activated.storage,
+                &created.storage,
                 Some(&threads),
                 Some(&[]),
             )
@@ -978,13 +954,7 @@ export default defineExtension({
             Some(&serde_json::json!("thread-1"))
         );
         let result = host
-            .dispatch_event(
-                &package,
-                &event,
-                &BTreeMap::new(),
-                Some(&summaries),
-                None,
-            )
+            .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries), None)
             .await
             .expect("event should run");
         host.stop().await;
