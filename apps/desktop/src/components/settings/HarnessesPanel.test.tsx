@@ -78,6 +78,11 @@ describe('HarnessesPanel', () => {
     // Detection-only harness shows no upgrade button.
     expect(screen.queryByRole('button', { name: 'Install' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Upgrade' })).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'FalconDeck checks this Mac daily after startup. Check any host manually at any time.',
+      ),
+    ).toBeInTheDocument()
   })
 
   it('deep-refreshes through the refresh endpoint when a remote host is selected', async () => {

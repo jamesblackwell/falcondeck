@@ -166,6 +166,7 @@ import {
   writePersistedComposerState,
   writeStoredDrafts,
 } from "./composer-persistence";
+import { scheduleHarnessUpdateCheck } from "./harness-update-check";
 import {
   clearStoredOnboarding,
   preferencesWithThinkingDisplay,
@@ -1874,6 +1875,26 @@ function AppInner() {
       });
     }
   }, [connectionError, toast]);
+
+  useEffect(() => {
+    if (!api || !isTauriDesktop() || isOnboardingActive) return;
+
+    return scheduleHarnessUpdateCheck({
+      api,
+      onUpdatesAvailable: (harnesses) => {
+        const labels = harnesses.map((harness) => harness.label);
+        const description =
+          labels.length === 1
+            ? `${labels[0]} has an upgrade available.`
+            : `${labels.slice(0, 2).join(", ")}${labels.length > 2 ? ` and ${labels.length - 2} more` : ""} have upgrades available.`;
+        toast({
+          variant: "warning",
+          title: "Harness updates available",
+          description: `${description} Open Settings → Harnesses to upgrade.`,
+        });
+      },
+    });
+  }, [api, isOnboardingActive, toast]);
 
   useEffect(() => {
     if (updater.state.status !== "available" || !updater.state.availableVersion)

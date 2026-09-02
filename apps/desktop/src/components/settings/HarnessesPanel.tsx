@@ -300,7 +300,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           <div>
             <CardTitle>Install status</CardTitle>
             <CardDescription>
-              Latest-version checks run only when you press Check for updates.
+              FalconDeck checks this Mac daily after startup. Check any host manually at any time.
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">

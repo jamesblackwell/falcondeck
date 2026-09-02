@@ -144,8 +144,10 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 - **Latest versions:** `include_latest` (default true on refresh) fetches
   `registry.npmjs.org/<package>/latest` per managed harness, concurrently,
   15s cap. This is the only network call in the module and it never runs
-  during snapshots, on a timer, or from the plain `GET` path — on-demand
-  only, per product decision. A newer-than-registry local build is never
+  during snapshots or from the plain `GET` path. The desktop schedules one
+  best-effort refresh 30 seconds after startup readiness, persisted to run at
+  most once per 24 hours; the manual Settings action remains available at any
+  time. A newer-than-registry local build is never
   offered as an "update" (the comparison is strictly latest > current).
 
 ## Upgrades
@@ -191,6 +193,8 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   normalizer), then populate it in `probe_local_harness` /
   `remote_probe_script`. Remember remote probes must stay shell-safe and
   marker-parsed.
-- **Background update checks:** deliberately not built. If product wants
-  them, add a TTL'd scheduler around `apply_latest_versions` rather than
-  calling it from snapshot paths.
+- **Background update checks:** desktop owns the launch delay, persisted
+  throttle, and update toast. It calls the same refresh API as the manual
+  action so probing, registry concurrency, and cached latest-version state
+  remain daemon-owned. Failed background checks stay silent and still consume
+  the daily attempt, preventing offline launches from creating retry storms.
