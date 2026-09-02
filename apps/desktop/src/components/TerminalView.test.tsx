@@ -91,7 +91,7 @@ describe('TerminalView socket lifecycle', () => {
     render(
       <TerminalView
         session={fakeSession}
-        socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws"
+        socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0"
         onExited={onExited}
         onTitleChange={vi.fn()}
         createSocket={(url) => new FakeSocket(url) as unknown as WebSocket}
@@ -99,6 +99,9 @@ describe('TerminalView socket lifecycle', () => {
     )
     await waitFor(() => expect(FakeSocket.instances).toHaveLength(1))
     const socket = FakeSocket.instances[0]
+    expect(socket.url).toBe(
+      'ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0',
+    )
     socket.open()
     socket.receive({
       type: 'terminal_attached',

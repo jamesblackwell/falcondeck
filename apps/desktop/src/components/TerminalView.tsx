@@ -94,7 +94,9 @@ export function TerminalView({
     function connect() {
       if (disposed || !terminal || !applier) return
       const since = applier.lastSeq === null ? 0 : applier.lastSeq + 1
-      const active = socketFactory(`${socketUrl}?since_seq=${since}`)
+      const activeUrl = new URL(socketUrl)
+      activeUrl.searchParams.set('since_seq', String(since))
+      const active = socketFactory(activeUrl.toString())
       socket = active
       active.onmessage = (message) => {
         let frame: TerminalServerFrame

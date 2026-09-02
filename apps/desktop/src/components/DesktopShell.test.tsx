@@ -28,6 +28,7 @@ describe('DesktopShell panel collapse', () => {
     expect(shell).toHaveClass('h-full')
     expect(shell).not.toHaveClass('h-screen')
     expect(screen.getByText('bottom content')).toBeInTheDocument()
+    expect(container.querySelector('[data-bottom-panel-resize]')).toHaveClass('bg-surface-0')
   })
 
   it('keeps the sidebar mounted while collapsed so the width can animate', () => {

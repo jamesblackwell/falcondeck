@@ -88,7 +88,7 @@ function BottomResizeHandle({
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
-      className="h-1 shrink-0 cursor-row-resize bg-border-subtle hover:bg-border-default"
+      className="h-1 shrink-0 cursor-row-resize bg-surface-0 hover:bg-border-default"
     />
   )
 }
