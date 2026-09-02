@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { PanelBottomClose } from 'lucide-react'
 import { createDaemonApiClient } from '@falcondeck/client-core'
+import { Button, Tooltip } from '@falcondeck/ui'
 import { TerminalView } from './TerminalView'
 import { nextActiveTabId, terminalTabLabel, type TerminalTab } from '../terminal-tabs'
+import { shortcutHintTokens, useShortcutSettings } from '../shortcuts'
 
 const DEFAULT_TERMINAL_COLS = 100
 const DEFAULT_TERMINAL_ROWS = 30
@@ -9,10 +12,12 @@ const DEFAULT_TERMINAL_ROWS = 30
 interface TerminalPanelProps {
   baseUrl: string
   workspaceId: string | null
+  onHide: () => void
 }
 
-export function TerminalPanel({ baseUrl, workspaceId }: TerminalPanelProps) {
+export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelProps) {
   const api = useMemo(() => createDaemonApiClient(baseUrl), [baseUrl])
+  const shortcutSettings = useShortcutSettings()
   const [tabs, setTabs] = useState<TerminalTab[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -182,6 +187,20 @@ export function TerminalPanel({ baseUrl, workspaceId }: TerminalPanelProps) {
         >
           +
         </button>
+        <Tooltip
+          label="Hide terminal"
+          shortcut={shortcutHintTokens('toggleTerminal', shortcutSettings)}
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Hide terminal"
+            onClick={onHide}
+          >
+            <PanelBottomClose aria-hidden="true" className="h-4 w-4" />
+          </Button>
+        </Tooltip>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
         {!workspaceId ? (

@@ -44,8 +44,17 @@ function tab(id: string, overrides: Partial<TerminalTab> = {}): TerminalTab {
   return { session: session(id), status: 'running', observedTitle: null, ...overrides }
 }
 
-async function renderPanel(workspaceId: string | null = 'workspace-1') {
-  render(<TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId={workspaceId} />)
+async function renderPanel(
+  workspaceId: string | null = 'workspace-1',
+  onHide: () => void = vi.fn(),
+) {
+  render(
+    <TerminalPanel
+      baseUrl="http://127.0.0.1:4123"
+      workspaceId={workspaceId}
+      onHide={onHide}
+    />,
+  )
 }
 
 beforeEach(() => {
@@ -101,6 +110,18 @@ describe('TerminalPanel', () => {
       expect(apiMocks.closeTerminal).toHaveBeenCalledWith('term-1')
     })
     expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(1)
+  })
+
+  it('hides the panel without closing its terminal session', async () => {
+    apiMocks.listTerminals.mockResolvedValue({ sessions: [session('term-1')] })
+    const onHide = vi.fn()
+    await renderPanel('workspace-1', onHide)
+    await screen.findByTestId('terminal-view')
+
+    fireEvent.click(screen.getByLabelText('Hide terminal'))
+
+    expect(onHide).toHaveBeenCalledOnce()
+    expect(apiMocks.closeTerminal).not.toHaveBeenCalled()
   })
 
   it('prompts for a project when no workspace is selected', async () => {

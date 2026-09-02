@@ -6258,7 +6258,11 @@ function AppInner() {
         bottom={
           isTerminalOpen ? (
             <Suspense fallback={null}>
-              <TerminalPanel baseUrl={baseUrl} workspaceId={selectedWorkspaceId} />
+              <TerminalPanel
+                baseUrl={baseUrl}
+                workspaceId={selectedWorkspaceId}
+                onHide={() => setIsTerminalOpen(false)}
+              />
             </Suspense>
           ) : undefined
         }
