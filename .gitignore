@@ -25,3 +25,5 @@ __pycache__/
 /ops/ansible/.vault-pass
 /ops/ansible/.env
 apps/mobile/src/vendor/mermaid.min.txt
+/.env
+/.deepsec
