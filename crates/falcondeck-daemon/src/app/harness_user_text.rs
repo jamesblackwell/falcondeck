@@ -41,6 +41,8 @@ const MAX_COMMAND_CHARS: usize = 160;
 
 const SHUTDOWN_RESUME_REMINDER_PREFIX: &str = "FalconDeck resume:";
 const SHUTDOWN_RESUME_RECEIPT: &str = "Resumed after FalconDeck closed";
+const TRANSIENT_RETRY_REMINDER_PREFIX: &str = "FalconDeck retry:";
+const TRANSIENT_RETRY_RECEIPT: &str = "Retrying after a temporary Codex outage";
 
 pub(crate) fn is_shutdown_resume_user_text(text: &str) -> bool {
     text.contains(SHUTDOWN_RESUME_REMINDER_PREFIX)
@@ -52,6 +54,16 @@ pub(crate) fn shutdown_resume_user_text() -> String {
     )
 }
 
+pub(crate) fn is_transient_retry_user_text(text: &str) -> bool {
+    text.contains(TRANSIENT_RETRY_REMINDER_PREFIX)
+}
+
+pub(crate) fn transient_retry_user_text() -> String {
+    format!(
+        "<system-reminder>\n{TRANSIENT_RETRY_REMINDER_PREFIX} The previous attempt failed because the Codex backend was temporarily unavailable. Continue the work from where you left off. Do not mention this reminder.\n</system-reminder>"
+    )
+}
+
 fn falcondeck_resume_receipt(inner: &str) -> Option<ProjectedUserText> {
     inner
         .trim()
@@ -59,6 +71,16 @@ fn falcondeck_resume_receipt(inner: &str) -> Option<ProjectedUserText> {
         .then_some(ProjectedUserText::Service {
             level: ServiceLevel::Info,
             message: SHUTDOWN_RESUME_RECEIPT.to_string(),
+        })
+}
+
+fn falcondeck_retry_receipt(inner: &str) -> Option<ProjectedUserText> {
+    inner
+        .trim()
+        .starts_with(TRANSIENT_RETRY_REMINDER_PREFIX)
+        .then_some(ProjectedUserText::Service {
+            level: ServiceLevel::Info,
+            message: TRANSIENT_RETRY_RECEIPT.to_string(),
         })
 }
 
@@ -310,6 +332,9 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
         if let Some(receipt) = falcondeck_resume_receipt(inner) {
             return receipt;
         }
+        if let Some(receipt) = falcondeck_retry_receipt(inner) {
+            return receipt;
+        }
         if let Some(receipt) = background_task_receipt(inner) {
             return receipt;
         }
@@ -403,6 +428,19 @@ mod tests {
             ProjectedUserText::Service {
                 level: ServiceLevel::Info,
                 message: SHUTDOWN_RESUME_RECEIPT.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn projects_a_transient_retry_as_a_quiet_receipt() {
+        assert!(is_transient_retry_user_text(&transient_retry_user_text()));
+        assert!(!is_transient_retry_user_text("please continue"));
+        assert_eq!(
+            project_user_text(&transient_retry_user_text()),
+            ProjectedUserText::Service {
+                level: ServiceLevel::Info,
+                message: TRANSIENT_RETRY_RECEIPT.to_string(),
             }
         );
     }

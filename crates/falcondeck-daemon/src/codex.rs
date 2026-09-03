@@ -1461,6 +1461,18 @@ fn hydrate_thread_summary(
             message,
             ..
         } => Some(message.clone()),
+        ConversationItem::AssistantMessage {
+            lifecycle: falcondeck_core::ContentLifecycle::Error,
+            error,
+            text,
+            ..
+        } => Some(
+            error
+                .clone()
+                .filter(|error| !error.is_empty())
+                .or_else(|| (!text.is_empty()).then(|| text.clone()))
+                .unwrap_or_else(|| "Turn failed".to_string()),
+        ),
         _ => None,
     }) {
         summary.last_error = Some(last_error);
@@ -3944,6 +3956,42 @@ mod tests {
         );
 
         assert!(summary.last_error.is_none());
+    }
+
+    #[test]
+    fn hydrates_codex_unavailable_dumps_as_failed_receipts() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-unavailable",
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": "user-1",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "Fix the logos"}]
+                        },
+                        {
+                            "id": "assistant-1",
+                            "type": "agentMessage",
+                            "text": "Error: RetriableError: [unavailable] Error"
+                        }
+                    ]
+                }]
+            }
+        }));
+
+        assert!(matches!(
+            &items[1],
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Error,
+                text,
+                error,
+                ..
+            } if text.is_empty()
+                && error.as_deref()
+                    == Some(crate::app::conversation_helpers::TRANSIENT_PROVIDER_ERROR_MESSAGE)
+        ));
     }
 
     #[test]

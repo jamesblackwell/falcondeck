@@ -191,9 +191,8 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     created_at,
                 },
             }),
-            "agent_message" => Some(SessionHydratedItem {
-                kind: SessionHydratedItemKind::AssistantMessageFromEvent,
-                item: ConversationItem::AssistantMessage {
+            "agent_message" => {
+                let mut item = ConversationItem::AssistantMessage {
                     id: extract_string(payload, &["id"]).unwrap_or_else(|| {
                         format!("session-agent-{}", created_at.timestamp_millis())
                     }),
@@ -204,8 +203,13 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     lifecycle: ContentLifecycle::Complete,
                     error: None,
                     created_at,
-                },
-            }),
+                };
+                crate::app::conversation_helpers::rewrite_transient_assistant_error(&mut item);
+                Some(SessionHydratedItem {
+                    kind: SessionHydratedItemKind::AssistantMessageFromEvent,
+                    item,
+                })
+            }
             _ => None,
         },
         "response_item" => match payload.get("type").and_then(Value::as_str)? {
@@ -221,7 +225,7 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                         item: {
                             let (phase, memory_citation) =
                                 codex_assistant_message_metadata(payload);
-                            ConversationItem::AssistantMessage {
+                            let mut item = ConversationItem::AssistantMessage {
                                 id: extract_string(payload, &["id"]).unwrap_or_else(|| {
                                     format!("response-assistant-{}", created_at.timestamp_millis())
                                 }),
@@ -232,7 +236,11 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                                 lifecycle: ContentLifecycle::Complete,
                                 error: None,
                                 created_at,
-                            }
+                            };
+                            crate::app::conversation_helpers::rewrite_transient_assistant_error(
+                                &mut item,
+                            );
+                            item
                         },
                     }),
                     "user" => None,

@@ -455,15 +455,40 @@ pub(super) async fn ingest_notification(
                 if error.is_none() && is_failed_turn_status(&status) {
                     error = Some("Turn failed".to_string());
                 }
+                if error
+                    .as_deref()
+                    .is_some_and(crate::app::conversation_helpers::is_transient_provider_error)
+                {
+                    error = Some(
+                        crate::app::conversation_helpers::TRANSIENT_PROVIDER_ERROR_MESSAGE
+                            .to_string(),
+                    );
+                }
+                let retry_plan = if turn_was_interrupted {
+                    super::threads::TransientTurnPlan::Ignored
+                } else {
+                    app.plan_transient_turn_retry(workspace_id, &thread_id, error.as_deref())
+                        .await
+                };
+                let retrying = matches!(retry_plan, super::threads::TransientTurnPlan::Retry);
+                let give_up_message = match &retry_plan {
+                    super::threads::TransientTurnPlan::GiveUp { message } => Some(message.clone()),
+                    _ => None,
+                };
+                if let Some(message) = give_up_message.as_ref() {
+                    error = Some(message.clone());
+                }
                 let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 let thread = app
                     .upsert_thread(workspace_id, &thread_id, |thread| {
-                        thread.status = if error.is_some() {
+                        thread.status = if retrying {
+                            ThreadStatus::Running
+                        } else if error.is_some() || give_up_message.is_some() {
                             ThreadStatus::Error
                         } else {
                             ThreadStatus::Idle
                         };
-                        thread.last_error = error.clone();
+                        thread.last_error = if retrying { None } else { error.clone() };
                         // Clients drop thread summaries whose timestamp moved
                         // backwards, and a dropped terminal update strands the
                         // thread as running. The provider's clock is not
@@ -473,7 +498,7 @@ pub(super) async fn ingest_notification(
                     .await?;
                 let tool_settlement = if turn_was_interrupted {
                     ToolSettlement::Interrupted
-                } else if error.is_some() {
+                } else if error.is_some() || retrying {
                     ToolSettlement::Failed
                 } else {
                     ToolSettlement::Completed
@@ -496,10 +521,17 @@ pub(super) async fn ingest_notification(
                     Some(thread_id.clone()),
                     UnifiedEvent::TurnEnd {
                         turn_id,
-                        status,
-                        error: error.clone(),
+                        status: if retrying {
+                            "running".to_string()
+                        } else {
+                            status
+                        },
+                        error: if retrying { None } else { error.clone() },
                     },
                 );
+                if retrying {
+                    return Ok(());
+                }
                 app.dispatch_next_queued_turn(workspace_id, &thread_id);
                 // A finished turn means the agent is waiting on the user;
                 // let disconnected devices know. The relay only pushes to
@@ -1344,6 +1376,16 @@ pub(super) async fn ingest_notification(
                     let completed_at =
                         notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let preview = match &message {
+                        ConversationItem::AssistantMessage {
+                            text,
+                            error,
+                            lifecycle: falcondeck_core::ContentLifecycle::Error,
+                            ..
+                        } => error
+                            .as_deref()
+                            .filter(|error| !error.is_empty())
+                            .unwrap_or(text)
+                            .to_string(),
                         ConversationItem::AssistantMessage { text, .. } => {
                             truncate_preview(text, 160)
                         }

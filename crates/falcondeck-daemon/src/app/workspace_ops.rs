@@ -1861,6 +1861,16 @@ async fn try_enqueue_turn(
                 Ok(None)
             };
         }
+        if thread.transient_retry_in_flight
+            && normalized_inputs.iter().any(|input| match input {
+                TurnInputItem::Text { text, .. } => {
+                    super::harness_user_text::is_transient_retry_user_text(text)
+                }
+                TurnInputItem::Image(_) => false,
+            })
+        {
+            return Ok(None);
+        }
         if !thread_is_busy(&thread.summary.status) {
             return Ok(None);
         }
@@ -2538,6 +2548,12 @@ async fn send_turn_with_startup_mode(
     } else {
         request.inputs.clone()
     };
+    let is_transient_retry = inputs.iter().any(|input| match input {
+        TurnInputItem::Text { text, .. } => {
+            super::harness_user_text::is_transient_retry_user_text(text)
+        }
+        TurnInputItem::Image(_) => false,
+    });
     {
         let workspaces = app.inner.workspaces.lock().await;
         if !workspaces.contains_key(&request.workspace_id) {
@@ -2681,7 +2697,14 @@ async fn send_turn_with_startup_mode(
         managed.summary.agent.sandbox_mode = sandbox_mode;
         let selected_skills =
             resolve_turn_skills(&skill_catalog, &request.selected_skills, &inputs, &provider);
+        if !request.resume_interrupted && !is_transient_retry {
+            managed.transient_retry_generation =
+                managed.transient_retry_generation.saturating_add(1);
+            managed.transient_retry_attempts = 0;
+            managed.transient_retry_in_flight = false;
+        }
         if !request.resume_interrupted
+            && !is_transient_retry
             && !managed.manual_title
             && !managed.ai_title_generated
             && is_placeholder_thread_title(&managed.summary.title)
@@ -2716,6 +2739,18 @@ async fn send_turn_with_startup_mode(
             id: format!("service-{}", Uuid::new_v4().simple()),
             level: falcondeck_core::ServiceLevel::Info,
             message: "Resumed after FalconDeck closed".to_string(),
+            created_at: Utc::now(),
+        })
+    } else if is_transient_retry {
+        super::harness_user_text::conversation_item_from_projected_user(
+            format!("user-retry-{}", request.thread_id),
+            &super::harness_user_text::transient_retry_user_text(),
+            Utc::now(),
+        )
+        .unwrap_or_else(|| ConversationItem::Service {
+            id: format!("service-{}", Uuid::new_v4().simple()),
+            level: falcondeck_core::ServiceLevel::Info,
+            message: "Retrying after a temporary Codex outage".to_string(),
             created_at: Utc::now(),
         })
     } else {
@@ -2782,7 +2817,9 @@ async fn send_turn_with_startup_mode(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
-                wait_for_startup: wait_for_startup || request.resume_interrupted,
+                wait_for_startup: wait_for_startup
+                    || request.resume_interrupted
+                    || is_transient_retry,
                 resume_interrupted: request.resume_interrupted,
             },
         )
@@ -3163,9 +3200,19 @@ pub(super) async fn interrupt_turn(
     thread_id: String,
 ) -> Result<CommandResponse, DaemonError> {
     let provider = app.thread_provider(&workspace_id, &thread_id).await?;
-    ProviderRuntime::for_provider(&provider)
+    let result = ProviderRuntime::for_provider(&provider)
         .interrupt(app, &workspace_id, &thread_id)
-        .await?;
+        .await;
+    let cancelled_retry = app
+        .cancel_transient_turn_retry(&workspace_id, &thread_id)
+        .await;
+    if cancelled_retry && result.is_err() {
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("interrupt requested".to_string()),
+        });
+    }
+    result?;
 
     Ok(CommandResponse {
         ok: true,

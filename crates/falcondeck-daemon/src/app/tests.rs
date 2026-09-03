@@ -1365,6 +1365,128 @@ fn uses_notification_timestamps_when_available() {
 }
 
 #[tokio::test]
+async fn retries_codex_unavailable_error_dumps() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "codex-thread-1",
+        temp_dir.path(),
+    )
+    .await;
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces.get_mut("workspace-1").unwrap();
+        workspace.summary.default_provider = AgentProvider::CODEX;
+        let thread = workspace.threads.get_mut("thread-1").unwrap();
+        thread.summary.provider = AgentProvider::CODEX;
+        thread.summary.status = ThreadStatus::Running;
+    }
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/completed",
+        json!({
+            "threadId": "thread-1",
+            "item": {
+                "id": "assistant-unavailable",
+                "type": "agentMessage",
+                "text": "Error: RetriableError: [unavailable] Error"
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "turn/completed",
+        json!({
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "status": "completed"
+        }),
+    )
+    .await
+    .unwrap();
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let thread = &workspaces["workspace-1"].threads["thread-1"];
+    assert_eq!(thread.summary.status, ThreadStatus::Running);
+    assert_eq!(thread.summary.last_error, None);
+    assert_eq!(thread.transient_retry_attempts, 1);
+    assert!(thread.transient_retry_in_flight);
+    assert!(matches!(
+        thread.items.iter().find(|item| matches!(
+            item,
+            ConversationItem::AssistantMessage { id, .. } if id == "assistant-unavailable"
+        )),
+        Some(ConversationItem::AssistantMessage {
+            lifecycle: ContentLifecycle::Error,
+            text,
+            error,
+            ..
+        }) if text.is_empty()
+            && error.as_deref()
+                == Some(super::conversation_helpers::TRANSIENT_PROVIDER_ERROR_MESSAGE)
+    ));
+    assert!(thread.items.iter().any(|item| matches!(
+        item,
+        ConversationItem::Service { message, .. }
+            if message == "Codex was temporarily unavailable. Retrying…"
+    )));
+    drop(workspaces);
+
+    for attempt in 2..=4 {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "item/completed",
+            json!({
+                "threadId": "thread-1",
+                "item": {
+                    "id": format!("assistant-unavailable-{attempt}"),
+                    "type": "agentMessage",
+                    "text": "Error: RetriableError: [unavailable] Error"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "turn/completed",
+            json!({
+                "threadId": "thread-1",
+                "turnId": format!("turn-{attempt}"),
+                "status": "failed",
+                "error": { "message": "RetriableError: [unavailable] Error" }
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let thread = &workspaces["workspace-1"].threads["thread-1"];
+    assert_eq!(thread.summary.status, ThreadStatus::Error);
+    assert_eq!(
+        thread.summary.last_error.as_deref(),
+        Some(super::conversation_helpers::TRANSIENT_PROVIDER_ERROR_MESSAGE)
+    );
+    assert!(!thread.transient_retry_in_flight);
+    assert_eq!(thread.transient_retry_attempts, 3);
+}
+
+#[tokio::test]
 async fn terminal_turn_cancels_orphaned_interactive_requests() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(

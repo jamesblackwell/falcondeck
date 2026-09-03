@@ -14,6 +14,7 @@ use falcondeck_core::{
 use futures_util::future::join_all;
 use regex::Regex;
 use serde_json::{Value, json};
+use tracing::debug;
 use uuid::Uuid;
 
 const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
@@ -456,6 +457,114 @@ pub(super) fn bounded_turn_error(error: Option<&str>) -> Option<String> {
         .map(|error| error.chars().take(2_000).collect())
 }
 
+/// User-facing copy when Codex (or another harness) dumps a retryable
+/// backend outage as if it were an assistant reply.
+pub(crate) const TRANSIENT_PROVIDER_ERROR_MESSAGE: &str =
+    "Codex was temporarily unavailable. Try again in a moment.";
+
+const TRANSIENT_ERROR_MARKERS: &[&str] = &[
+    "retriableerror",
+    "retryable error",
+    "[unavailable]",
+    "server overloaded",
+    "server_overloaded",
+    "service unavailable",
+    "service_unavailable",
+    "temporarily unavailable",
+    "model is at capacity",
+    "selected model is at capacity",
+    "stream disconnected",
+    "response stream connection failed",
+    "http connection failed",
+    "response too many failed attempts",
+];
+
+const NON_RETRYABLE_ERROR_MARKERS: &[&str] = &[
+    "quota exceeded",
+    "usage not included",
+    "usage limit",
+    "unauthorized",
+    "invalid api key",
+    "invalid request",
+    "context window",
+    "cyber policy",
+    "misalignment",
+];
+
+/// True for a provider error that is worth retrying: capacity, overload,
+/// disconnects, and Codex's `RetriableError: [unavailable] Error` dump.
+pub(crate) fn is_transient_provider_error(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    if NON_RETRYABLE_ERROR_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return false;
+    }
+    TRANSIENT_ERROR_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// True when the whole assistant body is just a short retryable error dump,
+/// not a real answer that happens to mention unavailability.
+pub(crate) fn is_transient_provider_error_dump(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 400 {
+        return false;
+    }
+    if trimmed
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+        > 6
+    {
+        return false;
+    }
+    is_transient_provider_error(trimmed)
+}
+
+pub(crate) fn assistant_is_transient_provider_error(item: &ConversationItem) -> bool {
+    match item {
+        ConversationItem::AssistantMessage {
+            phase: Some(AssistantMessagePhase::Commentary),
+            ..
+        } => false,
+        ConversationItem::AssistantMessage { text, error, .. } => {
+            error.as_deref().is_some_and(is_transient_provider_error)
+                || is_transient_provider_error_dump(text)
+        }
+        _ => false,
+    }
+}
+
+/// Turns a Codex error dump (`Error: RetriableError: [unavailable] Error`)
+/// into a failed assistant receipt instead of a completed answer.
+pub(crate) fn rewrite_transient_assistant_error(item: &mut ConversationItem) {
+    if !assistant_is_transient_provider_error(item) {
+        return;
+    }
+    let ConversationItem::AssistantMessage {
+        text,
+        lifecycle,
+        error,
+        ..
+    } = item
+    else {
+        return;
+    };
+    if !is_transient_provider_error_dump(text) {
+        return;
+    }
+    debug!(raw = %text, "rewriting a transient Codex provider error dump");
+    *error = Some(TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string());
+    *text = String::new();
+    *lifecycle = ContentLifecycle::Error;
+}
+
 pub(crate) fn codex_assistant_conversation_item(
     item: &Value,
     created_at: chrono::DateTime<Utc>,
@@ -471,7 +580,7 @@ pub(crate) fn codex_assistant_conversation_item(
     }
     let (phase, memory_citation) = codex_assistant_message_metadata(item);
     let lifecycle = settled_progress_lifecycle(lifecycle);
-    Some(ConversationItem::AssistantMessage {
+    let mut item = ConversationItem::AssistantMessage {
         id,
         text: item
             .get("text")
@@ -484,7 +593,9 @@ pub(crate) fn codex_assistant_conversation_item(
         lifecycle,
         error: None,
         created_at,
-    })
+    };
+    rewrite_transient_assistant_error(&mut item);
+    Some(item)
 }
 
 fn settled_progress_lifecycle(lifecycle: ContentLifecycle) -> ContentLifecycle {
@@ -4903,6 +5014,79 @@ mod thread_title_placeholder_tests {
         ));
         assert!(!is_placeholder_thread_title(
             "what is causing this prompt to be restricted?"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod transient_provider_error_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_codex_unavailable_dumps() {
+        assert!(is_transient_provider_error_dump(
+            "Error: RetriableError: [unavailable] Error"
+        ));
+        assert!(is_transient_provider_error(
+            "retryable error: stream disconnected before completion"
+        ));
+        assert!(is_transient_provider_error("server overloaded"));
+        assert!(!is_transient_provider_error("quota exceeded"));
+        assert!(!is_transient_provider_error_dump(
+            "The image is unavailable because this model does not support image input. Try a different model or drop the attachment."
+        ));
+    }
+
+    #[test]
+    fn rewrites_a_codex_error_dump_into_a_failed_receipt() {
+        let mut item = ConversationItem::AssistantMessage {
+            id: "assistant-1".to_string(),
+            text: "Error: RetriableError: [unavailable] Error".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        };
+
+        rewrite_transient_assistant_error(&mut item);
+
+        assert!(matches!(
+            item,
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Error,
+                ref text,
+                ref error,
+                ..
+            } if text.is_empty() && error.as_deref() == Some(TRANSIENT_PROVIDER_ERROR_MESSAGE)
+        ));
+        assert!(assistant_is_transient_provider_error(&item));
+    }
+
+    #[test]
+    fn leaves_real_answers_alone() {
+        let mut item = ConversationItem::AssistantMessage {
+            id: "assistant-1".to_string(),
+            text: "The logos are missing because the connector catalog stopped shipping them."
+                .to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        };
+
+        rewrite_transient_assistant_error(&mut item);
+
+        assert!(matches!(
+            item,
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Complete,
+                error: None,
+                ..
+            }
         ));
     }
 }

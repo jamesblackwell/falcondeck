@@ -6,9 +6,9 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveRequestKind,
-    InteractiveRequestOutcome, InteractiveRequestResolution, ServiceLevel, ThreadAgentParams,
-    ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary, ToolLifecycle,
-    UnifiedEvent, merge_conversation_citations,
+    InteractiveRequestOutcome, InteractiveRequestResolution, SendTurnRequest, ServiceLevel,
+    ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary,
+    ToolLifecycle, TurnInputItem, UnifiedEvent, merge_conversation_citations,
 };
 use serde_json::Value;
 use tokio::{
@@ -28,13 +28,16 @@ use super::{
         is_claude_text_block_start, merge_claude_assistant_text,
     },
     conversation_helpers::{
-        TURN_RECEIPT_ID_PREFIX, ToolSettlement, build_ai_thread_title_prompt,
+        TRANSIENT_PROVIDER_ERROR_MESSAGE, TURN_RECEIPT_ID_PREFIX, ToolSettlement,
+        assistant_is_transient_provider_error, build_ai_thread_title_prompt,
         build_refresh_ai_thread_title_prompt, is_placeholder_thread_title,
-        is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
-        settle_content_items, settle_items_as_shutdown_interrupted, settle_tool_call_items,
-        should_generate_ai_thread_title, terminal_assistant_receipt_with_error,
-        tool_display_metadata, with_renderable_attachment_previews,
+        is_provisional_thread_title, is_transient_provider_error, normalize_generated_thread_title,
+        sanitize_conversation_item, settle_content_items, settle_items_as_shutdown_interrupted,
+        settle_tool_call_items, should_generate_ai_thread_title,
+        terminal_assistant_receipt_with_error, tool_display_metadata,
+        with_renderable_attachment_previews,
     },
+    harness_user_text::transient_retry_user_text,
     is_shutdown_interrupted,
 };
 use crate::{
@@ -47,6 +50,19 @@ use crate::{
     codex::CodexSessionLease,
     error::DaemonError,
 };
+
+/// How many extra Codex turns FalconDeck will start after a retryable
+/// backend outage. Codex already retried internally; these wait longer.
+const MAX_TRANSIENT_TURN_RETRIES: u8 = 3;
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 3] = [2_000, 8_000, 20_000];
+const TRANSIENT_RETRY_RECEIPT: &str = "Codex was temporarily unavailable. Retrying…";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TransientTurnPlan {
+    Retry,
+    GiveUp { message: String },
+    Ignored,
+}
 
 /// How long a running Claude turn may stay silent — no stream traffic at all,
 /// not even thinking heartbeats — before the thread gets a visible warning.
@@ -681,6 +697,202 @@ impl AppState {
                 }
             }
         });
+    }
+
+    /// After a Codex turn fails with a retryable backend outage, keep the
+    /// thread running and start a continuation turn once the backoff elapses.
+    pub(super) async fn plan_transient_turn_retry(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        error: Option<&str>,
+    ) -> TransientTurnPlan {
+        let scheduled = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return TransientTurnPlan::Ignored;
+            };
+            let Some(thread) = workspace.threads.get_mut(thread_id) else {
+                return TransientTurnPlan::Ignored;
+            };
+            if thread.summary.provider != AgentProvider::CODEX {
+                thread.transient_retry_in_flight = false;
+                return TransientTurnPlan::Ignored;
+            }
+            let last_attempt_was_transient =
+                thread.items.iter().rev().find_map(|item| match item {
+                    ConversationItem::Service { message, .. }
+                        if message == TRANSIENT_RETRY_RECEIPT =>
+                    {
+                        Some(false)
+                    }
+                    ConversationItem::UserMessage { .. } => Some(false),
+                    ConversationItem::AssistantMessage {
+                        phase: Some(falcondeck_core::AssistantMessagePhase::Commentary),
+                        ..
+                    } => None,
+                    ConversationItem::AssistantMessage { .. } => {
+                        Some(assistant_is_transient_provider_error(item))
+                    }
+                    _ => None,
+                });
+            let transient = error.is_some_and(is_transient_provider_error)
+                || last_attempt_was_transient.unwrap_or(false);
+            if !transient {
+                thread.transient_retry_in_flight = false;
+                return TransientTurnPlan::Ignored;
+            }
+            if thread.transient_retry_attempts >= MAX_TRANSIENT_TURN_RETRIES {
+                thread.transient_retry_in_flight = false;
+                return TransientTurnPlan::GiveUp {
+                    message: TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string(),
+                };
+            }
+            thread.transient_retry_attempts += 1;
+            thread.transient_retry_in_flight = true;
+            Some((
+                thread.transient_retry_attempts,
+                thread.transient_retry_generation,
+            ))
+        };
+
+        let Some((attempt, generation)) = scheduled else {
+            return TransientTurnPlan::GiveUp {
+                message: TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string(),
+            };
+        };
+
+        self.push_conversation_diagnostic(
+            workspace_id,
+            thread_id,
+            ServiceLevel::Info,
+            TRANSIENT_RETRY_RECEIPT.to_string(),
+            Some("transient-retry".to_string()),
+        )
+        .await;
+
+        if !cfg!(test) {
+            let app = self.clone();
+            let workspace_id = workspace_id.to_string();
+            let thread_id = thread_id.to_string();
+            tokio::spawn(async move {
+                let delay_ms = TRANSIENT_RETRY_DELAYS_MS[(attempt as usize)
+                    .saturating_sub(1)
+                    .min(TRANSIENT_RETRY_DELAYS_MS.len() - 1)];
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                app.run_transient_turn_retry(&workspace_id, &thread_id, generation)
+                    .await;
+            });
+        }
+
+        TransientTurnPlan::Retry
+    }
+
+    async fn run_transient_turn_retry(&self, workspace_id: &str, thread_id: &str, generation: u64) {
+        {
+            let workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.threads.get(thread_id))
+            else {
+                return;
+            };
+            if thread.transient_retry_generation != generation || !thread.transient_retry_in_flight
+            {
+                return;
+            }
+        }
+        let result = self
+            .send_turn(SendTurnRequest {
+                workspace_id: workspace_id.to_string(),
+                thread_id: thread_id.to_string(),
+                inputs: vec![TurnInputItem::Text {
+                    id: None,
+                    text: transient_retry_user_text(),
+                }],
+                selected_skills: Vec::new(),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                user_item_id: None,
+                resume_interrupted: false,
+            })
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                %error,
+                thread = %thread_id,
+                "failed to start a transient Codex retry"
+            );
+            let failed_at = Utc::now();
+            let _ = self
+                .with_managed_thread_mut(workspace_id, thread_id, |thread| {
+                    if thread.transient_retry_generation != generation {
+                        return;
+                    }
+                    thread.transient_retry_in_flight = false;
+                    thread.summary.status = ThreadStatus::Error;
+                    thread.summary.last_error = Some(TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string());
+                    thread.summary.updated_at = failed_at;
+                })
+                .await;
+            if let Ok(thread) = self.thread_summary(workspace_id, thread_id).await {
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+            self.dispatch_next_queued_turn(workspace_id, thread_id);
+        }
+    }
+
+    /// Cancels a pending Codex retry. Returns whether one was in flight so
+    /// the interrupt path can succeed even when no provider turn is live.
+    pub(super) async fn cancel_transient_turn_retry(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> bool {
+        let cancelled = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            else {
+                return false;
+            };
+            let cancelled = thread.transient_retry_in_flight;
+            thread.transient_retry_generation = thread.transient_retry_generation.saturating_add(1);
+            thread.transient_retry_in_flight = false;
+            thread.transient_retry_attempts = 0;
+            cancelled
+        };
+        if cancelled {
+            let settled_at = Utc::now();
+            let _ = self
+                .with_thread_mut(workspace_id, thread_id, |thread| {
+                    if thread.status == ThreadStatus::Running {
+                        thread.status = ThreadStatus::Idle;
+                        thread.last_error = None;
+                        thread.updated_at = settled_at;
+                    }
+                })
+                .await;
+            if let Ok(thread) = self.thread_summary(workspace_id, thread_id).await {
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+        }
+        cancelled
     }
 
     /// Titles run on the cheap utility chain, so a user with only Codex,
@@ -2381,6 +2593,9 @@ impl ManagedThread {
             dispatching_request: None,
             pending_opencode_steer: None,
             claude_post_plan_permission_mode: None,
+            transient_retry_attempts: 0,
+            transient_retry_generation: 0,
+            transient_retry_in_flight: false,
         }
     }
 

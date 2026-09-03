@@ -608,6 +608,16 @@ struct ManagedThread {
     /// request. Captured when the thread enters plan mode; `acceptEdits` if
     /// the thread started in plan.
     claude_post_plan_permission_mode: Option<String>,
+    /// How many automatic Codex retries this thread has already spent on a
+    /// transient backend outage. Reset when the user starts a new turn.
+    transient_retry_attempts: u8,
+    /// Bumped to cancel an in-flight retry sleep when the user interrupts
+    /// or sends a replacement turn.
+    transient_retry_generation: u64,
+    /// True while FalconDeck is retrying a transient Codex failure, including
+    /// the backoff window and the retry turn itself. Lets the retry envelope
+    /// start instead of being queued behind the still-Running thread.
+    transient_retry_in_flight: bool,
 }
 
 #[derive(Clone)]
