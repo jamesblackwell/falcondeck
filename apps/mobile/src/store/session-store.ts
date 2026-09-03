@@ -154,25 +154,24 @@ function reuseIfIdentical<T>(built: T[], prev: T[] | undefined): T[] {
 }
 
 /**
- * Archive-free thread lists, keyed by the array that produced them. A
+ * Live (non-archived) thread lists, keyed by the array that produced them. A
  * streaming turn pushes a freshly built threads array through here for every
  * chunk, and nearly all of them hold no archived thread at all — the scan
  * below short-circuits on the first one it finds, and the result is reused so
  * repeat calls for the same array (snapshot apply, then the cache builder)
- * cost nothing.
+ * cost nothing. Archived chats stay in the snapshot for the sidebar restore
+ * list; this helper is only for current-thread pointers and approvals.
  */
-const activeThreadsCache = new WeakMap<object, DaemonSnapshot['threads']>();
+const liveThreadsCache = new WeakMap<object, DaemonSnapshot['threads']>();
 
-function activeThreads(threads: DaemonSnapshot['threads']): DaemonSnapshot['threads'] {
-  const cached = activeThreadsCache.get(threads);
+function liveThreads(threads: DaemonSnapshot['threads']): DaemonSnapshot['threads'] {
+  const cached = liveThreadsCache.get(threads);
   if (cached) return cached;
   const filtered = threads.some((thread) => thread.is_archived)
     ? threads.filter((thread) => !thread.is_archived)
     : threads;
-  activeThreadsCache.set(threads, filtered);
-  // A filtered list is itself archive-free, so a later pass over it resolves
-  // on the cache instead of rescanning.
-  if (filtered !== threads) activeThreadsCache.set(filtered, filtered);
+  liveThreadsCache.set(threads, filtered);
+  if (filtered !== threads) liveThreadsCache.set(filtered, filtered);
   return filtered;
 }
 
@@ -198,8 +197,9 @@ function filterActiveSnapshot(
   if (!snapshot) return null;
   if (snapshot === prevSnapshot) return prevSnapshot;
 
-  const threads = activeThreads(snapshot.threads);
-  const visibleThreadIds = visibleThreadIdsOf(threads);
+  const live = liveThreads(snapshot.threads);
+  const liveThreadIds = visibleThreadIdsOf(live);
+  const threads = snapshot.threads;
 
   // The common streaming event replaces one thread summary in place: the
   // workspaces array keeps its identity and every workspace pointer still
@@ -213,7 +213,7 @@ function filterActiveSnapshot(
     snapshot.workspaces === prevSnapshot.workspaces &&
     snapshot.workspaces.every(
       (workspace) =>
-        !workspace.current_thread_id || visibleThreadIds.has(workspace.current_thread_id),
+        !workspace.current_thread_id || liveThreadIds.has(workspace.current_thread_id),
     )
   ) {
     return {
@@ -225,7 +225,7 @@ function filterActiveSnapshot(
           ? prevSnapshot.interactive_requests
           : reuseIfIdentical(
               snapshot.interactive_requests.filter(
-                (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
+                (request) => !request.thread_id || liveThreadIds.has(request.thread_id),
               ),
               prevSnapshot.interactive_requests,
             ),
@@ -243,7 +243,7 @@ function filterActiveSnapshot(
     const candidate = {
       ...workspace,
       current_thread_id:
-        workspace.current_thread_id && visibleThreadIds.has(workspace.current_thread_id)
+        workspace.current_thread_id && liveThreadIds.has(workspace.current_thread_id)
           ? workspace.current_thread_id
           : null,
     };
@@ -261,7 +261,7 @@ function filterActiveSnapshot(
     threads: reuseIfIdentical(threads, prevSnapshot?.threads),
     interactive_requests: reuseIfIdentical(
       snapshot.interactive_requests.filter(
-        (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
+        (request) => !request.thread_id || liveThreadIds.has(request.thread_id),
       ),
       prevSnapshot?.interactive_requests,
     ),
@@ -298,8 +298,6 @@ function captureThreadArchiveUndo(
 
 function dropArchivedThread(state: SessionState, threadId: string): SessionState | null {
   if (!state.snapshot?.threads.some((thread) => thread.id === threadId)) return null;
-  // prevSnapshot is the already-filtered stored snapshot, so workspaces and
-  // threads untouched by the archive keep their object identity.
   const nextSnapshot = filterActiveSnapshot(
     {
       ...state.snapshot,
@@ -310,16 +308,18 @@ function dropArchivedThread(state: SessionState, threadId: string): SessionState
     state.snapshot,
   )!;
 
-  const visibleThreadIds = new Set(nextSnapshot.threads.map((thread) => thread.id));
-  const nextThreadItems = pruneThreadRecord(state.threadItems, visibleThreadIds);
-  const nextThreadHistory = pruneThreadRecord(state.threadHistory, visibleThreadIds);
-  const nextThreadDetailErrors = pruneThreadRecord(state.threadDetailErrors, visibleThreadIds);
+  const liveThreadIds = new Set(
+    liveThreads(nextSnapshot.threads).map((thread) => thread.id),
+  );
+  const nextThreadItems = pruneThreadRecord(state.threadItems, liveThreadIds);
+  const nextThreadHistory = pruneThreadRecord(state.threadHistory, liveThreadIds);
+  const nextThreadDetailErrors = pruneThreadRecord(state.threadDetailErrors, liveThreadIds);
   let nextThreadDetail =
-    state.threadDetail && visibleThreadIds.has(state.threadDetail.thread.id)
+    state.threadDetail && liveThreadIds.has(state.threadDetail.thread.id)
       ? state.threadDetail
       : null;
   const nextSelection = reconcileSnapshotSelection(
-    nextSnapshot,
+    { ...nextSnapshot, threads: liveThreads(nextSnapshot.threads) },
     state.selectedWorkspaceId,
     state.selectedThreadId,
     { preserveEmptyThreadSelection: true },
@@ -344,12 +344,15 @@ function restoreArchivedThreadState(
   undo: ThreadArchiveUndo,
 ): SessionState {
   if (!state.snapshot) return state;
-  if (state.snapshot.threads.some((thread) => thread.id === undo.thread.id)) {
-    return state;
-  }
-
+  const existingIndex = state.snapshot.threads.findIndex(
+    (thread) => thread.id === undo.thread.id,
+  );
   const threads = [...state.snapshot.threads];
-  threads.splice(Math.min(undo.index, threads.length), 0, undo.thread);
+  if (existingIndex >= 0) {
+    threads[existingIndex] = undo.thread;
+  } else {
+    threads.splice(Math.min(undo.index, threads.length), 0, undo.thread);
+  }
 
   const workspaces = state.snapshot.workspaces.map((workspace) =>
     workspace.id === undo.thread.workspace_id
@@ -547,10 +550,11 @@ function buildCacheFromState(state: SessionState): MobileSessionCache | null {
   };
 }
 
-// Streaming turns persist the cache after every applied event batch;
-// serializing the full cache to MMKV that often is wasteful. Throttle writes
-// to at most one per second, with a trailing write so the latest state still
-// lands after a burst.
+// Streaming turns used to persist the cache after every applied event batch.
+// The stringify + JS AES of even a projected snapshot is still too expensive
+// to run while tokens are arriving; persist on snapshot, selection, stream
+// end, and background instead. Throttle those remaining writes to at most
+// one per second, with a trailing write so the latest state still lands.
 const CACHE_PERSIST_THROTTLE_MS = 1_000;
 let lastCachePersistAt = 0;
 let trailingCachePersistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -620,6 +624,33 @@ export function persistSessionCacheNow(): void {
     trailingCachePersistTimer = null;
   }
   writeStateCache(useSessionStore.getState());
+}
+
+function isStreamingEvent(event: EventEnvelope): boolean {
+  const daemonEvent = event.event;
+  switch (daemonEvent.type) {
+    case 'conversation-item-updated':
+    case 'thread-token-usage-updated':
+    case 'text':
+      return true;
+    case 'conversation-item-added': {
+      const item = daemonEvent.item;
+      return (
+        typeof item === 'object' &&
+        item !== null &&
+        'lifecycle' in item &&
+        (item.lifecycle === 'streaming' || item.lifecycle === 'pending')
+      );
+    }
+    case 'thread-updated':
+      return daemonEvent.thread.status === 'running';
+    default:
+      return false;
+  }
+}
+
+function shouldPersistCacheAfterEvents(events: EventEnvelope[]): boolean {
+  return events.some((event) => !isStreamingEvent(event));
 }
 
 function persistStateCache(state: SessionState) {
@@ -704,7 +735,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     }
   }
 
-  if (nextSnapshot) {
+  if (nextSnapshot && nextSnapshot.threads !== state.snapshot?.threads) {
     const visibleThreadIds = new Set(nextSnapshot.threads.map((thread) => thread.id));
     nextThreadItems = pruneThreadRecord(nextThreadItems, visibleThreadIds);
     nextThreadHistory = pruneThreadRecord(nextThreadHistory, visibleThreadIds);
@@ -742,13 +773,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   applyDaemonEvent: (event) => {
     set((state) => applyEventsToState(state, [event]));
-    persistStateCache(get());
+    if (shouldPersistCacheAfterEvents([event])) persistStateCache(get());
   },
 
   applyDaemonEvents: (events) => {
     if (events.length === 0) return;
     set((state) => applyEventsToState(state, events));
-    persistStateCache(get());
+    if (shouldPersistCacheAfterEvents(events)) persistStateCache(get());
   },
 
   setPreferences: (preferences) => {
@@ -850,10 +881,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   applyThreadSummary: (thread) => {
     set((state) => {
-      if (!state.snapshot?.threads.some((entry) => entry.id === thread.id)) {
+      const existing = state.snapshot?.threads.find((entry) => entry.id === thread.id);
+      if (!existing) {
         return state;
       }
-      if (thread.is_archived) {
+      if (thread.is_archived && !existing.is_archived) {
         return dropArchivedThread(state, thread.id) ?? state;
       }
       return {

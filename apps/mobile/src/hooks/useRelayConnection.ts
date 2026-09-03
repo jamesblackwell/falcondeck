@@ -51,8 +51,8 @@ export {
 }
 
 // During a live stream the flush loop checkpoints its cursor after nearly
-// every rAF batch; writing the full session cache plus the relay session
-// record that often is the single heaviest recurring cost on the JS thread.
+// every rAF batch. Persist only the relay session record (the cursor) — the
+// session cache stringify + JS AES is too expensive to run on that cadence.
 // Cursor persistence is only a crash-recovery acknowledgement, so coalescing
 // writes to once per second (with a trailing write) merely means a restart
 // replays up to one extra second of updates.
@@ -62,7 +62,10 @@ let trailingRelayCheckpointTimer: ReturnType<typeof setTimeout> | null = null
 
 function writeRelayCheckpoint(): void {
   lastRelayCheckpointAt = Date.now()
-  persistSessionCacheNow()
+  // Cursor only. The session cache stringify + JS AES is the heaviest
+  // recurring JS cost during a live turn; crash recovery refetches
+  // snapshot.current and thread.detail, and background / stream-end / selection
+  // still flush the cache.
   useRelayStore.getState()._persistSession()
 }
 
@@ -402,10 +405,11 @@ export function useRelayConnection() {
         await relay._callRpc<DaemonSnapshot>(
           'snapshot.current',
           {
-            // Sidebar only: archived threads, full plans, and full diffs
-            // (Codex hangs the patch off every ThreadSummary) dominate the
-            // encrypted payload and are not rendered in the project list.
-            include_archived_threads: false,
+            // Sidebar only: full plans and full diffs (Codex hangs the patch
+            // off every ThreadSummary) dominate the encrypted payload and are
+            // not rendered in the project list. Archived chats stay in so the
+            // per-project Archived disclosure can restore them.
+            include_archived_threads: true,
             include_thread_plans: false,
             include_thread_diffs: false,
             // The per-agent skill catalog is the same list repeated once per

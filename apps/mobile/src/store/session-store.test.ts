@@ -22,6 +22,7 @@ import {
   threadDetail,
   snapshotEvent,
   conversationItemAddedEvent,
+  conversationItemUpdatedEvent,
   threadUpdatedEvent,
 } from '../test/factories'
 
@@ -748,6 +749,57 @@ describe('session-store', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it('does not persist the cache for streaming item chunks or running summaries', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+        threads: [thread({ id: 'thread-1', status: 'running' })],
+      })))
+      const first = loadMobileSessionCache()
+      expect(first).not.toBeNull()
+      resetMMKV()
+      setMobileSessionCacheKey(new Uint8Array(32).fill(7))
+
+      useSessionStore.getState().applyDaemonEvent(
+        conversationItemUpdatedEvent(assistantMessage('m1', 'Hel', '2026-03-16T10:01:00Z')),
+      )
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({
+          id: 'thread-1',
+          status: 'running',
+          updated_at: '2026-03-16T10:02:00Z',
+          attention: {
+            level: 'unread',
+            badge_label: null,
+            unread: true,
+            pending_approval_count: 0,
+            pending_question_count: 0,
+            last_agent_activity_seq: 2,
+            last_read_seq: 0,
+          },
+        })),
+      )
+
+      expect(loadMobileSessionCache()).toBeNull()
+      expect(useSessionStore.getState().threadItems['thread-1']?.[0]).toMatchObject({
+        id: 'm1',
+        text: 'Hel',
+      })
+    })
+
+    it('persists the cache when a running thread settles', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+        threads: [thread({ id: 'thread-1', status: 'running' })],
+      })))
+      resetMMKV()
+      setMobileSessionCacheKey(new Uint8Array(32).fill(7))
+      __resetSessionCachePersistThrottleForTests()
+
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({ id: 'thread-1', status: 'idle' })),
+      )
+
+      expect(loadMobileSessionCache()).not.toBeNull()
     })
   })
 

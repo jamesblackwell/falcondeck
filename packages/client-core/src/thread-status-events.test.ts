@@ -134,6 +134,56 @@ describe("thread status events", () => {
     expect(snapshot.threads[0]?.status).toBe("running");
   });
 
+  it("does not replace the threads array for a running attention-only update", () => {
+    const initial = thread({
+      status: "running",
+      updated_at: "2026-08-13T18:28:14Z",
+      attention: {
+        level: "running",
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 10,
+        last_read_seq: 10,
+      },
+    });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        updated_at: "2026-08-13T18:28:20Z",
+        attention: {
+          ...initial.attention,
+          last_agent_activity_seq: 11,
+          unread: true,
+          level: "unread",
+        },
+      }),
+    );
+
+    expect(next.threads).toBe(snapshot.threads);
+    expect(next).toBe(snapshot);
+    expect(next.threads[0]?.attention.last_agent_activity_seq).toBe(10);
+  });
+
+  it("still applies a running update that changes the preview", () => {
+    const initial = thread({ status: "running" });
+    const snapshot = snapshotWith(initial);
+    const next = apply(
+      snapshot,
+      thread({
+        ...initial,
+        last_message_preview: "Hello so far",
+        updated_at: "2026-08-13T18:28:20Z",
+      }),
+    );
+
+    expect(next.threads).not.toBe(snapshot.threads);
+    expect(next.threads[0]?.last_message_preview).toBe("Hello so far");
+  });
+
   it("applies a newer running update to an idle thread", () => {
     let snapshot = snapshotWith(settled);
     snapshot = apply(

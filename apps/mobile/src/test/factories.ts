@@ -199,6 +199,16 @@ export function conversationItemAddedEvent(item: ConversationItem, threadId = 't
   }
 }
 
+export function conversationItemUpdatedEvent(item: ConversationItem, threadId = 'thread-1'): EventEnvelope {
+  return {
+    seq: 4,
+    emitted_at: '2026-03-16T10:01:30Z',
+    workspace_id: 'workspace-1',
+    thread_id: threadId,
+    event: { type: 'conversation-item-updated', item },
+  }
+}
+
 export function threadUpdatedEvent(t: ThreadSummary): EventEnvelope {
   return {
     seq: 3,

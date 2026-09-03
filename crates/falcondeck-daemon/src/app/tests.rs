@@ -5342,6 +5342,83 @@ fn session_not_found_does_not_force_reset_for_trusted_pairings() {
     ));
 }
 
+#[tokio::test]
+async fn streaming_item_updates_do_not_emit_thread_updated() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        temp_dir.path(),
+    )
+    .await;
+
+    let mut events = app.subscribe();
+    let item = |text: &str, lifecycle: ContentLifecycle| ConversationItem::AssistantMessage {
+        id: "asst-1".to_string(),
+        text: text.to_string(),
+        phase: None,
+        memory_citation: None,
+        citations: Vec::new(),
+        lifecycle,
+        error: None,
+        created_at: Utc::now(),
+    };
+
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        item("Hel", ContentLifecycle::Streaming),
+        true,
+    )
+    .await
+    .unwrap();
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        item("Hello", ContentLifecycle::Streaming),
+        true,
+    )
+    .await
+    .unwrap();
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        item("Hello!", ContentLifecycle::Complete),
+        true,
+    )
+    .await
+    .unwrap();
+
+    let emitted: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    let item_events = emitted
+        .iter()
+        .filter(|envelope| {
+            matches!(
+                envelope.event,
+                UnifiedEvent::ConversationItemAdded { .. }
+                    | UnifiedEvent::ConversationItemUpdated { .. }
+            )
+        })
+        .count();
+    let thread_updated = emitted
+        .iter()
+        .filter(|envelope| matches!(envelope.event, UnifiedEvent::ThreadUpdated { .. }))
+        .count();
+
+    assert_eq!(item_events, 3);
+    assert_eq!(
+        thread_updated, 1,
+        "only the completed item should emit a summary; streaming chunks must not"
+    );
+}
+
 async fn insert_claude_workspace_with_session(
     app: &AppState,
     workspace_id: &str,

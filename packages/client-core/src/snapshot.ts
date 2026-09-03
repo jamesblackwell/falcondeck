@@ -293,6 +293,14 @@ function upsertThread(
     return threads;
   }
 
+  // A live turn emits one of these per chunk just to bump the attention seq.
+  // The visible row (spinner, title, preview) does not change, so replacing
+  // the threads array — and waking every snapshot subscriber — is wasted work
+  // until the terminal summary arrives.
+  if (isRunningAttentionOnlyUpdate(current, nextThread)) {
+    return threads;
+  }
+
   const merged = mergeThreadSummary(current, nextThread);
   if (merged === current) return threads;
   // A streaming turn emits one of these per chunk against a list that can hold
@@ -328,6 +336,34 @@ function isStaleThreadSummary(
     nextAt === currentAt &&
     TERMINAL_THREAD_STATUSES.has(current.status) &&
     !TERMINAL_THREAD_STATUSES.has(next.status)
+  );
+}
+
+function isRunningAttentionOnlyUpdate(
+  current: DaemonSnapshot["threads"][number],
+  next: DaemonSnapshot["threads"][number],
+) {
+  if (current.status !== "running" || next.status !== "running") return false;
+  return (
+    current.title === next.title &&
+    current.last_message_preview === next.last_message_preview &&
+    current.last_tool === next.last_tool &&
+    current.last_error === next.last_error &&
+    current.latest_turn_id === next.latest_turn_id &&
+    current.is_archived === next.is_archived &&
+    current.is_pinned === next.is_pinned &&
+    current.is_pinned_in_project === next.is_pinned_in_project &&
+    current.goal === next.goal &&
+    current.variant === next.variant &&
+    (current.native_session_id ?? null) === (next.native_session_id ?? null) &&
+    current.provider === next.provider &&
+    current.agent.model_id === next.agent.model_id &&
+    current.agent.reasoning_effort === next.agent.reasoning_effort &&
+    current.attention.pending_approval_count ===
+      next.attention.pending_approval_count &&
+    current.attention.pending_question_count ===
+      next.attention.pending_question_count &&
+    current.queued_turns.length === next.queued_turns.length
   );
 }
 
@@ -426,14 +462,14 @@ export function applySnapshotEvent(
           ),
         ],
       };
-    case "thread-updated":
-      return {
-        ...snapshot,
-        threads: upsertThread(
-          snapshot.threads,
-          normalizeThreadSummary(daemonEvent.thread),
-        ),
-      };
+    case "thread-updated": {
+      const threads = upsertThread(
+        snapshot.threads,
+        normalizeThreadSummary(daemonEvent.thread),
+      );
+      if (threads === snapshot.threads) return snapshot;
+      return { ...snapshot, threads };
+    }
     case "workspace-updated":
       return {
         ...snapshot,

@@ -2215,6 +2215,7 @@ impl AppState {
                     .last_agent_activity_seq
                     .max(self.inner.sequence.load(Ordering::Relaxed));
             }
+            let skip_summary = is_in_flight_text_item(&item);
             drop(workspaces);
             let emitted_item = with_renderable_attachment_previews(item).await;
             self.emit(
@@ -2222,7 +2223,10 @@ impl AppState {
                 Some(thread_id.to_string()),
                 UnifiedEvent::ConversationItemUpdated { item: emitted_item },
             );
-            if track_attention {
+            // Streaming chunks already replace the previous item. A ThreadUpdated
+            // on each one exists only to bump the attention seq, which the
+            // terminal summary will carry — and it doubles the remote event rate.
+            if track_attention && !skip_summary {
                 let thread = self.thread_summary(workspace_id, thread_id).await?;
                 self.emit(
                     Some(workspace_id.to_string()),
@@ -2270,6 +2274,7 @@ impl AppState {
         // so this is the earliest moment worth asking. Turn end also asks, as a
         // backstop for threads whose first agent item never arrives.
         let wants_title = !thread.ai_title_in_flight && should_generate_ai_thread_title(thread);
+        let skip_summary = is_in_flight_text_item(&item);
         drop(workspaces);
         let emitted_item = with_renderable_attachment_previews(item).await;
         self.emit(
@@ -2277,7 +2282,7 @@ impl AppState {
             Some(thread_id.to_string()),
             UnifiedEvent::ConversationItemAdded { item: emitted_item },
         );
-        if track_attention {
+        if track_attention && !skip_summary {
             let thread = self.thread_summary(workspace_id, thread_id).await?;
             self.emit(
                 Some(workspace_id.to_string()),
@@ -2575,6 +2580,21 @@ pub(super) fn refresh_thread_attention(
 /// stamping attention for those flips read threads back to unread every time
 /// the daemon settles a dying turn, e.g. on every app quit while a turn runs.
 /// Genuine failures already demand attention through the error status.
+/// Streaming text already replaces the previous item; a ThreadUpdated on each
+/// chunk exists only to bump the attention seq, which the terminal summary
+/// carries. Emitting it per fragment doubles the remote event rate.
+fn is_in_flight_text_item(item: &ConversationItem) -> bool {
+    let lifecycle = match item {
+        ConversationItem::AssistantMessage { lifecycle, .. }
+        | ConversationItem::Reasoning { lifecycle, .. } => *lifecycle,
+        _ => return false,
+    };
+    matches!(
+        lifecycle,
+        ContentLifecycle::Pending | ContentLifecycle::Streaming
+    )
+}
+
 fn marks_agent_activity(item: &ConversationItem) -> bool {
     match item {
         ConversationItem::UserMessage { .. } | ConversationItem::Service { .. } => false,
