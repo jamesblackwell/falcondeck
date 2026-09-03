@@ -2574,12 +2574,6 @@ pub(super) fn refresh_thread_attention(
     thread.attention.pending_question_count = pending_question_count;
 }
 
-/// Whether an item is fresh agent output for unread purposes. User messages
-/// are the user's own words; Service items and turn receipts are daemon
-/// commentary about the session (diagnostics, shutdown/interruption markers) —
-/// stamping attention for those flips read threads back to unread every time
-/// the daemon settles a dying turn, e.g. on every app quit while a turn runs.
-/// Genuine failures already demand attention through the error status.
 /// Streaming text already replaces the previous item; a ThreadUpdated on each
 /// chunk exists only to bump the attention seq, which the terminal summary
 /// carries. Emitting it per fragment doubles the remote event rate.
@@ -2595,6 +2589,12 @@ fn is_in_flight_text_item(item: &ConversationItem) -> bool {
     )
 }
 
+/// Whether an item is fresh agent output for unread purposes. User messages
+/// are the user's own words; Service items and turn receipts are daemon
+/// commentary about the session (diagnostics, shutdown/interruption markers) —
+/// stamping attention for those flips read threads back to unread every time
+/// the daemon settles a dying turn, e.g. on every app quit while a turn runs.
+/// Genuine failures already demand attention through the error status.
 fn marks_agent_activity(item: &ConversationItem) -> bool {
     match item {
         ConversationItem::UserMessage { .. } | ConversationItem::Service { .. } => false,
