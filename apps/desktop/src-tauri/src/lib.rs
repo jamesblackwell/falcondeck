@@ -1200,9 +1200,15 @@ pub fn run() {
         })
         .on_web_content_process_terminate(|webview| {
             eprintln!(
-                "FalconDeck webview '{}' content process terminated",
+                "FalconDeck webview '{}' content process terminated; reloading",
                 webview.label()
             );
+            if let Err(error) = webview.reload() {
+                eprintln!(
+                    "FalconDeck webview '{}' could not reload after content-process termination: {error}",
+                    webview.label()
+                );
+            }
         })
         .setup(|app| {
             #[cfg(desktop)]

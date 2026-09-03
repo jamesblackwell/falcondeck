@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
+    sync::{Mutex, MutexGuard, atomic::Ordering},
 };
 
 use chrono::Utc;
@@ -27,10 +27,9 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{
-    AppState, CachedEnvelope, RemoteBridgeCommand, RemoteBridgeError, RemotePairingState,
-    extract_string,
-    parse_agent_provider, parse_interactive_response_params, parse_thread_isolation,
-    relay_request_error,
+    AppState, EVENT_COALESCE_INTERVAL, EventCoalescer, RemoteBridgeCommand, RemoteBridgeError,
+    RemotePairingState, extract_string, parse_agent_provider, parse_interactive_response_params,
+    parse_thread_isolation, relay_request_error,
 };
 use crate::error::DaemonError;
 
@@ -436,10 +435,9 @@ impl AppState {
         // itself runs on per-RPC tasks.
         let (rpc_outbox, mut rpc_outbox_rx) = mpsc::unbounded_channel::<RemoteRpcOutboxMessage>();
         let mut key_generation = 0u64;
-        // Collapses the per-chunk stream storm before it reaches the phone;
-        // see RemoteEventCoalescer.
-        let mut coalescer = RemoteEventCoalescer::default();
-        let mut coalesce_flush = tokio::time::interval(REMOTE_EVENT_COALESCE_INTERVAL);
+        // Collapses the per-chunk stream storm before it reaches the phone.
+        let mut coalescer = EventCoalescer::default();
+        let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
         coalesce_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -2408,146 +2406,6 @@ pub(super) fn encrypt_remote_daemon_event(
     .map_err(|error| format!("failed to encrypt relay update: {error}"))
 }
 
-/// How long a superseded streaming update may wait for its replacement.
-/// Short enough to stay imperceptible in the transcript, long enough that a
-/// provider emitting chunks every few milliseconds collapses into one send.
-const REMOTE_EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(100);
-
-/// What a pending event supersedes, when it supersedes anything.
-#[derive(PartialEq, Eq)]
-enum CoalesceKey {
-    ThreadSummary(Option<String>),
-    ConversationItem(Option<String>, String),
-}
-
-/// Collapses the per-chunk event storm a running turn produces.
-///
-/// Every streamed fragment makes the daemon re-emit the whole accumulated item
-/// *and* a fresh thread summary, so one agent typing can put ~90 events per
-/// second on the wire. Remote clients decrypt, parse and reduce each one on a
-/// phone's JS thread; they cannot render at that rate and do not need to,
-/// because each of these events is a complete replacement for the one before
-/// it. Holding the newest and dropping the rest is therefore lossless as far
-/// as final state goes.
-///
-/// Two rules keep it lossless in practice as well:
-/// - Only non-terminal updates are ever held. A completed item or a settled
-///   thread summary is forwarded immediately, so the last word on anything
-///   cannot sit in this buffer waiting for a replacement that never comes
-///   (that is how a client ends up with a permanent spinner).
-/// - Anything not coalescable flushes the buffer first, so a held update can
-///   never be reordered behind a later event.
-#[derive(Default)]
-struct RemoteEventCoalescer {
-    // Holds the broadcast's own Arc so a held event keeps its cached
-    // serialization rather than being cloned out of it.
-    pending: Vec<(CoalesceKey, Arc<CachedEnvelope>)>,
-}
-
-impl RemoteEventCoalescer {
-    /// What this event is the latest word on, whether or not it may be held.
-    /// A terminal event still supersedes the held updates for the same key.
-    fn supersedes(event: &EventEnvelope) -> Option<CoalesceKey> {
-        match &event.event {
-            UnifiedEvent::ThreadUpdated { .. } => {
-                Some(CoalesceKey::ThreadSummary(event.thread_id.clone()))
-            }
-            UnifiedEvent::ConversationItemUpdated { item } => Some(CoalesceKey::ConversationItem(
-                event.thread_id.clone(),
-                conversation_item_id(item).to_string(),
-            )),
-            _ => None,
-        }
-    }
-
-    /// Whether this event may wait for a successor. Terminal states may not.
-    fn may_be_held(event: &EventEnvelope) -> bool {
-        match &event.event {
-            UnifiedEvent::ThreadUpdated { thread } => {
-                matches!(thread.status, falcondeck_core::ThreadStatus::Running)
-            }
-            UnifiedEvent::ConversationItemUpdated { item } => is_streaming_item(item),
-            _ => false,
-        }
-    }
-
-    /// Accepts an event and returns everything that should go out now.
-    fn push(&mut self, event: Arc<CachedEnvelope>) -> Vec<Arc<CachedEnvelope>> {
-        let key = Self::supersedes(&event);
-        if let Some(key) = &key {
-            // Whatever this replaces never needs to be sent, terminal or not:
-            // the arriving event already describes that same item or thread
-            // more recently.
-            self.pending.retain(|(pending_key, _)| pending_key != key);
-        }
-
-        if Self::may_be_held(&event) {
-            // Pushed at the end rather than replaced in place, so the buffer
-            // drains in the order the surviving updates last changed.
-            self.pending.push((key.expect("holdable events have a key"), event));
-            return Vec::new();
-        }
-
-        // Not holdable: everything still buffered describes an earlier moment
-        // and must go out ahead of it.
-        let mut outgoing = self.drain();
-        outgoing.push(event);
-        outgoing
-    }
-
-    fn drain(&mut self) -> Vec<Arc<CachedEnvelope>> {
-        self.pending
-            .drain(..)
-            .map(|(_, event)| event)
-            .collect()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-}
-
-/// Whether this item is still being produced.
-///
-/// Only text-producing items stream fragment by fragment. Tool calls and the
-/// rest carry results rather than growing content, so they are forwarded
-/// as-is instead of being held for a successor that may never arrive.
-fn is_streaming_item(item: &falcondeck_core::ConversationItem) -> bool {
-    use falcondeck_core::{ContentLifecycle, ConversationItem};
-    let lifecycle = match item {
-        ConversationItem::AssistantMessage { lifecycle, .. } => lifecycle,
-        ConversationItem::Reasoning { lifecycle, .. } => lifecycle,
-        _ => return false,
-    };
-    matches!(
-        lifecycle,
-        ContentLifecycle::Pending | ContentLifecycle::Streaming
-    )
-}
-
-/// Stable identity for an item, used to tell successive updates of the same
-/// item apart from updates of different ones.
-fn conversation_item_id(item: &falcondeck_core::ConversationItem) -> &str {
-    use falcondeck_core::ConversationItem;
-    match item {
-        ConversationItem::UserMessage { id, .. }
-        | ConversationItem::AssistantMessage { id, .. }
-        | ConversationItem::Reasoning { id, .. }
-        | ConversationItem::CodeReview { id, .. }
-        | ConversationItem::ContextCompaction { id, .. }
-        | ConversationItem::Artifact { id, .. }
-        | ConversationItem::Unsupported { id, .. }
-        | ConversationItem::Image { id, .. }
-        | ConversationItem::WebSearch { id, .. }
-        | ConversationItem::FileChange { id, .. }
-        | ConversationItem::ToolCall { id, .. }
-        | ConversationItem::Plan { id, .. }
-        | ConversationItem::Diff { id, .. }
-        | ConversationItem::Service { id, .. }
-        | ConversationItem::InteractiveRequest { id, .. } => id,
-    }
-}
-
 fn remote_event_message(
     data_key: &[u8; 32],
     event: &EventEnvelope,
@@ -2608,8 +2466,10 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::CachedEnvelope;
     use falcondeck_core::crypto::decrypt_bytes;
     use falcondeck_core::{ContentLifecycle, ThreadStatus};
+    use std::sync::Arc;
 
     fn coalescer_thread_summary(status: ThreadStatus, title: &str) -> falcondeck_core::ThreadSummary {
         falcondeck_core::ThreadSummary {
@@ -2668,6 +2528,24 @@ mod tests {
         )
     }
 
+    fn coalescer_text_delta(
+        seq: u64,
+        delta: &str,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Arc<CachedEnvelope> {
+        coalescer_event(
+            seq,
+            UnifiedEvent::Text {
+                item_id: "item-1".to_string(),
+                delta: delta.to_string(),
+                target: falcondeck_core::TextDeltaTarget::AssistantText,
+                start_offset: Some(start_offset),
+                end_offset: Some(end_offset),
+            },
+        )
+    }
+
     fn coalesced_texts(events: &[Arc<CachedEnvelope>]) -> Vec<String> {
         events
             .iter()
@@ -2682,7 +2560,7 @@ mod tests {
 
     #[test]
     fn coalescer_keeps_only_the_newest_streaming_update() {
-        let mut coalescer = RemoteEventCoalescer::default();
+        let mut coalescer = EventCoalescer::default();
 
         for (index, text) in ["a", "ab", "abc"].iter().enumerate() {
             let outgoing =
@@ -2699,8 +2577,35 @@ mod tests {
     }
 
     #[test]
+    fn coalescer_combines_contiguous_text_deltas() {
+        let mut coalescer = EventCoalescer::default();
+        assert!(
+            coalescer
+                .push(coalescer_text_delta(1, "hel", 0, 3))
+                .is_empty()
+        );
+        assert!(
+            coalescer
+                .push(coalescer_text_delta(2, "lo", 3, 5))
+                .is_empty()
+        );
+
+        let outgoing = coalescer.drain();
+        assert_eq!(outgoing.len(), 1);
+        assert!(matches!(
+            &outgoing[0].event,
+            UnifiedEvent::Text {
+                delta,
+                start_offset: Some(0),
+                end_offset: Some(5),
+                ..
+            } if delta == "hello"
+        ));
+    }
+
+    #[test]
     fn coalescer_forwards_terminal_updates_immediately() {
-        let mut coalescer = RemoteEventCoalescer::default();
+        let mut coalescer = EventCoalescer::default();
         assert!(
             coalescer
                 .push(coalescer_message(1, "partial", ContentLifecycle::Streaming))
@@ -2718,7 +2623,7 @@ mod tests {
 
     #[test]
     fn coalescer_holds_running_summaries_but_not_settled_ones() {
-        let mut coalescer = RemoteEventCoalescer::default();
+        let mut coalescer = EventCoalescer::default();
         let running = UnifiedEvent::ThreadUpdated {
             thread: coalescer_thread_summary(ThreadStatus::Running, "running"),
         };
@@ -2739,7 +2644,7 @@ mod tests {
 
     #[test]
     fn coalescer_flushes_held_updates_before_an_unrelated_event() {
-        let mut coalescer = RemoteEventCoalescer::default();
+        let mut coalescer = EventCoalescer::default();
         assert!(
             coalescer
                 .push(coalescer_message(1, "partial", ContentLifecycle::Streaming))
@@ -2771,7 +2676,7 @@ mod tests {
 
     #[test]
     fn coalescer_keeps_separate_items_and_threads_apart() {
-        let mut coalescer = RemoteEventCoalescer::default();
+        let mut coalescer = EventCoalescer::default();
         assert!(
             coalescer
                 .push(coalescer_message(1, "first", ContentLifecycle::Streaming))

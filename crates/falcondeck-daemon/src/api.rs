@@ -11,7 +11,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use futures_util::StreamExt;
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
@@ -30,7 +30,7 @@ use falcondeck_core::{
 
 use crate::{
     app::{
-        AppState, CachedEnvelope,
+        AppState, CachedEnvelope, EVENT_COALESCE_INTERVAL, EventCoalescer,
         host_provisioning::{
             HostCommandRequest, HostCommandResponse, ProvisionHostRequest, ProvisionJob,
             StartProvisionResponse,
@@ -1399,21 +1399,29 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
+    let mut coalescer = EventCoalescer::default();
+    let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
+    coalesce_flush.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
             event_result = receiver.recv() => {
                 match event_result {
                     Ok(event) => {
-                        if socket
-                            .send(Message::Text(event.serialized().to_owned().into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                        for outgoing in coalescer.push(event) {
+                            if socket
+                                .send(Message::Text(outgoing.serialized().to_owned().into()))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         tracing::warn!("local daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
+                        // The snapshot supersedes any held streaming state.
+                        coalescer.drain();
                         let snapshot = state.snapshot().await;
                         let snapshot_event = CachedEnvelope::new(falcondeck_core::EventEnvelope {
                             seq: 0,
@@ -1431,6 +1439,17 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = coalesce_flush.tick(), if !coalescer.is_empty() => {
+                for outgoing in coalescer.drain() {
+                    if socket
+                        .send(Message::Text(outgoing.serialized().to_owned().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
             }
             message = socket.next() => {
