@@ -236,7 +236,11 @@ export function useRelayConnection() {
   const deviceId = useRelayStore((s) => s.deviceId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
-  const snapshot = useSessionStore((s) => s.snapshot)
+  // A boolean, not the snapshot itself: this hook runs in the root layout, so
+  // subscribing to the object the store replaces on every applied event batch
+  // re-rendered the entire app tree at relay frame rate. Only the transition
+  // from "no snapshot" to "has one" needs to retrigger the fetch effect below.
+  const hasSnapshot = useSessionStore((s) => !!s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -404,6 +408,11 @@ export function useRelayConnection() {
             include_archived_threads: false,
             include_thread_plans: false,
             include_thread_diffs: false,
+            // The per-agent skill catalog is the same list repeated once per
+            // agent per workspace — megabytes on a daemon with many projects,
+            // and nothing reads it. The composer uses `workspace.skills`,
+            // refreshed by its own RPC.
+            include_agent_skills: false,
           },
           { requestIdPrefix: 'mobile-snapshot' },
         ),
@@ -1372,7 +1381,7 @@ export function useRelayConnection() {
     }
 
     void requestSnapshot()
-  }, [hasSyncedOnce, isEncrypted, requestSnapshot, sessionId, snapshot])
+  }, [hasSnapshot, hasSyncedOnce, isEncrypted, requestSnapshot, sessionId])
 
   // Once the session is usable (encrypted), register this device's push token
   // with the relay so it can alert us when an agent needs attention while the

@@ -17,7 +17,17 @@ export function useSharedValue(init: any) {
   return shared
 }
 export function cancelAnimation() {}
-export function useAnimatedStyle(fn: any) { return fn() }
+// Module-scope shared values (see ActivityDiamond's shared clock) are created
+// outside a component, so they cannot go through useSharedValue.
+export function makeMutable(init: any) {
+  const value: { value: any; get: () => any; set: (next: any) => void } = {
+    value: init,
+    get: () => value.value,
+    set: (next) => { value.value = next },
+  }
+  return value
+}
+export function useAnimatedStyle(fn: any, _deps?: any) { return fn() }
 export function useDerivedValue(fn: any) { return { value: fn() } }
 export function useAnimatedScrollHandler() { return () => {} }
 export function useAnimatedKeyboard() {

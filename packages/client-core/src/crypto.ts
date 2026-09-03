@@ -49,15 +49,44 @@ function toArrayBuffer(bytes: Uint8Array) {
   return copied.buffer
 }
 
+// Multi-megabyte payloads (relay snapshots, the mobile offline cache) run
+// through these on the JS thread, so prefer the engine-native Uint8Array
+// base64 codecs where they exist (Hermes and recent V8/JSC ship them). The
+// fallbacks stay for older engines, but batch through String.fromCharCode
+// instead of concatenating a fresh string per input byte — the per-byte
+// version was quadratic enough to show up as sustained CPU on device.
+const nativeToBase64: ((bytes: Uint8Array) => string) | null = (() => {
+  const proto = Uint8Array.prototype as unknown as { toBase64?: () => string }
+  if (typeof proto.toBase64 !== 'function') return null
+  return (bytes: Uint8Array) =>
+    (bytes as unknown as { toBase64: () => string }).toBase64()
+})()
+
+const nativeFromBase64: ((value: string) => Uint8Array) | null = (() => {
+  const ctor = Uint8Array as unknown as {
+    fromBase64?: (value: string) => Uint8Array
+  }
+  if (typeof ctor.fromBase64 !== 'function') return null
+  return (value: string) => ctor.fromBase64!(value)
+})()
+
+// Chunked so the spread into String.fromCharCode cannot overflow the engine's
+// argument limit on large payloads.
+const BASE64_CHUNK_BYTES = 0x2000
+
 export function bytesToBase64(bytes: Uint8Array) {
-  let binary = ''
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte)
-  })
-  return btoa(binary)
+  if (nativeToBase64) return nativeToBase64(bytes)
+  const pieces: string[] = []
+  for (let index = 0; index < bytes.length; index += BASE64_CHUNK_BYTES) {
+    pieces.push(
+      String.fromCharCode(...bytes.subarray(index, index + BASE64_CHUNK_BYTES)),
+    )
+  }
+  return btoa(pieces.join(''))
 }
 
 export function base64ToBytes(value: string) {
+  if (nativeFromBase64) return nativeFromBase64(value)
   const binary = atob(value)
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) {

@@ -6397,6 +6397,83 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
 }
 
 #[tokio::test]
+async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+
+    let skill: falcondeck_core::SkillSummary = serde_json::from_value(serde_json::json!({
+        "id": "skill-1",
+        "label": "Deploy",
+        "alias": "/deploy",
+        "availability": "codex",
+        "providers": ["codex"],
+        "source_kind": "provider_native",
+    }))
+    .expect("skill fixture");
+    let agent: falcondeck_core::WorkspaceAgentSummary = serde_json::from_value(serde_json::json!({
+        "provider": "codex",
+        "label": "Codex",
+        "account": { "status": "ready", "label": "ready" },
+        "skills": [skill],
+    }))
+    .expect("agent fixture");
+
+    let workspace_id = "workspace-1".to_string();
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
+                id: workspace_id.clone(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: vec![agent],
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: None,
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: HashMap::new(),
+        },
+    );
+
+    let full = app.snapshot_with_request(&SnapshotRequest::default()).await;
+    assert_eq!(full.workspaces[0].agents[0].skills.len(), 1);
+
+    // The catalog is repeated per agent per workspace and no client reads it,
+    // so remote clients drop it from the encrypted payload.
+    let slim = app
+        .snapshot_with_request(&SnapshotRequest {
+            include_agent_skills: false,
+            ..SnapshotRequest::default()
+        })
+        .await;
+    assert!(slim.workspaces[0].agents[0].skills.is_empty());
+    // The workspace-level list the composer actually reads is untouched.
+    assert_eq!(
+        slim.workspaces[0].skills.len(),
+        full.workspaces[0].skills.len()
+    );
+}
+
+#[tokio::test]
 async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-a");

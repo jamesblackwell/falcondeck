@@ -8,6 +8,18 @@ const respondApprovalMock = vi.fn();
 
 vi.mock("react-native-reanimated", () => ({
   View: "Animated.View",
+  // Module-scope shared values (ActivityDiamond's shared clock) cannot go
+  // through useSharedValue.
+  makeMutable: (init: any) => {
+    const value: { value: any; get: () => any; set: (next: any) => void } = {
+      value: init,
+      get: () => value.value,
+      set: (next) => {
+        value.value = next;
+      },
+    };
+    return value;
+  },
   useSharedValue: (init: any) => {
     const value: { value: any; get: () => any; set: (next: any) => void } = {
       value: init,

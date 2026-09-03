@@ -5,7 +5,7 @@
  * maintains the same state shape as the desktop/remote-web apps,
  * plus a mobile-only cache of recent thread history windows.
  */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
@@ -39,6 +39,13 @@ import { useUIStore } from './ui-store';
 
 const MAX_CACHED_THREADS = 5;
 const MAX_CACHED_ITEMS = 150;
+/**
+ * Threads kept in the cached snapshot. Deep enough that every project in the
+ * sidebar still has its recent conversations offline, far short of the
+ * thousands a long-lived daemon accumulates. The selected thread and each
+ * workspace's current thread are kept regardless of where they fall.
+ */
+const MAX_CACHED_SNAPSHOT_THREADS = 200;
 
 type ThreadDetailMergeMode = 'refresh' | 'prepend';
 
@@ -146,6 +153,39 @@ function reuseIfIdentical<T>(built: T[], prev: T[] | undefined): T[] {
   return built;
 }
 
+/**
+ * Archive-free thread lists, keyed by the array that produced them. A
+ * streaming turn pushes a freshly built threads array through here for every
+ * chunk, and nearly all of them hold no archived thread at all — the scan
+ * below short-circuits on the first one it finds, and the result is reused so
+ * repeat calls for the same array (snapshot apply, then the cache builder)
+ * cost nothing.
+ */
+const activeThreadsCache = new WeakMap<object, DaemonSnapshot['threads']>();
+
+function activeThreads(threads: DaemonSnapshot['threads']): DaemonSnapshot['threads'] {
+  const cached = activeThreadsCache.get(threads);
+  if (cached) return cached;
+  const filtered = threads.some((thread) => thread.is_archived)
+    ? threads.filter((thread) => !thread.is_archived)
+    : threads;
+  activeThreadsCache.set(threads, filtered);
+  // A filtered list is itself archive-free, so a later pass over it resolves
+  // on the cache instead of rescanning.
+  if (filtered !== threads) activeThreadsCache.set(filtered, filtered);
+  return filtered;
+}
+
+const visibleThreadIdCache = new WeakMap<object, Set<string>>();
+
+function visibleThreadIdsOf(threads: DaemonSnapshot['threads']): Set<string> {
+  const cached = visibleThreadIdCache.get(threads);
+  if (cached) return cached;
+  const ids = new Set(threads.map((thread) => thread.id));
+  visibleThreadIdCache.set(threads, ids);
+  return ids;
+}
+
 function filterActiveSnapshot(
   snapshot: DaemonSnapshot | null,
   /**
@@ -156,9 +196,42 @@ function filterActiveSnapshot(
   prevSnapshot?: DaemonSnapshot | null,
 ): DaemonSnapshot | null {
   if (!snapshot) return null;
+  if (snapshot === prevSnapshot) return prevSnapshot;
 
-  const threads = snapshot.threads.filter((thread) => !thread.is_archived);
-  const visibleThreadIds = new Set(threads.map((thread) => thread.id));
+  const threads = activeThreads(snapshot.threads);
+  const visibleThreadIds = visibleThreadIdsOf(threads);
+
+  // The common streaming event replaces one thread summary in place: the
+  // workspaces array keeps its identity and every workspace pointer still
+  // resolves, so the whole per-workspace rebuild below (a spread and a
+  // field-by-field compare each) is redundant. Validating the pointers is a
+  // pass over the handful of workspaces rather than over every thread, so
+  // this stays exact — a workspace whose current thread just disappeared
+  // still falls through to the rebuild.
+  if (
+    prevSnapshot &&
+    snapshot.workspaces === prevSnapshot.workspaces &&
+    snapshot.workspaces.every(
+      (workspace) =>
+        !workspace.current_thread_id || visibleThreadIds.has(workspace.current_thread_id),
+    )
+  ) {
+    return {
+      ...snapshot,
+      workspaces: prevSnapshot.workspaces,
+      threads: reuseIfIdentical(threads, prevSnapshot.threads),
+      interactive_requests:
+        snapshot.interactive_requests === prevSnapshot.interactive_requests
+          ? prevSnapshot.interactive_requests
+          : reuseIfIdentical(
+              snapshot.interactive_requests.filter(
+                (request) => !request.thread_id || visibleThreadIds.has(request.thread_id),
+              ),
+              prevSnapshot.interactive_requests,
+            ),
+    };
+  }
+
   const prevWorkspacesById = prevSnapshot
     ? new Map(prevSnapshot.workspaces.map((workspace) => [workspace.id, workspace]))
     : null;
@@ -367,9 +440,62 @@ function reconcileThreadDetail(
   };
 }
 
+/**
+ * Trims the snapshot down to what the offline cache actually renders before it
+ * is serialized, encrypted and written.
+ *
+ * The daemon's snapshot is dominated by two things the cache has no use for:
+ * skill catalogs (duplicated per workspace and again per agent — megabytes of
+ * the payload) and the full thread list, which can run to thousands of entries
+ * while the sidebar shows a few dozen. Both are re-supplied by the
+ * authoritative snapshot moments after launch, and the composer's skill list
+ * is refreshed by its own `workspace.skills` RPC, so dropping them costs a
+ * cold start nothing and takes the recurring encrypt-and-write cost down with
+ * the byte count.
+ */
+function cacheableSnapshot(
+  snapshot: DaemonSnapshot,
+  selectedThreadId: string | null,
+): DaemonSnapshot {
+  const keptThreadIds = new Set<string>();
+  if (selectedThreadId) keptThreadIds.add(selectedThreadId);
+  for (const workspace of snapshot.workspaces) {
+    if (workspace.current_thread_id) keptThreadIds.add(workspace.current_thread_id);
+  }
+
+  const threads =
+    snapshot.threads.length > MAX_CACHED_SNAPSHOT_THREADS
+      ? snapshot.threads.filter(
+          (thread, index) =>
+            index < MAX_CACHED_SNAPSHOT_THREADS || keptThreadIds.has(thread.id),
+        )
+      : snapshot.threads;
+
+  return {
+    ...snapshot,
+    threads,
+    workspaces: snapshot.workspaces.map((workspace) => {
+      const { skills: _skills, ...rest } = workspace;
+      return {
+        ...rest,
+        // Both of these are the same catalog repeated for every agent of every
+        // workspace, and between them they are the largest thing in here. The
+        // composer reads models through its own per-workspace model cache
+        // (see loadCachedModels) whenever the snapshot has none, so a cold
+        // start still opens with a populated picker.
+        agents: (workspace.agents ?? []).map((agent) => {
+          const { skills: _agentSkills, ...agentRest } = agent;
+          return { ...agentRest, models: [] };
+        }),
+      };
+    }),
+  };
+}
+
 function buildCacheFromState(state: SessionState): MobileSessionCache | null {
-  const snapshot = filterActiveSnapshot(state.snapshot, state.snapshot);
-  if (!snapshot) return null;
+  const filtered = filterActiveSnapshot(state.snapshot, state.snapshot);
+  if (!filtered) return null;
+  const snapshot = cacheableSnapshot(filtered, state.selectedThreadId);
 
   const visibleThreadIds = new Set(snapshot.threads.map((thread) => thread.id));
   const orderedThreadIds = [
@@ -429,6 +555,20 @@ const CACHE_PERSIST_THROTTLE_MS = 1_000;
 let lastCachePersistAt = 0;
 let trailingCachePersistTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * The state a write was last derived from. Every field the cache reads is
+ * replaced wholesale rather than mutated, so identity is a sound (and O(1))
+ * test for "nothing to write" — and the relay checkpoints a cursor on a
+ * timer whether or not anything changed, which otherwise re-encrypts an
+ * identical payload every second while the desktop merely ticks.
+ */
+let lastWrittenCacheInputs: {
+  snapshot: SessionState['snapshot'];
+  threadItems: SessionState['threadItems'];
+  selectedWorkspaceId: string | null;
+  selectedThreadId: string | null;
+} | null = null;
+
 /** Test-only: make the next persist write through immediately. */
 export function __resetSessionCachePersistThrottleForTests(): void {
   if (trailingCachePersistTimer) {
@@ -436,15 +576,36 @@ export function __resetSessionCachePersistThrottleForTests(): void {
     trailingCachePersistTimer = null;
   }
   lastCachePersistAt = 0;
+  lastWrittenCacheInputs = null;
 }
 
 function writeStateCache(state: SessionState) {
+  const previous = lastWrittenCacheInputs;
+  if (
+    previous &&
+    previous.snapshot === state.snapshot &&
+    previous.threadItems === state.threadItems &&
+    previous.selectedWorkspaceId === state.selectedWorkspaceId &&
+    previous.selectedThreadId === state.selectedThreadId
+  ) {
+    // Still stamp the clock: the throttle window is about how often we are
+    // willing to write, not about how often we were asked.
+    lastCachePersistAt = Date.now();
+    return;
+  }
+
   const cache = buildCacheFromState(state);
   // A null cache just means there is no snapshot to derive one from.
   // Deleting the persisted cache here would defeat reset({ preserveCache: true });
   // explicit clearing goes through clearMobileSessionCache instead.
   if (!cache) return;
   lastCachePersistAt = Date.now();
+  lastWrittenCacheInputs = {
+    snapshot: state.snapshot,
+    threadItems: state.threadItems,
+    selectedWorkspaceId: state.selectedWorkspaceId,
+    selectedThreadId: state.selectedThreadId,
+  };
   persistMobileSessionCache(cache);
 }
 
@@ -885,6 +1046,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       clearTimeout(trailingCachePersistTimer);
       trailingCachePersistTimer = null;
     }
+    // The unchanged-inputs guard must not vouch for a cache this reset is
+    // about to delete.
+    lastWrittenCacheInputs = null;
     // A relay history truncation only needs derived state rebuilt; wiping the
     // offline cache would blank the UI until the next snapshot arrives.
     if (!preserveCache) {
@@ -1017,3 +1181,51 @@ export function useInteractiveRequests() {
 /** @deprecated Use the accurately named `useInteractiveRequests`. */
 export const useApprovals = useInteractiveRequests;
 /* v8 ignore stop */
+
+/**
+ * The snapshot, sampled at most once per `intervalMs`.
+ *
+ * A streaming turn replaces the snapshot on every applied event batch — up to
+ * one per animation frame. Screens that re-derive something expensive from the
+ * whole snapshot (the sidebar rebuilds project groups, filters, sorts and rows
+ * over every thread) cannot usefully repaint that often, and doing so on the
+ * JS thread is what makes a live turn feel like a hot phone. Subscribing here
+ * rather than through a selector means the component is not re-rendered at all
+ * between samples, and the flush always reads the current store value, so the
+ * only cost is up to `intervalMs` of staleness.
+ */
+export function useThrottledSnapshot(intervalMs: number): DaemonSnapshot | null {
+  const [snapshot, setSnapshot] = useState(() => useSessionStore.getState().snapshot);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let lastFlushedAt = 0;
+
+    const flush = () => {
+      timer = null;
+      lastFlushedAt = Date.now();
+      setSnapshot(useSessionStore.getState().snapshot);
+    };
+
+    // Catch up on anything that landed between the render that seeded state
+    // and this subscription being installed.
+    flush();
+
+    const unsubscribe = useSessionStore.subscribe((state, previous) => {
+      if (state.snapshot === previous.snapshot || timer) return;
+      const elapsed = Date.now() - lastFlushedAt;
+      if (elapsed >= intervalMs) {
+        flush();
+        return;
+      }
+      timer = setTimeout(flush, intervalMs - elapsed);
+    });
+
+    return () => {
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+    };
+  }, [intervalMs]);
+
+  return snapshot;
+}

@@ -3,9 +3,9 @@ import Animated, {
   cancelAnimation,
   Easing,
   interpolate,
+  makeMutable,
   useAnimatedStyle,
   useReducedMotion,
-  useSharedValue,
   withRepeat,
   withTiming,
 } from 'react-native-reanimated'
@@ -23,29 +23,52 @@ const OPACITY = [0.55, 1, 0.55, 1, 0.55, 1, 1, 1, 1, 0.55, 0.55]
 const SCALE = [0.82, 1, 0.82, 1, 0.82, 1, 1, 1, 1, 0.82, 0.82]
 const ROTATION = [0, 0, 0, 0, 0, 0, 12, 348, 360, 360, 360]
 
+/**
+ * One clock for every diamond on screen.
+ *
+ * These mark live agent work, so during a busy turn they appear in the sidebar
+ * for each running thread and again on every in-flight block in the transcript
+ * — and FlashList recycling mounts and unmounts them constantly. Giving each
+ * instance its own repeating timing meant a separate animation driver per
+ * diamond plus a JS-to-UI-thread animation start on every remount. A single
+ * module-level driver, reference counted so it runs only while something is
+ * actually using it, costs the same whether one diamond is visible or thirty,
+ * and a remounting row simply reads the clock that is already running (which
+ * also keeps the diamonds in phase with each other).
+ */
+const clock = makeMutable(0)
+let clockSubscribers = 0
+
+function acquireClock() {
+  clockSubscribers += 1
+  if (clockSubscribers > 1) return
+  clock.value = 0
+  clock.value = withRepeat(
+    withTiming(1, { duration: CYCLE_DURATION_MS, easing: Easing.linear }),
+    -1,
+  )
+}
+
+function releaseClock() {
+  clockSubscribers = Math.max(0, clockSubscribers - 1)
+  if (clockSubscribers === 0) cancelAnimation(clock)
+}
+
 /** A small double-pulse-and-turn diamond for live agent work. */
 export const ActivityDiamond = memo(function ActivityDiamond({
   size = 14,
   color,
 }: ActivityDiamondProps) {
   const reducedMotion = useReducedMotion()
-  const progress = useSharedValue(reducedMotion ? STATIC_PROGRESS : 0)
 
   useEffect(() => {
-    cancelAnimation(progress)
-    progress.set(
-      reducedMotion
-        ? STATIC_PROGRESS
-        : withRepeat(
-            withTiming(1, { duration: CYCLE_DURATION_MS, easing: Easing.linear }),
-            -1,
-          ),
-    )
-    return () => cancelAnimation(progress)
-  }, [progress, reducedMotion])
+    if (reducedMotion) return
+    acquireClock()
+    return releaseClock
+  }, [reducedMotion])
 
   const animatedStyle = useAnimatedStyle(() => {
-    const value = progress.get()
+    const value = reducedMotion ? STATIC_PROGRESS : clock.get()
     return {
       opacity: interpolate(value, KEYFRAMES, OPACITY),
       transform: [
@@ -53,7 +76,7 @@ export const ActivityDiamond = memo(function ActivityDiamond({
         { scale: interpolate(value, KEYFRAMES, SCALE) },
       ],
     }
-  })
+  }, [reducedMotion])
   const diamondStyle = useMemo(
     () => ({ width: size * 0.58, height: size * 0.58, backgroundColor: color }),
     [color, size],

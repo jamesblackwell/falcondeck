@@ -294,9 +294,13 @@ function upsertThread(
   }
 
   const merged = mergeThreadSummary(current, nextThread);
-  return threads.map((thread) =>
-    thread.id === nextThread.id ? merged : thread,
-  );
+  if (merged === current) return threads;
+  // A streaming turn emits one of these per chunk against a list that can hold
+  // thousands of threads, so replace the single changed entry by copy-and-set
+  // rather than walking the whole array through a callback.
+  const next = threads.slice();
+  next[existing] = merged;
+  return next;
 }
 
 const TERMINAL_THREAD_STATUSES = new Set<ThreadSummary["status"]>([

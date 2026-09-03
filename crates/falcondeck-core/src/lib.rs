@@ -1882,6 +1882,15 @@ pub struct SnapshotRequest {
     /// shipping megabytes on every reconnect.
     #[serde(default = "default_true")]
     pub include_thread_diffs: bool,
+    /// Whether each workspace's per-agent skill catalog should be included.
+    ///
+    /// The catalog is serialized once per agent per workspace, so a handful of
+    /// distinct catalogs can account for the largest single share of a
+    /// snapshot. No client reads `workspace.agents[].skills` — the composer
+    /// uses `workspace.skills` and the live `workspace.skills` RPC — so remote
+    /// clients drop it rather than encrypting and shipping it on every sync.
+    #[serde(default = "default_true")]
+    pub include_agent_skills: bool,
 }
 
 impl Default for SnapshotRequest {
@@ -1890,6 +1899,7 @@ impl Default for SnapshotRequest {
             include_archived_threads: true,
             include_thread_plans: true,
             include_thread_diffs: true,
+            include_agent_skills: true,
         }
     }
 }

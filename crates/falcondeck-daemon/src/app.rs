@@ -2910,6 +2910,17 @@ impl AppState {
                 }
             }
         }
+
+        // The same skill catalog is attached to every agent of every
+        // workspace; on a daemon with many projects that repetition, not the
+        // thread list, is the biggest part of the payload.
+        if !request.include_agent_skills {
+            for workspace in &mut snapshot.workspaces {
+                for agent in &mut workspace.agents {
+                    agent.skills.clear();
+                }
+            }
+        }
         snapshot
     }
 

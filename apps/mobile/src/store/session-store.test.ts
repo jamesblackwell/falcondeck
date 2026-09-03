@@ -7,7 +7,11 @@ import {
   loadMobileSessionCache,
   setMobileSessionCacheKey,
 } from '@/storage/mobile-session-cache'
-import { __resetSessionCachePersistThrottleForTests, useSessionStore } from './session-store'
+import {
+  __resetSessionCachePersistThrottleForTests,
+  persistSessionCacheNow,
+  useSessionStore,
+} from './session-store'
 import {
   workspace,
   thread,
@@ -613,6 +617,79 @@ describe('session-store', () => {
         conversationItemAddedEvent(assistantMessage('msg-1', 'streamed')),
       )
 
+      expect(loadMobileSessionCache()).not.toBeNull()
+    })
+
+    it('keeps duplicated skill and model catalogs out of the written cache', () => {
+      const skills = [{ id: 'skill-1', name: 'Skill', description: 'x' }] as never
+      const models = [{ id: 'model-1', label: 'Model' }] as never
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(
+          snapshot({
+            workspaces: [
+              workspace({
+                id: 'workspace-1',
+                skills,
+                agents: [{ provider: 'codex', skills, models } as never],
+              }),
+            ],
+          }),
+        ),
+      )
+
+      const cached = loadMobileSessionCache()
+      expect(cached?.snapshot.workspaces[0]?.skills).toBeUndefined()
+      expect(cached?.snapshot.workspaces[0]?.agents[0]?.skills).toBeUndefined()
+      // Repeated once per agent per workspace; the composer refills it from
+      // the live snapshot or its own model cache.
+      expect(cached?.snapshot.workspaces[0]?.agents[0]?.models).toEqual([])
+      // The live snapshot still carries all of it; only the disk copy is slim.
+      const live = useSessionStore.getState().snapshot?.workspaces[0]
+      expect(live?.skills).toBeTruthy()
+      expect(live?.agents[0]?.models).toHaveLength(1)
+    })
+
+    it('caps cached threads while keeping the selected thread', () => {
+      const threads = Array.from({ length: 260 }, (_, index) =>
+        thread({ id: `t${index}`, workspace_id: 'workspace-1' }),
+      )
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(
+          snapshot({ workspaces: [workspace({ id: 'workspace-1' })], threads }),
+        ),
+      )
+      useSessionStore.getState().selectThread('workspace-1', 't259')
+      __resetSessionCachePersistThrottleForTests()
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({ id: 't0', workspace_id: 'workspace-1' })),
+      )
+
+      const cached = loadMobileSessionCache()
+      expect(cached!.snapshot.threads.length).toBeLessThan(threads.length)
+      // The thread on screen survives the cap wherever it sorts.
+      expect(cached!.snapshot.threads.map((entry) => entry.id)).toContain('t259')
+      expect(useSessionStore.getState().snapshot?.threads).toHaveLength(260)
+    })
+
+    it('skips rewriting an identical cache when nothing it reads changed', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot()))
+      const first = loadMobileSessionCache()
+      expect(first).not.toBeNull()
+
+      // The relay checkpoints on a timer whether or not state moved; an
+      // unchanged checkpoint must not re-encrypt and rewrite the blob.
+      // (No throttle reset here — that deliberately forgets what was last
+      // written, which is what this guard keys off.)
+      resetMMKV()
+      useSessionStore.setState({ ...useSessionStore.getState() })
+      persistSessionCacheNow()
+      expect(loadMobileSessionCache()).toBeNull()
+
+      // A real change still writes through.
+      useSessionStore.getState().applyDaemonEvent(
+        threadUpdatedEvent(thread({ id: 'thread-1', title: 'renamed' })),
+      )
+      persistSessionCacheNow()
       expect(loadMobileSessionCache()).not.toBeNull()
     })
 

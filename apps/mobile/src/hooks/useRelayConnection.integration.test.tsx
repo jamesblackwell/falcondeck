@@ -999,6 +999,7 @@ describe('useRelayConnection session rotation', () => {
           include_archived_threads: false,
           include_thread_plans: false,
           include_thread_diffs: false,
+          include_agent_skills: false,
         },
         expect.anything(),
       ))

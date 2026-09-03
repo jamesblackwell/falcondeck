@@ -9,7 +9,7 @@
  * fresh render, so at worst the sidebar is a closed-drawer's-worth stale
  * during the opening animation.
  */
-import { memo, useCallback, useMemo, type ReactElement } from "react";
+import { memo, useCallback, useMemo, useRef, type ReactElement } from "react";
 import { Alert } from "react-native";
 import { usePathname, useRouter } from "expo-router";
 import { DrawerActions } from "@react-navigation/native";
@@ -22,12 +22,20 @@ import {
   buildProjectGroups,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
+  type ProjectGroup,
   type WorkspaceSummary,
 } from "@falcondeck/client-core";
 
-import { useRelayStore, useSessionStore } from "@/store";
+import { useRelayStore, useSessionStore, useThrottledSnapshot } from "@/store";
 import { SidebarView } from "./SidebarView";
 import { triggerThreadSelectionHaptic } from "@/lib/haptics";
+
+/**
+ * How often the open drawer resamples the snapshot. Long enough that a
+ * streaming turn cannot drive a full sidebar rebuild per frame, short enough
+ * that a thread appearing or finishing still feels immediate.
+ */
+const SIDEBAR_REFRESH_INTERVAL_MS = 250;
 
 export function SidebarDrawerContent({
   navigation,
@@ -40,22 +48,35 @@ export function SidebarDrawerContent({
     pathname.startsWith("/settings/") ||
     pathname === "/automations" ||
     pathname.startsWith("/automations/");
-  const snapshot = useSessionStore((s) => s.snapshot);
+  // Sampled, not subscribed: while the drawer is open the freeze below cannot
+  // help, and rebuilding groups/filters/rows over every thread once per relay
+  // frame is pure heat. Four refreshes a second is past the point anyone can
+  // read a moving sidebar.
+  const snapshot = useThrottledSnapshot(SIDEBAR_REFRESH_INTERVAL_MS);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
-  const groups = useMemo(
-    () =>
-      buildProjectGroups(
-        snapshot?.workspaces ?? [],
-        snapshot?.threads ?? [],
-        snapshot?.preferences.workspace_order,
-      ),
-    [
+  // Groups built from an unchanged workspace keep their previous identity, so
+  // the memoized rows below survive a refresh that only touched one thread.
+  const previousGroupsRef = useRef<ProjectGroup[] | null>(null);
+  // Render-only structural-sharing cache, the same pattern (and the same lint
+  // exemption) as useConversationPresentation: React has no previous-value
+  // form of useMemo, and buildProjectGroups is pure.
+  /* eslint-disable react-hooks/refs */
+  const groups = useMemo(() => {
+    const built = buildProjectGroups(
+      snapshot?.workspaces ?? [],
+      snapshot?.threads ?? [],
       snapshot?.preferences.workspace_order,
-      snapshot?.threads,
-      snapshot?.workspaces,
-    ],
-  );
+      previousGroupsRef.current,
+    );
+    previousGroupsRef.current = built;
+    return built;
+  }, [
+    snapshot?.preferences.workspace_order,
+    snapshot?.threads,
+    snapshot?.workspaces,
+  ]);
+  /* eslint-enable react-hooks/refs */
   const threadTags = useMemo(
     () => deriveThreadTags(snapshot?.extensions),
     [snapshot?.extensions],

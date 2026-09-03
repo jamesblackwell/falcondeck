@@ -141,23 +141,31 @@ export default function HomeScreen() {
   const workspace = useSelectedWorkspace();
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
-  const snapshot = useSessionStore((s) => s.snapshot);
+  // Deliberately NOT `s.snapshot`: the store replaces that object on every
+  // applied event batch, so subscribing to it re-rendered this whole screen at
+  // relay frame rate for the four narrow fields actually read below.
+  const hasSnapshot = useSessionStore((s) => !!s.snapshot);
+  const operationalConditionSource = useSessionStore(
+    (s) => s.snapshot?.operational_conditions,
+  );
+  const serviceNotices = useSessionStore((s) => s.snapshot?.service_notices);
+  const extensionSnapshot = useSessionStore((s) => s.snapshot?.extensions);
   const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
     Set<string>
   >(() => new Set());
   const operationalConditions = useMemo(
     () =>
       workspaceOperationalConditions(
-        snapshot?.operational_conditions,
-        snapshot?.service_notices,
+        operationalConditionSource,
+        serviceNotices,
         selectedWorkspaceId,
         dismissedConditionVersions,
       ),
     [
       dismissedConditionVersions,
       selectedWorkspaceId,
-      snapshot?.operational_conditions,
-      snapshot?.service_notices,
+      operationalConditionSource,
+      serviceNotices,
     ],
   );
   const dismissOperationalCondition = useCallback(
@@ -335,7 +343,7 @@ export default function HomeScreen() {
   const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
   const composerSuggestionOffer = useMemo(() => {
     const offer = deriveComposerSuggestions(
-      snapshot?.extensions,
+      extensionSnapshot,
       selectedThreadId,
       selectedThread?.status,
     );
@@ -345,7 +353,7 @@ export default function HomeScreen() {
     dismissedSuggestions,
     selectedThread?.status,
     selectedThreadId,
-    snapshot?.extensions,
+    extensionSnapshot,
   ]);
   // A chosen suggestion is its own turn: it submits the offered prompt and
   // leaves whatever the user was drafting untouched.
@@ -525,7 +533,7 @@ export default function HomeScreen() {
   });
 
   // True during initial sync: session exists but snapshot hasn't loaded yet
-  const isSyncing = !!sessionId && !snapshot;
+  const isSyncing = !!sessionId && !hasSnapshot;
 
   // Transport loss gates sending, not drafting. A saved workspace is enough
   // to focus and edit the composer while relay encryption reconnects.
