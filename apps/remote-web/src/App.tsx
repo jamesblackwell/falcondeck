@@ -4356,8 +4356,12 @@ function RemoteApp() {
         // Rethrown so the fork dialog keeps itself open and shows the reason.
         throw error instanceof Error ? error : new Error("Failed to fork thread");
       } finally {
-        handoffPendingRef.current = false;
-        setHandoffPending(false);
+        // Only the cross-harness path claimed the gate; a same-harness fork
+        // clearing it would re-open the menu under an unrelated handoff.
+        if (crossHarness) {
+          handoffPendingRef.current = false;
+          setHandoffPending(false);
+        }
         setHandoffPendingThreadKey(null);
       }
     },
