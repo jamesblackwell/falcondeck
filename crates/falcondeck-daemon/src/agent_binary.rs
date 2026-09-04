@@ -291,10 +291,7 @@ fn resolve_from_path(bin_name: &str) -> Option<String> {
     })
 }
 
-fn resolve_from_known_locations(
-    bin_name: &str,
-    diagnostics: &mut ResolutionDiagnostics,
-) -> Option<String> {
+fn known_location_paths(bin_name: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(home) = env::var("HOME") {
@@ -317,6 +314,14 @@ fn resolve_from_known_locations(
         candidates.push(PathBuf::from("/usr/bin").join(bin_name));
     }
 
+    candidates
+}
+
+fn resolve_from_known_locations(
+    bin_name: &str,
+    diagnostics: &mut ResolutionDiagnostics,
+) -> Option<String> {
+    let candidates = known_location_paths(bin_name);
     diagnostics.checked_locations = candidates
         .iter()
         .map(|path| path.display().to_string())
@@ -325,6 +330,26 @@ fn resolve_from_known_locations(
     candidates
         .into_iter()
         .find_map(|path| normalize_existing_path(&path))
+}
+
+/// Every distinct `bin_name` FalconDeck can see: known install locations plus
+/// every matching PATH entry. Used to surface unused dual installs (native
+/// `~/.local/bin` vs Homebrew npm) without changing which copy we launch.
+pub fn list_installed_agent_binaries(bin_name: &str) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for path in known_location_paths(bin_name) {
+        if let Some(canonical) = normalize_existing_path(&path) {
+            seen.insert(canonical);
+        }
+    }
+    if let Some(paths) = env::var_os("PATH") {
+        for dir in env::split_paths(&paths) {
+            if let Some(canonical) = normalize_existing_path(&dir.join(bin_name)) {
+                seen.insert(canonical);
+            }
+        }
+    }
+    seen.into_iter().collect()
 }
 
 fn resolve_from_login_shell(bin_name: &str) -> Option<String> {
@@ -429,7 +454,7 @@ mod tests {
 
     use super::{
         ResolutionDiagnostics, build_preferred_command_path, command_output_with_timeout,
-        missing_binary_message, parse_login_shell_environment,
+        known_location_paths, missing_binary_message, parse_login_shell_environment,
     };
 
     #[test]
@@ -455,6 +480,16 @@ mod tests {
         assert!(message.contains("the current PATH"));
         assert!(message.contains("your login shell via `command -v`"));
         assert!(message.contains("/opt/homebrew/bin/claude"));
+    }
+
+    #[test]
+    fn known_locations_include_user_local_bin() {
+        let paths = known_location_paths("claude");
+        assert!(
+            paths.iter().any(|path| path.ends_with(".local/bin/claude")
+                || path.to_string_lossy().contains(".local/bin/claude")),
+            "expected ~/.local/bin/claude among {paths:?}"
+        );
     }
 
     #[test]

@@ -208,6 +208,13 @@ export type HarnessCompatibilityVerdict =
 export type HarnessProviderUsageState =
   "supported" | "unavailable" | "unsupported";
 
+/** An additional copy of a harness CLI that FalconDeck found but is not using. */
+export type HarnessInstallCopy = {
+  path: string;
+  version?: string | null;
+  install_source?: string | null;
+};
+
 /**
  * Install status of one coding harness on one host (local machine or an SSH
  * target). Latest-version fields are only populated after an explicit
@@ -220,6 +227,8 @@ export type HarnessSummary = {
   /** Binary name the daemon resolves and launches. */
   bin: string;
   resolved_path?: string | null;
+  /** Other copies of the same CLI on this host that FalconDeck is not using. */
+  extra_installs?: HarnessInstallCopy[];
   installed?: boolean;
   install_state?: HarnessInstallState;
   executable_source?: HarnessExecutableSource;

@@ -85,6 +85,49 @@ describe('HarnessesPanel', () => {
     ).toBeInTheDocument()
   })
 
+  it('lists unused copies of the same CLI', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          host: 'local',
+          harnesses: [
+            {
+              id: 'claude',
+              label: 'Claude Code',
+              kind: 'builtin',
+              bin: 'claude',
+              resolved_path: '/Users/x/.local/share/claude/versions/2.1.258',
+              extra_installs: [
+                {
+                  path: '/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe',
+                  version: '2.1.259',
+                  install_source: 'npm',
+                },
+              ],
+              installed: true,
+              version: '2.1.258',
+              latest_version: '2.1.259',
+              update_available: true,
+              install_source: 'local',
+              upgrade_command: 'curl -fsSL https://claude.ai/install.sh | bash',
+            },
+          ],
+        }),
+      ),
+    )
+
+    render(
+      <HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={[]} onToast={vi.fn()} />,
+    )
+
+    expect(await screen.findByText('Claude Code')).toBeInTheDocument()
+    expect(screen.getByText('Another install')).toBeInTheDocument()
+    expect(screen.getByText(/Using /)).toBeInTheDocument()
+    expect(screen.getByText(/Also found /)).toBeInTheDocument()
+    expect(screen.getByText(/not used/)).toBeInTheDocument()
+  })
+
   it('deep-refreshes through the refresh endpoint when a remote host is selected', async () => {
     const fetchMock = vi
       .fn()

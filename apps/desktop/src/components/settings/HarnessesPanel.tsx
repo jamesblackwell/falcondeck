@@ -24,6 +24,11 @@ import { CheckCircle2, Download, RefreshCw, Terminal } from 'lucide-react'
 
 import { falconDeckHttpError } from '../../connection-copy'
 import type { HostView } from '../../hosts'
+import {
+  HarnessInstallPaths,
+  harnessHasDivergentInstall,
+  upgradeFinishedDescription,
+} from '../HarnessInstallPaths'
 
 export type HarnessesPanelProps = {
   baseUrl: string | null
@@ -40,6 +45,8 @@ type ActiveJob = {
   jobId: string
   harnessId: string
   hostKey: string
+  targetSource: string | null
+  unusedInstallCount: number
 }
 
 const LOCAL_HOST_KEY = 'local'
@@ -221,7 +228,11 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             onToast({
               variant: 'success',
               title: `${job.label} upgraded`,
-              description: `Finished on ${hostLabel(job.host)}.`,
+              description: upgradeFinishedDescription({
+                hostLabel: hostLabel(job.host),
+                targetSource: activeJob.targetSource,
+                unusedInstallCount: activeJob.unusedInstallCount,
+              }),
             })
           } else {
             onToast({
@@ -274,7 +285,13 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         const body = (await response.json()) as { job_id?: string }
         if (!body.job_id) throw new Error('FalconDeck did not start the upgrade.')
         setJobLog([])
-        setActiveJob({ jobId: body.job_id, harnessId: harness.id, hostKey })
+        setActiveJob({
+          jobId: body.job_id,
+          harnessId: harness.id,
+          hostKey,
+          targetSource: harness.install_source ?? null,
+          unusedInstallCount: harness.extra_installs?.length ?? 0,
+        })
       } catch (error) {
         onToast({
           variant: 'danger',
@@ -378,6 +395,9 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                         </span>
                         <Badge variant="default">{kindLabel(harness.kind)}</Badge>
                         <Badge variant={status.variant}>{status.label}</Badge>
+                        {harnessHasDivergentInstall(harness) ? (
+                          <Badge variant="warning">Another install</Badge>
+                        ) : null}
                         {harness.version ? (
                           <span className="font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
                             v{harness.version}
@@ -387,14 +407,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                           </span>
                         ) : null}
                       </div>
-                      {harness.installed && harness.resolved_path ? (
-                        <p className="mt-0.5 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
-                          {harness.resolved_path}
-                          {harness.install_source && harness.install_source !== 'unknown'
-                            ? ` · ${harness.install_source}`
-                            : ''}
-                        </p>
-                      ) : null}
+                      <HarnessInstallPaths harness={harness} />
                       {harness.account_status ? (
                         <p className="mt-0.5 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                           {harness.account_status}
@@ -446,6 +459,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           <ul className="list-inside list-disc space-y-1 text-[length:var(--fd-text-sm)] text-fg-muted">
             <li>Custom ACP agents are listed with status but never auto-upgraded.</li>
             <li>Detected CLIs without a managed path show install location and version only.</li>
+            <li>
+              Upgrade updates the copy FalconDeck uses. Other installs of the same CLI are listed
+              and left alone.
+            </li>
           </ul>
         </CardContent>
       </Card>

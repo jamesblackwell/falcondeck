@@ -15,6 +15,7 @@ import type {
   EventEnvelope,
   FalconDeckPreferences,
   HarnessesOverview,
+  HarnessInstallCopy,
   HarnessSummary,
   HarnessUpgradeJob,
   UtilityModelChoice,
@@ -2372,6 +2373,12 @@ export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
     kind,
     bin,
     resolved_path: optionalTrimmedString(raw.resolved_path),
+    extra_installs: Array.isArray(raw.extra_installs)
+      ? raw.extra_installs.flatMap((entry) => {
+          const copy = normalizeHarnessInstallCopy(entry);
+          return copy ? [copy] : [];
+        })
+      : [],
     installed,
     install_state:
       raw.install_state === "installed" || raw.install_state === "missing"
@@ -2412,6 +2419,18 @@ export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
         : "unsupported",
     last_checked_at: optionalTrimmedString(raw.last_checked_at),
     failure: optionalTrimmedString(raw.failure),
+  };
+}
+
+function normalizeHarnessInstallCopy(value: unknown): HarnessInstallCopy | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const path = optionalTrimmedString(raw.path);
+  if (!path) return null;
+  return {
+    path,
+    version: optionalTrimmedString(raw.version),
+    install_source: optionalTrimmedString(raw.install_source),
   };
 }
 

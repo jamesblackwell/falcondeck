@@ -3300,6 +3300,19 @@ pub enum HarnessProviderUsageState {
     Unsupported,
 }
 
+/// An additional copy of a harness CLI that FalconDeck found but is not using.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarnessInstallCopy {
+    /// Canonical path of the unused binary.
+    pub path: String,
+    /// Version reported by that binary, when the probe succeeded.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Best-effort classification (npm, homebrew, cargo, local, unknown).
+    #[serde(default)]
+    pub install_source: Option<String>,
+}
+
 /// Install status of one coding harness on one host (local or SSH).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HarnessSummary {
@@ -3315,6 +3328,10 @@ pub struct HarnessSummary {
     /// Absolute path when the binary was found, else `None`.
     #[serde(default)]
     pub resolved_path: Option<String>,
+    /// Other copies of the same CLI on this host that FalconDeck is not using.
+    /// Dual native+npm installs are common; Upgrade always targets `resolved_path`.
+    #[serde(default)]
+    pub extra_installs: Vec<HarnessInstallCopy>,
     /// Whether the binary currently exists on the host.
     #[serde(default)]
     pub installed: bool,

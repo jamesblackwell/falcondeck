@@ -1042,13 +1042,40 @@ describe("harness normalization", () => {
     expect(codex?.update_available).toBe(true);
     expect(codex?.install_source).toBe("npm");
     expect(codex?.version_state).toBe("update_available");
+    expect(codex?.extra_installs).toEqual([]);
     expect(codex?.provider_usage_state).toBe("supported");
     const customAgent = normalized.harnesses[1];
     expect(customAgent?.kind).toBe("detected");
     expect(customAgent?.resolved_path).toBeNull();
+    expect(customAgent?.extra_installs).toEqual([]);
     expect(customAgent?.installed).toBe(false);
     expect(customAgent?.install_state).toBe("missing");
     expect(customAgent?.provider_usage_state).toBe("unsupported");
+  });
+
+  it("keeps unused extra installs and drops copies without a path", () => {
+    const normalized = normalizeHarnessSummary({
+      id: "claude",
+      bin: "claude",
+      installed: true,
+      resolved_path: "/Users/x/.local/share/claude/versions/2.1.258",
+      extra_installs: [
+        {
+          path: "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+          version: "2.1.259",
+          install_source: "npm",
+        },
+        { version: "1.0.0" },
+        null,
+      ],
+    });
+    expect(normalized?.extra_installs).toEqual([
+      {
+        path: "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        version: "2.1.259",
+        install_source: "npm",
+      },
+    ]);
   });
 
   it("derives doctor states from legacy harness fields", () => {

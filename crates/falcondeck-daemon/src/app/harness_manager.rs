@@ -25,10 +25,10 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use falcondeck_core::{
-    HarnessAuthVerdict, HarnessCompatibilityVerdict, HarnessExecutableSource, HarnessInstallState,
-    HarnessKind, HarnessProviderUsageState, HarnessRefreshRequest, HarnessSummary,
-    HarnessUpgradeJob, HarnessUpgradeRequest, HarnessUpgradeStatus, HarnessVersionState,
-    HarnessesOverview,
+    HarnessAuthVerdict, HarnessCompatibilityVerdict, HarnessExecutableSource, HarnessInstallCopy,
+    HarnessInstallState, HarnessKind, HarnessProviderUsageState, HarnessRefreshRequest,
+    HarnessSummary, HarnessUpgradeJob, HarnessUpgradeRequest, HarnessUpgradeStatus,
+    HarnessVersionState, HarnessesOverview,
 };
 use futures_util::future::join_all;
 use tokio::{process::Command as TokioCommand, time::timeout};
@@ -51,6 +51,12 @@ const MAX_JOBS: usize = 32;
 const MAX_LOG_ENTRIES: usize = 100;
 /// Upper bound on characters kept per log line.
 const MAX_LOG_ENTRY_CHARS: usize = 4000;
+/// Unused copies of the same CLI listed on a harness row.
+const MAX_EXTRA_INSTALLS: usize = 8;
+/// Official Claude Code native installer (also used when nothing is installed).
+const CLAUDE_NATIVE_INSTALL: &str = "curl -fsSL https://claude.ai/install.sh | bash";
+/// npm global upgrade for Claude Code when the resolved binary is the npm package.
+const CLAUDE_NPM_UPGRADE: &str = "npm install -g @anthropic-ai/claude-code@latest";
 
 /// A harness FalconDeck knows how to detect and (optionally) manage. Entries
 /// without `npm_package` get no latest-version check; entries without
@@ -88,7 +94,12 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         label: "Claude Code",
         bin: "claude",
         npm_package: Some("@anthropic-ai/claude-code"),
-        upgrade_command: Some("npm install -g @anthropic-ai/claude-code"),
+        // Native installer is Anthropic's recommended path. Dual installs are
+        // common (native at ~/.local/bin plus Homebrew npm); packaged macOS
+        // prefers ~/.local/bin, so a hardcoded npm upgrade would succeed
+        // while the probed binary stayed stale. start_harness_upgrade picks
+        // native / npm / Homebrew from the resolved path.
+        upgrade_command: Some(CLAUDE_NATIVE_INSTALL),
         auth_probe: Some(&["auth", "status"]),
         builtin: true,
     },
@@ -167,6 +178,7 @@ impl KnownHarness {
             },
             bin: self.bin.to_string(),
             resolved_path: None,
+            extra_installs: Vec::new(),
             installed: false,
             install_state: HarnessInstallState::Missing,
             executable_source: HarnessExecutableSource::Unknown,
@@ -267,6 +279,11 @@ impl AppState {
                 harness.label
             ))
         })?;
+        let upgrade_command = if harness.id == "claude" {
+            claude_upgrade_command_for_host(&host)
+        } else {
+            upgrade_command.to_string()
+        };
 
         let job_id = Uuid::new_v4().to_string();
         let job = HarnessUpgradeJob {
@@ -289,12 +306,12 @@ impl AppState {
         let port = request.port;
         tokio::spawn(async move {
             let result = if host == LOCAL_HOST {
-                run_local_upgrade(upgrade_command).await
+                run_local_upgrade(&upgrade_command).await
             } else {
                 match host_provisioning::ssh_exec_with_timeout(
                     &host,
                     port,
-                    upgrade_command,
+                    &upgrade_command,
                     UPGRADE_TIMEOUT,
                 )
                 .await
@@ -421,6 +438,7 @@ impl AppState {
                     kind: HarnessKind::Acp,
                     bin: bin.clone(),
                     resolved_path: None,
+                    extra_installs: Vec::new(),
                     installed: false,
                     install_state: HarnessInstallState::Missing,
                     executable_source: HarnessExecutableSource::Unknown,
@@ -469,14 +487,14 @@ impl AppState {
             if let Some(previous) = previous {
                 for summary in &mut summaries {
                     if let Some((latest, update)) = previous.get(&summary.id) {
-                        summary.latest_version = latest.clone();
-                        summary.update_available = *update;
+                        carry_latest_version(summary, latest, *update);
                     }
                 }
             }
         }
 
         for summary in &mut summaries {
+            refine_upgrade_command(summary);
             finalize_doctor_state(summary);
         }
 
@@ -603,6 +621,105 @@ async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
     }
 }
 
+/// Picks the Claude upgrade that will actually move the binary FalconDeck
+/// probes. Packaged macOS prefers `~/.local/bin/claude` (native installer)
+/// over Homebrew npm; a hardcoded `npm install -g` updates the other copy.
+fn claude_upgrade_command_for_host(host: &str) -> String {
+    if host == LOCAL_HOST {
+        let resolution = crate::agent_binary::resolve_agent_binary("claude", "claude");
+        if Path::new(&resolution.executable).is_file() {
+            return claude_upgrade_command_for_path(&resolution.executable);
+        }
+        return CLAUDE_NATIVE_INSTALL.to_string();
+    }
+    claude_remote_upgrade_command().to_string()
+}
+
+fn claude_upgrade_command_for_path(path: &str) -> String {
+    if path.contains("node_modules") {
+        CLAUDE_NPM_UPGRADE.to_string()
+    } else if is_homebrew_claude_cask(path) {
+        "brew upgrade --cask claude-code@latest || brew upgrade --cask claude-code".to_string()
+    } else {
+        format!("{} update || {CLAUDE_NATIVE_INSTALL}", shell_quote(path))
+    }
+}
+
+fn claude_remote_upgrade_command() -> &'static str {
+    concat!(
+        r#"p=$(command -v claude 2>/dev/null) || true; "#,
+        r#"if [ -z "$p" ]; then "#,
+        r#"curl -fsSL https://claude.ai/install.sh | bash; "#,
+        r#"else target="$p"; "#,
+        r#"if [ -L "$p" ]; then t=$(readlink "$p"); "#,
+        r#"case "$t" in /*) target="$t" ;; *) target="$(dirname "$p")/$t" ;; esac; fi; "#,
+        r#"case "$target" in "#,
+        r#"*.local/share/claude*|*/.local/bin/claude*) "#,
+        r#""$HOME/.local/bin/claude" update || curl -fsSL https://claude.ai/install.sh | bash ;; "#,
+        r#"*node_modules*) npm install -g @anthropic-ai/claude-code@latest ;; "#,
+        r#"*Caskroom*) brew upgrade --cask claude-code@latest || brew upgrade --cask claude-code ;; "#,
+        r#"*) "$p" update || npm install -g @anthropic-ai/claude-code@latest || curl -fsSL https://claude.ai/install.sh | bash ;; "#,
+        r#"esac; fi"#,
+    )
+}
+
+fn is_homebrew_claude_cask(path: &str) -> bool {
+    !path.contains("node_modules")
+        && (path.contains("Caskroom")
+            || path.contains("/opt/homebrew/")
+            || path.contains("/Cellar/"))
+}
+
+fn refine_upgrade_command(summary: &mut HarnessSummary) {
+    if summary.id != "claude" {
+        return;
+    }
+    summary.upgrade_command = Some(match summary.resolved_path.as_deref() {
+        Some(path) if summary.installed => claude_upgrade_command_for_path(path),
+        _ => CLAUDE_NATIVE_INSTALL.to_string(),
+    });
+}
+
+/// Re-applies a previously fetched latest version to a fresh probe.
+/// `update_available` is recomputed from the new current version so a
+/// successful upgrade cannot keep the pre-upgrade badge.
+fn carry_latest_version(
+    summary: &mut HarnessSummary,
+    latest: &Option<String>,
+    previous_update: Option<bool>,
+) {
+    summary.latest_version = latest.clone();
+    summary.update_available = match (summary.version.as_deref(), latest.as_deref()) {
+        (Some(version), Some(latest_ver)) => Some(is_update_available(version, latest_ver)),
+        _ => previous_update,
+    };
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+async fn collect_extra_installs(primary: &str, bin: &str) -> Vec<HarnessInstallCopy> {
+    let extras: Vec<String> = crate::agent_binary::list_installed_agent_binaries(bin)
+        .into_iter()
+        .filter(|path| path != primary)
+        .take(MAX_EXTRA_INSTALLS)
+        .collect();
+    if extras.is_empty() {
+        return Vec::new();
+    }
+    let versions = join_all(extras.iter().map(|path| probe_binary_version(path))).await;
+    extras
+        .into_iter()
+        .zip(versions)
+        .map(|(path, version)| HarnessInstallCopy {
+            install_source: Some(classify_install_source(&path).to_string()),
+            version: version.ok().flatten(),
+            path,
+        })
+        .collect()
+}
+
 async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
     let resolution = crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
     let mut summary = harness.summary();
@@ -637,6 +754,9 @@ async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
         }
     }
     summary.last_checked_at = Some(checked_at());
+    if summary.installed {
+        summary.extra_installs = collect_extra_installs(&resolution.executable, harness.bin).await;
+    }
     summary
 }
 
@@ -654,6 +774,13 @@ async fn probe_configured_bin(summary: &mut HarnessSummary, bin: &str) {
         Err(failure) => summary.failure = Some(version_probe_failure(&summary.label, failure)),
     }
     summary.last_checked_at = Some(checked_at());
+    if summary.installed {
+        let primary = summary
+            .resolved_path
+            .clone()
+            .unwrap_or_else(|| bin.to_string());
+        summary.extra_installs = collect_extra_installs(&primary, bin).await;
+    }
 }
 
 /// Applies a resolved executable path to a summary, classifying the install
@@ -698,6 +825,7 @@ fn classify_install_source(path: &str) -> &'static str {
     } else if path.contains(".cargo/bin") {
         "cargo"
     } else if path.contains(".local/bin")
+        || path.contains(".local/share/claude")
         || path.contains(".opencode/bin")
         || path.contains(".grok/bin")
         || path.contains(".codex/packages/standalone")
@@ -752,6 +880,9 @@ async fn probe_auth_status(executable: &str, args: &[&str]) -> AuthProbeResult {
 }
 
 fn interpret_auth_probe(success: bool, output: &str) -> AuthProbeResult {
+    if let Some(result) = interpret_json_auth_probe(output) {
+        return result;
+    }
     if !success {
         return AuthProbeResult {
             verdict: HarnessAuthVerdict::Unauthenticated,
@@ -771,6 +902,58 @@ fn interpret_auth_probe(success: bool, output: &str) -> AuthProbeResult {
         status: (!flat.is_empty()).then_some(flat),
         failure: None,
     }
+}
+
+/// Claude Code's `auth status` prints JSON (`loggedIn`, `email`, …). Flatten
+/// that into the one-line account status the panel shows for Codex/Cursor,
+/// and never surface org ids or credential paths.
+fn interpret_json_auth_probe(output: &str) -> Option<AuthProbeResult> {
+    let value = json_from_auth_output(output)?;
+    let logged_in = value
+        .get("loggedIn")
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| {
+            value
+                .get("authenticated")
+                .and_then(serde_json::Value::as_bool)
+        })?;
+    if !logged_in {
+        return Some(AuthProbeResult {
+            verdict: HarnessAuthVerdict::Unauthenticated,
+            status: None,
+            failure: Some(
+                "Authentication check failed. Sign in with the harness CLI, then check again."
+                    .to_string(),
+            ),
+        });
+    }
+    let email = value
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|email| !email.is_empty());
+    let status = match email {
+        Some(email) => format!("Logged in as {email}"),
+        None => "Logged in".to_string(),
+    };
+    Some(AuthProbeResult {
+        verdict: HarnessAuthVerdict::Authenticated,
+        status: Some(truncate(&status, 300)),
+        failure: None,
+    })
+}
+
+fn json_from_auth_output(output: &str) -> Option<serde_json::Value> {
+    let trimmed = output.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Some(value);
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    serde_json::from_str(&trimmed[start..=end]).ok()
 }
 
 async fn run_with_timeout(executable: &str, args: &[&str]) -> Result<ProbeOutput, ProbeFailure> {
@@ -912,6 +1095,7 @@ async fn fetch_latest_version(client: &reqwest::Client, package: &str) -> Option
 /// a single `split_once(':')` so paths containing colons survive.
 const REMOTE_BIN: &str = "FD_BIN:";
 const REMOTE_VERSION: &str = "FD_VER:";
+const REMOTE_ALT: &str = "FD_ALT:";
 const REMOTE_AUTH_OK: &str = "FD_AUTH_OK:";
 const REMOTE_AUTH_FAILED: &str = "FD_AUTH_FAILED:";
 
@@ -939,6 +1123,7 @@ async fn probe_remote_harnesses(
     // resolved path entry.
     let mut paths: HashMap<String, String> = HashMap::new();
     let mut versions: HashMap<String, String> = HashMap::new();
+    let mut alts: HashMap<String, Vec<HarnessInstallCopy>> = HashMap::new();
     let mut auths: HashMap<String, String> = HashMap::new();
     let mut auth_failures = std::collections::HashSet::new();
     for line in output.stdout.lines() {
@@ -952,11 +1137,24 @@ async fn probe_remote_harnesses(
             {
                 versions.insert(bin.to_string(), version);
             }
+        } else if let Some(rest) = line.strip_prefix(REMOTE_ALT) {
+            if let Some((bin, rest)) = rest.split_once(':')
+                && let Some((version, path)) = rest.split_once(':')
+                && !path.is_empty()
+            {
+                alts.entry(bin.to_string())
+                    .or_default()
+                    .push(HarnessInstallCopy {
+                        path: path.to_string(),
+                        version: parse_version(version),
+                        install_source: Some(classify_install_source(path).to_string()),
+                    });
+            }
         } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH_OK)
             && let Some((bin, status)) = rest.split_once(':')
             && !status.trim().is_empty()
         {
-            auths.insert(bin.to_string(), truncate(status.trim(), 300));
+            auths.insert(bin.to_string(), truncate(status.trim(), 8000));
         } else if let Some(bin) = line.strip_prefix(REMOTE_AUTH_FAILED) {
             auth_failures.insert(bin.to_string());
         }
@@ -976,10 +1174,22 @@ async fn probe_remote_harnesses(
                 summary.failure = Some(missing_binary_failure(&summary.label, &summary.bin));
             }
             summary.version = versions.get(harness.bin).cloned();
+            if let Some(copies) = alts.get(harness.bin) {
+                summary.extra_installs = copies
+                    .iter()
+                    .filter(|copy| Some(copy.path.as_str()) != summary.resolved_path.as_deref())
+                    .take(MAX_EXTRA_INSTALLS)
+                    .cloned()
+                    .collect();
+            }
             if harness.auth_probe.is_some() && summary.installed {
                 if let Some(status) = auths.get(harness.bin) {
-                    summary.account_status = Some(status.clone());
-                    summary.auth_verdict = HarnessAuthVerdict::Authenticated;
+                    let interpreted = interpret_auth_probe(true, status);
+                    summary.account_status = interpreted.status;
+                    summary.auth_verdict = interpreted.verdict;
+                    if let Some(failure) = interpreted.failure {
+                        summary.failure = Some(failure);
+                    }
                 } else if auth_failures.contains(harness.bin) {
                     summary.auth_verdict = HarnessAuthVerdict::Unauthenticated;
                     summary.failure = Some(
@@ -1006,11 +1216,29 @@ fn remote_probe_script() -> String {
         script.push_str(harness.bin);
         script.push(' ');
     }
-    script.push_str("\nfor bin do\n  p=$(command -v \"$bin\" 2>/dev/null) || continue\n  echo \"FD_BIN:$bin:$p\"\n  v=$(\"$bin\" --version 2>&1 | head -n 1)\n  echo \"FD_VER:$bin:$v\"\ndone\n");
+    script.push_str(
+        r#"
+for bin do
+  p=$(command -v "$bin" 2>/dev/null) || continue
+  echo "FD_BIN:$bin:$p"
+  v=$("$p" --version 2>&1 | head -n 1)
+  echo "FD_VER:$bin:$v"
+  seen="$p"
+  for candidate in "$HOME/.local/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/.opencode/bin/$bin" /opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin
+  do
+    [ -f "$candidate" ] || continue
+    case " $seen " in *" $candidate "*) continue ;; esac
+    seen="$seen $candidate"
+    av=$("$candidate" --version 2>&1 | head -n 1 | tr ':' ' ')
+    echo "FD_ALT:$bin:$av:$candidate"
+  done
+done
+"#,
+    );
     for harness in KNOWN_HARNESSES.iter().filter(|h| h.auth_probe.is_some()) {
         let args = harness.auth_probe.unwrap_or_default().join(" ");
         script.push_str(&format!(
-            "if command -v {bin} >/dev/null 2>&1; then\n  if a=$(\"{bin}\" {args} 2>&1); then\n    a=$(printf '%s' \"$a\" | head -n 2 | tr '\\n' ' ')\n    echo \"FD_AUTH_OK:{bin}:$a\"\n  else\n    echo \"FD_AUTH_FAILED:{bin}\"\n  fi\nfi\n",
+            "if command -v {bin} >/dev/null 2>&1; then\n  if a=$(\"{bin}\" {args} 2>&1); then\n    a=$(printf '%s' \"$a\" | tr '\\n' ' ')\n    echo \"FD_AUTH_OK:{bin}:$a\"\n  else\n    echo \"FD_AUTH_FAILED:{bin}\"\n  fi\nfi\n",
             bin = harness.bin
         ));
     }
@@ -1172,7 +1400,113 @@ mod tests {
             classify_install_source("/Users/x/.codex/packages/standalone/releases/0.147.0/codex"),
             "local"
         );
+        assert_eq!(
+            classify_install_source("/Users/x/.local/share/claude/versions/2.1.258"),
+            "local"
+        );
         assert_eq!(classify_install_source("/usr/bin/tool"), "unknown");
+    }
+
+    #[test]
+    fn claude_upgrade_targets_the_resolved_install() {
+        let claude = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "claude")
+            .expect("claude is a curated harness");
+        assert!(
+            claude
+                .upgrade_command
+                .expect("claude has an upgrade command")
+                .contains("claude.ai/install.sh"),
+            "uninstalled Claude should use the native installer, not npm"
+        );
+
+        let native =
+            claude_upgrade_command_for_path("/Users/x/.local/share/claude/versions/2.1.258");
+        assert!(native.contains("update"));
+        assert!(native.contains("claude.ai/install.sh"));
+        assert!(
+            !native.contains("npm install"),
+            "native installs must not be upgraded via npm: {native}"
+        );
+
+        let npm = claude_upgrade_command_for_path(
+            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        );
+        assert_eq!(npm, CLAUDE_NPM_UPGRADE);
+
+        let cask =
+            claude_upgrade_command_for_path("/opt/homebrew/Caskroom/claude-code/2.1.259/claude");
+        assert!(cask.contains("brew upgrade --cask"));
+
+        let remote = claude_remote_upgrade_command();
+        assert!(remote.contains("command -v claude"));
+        assert!(remote.contains("node_modules"));
+        assert!(remote.contains("claude.ai/install.sh"));
+        assert!(remote.contains("readlink"));
+    }
+
+    #[test]
+    fn carried_latest_version_is_recompared_after_upgrade() {
+        let mut summary = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "claude")
+            .expect("claude is a curated harness")
+            .summary();
+        summary.version = Some("2.1.259".to_string());
+
+        carry_latest_version(&mut summary, &Some("2.1.259".to_string()), Some(true));
+
+        assert_eq!(summary.latest_version.as_deref(), Some("2.1.259"));
+        assert_eq!(summary.update_available, Some(false));
+    }
+
+    #[test]
+    fn claude_json_auth_status_becomes_a_human_line() {
+        let result = interpret_auth_probe(
+            true,
+            r#"{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "email": "james@blackwell.page",
+  "orgId": "secret-org-id",
+  "subscriptionType": "max"
+}"#,
+        );
+
+        assert_eq!(result.verdict, HarnessAuthVerdict::Authenticated);
+        assert_eq!(
+            result.status.as_deref(),
+            Some("Logged in as james@blackwell.page")
+        );
+        assert!(!result.status.unwrap().contains("secret-org-id"));
+    }
+
+    #[test]
+    fn claude_json_auth_logged_out_is_unauthenticated() {
+        let result = interpret_auth_probe(true, r#"{"loggedIn": false}"#);
+
+        assert_eq!(result.verdict, HarnessAuthVerdict::Unauthenticated);
+        assert_eq!(result.status, None);
+    }
+
+    #[test]
+    fn remote_alt_lines_capture_unused_copies() {
+        let line = "FD_ALT:claude:2.1.259 (Claude Code):/opt/homebrew/bin/claude";
+        let rest = line.strip_prefix(REMOTE_ALT).unwrap();
+        let (bin, rest) = rest.split_once(':').unwrap();
+        let (version, path) = rest.split_once(':').unwrap();
+        assert_eq!(bin, "claude");
+        assert_eq!(parse_version(version).as_deref(), Some("2.1.259"));
+        assert_eq!(path, "/opt/homebrew/bin/claude");
+    }
+
+    #[test]
+    fn remote_probe_script_lists_unused_install_locations() {
+        let script = remote_probe_script();
+        assert!(script.contains("FD_ALT:"));
+        assert!(script.contains("$HOME/.local/bin/$bin"));
+        assert!(script.contains("/opt/homebrew/bin/$bin"));
     }
 
     #[test]

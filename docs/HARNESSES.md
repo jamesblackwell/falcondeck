@@ -21,11 +21,12 @@ An overview is a list of `HarnessSummary` entries for one host:
 | --- | --- |
 | `id` / `label` / `kind` | Identity; `kind` is `builtin` (codex, claude), `acp` (providers.json entry), or `detected` (known CLI found on the machine) |
 | `bin` / `resolved_path` / `installed` | Binary name and canonical path (npm symlinks resolve into `node_modules`) |
+| `extra_installs` | Other copies of the same CLI on this host that FalconDeck is not using (path, version, install source). Dual native+npm installs are common; Upgrade always targets `resolved_path` |
 | `version` | Parsed from `<bin> --version` (first `x.y` token) |
 | `latest_version` / `update_available` | Populated only by an explicit refresh with update checks enabled |
 | `install_source` | Best-effort classification: npm / homebrew / cargo / local / unknown |
 | `upgrade_command` | Present only for curated, managed harnesses |
-| `account_status` | Auth/subscription line for harnesses with a probe (`codex login status`, `claude auth status`) |
+| `account_status` | Auth/subscription line for harnesses with a probe (`codex login status`, `claude auth status`). Claude's JSON `auth status` is flattened to `Logged in as <email>` so org ids never reach the panel |
 
 Entries come from two sources, merged by id:
 
@@ -35,7 +36,10 @@ Entries come from two sources, merged by id:
    probe. Adding a harness means adding one struct — the panel, RPC, and
    per-host probing pick it up automatically. Cursor, Antigravity, and Grok ship via
    their own install scripts (no npm package, so no latest-version check).
-   Current Cursor prints `YYYY.MM.DD-hash`; the original 2025 beta printed a
+   Claude Code's recommended path is the native installer
+   (`~/.local/bin/claude` → `~/.local/share/claude/versions/`); npm global is
+   used only when that is the resolved binary. Dual native+npm installs are
+   common on macOS. Current Cursor prints `YYYY.MM.DD-hash`; the original 2025 beta printed a
    bare commit hash, which the version parser treats as "no version". Cursor's
    installer also writes `~/.local/bin/agent`, colliding with Grok; the
    upgrade command restores a pre-existing non-Cursor `agent` symlink.
@@ -160,6 +164,16 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   login-shell PATH resolves `npm` / `curl` (the packaged macOS daemon does
   not inherit the terminal PATH). 600s ceiling, output appended to the job
   log.
+- Claude upgrades the *resolved* install, not a hardcoded npm command.
+  Packaged macOS prefers `~/.local/bin/claude` (native) over Homebrew npm;
+  running `npm install -g` would report success while the probed binary
+  stayed stale. Native → `claude update` (falling back to `install.sh`);
+  npm → `npm install -g @anthropic-ai/claude-code@latest`; Homebrew cask →
+  `brew upgrade --cask`. Remote upgrades classify `command -v claude`
+  (following one symlink) the same way.
+- A cheap re-probe that carries over `latest_version` recomputes
+  `update_available` against the new current version, so a successful
+  upgrade cannot keep the pre-upgrade badge.
 - Remote upgrades run the same command string as a single BatchMode ssh
   script with the same ceiling.
 - Jobs are in-memory only (like provisioning jobs): meaningless across a
@@ -174,6 +188,11 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 ## Client notes
 
+- When `extra_installs` is non-empty the panel prefixes the resolved path
+  with **Using** and lists each unused copy as **Also found … — not used**.
+  A warning badge **Another install** appears when an unused copy reports a
+  different version. Upgrade still only moves the Using copy; extras are
+  never uninstalled automatically.
 - The desktop panel keys hosts by `HostView.id` (`"local"` for this Mac)
   and derives `ssh_target`/`port` from the structured host record — never
   by parsing a joined string. Switching to a remote host clears the view
