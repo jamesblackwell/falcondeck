@@ -11,20 +11,31 @@ import {
 
 import { useConversationItems, useSessionStore } from '@/store'
 
-export function useConversationPresentation(): ConversationPresentation {
-  const items = useConversationItems()
+export function useConversationPresentation(options?: {
+  pause?: boolean
+}): ConversationPresentation {
+  const pause = options?.pause === true
+  const items = useConversationItems(options)
   const preferences = useSessionStore((s) => s.snapshot?.preferences ?? null)
+  const frozenStreaming = useRef<boolean | null>(null)
   // Subscribe to the smallest value the presentation needs. A running turn
   // keeps a trailing collapsed work session live even after its last tool has
   // settled; without this, iOS briefly claims the session already "Worked"
   // while the thought nested inside it is still streaming.
-  const isStreaming = useSessionStore((s) =>
-    threadForSelection(
-      s.snapshot?.threads ?? [],
-      s.selectedWorkspaceId,
-      s.selectedThreadId,
-    )?.status === 'running'
-  )
+  const isStreaming = useSessionStore((s) => {
+    const live =
+      threadForSelection(
+        s.snapshot?.threads ?? [],
+        s.selectedWorkspaceId,
+        s.selectedThreadId,
+      )?.status === 'running'
+    if (!pause) {
+      frozenStreaming.current = live
+      return live
+    }
+    if (frozenStreaming.current == null) frozenStreaming.current = live
+    return frozenStreaming.current
+  })
   const presentationRef = useRef<ConversationPresentation | null>(null)
 
   // This ref is a render-only structural-sharing cache. React has no
@@ -71,6 +82,8 @@ export function useConversationPresentation(): ConversationPresentation {
   return presentation
 }
 
-export function useRenderBlocks(): ConversationRenderBlock[] {
-  return useConversationPresentation().history_blocks
+export function useRenderBlocks(options?: {
+  pause?: boolean
+}): ConversationRenderBlock[] {
+  return useConversationPresentation(options).history_blocks
 }

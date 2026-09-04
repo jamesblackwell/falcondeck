@@ -12,6 +12,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { FlashList } from "@shopify/flash-list";
 import { ChevronLeft, MoreHorizontal, SquarePen } from "lucide-react-native";
 import { DrawerActions } from "@react-navigation/native";
+import { useDrawerStatus } from "@react-navigation/drawer";
 import { useNavigation } from "expo-router";
 import {
   composerProviderFor,
@@ -124,8 +125,14 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { theme } = useUnistyles();
   const navigation = useNavigation();
+  // The full-width drawer covers the transcript but leaves it mounted.
+  // Pause live item subscriptions so a streaming turn does not re-parse
+  // Markdown under the sidebar; the store still applies events.
+  const pauseLiveTranscript = useDrawerStatus() === "open";
 
-  const presentation: ConversationPresentation = useConversationPresentation();
+  const presentation: ConversationPresentation = useConversationPresentation({
+    pause: pauseLiveTranscript,
+  });
   const blocks = presentation.history_blocks;
   const liveActivityGroups = presentation.live_activity_groups;
   const interactiveRequests = useInteractiveRequests();
@@ -137,7 +144,7 @@ export default function HomeScreen() {
   const selectedThread = useSelectedThread();
   const selectedThreadHistory = useSelectedThreadHistory();
   const selectedThreadDetailError = useSelectedThreadDetailError();
-  const conversationItems = useConversationItems();
+  const conversationItems = useConversationItems({ pause: pauseLiveTranscript });
   const workspace = useSelectedWorkspace();
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);

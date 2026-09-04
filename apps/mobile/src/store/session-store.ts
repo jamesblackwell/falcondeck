@@ -5,7 +5,7 @@
  * maintains the same state shape as the desktop/remote-web apps,
  * plus a mobile-only cache of recent thread history windows.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
@@ -1157,23 +1157,45 @@ export function useSelectedThreadDetailError() {
   );
 }
 
-export function useConversationItems() {
+function selectLiveConversationItems(state: SessionStore): ConversationItem[] {
+  const selectedThread = threadForSelection(
+    state.snapshot?.threads ?? EMPTY_THREADS,
+    state.selectedWorkspaceId,
+    state.selectedThreadId,
+  );
+  if (!selectedThread) return EMPTY_ITEMS;
+  if (
+    state.threadDetail &&
+    state.threadDetail.workspace.id === state.selectedWorkspaceId &&
+    state.threadDetail.thread.id === selectedThread.id
+  ) {
+    return state.threadDetail.items;
+  }
+  if (state.selectedThreadId) return state.threadItems[state.selectedThreadId] ?? EMPTY_ITEMS;
+  return EMPTY_ITEMS;
+}
+
+/**
+ * Items for the selected thread.
+ *
+ * `pause` keeps returning the array from the last unpaused snapshot. The
+ * drawer covers the transcript but does not unmount it, so without this a
+ * streaming turn still re-derives presentation and re-parses Markdown under
+ * the sidebar. The store keeps applying events; closing the drawer reads the
+ * live items in one paint.
+ */
+export function useConversationItems(options?: { pause?: boolean }) {
+  const pause = options?.pause === true;
+  const frozenItems = useRef<ConversationItem[] | null>(null);
   const selectedItems = useSessionStore(
     useShallow((s) => {
-      const selectedThread = threadForSelection(
-        s.snapshot?.threads ?? EMPTY_THREADS,
-        s.selectedWorkspaceId,
-        s.selectedThreadId,
-      );
-      if (!selectedThread) return EMPTY_ITEMS;
-      if (
-        s.threadDetail &&
-        s.threadDetail.workspace.id === s.selectedWorkspaceId &&
-        s.threadDetail.thread.id === selectedThread.id
-      )
-        return s.threadDetail.items;
-      if (s.selectedThreadId) return s.threadItems[s.selectedThreadId] ?? EMPTY_ITEMS;
-      return EMPTY_ITEMS;
+      const live = selectLiveConversationItems(s);
+      if (!pause) {
+        frozenItems.current = live;
+        return live;
+      }
+      if (frozenItems.current == null) frozenItems.current = live;
+      return frozenItems.current;
     }),
   );
   const pendingNewThreadItem = useUIStore((state) =>
