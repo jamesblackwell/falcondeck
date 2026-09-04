@@ -10,7 +10,7 @@ export function speechSynthesisBlob({
   audio_base64,
   mime_type,
 }: SpeechSynthesisResponse): Blob {
-  return new Blob([base64ToBytes(audio_base64)], {
+  return new Blob([base64ToBytes(audio_base64) as BlobPart], {
     type: mime_type || "audio/mpeg",
   });
 }
