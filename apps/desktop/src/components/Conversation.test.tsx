@@ -592,6 +592,218 @@ describe("Conversation empty state", () => {
     expect(transcript.scrollTop).toBe(100);
   });
 
+  it("snaps a send to the bottom even when the sent message itself lands below the tail", () => {
+    const earlier = {
+      kind: "user_message" as const,
+      id: "user-1",
+      text: "Earlier message",
+      attachments: [],
+      created_at: "2026-08-08T12:00:00Z",
+    };
+    const sent = {
+      kind: "user_message" as const,
+      id: "user-2",
+      text: "A longer message that adds a few hundred pixels below the reader",
+      attachments: [],
+      created_at: "2026-08-08T12:00:05Z",
+    };
+    const { rerender } = render(
+      <Conversation threadKey="thread-1" items={[earlier]} />,
+    );
+    const transcript = screen.getByRole("log", { name: "Conversation" });
+    let scrollHeight = 1_000;
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(transcript, "clientHeight", {
+      configurable: true,
+      get: () => 500,
+    });
+    // Parked 150px above the tail — inside the jump-button threshold.
+    transcript.scrollTop = 350;
+    fireEvent.scroll(transcript);
+
+    const raf = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((frame) => {
+        frame(performance.now() + 10_000);
+        return 0;
+      });
+    try {
+      // The send commit appends the message and the Sending row in one go:
+      // measured live, the reader now looks 450px from the tail.
+      scrollHeight = 1_300;
+      rerender(
+        <Conversation
+          threadKey="thread-1"
+          items={[earlier, sent]}
+          isSending
+        />,
+      );
+    } finally {
+      raf.mockRestore();
+    }
+
+    expect(transcript.scrollTop).toBe(800);
+  });
+
+  it("keeps following when the tail grows between a pin and its scroll event", () => {
+    const observers = captureResizeObservers();
+    const makeItem = (id: string) => ({
+      kind: "assistant_message" as const,
+      id,
+      text: `Reply ${id}`,
+      created_at: "2026-08-08T12:00:00Z",
+    });
+    try {
+      const { rerender } = render(
+        <Conversation
+          threadKey="thread-1"
+          items={[makeItem("a-1")]}
+          isThinking
+        />,
+      );
+      const transcript = screen.getByRole("log", { name: "Conversation" });
+      let scrollHeight = 1_000;
+      Object.defineProperty(transcript, "scrollHeight", {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(transcript, "clientHeight", {
+        configurable: true,
+        get: () => 500,
+      });
+      transcript.scrollTop = 500;
+      fireEvent.scroll(transcript);
+
+      // A streaming delta lands; the resize observation pins to the new tail.
+      scrollHeight = 1_100;
+      rerender(
+        <Conversation
+          threadKey="thread-1"
+          items={[makeItem("a-1"), makeItem("a-2")]}
+          isThinking
+        />,
+      );
+      observers.flush();
+      expect(transcript.scrollTop).toBe(600);
+
+      // Before the browser delivers that pin's scroll event, another delta
+      // grows the tail past the follow threshold. The echo reports the pinned
+      // position against the taller layout; it is not the reader scrolling up.
+      scrollHeight = 1_300;
+      fireEvent.scroll(transcript);
+      expect(
+        screen.queryByRole("button", { name: "Jump to latest message" }),
+      ).toBeNull();
+
+      scrollHeight = 1_400;
+      rerender(
+        <Conversation
+          threadKey="thread-1"
+          items={[makeItem("a-1"), makeItem("a-2"), makeItem("a-3")]}
+          isThinking
+        />,
+      );
+      observers.flush();
+      expect(transcript.scrollTop).toBe(900);
+    } finally {
+      observers.restore();
+    }
+  });
+
+  it("stops following when the reader scrolls up from the tail", () => {
+    const makeItem = (id: string) => ({
+      kind: "assistant_message" as const,
+      id,
+      text: `Reply ${id}`,
+      created_at: "2026-08-08T12:00:00Z",
+    });
+    const { rerender } = render(
+      <Conversation threadKey="thread-1" items={[makeItem("a-1")]} isThinking />,
+    );
+    const transcript = screen.getByRole("log", { name: "Conversation" });
+    let scrollHeight = 1_000;
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(transcript, "clientHeight", {
+      configurable: true,
+      get: () => 500,
+    });
+    transcript.scrollTop = 500;
+    fireEvent.scroll(transcript);
+
+    transcript.scrollTop = 200;
+    fireEvent.scroll(transcript);
+
+    scrollHeight = 1_200;
+    rerender(
+      <Conversation
+        threadKey="thread-1"
+        items={[makeItem("a-1"), makeItem("a-2")]}
+        isThinking
+      />,
+    );
+    expect(transcript.scrollTop).toBe(200);
+    expect(
+      screen.getByRole("button", { name: "Jump to latest message" }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers the jump button to a parked reader once the tail outgrows the threshold", () => {
+    const observers = captureResizeObservers();
+    const makeItem = (id: string) => ({
+      kind: "assistant_message" as const,
+      id,
+      text: `Reply ${id}`,
+      created_at: "2026-08-08T12:00:00Z",
+    });
+    try {
+      const { rerender } = render(
+        <Conversation
+          threadKey="thread-1"
+          items={[makeItem("a-1")]}
+          isThinking
+        />,
+      );
+      const transcript = screen.getByRole("log", { name: "Conversation" });
+      let scrollHeight = 1_000;
+      Object.defineProperty(transcript, "scrollHeight", {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(transcript, "clientHeight", {
+        configurable: true,
+        get: () => 500,
+      });
+      // 100px above the tail: not following, but not far enough for the button.
+      transcript.scrollTop = 400;
+      fireEvent.scroll(transcript);
+      expect(
+        screen.queryByRole("button", { name: "Jump to latest message" }),
+      ).toBeNull();
+
+      scrollHeight = 1_300;
+      rerender(
+        <Conversation
+          threadKey="thread-1"
+          items={[makeItem("a-1"), makeItem("a-2")]}
+          isThinking
+        />,
+      );
+      observers.flush();
+      expect(transcript.scrollTop).toBe(400);
+      expect(
+        screen.getByRole("button", { name: "Jump to latest message" }),
+      ).toBeInTheDocument();
+    } finally {
+      observers.restore();
+    }
+  });
+
   it("stays pinned to the bottom when the viewport shrinks while following", () => {
     const observers = captureResizeObservers();
     const item = {

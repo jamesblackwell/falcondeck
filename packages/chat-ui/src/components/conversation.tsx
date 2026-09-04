@@ -243,6 +243,16 @@ export const Conversation = memo(function Conversation({
   const readAloudThreadKeyRef = useRef<string | null>(threadKey);
   const lastRestoredThreadKeyRef = useRef<string | null>(null);
   const stickyToBottomRef = useRef(true);
+  /// Distance from the tail as of the last scroll or resize observation —
+  /// the reader's position *before* the current commit landed. The send snap
+  /// judges against this rather than a live read, because a live read after
+  /// the commit already includes the just-sent message and the Sending row.
+  const readerDistanceRef = useRef(0);
+  /// scrollTop as last written by this component. The scroll event that
+  /// echoes a programmatic write arrives a frame later, by which time a
+  /// streaming tail may already have grown again; that echo must not be
+  /// mistaken for the reader scrolling away.
+  const programmaticScrollTopRef = useRef<number | null>(null);
   const wasSendingRef = useRef(isSending);
   const smoothScrollFrameRef = useRef<number | null>(null);
   const prependAnchorRef = useRef<{
@@ -449,21 +459,32 @@ export const Conversation = memo(function Conversation({
   }, [threadKey]);
 
   const persistScrollPosition = useCallback(
-    (keyOverride?: string | null) => {
+    (keyOverride?: string | null): number | undefined => {
       const key = keyOverride ?? threadKey;
       const el = scrollRef.current;
-      if (!key || !el) return;
+      if (!el) return undefined;
 
       const distanceFromBottom =
         el.scrollHeight - el.scrollTop - el.clientHeight;
-      scrollPositionsRef.current.delete(key);
-      scrollPositionsRef.current.set(key, {
-        scrollTop: el.scrollTop,
-        stickToBottom: distanceFromBottom <= AUTO_SCROLL_THRESHOLD,
-      });
+      readerDistanceRef.current = distanceFromBottom;
+      if (key) {
+        scrollPositionsRef.current.delete(key);
+        scrollPositionsRef.current.set(key, {
+          scrollTop: el.scrollTop,
+          stickToBottom: distanceFromBottom <= AUTO_SCROLL_THRESHOLD,
+        });
+      }
+      return distanceFromBottom;
     },
     [threadKey],
   );
+
+  /// Every scroll position this component sets goes through here so the
+  /// echoing scroll event can be told apart from reader input.
+  const writeScrollTop = useCallback((el: HTMLDivElement, value: number) => {
+    el.scrollTop = value;
+    programmaticScrollTopRef.current = el.scrollTop;
+  }, []);
 
   const cancelSmoothScroll = useCallback(() => {
     if (smoothScrollFrameRef.current === null) return;
@@ -476,11 +497,11 @@ export const Conversation = memo(function Conversation({
     if (!el) return;
 
     cancelSmoothScroll();
-    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    writeScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight));
     stickyToBottomRef.current = true;
     setShowJump(false);
     persistScrollPosition();
-  }, [cancelSmoothScroll, persistScrollPosition]);
+  }, [cancelSmoothScroll, persistScrollPosition, writeScrollTop]);
 
   /// Glides to the bottom instead of teleporting — for the send snap and the
   /// jump button, where the reader is watching. The target is re-read every
@@ -508,7 +529,7 @@ export const Conversation = memo(function Conversation({
     const step = (now: number) => {
       const t = Math.min(1, (now - start) / SMOOTH_SCROLL_DURATION_MS);
       const eased = 1 - (1 - t) ** 3;
-      el.scrollTop = from + (target() - from) * eased;
+      writeScrollTop(el, from + (target() - from) * eased);
       if (t < 1) {
         smoothScrollFrameRef.current = window.requestAnimationFrame(step);
         return;
@@ -518,7 +539,12 @@ export const Conversation = memo(function Conversation({
       persistScrollPosition();
     };
     smoothScrollFrameRef.current = window.requestAnimationFrame(step);
-  }, [cancelSmoothScroll, persistScrollPosition, scrollToBottom]);
+  }, [
+    cancelSmoothScroll,
+    persistScrollPosition,
+    scrollToBottom,
+    writeScrollTop,
+  ]);
 
   /// Pins to the bottom before the browser paints. Streaming must use this:
   /// deferring the scroll by even one frame paints the taller content at the
@@ -526,8 +552,9 @@ export const Conversation = memo(function Conversation({
   const pinToBottomNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    writeScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight));
     stickyToBottomRef.current = true;
+    readerDistanceRef.current = 0;
     if (threadKey) {
       scrollPositionsRef.current.delete(threadKey);
       scrollPositionsRef.current.set(threadKey, {
@@ -535,7 +562,7 @@ export const Conversation = memo(function Conversation({
         stickToBottom: true,
       });
     }
-  }, [threadKey]);
+  }, [threadKey, writeScrollTop]);
 
   /// Deferred pin, for thread switches only: restored content (images, code
   /// blocks, fonts) settles its height over the next couple of frames, so the
@@ -570,7 +597,7 @@ export const Conversation = memo(function Conversation({
       return;
     }
 
-    el.scrollTop = clampScrollTop(savedPosition.scrollTop, el);
+    writeScrollTop(el, clampScrollTop(savedPosition.scrollTop, el));
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
     setShowJump(distanceFromBottom > JUMP_THRESHOLD);
@@ -581,6 +608,7 @@ export const Conversation = memo(function Conversation({
     schedulePinToBottom,
     scrollToBottom,
     threadKey,
+    writeScrollTop,
   ]);
 
   const handleScroll = useCallback(() => {
@@ -594,9 +622,20 @@ export const Conversation = memo(function Conversation({
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const isNearBottom = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
-    stickyToBottomRef.current = isNearBottom;
+    // The echo of our own pin reports the position we wrote, but against a
+    // layout that may have grown since; only reader input may stop following.
+    const isProgrammaticEcho =
+      programmaticScrollTopRef.current !== null &&
+      Math.abs(el.scrollTop - programmaticScrollTopRef.current) < 1;
+    if (isNearBottom) {
+      stickyToBottomRef.current = true;
+    } else if (!isProgrammaticEcho) {
+      stickyToBottomRef.current = false;
+    }
     setSelectedExcerpt(null);
-    setShowJump(distanceFromBottom > JUMP_THRESHOLD);
+    setShowJump(
+      !stickyToBottomRef.current && distanceFromBottom > JUMP_THRESHOLD,
+    );
     persistScrollPosition();
   }, [persistScrollPosition]);
 
@@ -729,7 +768,7 @@ export const Conversation = memo(function Conversation({
       : heightDelta !== 0;
 
     if (needsAdjustment) {
-      scroll.scrollTop = anchor.scrollTop + offsetDelta;
+      writeScrollTop(scroll, anchor.scrollTop + offsetDelta);
       stickyToBottomRef.current = false;
       persistScrollPosition();
       prependAnchorRef.current = null;
@@ -741,22 +780,29 @@ export const Conversation = memo(function Conversation({
       // The request completed without adding a page (failure or end reached).
       prependAnchorRef.current = null;
     }
-  }, [isLoadingOlder, persistScrollPosition, renderBlocks]);
+  }, [
+    isLoadingOlder,
+    persistScrollPosition,
+    renderBlocks,
+    writeScrollTop,
+  ]);
 
   // Sending re-arms bottom-following for a reader hovering just above the tail
   // (within the jump-button threshold, wider than the streaming stick), so
   // their own message lands in view; a reader deep in the history keeps their
   // place. Rising edge only — isSending holding true across a slow transport
   // must not fight someone who scrolls up mid-send.
+  //
+  // The reader's position is the one observed before this commit. The commit
+  // itself appends the sent message and the Sending row below the reader, so
+  // a live measurement here would count them as distance the reader had put
+  // between themselves and the tail and refuse to follow a one-line send.
   useLayoutEffect(() => {
     const wasSending = wasSendingRef.current;
     wasSendingRef.current = isSending;
     if (!isSending || wasSending) return;
-
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distanceFromBottom > JUMP_THRESHOLD) return;
+    if (!scrollRef.current) return;
+    if (readerDistanceRef.current > JUMP_THRESHOLD) return;
 
     smoothScrollToBottom();
   }, [isSending, smoothScrollToBottom]);
@@ -770,8 +816,13 @@ export const Conversation = memo(function Conversation({
 
     // A running glide already converges on the live bottom; teleporting from
     // under it would end the animation with a visible snap.
-    if (!stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
+    if (smoothScrollFrameRef.current !== null) {
       persistScrollPosition();
+      return;
+    }
+    if (!stickyToBottomRef.current) {
+      const distance = persistScrollPosition();
+      if (distance !== undefined) setShowJump(distance > JUMP_THRESHOLD);
       return;
     }
 
@@ -799,8 +850,15 @@ export const Conversation = memo(function Conversation({
     // shrinks clientHeight without changing content size, which would
     // otherwise leave a follower looking at a gap above the tail.
     const observer = new ResizeObserver(() => {
-      if (!stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
+      if (smoothScrollFrameRef.current !== null) {
         persistScrollPosition();
+        return;
+      }
+      // A parked reader gets the jump button as soon as the tail outgrows
+      // the threshold, not only once they next scroll.
+      if (!stickyToBottomRef.current) {
+        const distance = persistScrollPosition();
+        if (distance !== undefined) setShowJump(distance > JUMP_THRESHOLD);
         return;
       }
 
