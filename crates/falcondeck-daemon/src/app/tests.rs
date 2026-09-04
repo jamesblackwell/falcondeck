@@ -5525,9 +5525,7 @@ async fn streaming_item_updates_do_not_emit_thread_updated() {
         .count();
     let updated = emitted
         .iter()
-        .filter(|envelope| {
-            matches!(envelope.event, UnifiedEvent::ConversationItemUpdated { .. })
-        })
+        .filter(|envelope| matches!(envelope.event, UnifiedEvent::ConversationItemUpdated { .. }))
         .count();
     let text_deltas: Vec<&str> = emitted
         .iter()
@@ -5596,9 +5594,11 @@ async fn streaming_rewrites_still_emit_conversation_item_updated() {
             item: ConversationItem::AssistantMessage { text, .. }
         } if text == "Goodbye"
     )));
-    assert!(!emitted
-        .iter()
-        .any(|envelope| matches!(envelope.event, UnifiedEvent::Text { .. })));
+    assert!(
+        !emitted
+            .iter()
+            .any(|envelope| matches!(envelope.event, UnifiedEvent::Text { .. }))
+    );
 }
 
 async fn insert_claude_workspace_with_session(
