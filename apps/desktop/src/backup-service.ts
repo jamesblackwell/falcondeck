@@ -12,6 +12,7 @@ const CLIENT_STORAGE_KEYS = {
   shortcuts: 'falcondeck.shortcuts.v1',
   dictation: 'falcondeck.desktop.dictation.v2',
   onboarding: 'falcondeck.desktop.onboarding.v1',
+  onboardingResume: 'falcondeck.desktop.onboarding.resume.v1',
   threadSort: 'falcondeck.desktop.thread-sort.v1',
   collapsedWorkspaces: 'falcondeck.desktop.collapsed-workspaces.v1',
   chatsCollapsed: 'falcondeck.desktop.chats-collapsed.v1',

@@ -107,11 +107,16 @@ describe('backup-service', () => {
   it('resets local app state keys from localStorage', () => {
     window.localStorage.setItem('fd-appearance', JSON.stringify({ theme: 'dark' }))
     window.localStorage.setItem('falcondeck.desktop.onboarding.v1', JSON.stringify({ done: true }))
+    window.localStorage.setItem(
+      'falcondeck.desktop.onboarding.resume.v1',
+      JSON.stringify({ step: 'computerUse' }),
+    )
 
     resetLocalAppState()
 
     expect(window.localStorage.getItem('fd-appearance')).toBeNull()
     expect(window.localStorage.getItem('falcondeck.desktop.onboarding.v1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.desktop.onboarding.resume.v1')).toBeNull()
   })
 
   it('inspects valid backup file by querying daemon API', async () => {
