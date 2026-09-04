@@ -235,13 +235,14 @@ export default async function (api) {
                 isError: res?.isError ?? false,
               };
             } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
               return {
                 content: [
                   {
                     type: "text",
-                    text: err instanceof Error ? err.message : String(err),
+                    text: errMsg,
                   },
-                ];
+                ],
                 isError: true,
               };
             }
