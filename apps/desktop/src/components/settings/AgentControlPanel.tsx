@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 
-import type {
-  AgentControlSettings,
-  ControlAuditEntry,
+import {
+  CONTROL_PROVIDER_CHOICES,
+  type AgentControlSettings,
+  type ControlAuditEntry,
 } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -33,10 +34,6 @@ export type AgentControlPanelProps = {
     description?: string;
   }) => void;
 };
-
-/** Providers the panel offers explicit toggles for. Additional overrides
- * recorded through the control API are shown as they exist. */
-const TOGGLE_PROVIDERS = ["codex", "claude"];
 
 export function AgentControlPanel({
   baseUrl,
@@ -99,8 +96,12 @@ export function AgentControlPanel({
     [baseUrl, onToast],
   );
 
+  // First-class providers plus any extra overrides already stored.
   const providerIds = Array.from(
-    new Set([...TOGGLE_PROVIDERS, ...Object.keys(settings?.providers ?? {})]),
+    new Set([
+      ...CONTROL_PROVIDER_CHOICES,
+      ...Object.keys(settings?.providers ?? {}),
+    ]),
   );
 
   return (

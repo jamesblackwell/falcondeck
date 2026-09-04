@@ -87,11 +87,13 @@ describe("AgentControlPanel", () => {
     await waitFor(() => {
       expect(screen.getByText("Agent control enabled")).toBeTruthy();
     });
-    // The codex override is rendered with its own toggle; claude inherits.
+    // The codex override is rendered with its own toggle; others inherit.
     expect(screen.getByLabelText("Toggle agent control for codex")).toBeTruthy();
     expect(screen.getByLabelText("Toggle agent control for claude")).toBeTruthy();
+    expect(screen.getByLabelText("Toggle agent control for grok")).toBeTruthy();
+    expect(screen.getByLabelText("Toggle agent control for agy")).toBeTruthy();
     expect(screen.getByText("Explicit provider override")).toBeTruthy();
-    expect(screen.getByText("Inherits the global setting")).toBeTruthy();
+    expect(screen.getAllByText("Inherits the global setting").length).toBeGreaterThan(1);
     // Recent changes list renders with origin detail.
     expect(
       screen.getByText("Created automation Weekday inbox review (automation-1)"),

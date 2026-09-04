@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  controlProviderChoices,
   normalizeAgentControlSettings,
   normalizeAutomation,
   normalizeAutomationRun,
@@ -200,5 +201,25 @@ describe("normalizeControlStateChanged", () => {
       }),
     ).toEqual({ store_revision: 42, domains: ["automations", "audit"] });
     expect(normalizeControlStateChanged({ store_revision: 42 })).toBeNull();
+  });
+});
+
+describe("controlProviderChoices", () => {
+  it("always lists grok and keeps an unlisted current id selectable", () => {
+    expect(controlProviderChoices()).toEqual(["codex", "claude", "grok", "agy"]);
+    expect(controlProviderChoices("grok")).toEqual([
+      "grok",
+      "codex",
+      "claude",
+      "agy",
+    ]);
+    expect(controlProviderChoices("cursor", ["opencode"])).toEqual([
+      "cursor",
+      "opencode",
+      "codex",
+      "claude",
+      "grok",
+      "agy",
+    ]);
   });
 });

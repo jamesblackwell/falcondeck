@@ -2134,6 +2134,16 @@ export function ScheduledTasksView({
                 revision: automationEditor.automation.revision,
                 draft: automationDraftFrom(automationEditor.automation),
               }}
+              extraProviders={[
+                ...Object.keys(
+                  automationsByHost[
+                    automationEditor.entry.hostId ?? "local"
+                  ]?.settings?.providers ?? {},
+                ),
+                ...automationEditor.entry.workspaces.flatMap((workspace) =>
+                  workspace.agents.map((agent) => agent.provider),
+                ),
+              ]}
               allowElevated={
                 automationsByHost[
                   automationEditor.entry.hostId ?? "local"

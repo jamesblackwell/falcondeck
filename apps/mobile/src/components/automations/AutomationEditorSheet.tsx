@@ -2,7 +2,12 @@ import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { ScrollView, Switch, TextInput, View, useWindowDimensions } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import type { AgentControlSettings, Automation } from '@falcondeck/client-core'
+import {
+  controlProviderChoices,
+  defaultProviderLabel,
+  type AgentControlSettings,
+  type Automation,
+} from '@falcondeck/client-core'
 
 import { Button, NativeSheet, Text } from '@/components/ui'
 import {
@@ -10,6 +15,7 @@ import {
   automationDraftError,
   automationDraftFromDefinition,
   automationDraftIsElevated,
+  draftWithProvider,
   emptyAutomationDraft,
   type AutomationDraft,
 } from '@/features/automations/model'
@@ -203,11 +209,13 @@ export const AutomationEditorSheet = memo(function AutomationEditorSheet({
           <ChipSelect
             label="Provider"
             value={draft.provider}
-            options={[
-              ['codex', 'Codex'],
-              ['claude', 'Claude'],
-            ]}
-            onChange={(value) => set('provider', value)}
+            options={controlProviderChoices(
+              draft.provider,
+              Object.keys(settings?.providers ?? {}),
+            ).map((id) => [id, defaultProviderLabel(id)] as const)}
+            onChange={(value) =>
+              setDraft((current) => draftWithProvider(current, value))
+            }
           />
           <ChipSelect
             label="Thread strategy"

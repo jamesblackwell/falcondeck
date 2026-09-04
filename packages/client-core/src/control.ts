@@ -260,6 +260,34 @@ export class ControlOperationError extends Error {
   }
 }
 
+/**
+ * Providers the control and automation editors always list. AgentProvider is
+ * an open identifier, so a stored or workspace id that is not in this list is
+ * still prepended — otherwise a native `<select>` paints the first option
+ * (codex) while the draft remains grok.
+ */
+export const CONTROL_PROVIDER_CHOICES = [
+  "codex",
+  "claude",
+  "grok",
+  "agy",
+] as const;
+
+export function controlProviderChoices(
+  current?: string | null,
+  extra: readonly string[] = [],
+): string[] {
+  const seen = new Set<string>();
+  const choices: string[] = [];
+  for (const id of [current ?? "", ...extra, ...CONTROL_PROVIDER_CHOICES]) {
+    const trimmed = id.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    choices.push(trimmed);
+  }
+  return choices;
+}
+
 const AUTOMATION_STATES: ReadonlySet<string> = new Set([
   "enabled",
   "paused",

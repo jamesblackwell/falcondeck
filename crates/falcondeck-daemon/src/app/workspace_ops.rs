@@ -2556,8 +2556,16 @@ async fn send_turn_with_startup_mode(
     });
     {
         let workspaces = app.inner.workspaces.lock().await;
-        if !workspaces.contains_key(&request.workspace_id) {
-            return Err(DaemonError::NotFound("workspace not found".to_string()));
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        if let Some(requested) = request.provider.as_ref()
+            && let Some(thread) = workspace.threads.get(&request.thread_id)
+            && requested != &thread.summary.provider
+        {
+            return Err(DaemonError::BadRequest(
+                "threads are permanently bound to their original provider".to_string(),
+            ));
         }
     }
     // Keep an ACP transcript-replay gate alive through provider startup. A

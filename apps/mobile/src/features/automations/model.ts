@@ -33,6 +33,21 @@ export type AutomationDraft = {
   anchorAt: string
 }
 
+/** Changing provider on a managed thread drops the remembered id so the next
+ * run opens a thread on the new provider instead of reusing the old one. */
+export function draftWithProvider(
+  draft: AutomationDraft,
+  provider: string,
+): AutomationDraft {
+  const next = provider.trim()
+  if (!next || next === draft.provider) return draft
+  return {
+    ...draft,
+    provider: next,
+    threadId: draft.threadKind === 'managed' ? '' : draft.threadId,
+  }
+}
+
 export function emptyAutomationDraft(
   settings: AgentControlSettings | null,
   workspacePath = '',

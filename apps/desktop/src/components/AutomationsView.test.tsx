@@ -46,7 +46,8 @@ const automation: Automation = {
 
 type ExecuteCall = { operation: string; expected_revision?: number; arguments: Record<string, unknown> };
 
-function stubControl(options?: { executeResponse?: unknown }) {
+function stubControl(options?: { executeResponse?: unknown; automation?: Automation }) {
+  const row = options?.automation ?? automation;
   const executeCalls: ExecuteCall[] = [];
   const fetchMock = vi.fn<typeof fetch>(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input).replace("http://daemon.test", "");
@@ -59,10 +60,10 @@ function stubControl(options?: { executeResponse?: unknown }) {
       return json({ resource: "agent_control.settings", data: settings });
     }
     if (url === "/api/control/get" && body.resource === "automations") {
-      return json({ resource: "automations", data: [automation] });
+      return json({ resource: "automations", data: [row] });
     }
     if (url === "/api/control/get" && body.resource === "automation") {
-      return json({ resource: "automation", data: automation });
+      return json({ resource: "automation", data: row });
     }
     if (url === "/api/control/get" && body.resource === "automation.runs") {
       return json({
@@ -303,6 +304,63 @@ describe("AutomationsView editor", () => {
           timezone: "Europe/London",
         },
       });
+    });
+  });
+
+  it("shows a stored grok provider instead of falling back to codex", async () => {
+    stubControl({
+      automation: {
+        ...automation,
+        target: {
+          ...automation.target,
+          provider: "grok",
+          thread: { kind: "managed", thread_id: "grok-thread-abc" },
+        },
+      },
+    });
+    await renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByText("Edit automation");
+    const provider = screen.getByLabelText("Provider") as HTMLSelectElement;
+    await waitFor(() => expect(provider.value).toBe("grok"));
+    expect([...provider.options].map((option) => option.value)).toEqual(
+      expect.arrayContaining(["codex", "claude", "grok", "agy"]),
+    );
+    expect(screen.getByLabelText("Thread id")).toHaveValue("grok-thread-abc");
+  });
+
+  it("clears the managed thread when the provider changes", async () => {
+    const { executeCalls } = stubControl({
+      automation: {
+        ...automation,
+        target: {
+          ...automation.target,
+          provider: "grok",
+          thread: { kind: "managed", thread_id: "grok-thread-abc" },
+        },
+      },
+    });
+    await renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByText("Edit automation");
+    fireEvent.change(screen.getByLabelText("Provider"), {
+      target: { value: "codex" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const update = executeCalls.find(
+        (call) => call.operation === "automation.update",
+      );
+      expect(update?.arguments).toMatchObject({
+        target: {
+          provider: "codex",
+          thread: { kind: "managed" },
+        },
+      });
+      expect(
+        (update?.arguments.target as { thread?: { thread_id?: string } })
+          .thread?.thread_id,
+      ).toBeUndefined();
     });
   });
 

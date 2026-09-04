@@ -540,13 +540,18 @@ async fn resolve_thread(
 ) -> Result<String, String> {
     match &automation.target.thread {
         AutomationThreadTarget::Existing { thread_id } => {
-            let exists = app.thread_summary(workspace_id, thread_id).await.is_ok();
-            if exists {
-                Ok(thread_id.clone())
-            } else {
-                Err(format!(
+            match app.thread_summary(workspace_id, thread_id).await {
+                Ok(thread) if thread.provider == automation.target.provider => {
+                    Ok(thread_id.clone())
+                }
+                Ok(thread) => Err(format!(
+                    "thread {thread_id} is bound to {}, not {}",
+                    thread.provider.as_str(),
+                    automation.target.provider.as_str()
+                )),
+                Err(_) => Err(format!(
                     "thread {thread_id} does not exist in the target workspace"
-                ))
+                )),
             }
         }
         AutomationThreadTarget::NewEachRun => {
@@ -554,12 +559,15 @@ async fn resolve_thread(
         }
         AutomationThreadTarget::Managed { thread_id } => {
             if let Some(thread_id) = thread_id
-                && app.thread_summary(workspace_id, thread_id).await.is_ok()
+                && let Ok(thread) = app.thread_summary(workspace_id, thread_id).await
+                && thread.provider == automation.target.provider
             {
                 return Ok(thread_id.clone());
             }
             // Managed threads are created once and remembered; the stored id
-            // persists back into the definition with a revision bump.
+            // persists back into the definition with a revision bump. A
+            // provider change leaves the old id behind, so we open a new
+            // thread rather than send the new provider into the old one.
             let created = start_automation_thread(app, automation, workspace_id).await?;
             let _ = app
                 .control()

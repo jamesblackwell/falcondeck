@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type {
-  AgentControlSettings,
-  Automation,
-  AutomationRun,
-  ControlErrorDetail,
+import {
+  controlProviderChoices,
+  type AgentControlSettings,
+  type Automation,
+  type AutomationRun,
+  type ControlErrorDetail,
 } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -38,6 +39,7 @@ import {
   automationDraftFrom,
   draftIsElevated,
   draftIsSubmittable,
+  draftWithProvider,
   emptyAutomationDraft,
 } from "./automation-draft";
 
@@ -401,6 +403,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
         <AutomationEditor
           key={editor.kind === "edit" ? editor.id : "create"}
           state={editor}
+          extraProviders={Object.keys(settings?.providers ?? {})}
           allowElevated={settings?.allow_elevated_automations ?? false}
           onCancel={() => setEditor({ kind: "closed" })}
           onSubmit={async (draft, includeTrigger) => {
@@ -433,11 +436,13 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
 
 export function AutomationEditor({
   state,
+  extraProviders = [],
   allowElevated,
   onCancel,
   onSubmit,
 }: {
   state: Extract<AutomationEditorState, { kind: "create" | "edit" }>;
+  extraProviders?: readonly string[];
   allowElevated: boolean;
   onCancel: () => void;
   onSubmit: (draft: AutomationDraft, includeTrigger: boolean) => Promise<void>;
@@ -619,11 +624,20 @@ export function AutomationEditor({
             <select
               aria-label="Provider"
               value={draft.provider}
-              onChange={(event) => set("provider", event.target.value)}
+              onChange={(event) =>
+                setDraft((current) =>
+                  draftWithProvider(current, event.target.value),
+                )
+              }
               className="h-9 w-full rounded-[var(--fd-radius-md)] border border-border bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
             >
-              <option value="codex">codex</option>
-              <option value="claude">claude</option>
+              {controlProviderChoices(draft.provider, extraProviders).map(
+                (id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ),
+              )}
             </select>
           </label>
         </div>

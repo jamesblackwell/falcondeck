@@ -6,6 +6,7 @@ import {
   automationDraftArguments,
   automationDraftError,
   automationDraftFromDefinition,
+  draftWithProvider,
   emptyAutomationDraft,
 } from './model'
 
@@ -44,6 +45,15 @@ const automation: Automation = {
 }
 
 describe('automation drafts', () => {
+  it('clears a managed thread id when the provider changes', () => {
+    const draft = automationDraftFromDefinition(automation)
+    expect(draftWithProvider(draft, 'grok')).toMatchObject({
+      provider: 'grok',
+      threadId: '',
+    })
+    expect(draftWithProvider(draft, 'codex').threadId).toBe('thread-1')
+  })
+
   it('preserves thread and interval anchors while editing', () => {
     const draft = automationDraftFromDefinition(automation)
     const payload = automationDraftArguments({ ...draft, name: 'Renamed' })
