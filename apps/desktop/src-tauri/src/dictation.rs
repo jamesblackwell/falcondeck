@@ -258,6 +258,7 @@ unsafe extern "C" {
     fn fd_dictation_cancel();
     fn fd_dictation_retry();
     fn fd_dictation_discard();
+    fn fd_dictation_retry_paste(text: *const std::ffi::c_char);
     fn fd_dictation_make_overlay_nonactivating(window: *mut std::ffi::c_void) -> bool;
     fn fd_dictation_paste_text(text: *const std::ffi::c_char) -> bool;
     #[cfg(test)]
@@ -266,6 +267,8 @@ unsafe extern "C" {
     fn fd_dictation_test_transient_pasteboard_round_trip() -> bool;
     #[cfg(test)]
     fn fd_dictation_test_recording_duration_is_usable(duration_seconds: f64) -> bool;
+    #[cfg(test)]
+    fn fd_dictation_test_rewrite_selection_contract() -> bool;
     fn fd_dictation_copy_text(text: *const std::ffi::c_char) -> bool;
     fn fd_dictation_mark_completed();
     fn fd_dictation_open_accessibility_settings();
@@ -550,6 +553,23 @@ pub fn retry_dictation() {
     unsafe {
         fd_dictation_retry();
     }
+}
+
+/// Paste-only retry: the transcript is already complete, so this re-captures
+/// the live target and runs the paste pipeline again without re-transcribing.
+/// The native side emits Completed or PasteFailed when the attempt resolves.
+#[tauri::command]
+pub fn retry_dictation_paste() -> Result<(), String> {
+    let text = last_dictation_transcript()
+        .ok_or_else(|| "There is no transcript to paste.".to_string())?;
+    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel);
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let c_text = CString::new(text.as_str())
+            .map_err(|_| "The transcript contained unsupported text.".to_string())?;
+        fd_dictation_retry_paste(c_text.as_ptr());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1291,10 +1311,10 @@ async fn transcribe_openrouter(
             emit_failure_with_transcript(
                 &finish_app,
                 if rewrite_mode().is_some() {
-                    "The rewrite is ready, but FalconDeck could not paste it. Copy it below or retry."
+                    "The rewrite is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
                         .to_string()
                 } else {
-                    "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
+                    "The transcript is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
                         .to_string()
                 },
                 true,
@@ -1530,7 +1550,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
                                 file_native_recording(Some(text.clone()), None);
                                 emit_failure_with_transcript(
                                     &finish_app,
-                                    "The rewrite is ready, but FalconDeck could not paste it. Copy it below or retry."
+                                    "The rewrite is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
                                         .to_string(),
                                     true,
                                     Some(text.clone()),
@@ -1616,7 +1636,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             file_native_recording(Some(payload.clone()), None);
             emit_failure_with_transcript(
                 &app,
-                "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry."
+                "The transcript is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below."
                     .to_string(),
                 true,
                 Some(payload),
@@ -1691,6 +1711,12 @@ mod tests {
     fn native_recorder_rejects_startup_artifacts_but_accepts_speech() {
         assert!(!unsafe { super::fd_dictation_test_recording_duration_is_usable(0.020) });
         assert!(unsafe { super::fd_dictation_test_recording_duration_is_usable(0.250) });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn empty_ax_selection_is_not_treated_as_resolved() {
+        assert!(unsafe { super::fd_dictation_test_rewrite_selection_contract() });
     }
 
     #[test]

@@ -24,7 +24,7 @@ const event: DictationEvent = {
   state: "failed",
   text: "Small thing, but when you delete in the sort of gallery mode, so if you've clicked on an image and it comes up full screen in the modal, and then you delete, it currently takes you back to the gallery. Can we instead keep you in the gallery and just go to the next image?",
   error:
-    "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry.",
+    "The transcript is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below.",
   retainedAudio: true,
 };
 

@@ -240,9 +240,43 @@ static AXUIElementRef FDCopyFocusedUIElement(pid_t *processIdentifier) {
   return (AXUIElementRef)focusedElement;
 }
 
-// Returns selected text when the focused element exposes it. An empty string
-// means the attribute exists and nothing is selected. nil means the app did
-// not report a selection (Electron editors, many web fields).
+// Non-empty selected text, preserving surrounding whitespace. Empty or
+// whitespace-only strings are treated as missing: Chromium, Electron, and
+// WKWebView often return a successful empty AXSelectedText while a visual
+// selection still exists, so callers must fall through to Command-C.
+static NSString *FDNonEmptyString(NSString *text) {
+  NSString *trimmed = [text
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  return trimmed.length > 0 ? text : nil;
+}
+
+static NSString *FDSelectedTextFromMarkers(AXUIElementRef element) {
+  if (!element) return nil;
+  CFTypeRef range = NULL;
+  AXError result = AXUIElementCopyAttributeValue(
+      element, CFSTR("AXSelectedTextMarkerRange"), &range);
+  if (result != kAXErrorSuccess || !range) {
+    if (range) CFRelease(range);
+    return nil;
+  }
+  CFTypeRef text = NULL;
+  result = AXUIElementCopyParameterizedAttributeValue(
+      element, CFSTR("AXStringForTextMarkerRange"), range, &text);
+  CFRelease(range);
+  if (result != kAXErrorSuccess || !text) {
+    if (text) CFRelease(text);
+    return nil;
+  }
+  if (CFGetTypeID(text) != CFStringGetTypeID()) {
+    CFRelease(text);
+    return nil;
+  }
+  return FDNonEmptyString((__bridge_transfer NSString *)text);
+}
+
+// Returns selected text when the focused element exposes a non-empty
+// selection. nil means AX did not report one — including the common case
+// where the attribute exists and is empty (Electron, Chrome, Linear).
 static NSString *FDSelectedTextFromElement(AXUIElementRef element) {
   if (!element) return nil;
   CFTypeRef value = NULL;
@@ -250,46 +284,127 @@ static NSString *FDSelectedTextFromElement(AXUIElementRef element) {
       AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute, &value);
   if (result == kAXErrorSuccess && value) {
     if (CFGetTypeID(value) == CFStringGetTypeID()) {
-      return (__bridge_transfer NSString *)value;
+      NSString *text = FDNonEmptyString((__bridge_transfer NSString *)value);
+      if (text) return text;
+    } else {
+      CFRelease(value);
     }
-    CFRelease(value);
   }
 
   CFTypeRef selectedRangeRef = NULL;
   AXError rangeResult = AXUIElementCopyAttributeValue(
       element, kAXSelectedTextRangeAttribute, &selectedRangeRef);
-  if (rangeResult != kAXErrorSuccess || !selectedRangeRef) {
-    if (selectedRangeRef) CFRelease(selectedRangeRef);
-    return nil;
-  }
-  if (CFGetTypeID(selectedRangeRef) != AXValueGetTypeID()) {
+  if (rangeResult == kAXErrorSuccess && selectedRangeRef &&
+      CFGetTypeID(selectedRangeRef) == AXValueGetTypeID()) {
+    CFRange range = {0, 0};
+    Boolean gotRange = AXValueGetValue((AXValueRef)selectedRangeRef,
+                                       kAXValueCFRangeType, &range);
     CFRelease(selectedRangeRef);
-    return nil;
+    if (gotRange && range.location != kCFNotFound && range.location >= 0 &&
+        range.length > 0) {
+      CFTypeRef fullValueRef = NULL;
+      AXError valueResult = AXUIElementCopyAttributeValue(
+          element, kAXValueAttribute, &fullValueRef);
+      if (valueResult == kAXErrorSuccess && fullValueRef &&
+          CFGetTypeID(fullValueRef) == CFStringGetTypeID()) {
+        NSString *fullText = (__bridge_transfer NSString *)fullValueRef;
+        NSUInteger location = (NSUInteger)range.location;
+        NSUInteger length = (NSUInteger)range.length;
+        if (location + length <= fullText.length) {
+          NSString *sliced = FDNonEmptyString(
+              [fullText substringWithRange:NSMakeRange(location, length)]);
+          if (sliced) return sliced;
+        }
+      } else if (fullValueRef) {
+        CFRelease(fullValueRef);
+      }
+    }
+  } else if (selectedRangeRef) {
+    CFRelease(selectedRangeRef);
   }
-  CFRange range = {0, 0};
-  Boolean gotRange =
-      AXValueGetValue((AXValueRef)selectedRangeRef, kAXValueCFRangeType, &range);
-  CFRelease(selectedRangeRef);
-  if (!gotRange || range.location == kCFNotFound) return nil;
-  if (range.length <= 0) return @"";
 
-  CFTypeRef fullValueRef = NULL;
-  AXError valueResult =
-      AXUIElementCopyAttributeValue(element, kAXValueAttribute, &fullValueRef);
-  if (valueResult != kAXErrorSuccess || !fullValueRef) {
-    if (fullValueRef) CFRelease(fullValueRef);
+  return FDSelectedTextFromMarkers(element);
+}
+
+static NSString *FDSelectedTextFromChildren(AXUIElementRef element,
+                                            int depth) {
+  if (!element || depth <= 0) return nil;
+  CFTypeRef childrenRef = NULL;
+  AXError result =
+      AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &childrenRef);
+  if (result != kAXErrorSuccess || !childrenRef) {
+    if (childrenRef) CFRelease(childrenRef);
     return nil;
   }
-  if (CFGetTypeID(fullValueRef) != CFStringGetTypeID()) {
-    CFRelease(fullValueRef);
+  if (CFGetTypeID(childrenRef) != CFArrayGetTypeID()) {
+    CFRelease(childrenRef);
     return nil;
   }
-  NSString *fullText = (__bridge_transfer NSString *)fullValueRef;
-  if (range.location < 0 || range.length < 0) return nil;
-  NSUInteger location = (NSUInteger)range.location;
-  NSUInteger length = (NSUInteger)range.length;
-  if (location + length > fullText.length) return nil;
-  return [fullText substringWithRange:NSMakeRange(location, length)];
+  CFArrayRef children = (CFArrayRef)childrenRef;
+  CFIndex count = CFArrayGetCount(children);
+  if (count > 12) count = 12;
+  for (CFIndex index = 0; index < count; index += 1) {
+    const void *item = CFArrayGetValueAtIndex(children, index);
+    if (!item || CFGetTypeID(item) != AXUIElementGetTypeID()) continue;
+    AXUIElementRef child = (AXUIElementRef)item;
+    NSString *text = FDSelectedTextFromElement(child);
+    if (text) {
+      CFRelease(childrenRef);
+      return text;
+    }
+    text = FDSelectedTextFromChildren(child, depth - 1);
+    if (text) {
+      CFRelease(childrenRef);
+      return text;
+    }
+  }
+  CFRelease(childrenRef);
+  return nil;
+}
+
+// Formatting popovers (Linear, Notion, Google Docs) can become the focused
+// AX element while the editor still holds the highlight. Search the focused
+// node and its parent immediately; the child walk is opt-in because Chrome
+// accessibility trees are large and this also runs on rewrite-key-down.
+static NSString *FDCopySelectedTextNearElement(AXUIElementRef element,
+                                               BOOL searchChildren) {
+  if (!element) return nil;
+  NSString *text = FDSelectedTextFromElement(element);
+  if (text) return text;
+
+  CFTypeRef parentRef = NULL;
+  AXError parentResult =
+      AXUIElementCopyAttributeValue(element, kAXParentAttribute, &parentRef);
+  if (parentResult == kAXErrorSuccess && parentRef &&
+      CFGetTypeID(parentRef) == AXUIElementGetTypeID()) {
+    AXUIElementRef parent = (AXUIElementRef)parentRef;
+    text = FDSelectedTextFromElement(parent);
+    if (!text && searchChildren) {
+      text = FDSelectedTextFromChildren(parent, 2);
+    }
+    if (text) {
+      CFRelease(parentRef);
+      return text;
+    }
+  }
+  if (parentRef) CFRelease(parentRef);
+
+  return searchChildren ? FDSelectedTextFromChildren(element, 2) : nil;
+}
+
+static void FDEnableManualAccessibility(pid_t processIdentifier) {
+  if (processIdentifier <= 0) return;
+  pid_t ownProcessIdentifier = NSProcessInfo.processInfo.processIdentifier;
+  if (processIdentifier == ownProcessIdentifier) return;
+  AXUIElementRef application = AXUIElementCreateApplication(processIdentifier);
+  if (!application) return;
+  // Electron reads AXManualAccessibility; Chrome/Chromium also honor
+  // AXEnhancedUserInterface. Both are no-ops on apps that ignore them.
+  AXUIElementSetAttributeValue(application, CFSTR("AXManualAccessibility"),
+                               kCFBooleanTrue);
+  AXUIElementSetAttributeValue(application, CFSTR("AXEnhancedUserInterface"),
+                               kCFBooleanTrue);
+  CFRelease(application);
 }
 
 static NSArray<NSPasteboardItem *> *FDSnapshotPasteboard(
@@ -446,8 +561,20 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
 - (void)startRecordingAsRewrite:(BOOL)rewrite;
 - (NSString *)captureSelectedText;
 - (BOOL)postCopyShortcut;
+- (BOOL)postCopyShortcutToPid:(pid_t)processIdentifier;
+- (BOOL)postTaggedKey:(CGKeyCode)keyCode
+                 down:(BOOL)down
+                flags:(CGEventFlags)flags
+                  pid:(pid_t)processIdentifier;
+- (CGKeyCode)heldNonCommandRewriteModifierKeyCode;
+- (void)withRewriteModifierLifted:(void (^)(void))block;
 - (void)clearRewriteSession;
 - (void)primeRewriteSelectionCapture;
+- (void)enableManualAccessibilityForPasteTarget;
+- (NSString *)readCopiedSelectionFromPasteboard:(NSPasteboard *)pasteboard
+                                         before:(NSInteger)before
+                                  previousItems:
+                                      (NSArray<NSPasteboardItem *> *)previousItems;
 - (void)transcribeSystemRecording:(NSURL *)url API_AVAILABLE(macos(10.15));
 - (void)startAudioLevelMeter;
 - (void)stopAudioLevelMeter;
@@ -459,11 +586,14 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
 - (BOOL)claimSpeechCompletion:(NSUInteger)generation API_AVAILABLE(macos(10.15));
 - (void)surfaceRetainedRecordingIfNeeded;
 - (void)capturePasteTarget;
+- (void)recapturePasteTarget;
+- (void)returnFocusToPasteTarget;
 - (BOOL)refreshPasteTargetIfFocused;
 - (BOOL)postPasteShortcut;
 - (void)finishActivePasteboardSessionIfOwned;
 - (void)dropCancelledRecording;
-- (void)returnFocusToPasteTarget;
+- (void)retryPasteTranscript:(NSString *)text;
+- (BOOL)postPasteShortcutToPid:(pid_t)processIdentifier;
 @end
 
 static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
@@ -744,18 +874,25 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.audioLevelTimer = nil;
 }
 
+- (void)enableManualAccessibilityForPasteTarget {
+  pid_t processIdentifier = self.pasteTargetApplicationProcessIdentifier > 0
+      ? self.pasteTargetApplicationProcessIdentifier
+      : self.pasteTargetProcessIdentifier;
+  FDEnableManualAccessibility(processIdentifier);
+}
+
 - (void)primeRewriteSelectionCapture {
   [self capturePasteTarget];
-  NSString *axText = FDSelectedTextFromElement(_pasteTargetElement);
-  if (!axText) {
-    self.pendingRewriteAxResolved = NO;
-    self.pendingRewriteSelection = nil;
-    return;
-  }
-  NSString *trimmed = [axText
-      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  self.pendingRewriteAxResolved = YES;
-  self.pendingRewriteSelection = trimmed.length > 0 ? axText : nil;
+  NSString *axText = FDCopySelectedTextNearElement(_pasteTargetElement, NO);
+  NSString *trusted = FDNonEmptyString(axText);
+  // Only treat AX as resolved when it actually produced text. An empty
+  // AXSelectedText is the usual Electron/Chrome lie, not proof of no
+  // selection — Command-C has to run after the hold delay.
+  self.pendingRewriteAxResolved = trusted != nil;
+  self.pendingRewriteSelection = trusted;
+  os_log_info(FDPasteLog(),
+              "primed rewrite selection axChars=%{public}lu resolved=%{public}d",
+              (unsigned long)axText.length, self.pendingRewriteAxResolved);
 }
 
 - (void)armHoldRecording:(BOOL)rewrite {
@@ -971,6 +1108,17 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   _pasteTargetElement = FDCopyFocusedUIElement(&focusedProcessIdentifier);
   pid_t applicationProcessIdentifier =
       NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+  pid_t ownProcessIdentifier = NSProcessInfo.processInfo.processIdentifier;
+  // AX focus and the frontmost application are sampled at different moments,
+  // so they can disagree when the writer just switched apps: the stale app is
+  // still frontmost while focus already moved on (or vice versa). FalconDeck
+  // can reach its own composer directly, so when the focused element belongs
+  // to FalconDeck itself, trust it over a stale frontmost reading — otherwise
+  // a self-dictation is misclassified as external, the target gets reactivated
+  // over FalconDeck, and the transcript lands in the failure card.
+  if (focusedProcessIdentifier == ownProcessIdentifier) {
+    applicationProcessIdentifier = ownProcessIdentifier;
+  }
   self.pasteTargetProcessIdentifier = focusedProcessIdentifier > 0
       ? focusedProcessIdentifier
       : applicationProcessIdentifier;
@@ -982,6 +1130,31 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
               "captured target elementPid=%{public}d appPid=%{public}d",
               self.pasteTargetProcessIdentifier,
               self.pasteTargetApplicationProcessIdentifier);
+}
+
+// Refreshes the target without moving focus. Overlay clicks and Tauri window
+// resizes can flip `frontmostApplication` to FalconDeck momentarily, so when
+// the focused AX element still matches the captured target, refresh just the
+// element reference and keep the original app PID. Only when focus genuinely
+// moved elsewhere is a full re-capture taken.
+- (void)recapturePasteTarget {
+  pid_t focusedProcessIdentifier = 0;
+  AXUIElementRef focusedElement =
+      FDCopyFocusedUIElement(&focusedProcessIdentifier);
+  if (focusedElement &&
+      (focusedProcessIdentifier == self.pasteTargetProcessIdentifier ||
+       focusedProcessIdentifier ==
+           self.pasteTargetApplicationProcessIdentifier)) {
+    if (_pasteTargetElement) CFRelease(_pasteTargetElement);
+    _pasteTargetElement = focusedElement;
+    os_log_info(FDPasteLog(),
+                "recaptured target elementPid=%{public}d appPid=%{public}d",
+                self.pasteTargetProcessIdentifier,
+                self.pasteTargetApplicationProcessIdentifier);
+    return;
+  }
+  if (focusedElement) CFRelease(focusedElement);
+  [self capturePasteTarget];
 }
 
 - (void)startRecording {
@@ -1453,6 +1626,170 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   return YES;
 }
 
+// Targeted fallback for the HID paste: delivers the same Command-V directly
+// to the captured process (Fluid Voice's `postToPid` approach). HID routing
+// follows whatever is frontmost, so a focus change in the 80 ms settle window
+// misroutes the shortcut; posting to the PID reaches the right process even
+// when a transient focus flip is still settling. The shortcut events are
+// rerouted there by the system, not synthesized keystrokes, so the target's
+// ordinary paste handling (and its Edit menu state) still applies.
+- (BOOL)postPasteShortcutToPid:(pid_t)processIdentifier {
+  if (processIdentifier <= 0) return NO;
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (!source) return NO;
+  CGKeyCode pasteKeyCode = FDPasteVirtualKeyCode();
+  CGEventRef commandDown =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, true);
+  CGEventRef pasteDown =
+      CGEventCreateKeyboardEvent(source, pasteKeyCode, true);
+  CGEventRef pasteUp =
+      CGEventCreateKeyboardEvent(source, pasteKeyCode, false);
+  CGEventRef commandUp =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, false);
+  if (!commandDown || !pasteDown || !pasteUp || !commandUp) {
+    if (commandDown) CFRelease(commandDown);
+    if (pasteDown) CFRelease(pasteDown);
+    if (pasteUp) CFRelease(pasteUp);
+    if (commandUp) CFRelease(commandUp);
+    CFRelease(source);
+    return NO;
+  }
+
+  CGEventSetFlags(commandDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(pasteDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(pasteUp, kCGEventFlagMaskCommand);
+  CGEventSetFlags(commandUp, 0);
+  CGEventRef events[] = {commandDown, pasteDown, pasteUp, commandUp};
+  for (NSUInteger index = 0; index < 4; index += 1) {
+    CGEventSetIntegerValueField(events[index], kCGEventSourceUserData,
+                                FDPasteEventUserData);
+    CGEventPostToPid(processIdentifier, events[index]);
+    if (index < 3) usleep(FDPasteShortcutEventDelayMicros);
+  }
+  CFRelease(commandDown);
+  CFRelease(pasteDown);
+  CFRelease(pasteUp);
+  CFRelease(commandUp);
+  CFRelease(source);
+  os_log_info(FDPasteLog(),
+              "posted targeted paste shortcut pid=%{public}d keyCode=%{public}u",
+              processIdentifier, pasteKeyCode);
+  return YES;
+}
+
+- (BOOL)postTaggedKey:(CGKeyCode)keyCode
+                 down:(BOOL)down
+                flags:(CGEventFlags)flags
+                  pid:(pid_t)processIdentifier {
+  if (keyCode == FDUnknownKeyCode) return NO;
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (!source) return NO;
+  CGEventRef event = CGEventCreateKeyboardEvent(source, keyCode, down);
+  if (!event) {
+    CFRelease(source);
+    return NO;
+  }
+  CGEventSetFlags(event, flags);
+  CGEventSetIntegerValueField(event, kCGEventSourceUserData, FDPasteEventUserData);
+  if (processIdentifier > 0) {
+    CGEventPostToPid(processIdentifier, event);
+  } else {
+    CGEventPost(kCGHIDEventTap, event);
+  }
+  CFRelease(event);
+  CFRelease(source);
+  return YES;
+}
+
+// Right Option (the default rewrite shortcut) is still physically down when
+// we snapshot the selection. A synthetic Command-C that does not first lift
+// Option is delivered as Option-Command-C, which most editors do not copy.
+- (CGKeyCode)heldNonCommandRewriteModifierKeyCode {
+  if (!self.rewriteModifierDown) return FDUnknownKeyCode;
+  FDHotkey shortcut = self.rewriteShortcut;
+  if (shortcut.chord) {
+    if (shortcut.requiredFlags & kCGEventFlagMaskAlternate) {
+      return FDRightOptionKeyCode;
+    }
+    if (shortcut.requiredFlags & kCGEventFlagMaskControl) {
+      return FDRightControlKeyCode;
+    }
+    return FDUnknownKeyCode;
+  }
+  if (shortcut.deviceMask == NX_DEVICERCMDKEYMASK ||
+      shortcut.deviceMask == NX_DEVICELCMDKEYMASK) {
+    return FDUnknownKeyCode;
+  }
+  return shortcut.keyCode;
+}
+
+- (void)withRewriteModifierLifted:(void (^)(void))block {
+  CGKeyCode liftKey = [self heldNonCommandRewriteModifierKeyCode];
+  CGEventFlags restoreFlags = 0;
+  if (liftKey == FDRightOptionKeyCode || liftKey == FDLeftOptionKeyCode) {
+    restoreFlags = kCGEventFlagMaskAlternate;
+  } else if (liftKey == FDRightControlKeyCode ||
+             liftKey == FDLeftControlKeyCode) {
+    restoreFlags = kCGEventFlagMaskControl;
+  } else if (liftKey == FDFunctionKeyCode) {
+    restoreFlags = kCGEventFlagMaskSecondaryFn;
+  }
+  if (liftKey != FDUnknownKeyCode) {
+    [self postTaggedKey:liftKey down:NO flags:0 pid:0];
+    usleep(FDPasteShortcutEventDelayMicros);
+  }
+  block();
+  if (liftKey != FDUnknownKeyCode) {
+    // Put the modifier back so the physical key-up still stops a hold-mode
+    // recording. The tap ignores these tagged events.
+    [self postTaggedKey:liftKey down:YES flags:restoreFlags pid:0];
+  }
+}
+
+- (BOOL)postCopyShortcutToPid:(pid_t)processIdentifier {
+  if (processIdentifier <= 0) return NO;
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (!source) return NO;
+  CGKeyCode copyKeyCode = FDCopyVirtualKeyCode();
+  CGEventRef commandDown =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, true);
+  CGEventRef copyDown =
+      CGEventCreateKeyboardEvent(source, copyKeyCode, true);
+  CGEventRef copyUp =
+      CGEventCreateKeyboardEvent(source, copyKeyCode, false);
+  CGEventRef commandUp =
+      CGEventCreateKeyboardEvent(source, FDLeftCommandKeyCode, false);
+  if (!commandDown || !copyDown || !copyUp || !commandUp) {
+    if (commandDown) CFRelease(commandDown);
+    if (copyDown) CFRelease(copyDown);
+    if (copyUp) CFRelease(copyUp);
+    if (commandUp) CFRelease(commandUp);
+    CFRelease(source);
+    return NO;
+  }
+
+  CGEventSetFlags(commandDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(copyDown, kCGEventFlagMaskCommand);
+  CGEventSetFlags(copyUp, kCGEventFlagMaskCommand);
+  CGEventSetFlags(commandUp, 0);
+  CGEventRef events[] = {commandDown, copyDown, copyUp, commandUp};
+  for (NSUInteger index = 0; index < 4; index += 1) {
+    CGEventSetIntegerValueField(events[index], kCGEventSourceUserData,
+                                FDPasteEventUserData);
+    CGEventPostToPid(processIdentifier, events[index]);
+    if (index < 3) usleep(FDPasteShortcutEventDelayMicros);
+  }
+  CFRelease(commandDown);
+  CFRelease(copyDown);
+  CFRelease(copyUp);
+  CFRelease(commandUp);
+  CFRelease(source);
+  os_log_info(FDPasteLog(),
+              "posted targeted copy shortcut pid=%{public}d keyCode=%{public}u",
+              processIdentifier, copyKeyCode);
+  return YES;
+}
+
 - (BOOL)postCopyShortcut {
   CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
   if (!source) return NO;
@@ -1493,29 +1830,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   return YES;
 }
 
-- (NSString *)captureSelectedText {
-  NSString *axText = FDSelectedTextFromElement(_pasteTargetElement);
-  if (axText) {
-    NSString *trimmed = [axText
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    return trimmed.length > 0 ? axText : nil;
-  }
-
-  NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-  NSArray<NSPasteboardItem *> *previousItems = nil;
-  @try {
-    previousItems = FDSnapshotPasteboard(pasteboard);
-  } @catch (__unused NSException *exception) {
-    previousItems = @[];
-  }
-  NSInteger before = pasteboard.changeCount;
-  if (![self postCopyShortcut]) {
-    @try {
-      FDRestorePasteboard(pasteboard, previousItems);
-    } @catch (__unused NSException *exception) {
-    }
-    return nil;
-  }
+- (NSString *)readCopiedSelectionFromPasteboard:(NSPasteboard *)pasteboard
+                                         before:(NSInteger)before
+                                  previousItems:
+                                      (NSArray<NSPasteboardItem *> *)previousItems {
   for (int attempt = 0; attempt < FDCopyPollAttempts; attempt += 1) {
     usleep(FDCopyPollIntervalMicros);
     if (pasteboard.changeCount == before) continue;
@@ -1529,14 +1847,60 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       FDRestorePasteboard(pasteboard, previousItems);
     } @catch (__unused NSException *exception) {
     }
-    NSString *trimmed = [text
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    return trimmed.length > 0 ? text : nil;
+    return FDNonEmptyString(text);
+  }
+  return nil;
+}
+
+- (NSString *)captureSelectedText {
+  [self enableManualAccessibilityForPasteTarget];
+  [self recapturePasteTarget];
+  NSString *axText = FDCopySelectedTextNearElement(_pasteTargetElement, YES);
+  if (FDNonEmptyString(axText)) {
+    os_log_info(FDPasteLog(), "rewrite selection from ax chars=%{public}lu",
+                (unsigned long)axText.length);
+    return axText;
+  }
+
+  NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
+  NSArray<NSPasteboardItem *> *previousItems = nil;
+  @try {
+    previousItems = FDSnapshotPasteboard(pasteboard);
+  } @catch (__unused NSException *exception) {
+    previousItems = @[];
+  }
+  __block NSInteger before = pasteboard.changeCount;
+  pid_t processIdentifier = self.pasteTargetApplicationProcessIdentifier > 0
+      ? self.pasteTargetApplicationProcessIdentifier
+      : self.pasteTargetProcessIdentifier;
+  BOOL targetedIsSelf =
+      processIdentifier == NSProcessInfo.processInfo.processIdentifier;
+  __block NSString *copied = nil;
+  [self withRewriteModifierLifted:^{
+    if (processIdentifier > 0 && !targetedIsSelf) {
+      if ([self postCopyShortcutToPid:processIdentifier]) {
+        copied = [self readCopiedSelectionFromPasteboard:pasteboard
+                                                  before:before
+                                           previousItems:previousItems];
+        if (!copied) before = pasteboard.changeCount;
+      }
+    }
+    if (!copied && [self postCopyShortcut]) {
+      copied = [self readCopiedSelectionFromPasteboard:pasteboard
+                                                before:before
+                                         previousItems:previousItems];
+    }
+  }];
+  if (copied) {
+    os_log_info(FDPasteLog(), "rewrite selection from copy chars=%{public}lu",
+                (unsigned long)copied.length);
+    return copied;
   }
   @try {
     FDRestorePasteboard(pasteboard, previousItems);
   } @catch (__unused NSException *exception) {
   }
+  os_log_info(FDPasteLog(), "rewrite selection capture found nothing");
   return nil;
 }
 
@@ -1557,7 +1921,20 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (BOOL)pasteText:(NSString *)text {
+  return [self pasteText:text attemptTargetedFirst:NO];
+}
+
+// Re-checks the target at delivery time, reclassifying a capture that went
+// stale while transcription was running: if the focused element is now (or is
+// again) FalconDeck itself, the transcript goes through the deterministic
+// self-insert event instead of a synthetic paste into an external app.
+- (BOOL)pasteText:(NSString *)text attemptTargetedFirst:(BOOL)attemptTargetedFirst {
   if (!AXIsProcessTrusted() || text.length == 0) return NO;
+  // The target captured at key-down may be stale after seconds of
+  // transcription. AX focus is cheap to re-read and never moves focus, so
+  // prefer the live reading when it still matches the captured target — and
+  // reclassify to self-insert when focus is back inside FalconDeck.
+  [self recapturePasteTarget];
   pid_t targetApplicationProcessIdentifier =
       self.pasteTargetApplicationProcessIdentifier > 0
           ? self.pasteTargetApplicationProcessIdentifier
@@ -1614,9 +1991,31 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   // Give the pasteboard server and clipboard integrations one short settling
   // turn before delivering the shortcut. Re-check focus afterwards so the
   // normal session event can never be routed to an app that became active in
-  // that interval.
+  // that interval. When the HID post cannot be delivered, fall back to a
+  // directly targeted post to the captured process before giving up.
   usleep(FDPasteboardPrepareDelayMicros);
-  if (![self refreshPasteTargetIfFocused] || ![self postPasteShortcut]) {
+  if (![self refreshPasteTargetIfFocused]) {
+    [self finishActivePasteboardSessionIfOwned];
+    return NO;
+  }
+  BOOL delivered = NO;
+  pid_t targetedPid = self.pasteTargetApplicationProcessIdentifier > 0
+      ? self.pasteTargetApplicationProcessIdentifier
+      : self.pasteTargetProcessIdentifier;
+  BOOL targetedIsSelf =
+      targetedPid == NSProcessInfo.processInfo.processIdentifier;
+  if (attemptTargetedFirst && !targetedIsSelf) {
+    // Retry path: the HID post just missed, so lead with the directly
+    // targeted post before falling back to HID routing.
+    delivered = [self postPasteShortcutToPid:targetedPid];
+  }
+  if (!delivered) {
+    delivered = [self postPasteShortcut];
+  }
+  if (!delivered && !attemptTargetedFirst && !targetedIsSelf) {
+    delivered = [self postPasteShortcutToPid:targetedPid];
+  }
+  if (!delivered) {
     [self finishActivePasteboardSessionIfOwned];
     return NO;
   }
@@ -1652,6 +2051,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)retryLastRecording {
+  [self recapturePasteTarget];
   if (self.pasteTargetProcessIdentifier <= 0) {
     [self capturePasteTarget];
   }
@@ -1737,6 +2137,28 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 - (void)markLastRecordingCompleted {
   [self setRetainedRecordingURL:nil provider:0];
   [self clearRewriteSession];
+}
+
+// Paste-only retry for a transcript that is already complete: re-captures the
+// live target (the writer may have clicked back into the note since the
+// failure card appeared) and runs the paste pipeline again without touching
+// any recording. Emits Completed on success, PasteFailed on another miss.
+- (void)retryPasteTranscript:(NSString *)text {
+  if (text.length == 0) {
+    FDEmit(FDEventFailed, @"There is no transcript to paste.");
+    return;
+  }
+  [self capturePasteTarget];
+  FDEmit(FDEventProcessing, @"");
+  NSString *attempt = [text copy];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if ([self pasteText:attempt attemptTargetedFirst:YES]) {
+      [self setRetainedRecordingURL:nil provider:0];
+      FDEmit(FDEventCompleted, attempt);
+    } else {
+      FDEmit(FDEventPasteFailed, attempt);
+    }
+  });
 }
 
 // A recording restored from a previous session (or left over from a failed
@@ -1909,6 +2331,20 @@ bool fd_dictation_test_recording_duration_is_usable(double duration_seconds) {
   return FDRecordingDurationIsUsable(duration_seconds);
 }
 
+bool fd_dictation_test_rewrite_selection_contract(void) {
+  BOOL emptyRejected = FDNonEmptyString(nil) == nil &&
+                       FDNonEmptyString(@"") == nil &&
+                       FDNonEmptyString(@" \n\t") == nil;
+  BOOL textKept =
+      [FDNonEmptyString(@"hello") isEqualToString:@"hello"] &&
+      [FDNonEmptyString(@"  hello  ") isEqualToString:@"  hello  "];
+  BOOL missingElement =
+      FDSelectedTextFromElement(NULL) == nil &&
+      FDCopySelectedTextNearElement(NULL, NO) == nil &&
+      FDCopySelectedTextNearElement(NULL, YES) == nil;
+  return emptyRejected && textKept && missingElement;
+}
+
 char *fd_dictation_audio_devices_json(void) {
   @autoreleasepool {
 #pragma clang diagnostic push
@@ -2033,6 +2469,13 @@ void fd_dictation_retry(void) {
   dispatch_async(dispatch_get_main_queue(), ^{
     [[FDDictationController sharedController] retryLastRecording];
   });
+}
+
+void fd_dictation_retry_paste(const char *utf8_text) {
+  if (!utf8_text) return;
+  NSString *text = [NSString stringWithUTF8String:utf8_text];
+  if (text.length == 0) return;
+  [[FDDictationController sharedController] retryPasteTranscript:text];
 }
 
 void fd_dictation_discard(void) {

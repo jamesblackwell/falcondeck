@@ -158,7 +158,7 @@ describe("DictationOverlay", () => {
       state: "failed",
       text: transcript,
       error:
-        "The transcript is ready, but FalconDeck could not paste it. Copy it below or retry.",
+        "The transcript is ready, but FalconDeck could not paste it. Click Retry paste after focusing the destination, or copy it below.",
       retainedAudio: true,
     });
 
@@ -166,10 +166,13 @@ describe("DictationOverlay", () => {
     expect(screen.getByText(transcript)).toBeInTheDocument();
     expect(screen.queryByText(`“${transcript}”`)).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Copy transcript" }),
+      screen.getByRole("button", { name: "Retry paste" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Copy transcript" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry paste" }),
     ).toHaveClass("text-surface-0");
     expect(
       screen.getByRole("button", { name: "Retry transcription" }),
@@ -179,8 +182,35 @@ describe("DictationOverlay", () => {
     ).toBeInTheDocument();
 
     await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Retry paste" }));
+    });
+    expect(invoked).toContain("retry_dictation_paste");
+
+    await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Close" }));
     });
     expect(invoked).toContain("dismiss_dictation_overlay");
+  });
+
+  it("renames the retry button for a failed rewrite", async () => {
+    render(<DictationOverlay />);
+
+    await emit("falcondeck://dictation-state", {
+      state: "failed",
+      text: "Shorter version.",
+      error: "The rewrite is ready.",
+      retainedAudio: true,
+      mode: "rewrite",
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Retry paste" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy rewrite" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retry rewrite" }),
+    ).toBeInTheDocument();
   });
 });

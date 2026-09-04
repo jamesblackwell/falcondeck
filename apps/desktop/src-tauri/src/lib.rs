@@ -1378,6 +1378,7 @@ pub fn run() {
             dictation::stop_dictation,
             dictation::cancel_dictation,
             dictation::retry_dictation,
+            dictation::retry_dictation_paste,
             dictation::discard_dictation,
             dictation::dismiss_dictation_overlay,
             dictation::last_dictation_transcript,

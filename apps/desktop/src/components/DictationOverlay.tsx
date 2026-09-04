@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Button } from "@falcondeck/ui";
-import { Check, Copy, Mic, RotateCcw, Trash2, X } from "lucide-react";
+import { Check, ClipboardPaste, Copy, Mic, RotateCcw, Trash2, X } from "lucide-react";
 
 type DictationState =
   | "recording"
@@ -277,17 +277,28 @@ export function DictationOverlay({
             </div>
             <div className="mt-3 flex shrink-0 flex-wrap justify-end gap-2">
               {event.text ? (
-                <Button
-                  type="button"
-                  onClick={copyTranscript}
-                >
-                  {copied ? (
-                    <Check aria-hidden="true" className="h-4 w-4" />
-                  ) : (
-                    <Copy aria-hidden="true" className="h-4 w-4" />
-                  )}
-                  {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
-                </Button>
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => void invoke("retry_dictation_paste")}
+                    aria-label="Retry paste"
+                  >
+                    <ClipboardPaste aria-hidden="true" className="h-4 w-4" />
+                    Retry paste
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={copyTranscript}
+                  >
+                    {copied ? (
+                      <Check aria-hidden="true" className="h-4 w-4" />
+                    ) : (
+                      <Copy aria-hidden="true" className="h-4 w-4" />
+                    )}
+                    {copied ? "Copied" : rewrite ? "Copy rewrite" : "Copy transcript"}
+                  </Button>
+                </>
               ) : null}
               {event.retainedAudio ? (
                 <Button

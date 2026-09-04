@@ -47,8 +47,11 @@ status window, and paste-at-cursor behavior.
   action. Explicit copy leaves the transcript on the clipboard; automatic paste
   still restores the clipboard contents it temporarily replaced.
 - If the destination cannot accept the paste, the overlay grows into a recovery
-  card: the transcript is shown as plain text (not a quotation), with Copy as
-  the primary action and Retry/Discard still available. The window is sized to
+  card: the transcript is shown as plain text (not a quotation), with Retry
+  paste as the primary action (re-captures the live target and re-runs the
+  paste without re-transcribing, trying a directly targeted Command-V before
+  the normally routed one), Copy as the secondary action, and
+  Retry transcription / Discard still available. The window is sized to
   keep those controls on-screen.
 
 ## Native flow
@@ -64,7 +67,10 @@ AVFoundation, ApplicationServices, and Speech. The bridge:
    to Rust for the daemon's OpenRouter endpoint;
 5. revalidates the captured frontmost application, stages an ownership-tagged
    transient clipboard item, and synthesizes a normally routed Command-V
-   without targeting a possibly stale process ID.
+   without targeting a possibly stale process ID. When the normal route
+   cannot be delivered, it retries with a Command-V posted directly to the
+   captured process; paste attempts also re-read the live AX focus first so a
+   stale capture is reclassified as a same-app insert.
 
 FalconDeck inserts directly into its own React composer rather than routing its
 transcript back through the native paste machinery. For external apps, macOS
@@ -87,14 +93,14 @@ The Rust shell validates temporary paths before reading them, limits OpenRouter
 recordings to 8 MiB, and never exposes the OpenRouter credential to the
 webview.
 
-For the strongest stable local identity, set
-`FALCONDECK_LOCAL_CODESIGN_IDENTITY` to a certificate shown by
-`security find-identity -v -p codesigning` before running
-`make desktop-install`. When no identity is configured, local packaged builds
-fall back to an ad-hoc designated requirement derived from
-`CFBundleIdentifier`. Without an explicit stable requirement, macOS uses the
-executable's changing code hash as its identity and an enabled Accessibility
-entry can become stale after every install.
+`make desktop-install` signs with `Developer ID Application: Version Zero Limited`
+when that identity is in the login keychain, so Accessibility stays stable
+across local rebuilds. Override with `FALCONDECK_LOCAL_CODESIGN_IDENTITY` if
+needed. When no Developer ID is present, local packaged builds fall back to an
+ad-hoc designated requirement derived from `CFBundleIdentifier`. Without a
+stable requirement, macOS uses the executable's changing code hash as its
+identity and an enabled Accessibility entry can become stale after every
+install.
 
 The identifier-only ad-hoc fallback is intended only for trusted local
 development machines. Another locally run binary can claim the same bundle
@@ -138,8 +144,12 @@ Voice rewrite of selected text is a separate, off-by-default mode: select
 text, hold a different shortcut (Right Option by default), and speak an
 instruction such as "polish this in my style, but fix any grammar issues."
 FalconDeck captures the selection through Accessibility when the focused
-editor exposes it, otherwise by a snapshot-and-restore Command-C, transcribes
-the instruction with the same engine as dictation, then rewrites through
+editor exposes a non-empty selection. Chromium, Electron, and many web
+editors report a successful empty AX selection even when text is highlighted;
+those cases fall through to a snapshot-and-restore Command-C. The rewrite
+shortcut is lifted for that copy so a held Right Option does not turn it into
+Option-Command-C. The spoken instruction is transcribed with the same engine
+as dictation, then the selection is rewritten through
 OpenRouter (default `openai/gpt-5.6-luna`, with faster options such as
 `openai/gpt-oss-120b`) using the existing speech API key. Settings → Speech
 has a Custom prompt control that opens pre-filled with the built-in system
