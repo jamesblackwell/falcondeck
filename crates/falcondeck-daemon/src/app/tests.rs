@@ -5519,26 +5519,86 @@ async fn streaming_item_updates_do_not_emit_thread_updated() {
     .unwrap();
 
     let emitted: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
-    let item_events = emitted
+    let added = emitted
+        .iter()
+        .filter(|envelope| matches!(envelope.event, UnifiedEvent::ConversationItemAdded { .. }))
+        .count();
+    let updated = emitted
         .iter()
         .filter(|envelope| {
-            matches!(
-                envelope.event,
-                UnifiedEvent::ConversationItemAdded { .. }
-                    | UnifiedEvent::ConversationItemUpdated { .. }
-            )
+            matches!(envelope.event, UnifiedEvent::ConversationItemUpdated { .. })
         })
         .count();
+    let text_deltas: Vec<&str> = emitted
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            UnifiedEvent::Text { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
     let thread_updated = emitted
         .iter()
         .filter(|envelope| matches!(envelope.event, UnifiedEvent::ThreadUpdated { .. }))
         .count();
 
-    assert_eq!(item_events, 3);
+    assert_eq!(added, 1);
+    assert_eq!(text_deltas, ["lo"]);
+    assert_eq!(
+        updated, 1,
+        "only the completed item should replace the whole body"
+    );
     assert_eq!(
         thread_updated, 1,
         "only the completed item should emit a summary; streaming chunks must not"
     );
+}
+
+#[tokio::test]
+async fn streaming_rewrites_still_emit_conversation_item_updated() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        temp_dir.path(),
+    )
+    .await;
+
+    let mut events = app.subscribe();
+    let item = |text: &str| ConversationItem::AssistantMessage {
+        id: "asst-1".to_string(),
+        text: text.to_string(),
+        phase: None,
+        memory_citation: None,
+        citations: Vec::new(),
+        lifecycle: ContentLifecycle::Streaming,
+        error: None,
+        created_at: Utc::now(),
+    };
+
+    app.push_conversation_item("workspace-1", "thread-1", item("Hello"), true)
+        .await
+        .unwrap();
+    app.push_conversation_item("workspace-1", "thread-1", item("Goodbye"), true)
+        .await
+        .unwrap();
+
+    let emitted: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        UnifiedEvent::ConversationItemUpdated {
+            item: ConversationItem::AssistantMessage { text, .. }
+        } if text == "Goodbye"
+    )));
+    assert!(!emitted
+        .iter()
+        .any(|envelope| matches!(envelope.event, UnifiedEvent::Text { .. })));
 }
 
 async fn insert_claude_workspace_with_session(
@@ -7738,4 +7798,91 @@ fn codex_turn_failures_keep_provider_detail() {
     );
     assert_eq!(codex_turn_error_text(&json!({ "error": null })), None);
     assert_eq!(codex_turn_error_text(&json!({ "status": "failed" })), None);
+}
+
+#[tokio::test]
+async fn backup_and_restore_cycle_restores_preferences_workspaces_and_extensions() {
+    let temp = tempdir().unwrap();
+    let state_path = temp.path().join("state.json");
+    let app = AppState::new_with_state_path(
+        "test-version".to_string(),
+        HashMap::new(),
+        state_path.clone(),
+    );
+
+    // Update preferences
+    let updated_prefs = app
+        .update_preferences(falcondeck_core::UpdatePreferencesRequest {
+            workspace_colors: Some(std::collections::BTreeMap::from([(
+                "ws-1".to_string(),
+                "cat-3".to_string(),
+            )])),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        updated_prefs
+            .workspace_colors
+            .get("ws-1")
+            .map(String::as_str),
+        Some("cat-3")
+    );
+
+    // Export backup
+    let backup = app.export_backup().await.unwrap();
+    assert_eq!(backup.version, falcondeck_core::BACKUP_SCHEMA_VERSION);
+    assert_eq!(backup.app_version.as_deref(), Some("test-version"));
+    assert_eq!(
+        backup
+            .daemon
+            .preferences
+            .workspace_colors
+            .get("ws-1")
+            .map(String::as_str),
+        Some("cat-3")
+    );
+
+    // Inspect summary
+    let summary = backup.summarize();
+    assert_eq!(summary.version, falcondeck_core::BACKUP_SCHEMA_VERSION);
+
+    // Create a new fresh daemon in a different state directory
+    let temp_fresh = tempdir().unwrap();
+    let fresh_state_path = temp_fresh.path().join("state.json");
+    let fresh_app = AppState::new_with_state_path(
+        "fresh-version".to_string(),
+        HashMap::new(),
+        fresh_state_path,
+    );
+
+    assert_ne!(
+        fresh_app
+            .preferences()
+            .await
+            .workspace_colors
+            .get("ws-1")
+            .map(String::as_str),
+        Some("cat-3")
+    );
+
+    // Import backup into fresh daemon
+    let import_result = fresh_app
+        .import_backup(falcondeck_core::ImportBackupRequest {
+            backup: backup.clone(),
+            path_mappings: HashMap::new(),
+        })
+        .await
+        .unwrap();
+
+    assert!(import_result.preferences_restored);
+    assert_eq!(
+        fresh_app
+            .preferences()
+            .await
+            .workspace_colors
+            .get("ws-1")
+            .map(String::as_str),
+        Some("cat-3")
+    );
 }

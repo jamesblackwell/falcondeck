@@ -7,8 +7,8 @@ use chrono::Utc;
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveRequestKind,
     InteractiveRequestOutcome, InteractiveRequestResolution, SendTurnRequest, ServiceLevel,
-    ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary,
-    ToolLifecycle, TurnInputItem, UnifiedEvent, merge_conversation_citations,
+    TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadStatus,
+    ThreadSummary, ToolLifecycle, TurnInputItem, UnifiedEvent, merge_conversation_citations,
 };
 use serde_json::Value;
 use tokio::{
@@ -2418,6 +2418,7 @@ impl AppState {
         };
 
         if update_existing && let Some(index) = existing_index {
+            let previous = thread.items[index].clone();
             thread.items[index] = item.clone();
             let track_attention = track_attention && marks_agent_activity(&item);
             if track_attention {
@@ -2428,13 +2429,28 @@ impl AppState {
                     .max(self.inner.sequence.load(Ordering::Relaxed));
             }
             let skip_summary = is_in_flight_text_item(&item);
+            let append_delta = in_flight_append_delta(&previous, &item);
             drop(workspaces);
-            let emitted_item = with_renderable_attachment_previews(item).await;
-            self.emit(
-                Some(workspace_id.to_string()),
-                Some(thread_id.to_string()),
-                UnifiedEvent::ConversationItemUpdated { item: emitted_item },
-            );
+            if let Some(delta) = append_delta {
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    UnifiedEvent::Text {
+                        item_id: conversation_item_identity(&item).to_string(),
+                        delta: delta.text,
+                        target: delta.target,
+                        start_offset: Some(delta.start_offset),
+                        end_offset: Some(delta.end_offset),
+                    },
+                );
+            } else {
+                let emitted_item = with_renderable_attachment_previews(item).await;
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    UnifiedEvent::ConversationItemUpdated { item: emitted_item },
+                );
+            }
             // Streaming chunks already replace the previous item. A ThreadUpdated
             // on each one exists only to bump the attention seq, which the
             // terminal summary will carry — and it doubles the remote event rate.
@@ -2802,6 +2818,106 @@ fn is_in_flight_text_item(item: &ConversationItem) -> bool {
         lifecycle,
         ContentLifecycle::Pending | ContentLifecycle::Streaming
     )
+}
+
+struct InFlightAppendDelta {
+    text: String,
+    target: TextDeltaTarget,
+    start_offset: u64,
+    end_offset: u64,
+}
+
+fn utf16_len(text: &str) -> u64 {
+    text.encode_utf16().count() as u64
+}
+
+/// Prefix-extend a streaming assistant/reasoning item into a `Text` delta.
+/// Anything else (rewrite, citations, phase, terminal lifecycle) stays a
+/// full `ConversationItemUpdated`.
+fn in_flight_append_delta(
+    previous: &ConversationItem,
+    next: &ConversationItem,
+) -> Option<InFlightAppendDelta> {
+    if !is_in_flight_text_item(previous) || !is_in_flight_text_item(next) {
+        return None;
+    }
+    match (previous, next) {
+        (
+            ConversationItem::AssistantMessage {
+                id: previous_id,
+                text: previous_text,
+                phase: previous_phase,
+                memory_citation: previous_citation,
+                citations: previous_citations,
+                error: previous_error,
+                ..
+            },
+            ConversationItem::AssistantMessage {
+                id: next_id,
+                text: next_text,
+                phase: next_phase,
+                memory_citation: next_citation,
+                citations: next_citations,
+                error: next_error,
+                ..
+            },
+        ) if previous_id == next_id
+            && previous_phase == next_phase
+            && previous_citation == next_citation
+            && previous_citations == next_citations
+            && previous_error == next_error
+            && next_text.starts_with(previous_text.as_str())
+            && next_text.len() > previous_text.len() =>
+        {
+            Some(InFlightAppendDelta {
+                text: next_text[previous_text.len()..].to_string(),
+                target: TextDeltaTarget::AssistantText,
+                start_offset: utf16_len(previous_text),
+                end_offset: utf16_len(next_text),
+            })
+        }
+        (
+            ConversationItem::Reasoning {
+                id: previous_id,
+                summary: previous_summary,
+                content: previous_content,
+                duration_ms: previous_duration,
+                ..
+            },
+            ConversationItem::Reasoning {
+                id: next_id,
+                summary: next_summary,
+                content: next_content,
+                duration_ms: next_duration,
+                ..
+            },
+        ) if previous_id == next_id && previous_duration == next_duration => {
+            let previous_summary_text = previous_summary.as_deref().unwrap_or("");
+            let next_summary_text = next_summary.as_deref().unwrap_or("");
+            let summary_grew = next_summary_text.starts_with(previous_summary_text)
+                && next_summary_text.len() > previous_summary_text.len();
+            let content_grew = next_content.starts_with(previous_content.as_str())
+                && next_content.len() > previous_content.len();
+            if summary_grew && previous_content == next_content {
+                return Some(InFlightAppendDelta {
+                    text: next_summary_text[previous_summary_text.len()..].to_string(),
+                    target: TextDeltaTarget::ReasoningSummary,
+                    start_offset: utf16_len(previous_summary_text),
+                    end_offset: utf16_len(next_summary_text),
+                });
+            }
+            if content_grew && previous_summary == next_summary {
+                return Some(InFlightAppendDelta {
+                    text: next_content[previous_content.len()..].to_string(),
+                    target: TextDeltaTarget::ReasoningContent,
+                    start_offset: utf16_len(previous_content),
+                    end_offset: utf16_len(next_content),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Whether an item is fresh agent output for unread purposes. User messages
