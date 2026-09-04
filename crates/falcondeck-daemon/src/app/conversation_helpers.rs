@@ -19,6 +19,27 @@ use uuid::Uuid;
 
 const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
     ["data:", "http://", "https://", "blob:", "asset:"];
+/// Desktop screenshots can be hundreds of KB. Capping data URLs keeps the
+/// snapshot and mobile cache from ballooning when cua-driver returns images.
+const MAX_SYNCED_TOOL_IMAGE_CHARS: usize = 48_000;
+
+pub(crate) fn cap_synced_tool_image(url: String) -> Option<ToolOutputContentItem> {
+    if url.starts_with("data:") && url.len() > MAX_SYNCED_TOOL_IMAGE_CHARS {
+        Some(ToolOutputContentItem::Text {
+            text: "[Screenshot omitted — too large to sync to paired devices]".to_string(),
+        })
+    } else {
+        Some(ToolOutputContentItem::Image { url })
+    }
+}
+
+pub(crate) fn cap_synced_image_url(url: String) -> Option<String> {
+    if url.starts_with("data:") && url.len() > MAX_SYNCED_TOOL_IMAGE_CHARS {
+        None
+    } else {
+        Some(url)
+    }
+}
 
 /// Skill files are agent instructions, not useful tool output for a chat
 /// transcript. Keep the activity row, but never retain or transport the full
@@ -976,15 +997,13 @@ pub(crate) fn codex_tool_call_detail(item: &Value) -> Option<ToolCallDetail> {
                                 text: content.get("text")?.as_str()?.to_string(),
                             })
                         }
-                        Some("inputImage") | Some("input_image") => {
-                            Some(ToolOutputContentItem::Image {
-                                url: content
-                                    .get("imageUrl")
-                                    .or_else(|| content.get("image_url"))?
-                                    .as_str()?
-                                    .to_string(),
-                            })
-                        }
+                        Some("inputImage") | Some("input_image") => cap_synced_tool_image(
+                            content
+                                .get("imageUrl")
+                                .or_else(|| content.get("image_url"))?
+                                .as_str()?
+                                .to_string(),
+                        ),
                         _ => None,
                     },
                 )

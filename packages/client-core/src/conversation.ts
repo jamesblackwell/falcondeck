@@ -1550,8 +1550,10 @@ function isHighSignalTool(
       item.detail.result,
       item.display.provider_output_summary,
     ).total > 0
-  )
+  ) {
+    // Visible artifacts only. Structured JSON is the MCP payload, not a card.
     return true;
+  }
   if (
     isAbnormalTerminalTool(item) &&
     preferences.conversation.auto_expand.errors

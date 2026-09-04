@@ -310,7 +310,7 @@ describe("provider-native tool output", () => {
         })}
       />,
     );
-    expect(screen.getByText("5 artifacts")).toBeVisible();
+    expect(screen.getByText("4 artifacts")).toBeVisible();
     fireEvent.click(
       screen.getByRole("button", {
         name: /Notion · Search details, Completed$/,
@@ -347,6 +347,43 @@ describe("provider-native tool output", () => {
     expect(screen.queryByText("git commit")).not.toBeInTheDocument();
     expect(screen.getByText(/"payload": 7/)).toBeVisible();
     expect(screen.getByText(/"count": 3/)).toBeVisible();
+  });
+
+  it("does not treat a FalconDeck structured JSON fallback as an artifact dump", () => {
+    const structured = {
+      data: {
+        concurrency_policy: "skip",
+        name: "Recheck saved-course canary",
+      },
+    };
+    render(
+      <MessageCard
+        item={tool("falcondeck-execute", "falcondeck · falcondeck_execute", {
+          kind: "mcp",
+          server: "falcondeck",
+          tool: "falcondeck_execute",
+          arguments: { operation: "automation.create" },
+          result: {
+            content: [{ type: "text", text: JSON.stringify(structured) }],
+            structuredContent: structured,
+          },
+          error: null,
+          duration_ms: 23,
+          app_context: null,
+        })}
+      />,
+    );
+
+    expect(screen.queryByText("1 artifact")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /falcondeck · falcondeck_execute details, Completed$/,
+      }),
+    );
+    expect(screen.queryByText("Provider artifacts")).not.toBeInTheDocument();
+    expect(screen.queryByText("code")).not.toBeInTheDocument();
+    expect(screen.getByText("Structured result")).toBeVisible();
+    expect(screen.getByText(/"concurrency_policy": "skip"/)).toBeVisible();
   });
 
   it("renders ordered dynamic content and previews safe provider images in-app", async () => {

@@ -63,6 +63,7 @@ import {
   inspectableValueSummary,
   isSafeExternalUrl,
   isSafeMediaUrl,
+  mcpTextDuplicatesStructuredContent,
   providerOutputKindLabel,
   parseMcpResult,
   projectHarnessUserText,
@@ -1801,6 +1802,14 @@ function McpResultContent({ value, tool }: { value: unknown; tool: string }) {
       ) : null}
       {result.content.map((content, index) => {
         if (content.kind === "text") {
+          if (
+            mcpTextDuplicatesStructuredContent(
+              content.text,
+              result.structured_content,
+            )
+          ) {
+            return null;
+          }
           return (
             <CodeBlock
               key={`text-${index}`}

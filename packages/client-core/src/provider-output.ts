@@ -46,6 +46,7 @@ export type McpResourceIcon = {
 };
 
 export type McpArtifactSummary = {
+  /** Images, audio, and resources only. Structured JSON is counted separately. */
   total: number;
   resource_links: number;
   embedded_resources: number;
@@ -253,12 +254,7 @@ export function inspectMcpResult(
     const cached = providerOutputInspectionCache.get(summary);
     if (cached) return cached;
     const artifacts: McpArtifactSummary = {
-      total:
-        summary.images +
-        summary.audio +
-        summary.resource_links +
-        summary.embedded_resources +
-        summary.structured_results,
+      total: visibleArtifactTotal(summary),
       resource_links: summary.resource_links,
       embedded_resources: summary.embedded_resources,
       images: summary.images,
@@ -332,12 +328,7 @@ export function inspectMcpResult(
       }
     }
   }
-  artifacts.total =
-    artifacts.resource_links +
-    artifacts.embedded_resources +
-    artifacts.images +
-    artifacts.audio +
-    artifacts.structured_results;
+  artifacts.total = visibleArtifactTotal(artifacts);
   const inspection = { has_text_content: hasTextContent, artifacts };
   mcpResultInspectionCache.set(result, inspection);
   return inspection;
@@ -360,13 +351,49 @@ export function summarizeParsedMcpArtifacts(
     else if (content.kind === "image") summary.images += 1;
     else if (content.kind === "audio") summary.audio += 1;
   }
-  summary.total =
+  summary.total = visibleArtifactTotal(summary);
+  return summary;
+}
+
+function visibleArtifactTotal(summary: {
+  resource_links: number;
+  embedded_resources: number;
+  images: number;
+  audio: number;
+}): number {
+  return (
     summary.resource_links +
     summary.embedded_resources +
     summary.images +
-    summary.audio +
-    summary.structured_results;
-  return summary;
+    summary.audio
+  );
+}
+
+/**
+ * MCP servers that emit `structuredContent` still have to send a text
+ * fallback. FalconDeck (and many others) stringify that same object into
+ * `content[0].text`, which the transcript would otherwise render twice.
+ */
+export function mcpTextDuplicatesStructuredContent(
+  text: string,
+  structured: unknown,
+): boolean {
+  if (structured == null) return false;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    return jsonEqual(JSON.parse(trimmed), structured);
+  } catch {
+    return false;
+  }
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
 }
 
 export function summarizeMcpArtifacts(

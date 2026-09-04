@@ -109,4 +109,58 @@ describe("MCP artifact presentation", () => {
       suppress_read_only_detail: false,
     });
   });
+
+  it("does not auto-expand MCP calls that only return structured JSON", () => {
+    const structured = {
+      ok: true,
+      data: { name: "Recheck saved-course canary" },
+    };
+    const item = mcpArtifact();
+    item.id = "mcp-structured";
+    item.title = "falcondeck · falcondeck_execute";
+    item.display.is_read_only = false;
+    item.display.has_side_effect = true;
+    item.display.activity_kind = "other";
+    item.display.history_mode = "full";
+    item.display.summary_hint = null;
+    item.display.provider_output_summary = {
+      text_blocks: 1,
+      images: 0,
+      audio: 0,
+      resource_links: 0,
+      embedded_resources: 0,
+      structured_results: 1,
+    };
+    item.detail = {
+      kind: "mcp",
+      server: "falcondeck",
+      tool: "falcondeck_execute",
+      arguments: { operation: "automation.create" },
+      result: {
+        content: [{ type: "text", text: JSON.stringify(structured) }],
+        structuredContent: structured,
+      },
+      error: null,
+      duration_ms: 23,
+      app_context: null,
+    };
+
+    const collapsed = deriveConversationPresentation(
+      [item],
+      preferences("collapsed"),
+    );
+    expect(collapsed.history_blocks).toHaveLength(1);
+    expect(collapsed.history_blocks[0]).toMatchObject({
+      kind: "work_session",
+    });
+
+    const compact = deriveConversationPresentation(
+      [item],
+      preferences("compact"),
+    );
+    expect(compact.history_blocks[0]).toMatchObject({
+      kind: "item",
+      default_open: false,
+    });
+  });
 });

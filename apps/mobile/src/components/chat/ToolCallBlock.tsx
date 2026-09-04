@@ -33,6 +33,7 @@ import {
   formatInspectableValue,
   guardianReviewPresentation,
   inspectableValueSummary,
+  mcpTextDuplicatesStructuredContent,
   parseMcpResult,
   summarizeMcpArtifacts,
   summarizeParsedMcpArtifacts,
@@ -779,6 +780,14 @@ function McpDetail({
       ) : null}
       {result.content.map((content, index) => {
         if (content.kind === "text") {
+          if (
+            mcpTextDuplicatesStructuredContent(
+              content.text,
+              result.structured_content,
+            )
+          ) {
+            return null;
+          }
           return (
             <CodeBlock
               key={`text-${index}`}

@@ -7,6 +7,7 @@ import {
   imageInputLabel,
   inspectMcpResult,
   isSafeExternalUrl,
+  mcpTextDuplicatesStructuredContent,
   safeExternalUrl,
   isSafeMediaUrl,
   isSafeNativeImageUrl,
@@ -115,7 +116,7 @@ describe("parseMcpResult", () => {
     expect(inspection).toEqual({
       has_text_content: true,
       artifacts: {
-        total: 6,
+        total: 5,
         resource_links: 3,
         embedded_resources: 1,
         images: 1,
@@ -202,13 +203,42 @@ describe("parseMcpResult", () => {
     expect(parsed.metadata).toEqual({ trace: "abc" });
     expect(parsed.extra).toEqual({ isError: false });
     expect(summarizeParsedMcpArtifacts(parsed)).toEqual({
-      total: 5,
+      total: 4,
       resource_links: 1,
       embedded_resources: 1,
       images: 1,
       audio: 1,
       structured_results: 1,
     });
+  });
+
+  it("does not treat structured JSON as a visible provider artifact", () => {
+    const structured = {
+      ok: true,
+      data: { name: "Recheck saved-course canary" },
+    };
+    const result = {
+      content: [{ type: "text", text: JSON.stringify(structured) }],
+      structuredContent: structured,
+    };
+
+    expect(summarizeMcpArtifacts(result)).toEqual({
+      total: 0,
+      resource_links: 0,
+      embedded_resources: 0,
+      images: 0,
+      audio: 0,
+      structured_results: 1,
+    });
+    expect(summarizeMcpArtifacts(result)).toEqual(
+      summarizeParsedMcpArtifacts(parseMcpResult(result)),
+    );
+    expect(
+      mcpTextDuplicatesStructuredContent(JSON.stringify(structured), structured),
+    ).toBe(true);
+    expect(
+      mcpTextDuplicatesStructuredContent("Created the automation.", structured),
+    ).toBe(false);
   });
 
   it("keeps lightweight artifact counts aligned with full parsing", () => {

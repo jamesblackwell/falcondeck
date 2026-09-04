@@ -310,7 +310,7 @@ describe("provider-native tool output", () => {
     const renderer = renderComponent(
       <ToolCallBlock defaultOpen={false} suppressDetail={false} item={item} />,
     );
-    expect(textOf(renderer)).toContain("5 artifacts");
+    expect(textOf(renderer)).toContain("4 artifacts");
     const disclosure = renderer.root.findByProps({
       accessibilityLabel: "Notion · Search, Completed",
     });

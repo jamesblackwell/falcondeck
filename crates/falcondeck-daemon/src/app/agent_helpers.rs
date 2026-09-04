@@ -886,22 +886,26 @@ pub(crate) fn claude_tool_result_image_items(
     images
         .iter()
         .enumerate()
-        .map(|(index, image)| {
+        .filter_map(|(index, image)| {
+            let url = super::conversation_helpers::cap_synced_image_url(format!(
+                "data:{};base64,{}",
+                image.media_type, image.data
+            ))?;
             let id = format!("{tool_id}-image-{index}");
-            falcondeck_core::ConversationItem::Image {
+            Some(falcondeck_core::ConversationItem::Image {
                 id: id.clone(),
                 title: Some(title.to_string()),
                 image: falcondeck_core::ConversationImage {
                     id: format!("{id}-asset"),
                     name: None,
                     mime_type: Some(image.media_type.clone()),
-                    url: format!("data:{};base64,{}", image.media_type, image.data),
+                    url,
                     local_path: None,
                     alt_text: None,
                 },
                 lifecycle: falcondeck_core::ContentLifecycle::Complete,
                 created_at: chrono::Utc::now(),
-            }
+            })
         })
         .collect()
 }
@@ -1072,7 +1076,9 @@ pub(crate) fn extract_claude_user_message_images(value: &Value) -> Vec<ImageInpu
                         id: format!("claude-img-{:016x}", fnv1a_64(data.as_bytes())),
                         name: None,
                         mime_type: Some(media_type.clone()),
-                        url: format!("data:{media_type};base64,{data}"),
+                        url: super::conversation_helpers::cap_synced_image_url(format!(
+                            "data:{media_type};base64,{data}"
+                        ))?,
                         local_path: None,
                     })
                 }
