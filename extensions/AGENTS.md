@@ -10,6 +10,9 @@ Read `../docs/EXTENSIONS.md` before changing or creating an extension.
   `defineExtensionUi` is available when constructing the same documents in TS.
 - Declare a titled `panels` entry for a full-main-area surface. Desktop and web
   render the bounded document; mobile deliberately shows a visible fallback.
+  The host owns the compact chrome (icon + title). Do not draw a second page
+  `h1`. Directory panels use an inner `max-w-4xl px-6 py-6` scroller; spatial
+  tools (boards, split editors) fill the frame. See DESIGN.md “Main views”.
 - Keep private data in `context.storage`; publish only bounded, non-secret view
   projections needed by clients.
 - Use `context.events.on(...)` only for identifier-only lifecycle signals;

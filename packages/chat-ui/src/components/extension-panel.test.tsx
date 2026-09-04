@@ -24,9 +24,21 @@ describe("ExtensionPanel", () => {
     render(<ExtensionPanel panel={panel} onClose={onClose} />);
 
     expect(screen.getByRole("heading", { name: "Mini Zen" })).toBeTruthy();
+    expect(screen.getByText("Example Zen")).toBeTruthy();
     expect(screen.getByText("One thing at a time")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close Mini Zen" }));
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("hides the extension name when it matches the panel title", () => {
+    render(
+      <ExtensionPanel
+        panel={{ ...panel, title: "Example Zen" }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByText("Example Zen")).toHaveLength(1);
   });
 
   it("keeps unsupported panel content visible", () => {

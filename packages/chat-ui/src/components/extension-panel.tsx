@@ -8,7 +8,6 @@ import {
   NotebookPen,
   PanelsTopLeft,
   StickyNote,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -17,7 +16,7 @@ import type {
   ExtensionPanelDefinition,
   ExtensionUiActionBinding,
 } from "@falcondeck/client-core";
-import { Button, cn } from "@falcondeck/ui";
+import { MainView, MainViewBody, cn } from "@falcondeck/ui";
 
 const PANEL_ICONS: Record<string, LucideIcon> = {
   activity: Activity,
@@ -64,63 +63,41 @@ export function ExtensionPanel({
   className,
   children,
 }: ExtensionPanelProps) {
+  const showExtensionName =
+    panel.extensionName.trim().toLocaleLowerCase() !==
+    panel.title.trim().toLocaleLowerCase();
+
   return (
-    <section
-      aria-label={panel.title}
-      className={cn("flex h-full min-h-0 flex-col bg-surface-0", className)}
+    <MainView
+      className={className}
+      icon={<PanelIcon name={panel.icon} className="h-4 w-4" />}
+      title={panel.title}
+      meta={showExtensionName ? panel.extensionName : undefined}
+      onClose={onClose}
+      closeLabel={`Close ${panel.title}`}
     >
-      <header
-        data-tauri-drag-region="deep"
-        className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-5 py-3"
-      >
-        <PanelIcon
-          name={panel.icon}
-          className="h-4 w-4 text-fg-muted"
-        />
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
-            {panel.title}
-          </h1>
-          <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-            {panel.extensionName}
-          </p>
-        </div>
-        {onClose ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={`Close ${panel.title}`}
-            onClick={onClose}
-          >
-            <X aria-hidden="true" className="h-4 w-4" />
-          </Button>
-        ) : null}
-      </header>
       {children ? (
-        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+        <MainViewBody layout="workspace">{children}</MainViewBody>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
-          <div className="mx-auto w-full max-w-4xl">
-            {panel.document ? (
-              <ExtensionUiRenderer
-                extensionId={panel.extensionId}
-                document={panel.document}
-                onAction={onAction}
-              />
-            ) : (
-              <ExtensionUiFallback
-                extensionName={panel.extensionName}
-                contributionKind="panel"
-                reason={
-                  panel.unsupportedReason ?? "Panel content is unavailable"
-                }
-              />
-            )}
-          </div>
-        </div>
+        <MainViewBody>
+          {panel.document ? (
+            <ExtensionUiRenderer
+              extensionId={panel.extensionId}
+              document={panel.document}
+              onAction={onAction}
+            />
+          ) : (
+            <ExtensionUiFallback
+              extensionName={panel.extensionName}
+              contributionKind="panel"
+              reason={
+                panel.unsupportedReason ?? "Panel content is unavailable"
+              }
+            />
+          )}
+        </MainViewBody>
       )}
-    </section>
+    </MainView>
   );
 }
 

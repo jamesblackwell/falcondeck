@@ -129,6 +129,37 @@ describe('PluginsView', () => {
     expect(screen.getByText('fal')).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Featured' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Installed' })).toBeInTheDocument()
+
+    const notionLogo = document.querySelector(
+      'img[src*="/api/plugin-logos?domain=notion.so"]',
+    )
+    expect(notionLogo).toBeInTheDocument()
+    expect(notionLogo).toHaveAttribute(
+      'src',
+      'http://127.0.0.1:4123/api/plugin-logos?domain=notion.so',
+    )
+  })
+
+  it('falls back to the initial letter when a plugin logo fails to load', async () => {
+    stubFetch()
+    render(
+      <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
+    )
+
+    expect(await screen.findByText('Notion')).toBeInTheDocument()
+    const notionLogos = document.querySelectorAll(
+      'img[src*="/api/plugin-logos?domain=notion.so"]',
+    )
+    expect(notionLogos.length).toBeGreaterThan(0)
+
+    for (const logo of notionLogos) {
+      fireEvent.error(logo)
+    }
+
+    expect(
+      document.querySelector('img[src*="/api/plugin-logos?domain=notion.so"]'),
+    ).not.toBeInTheDocument()
+    expect(screen.getAllByText('N').length).toBeGreaterThan(0)
   })
 
   it('lists installed skills and only offers removal for managed ones', async () => {

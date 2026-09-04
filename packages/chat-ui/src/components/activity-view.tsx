@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { PanelsTopLeft, Plus, X } from "lucide-react";
+import { Activity, PanelsTopLeft, Plus } from "lucide-react";
 
 import {
   collectActivityEntries,
@@ -19,7 +19,16 @@ import {
   type ProjectGroup,
   type RecentEntry,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, Button, EmptyState, Kbd, cn } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  Button,
+  EmptyState,
+  Kbd,
+  MainView,
+  MainViewBody,
+  MainViewSection,
+  cn,
+} from "@falcondeck/ui";
 
 import { InteractiveRequestCard } from "./interactive-request-card";
 
@@ -821,31 +830,20 @@ export const ActivityView = memo(function ActivityView({
   const isEmpty = visibleEntries.length === 0 && recentEntries.length === 0;
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-surface-1 text-fg-primary">
-      <div
-        ref={scrollRef}
-        className="min-h-0 flex-1 overflow-y-auto"
-      >
-      <div
-        className={cn(
-          "mx-auto w-full max-w-3xl px-8 py-10",
-          trafficLightInset && "pl-[86px] pt-8",
-        )}
-      >
-        <header
-          aria-label="Activity summary"
-          data-tauri-drag-region="deep"
-          className="flex items-start justify-between gap-4"
-        >
-          <div className="min-w-0">
-            <h1 className="text-3xl font-semibold tracking-tight">Activity</h1>
-            {subtitle ? (
-              <p className="mt-2 truncate text-fg-secondary">{subtitle}</p>
-            ) : null}
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
+    <MainView
+      className="relative"
+      icon={<Activity aria-hidden="true" className="h-4 w-4" />}
+      title="Activity"
+      meta={subtitle}
+      headerAriaLabel="Activity summary"
+      trafficLightInset={trafficLightInset}
+      onClose={onClose}
+      closeLabel="Close Activity"
+      actions={
+        onNewThread || headerActions || onPopOut ? (
+          <>
             {onNewThread ? (
-              <Button type="button" size="sm" onClick={onNewThread}>
+              <Button type="button" onClick={onNewThread}>
                 <Plus aria-hidden="true" className="h-4 w-4" />
                 New task
               </Button>
@@ -854,7 +852,6 @@ export const ActivityView = memo(function ActivityView({
             {onPopOut ? (
               <Button
                 type="button"
-                size="sm"
                 variant="ghost"
                 className="text-fg-muted"
                 title="Keep Activity open in its own window"
@@ -864,68 +861,47 @@ export const ActivityView = memo(function ActivityView({
                 Open in new window
               </Button>
             ) : null}
-            {onClose ? (
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                aria-label="Close Activity"
-                onClick={onClose}
-              >
-                <X aria-hidden="true" className="h-4 w-4" />
-              </Button>
-            ) : null}
-          </div>
-        </header>
-
+          </>
+        ) : undefined
+      }
+    >
+      <MainViewBody ref={scrollRef}>
         {isEmpty ? (
           <EmptyState
             title="All caught up"
             description="Tasks that need a response, failed, or are still running will show up here."
-            className="py-24"
+            className="py-16"
           />
         ) : (
-          <div className="mt-10 space-y-8">
+          <div className="space-y-8">
             {SECTION_ORDER.map((section) => {
               const sectionEntries = sections.get(section) ?? [];
               if (sectionEntries.length === 0) return null;
               const meta = SECTION_META[section];
               return (
-                <section
+                <MainViewSection
                   key={section}
-                  aria-labelledby={`activity-${section}`}
+                  title={meta.title}
+                  count={sectionEntries.length}
                   data-activity-list={section}
                 >
-                  <div className="mb-1.5 flex items-baseline gap-2 px-2.5">
-                    <h2
-                      id={`activity-${section}`}
-                      className="fd-type-eyebrow text-fg-muted"
-                    >
-                      {meta.title}
-                    </h2>
-                    <span className="fd-type-meta text-fg-muted">
-                      {sectionEntries.length}
-                    </span>
-                  </div>
-                  <div>
-                    {sectionEntries.map((entry) => (
-                      <ActivityRow
-                        key={entryKey(entry)}
-                        entry={entry}
-                        host={workspaceHosts[entry.workspaceId]}
-                        nowMs={nowMs}
-                        selected={selectedKey === entryKey(entry)}
-                        resolvedRequest={resolvedRequestForEntry(
-                          entry,
-                          resolvedEntries[entryKey(entry)],
-                        )}
-                        onOpenThread={onOpenThread}
-                        onMarkThreadRead={onMarkThreadRead}
-                        onRespond={handleRespond}
-                      />
-                    ))}
-                  </div>
-                </section>
+                  {sectionEntries.map((entry) => (
+                    <ActivityRow
+                      key={entryKey(entry)}
+                      entry={entry}
+                      host={workspaceHosts[entry.workspaceId]}
+                      nowMs={nowMs}
+                      selected={selectedKey === entryKey(entry)}
+                      resolvedRequest={resolvedRequestForEntry(
+                        entry,
+                        resolvedEntries[entryKey(entry)],
+                      )}
+                      onOpenThread={onOpenThread}
+                      onMarkThreadRead={onMarkThreadRead}
+                      onRespond={handleRespond}
+                    />
+                  ))}
+                </MainViewSection>
               );
             })}
 
@@ -939,8 +915,7 @@ export const ActivityView = memo(function ActivityView({
             />
           </div>
         )}
-      </div>
-      </div>
+      </MainViewBody>
 
       {showKeys ? (
         <div
@@ -979,6 +954,6 @@ export const ActivityView = memo(function ActivityView({
           </div>
         </div>
       ) : null}
-    </div>
+    </MainView>
   );
 });

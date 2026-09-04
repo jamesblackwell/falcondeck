@@ -20,7 +20,6 @@ import {
   Pencil,
   Play,
   Plus,
-  Search,
   Server,
   Trash2,
   X,
@@ -42,7 +41,12 @@ import type {
 import { approvalPolicyForProvider } from "@falcondeck/client-core";
 import {
   Button,
+  MainView,
+  MainViewBody,
+  MainViewLead,
   Popover,
+  SearchField,
+  SegmentedControl,
   Select,
   SelectContent,
   SelectItem,
@@ -1430,106 +1434,91 @@ export function ScheduledTasksView({
   };
 
   return (
-    <main className="h-full overflow-y-auto bg-surface-1 px-8 py-10 text-fg-primary">
-      <div className="mx-auto max-w-5xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-semibold tracking-tight">
-              Automations
-            </h1>
-            <p className="mt-2 text-fg-secondary">
-              Run recurring agent work on this Mac or an enrolled server.
-            </p>
-          </div>
-          <div className="flex">
-            <Button
-              className="rounded-r-none"
-              onClick={onCreateWithAgent}
-              disabled={!onCreateWithAgent}
-            >
-              <Plus aria-hidden="true" className="h-4 w-4" />
-              New automation
-            </Button>
-            <Popover.Root>
-              <Popover.Trigger asChild>
-                <Button
-                  className="rounded-l-none border-l border-surface-0 px-2"
-                  aria-haspopup="menu"
-                  aria-label="New automation options"
-                  disabled={!onCreateWithAgent && !canCreate}
-                >
-                  <ChevronDown aria-hidden="true" className="h-4 w-4" />
-                </Button>
-              </Popover.Trigger>
-              <Popover.Portal>
-                <Popover.Content
-                  align="end"
-                  sideOffset={8}
-                  role="menu"
-                  aria-label="New automation options"
-                  onKeyDown={handleMenuKeyDown}
-                  className="z-50 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
-                >
-                  <Popover.Close asChild>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      disabled={!onCreateWithAgent}
-                      className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
-                      onClick={onCreateWithAgent}
-                    >
-                      <MessageCircle aria-hidden="true" className="h-4 w-4" />
-                      Create with agent
-                    </button>
-                  </Popover.Close>
-                  <Popover.Close asChild>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      disabled={!canCreate}
-                      className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
-                      onClick={openCreateEditor}
-                    >
-                      <Pencil aria-hidden="true" className="h-4 w-4" />
-                      Set up manually
-                    </button>
-                  </Popover.Close>
-                </Popover.Content>
-              </Popover.Portal>
-            </Popover.Root>
-          </div>
-        </div>
-        <label className="relative mt-8 block">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" />
-          <span className="sr-only">Search automations</span>
-          <input
-            className={`${inputClass} pl-10`}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search automations"
-          />
-        </label>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <div
-            className="inline-flex rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-0.5"
-            role="group"
-            aria-label="Automation status filter"
+    <MainView
+      icon={<Clock3 aria-hidden="true" className="h-4 w-4" />}
+      title="Automations"
+      actions={
+        <div className="flex">
+          <Button
+            className="rounded-r-none"
+            onClick={onCreateWithAgent}
+            disabled={!onCreateWithAgent}
           >
-            {(["all", "active", "paused"] as const).map((value) => (
-              <button
-                key={value}
-                aria-pressed={filter === value}
-                className={cn(
-                  "fd-focus h-8 rounded-[var(--fd-radius-md)] px-3 text-sm capitalize text-fg-secondary transition-colors duration-[var(--fd-duration-fast)] hover:text-fg-primary",
-                  filter === value &&
-                    "bg-surface-4 text-fg-primary shadow-[var(--fd-shadow-sm)]",
-                )}
-                onClick={() => setFilter(value)}
+            <Plus aria-hidden="true" className="h-4 w-4" />
+            New automation
+          </Button>
+          <Popover.Root>
+            <Popover.Trigger asChild>
+              <Button
+                className="rounded-l-none border-l border-surface-0 px-2"
+                aria-haspopup="menu"
+                aria-label="New automation options"
+                disabled={!onCreateWithAgent && !canCreate}
               >
-                {value}
-              </button>
-            ))}
-          </div>
+                <ChevronDown aria-hidden="true" className="h-4 w-4" />
+              </Button>
+            </Popover.Trigger>
+            <Popover.Portal>
+              <Popover.Content
+                align="end"
+                sideOffset={8}
+                role="menu"
+                aria-label="New automation options"
+                onKeyDown={handleMenuKeyDown}
+                className="z-50 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
+              >
+                <Popover.Close asChild>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!onCreateWithAgent}
+                    className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                    onClick={onCreateWithAgent}
+                  >
+                    <MessageCircle aria-hidden="true" className="h-4 w-4" />
+                    Create with agent
+                  </button>
+                </Popover.Close>
+                <Popover.Close asChild>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={!canCreate}
+                    className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                    onClick={openCreateEditor}
+                  >
+                    <Pencil aria-hidden="true" className="h-4 w-4" />
+                    Set up manually
+                  </button>
+                </Popover.Close>
+              </Popover.Content>
+            </Popover.Portal>
+          </Popover.Root>
+        </div>
+      }
+    >
+      <MainViewBody>
+        <MainViewLead>
+          Run recurring agent work on this Mac or an enrolled server.
+        </MainViewLead>
+        <SearchField
+          label="Search automations"
+          className="mt-5"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search automations"
+        />
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <SegmentedControl
+            ariaLabel="Automation status filter"
+            value={filter}
+            options={[
+              { value: "all", label: "All" },
+              { value: "active", label: "Active" },
+              { value: "paused", label: "Paused" },
+            ]}
+            onChange={setFilter}
+          />
           {hosts.length ? (
             <Select value={hostFilter} onValueChange={setHostFilter}>
               <SelectTrigger
@@ -1628,7 +1617,7 @@ export function ScheduledTasksView({
             return (
               <Fragment key={key}>
                 {index === firstOwnedIndex ? (
-                  <div className="bg-surface-1 px-4 py-2.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-wide text-fg-muted">
+                  <div className="fd-type-eyebrow bg-surface-1 px-4 py-2.5 text-fg-muted">
                     Used by Missions
                   </div>
                 ) : null}
@@ -1795,7 +1784,7 @@ export function ScheduledTasksView({
             </div>
           ) : null}
         </div>
-      </div>
+      </MainViewBody>
       {selected ? (
         <aside
           role="dialog"
@@ -2189,6 +2178,6 @@ export function ScheduledTasksView({
           </section>
         </div>
       ) : null}
-    </main>
+    </MainView>
   );
 }

@@ -33,9 +33,7 @@ export function SettingsPageHeader({
       )}
     >
       <div className="min-w-0 flex-1 space-y-1.5">
-        <h1 className="text-[length:var(--fd-text-2xl)] font-semibold tracking-tight text-fg-primary">
-          {title}
-        </h1>
+        <h1 className="fd-type-heading text-fg-primary">{title}</h1>
         {description ? (
           <p className="max-w-[60ch] text-[length:var(--fd-text-sm)] text-fg-tertiary">
             {description}
@@ -250,16 +248,20 @@ export function SegmentedControl<T extends string>({
   onChange,
   ariaLabel,
   className,
+  kind = 'group',
 }: {
   value: T
   options: Array<{ value: T; label: string }>
   onChange: (value: T) => void
   ariaLabel?: string
   className?: string
+  /** `tabs` for a page switcher in main-view chrome; `group` for in-page filters. */
+  kind?: 'group' | 'tabs'
 }) {
+  const isTabs = kind === 'tabs'
   return (
     <div
-      role="group"
+      role={isTabs ? 'tablist' : 'group'}
       aria-label={ariaLabel}
       className={cn(
         'inline-flex rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 p-0.5',
@@ -272,7 +274,9 @@ export function SegmentedControl<T extends string>({
           <button
             key={option.value}
             type="button"
-            aria-pressed={selected}
+            role={isTabs ? 'tab' : undefined}
+            aria-selected={isTabs ? selected : undefined}
+            aria-pressed={isTabs ? undefined : selected}
             onClick={() => onChange(option.value)}
             className={cn(
               'fd-focus rounded-[calc(var(--fd-radius-md)-2px)] px-3 py-1.5 text-[length:var(--fd-text-sm)] font-medium transition-colors duration-[var(--fd-duration-fast)]',

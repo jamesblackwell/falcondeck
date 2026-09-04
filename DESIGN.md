@@ -209,7 +209,7 @@ Shared UI should generally live in `packages/ui` or `packages/chat-ui`, not be r
 Rules:
 
 - Prefer semantic wrappers over long utility-only markup
-- Reuse the established panel, card, badge, button, input, and shell primitives
+- Reuse the established panel, card, badge, button, input, shell, and main-view primitives
 - Preserve the existing dark shell and sidebar hierarchy
 - Treat spacing and border contrast as the primary layout language
 
@@ -218,6 +218,102 @@ When adding a new shared pattern:
 - Start with token usage
 - Check whether it belongs in `packages/ui`
 - Keep states consistent across desktop, remote web, and mobile
+- New sidebar takeovers must use `MainView` rather than inventing a page heading
+
+## Main views
+
+Every surface that replaces the conversation column is a **main view**: Activity,
+Extensions, Plugins, Scheduled, Settings, and every extension `panels`
+contribution (Notes, Missions, Kanban, Mini Zen, and later packages).
+
+These used to be several unrelated pages — marketing-sized `text-3xl` titles at
+`max-w-3xl`, settings headers at `max-w-4xl`, catalog pages at `max-w-5xl`, and
+extension panels with a compact chrome bar. That split is closed. There is one
+chrome, owned by the host, and two body layouts.
+
+### Chrome (required, host-owned)
+
+Use `MainView` from `@falcondeck/ui`. `ExtensionPanel` is the same chrome with
+an extension icon and optional close.
+
+- Full-bleed `bg-surface-1`, filling the main column
+- Sticky header: `min-h-14`, bottom hairline, `px-5 py-2.5`
+- Left: optional 16px icon, page `h1` at `fd-type-heading fd-type-heading--sm`
+  (18px semibold), optional meta line at `fd-type-meta`
+- Right: page actions, then optional close (`Button` ghost `icon`)
+- Do not repeat the page title in the body. The chrome *is* the title.
+- Do not use `text-3xl` / `text-2xl` as a main-view heading. Those sizes are
+  for empty states and rare emphasis, not page identity.
+- Hide the extension-name subtitle when it equals the panel title.
+
+Primary chrome actions (`New task`, `New automation`) use `Button` default
+(`h-9`). Secondary chrome actions (pop out, pin) may use `ghost`. Row actions
+inside a list (`Connect`, `Disable`, `Pause`) use `size="sm"`.
+
+View switchers that change the whole page (Plugins / Skills) live in the chrome
+as `SegmentedControl` with `kind="tabs"`. Filters that subset a list (All /
+Active / Paused) live in the body as `SegmentedControl` (default `kind="group"`).
+
+### Body layouts (pick one)
+
+`MainViewBody` from `@falcondeck/ui` encodes the two layouts. Do not invent a
+third max-width.
+
+**Directory** — catalogs, queues, and card dashboards.
+
+- Scrollable column: `max-w-4xl` (56rem), `px-6 py-6`, centered
+- Optional lead paragraph: `MainViewLead` (supporting size, secondary
+  foreground, max 60ch)
+- Search: `SearchField`, full measure of the column, not a compact chip in the
+  heading
+- Section labels: `MainViewSection` (`fd-type-eyebrow`, not a second `h1`)
+- Used by: Activity, Extensions, Plugins, Scheduled, Missions, and declarative
+  extension panels (the host wraps those automatically)
+
+**Workspace** — spatial tools that need the whole frame.
+
+- Flush: no max-width, children fill the remaining height
+- Split panes, boards, and editors own their internal padding
+- Used by: conversation, Notes, Kanban, Settings (nav + panel), and any trusted
+  frontend that opts into a spatial layout by rendering its own children under
+  `ExtensionPanel`
+
+Settings is a workspace whose inner panels still use `SettingsPageHeader`.
+Those headers are section titles inside Settings, not a second app chrome.
+When the same panel is also a top-level main view (Extensions), the main-view
+chrome replaces `SettingsPageHeader`.
+
+### Extensions
+
+The host owns chrome for every `panels` contribution. Trusted frontends import
+only `@falcondeck/extension-sdk/app` and must not import `@falcondeck/ui`, so
+they cannot mount `MainView` themselves.
+
+- Declarative panels: host wraps the document in directory `MainViewBody`
+- Trusted React frontends: host provides chrome and a flush workspace body;
+  the frontend picks directory (`max-w-4xl px-6 py-6` on an inner scroller)
+  or workspace (split/board) using the same tokens
+- A trusted frontend must not draw a second page `h1`. Put create/refresh
+  actions in the first body row if they cannot live in host chrome
+- Match Button sizes to the host: page actions at default (`h-9` / `text-sm`),
+  inline/row actions at `sm`
+
+Copy this inner directory shell in a trusted frontend:
+
+```tsx
+<div className="h-full overflow-y-auto">
+  <div className="mx-auto w-full max-w-4xl px-6 py-6">{/* lead, actions, cards */}</div>
+</div>
+```
+
+### Adding a main view
+
+1. Wrap the surface in `MainView` (or `ExtensionPanel` for an extension).
+2. Choose `MainViewBody` `directory` or `workspace`.
+3. Use `SearchField`, `SegmentedControl`, `MainViewSection`, `Button`, `Card`,
+   and `EmptyState` instead of one-off markup.
+4. If the view is an extension panel, keep chrome in the host and follow the
+   inner shell above.
 
 ## Interaction Patterns
 
@@ -236,7 +332,7 @@ Rules:
 - Order is: pin/unpin, pin in project, rename, mark as read, then a separator, then copy actions, then a separator, then destructive actions last.
 - Destructive items use `danger` foreground with a muted danger hover fill.
 - If a menu is positioned manually, the width constant used for viewport clamping must match the rendered width, or the menu will overflow the screen edge.
-- One action may also appear inline on hover as a shortcut (thread archive), but the context menu remains the complete list.
+- One action may also appear inline on hover as a shortcut (thread archive, or unarchive on an archived row), but the context menu remains the complete list.
 
 ### Collapsible side panels
 

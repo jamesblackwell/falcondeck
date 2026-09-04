@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
-import { Search } from "lucide-react";
 
 import type { ExtensionSnapshot } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
   Badge,
   Button,
-  Input,
+  MainViewLead,
+  SearchField,
   SettingsPage,
   SettingsPageHeader,
 } from "@falcondeck/ui";
@@ -36,10 +36,14 @@ function permissionPresentation(permission: string) {
   return { title: permission, description: "Requested extension capability." };
 }
 
+const EXTENSIONS_DESCRIPTION =
+  "Manage extensions installed on this FalconDeck. Official extensions are built and maintained by FalconDeck.";
+
 export function ExtensionsPanel({
   extensions,
   onSetEnabled,
   onSetPermission,
+  chrome = "settings",
 }: {
   extensions: ExtensionSnapshot;
   onSetEnabled: (extensionId: string, enabled: boolean) => Promise<void>;
@@ -48,6 +52,8 @@ export function ExtensionsPanel({
     permission: string,
     granted: boolean,
   ) => Promise<void>;
+  /** `host` when this panel is a top-level main view; chrome already titles it. */
+  chrome?: "settings" | "host";
 }) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -108,25 +114,21 @@ export function ExtensionsPanel({
   };
 
   return (
-    <SettingsPage>
-      <SettingsPageHeader
-        title="Extensions"
-        description="Manage extensions installed on this FalconDeck. Official extensions are built and maintained by FalconDeck."
+    <SettingsPage className={chrome === "host" ? "pb-0" : undefined}>
+      {chrome === "settings" ? (
+        <SettingsPageHeader
+          title="Extensions"
+          description={EXTENSIONS_DESCRIPTION}
+        />
+      ) : (
+        <MainViewLead>{EXTENSIONS_DESCRIPTION}</MainViewLead>
+      )}
+      <SearchField
+        label="Search installed extensions"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search installed extensions"
       />
-      <label className="relative block max-w-xl">
-        <Search
-          aria-hidden="true"
-          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted"
-        />
-        <span className="sr-only">Search installed extensions</span>
-        <Input
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search installed extensions"
-          className="pl-9"
-        />
-      </label>
       {error ? (
         <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">
           {error}
@@ -142,13 +144,11 @@ export function ExtensionsPanel({
           return (
             <div key={extension.id}>
               {startsDisabledSection ? (
-                <h2 className="mb-2 mt-6 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+                <h2 className="fd-type-eyebrow mb-2 mt-6 text-fg-muted">
                   Disabled
                 </h2>
               ) : index === 0 && extension.enabled ? (
-                <h2 className="mb-2 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-                  Enabled
-                </h2>
+                <h2 className="fd-type-eyebrow mb-2 text-fg-muted">Enabled</h2>
               ) : null}
               <section className="rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 p-4">
                 <div className="flex items-start justify-between gap-4">

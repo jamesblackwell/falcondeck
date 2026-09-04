@@ -66,8 +66,12 @@ function classes(...values: Array<string | false | undefined>): string {
 function Button({
   className,
   variant = "default",
+  size = "default",
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant }) {
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  size?: "default" | "sm";
+}) {
   const variants: Record<ButtonVariant, string> = {
     default: "bg-accent text-surface-0 hover:bg-accent-strong",
     outline:
@@ -80,7 +84,10 @@ function Button({
     <button
       type="button"
       className={classes(
-        "fd-focus inline-flex h-8 items-center justify-center rounded-[var(--fd-radius-md)] px-3 text-[length:var(--fd-text-xs)] font-medium transition-colors disabled:pointer-events-none disabled:opacity-40",
+        "fd-focus inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:pointer-events-none disabled:opacity-40",
+        size === "sm"
+          ? "h-7 rounded-[var(--fd-radius-md)] px-2.5 text-[length:var(--fd-text-xs)]"
+          : "h-9 rounded-[var(--fd-radius-lg)] px-3.5 text-[length:var(--fd-text-sm)]",
         variants[variant],
         className,
       )}
@@ -271,6 +278,7 @@ function StatusActions({
     <>
       {mission.status === "paused" ? (
         <Button
+          size="sm"
           disabled={pending}
           variant="outline"
           onClick={() => act("active")}
@@ -279,6 +287,7 @@ function StatusActions({
         </Button>
       ) : (
         <Button
+          size="sm"
           disabled={pending}
           variant="outline"
           onClick={() => act("paused")}
@@ -292,6 +301,7 @@ function StatusActions({
         </Button>
       ) : null}
       <Button
+        size="sm"
         disabled={pending}
         variant="ghost"
         onClick={() => act("cancelled")}
@@ -462,6 +472,7 @@ function MissionCard({
                     </span>
                     <span className="ml-auto flex gap-1.5">
                       <Button
+                        size="sm"
                         variant="outline"
                         disabled={
                           busy ||
@@ -482,6 +493,7 @@ function MissionCard({
                         Run agent now
                       </Button>
                       <Button
+                        size="sm"
                         variant="ghost"
                         disabled={
                           busy ||
@@ -706,9 +718,9 @@ function MissionDashboard({
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl px-5 py-7 sm:px-7">
+      <div className="mx-auto w-full max-w-4xl px-6 py-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-3xl">
+          <div className="max-w-[60ch]">
             <p className="text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
               Missions keep larger outcomes visible when the work spans several
               agent tasks or long periods of waiting. Each Mission holds the

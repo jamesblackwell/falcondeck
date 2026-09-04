@@ -188,7 +188,6 @@ import {
   resolveThreadModelId,
 } from "./utils";
 import { DesktopConversationPane } from "./components/DesktopConversationPane";
-import { ExtensionsPanel } from "./components/settings/ExtensionsPanel";
 import { useVoiceRecorder } from "./hooks/useVoiceRecorder";
 import { useWorkspaceFileIndex } from "./hooks/useWorkspaceFileIndex";
 import { DesktopSidebar } from "./components/Sidebar";
@@ -270,6 +269,11 @@ const CommandPalette = lazy(() =>
 const PluginsView = lazy(() =>
   import("./components/PluginsView").then((module) => ({
     default: module.PluginsView,
+  })),
+);
+const ExtensionsView = lazy(() =>
+  import("./components/ExtensionsView").then((module) => ({
+    default: module.ExtensionsView,
   })),
 );
 const TerminalPanel = lazy(() =>
@@ -5795,17 +5799,15 @@ function AppInner() {
                 </Suspense>
               ),
               "core.extensions": (
-                <section className="h-full min-h-0 overflow-y-auto bg-surface-1 px-8 py-10">
-                  <div className="mx-auto w-full max-w-4xl">
-                    <ExtensionsPanel
-                      extensions={
-                        snapshot?.extensions ?? { catalog: [], views: [] }
-                      }
-                      onSetEnabled={handleSetExtensionEnabled}
-                      onSetPermission={handleSetExtensionPermission}
-                    />
-                  </div>
-                </section>
+                <Suspense fallback={loadingThreadState}>
+                  <ExtensionsView
+                    extensions={
+                      snapshot?.extensions ?? { catalog: [], views: [] }
+                    }
+                    onSetEnabled={handleSetExtensionEnabled}
+                    onSetPermission={handleSetExtensionPermission}
+                  />
+                </Suspense>
               ),
               "core.plugins": (
                 <Suspense fallback={loadingThreadState}>

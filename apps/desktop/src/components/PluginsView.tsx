@@ -7,6 +7,12 @@ import {
   CardContent,
   EmptyState,
   Input,
+  MainView,
+  MainViewBody,
+  MainViewLead,
+  MainViewSection,
+  SearchField,
+  SegmentedControl,
   Tooltip,
   cn,
 } from '@falcondeck/ui'
@@ -14,6 +20,7 @@ import {
   Check,
   Download,
   Plus,
+  Puzzle,
   Search,
   Settings2,
   Sparkles,
@@ -107,34 +114,20 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
   }, [])
 
   return (
-    <section className="h-full min-h-0 overflow-y-auto bg-surface-1 px-8 py-8 text-fg-primary">
-      <div className="mx-auto w-full max-w-4xl">
-        <div className="flex justify-center">
-          <div
-            role="tablist"
-            aria-label="Plugins and skills"
-            className="flex items-center rounded-full bg-surface-2 p-1"
-          >
-            {TOP_TABS.map(({ id, label }) => (
-              <button
-                key={id}
-                type="button"
-                role="tab"
-                aria-selected={topTab === id}
-                onClick={() => setTopTab(id)}
-                className={cn(
-                  'fd-focus rounded-full px-4 py-1.5 text-[length:var(--fd-text-sm)] transition-colors',
-                  topTab === id
-                    ? 'bg-surface-0 font-medium text-fg-primary shadow-[var(--fd-shadow-sm)]'
-                    : 'text-fg-secondary hover:text-fg-primary',
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
+    <MainView
+      icon={<Puzzle aria-hidden="true" className="h-4 w-4" />}
+      title="Plugins"
+      actions={
+        <SegmentedControl
+          kind="tabs"
+          ariaLabel="Plugins and skills"
+          value={topTab}
+          options={TOP_TABS.map(({ id, label }) => ({ value: id, label }))}
+          onChange={setTopTab}
+        />
+      }
+    >
+      <MainViewBody>
         {topTab === 'plugins' ? (
           <PluginsSection baseUrl={baseUrl} workspaces={workspaces} onToast={onToast} />
         ) : (
@@ -145,8 +138,8 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
             onToast={onToast}
           />
         )}
-      </div>
-    </section>
+      </MainViewBody>
+    </MainView>
   )
 }
 
@@ -164,7 +157,7 @@ function PluginLogo({
   const [failed, setFailed] = useState(false)
   useEffect(() => {
     setFailed(false)
-  }, [domain])
+  }, [domain, baseUrl])
   const letter = (name.trim().charAt(0) || '?').toUpperCase()
   if (!baseUrl || !domain || failed) {
     return (
@@ -338,30 +331,19 @@ function PluginsSection({
     .filter((group) => group.items.length > 0)
 
   return (
-    <div className="mt-8">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Plugins</h1>
-          <p className="mt-1 text-fg-secondary">
-            Work with your agents across your favorite tools.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="relative block min-w-0 flex-1 sm:w-64 sm:flex-none">
-            <Search
-              aria-hidden="true"
-              className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted"
-            />
-            <Input
-              type="search"
-              role="searchbox"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search plugins"
-              className="pl-10"
-              aria-label="Search plugins"
-            />
-          </label>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <MainViewLead>
+          Work with your agents across your favorite tools.
+        </MainViewLead>
+        <div className="flex w-full items-center gap-2 sm:w-auto">
+          <SearchField
+            label="Search plugins"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search plugins"
+            className="min-w-0 flex-1 sm:w-64 sm:flex-none"
+          />
           <Tooltip label="Add a custom MCP server">
             <Button
               variant="secondary"
@@ -374,13 +356,11 @@ function PluginsSection({
             </Button>
           </Tooltip>
         </div>
-      </header>
+      </div>
 
-      <section aria-labelledby="installed-plugins-heading" className="mt-8">
-        <div className="flex items-center justify-between gap-3">
-          <h2 id="installed-plugins-heading" className="text-[length:var(--fd-text-sm)] font-medium">
-            Installed
-          </h2>
+      <MainViewSection
+        title="Installed"
+        actions={
           <Tooltip label="Manage MCP servers">
             <Button
               variant="ghost"
@@ -392,13 +372,14 @@ function PluginsSection({
               <Settings2 aria-hidden="true" className="h-4 w-4" />
             </Button>
           </Tooltip>
-        </div>
+        }
+      >
         {installed.length === 0 ? (
-          <p className="mt-3 text-[length:var(--fd-text-sm)] text-fg-muted">
+          <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
             Nothing installed yet. Connect a plugin below.
           </p>
         ) : (
-          <ul className="mt-3 flex flex-wrap gap-2">
+          <ul className="flex flex-wrap gap-2">
             {installed.map((server) => (
               <li key={server.id}>
                 <Tooltip label={server.name}>
@@ -415,7 +396,7 @@ function PluginsSection({
             ))}
           </ul>
         )}
-      </section>
+      </MainViewSection>
 
       {manageOpen ? (
         <div className="mt-6">
@@ -505,16 +486,9 @@ function PluginCategory({
   const visible = hidden ? servers.slice(0, CATEGORY_PREVIEW) : servers
   const overflow = hidden ? servers.slice(CATEGORY_PREVIEW) : []
 
-  const headingId = `${title.toLowerCase().replace(/\s+/g, '-')}-heading`
   return (
-    <section aria-labelledby={headingId} className="mt-8">
-      <h2
-        id={headingId}
-        className="text-[length:var(--fd-text-sm)] font-medium text-fg-secondary"
-      >
-        {title}
-      </h2>
-      <ul className="mt-1 divide-y divide-border-subtle">
+    <MainViewSection title={title}>
+      <ul className="divide-y divide-border-subtle">
         {visible.map((server) => (
           <PluginRow
             key={server.id}
@@ -550,7 +524,7 @@ function PluginCategory({
           {overflow.length > 2 ? `, and ${overflow.length - 2} more` : ''}
         </button>
       ) : null}
-    </section>
+    </MainViewSection>
   )
 }
 
@@ -809,45 +783,31 @@ function SkillsSection({
     query.trim().length >= 2 ? `Results for “${query.trim()}”` : 'Trending on skills.sh'
 
   return (
-    <div className="mt-8">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Skills</h1>
-          <p className="mt-1 text-fg-secondary">
-            Extend your agents with task-specific skills.
-          </p>
-        </div>
-        <label className="relative block w-full sm:w-72">
-          <Search
-            aria-hidden="true"
-            className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted"
-          />
-          <Input
-            type="search"
-            role="searchbox"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search skills"
-            className="pl-10"
-            aria-label="Search skills"
-          />
-        </label>
-      </header>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <MainViewLead>Extend your agents with task-specific skills.</MainViewLead>
+        <SearchField
+          label="Search skills"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search skills"
+          className="w-full sm:w-72"
+        />
+      </div>
 
-      <section aria-labelledby="installed-skills-heading" className="mt-8">
-        <div className="flex items-baseline justify-between gap-3">
-          <h2 id="installed-skills-heading" className="text-[length:var(--fd-text-sm)] font-medium">
-            Installed
-          </h2>
-          {library ? (
+      <MainViewSection
+        title="Installed"
+        actions={
+          library ? (
             <span
               className="truncate text-[length:var(--fd-text-xs)] text-fg-muted"
               title={library.root}
             >
               {library.root}
             </span>
-          ) : null}
-        </div>
+          ) : null
+        }
+      >
         {sources.length > 1 ? (
           <div className="mt-3 flex flex-wrap gap-1.5">
             <button
@@ -950,18 +910,17 @@ function SkillsSection({
             See {visibleInstalled.length - installedCap} more
           </button>
         ) : null}
-      </section>
+      </MainViewSection>
 
-      <section aria-labelledby="browse-skills-heading" className="mt-10">
-        <div className="flex items-center justify-between">
-          <h2 id="browse-skills-heading" className="text-[length:var(--fd-text-sm)] font-medium">
-            {browseCaption}
-          </h2>
-          {isSearching ? (
+      <MainViewSection
+        title={browseCaption}
+        actions={
+          isSearching ? (
             <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Searching…</span>
-          ) : null}
-        </div>
-        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          ) : null
+        }
+      >
+        <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
           From the open{' '}
           <a
             href="https://skills.sh"
@@ -1021,7 +980,7 @@ function SkillsSection({
             ))}
           </ul>
         )}
-      </section>
+      </MainViewSection>
     </div>
   )
 }
