@@ -2446,7 +2446,10 @@ function RemoteApp() {
       }, delay);
     };
     void callRpc<DaemonSnapshot>("snapshot.current", {
-      include_archived_threads: false,
+      // Archived chats stay in so the per-project archived view can restore
+      // them. Plans and diffs are still omitted: they dominate the encrypted
+      // payload and are not shown in the project list.
+      include_archived_threads: true,
       include_thread_plans: false,
       include_thread_diffs: false,
     })
@@ -4137,6 +4140,18 @@ function RemoteApp() {
     }
   }
 
+  async function handleUnarchiveThread(workspaceId: string, threadId: string) {
+    try {
+      await callRpc("thread.unarchive", {
+        workspace_id: workspaceId,
+        thread_id: threadId,
+      });
+      setError(null);
+    } catch (e) {
+      reportError(e, "Failed to unarchive thread");
+    }
+  }
+
   async function handleRenameThread(
     workspaceId: string,
     threadId: string,
@@ -5092,6 +5107,7 @@ function RemoteApp() {
                 onSelectThread={handleSelectThread}
                 onNewThread={handleNewThread}
                 onArchiveThread={handleArchiveThread}
+                onUnarchiveThread={handleUnarchiveThread}
                 onRenameThread={handleRenameThread}
                 onSuggestThreadTitle={handleSuggestThreadTitle}
                 onForkThread={handleForkThread}
@@ -5156,6 +5172,7 @@ function RemoteApp() {
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
           onArchiveThread={handleArchiveThread}
+          onUnarchiveThread={handleUnarchiveThread}
           onRenameThread={handleRenameThread}
           onSuggestThreadTitle={handleSuggestThreadTitle}
           onForkThread={handleForkThread}

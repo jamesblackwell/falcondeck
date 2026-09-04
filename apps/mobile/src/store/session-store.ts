@@ -922,7 +922,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   applyThreadSummary: (thread) => {
     set((state) => {
-      const existing = state.snapshot?.threads.find((entry) => entry.id === thread.id);
+      if (!state.snapshot) return state;
+      const existing = state.snapshot.threads.find((entry) => entry.id === thread.id);
       if (!existing) {
         return state;
       }

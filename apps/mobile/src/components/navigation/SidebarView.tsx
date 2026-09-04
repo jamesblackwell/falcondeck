@@ -12,6 +12,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated from "react-native-reanimated";
 import { FlashList } from "@shopify/flash-list";
 import {
+  Archive,
   ArrowUpDown,
   ChevronDown,
   FolderClosed,
@@ -178,6 +179,9 @@ export const SidebarView = memo(function SidebarView({
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<
     Map<string, number>
   >(() => new Map());
+  const [expandedArchivedWorkspaces, setExpandedArchivedWorkspaces] = useState<
+    Set<string>
+  >(() => new Set());
   const [optionsTarget, setOptionsTarget] = useState<{
     workspaceId: string;
     thread: ThreadSummary;
@@ -281,6 +285,7 @@ export const SidebarView = memo(function SidebarView({
         sortMode,
         Boolean(onNewChat),
         chatsCollapsed,
+        expandedArchivedWorkspaces,
       ),
     [
       displayGroups,
@@ -290,6 +295,7 @@ export const SidebarView = memo(function SidebarView({
       sortMode,
       onNewChat,
       chatsCollapsed,
+      expandedArchivedWorkspaces,
     ],
   );
   // Selecting a visible thread rebuilds builtRows with identical content;
@@ -374,6 +380,15 @@ export const SidebarView = memo(function SidebarView({
     },
     [],
   );
+
+  const handleArchivedToggle = useCallback((workspaceId: string) => {
+    setExpandedArchivedWorkspaces((prev) => {
+      const next = new Set(prev);
+      if (next.has(workspaceId)) next.delete(workspaceId);
+      else next.add(workspaceId);
+      return next;
+    });
+  }, []);
 
   const openThreadOptions = useCallback(
     (workspaceId: string, thread: ThreadSummary) => {
@@ -624,6 +639,30 @@ export const SidebarView = memo(function SidebarView({
         );
       }
 
+      if (item.type === "archived-toggle") {
+        return (
+          <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
+            <Pressable
+              style={styles.overflowRow}
+              onPress={() => handleArchivedToggle(item.workspaceId)}
+              accessibilityRole="button"
+              accessibilityLabel={`Archived, ${item.count}`}
+              accessibilityState={{ expanded: item.isOpen }}
+            >
+              <ChevronDown
+                size={12}
+                color={theme.colors.fg.muted}
+                style={item.isOpen ? undefined : styles.sectionChevronCollapsed}
+              />
+              <Archive size={12} color={theme.colors.fg.muted} />
+              <Text variant="caption" color="muted">
+                Archived {item.count}
+              </Text>
+            </Pressable>
+          </CollapsibleRow>
+        );
+      }
+
       if (item.type === "overflow") {
         return (
           <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
@@ -678,6 +717,7 @@ export const SidebarView = memo(function SidebarView({
       toggleWorkspaceCollapse,
       toggleChatsCollapsed,
       handleOverflowPress,
+      handleArchivedToggle,
       threadTagsById,
       workspaceColors,
       activeExtensionFilterCount,
@@ -1006,7 +1046,6 @@ const styles = StyleSheet.create((theme) => ({
     height: 8,
     borderRadius: theme.radius.full,
   },
-
   overflowRow: {
     flexDirection: "row",
     alignItems: "center",

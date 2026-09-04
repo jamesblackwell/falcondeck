@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
+import { Archive, ArchiveRestore, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
 
 import {
   deriveThreadAttentionPresentation,
@@ -33,6 +33,8 @@ export type ThreadItemProps = {
   onSelect: (workspaceId: string, threadId: string) => void
   /** Invoked once the archive is confirmed; the row asks first. */
   onArchive?: ThreadItemArchiveHandler
+  /** Restores an archived row immediately; no confirm. */
+  onUnarchive?: ThreadItemArchiveHandler
   /** Archive was requested for this row and it is waiting on the Confirm pill. */
   archiveConfirmPending?: boolean
   onArchiveConfirm?: () => void
@@ -87,6 +89,7 @@ export const ThreadItem = memo(
     isSelected,
     onSelect,
     onArchive,
+    onUnarchive,
     onOpenContextMenu,
     onRequestRename,
     nowTick = 0,
@@ -99,6 +102,13 @@ export const ThreadItem = memo(
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
     const archiveConfirm = archiveConfirmPending && Boolean(onArchiveConfirm)
+    const hoverAction = thread.is_archived
+      ? onUnarchive
+        ? ('unarchive' as const)
+        : null
+      : onArchive
+        ? ('archive' as const)
+        : null
     const timeString = useMemo(
       () => timeAgo(thread.updated_at),
       [nowTick, thread.updated_at],
@@ -199,7 +209,9 @@ export const ThreadItem = memo(
               "fd-type-supporting min-w-0 flex-1 truncate transition-colors duration-[var(--fd-duration-fast)]",
               isSelected
                 ? "text-fg-primary"
-                : "text-fg-secondary group-hover:text-fg-primary",
+                : thread.is_archived
+                  ? "text-fg-muted"
+                  : "text-fg-secondary group-hover:text-fg-primary",
             )}
           >
             {thread.title}
@@ -268,7 +280,7 @@ export const ThreadItem = memo(
                 role="img"
                 aria-label={providerLabel ?? undefined}
                 title={providerLabel ?? undefined}
-                className="pointer-events-none hidden h-[18px] w-[18px] shrink-0 items-center justify-center text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] group-focus-within:opacity-100 group-hover:opacity-100 @[13rem]:flex"
+                className="pointer-events-none hidden h-[18px] w-[18px] shrink-0 items-center justify-center text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] group-focus-within:opacity-100 group-hover:opacity-100 group-[:hover]:opacity-100 @[13rem]:flex"
               >
                 <ProviderIcon className="h-2.5 w-2.5" provider={thread.provider} />
               </span>
@@ -292,8 +304,8 @@ export const ThreadItem = memo(
                   variant="danger"
                   className={cn(
                     'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
-                    onArchive &&
-                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
+                    hoverAction &&
+                      'group-hover:hidden group-[:hover]:hidden group-focus-within/actions:hidden group-hover:invisible group-[:hover]:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   Stopped
@@ -303,8 +315,8 @@ export const ThreadItem = memo(
                   variant="success"
                   className={cn(
                     'col-start-1 row-start-1 transition-opacity duration-[var(--fd-duration-fast)]',
-                    onArchive &&
-                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
+                    hoverAction &&
+                      'group-hover:hidden group-[:hover]:hidden group-focus-within/actions:hidden group-hover:invisible group-[:hover]:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   {attention.badgeLabel}
@@ -315,27 +327,42 @@ export const ThreadItem = memo(
                   title={fullTimestamp}
                   className={cn(
                     'fd-type-meta col-start-1 row-start-1 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
-                    onArchive &&
-                      'group-hover:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
+                    hoverAction &&
+                      'group-hover:hidden group-[:hover]:hidden group-focus-within/actions:hidden group-hover:invisible group-[:hover]:invisible group-hover:opacity-0 group-focus-within/actions:invisible group-focus-within/actions:opacity-0',
                   )}
                 >
                   {timeString}
                 </time>
               )}
-              {onArchive ? (
+              {hoverAction === 'archive' ? (
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation()
                     void Promise.resolve(
-                      onArchive(workspaceId, thread.id),
+                      onArchive?.(workspaceId, thread.id),
                     ).catch(() => {})
                   }}
                   title="Archive thread"
                   aria-label={`Archive thread ${thread.title}`}
-                  className="fd-focus pointer-events-none invisible z-10 col-start-1 row-start-1 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:visible focus-visible:opacity-100 group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100"
+                  className="fd-focus pointer-events-none hidden invisible z-10 col-start-1 row-start-1 items-center justify-center rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:visible focus-visible:opacity-100 focus-visible:flex group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100 group-hover:flex group-[:hover]:pointer-events-auto group-[:hover]:visible group-[:hover]:opacity-100 group-[:hover]:flex"
                 >
                   <Archive aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              ) : hoverAction === 'unarchive' ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void Promise.resolve(
+                      onUnarchive?.(workspaceId, thread.id),
+                    ).catch(() => {})
+                  }}
+                  title="Unarchive thread"
+                  aria-label={`Unarchive thread ${thread.title}`}
+                  className="fd-focus pointer-events-none hidden invisible z-10 col-start-1 row-start-1 items-center justify-center rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted opacity-0 transition-opacity duration-[var(--fd-duration-fast)] hover:text-fg-secondary focus-visible:pointer-events-auto focus-visible:visible focus-visible:opacity-100 focus-visible:flex group-hover:pointer-events-auto group-hover:visible group-hover:opacity-100 group-hover:flex group-[:hover]:pointer-events-auto group-[:hover]:visible group-[:hover]:opacity-100 group-[:hover]:flex"
+                >
+                  <ArchiveRestore aria-hidden="true" className="h-3.5 w-3.5" />
                 </button>
               ) : null}
             </span>
@@ -355,6 +382,7 @@ export const ThreadItem = memo(
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&
+    prev.onUnarchive === next.onUnarchive &&
     prev.archiveConfirmPending === next.archiveConfirmPending &&
     prev.onArchiveConfirm === next.onArchiveConfirm &&
     prev.onArchiveCancel === next.onArchiveCancel &&
@@ -399,6 +427,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.last_error === b.last_error &&
     a.is_pinned === b.is_pinned &&
     a.is_pinned_in_project === b.is_pinned_in_project &&
+    a.is_archived === b.is_archived &&
     a.variant?.slug === b.variant?.slug &&
     originEqual(a.origin, b.origin) &&
     a.attention.unread === b.attention.unread &&

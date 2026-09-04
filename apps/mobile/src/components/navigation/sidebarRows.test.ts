@@ -453,6 +453,40 @@ describe('sidebarRowsEqual', () => {
     expect(sidebarRowsEqual(before, after)).toBe(false)
   })
 
+  it('tucks archived chats behind a disclosure under the project', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),
+          threads: [thread({ id: 't1', workspace_id: 'w1' })],
+          archivedThreads: [
+            thread({
+              id: 'old',
+              workspace_id: 'w1',
+              title: 'Old work',
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+      emptyCollapsed,
+      defaultCounts,
+      null,
+    )
+
+    expect(rows.map((row) => row.key)).toEqual([
+      'section:projects',
+      'workspace:w1',
+      'thread:t1',
+      'archived-toggle:w1',
+      'archived:old',
+    ])
+    const toggle = rows.find((row) => row.type === 'archived-toggle')
+    expect(toggle).toMatchObject({ count: 1, isOpen: false, isCollapsed: false })
+    const archived = rows.find((row) => row.key === 'archived:old')
+    expect(archived).toMatchObject({ type: 'thread', isCollapsed: true })
+  })
+
   it('detects length changes', () => {
     const before = buildSidebarRows(groups, emptyCollapsed, defaultCounts, null)
     const after = buildSidebarRows(

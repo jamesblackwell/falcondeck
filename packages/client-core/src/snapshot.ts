@@ -265,20 +265,15 @@ function upsertThread(
 ) {
   const existing = threads.findIndex((thread) => thread.id === nextThread.id);
   if (existing === -1) {
-    // An update to an archived thread (mark_read etc.) must not resurrect it
-    // into the sidebar.
+    // Compact snapshots omit archived chats. A later mark_read (or similar)
+    // must not insert one that the client never asked for.
     if (nextThread.is_archived) {
       return threads;
     }
     // Snapshots list threads newest-first, so a thread whose thread-started
-    // event was missed still becomes visible at the top.
+    // event was missed still becomes visible at the top. Unarchive of a chat
+    // the compact snapshot omitted also lands here.
     return [nextThread, ...threads];
-  }
-
-  // A thread that just became archived leaves the list the same way it would
-  // be absent from a fresh snapshot.
-  if (nextThread.is_archived) {
-    return threads.filter((thread) => thread.id !== nextThread.id);
   }
 
   // The daemon builds some thread updates on background tasks, so a summary

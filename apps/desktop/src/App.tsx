@@ -4257,6 +4257,40 @@ function AppInner() {
     ],
   );
 
+  const handleUnarchiveThread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      try {
+        await client.unarchiveThread(workspaceId, threadId);
+        if (!workspaceHostIndex.has(workspaceId) && api) {
+          const nextSnapshot = await api.snapshot();
+          setSnapshot(nextSnapshot);
+        }
+        setActionError(null);
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error
+            ? error.message
+            : "Failed to unarchive thread";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to unarchive thread",
+          description: msg,
+        });
+      }
+    },
+    [
+      api,
+      apiFor,
+      setActionError,
+      setSnapshot,
+      toast,
+      workspaceHostIndex,
+    ],
+  );
+
   const handleDeleteThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
@@ -5624,6 +5658,7 @@ function AppInner() {
             onNewThread={handleNewThread}
             onNewChat={handleNewChat}
             onArchiveThread={handleArchiveThread}
+            onUnarchiveThread={handleUnarchiveThread}
             onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}
             onSuggestThreadTitle={handleSuggestThreadTitle}

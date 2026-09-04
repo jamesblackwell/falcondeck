@@ -114,8 +114,14 @@ describe('ThreadOptionsSheet', () => {
     expect(impactAsync).toHaveBeenCalledWith(Haptics.ImpactFeedbackStyle.Medium)
     expect(onClose).toHaveBeenCalledOnce()
     expect(useSessionStore.getState().snapshot?.threads.map((entry) => entry.id)).toEqual([
+      'thread-1',
       'thread-2',
     ])
+    expect(
+      useSessionStore
+        .getState()
+        .snapshot?.threads.find((entry) => entry.id === 'thread-1')?.is_archived,
+    ).toBe(true)
     expect(rpc).toHaveBeenCalledWith(
       'thread.archive',
       { workspace_id: 'workspace-1', thread_id: 'thread-1' },

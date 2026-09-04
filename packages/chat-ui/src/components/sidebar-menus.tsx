@@ -3,6 +3,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Archive,
+  ArchiveRestore,
   Check,
   ChevronRight,
   CircleDashed,
@@ -124,6 +125,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canRename,
   canFork,
   canArchive,
+  canUnarchive,
   canDelete,
   canPin,
   canPinInProject,
@@ -135,6 +137,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onRename,
   onFork,
   onArchive,
+  onUnarchive,
   onDelete,
   onTogglePin,
   onTogglePinInProject,
@@ -150,6 +153,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   /** Whether this thread can be continued in a fresh, independent copy. */
   canFork: boolean
   canArchive: boolean
+  canUnarchive: boolean
   canDelete: boolean
   canPin: boolean
   canPinInProject: boolean
@@ -161,6 +165,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onRename: () => void
   onFork: () => void
   onArchive: () => void
+  onUnarchive: () => void
   onDelete: () => void
   onTogglePin: () => void
   onTogglePinInProject: () => void
@@ -236,7 +241,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
     if (!target) return
     menuRef.current
       ?.querySelector<HTMLButtonElement>(':scope > [role="menuitem"]')
-      ?.focus()
+      ?.focus({ preventScroll: true })
   }, [menuRef, target])
 
   if (!target || typeof document === 'undefined') {
@@ -265,6 +270,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
     Number(Boolean(workspacePath)) +
     Number(Boolean(sessionId)) +
     Number(canArchive) +
+    Number(canUnarchive) +
     Number(canDelete)
 
   if (rowCount === 0) {
@@ -273,7 +279,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
 
   const separatorCount =
     Number(Boolean(workspacePath) || Boolean(sessionId)) +
-    Number(canArchive || canDelete)
+    Number(canArchive || canUnarchive || canDelete)
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
     THREAD_MENU_ROW_HEIGHT_PX * rowCount +
@@ -434,7 +440,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
             window.requestAnimationFrame(() => {
               stageMenuRef.current
                 ?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
-                ?.focus()
+                ?.focus({ preventScroll: true })
             })
           }}
           className="fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
@@ -463,7 +469,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
               event.preventDefault()
               event.stopPropagation()
               setStageMenuOpen(false)
-              stageTriggerRef.current?.focus()
+              stageTriggerRef.current?.focus({ preventScroll: true })
               return
             }
             if (
@@ -602,7 +608,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           onClick={() => handleCopy('session', sessionId)}
         />
       ) : null}
-      {canArchive || canDelete ? (
+      {canArchive || canUnarchive || canDelete ? (
         <div
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"
@@ -615,6 +621,16 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           destructive
           onClick={() => {
             onArchive()
+            onClose()
+          }}
+        />
+      ) : null}
+      {canUnarchive ? (
+        <ThreadMenuItem
+          icon={<ArchiveRestore className="h-3.5 w-3.5" />}
+          label="Unarchive"
+          onClick={() => {
+            onUnarchive()
             onClose()
           }}
         />
@@ -635,14 +651,20 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
 export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
   selectedColor = null,
+  archivedCount = 0,
+  archivedOpen = false,
   onSetColor,
+  onViewArchived,
   onCloseFromSidebar,
   onRemove,
   menuRef,
 }: {
   target: WorkspaceContextMenuState | null
   selectedColor?: string | null
+  archivedCount?: number
+  archivedOpen?: boolean
   onSetColor?: (color: WorkspaceColorId | null) => void
+  onViewArchived?: () => void
   onCloseFromSidebar?: () => void
   onRemove?: () => void
   menuRef: React.RefObject<HTMLDivElement | null>
@@ -653,13 +675,24 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
 
   const projectLabel = target.path.split('/').pop() || target.path
   const showColors = Boolean(onSetColor)
+  const showArchivedAction =
+    Boolean(onViewArchived) && (archivedCount > 0 || archivedOpen)
   const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
   const showMembership = showClose || showRemove
+  if (!showColors && !showArchivedAction && !showMembership) {
+    return null
+  }
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
     (showColors ? WORKSPACE_COLOR_SECTION_HEIGHT_PX : 0) +
-    (showColors && showMembership ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
+    (showColors && (showArchivedAction || showMembership)
+      ? THREAD_MENU_SEPARATOR_HEIGHT_PX
+      : 0) +
+    (showArchivedAction ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
+    (showArchivedAction && showMembership
+      ? THREAD_MENU_SEPARATOR_HEIGHT_PX
+      : 0) +
     (showClose ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
     (showClose && showRemove ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showRemove ? THREAD_MENU_ROW_HEIGHT_PX : 0)
@@ -732,7 +765,26 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           </div>
         </div>
       ) : null}
-      {showColors && showMembership ? (
+      {showColors && (showArchivedAction || showMembership) ? (
+        <div
+          role="separator"
+          className="mx-2 my-1 border-t border-border-subtle"
+        />
+      ) : null}
+      {showArchivedAction && onViewArchived ? (
+        <ThreadMenuItem
+          icon={
+            archivedOpen ? (
+              <ArchiveRestore className="h-3.5 w-3.5" />
+            ) : (
+              <Archive className="h-3.5 w-3.5" />
+            )
+          }
+          label={archivedOpen ? 'Hide archived' : 'View archived'}
+          onClick={onViewArchived}
+        />
+      ) : null}
+      {showArchivedAction && showMembership ? (
         <div
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"

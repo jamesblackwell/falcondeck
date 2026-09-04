@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ThreadSummary } from '@falcondeck/client-core'
@@ -57,6 +57,33 @@ describe('ThreadItem timestamp', () => {
         new Date('2026-09-02T10:00:00Z'),
       ),
     ).toContain('2025')
+  })
+})
+
+describe('ThreadItem archive actions', () => {
+  it('offers unarchive on an archived row instead of archive', () => {
+    const onUnarchive = vi.fn()
+    render(
+      <ThreadItem
+        thread={{ ...thread('2026-08-31T14:08:59Z'), is_archived: true }}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+        onArchive={() => {}}
+        onUnarchive={onUnarchive}
+      />,
+    )
+
+    expect(
+      screen.queryByRole('button', { name: /Archive thread/, hidden: true }),
+    ).not.toBeInTheDocument()
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Unarchive thread Timestamped task',
+        hidden: true,
+      }),
+    )
+    expect(onUnarchive).toHaveBeenCalledWith('workspace-1', 'thread-1')
   })
 })
 

@@ -61,6 +61,24 @@ export function useThreadActions() {
     }
   }, [])
 
+  const unarchiveThread = useCallback(async (workspaceId: string, threadId: string) => {
+    const relay = useRelayStore.getState()
+    try {
+      const thread = normalizeThreadSummary(
+        await relay._callRpc<ThreadSummary>(
+          'thread.unarchive',
+          { workspace_id: workspaceId, thread_id: threadId },
+          { requestIdPrefix: 'mobile-thread' },
+        ),
+      )
+      useSessionStore.getState().applyThreadSummary(thread)
+      relay._setError(null)
+    } catch (e) {
+      relay._setError(e instanceof Error ? e.message : 'Failed to unarchive thread')
+      throw e
+    }
+  }, [])
+
   const renameThread = useCallback(async (workspaceId: string, threadId: string, title: string) => {
     const relay = useRelayStore.getState()
     try {
@@ -340,6 +358,7 @@ export function useThreadActions() {
 
   return {
     archiveThread,
+    unarchiveThread,
     renameThread,
     suggestThreadTitle,
     setThreadPinned,

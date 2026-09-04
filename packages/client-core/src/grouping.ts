@@ -4,6 +4,8 @@ import type { ThreadSummary, WorkspaceSummary } from './types'
 export type ProjectGroup = {
   workspace: WorkspaceSummary
   threads: ThreadSummary[]
+  /** Put-away chats for this project; omitted from `threads` so the work list stays clean. */
+  archivedThreads?: ThreadSummary[]
 }
 
 /** How the sidebar orders chats inside each project (and the pinned list). */
@@ -88,6 +90,14 @@ export function compareThreads(mode: ThreadSortMode) {
   }
 }
 
+const EMPTY_ARCHIVED_THREADS: ThreadSummary[] = []
+
+export function archivedThreadsOf(
+  group: Pick<ProjectGroup, 'archivedThreads'>,
+): ThreadSummary[] {
+  return group.archivedThreads ?? EMPTY_ARCHIVED_THREADS
+}
+
 export function buildProjectGroups(
   workspaces: WorkspaceSummary[],
   threads: ThreadSummary[],
@@ -95,11 +105,12 @@ export function buildProjectGroups(
   previous?: ProjectGroup[] | null,
 ): ProjectGroup[] {
   const threadsByWorkspace = new Map<string, ThreadSummary[]>()
+  const archivedByWorkspace = new Map<string, ThreadSummary[]>()
   for (const thread of threads) {
-    if (thread.is_archived) continue
-    const bucket = threadsByWorkspace.get(thread.workspace_id) ?? []
+    const buckets = thread.is_archived ? archivedByWorkspace : threadsByWorkspace
+    const bucket = buckets.get(thread.workspace_id) ?? []
     bucket.push(thread)
-    threadsByWorkspace.set(thread.workspace_id, bucket)
+    buckets.set(thread.workspace_id, bucket)
   }
 
   const workspaceRanks = new Map<string, number>()
@@ -123,6 +134,9 @@ export function buildProjectGroups(
     .map((workspace) => ({
       workspace,
       threads: (threadsByWorkspace.get(workspace.id) ?? []).sort(compareByRecency),
+      archivedThreads: (archivedByWorkspace.get(workspace.id) ?? []).sort(
+        compareByRecency,
+      ),
     }))
 
   if (!previous || previous.length === 0) return built
@@ -146,10 +160,16 @@ export function buildProjectGroups(
       ? prior.workspace
       : group.workspace
     const threads = reuseThreadsById(prior.threads, group.threads)
+    const archivedThreads = reuseThreadsById(
+      prior.archivedThreads ?? EMPTY_ARCHIVED_THREADS,
+      group.archivedThreads ?? EMPTY_ARCHIVED_THREADS,
+    )
     const merged =
-      workspace === prior.workspace && threads === prior.threads
+      workspace === prior.workspace &&
+      threads === prior.threads &&
+      archivedThreads === (prior.archivedThreads ?? EMPTY_ARCHIVED_THREADS)
         ? prior
-        : { workspace, threads }
+        : { workspace, threads, archivedThreads }
     // Reordering shows up positionally: same groups in a new sequence still
     // produce a new top-level array, which is exactly what consumers keyed on
     // order need to see.
@@ -210,12 +230,14 @@ export function partitionSidebarThreads(threads: readonly ThreadSummary[]) {
   const globallyPinned: ThreadSummary[] = []
   const pinnedInProject: ThreadSummary[] = []
   const unpinned: ThreadSummary[] = []
+  const archived: ThreadSummary[] = []
   for (const thread of threads) {
-    if (thread.is_pinned) globallyPinned.push(thread)
+    if (thread.is_archived) archived.push(thread)
+    else if (thread.is_pinned) globallyPinned.push(thread)
     else if (thread.is_pinned_in_project) pinnedInProject.push(thread)
     else unpinned.push(thread)
   }
-  return { globallyPinned, pinnedInProject, unpinned }
+  return { globallyPinned, pinnedInProject, unpinned, archived }
 }
 
 /** Reorders chats inside each project. Pinned rows are sorted separately. */
@@ -235,6 +257,7 @@ export function sortProjectGroupThreads(
         ...pinnedInProject.sort(compare),
         ...unpinned.sort(compare),
       ],
+      archivedThreads: [...archivedThreadsOf(group)].sort(compare),
     }
   })
 }

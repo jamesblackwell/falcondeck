@@ -80,7 +80,13 @@ describe('useThreadActions archive', () => {
       settled = true
     })
 
-    expect(useSessionStore.getState().snapshot?.threads.map((entry) => entry.id)).toEqual(['t2'])
+    expect(useSessionStore.getState().snapshot?.threads.map((entry) => entry.id)).toEqual([
+      't1',
+      't2',
+    ])
+    expect(
+      useSessionStore.getState().snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived,
+    ).toBe(true)
     expect(settled).toBe(false)
 
     await act(async () => {

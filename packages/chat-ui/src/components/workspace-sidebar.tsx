@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import {
+  Archive,
   ChevronDown,
   FolderClosed,
   FolderPlus,
@@ -12,9 +13,10 @@ import {
 } from "lucide-react";
 
 import {
+  archivedThreadsOf,
   compareThreads,
-  filterProjectGroupsByExtensions,
   forkProviderOptions,
+  filterProjectGroupsByExtensions,
   partitionSidebarThreads,
   summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
@@ -67,6 +69,9 @@ import { WorkspaceGroup, type WorkspaceHostBadge } from "./workspace-group";
 
 const VISIBLE_THREAD_LIMIT = 5;
 const SHOW_MORE_STEP = 10;
+// Synthetic workspace id for the Chats heading context menu. Real workspace
+// ids are daemon-issued; this one never collides with a project folder.
+const CHATS_CONTEXT_MENU_ID = "__fd_chats__";
 const THREAD_PAGER_BUTTON_CLASS =
   "fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary";
 // Same chrome as the Projects sort/filter triggers and per-project SquarePen.
@@ -101,6 +106,8 @@ export type WorkspaceSidebarProps = {
   /** Open the command palette scoped to one project's threads. */
   onSearchProjectThreads?: (workspaceId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  /** Restores a put-away chat to the project list. */
+  onUnarchiveThread?: ThreadItemArchiveHandler;
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
   onDeleteThread?: (
     workspaceId: string,
@@ -387,8 +394,11 @@ const ThreadList = memo(function ThreadList({
   group,
   sortMode,
   selectedThreadId,
+  viewingArchived = false,
+  onHideArchived,
   onSelectThread,
   onArchiveThread,
+  onUnarchiveThread,
   onArchiveConfirm,
   onArchiveCancel,
   pendingArchive,
@@ -400,8 +410,11 @@ const ThreadList = memo(function ThreadList({
   group: ProjectGroup;
   sortMode: ThreadSortMode;
   selectedThreadId: string | null;
+  viewingArchived?: boolean;
+  onHideArchived?: () => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  onUnarchiveThread?: ThreadItemArchiveHandler;
   onArchiveConfirm?: () => void;
   onArchiveCancel?: () => void;
   pendingArchive?: { workspaceId: string; threadId: string } | null;
@@ -418,8 +431,34 @@ const ThreadList = memo(function ThreadList({
     () => partitionSidebarThreads(group.threads),
     [group.threads],
   );
+  const archivedThreads = useOrderedThreads(
+    archivedThreadsOf(group),
+    sortMode,
+  );
   const pinnedInProjectThreads = useOrderedThreads(pinnedInProject, sortMode);
   const unpinnedThreads = useOrderedThreads(unpinned, sortMode);
+
+  if (viewingArchived && onHideArchived) {
+    return (
+      <ArchivedThreadList
+        entries={archivedThreads.map((thread) => ({
+          workspaceId: group.workspace.id,
+          thread,
+        }))}
+        selectedThreadId={selectedThreadId}
+        onHide={onHideArchived}
+        onSelectThread={onSelectThread}
+        onUnarchiveThread={onUnarchiveThread}
+        onOpenThreadContextMenu={onOpenThreadContextMenu}
+        onRequestRenameThread={onRequestRenameThread}
+        nowTick={nowTick}
+        threadTagsById={threadTagsById}
+        providerLabelFor={(thread) =>
+          threadProviderLabel(group.workspace, thread)
+        }
+      />
+    );
+  }
 
   const visible = unpinnedThreads.slice(0, visibleCount);
   const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length);
@@ -534,6 +573,126 @@ const pinnedEntryKey = (entry: PinnedThreadEntry) =>
   `${entry.workspaceId}:${entry.thread.id}`;
 const pinnedEntryThread = (entry: PinnedThreadEntry) => entry.thread;
 
+const ArchivedThreadList = memo(function ArchivedThreadList({
+  entries,
+  selectedThreadId,
+  onHide,
+  onSelectThread,
+  onUnarchiveThread,
+  onOpenThreadContextMenu,
+  onRequestRenameThread,
+  nowTick,
+  threadTagsById,
+  providerLabelFor,
+}: {
+  entries: Array<{ workspaceId: string; thread: ThreadSummary }>;
+  selectedThreadId: string | null;
+  onHide: () => void;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onUnarchiveThread?: ThreadItemArchiveHandler;
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
+  onRequestRenameThread?: (args: {
+    workspaceId: string;
+    thread: ThreadSummary;
+  }) => void;
+  nowTick: number;
+  threadTagsById?: Record<string, ThreadTag[]>;
+  providerLabelFor?: (thread: ThreadSummary) => string | null;
+}) {
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT);
+  const visible = entries.slice(0, visibleCount);
+  const hiddenCount = Math.max(0, entries.length - visible.length);
+  const trailingSelected =
+    selectedThreadId != null && hiddenCount > 0
+      ? (entries
+          .slice(visibleCount)
+          .find((entry) => entry.thread.id === selectedThreadId) ?? null)
+      : null;
+  const canCollapse = visibleCount > VISIBLE_THREAD_LIMIT;
+
+  return (
+    <div>
+      <div className="flex items-center">
+        <span className="flex min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          <Archive aria-hidden="true" className="h-3 w-3" />
+          Archived
+          <span>{entries.length}</span>
+        </span>
+        <button
+          type="button"
+          onClick={onHide}
+          className={cn(THREAD_PAGER_BUTTON_CLASS, "ml-auto")}
+          aria-label="Hide archived"
+        >
+          Hide
+        </button>
+      </div>
+      {entries.length === 0 ? (
+        <p className="py-2 pl-2.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          No archived threads
+        </p>
+      ) : null}
+      {visible.map(({ workspaceId, thread }) => (
+        <ThreadItem
+          key={`${workspaceId}:${thread.id}`}
+          thread={thread}
+          workspaceId={workspaceId}
+          isSelected={selectedThreadId === thread.id}
+          onSelect={onSelectThread}
+          onUnarchive={onUnarchiveThread}
+          onOpenContextMenu={onOpenThreadContextMenu}
+          onRequestRename={onRequestRenameThread}
+          nowTick={nowTick}
+          tags={threadTagsById?.[thread.id]}
+          providerLabel={providerLabelFor?.(thread)}
+        />
+      ))}
+      {trailingSelected ? (
+        <ThreadItem
+          key={`${trailingSelected.workspaceId}:${trailingSelected.thread.id}`}
+          thread={trailingSelected.thread}
+          workspaceId={trailingSelected.workspaceId}
+          isSelected
+          onSelect={onSelectThread}
+          onUnarchive={onUnarchiveThread}
+          onOpenContextMenu={onOpenThreadContextMenu}
+          onRequestRename={onRequestRenameThread}
+          nowTick={nowTick}
+          tags={threadTagsById?.[trailingSelected.thread.id]}
+          providerLabel={providerLabelFor?.(trailingSelected.thread)}
+        />
+      ) : null}
+      {hiddenCount > 0 || canCollapse ? (
+        <div className="flex items-center gap-1">
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setVisibleCount(visibleCount + SHOW_MORE_STEP)}
+              className={THREAD_PAGER_BUTTON_CLASS}
+            >
+              <ChevronDown aria-hidden="true" className="h-3 w-3" />
+              Show more
+            </button>
+          ) : null}
+          {canCollapse ? (
+            <button
+              type="button"
+              onClick={() => setVisibleCount(VISIBLE_THREAD_LIMIT)}
+              className={cn(
+                THREAD_PAGER_BUTTON_CLASS,
+                hiddenCount > 0 && "ml-auto",
+              )}
+            >
+              Show less
+              <ChevronDown aria-hidden="true" className="h-3 w-3 rotate-180" />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
 function WorkspaceDropIndicator() {
   return (
     <div
@@ -628,7 +787,6 @@ const ProjectGroupList = memo(function ProjectGroupList({
   onSelectWorkspace,
   onNewThread,
   onSearchProjectThreads,
-  canOpenWorkspaceContextMenu,
   onOpenWorkspaceContextMenu,
   workspaceColors,
   workspaceHosts,
@@ -636,8 +794,11 @@ const ProjectGroupList = memo(function ProjectGroupList({
   onWorkspaceOpenChange,
   threadSort,
   visualSelectedThreadId,
+  viewingArchivedWorkspaceIds,
+  onHideArchived,
   onSelectThread,
   onArchiveThread,
+  onUnarchiveThread,
   onArchiveConfirm,
   onArchiveCancel,
   pendingArchive,
@@ -662,7 +823,6 @@ const ProjectGroupList = memo(function ProjectGroupList({
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
   onNewThread?: (workspaceId: string) => void;
   onSearchProjectThreads?: (workspaceId: string) => void;
-  canOpenWorkspaceContextMenu: boolean;
   onOpenWorkspaceContextMenu: (
     workspaceId: string,
     path: string,
@@ -674,8 +834,11 @@ const ProjectGroupList = memo(function ProjectGroupList({
   onWorkspaceOpenChange: (workspaceId: string, open: boolean) => void;
   threadSort: ThreadSortMode;
   visualSelectedThreadId: string | null;
+  viewingArchivedWorkspaceIds: ReadonlySet<string>;
+  onHideArchived: (workspaceId: string) => void;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  onUnarchiveThread?: ThreadItemArchiveHandler;
   onArchiveConfirm?: () => void;
   onArchiveCancel?: () => void;
   pendingArchive?: { workspaceId: string; threadId: string } | null;
@@ -752,15 +915,12 @@ const ProjectGroupList = memo(function ProjectGroupList({
                   ? () => onSearchProjectThreads(workspaceId)
                   : undefined
               }
-              onOpenContextMenu={
-                canOpenWorkspaceContextMenu
-                  ? (position) =>
-                      onOpenWorkspaceContextMenu(
-                        workspaceId,
-                        group.workspace.path,
-                        position,
-                      )
-                  : undefined
+              onOpenContextMenu={(position) =>
+                onOpenWorkspaceContextMenu(
+                  workspaceId,
+                  group.workspace.path,
+                  position,
+                )
               }
               color={workspaceColors?.[workspaceId] ?? null}
               dragHandleProps={dragHandleProps}
@@ -774,8 +934,11 @@ const ProjectGroupList = memo(function ProjectGroupList({
                 group={group}
                 sortMode={threadSort}
                 selectedThreadId={visualSelectedThreadId}
+                viewingArchived={viewingArchivedWorkspaceIds.has(workspaceId)}
+                onHideArchived={() => onHideArchived(workspaceId)}
                 onSelectThread={onSelectThread}
                 onArchiveThread={onArchiveThread}
+                onUnarchiveThread={onUnarchiveThread}
                 onArchiveConfirm={onArchiveConfirm}
                 onArchiveCancel={onArchiveCancel}
                 pendingArchive={pendingArchive}
@@ -808,6 +971,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onNewChat,
   onSearchProjectThreads,
   onArchiveThread,
+  onUnarchiveThread,
   onDeleteThread,
   onRenameThread,
   onSuggestThreadTitle,
@@ -876,6 +1040,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     useState(false);
   const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
     useState(false);
+  const [viewingArchivedChats, setViewingArchivedChats] = useState(false);
+  const [archivedViewWorkspaceIds, setArchivedViewWorkspaceIds] = useState(
+    () => new Set<string>(),
+  );
+  const prevSelectedThreadIdRef = useRef<string | null | undefined>(undefined);
   const [selectedExtensionFilterValues, setSelectedExtensionFilterValues] =
     useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [threadContextMenu, setThreadContextMenu] =
@@ -1011,12 +1180,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const legacyDisplayGroups = useMemo(() => {
     if (activeTagIds.size === 0) return groups;
     return groups.flatMap((group) => {
-      const threads = group.threads.filter((thread) =>
+      const matchesTag = (thread: ThreadSummary) =>
         (threadTagsById?.[thread.id] ?? []).some((tag) =>
           activeTagIds.has(tag.id),
-        ),
-      );
-      return threads.length > 0 ? [{ ...group, threads }] : [];
+        );
+      const threads = group.threads.filter(matchesTag);
+      const archivedThreads = archivedThreadsOf(group).filter(matchesTag);
+      return threads.length > 0 || archivedThreads.length > 0
+        ? [{ ...group, threads, archivedThreads }]
+        : [];
     });
   }, [activeTagIds, groups, threadTagsById]);
   const activeExtensionFilters = useMemo(
@@ -1086,6 +1258,75 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         return pinDelta || compare(left.thread, right.thread);
       });
   }, [chatGroups, threadSort]);
+  const archivedChatEntries = useMemo(() => {
+    const compare = compareThreads(threadSort);
+    return chatGroups
+      .flatMap((group) =>
+        archivedThreadsOf(group).map((thread) => ({
+          workspaceId: group.workspace.id,
+          thread,
+        })),
+      )
+      .sort((left, right) => compare(left.thread, right.thread));
+  }, [chatGroups, threadSort]);
+
+  useEffect(() => {
+    const previousId = prevSelectedThreadIdRef.current;
+    prevSelectedThreadIdRef.current = visualSelectedThreadId;
+    if (
+      visualSelectedThreadId == null ||
+      visualSelectedThreadId === previousId
+    ) {
+      return;
+    }
+
+    if (
+      archivedChatEntries.some(
+        (entry) => entry.thread.id === visualSelectedThreadId,
+      )
+    ) {
+      setViewingArchivedChats(true);
+      return;
+    }
+    if (
+      chatEntries.some((entry) => entry.thread.id === visualSelectedThreadId)
+    ) {
+      setViewingArchivedChats(false);
+    }
+
+    for (const group of projectDisplayGroups) {
+      if (
+        archivedThreadsOf(group).some(
+          (thread) => thread.id === visualSelectedThreadId,
+        )
+      ) {
+        setArchivedViewWorkspaceIds((current) => {
+          if (current.has(group.workspace.id)) return current;
+          const next = new Set(current);
+          next.add(group.workspace.id);
+          return next;
+        });
+        return;
+      }
+      if (
+        group.threads.some((thread) => thread.id === visualSelectedThreadId)
+      ) {
+        setArchivedViewWorkspaceIds((current) => {
+          if (!current.has(group.workspace.id)) return current;
+          const next = new Set(current);
+          next.delete(group.workspace.id);
+          return next;
+        });
+        return;
+      }
+    }
+  }, [
+    archivedChatEntries,
+    chatEntries,
+    projectDisplayGroups,
+    visualSelectedThreadId,
+  ]);
+
   const orderedGroups = useMemo(() => {
     if (!optimisticWorkspaceOrder) return projectDisplayGroups;
     const groupsById = new Map(
@@ -1428,6 +1669,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     (args: ThreadContextMenuState) => {
       if (
         !onArchiveThread &&
+        !onUnarchiveThread &&
         !onDeleteThread &&
         !onRenameThread &&
         !onForkThread &&
@@ -1443,6 +1685,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     },
     [
       onArchiveThread,
+      onUnarchiveThread,
       onDeleteThread,
       onForkThread,
       onMarkThreadRead,
@@ -1535,7 +1778,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     const { workspaceId, thread } = threadContextMenu;
     setThreadContextMenu(null);
     requestArchiveConfirm(workspaceId, thread.id);
-  }, [requestArchiveConfirm, threadContextMenu]);
+  }, [onArchiveThread, requestArchiveConfirm, threadContextMenu]);
+
+  const handleUnarchiveFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onUnarchiveThread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    void Promise.resolve(onUnarchiveThread(workspaceId, thread.id)).catch(
+      () => {},
+    );
+  }, [onUnarchiveThread, threadContextMenu]);
 
   const handleStartRenameFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onRenameThread) return;
@@ -1713,8 +1965,29 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
-      if (!onRemoveWorkspace && !onCloseWorkspace && !onWorkspaceColorChange)
+      const isChats = workspaceId === CHATS_CONTEXT_MENU_ID;
+      const archivedCount = isChats
+        ? archivedChatEntries.length
+        : archivedThreadsOf(
+            projectDisplayGroups.find(
+              (group) => group.workspace.id === workspaceId,
+            ) ?? { archivedThreads: [] },
+          ).length;
+      const viewingArchived = isChats
+        ? viewingArchivedChats
+        : archivedViewWorkspaceIds.has(workspaceId);
+      const canColor = !isChats && Boolean(onWorkspaceColorChange);
+      const canClose = !isChats && Boolean(onCloseWorkspace);
+      const canRemove = !isChats && Boolean(onRemoveWorkspace);
+      if (
+        !canColor &&
+        !canClose &&
+        !canRemove &&
+        archivedCount === 0 &&
+        !viewingArchived
+      ) {
         return;
+      }
       setThreadContextMenu(null);
       setWorkspaceContextMenu({
         workspaceId,
@@ -1723,8 +1996,55 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         y: position.y,
       });
     },
-    [onCloseWorkspace, onRemoveWorkspace, onWorkspaceColorChange],
+    [
+      archivedChatEntries.length,
+      archivedViewWorkspaceIds,
+      onCloseWorkspace,
+      onRemoveWorkspace,
+      onWorkspaceColorChange,
+      projectDisplayGroups,
+      viewingArchivedChats,
+    ],
   );
+
+  const handleHideArchived = useCallback((workspaceId: string) => {
+    setArchivedViewWorkspaceIds((current) => {
+      if (!current.has(workspaceId)) return current;
+      const next = new Set(current);
+      next.delete(workspaceId);
+      return next;
+    });
+  }, []);
+
+  const handleViewArchivedFromContextMenu = useCallback(() => {
+    if (!workspaceContextMenu) return;
+    const { workspaceId } = workspaceContextMenu;
+    setWorkspaceContextMenu(null);
+    if (workspaceId === CHATS_CONTEXT_MENU_ID) {
+      const next = !viewingArchivedChats;
+      setViewingArchivedChats(next);
+      if (next && chatsCollapsed) handleChatsCollapsedChange(false);
+      return;
+    }
+    const nextOpen = !archivedViewWorkspaceIds.has(workspaceId);
+    setArchivedViewWorkspaceIds((current) => {
+      const next = new Set(current);
+      if (nextOpen) next.add(workspaceId);
+      else next.delete(workspaceId);
+      return next;
+    });
+    if (nextOpen && collapsedWorkspaces.has(workspaceId)) {
+      handleWorkspaceOpenChange(workspaceId, true);
+    }
+  }, [
+    archivedViewWorkspaceIds,
+    chatsCollapsed,
+    collapsedWorkspaces,
+    handleChatsCollapsedChange,
+    handleWorkspaceOpenChange,
+    viewingArchivedChats,
+    workspaceContextMenu,
+  ]);
 
   const handleSetWorkspaceColor = useCallback(
     (color: WorkspaceColorId | null) => {
@@ -1954,26 +2274,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       setThreadContextMenu(null);
     };
 
-    const handleViewportChange = (event: Event) => {
-      if (
-        event.target instanceof Node &&
-        threadContextMenuRef.current?.contains(event.target)
-      ) {
-        return;
-      }
+    const handleWindowResize = () => {
       setThreadContextMenu(null);
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("scroll", handleViewportChange, true);
-    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("resize", handleWindowResize);
 
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("scroll", handleViewportChange, true);
-      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("resize", handleWindowResize);
     };
   }, [threadContextMenu]);
 
@@ -1991,20 +2303,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       setWorkspaceContextMenu(null);
     };
 
-    const handleViewportChange = () => {
+    const handleWindowResize = () => {
       setWorkspaceContextMenu(null);
     };
 
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("scroll", handleViewportChange, true);
-    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("resize", handleWindowResize);
 
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("scroll", handleViewportChange, true);
-      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("resize", handleWindowResize);
     };
   }, [workspaceContextMenu]);
 
@@ -2286,11 +2596,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 onSelectWorkspace={handleSelectWorkspace}
                 onNewThread={onNewThread ? handleNewThread : undefined}
                 onSearchProjectThreads={onSearchProjectThreads}
-                canOpenWorkspaceContextMenu={Boolean(
-                  onRemoveWorkspace ||
-                    onCloseWorkspace ||
-                    onWorkspaceColorChange,
-                )}
                 onOpenWorkspaceContextMenu={handleOpenWorkspaceContextMenu}
                 workspaceColors={workspaceColors}
                 workspaceHosts={workspaceHosts}
@@ -2298,8 +2603,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 onWorkspaceOpenChange={handleWorkspaceOpenChange}
                 threadSort={threadSort}
                 visualSelectedThreadId={visualSelectedThreadId}
+                viewingArchivedWorkspaceIds={archivedViewWorkspaceIds}
+                onHideArchived={handleHideArchived}
                 onSelectThread={handleSelectThread}
                 onArchiveThread={requestArchiveConfirm}
+                onUnarchiveThread={onUnarchiveThread}
                 onArchiveConfirm={confirmArchive}
                 onArchiveCancel={cancelArchiveConfirm}
                 pendingArchive={pendingArchive}
@@ -2320,11 +2628,27 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             />
           ) : null}
         </section>
-        {onNewChat || chatEntries.length > 0 ? (
+        {onNewChat ||
+        chatEntries.length > 0 ||
+        archivedChatEntries.length > 0 ? (
           <section aria-labelledby="fd-chats-heading" className="mt-4">
             <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-2">
-              <h2 id="fd-chats-heading">
-                {chatEntries.length > 0 ? (
+              <h2
+                id="fd-chats-heading"
+                onContextMenu={
+                  archivedChatEntries.length > 0 || viewingArchivedChats
+                    ? (event) => {
+                        event.preventDefault();
+                        handleOpenWorkspaceContextMenu(
+                          CHATS_CONTEXT_MENU_ID,
+                          "Chats",
+                          { x: event.clientX, y: event.clientY },
+                        );
+                      }
+                    : undefined
+                }
+              >
+                {chatEntries.length > 0 || archivedChatEntries.length > 0 ? (
                   <button
                     type="button"
                     className={cn(
@@ -2368,27 +2692,41 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             </div>
             <Collapsible.Root open={!chatsCollapsed}>
               <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
-                {chatEntries.map(({ workspaceId, thread }) => (
-                  <ThreadItem
-                    key={`${workspaceId}:${thread.id}`}
-                    thread={thread}
-                    workspaceId={workspaceId}
-                    isSelected={visualSelectedThreadId === thread.id}
-                    onSelect={handleSelectThread}
-                    onArchive={requestArchiveConfirm}
-                    archiveConfirmPending={Boolean(
-                      pendingArchive &&
-                        pendingArchive.workspaceId === workspaceId &&
-                        pendingArchive.threadId === thread.id,
-                    )}
-                    onArchiveConfirm={confirmArchive}
-                    onArchiveCancel={cancelArchiveConfirm}
-                    onOpenContextMenu={handleOpenThreadContextMenu}
-                    onRequestRename={handleRequestRenameThread}
+                {viewingArchivedChats ? (
+                  <ArchivedThreadList
+                    entries={archivedChatEntries}
+                    selectedThreadId={visualSelectedThreadId}
+                    onHide={() => setViewingArchivedChats(false)}
+                    onSelectThread={handleSelectThread}
+                    onUnarchiveThread={onUnarchiveThread}
+                    onOpenThreadContextMenu={handleOpenThreadContextMenu}
+                    onRequestRenameThread={handleRequestRenameThread}
                     nowTick={nowTick}
-                    tags={threadTagsById?.[thread.id]}
+                    threadTagsById={threadTagsById}
                   />
-                ))}
+                ) : (
+                  chatEntries.map(({ workspaceId, thread }) => (
+                    <ThreadItem
+                      key={`${workspaceId}:${thread.id}`}
+                      thread={thread}
+                      workspaceId={workspaceId}
+                      isSelected={visualSelectedThreadId === thread.id}
+                      onSelect={handleSelectThread}
+                      onArchive={requestArchiveConfirm}
+                      archiveConfirmPending={Boolean(
+                        pendingArchive &&
+                          pendingArchive.workspaceId === workspaceId &&
+                          pendingArchive.threadId === thread.id,
+                      )}
+                      onArchiveConfirm={confirmArchive}
+                      onArchiveCancel={cancelArchiveConfirm}
+                      onOpenContextMenu={handleOpenThreadContextMenu}
+                      onRequestRename={handleRequestRenameThread}
+                      nowTick={nowTick}
+                      tags={threadTagsById?.[thread.id]}
+                    />
+                  ))
+                )}
               </Collapsible.Content>
             </Collapsible.Root>
           </section>
@@ -2407,7 +2745,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         }
         canRename={Boolean(onRenameThread)}
         canFork={Boolean(onForkThread)}
-        canArchive={Boolean(onArchiveThread)}
+        canArchive={
+          Boolean(onArchiveThread) && !threadContextMenu?.thread.is_archived
+        }
+        canUnarchive={
+          Boolean(onUnarchiveThread) &&
+          Boolean(threadContextMenu?.thread.is_archived)
+        }
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
         canPinInProject={
@@ -2436,6 +2780,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onRename={handleStartRenameFromContextMenu}
         onFork={handleForkFromContextMenu}
         onArchive={handleArchiveFromContextMenu}
+        onUnarchive={handleUnarchiveFromContextMenu}
         onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
         onTogglePinInProject={handleTogglePinInProjectFromContextMenu}
@@ -2484,15 +2829,52 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         menuRef={workspaceContextMenuRef}
         target={workspaceContextMenu}
         selectedColor={
-          workspaceContextMenu
+          workspaceContextMenu &&
+          workspaceContextMenu.workspaceId !== CHATS_CONTEXT_MENU_ID
             ? (workspaceColors?.[workspaceContextMenu.workspaceId] ?? null)
             : null
         }
-        onSetColor={onWorkspaceColorChange ? handleSetWorkspaceColor : undefined}
-        onCloseFromSidebar={
-          onCloseWorkspace ? requestCloseWorkspace : undefined
+        archivedCount={
+          workspaceContextMenu == null
+            ? 0
+            : workspaceContextMenu.workspaceId === CHATS_CONTEXT_MENU_ID
+              ? archivedChatEntries.length
+              : archivedThreadsOf(
+                  projectDisplayGroups.find(
+                    (group) =>
+                      group.workspace.id === workspaceContextMenu.workspaceId,
+                  ) ?? { archivedThreads: [] },
+                ).length
         }
-        onRemove={onRemoveWorkspace ? openRemoveDialog : undefined}
+        archivedOpen={
+          workspaceContextMenu?.workspaceId === CHATS_CONTEXT_MENU_ID
+            ? viewingArchivedChats
+            : Boolean(
+                workspaceContextMenu &&
+                  archivedViewWorkspaceIds.has(
+                    workspaceContextMenu.workspaceId,
+                  ),
+              )
+        }
+        onSetColor={
+          onWorkspaceColorChange &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? handleSetWorkspaceColor
+            : undefined
+        }
+        onViewArchived={handleViewArchivedFromContextMenu}
+        onCloseFromSidebar={
+          onCloseWorkspace &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? requestCloseWorkspace
+            : undefined
+        }
+        onRemove={
+          onRemoveWorkspace &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? openRemoveDialog
+            : undefined
+        }
       />
       <CloseWorkspaceDialog
         target={closeTarget}

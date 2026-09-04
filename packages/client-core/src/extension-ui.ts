@@ -574,6 +574,13 @@ export function filterProjectGroupsByExtensions(
         threadMatchesFilter(snapshot, thread.id, filter),
       ),
     );
-    return threads.length > 0 ? [{ ...group, threads }] : [];
+    const archivedThreads = (group.archivedThreads ?? []).filter((thread) =>
+      active.every((filter) =>
+        threadMatchesFilter(snapshot, thread.id, filter),
+      ),
+    );
+    return threads.length > 0 || archivedThreads.length > 0
+      ? [{ ...group, threads, archivedThreads }]
+      : [];
   });
 }

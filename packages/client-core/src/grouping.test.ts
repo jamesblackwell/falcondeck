@@ -49,6 +49,18 @@ describe('buildProjectGroups', () => {
 
     expect(groups.map((group) => group.workspace.id)).toEqual(['saved-a', 'saved-b', 'new'])
   })
+
+  it('keeps archived threads off the live list', () => {
+    const live = summary({ id: 'live' })
+    const archived = summary({ id: 'archived', is_archived: true, title: 'Old chat' })
+    const groups = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [live, archived],
+    )
+
+    expect(groups[0]?.threads.map(({ id }) => id)).toEqual(['live'])
+    expect(groups[0]?.archivedThreads?.map(({ id }) => id)).toEqual(['archived'])
+  })
 })
 
 describe('buildProjectGroups reuse', () => {
@@ -320,6 +332,13 @@ describe('partitionSidebarThreads', () => {
       globallyPinned: [globallyPinned],
       pinnedInProject: [projectPinned],
       unpinned: [ordinary],
+      archived: [],
     })
+  })
+
+  it('splits archived chats out of the pin buckets', () => {
+    const archived = summary({ id: 'archived', is_archived: true, is_pinned: true })
+    expect(partitionSidebarThreads([archived]).archived).toEqual([archived])
+    expect(partitionSidebarThreads([archived]).globallyPinned).toEqual([])
   })
 })

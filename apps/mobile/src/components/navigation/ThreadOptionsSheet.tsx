@@ -1,6 +1,6 @@
 import { memo, useCallback, useRef, useState } from 'react'
 import { Pressable, View } from 'react-native'
-import { Archive, ChevronRight, Pencil, Pin, Sparkles } from 'lucide-react-native'
+import { Archive, ArchiveRestore, ChevronRight, Pencil, Pin, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -25,6 +25,7 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   const { theme } = useUnistyles()
   const {
     archiveThread,
+    unarchiveThread,
     renameThread,
     suggestThreadTitle,
     setThreadPinned,
@@ -134,6 +135,12 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
     onClose()
     void archiveThread(workspaceId, thread.id).catch(() => {})
   }, [archiveThread, onClose, thread.id, workspaceId])
+
+  const handleUnarchive = useCallback(() => {
+    triggerThreadArchiveHaptic()
+    onClose()
+    void unarchiveThread(workspaceId, thread.id).catch(() => {})
+  }, [onClose, thread.id, unarchiveThread, workspaceId])
 
   const handleRename = useCallback(async () => {
     const nextTitle = renameValue.trim()
@@ -295,12 +302,18 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
           <Pressable
             style={[styles.item, styles.archiveItem]}
             accessibilityRole="button"
-            accessibilityLabel="Archive thread"
-            onPress={handleArchive}
+            accessibilityLabel={thread.is_archived ? 'Unarchive thread' : 'Archive thread'}
+            onPress={thread.is_archived ? handleUnarchive : handleArchive}
           >
             <View style={styles.itemLabel}>
-              <Archive size={theme.iconSize.sm} color={theme.colors.info.default} />
-              <Text variant="label" color="info">Archive</Text>
+              {thread.is_archived ? (
+                <ArchiveRestore size={theme.iconSize.sm} color={theme.colors.info.default} />
+              ) : (
+                <Archive size={theme.iconSize.sm} color={theme.colors.info.default} />
+              )}
+              <Text variant="label" color="info">
+                {thread.is_archived ? 'Unarchive' : 'Archive'}
+              </Text>
             </View>
           </Pressable>
           {actionError ? (

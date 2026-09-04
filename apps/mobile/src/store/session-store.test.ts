@@ -280,7 +280,8 @@ describe('session-store', () => {
       useSessionStore.getState().applyThreadSummary(thread({ id: 't1', is_archived: true }))
 
       const state = useSessionStore.getState()
-      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2'])
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2'])
+      expect(state.snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived).toBe(true)
       expect(state.selectedThreadId).toBe('t2')
       expect(state.threadDetail).toBeNull()
       expect(state.threadItems['t1']).toBeUndefined()
@@ -460,7 +461,7 @@ describe('session-store', () => {
   })
 
   describe('mobile cache', () => {
-    it('filters archived threads and archived approvals from snapshot state', () => {
+    it('keeps archived threads and drops archived approvals from snapshot state', () => {
       useSessionStore.getState().applyDaemonEvent(
         snapshotEvent(snapshot({
           workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
@@ -476,7 +477,13 @@ describe('session-store', () => {
       )
 
       const state = useSessionStore.getState()
-      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['thread-1'])
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual([
+        'thread-1',
+        'thread-archived',
+      ])
+      expect(
+        state.snapshot?.threads.find((entry) => entry.id === 'thread-archived')?.is_archived,
+      ).toBe(true)
       expect(state.snapshot?.interactive_requests.map((entry) => entry.request_id)).toEqual([
         'approval-active',
       ])
@@ -898,7 +905,8 @@ describe('session-store', () => {
         selectedThreadId: 't1',
       })
       const state = useSessionStore.getState()
-      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2', 't3'])
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2', 't3'])
+      expect(state.snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived).toBe(true)
       expect(state.snapshot?.workspaces[0]?.current_thread_id).toBeNull()
       expect(state.snapshot?.interactive_requests.map((entry) => entry.request_id)).toEqual([
         'approval-t2',
@@ -984,7 +992,8 @@ describe('session-store', () => {
       useSessionStore.getState().archiveThreadLocally('t1')
 
       const state = useSessionStore.getState()
-      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2', 't3'])
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t1', 't2', 't3'])
+      expect(state.snapshot?.threads.find((entry) => entry.id === 't1')?.is_archived).toBe(true)
       expect(state.selectedThreadId).toBe('t2')
       expect(state.threadDetail?.thread.id).toBe('t2')
     })

@@ -1605,6 +1605,135 @@ describe("DesktopSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("lists archived threads from the project menu and unarchives without confirm", async () => {
+    const onUnarchiveThread = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [thread()],
+          archivedThreads: [
+            thread({
+              id: "archived-1",
+              title: "Old CPU work",
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+      onUnarchiveThread,
+    });
+
+    expect(screen.queryByText("Old CPU work")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Archived/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "View archived" }),
+    );
+    expect(screen.getByText("Old CPU work")).toBeInTheDocument();
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+
+    fireEvent.contextMenu(screen.getByText("Old CPU work"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Unarchive" }));
+
+    await waitFor(() => {
+      expect(onUnarchiveThread).toHaveBeenCalledWith(
+        "workspace-1",
+        "archived-1",
+      );
+    });
+    expect(
+      screen.queryByRole("button", { name: /Confirm/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the archived view when the selected thread is archived", () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [thread()],
+          archivedThreads: [
+            thread({
+              id: "archived-1",
+              title: "Old CPU work",
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+      selectedThreadId: "archived-1",
+    });
+
+    expect(screen.getByText("Old CPU work")).toBeInTheDocument();
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+  });
+
+  it("hides archived threads from the archived view header", async () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [thread()],
+          archivedThreads: [
+            thread({
+              id: "archived-1",
+              title: "Old CPU work",
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+    });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "View archived" }),
+    );
+    expect(screen.getByText("Old CPU work")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide archived" }));
+    expect(screen.queryByText("Old CPU work")).not.toBeInTheDocument();
+    expect(screen.getByText("Main thread")).toBeInTheDocument();
+  });
+
+  it("opens archived chats from the Chats heading menu", async () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace({ id: "chat-w", kind: "casual" }),
+          threads: [
+            thread({
+              id: "chat-t",
+              workspace_id: "chat-w",
+              title: "Weekend plans",
+            }),
+          ],
+          archivedThreads: [
+            thread({
+              id: "archived-chat",
+              workspace_id: "chat-w",
+              title: "Old weekend plans",
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+      onNewChat: vi.fn(),
+    });
+
+    expect(screen.queryByText("Old weekend plans")).not.toBeInTheDocument();
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Collapse chats" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "View archived" }),
+    );
+    expect(screen.getByText("Old weekend plans")).toBeInTheDocument();
+    expect(screen.queryByText("Weekend plans")).not.toBeInTheDocument();
+  });
+
   it("deletes a thread from the right-click menu after confirmation", async () => {
     const { onDeleteThread } = renderSidebar();
 
@@ -1749,6 +1878,50 @@ describe("DesktopSidebar", () => {
     expect(
       screen.getByRole("menuitemradio", { name: "In progress" }),
     ).toBeInTheDocument();
+  });
+
+  it("keeps the context menu open when background or document scroll events occur", async () => {
+    const onTogglePinThread = vi.fn();
+    renderSidebar({ onTogglePinThread });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    expect(
+      await screen.findByRole("menuitem", { name: "Pin chat" }),
+    ).toBeInTheDocument();
+
+    const externalScrollContainer = document.createElement("div");
+    document.body.appendChild(externalScrollContainer);
+    fireEvent.scroll(externalScrollContainer);
+    fireEvent.scroll(window);
+    fireEvent.scroll(document);
+
+    expect(
+      screen.getByRole("menuitem", { name: "Pin chat" }),
+    ).toBeInTheDocument();
+
+    externalScrollContainer.remove();
+  });
+
+  it("keeps the workspace context menu open when scroll events occur", async () => {
+    const onCloseWorkspace = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({ onCloseWorkspace });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(
+      await screen.findByRole("menuitem", { name: "Remove from Sidebar" }),
+    ).toBeInTheDocument();
+
+    const externalScrollContainer = document.createElement("div");
+    document.body.appendChild(externalScrollContainer);
+    fireEvent.scroll(externalScrollContainer);
+    fireEvent.scroll(window);
+    fireEvent.scroll(document);
+
+    expect(
+      screen.getByRole("menuitem", { name: "Remove from Sidebar" }),
+    ).toBeInTheDocument();
+
+    externalScrollContainer.remove();
   });
 
   it("hides thread stages when the owning daemon disables the extension", () => {
@@ -2183,6 +2356,35 @@ describe("DesktopSidebar", () => {
     expect(
       screen.queryByRole("menuitem", { name: "Forget project" }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "View archived" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still offers View archived when membership actions are unavailable", async () => {
+    renderSidebar({
+      onRemoveWorkspace: undefined,
+      onCloseWorkspace: undefined,
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [thread()],
+          archivedThreads: [
+            thread({
+              id: "archived-1",
+              title: "Old CPU work",
+              is_archived: true,
+            }),
+          ],
+        },
+      ],
+    });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "View archived" }),
+    );
+    expect(screen.getByText("Old CPU work")).toBeInTheDocument();
   });
 
   it("renders Options menu trigger in footer and triggers actions", () => {
