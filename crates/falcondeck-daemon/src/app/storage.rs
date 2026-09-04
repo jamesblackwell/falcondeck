@@ -121,7 +121,7 @@ pub(super) async fn persist_app_state(
     write_atomically(path, payload).await
 }
 
-pub(super) async fn persist_preferences(
+pub(in crate::app) async fn persist_preferences(
     path: &PathBuf,
     preferences: &FalconDeckPreferences,
 ) -> Result<(), DaemonError> {
@@ -313,6 +313,18 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
                     }
                     choices
                 });
+        }
+    }
+
+    if let Some(computer_use) = value.get("computer_use") {
+        if let Some(enabled) = computer_use.get("enabled").and_then(Value::as_bool) {
+            preferences.computer_use.enabled = enabled;
+        }
+        if let Some(telemetry) = computer_use.get("telemetry").and_then(Value::as_bool) {
+            preferences.computer_use.telemetry = telemetry;
+        }
+        if let Some(overlay) = computer_use.get("overlay").and_then(Value::as_bool) {
+            preferences.computer_use.overlay = overlay;
         }
     }
 
@@ -1023,6 +1035,22 @@ mod tests {
         assert!(preferences.notifications.notify_on_input_required);
         assert!(!preferences.notifications.notify_on_error);
         assert!(!preferences.notifications.suppress_when_desktop_active);
+    }
+
+    #[test]
+    fn loads_computer_use_preferences() {
+        let preferences = merge_preferences_from_value(json!({
+            "computer_use": {
+                "enabled": true,
+                "telemetry": true,
+                "overlay": false
+            }
+        }));
+        assert!(preferences.computer_use.enabled);
+        assert!(preferences.computer_use.telemetry);
+        assert!(!preferences.computer_use.overlay);
+        assert!(!FalconDeckPreferences::default().computer_use.enabled);
+        assert!(FalconDeckPreferences::default().computer_use.overlay);
     }
 
     #[test]

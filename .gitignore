@@ -10,6 +10,13 @@ node_modules/
 .expo/
 web-build/
 apps/desktop/src-tauri/binaries/deno-*
+apps/desktop/src-tauri/binaries/cua-driver-*
+
+# Apple and updater signing material — never commit
+*.p12
+*.p8
+*.certSigningRequest
+falcondeck-signing/
 
 # Local machine and tool output
 .claude/settings.local.json

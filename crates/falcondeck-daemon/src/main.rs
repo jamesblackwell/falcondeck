@@ -59,6 +59,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .skip(1)
             .find_map(|arg| arg.strip_prefix("--deno-bin=").map(str::to_string))
             .unwrap_or_else(|| "deno".to_string()),
+        computer_use_bin: std::env::args()
+            .skip(1)
+            .find_map(|arg| arg.strip_prefix("--cua-driver-bin=").map(str::to_string))
+            .or_else(|| {
+                std::env::var("FALCONDECK_CUA_DRIVER_BIN")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            }),
         state_path: None,
     };
 

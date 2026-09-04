@@ -337,6 +337,14 @@ const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
   models: [{ provider: "claude", model_id: "haiku" }],
 };
 
+const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
+  FalconDeckPreferences["computer_use"]
+> = {
+  enabled: false,
+  telemetry: false,
+  overlay: true,
+};
+
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   workspace_order: [],
@@ -344,6 +352,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
   utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
+  computer_use: DEFAULT_COMPUTER_USE_PREFERENCES,
 };
 
 const FALLBACK_PROVIDER: AgentProvider = "codex";
@@ -1533,6 +1542,7 @@ export function normalizeDaemonSnapshot(
       capabilities: {
         scheduled_tasks:
           snapshot.daemon?.capabilities?.scheduled_tasks ?? false,
+        computer_use: snapshot.daemon?.capabilities?.computer_use ?? false,
       },
     },
     ...(restorePhase ? { restore_phase: restorePhase } : {}),
@@ -2253,6 +2263,20 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         notifications.suppress_when_desktop_active ?? true,
     },
     utility_models: normalizeUtilityModelPreferences(raw.utility_models),
+    computer_use: normalizeComputerUsePreferences(raw.computer_use),
+  };
+}
+
+function normalizeComputerUsePreferences(
+  value: unknown,
+): NonNullable<FalconDeckPreferences["computer_use"]> {
+  const raw = (value ?? {}) as Partial<
+    NonNullable<FalconDeckPreferences["computer_use"]>
+  >;
+  return {
+    enabled: raw.enabled ?? false,
+    telemetry: raw.telemetry ?? false,
+    overlay: raw.overlay ?? true,
   };
 }
 

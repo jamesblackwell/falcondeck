@@ -82,6 +82,7 @@ use crate::{
 
 mod acp_threads;
 pub(crate) mod agent_helpers;
+mod computer_use;
 pub(crate) mod conversation_helpers;
 mod extension_events;
 mod extension_host;
@@ -468,6 +469,8 @@ struct InnerState {
     /// app crashes or is force-quit.
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
+    /// Embedded cua-driver child. Absent binary means this host cannot run it.
+    computer_use: computer_use::ComputerUseHost,
     /// Definitions and bounded run ledgers owned by this daemon.
     scheduled_tasks: Mutex<scheduled_tasks::ScheduledTaskRegistry>,
     /// Makes the lightweight task-store restore a readiness prerequisite and
@@ -985,11 +988,16 @@ impl AppState {
         state_path: PathBuf,
     ) -> Self {
         let deno_bin = std::env::var("FALCONDECK_DENO_BIN").unwrap_or_else(|_| "deno".to_string());
-        Self::new_with_state_path_and_extension_runtime(
+        let computer_use_bin = std::env::var("FALCONDECK_CUA_DRIVER_BIN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        Self::new_with_state_path_and_runtimes(
             version,
             provider_bins,
             state_path,
             deno_bin,
+            computer_use_bin,
         )
     }
 
@@ -998,6 +1006,16 @@ impl AppState {
         provider_bins: HashMap<AgentProvider, String>,
         state_path: PathBuf,
         deno_bin: String,
+    ) -> Self {
+        Self::new_with_state_path_and_runtimes(version, provider_bins, state_path, deno_bin, None)
+    }
+
+    pub fn new_with_state_path_and_runtimes(
+        version: String,
+        provider_bins: HashMap<AgentProvider, String>,
+        state_path: PathBuf,
+        deno_bin: String,
+        computer_use_bin: Option<String>,
     ) -> Self {
         // 512 envelopes cover any realistic burst between client paints while
         // bounding retained memory: each slot can hold a full snapshot event
@@ -1008,6 +1026,8 @@ impl AppState {
         let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
+        let computer_use = computer_use::ComputerUseHost::new(computer_use_bin, &state_path);
+        let computer_use_available = computer_use.available();
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -1015,6 +1035,7 @@ impl AppState {
                     started_at: Utc::now(),
                     capabilities: DaemonCapabilities {
                         scheduled_tasks: true,
+                        computer_use: computer_use_available,
                     },
                 },
                 restore_phase: StdMutex::new(DaemonRestorePhase::Ready),
@@ -1045,6 +1066,7 @@ impl AppState {
                 local_base_url: OnceLock::new(),
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
+                computer_use,
                 scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),
                 scheduled_tasks_restored: OnceCell::new(),
                 scheduled_mutation: Mutex::new(()),
@@ -1254,6 +1276,7 @@ impl AppState {
             extensions: self
                 .builtin_extensions_spec(provider, workspace_path, thread_id)
                 .await,
+            computer_use: self.builtin_computer_use_spec().await,
         }
     }
 
@@ -1318,7 +1341,9 @@ impl AppState {
     /// currently published.
     pub async fn agent_context_instructions(&self, provider: &AgentProvider) -> Option<String> {
         self.agent_context_enabled(provider).await?;
-        let staged = crate::agent_context::stage_bundled_skills(&self.inner.state_path);
+        let computer_use_ready = self.builtin_computer_use_spec().await.is_some();
+        let staged =
+            crate::agent_context::stage_bundled_skills(&self.inner.state_path, computer_use_ready);
         if let Err(error) = &staged {
             tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
         }
@@ -1330,13 +1355,18 @@ impl AppState {
             .agent_tools()
             .iter()
             .any(|tool| tool.name == crate::agent_context::SUGGEST_FOLLOW_UPS_TOOL);
-        let (control, mcp) = match &staged {
-            Ok(paths) => (Some(paths.control.as_path()), Some(paths.mcp.as_path())),
-            Err(_) => (None, None),
+        let (control, mcp, computer_use) = match &staged {
+            Ok(paths) => (
+                Some(paths.control.as_path()),
+                Some(paths.mcp.as_path()),
+                paths.computer_use.as_deref(),
+            ),
+            Err(_) => (None, None, None),
         };
         Some(crate::agent_context::append_instructions(
             control,
             mcp,
+            computer_use,
             suggest_follow_ups,
         ))
     }
@@ -1345,7 +1375,9 @@ impl AppState {
     /// skill directories natively (Codex `skills/extraRoots`).
     pub async fn agent_skill_root(&self, provider: &AgentProvider) -> Option<std::path::PathBuf> {
         self.agent_context_enabled(provider).await?;
-        match crate::agent_context::stage_bundled_skills(&self.inner.state_path) {
+        let computer_use_ready = self.builtin_computer_use_spec().await.is_some();
+        match crate::agent_context::stage_bundled_skills(&self.inner.state_path, computer_use_ready)
+        {
             Ok(_) => Some(crate::agent_context::skills_root(&self.inner.state_path)),
             Err(error) => {
                 tracing::warn!(%error, "failed to stage bundled FalconDeck skills");
@@ -2007,6 +2039,7 @@ impl AppState {
         // Flag first: reconnect/respawn paths check this before spawning new
         // agent processes, so nothing new starts while we tear down.
         self.inner.shutting_down.store(true, Ordering::Release);
+        self.inner.computer_use.stop().await;
         self.inner.terminals.shutdown_all().await;
         self.inner.scheduled_notify.notify_waiters();
         scheduled_tasks::interrupt_active_runs(self).await?;

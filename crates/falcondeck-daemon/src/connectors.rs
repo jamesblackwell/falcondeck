@@ -241,6 +241,63 @@ pub fn with_builtin_extensions(
     servers
 }
 
+/// Reserved connector name for the bundled cua-driver computer-use server.
+pub const BUILTIN_COMPUTER_USE_CONNECTOR_NAME: &str = "cua-driver";
+
+/// Embedded computer-use MCP proxy. Computed at each spawn; never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinComputerUseSpec {
+    /// Absolute path to the bundled `cua-driver` binary.
+    pub binary: String,
+    /// Private Unix socket of the host-owned `serve --embedded` daemon.
+    pub socket_path: String,
+}
+
+/// Builds the in-memory cua-driver MCP proxy for one spawn.
+pub fn builtin_computer_use_server(spec: &BuiltinComputerUseSpec) -> McpServerConfig {
+    McpServerConfig {
+        name: BUILTIN_COMPUTER_USE_CONNECTOR_NAME.to_string(),
+        transport: McpTransport::Stdio {
+            command: spec.binary.clone(),
+            args: vec![
+                "mcp".to_string(),
+                "--embedded".to_string(),
+                "--socket".to_string(),
+                spec.socket_path.clone(),
+                "--host-bundle-id".to_string(),
+                "com.falcondeck.desktop".to_string(),
+            ],
+            env: BTreeMap::new(),
+        },
+    }
+}
+
+/// Appends the bundled computer-use connector. User entries using the reserved
+/// name are dropped rather than allowed to shadow it.
+pub fn with_builtin_computer_use(
+    servers: Vec<McpServerConfig>,
+    spec: Option<&BuiltinComputerUseSpec>,
+) -> Vec<McpServerConfig> {
+    let Some(spec) = spec else {
+        return servers;
+    };
+    let mut servers: Vec<McpServerConfig> = servers
+        .into_iter()
+        .filter(|server| {
+            if server.name == BUILTIN_COMPUTER_USE_CONNECTOR_NAME {
+                tracing::warn!(
+                    "ignoring user connector named {BUILTIN_COMPUTER_USE_CONNECTOR_NAME:?}: the name is reserved for FalconDeck computer use"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    servers.push(builtin_computer_use_server(spec));
+    servers
+}
+
 /// The built-in connectors that apply to one provider spawn. Each is
 /// independently optional: agent control and extension tools are separate
 /// user-facing switches.
@@ -250,6 +307,8 @@ pub struct BuiltinConnectors {
     pub control: Option<BuiltinControlSpec>,
     /// FalconDeck extensions bridge, when any extension publishes a tool.
     pub extensions: Option<BuiltinExtensionsSpec>,
+    /// Bundled cua-driver, when computer use is enabled and healthy.
+    pub computer_use: Option<BuiltinComputerUseSpec>,
 }
 
 /// Appends every applicable built-in connector to a merged user list.
@@ -258,7 +317,8 @@ pub fn with_builtin_servers(
     builtin: &BuiltinConnectors,
 ) -> Vec<McpServerConfig> {
     let servers = with_builtin_control(servers, builtin.control.as_ref());
-    with_builtin_extensions(servers, builtin.extensions.as_ref())
+    let servers = with_builtin_extensions(servers, builtin.extensions.as_ref());
+    with_builtin_computer_use(servers, builtin.computer_use.as_ref())
 }
 
 /// Resolves this daemon's own executable for built-in connector spawns.
@@ -1099,7 +1159,10 @@ mod tests {
                 transport: McpTransport::Stdio {
                     command: "falcondeck-daemon".into(),
                     args: vec!["mcp".into()],
-                    env: BTreeMap::from([("FALCONDECK_DAEMON_URL".to_string(), "http://127.0.0.1:4123".to_string())]),
+                    env: BTreeMap::from([(
+                        "FALCONDECK_DAEMON_URL".to_string(),
+                        "http://127.0.0.1:4123".to_string(),
+                    )]),
                 },
             },
             McpServerConfig {
@@ -1120,7 +1183,10 @@ mod tests {
         assert_eq!(list[0]["name"], "falcondeck");
         assert_eq!(list[0]["command"], "falcondeck-daemon");
         assert_eq!(list[0]["args"], json!(["mcp"]));
-        assert_eq!(list[0]["env"]["FALCONDECK_DAEMON_URL"], "http://127.0.0.1:4123");
+        assert_eq!(
+            list[0]["env"]["FALCONDECK_DAEMON_URL"],
+            "http://127.0.0.1:4123"
+        );
         assert_eq!(list[1]["name"], "remote");
         assert_eq!(list[1]["type"], "http");
         assert_eq!(list[1]["url"], "https://remote.test");
@@ -1245,6 +1311,7 @@ mod tests {
         let builtin = BuiltinConnectors {
             control: Some(spec(None)),
             extensions: Some(extensions_spec(Some("thread-7"))),
+            computer_use: None,
         };
         let servers = with_builtin_servers(Vec::new(), &builtin);
         let names: Vec<&str> = servers.iter().map(|server| server.name.as_str()).collect();
@@ -1278,6 +1345,7 @@ mod tests {
             &BuiltinConnectors {
                 control: Some(spec(None)),
                 extensions: None,
+                computer_use: None,
             },
         );
         assert_eq!(control_only.len(), 1);
@@ -1288,12 +1356,51 @@ mod tests {
             &BuiltinConnectors {
                 control: None,
                 extensions: Some(extensions_spec(None)),
+                computer_use: None,
             },
         );
         assert_eq!(extensions_only.len(), 1);
         assert_eq!(extensions_only[0].name, BUILTIN_EXTENSIONS_CONNECTOR_NAME);
 
         assert!(with_builtin_servers(Vec::new(), &BuiltinConnectors::default()).is_empty());
+    }
+
+    #[test]
+    fn computer_use_connector_is_a_stdio_proxy_and_cannot_be_shadowed() {
+        let spec = BuiltinComputerUseSpec {
+            binary: "/Applications/FalconDeck.app/Contents/MacOS/cua-driver".to_string(),
+            socket_path: "/tmp/cua.sock".to_string(),
+        };
+        let impostor = vec![McpServerConfig {
+            name: BUILTIN_COMPUTER_USE_CONNECTOR_NAME.to_string(),
+            transport: McpTransport::Stdio {
+                command: "/tmp/evil".into(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+        }];
+        let servers = with_builtin_computer_use(impostor, Some(&spec));
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, BUILTIN_COMPUTER_USE_CONNECTOR_NAME);
+        let McpTransport::Stdio { command, args, env } = &servers[0].transport else {
+            panic!("computer-use connector is stdio");
+        };
+        assert_eq!(
+            command,
+            "/Applications/FalconDeck.app/Contents/MacOS/cua-driver"
+        );
+        assert_eq!(
+            args,
+            &vec![
+                "mcp".to_string(),
+                "--embedded".to_string(),
+                "--socket".to_string(),
+                "/tmp/cua.sock".to_string(),
+                "--host-bundle-id".to_string(),
+                "com.falcondeck.desktop".to_string(),
+            ]
+        );
+        assert!(env.is_empty());
     }
 
     #[test]

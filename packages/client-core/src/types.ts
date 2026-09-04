@@ -404,6 +404,61 @@ export type FalconDeckPreferences = {
   notifications: NotificationPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   utility_models?: UtilityModelPreferences;
+  /** Older daemons omit this; `normalizePreferences` always fills it in. */
+  computer_use?: ComputerUsePreferences;
+};
+
+export type ComputerUsePreferences = {
+  enabled: boolean;
+  telemetry: boolean;
+  overlay: boolean;
+};
+
+export type ComputerUseSettingsUpdate = {
+  enabled?: boolean | null;
+  telemetry?: boolean | null;
+  overlay?: boolean | null;
+};
+
+export type ComputerUsePermissions = {
+  accessibility: boolean;
+  screen_recording: boolean;
+};
+
+export type ComputerUseHealthCheck = {
+  name: string;
+  status: string;
+  message: string;
+  hint?: string | null;
+};
+
+export type ComputerUseHealth = {
+  overall: string;
+  driver_version?: string | null;
+  checks: ComputerUseHealthCheck[];
+};
+
+export type ComputerUseStatus = {
+  available: boolean;
+  enabled: boolean;
+  macos_ok: boolean;
+  binary_present: boolean;
+  permissions: ComputerUsePermissions;
+  driver_version?: string | null;
+  generation?: number | null;
+  health?: ComputerUseHealth | null;
+  telemetry: boolean;
+  overlay: boolean;
+  running: boolean;
+  last_error?: string | null;
+};
+
+export type ComputerUseTestResult = {
+  ok: boolean;
+  health?: ComputerUseHealth | null;
+  thumbnail_data_url?: string | null;
+  error?: string | null;
+  black_frame?: boolean;
 };
 
 export type UpdateConversationAutoExpandPreferences =
@@ -1089,6 +1144,7 @@ export type DaemonSnapshot = {
     started_at: string;
     capabilities?: {
       scheduled_tasks?: boolean;
+      computer_use?: boolean;
     };
   };
   /** Whether persisted session summaries are complete enough for recovery UX. */

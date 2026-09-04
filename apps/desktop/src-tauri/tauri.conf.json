@@ -5,7 +5,7 @@
   "identifier": "com.falcondeck.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run extension-runtime:prepare --prefix ../.. && npm run build",
+    "beforeBuildCommand": "npm run extension-runtime:prepare --prefix ../.. && npm run computer-use-runtime:prepare --prefix ../.. && npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist",
     "additionalWatchFolders": [
@@ -17,7 +17,8 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "externalBin": [
-      "binaries/deno"
+      "binaries/deno",
+      "binaries/cua-driver"
     ],
     "icon": [
       "icons/32x32.png",
@@ -25,7 +26,12 @@
       "icons/128x128@2x.png",
       "icons/icon.png",
       "icons/icon.icns"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "entitlements.plist",
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "12.0"
+    }
   },
   "app": {
     "macOSPrivateApi": true,

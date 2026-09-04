@@ -1,7 +1,7 @@
 /* Standalone settings fixture: `npm run dev` → /settings-qa.html.
    Renders the settings shell with stubbed props so page layout, hierarchy and
    spacing can be checked without launching the app or a daemon.
-   `?section=speech|general|appearance|keyboard|connectors` picks the panel,
+   `?section=speech|computer-use|general|appearance|keyboard|connectors` picks the panel,
    `?theme=light|dark` the mode, `?baseUrl=` points panels at a live daemon. */
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -13,6 +13,7 @@ import { ConnectorsPanel } from "./components/settings/ConnectorsPanel";
 import { GeneralSettingsPanel } from "./components/settings/GeneralSettingsPanel";
 import { KeyboardShortcutsPanel } from "./components/settings/KeyboardShortcutsPanel";
 import { SettingsSidebar } from "./components/settings/SettingsSidebar";
+import { ComputerUsePanel } from "./components/settings/ComputerUsePanel";
 import { SpeechSettingsPanel } from "./components/settings/SpeechSettingsPanel";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 
@@ -101,6 +102,8 @@ export function Fixture() {
               workspaces={CONNECTOR_WORKSPACES}
               onToast={() => {}}
             />
+          ) : section === "computer-use" ? (
+            <ComputerUsePanel baseUrl={baseUrl} onToast={() => {}} />
           ) : (
             <SpeechSettingsPanel baseUrl={baseUrl} onToast={() => {}} />
           )}

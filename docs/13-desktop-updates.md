@@ -24,7 +24,8 @@ Source-of-truth files:
 
 - [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml): workspace version
 - [package.json](/Users/James/www/sites/falcondeck/package.json): release prep scripts
-- [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, embedded public key placeholder
+- [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, embedded public key placeholder, macOS entitlements
+- [apps/desktop/src-tauri/entitlements.plist](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/entitlements.plist): Hardened Runtime entitlements for WebView JIT and microphone access
 - [apps/desktop/src-tauri/src/lib.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/src/lib.rs): Tauri updater plugin registration and restart/shutdown behavior
 - [apps/desktop/src/hooks/useAppUpdater.ts](/Users/James/www/sites/falcondeck/apps/desktop/src/hooks/useAppUpdater.ts): startup polling, 4-hour checks, download/install state
 - [apps/desktop/src/components/SettingsView.tsx](/Users/James/www/sites/falcondeck/apps/desktop/src/components/SettingsView.tsx): user-facing updater UI
@@ -42,29 +43,72 @@ The generated schema files should change only when Tauri config or permissions c
 
 ## First-time setup
 
-1. Generate a Tauri updater signing keypair on a trusted machine.
-2. Store the private key outside git.
-3. Add the public key and signing credentials to GitHub Actions secrets.
-4. Run `npm run desktop:version:sync` once to confirm the desktop package and Tauri config stay aligned with the Cargo workspace version.
-5. Trigger a draft desktop release and confirm the GitHub Release contains installer assets plus updater metadata before publishing it.
+Two separate signing systems are required for a downloadable Mac build:
 
-## Required secrets
+1. **Apple Developer ID + notarization** so Gatekeeper will open the DMG. This uses the same paid Apple Developer team as the iOS App Store app. It is *not* the iOS Distribution certificate EAS already uses.
+2. **Tauri updater keys** so later desktop releases can be verified by already-installed apps.
 
-GitHub Actions needs these secrets before the release workflow can publish installable updates:
+The iOS app and `com.falcondeck.desktop` can share one team. They cannot share one certificate. Only the Apple Developer **Account Holder** can create a Developer ID Application certificate.
 
-- `TAURI_SIGNING_PRIVATE_KEY`: the Tauri updater private key path or key contents.
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional password for the private key.
-- `FALCONDECK_UPDATER_PUBLIC_KEY`: the matching updater public key contents. This is injected into the Tauri config during release prep.
+### Apple account (Account Holder)
 
-## Generating the updater keypair
+Do this on the Mac that should also sign local `make desktop-install` builds:
 
-Run the Tauri signer once from `apps/desktop` and store the private key safely outside git:
+1. Sign in to [developer.apple.com](https://developer.apple.com/account) with the **paid team** that owns the FalconDeck iOS app. Do not use the free personal team.
+2. In Keychain Access: Certificate Assistant → Request a Certificate From a Certificate Authority. Save a CSR to disk. Use your email, leave CA email empty, choose Saved to disk.
+3. [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list) → + → **Developer ID Application** → G2 (or the current default) → upload the CSR.
+4. Download the `.cer`, double-click it so it lands in the login keychain under My Certificates, and confirm:
+
+   ```bash
+   security find-identity -v -p codesigning
+   ```
+
+   You want a line like `Developer ID Application: Version Zero Limited (TEAMID)`.
+5. Export that identity as a `.p12` (right-click the private key under the certificate) and set a password.
+6. Create an App Store Connect API key for notarization: [Users and Access → Integrations → Team Keys](https://appstoreconnect.apple.com/access/integrations/api) → Generate → **Developer** or **App Manager**. Download the `.p8` once. Note the Key ID and Issuer ID. The Team ID is on [Membership](https://developer.apple.com/account#MembershipDetailsCard).
+
+Then put those values in GitHub Actions secrets (never commit them):
+
+```bash
+openssl base64 -A -in /path/to/developer-id.p12 | gh secret set APPLE_CERTIFICATE
+gh secret set APPLE_CERTIFICATE_PASSWORD   # .p12 password
+gh secret set APPLE_TEAM_ID --body 'TEAMID'
+gh secret set APPLE_API_ISSUER --body 'issuer-uuid'
+gh secret set APPLE_API_KEY --body 'KEYID'
+gh secret set APPLE_API_KEY_P8 < /path/to/AuthKey_KEYID.p8
+```
+
+Apple ID + app-specific password (`APPLE_ID`, `APPLE_PASSWORD`) is an alternative to the API key. Prefer the API key.
+
+### Tauri updater keys
+
+Run the Tauri signer once from `apps/desktop` and store the private key outside git:
 
 ```bash
 npm run tauri signer generate -- -w ~/.tauri/falcondeck-updater.key
 ```
 
-Add the public key output to the `FALCONDECK_UPDATER_PUBLIC_KEY` GitHub secret. Add the private key to `TAURI_SIGNING_PRIVATE_KEY`.
+Add the public key output to `FALCONDECK_UPDATER_PUBLIC_KEY`. Add the private key to `TAURI_SIGNING_PRIVATE_KEY`, and its password to `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+Then:
+
+1. Run `npm run desktop:version:sync` once to confirm the desktop package and Tauri config stay aligned with the Cargo workspace version.
+2. Trigger a draft desktop release and confirm the GitHub Release contains installer assets plus updater metadata before publishing it.
+3. Install that DMG on a Mac that did not build it and confirm Gatekeeper is silent before publishing.
+
+## Required secrets
+
+GitHub Actions needs these secrets before the release workflow can publish installable Mac builds:
+
+- `TAURI_SIGNING_PRIVATE_KEY`: the Tauri updater private key contents.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: password for that private key.
+- `FALCONDECK_UPDATER_PUBLIC_KEY`: the matching updater public key contents. This is injected into the Tauri config during release prep.
+- `APPLE_CERTIFICATE`: base64 of the Developer ID Application `.p12`.
+- `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`.
+- `APPLE_TEAM_ID`: 10-character Apple team ID.
+- `APPLE_API_ISSUER`, `APPLE_API_KEY`, `APPLE_API_KEY_P8`: App Store Connect API key for notarization.
+
+`APPLE_ID` and `APPLE_PASSWORD` (an [app-specific password](https://support.apple.com/en-ca/HT204397), not the account password) can replace the API key trio.
 
 ## Versioning rules
 
@@ -77,10 +121,15 @@ Add the public key output to the `FALCONDECK_UPDATER_PUBLIC_KEY` GitHub secret. 
 
 ## Releasing
 
-1. Bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml).
-2. Run `npm run desktop:version:sync` from the repo root to sync the root package, desktop package, and Tauri config versions.
-3. Push a tag like `desktop-v0.1.1` or run the `release-desktop` GitHub Actions workflow manually.
-4. Review the draft GitHub Release and publish it when the assets look correct.
+GitHub Actions secrets and the Mac-only notarizing workflow are already in place. First public version is `0.1.0` (no bump needed). After the current working-tree work is on `main`:
+
+1. Rebase or merge `origin/main`, then push `main`.
+2. `git tag desktop-v0.1.0 && git push origin desktop-v0.1.0` (or run the `release-desktop` workflow manually). That creates a **draft** GitHub Release.
+3. Wait for both macOS jobs (Apple Silicon and Intel). Confirm the draft has `.dmg` / `.app.tar.gz` assets and `latest.json`.
+4. Install from that DMG (not `make desktop-install`) and confirm Gatekeeper is silent, the daemon starts, and one real agent turn works.
+5. Publish the draft. Then update the README “until the first build is available” copy.
+
+Later cuts: bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml), run `npm run desktop:version:sync`, tag `desktop-vX.Y.Z`.
 
 ## Release checklist
 
@@ -116,7 +165,11 @@ Check:
 
 - `FALCONDECK_UPDATER_PUBLIC_KEY` is set
 - `TAURI_SIGNING_PRIVATE_KEY` is set
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is correct for the key, if a password was used
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is correct for the key
+- `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_TEAM_ID` are set
+- notarization credentials are set (API key or Apple ID)
+
+The imported certificate must be **Developer ID Application**, not Apple Distribution or iOS Distribution. Those iOS/App Store certs cannot sign a GitHub Releases DMG.
 
 ### The desktop release builds but auto-update does not work
 

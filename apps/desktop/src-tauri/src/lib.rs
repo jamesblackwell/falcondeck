@@ -16,6 +16,7 @@ use serde::Serialize;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+mod computer_use;
 mod desktop_notifications;
 mod dictation;
 mod dictation_history;
@@ -313,6 +314,7 @@ fn ensure_dev_daemon() -> Result<String, String> {
             let _ = std::fs::remove_file(dev_pid_path());
             let repo_root = repo_root()?;
             let state_path = dev_state_path();
+            let cua_driver_bin = dev_cua_driver_bin().unwrap_or_default();
             let binary = repo_root.join("target/debug/falcondeck-daemon");
             // Warm restart: stamp still matches and the debug binary exists →
             // skip cargo entirely. Cold / after source changes: build then exec
@@ -332,6 +334,7 @@ fn ensure_dev_daemon() -> Result<String, String> {
                             &format!("--port={DEFAULT_DAEMON_PORT}"),
                         ])
                         .env("FALCONDECK_STATE_PATH", &state_path)
+                        .env("FALCONDECK_CUA_DRIVER_BIN", &cua_driver_bin)
                         .current_dir(&repo_root)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
@@ -345,6 +348,7 @@ fn ensure_dev_daemon() -> Result<String, String> {
                         Command::new(&binary)
                             .args([&format!("--port={DEFAULT_DAEMON_PORT}")])
                             .env("FALCONDECK_STATE_PATH", &state_path)
+                            .env("FALCONDECK_CUA_DRIVER_BIN", &cua_driver_bin)
                             .current_dir(&repo_root)
                             .stdin(Stdio::null())
                             .stdout(Stdio::null())
@@ -364,6 +368,7 @@ fn ensure_dev_daemon() -> Result<String, String> {
                                 })?,
                             ])
                             .env("FALCONDECK_STATE_PATH", &state_path)
+                            .env("FALCONDECK_CUA_DRIVER_BIN", &cua_driver_bin)
                             .current_dir(&repo_root)
                             .stdin(Stdio::null())
                             .stdout(Stdio::null())
@@ -461,18 +466,48 @@ fn normalize_existing_path(path: &Path) -> Option<String> {
 }
 
 fn bundled_deno_bin() -> Result<String, String> {
-    let executable_name = if cfg!(windows) { "deno.exe" } else { "deno" };
+    bundled_sidecar_bin("deno", "bundled extension runtime")
+}
+
+fn bundled_cua_driver_bin() -> Option<String> {
+    bundled_sidecar_bin("cua-driver", "bundled computer-use runtime").ok()
+}
+
+fn bundled_sidecar_bin(name: &str, label: &str) -> Result<String, String> {
+    let executable_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     let candidate = executable
         .parent()
         .ok_or_else(|| "FalconDeck executable has no parent directory".to_string())?
         .join(executable_name);
-    normalize_existing_path(&candidate).ok_or_else(|| {
-        format!(
-            "bundled extension runtime is missing at {}",
-            candidate.display()
-        )
-    })
+    normalize_existing_path(&candidate)
+        .ok_or_else(|| format!("{label} is missing at {}", candidate.display()))
+}
+
+fn rust_target_triple() -> Option<&'static str> {
+    match (env::consts::OS, env::consts::ARCH) {
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        _ => None,
+    }
+}
+
+fn dev_cua_driver_bin() -> Option<String> {
+    if let Ok(path) = env::var("FALCONDECK_CUA_DRIVER_BIN") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return normalize_existing_path(Path::new(trimmed));
+        }
+    }
+    let triple = rust_target_triple()?;
+    let repo = repo_root().ok()?;
+    normalize_existing_path(&repo.join(format!(
+        "apps/desktop/src-tauri/binaries/cua-driver-{triple}"
+    )))
 }
 
 #[tauri::command]
@@ -496,6 +531,7 @@ async fn ensure_daemon_running(
     let claude_bin = resolve_agent_bin("claude", "FALCONDECK_CLAUDE_BIN");
     let agy_bin = resolve_agent_bin("agy", "FALCONDECK_AGY_BIN");
     let deno_bin = bundled_deno_bin()?;
+    let computer_use_bin = bundled_cua_driver_bin();
     let handle = spawn_embedded(DaemonConfig {
         bind_addr: "127.0.0.1:0"
             .parse::<SocketAddr>()
@@ -504,6 +540,7 @@ async fn ensure_daemon_running(
         codex_bin,
         claude_bin,
         deno_bin,
+        computer_use_bin,
         ..DaemonConfig::default()
     })
     .await
@@ -1349,7 +1386,10 @@ pub fn run() {
             dictation::dictation_history_retry,
             dictation::dictation_history_delete,
             dictation::dictation_history_clear,
-            dictation::open_dictation_accessibility_settings
+            dictation::open_dictation_accessibility_settings,
+            computer_use::computer_use_permission_status,
+            computer_use::request_computer_use_permission,
+            computer_use::open_computer_use_settings
         ])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");

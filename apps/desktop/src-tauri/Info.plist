@@ -6,5 +6,7 @@
   <string>FalconDeck uses the microphone while you hold or toggle your dictation shortcut.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
   <string>FalconDeck uses Apple Speech to turn your dictated audio into text.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>FalconDeck talks to other Mac apps when you let agents use this computer.</string>
 </dict>
 </plist>

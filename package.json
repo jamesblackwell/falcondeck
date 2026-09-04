@@ -12,6 +12,7 @@
     "desktop:release:prepare": "node ./scripts/prepare-desktop-release.mjs --require-updater-key",
     "desktop:version:sync": "node ./scripts/prepare-desktop-release.mjs",
     "extension-runtime:prepare": "node ./scripts/prepare-extension-runtime.mjs",
+    "computer-use-runtime:prepare": "node ./scripts/prepare-computer-use-runtime.mjs",
     "extension:validate": "node ./scripts/validate-extensions.mjs",
     "extension:validate:test": "node --test ./scripts/validate-extensions.test.mjs",
     "extension:frontend:typecheck": "tsc -p tsconfig.extension-frontends.json",

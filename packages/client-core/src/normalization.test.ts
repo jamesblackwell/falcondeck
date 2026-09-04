@@ -543,6 +543,7 @@ describe("interactive request boundary normalization", () => {
     });
 
     expect(snapshot.daemon.capabilities?.scheduled_tasks).toBe(true);
+    expect(snapshot.daemon.capabilities?.computer_use).toBe(false);
     expect(snapshot.scheduled_tasks?.map((task) => task.id)).toEqual([
       "scheduled-1",
     ]);

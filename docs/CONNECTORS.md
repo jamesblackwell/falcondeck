@@ -49,6 +49,9 @@ Per-server optional fields:
 - Config is re-read at each spawn boundary (every Claude turn, every Codex
   app-server start, every ACP session), so edits apply on the next turn — no
   daemon restart.
+- The names `falcondeck`, `falcondeck-extensions`, and `cua-driver` are
+  reserved for built-in servers FalconDeck injects at spawn. A user entry with
+  one of those names is ignored rather than allowed to shadow the built-in.
 - Materialization per provider, ranked so FalconDeck's list is what the
   spawned CLI sees without rewriting the user's own config files:
   - ACP: `mcpServers` on `session/new`.

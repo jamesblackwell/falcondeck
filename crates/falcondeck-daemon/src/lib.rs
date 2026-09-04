@@ -65,6 +65,8 @@ pub struct DaemonConfig {
     pub claude_bin: String,
     /// Executable name or path used for the sandboxed extension runtime.
     pub deno_bin: String,
+    /// Optional bundled `cua-driver` binary. Set only by the desktop embedding.
+    pub computer_use_bin: Option<String>,
     /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
 }
@@ -80,6 +82,7 @@ impl Default for DaemonConfig {
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
             deno_bin: "deno".to_string(),
+            computer_use_bin: None,
             state_path: None,
         }
     }
@@ -184,11 +187,12 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // and never goes through that path, so every diagnostic it logged used to
     // be dropped on the floor.
     logging::init(&state_path);
-    let state = AppState::new_with_state_path_and_extension_runtime(
+    let state = AppState::new_with_state_path_and_runtimes(
         "0.1.0".to_string(),
         provider_bins,
         state_path,
         config.deno_bin,
+        config.computer_use_bin,
     );
     state.begin_local_restore();
     // Scheduled definitions are small, local, and must be present before the

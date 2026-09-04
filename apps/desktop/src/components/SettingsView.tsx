@@ -22,6 +22,7 @@ import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
+import { ComputerUsePanel } from "./settings/ComputerUsePanel";
 import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import { UsagePanel } from "./settings/UsagePanel";
@@ -129,6 +130,11 @@ export function SettingsView(props: SettingsViewProps) {
             />
           ) : activeSection === "speech" ? (
             <SpeechSettingsPanel
+              baseUrl={props.baseUrl}
+              onToast={props.onToast}
+            />
+          ) : activeSection === "computer-use" ? (
+            <ComputerUsePanel
               baseUrl={props.baseUrl}
               onToast={props.onToast}
             />

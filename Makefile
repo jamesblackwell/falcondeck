@@ -109,7 +109,7 @@ MOBILE_METRO_LOG_FILE = /tmp/falcondeck-mobile-metro.log
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile mobile-build mobile-deploy mobile-test desktop-dev desktop-dev-stop desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop test-mobile lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile mobile-build mobile-deploy mobile-test desktop-dev desktop-dev-stop desktop-build desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop test-mobile lint typecheck check fmt build clean
 
 help:
 	@printf '%s\n' \
@@ -130,6 +130,7 @@ help:
 		'' \
 		'Build & install:' \
 		'  make install          Install desktop, mobile, and web dependencies' \
+		'  make desktop-build    Alias for desktop-install (packaged local app)' \
 		'  make desktop-install  Build, install, and open the packaged desktop app' \
 		'  make desktop-brand-assets Regenerate desktop icons/brand assets (skip if up to date; FORCE_BRAND=1 to force)' \
 		'  make build            Build desktop, remote web, and site bundles' \
@@ -171,7 +172,9 @@ desktop-prepare:
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 			($(DESKTOP_NATIVE_CHECK)); \
-		fi
+		fi; \
+		echo "Checking bundled computer-use runtime"; \
+		cd "$(ROOT)" && $(ROOT_NPM) run computer-use-runtime:prepare
 
 # Regenerates only when brand sources (or the generator) are newer than outputs.
 # Force with: make desktop-brand-assets FORCE_BRAND=1
@@ -382,6 +385,8 @@ desktop-dev: desktop-prepare
 desktop-dev-stop: desktop-prepare
 	@$(STOP_DEV_DAEMON)
 
+desktop-build: desktop-install
+
 desktop-install: desktop-brand-assets
 	@set -e; \
 		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
@@ -408,11 +413,22 @@ desktop-install: desktop-brand-assets
 			exit 1; \
 		fi; \
 		if command -v codesign >/dev/null 2>&1; then \
-			signing_identity="$${FALCONDECK_LOCAL_CODESIGN_IDENTITY:--}"; \
+			signing_identity="$${FALCONDECK_LOCAL_CODESIGN_IDENTITY:-}"; \
+			if [ -z "$$signing_identity" ]; then \
+				signing_identity=$$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application: Version Zero Limited/ { print $$2; exit }'); \
+			fi; \
+			if [ -z "$$signing_identity" ]; then \
+				signing_identity="-"; \
+			fi; \
 			bundled_deno="$(DESKTOP_BUNDLE_APP)/Contents/MacOS/deno"; \
 			if [ -f "$$bundled_deno" ]; then \
 				echo "Signing bundled Deno sidecar before the app bundle"; \
 				codesign --force --sign "$$signing_identity" "$$bundled_deno"; \
+			fi; \
+			bundled_cua="$(DESKTOP_BUNDLE_APP)/Contents/MacOS/cua-driver"; \
+			if [ -f "$$bundled_cua" ]; then \
+				echo "Signing bundled cua-driver sidecar before the app bundle"; \
+				codesign --force --sign "$$signing_identity" "$$bundled_cua"; \
 			fi; \
 			if [ "$$signing_identity" = "-" ]; then \
 				bundle_identifier=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$(DESKTOP_BUNDLE_APP)/Contents/Info.plist"); \

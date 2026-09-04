@@ -10,6 +10,7 @@ import {
   Bot,
   Keyboard,
   Mic,
+  Monitor,
   Palette,
   Plug,
   Server,
@@ -33,6 +34,7 @@ export type SettingsSectionId =
   | "connectors"
   | "extensions"
   | "speech"
+  | "computer-use"
   | "remote"
   | "backup";
 
@@ -103,6 +105,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Speech",
     description: "Transcription and OpenRouter",
     icon: Mic,
+  },
+  {
+    id: "computer-use",
+    label: "Computer use",
+    description: "Let agents operate apps on this Mac",
+    icon: Monitor,
   },
   {
     id: "remote",

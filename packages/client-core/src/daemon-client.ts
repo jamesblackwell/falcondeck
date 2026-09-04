@@ -41,6 +41,9 @@ import type {
   TerminalListResponse,
   TerminalOpenedResponse,
   FalconDeckPreferences,
+  ComputerUseSettingsUpdate,
+  ComputerUseStatus,
+  ComputerUseTestResult,
   ThreadDetail,
   ThreadDetailRequest,
   ThreadHandle,
@@ -355,6 +358,34 @@ export function createDaemonApiClient(baseUrl: string) {
         await parseJson<HarnessesOverview>(
           await fetch(`${baseUrl}/api/harnesses`),
         ),
+      );
+    },
+    async computerUse() {
+      return parseJson<ComputerUseStatus>(
+        await fetch(`${baseUrl}/api/computer-use`),
+      );
+    },
+    async updateComputerUse(payload: ComputerUseSettingsUpdate) {
+      return parseJson<ComputerUseStatus>(
+        await fetch(`${baseUrl}/api/computer-use`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+    },
+    async restartComputerUse() {
+      return parseJson<ComputerUseStatus>(
+        await fetch(`${baseUrl}/api/computer-use/restart`, {
+          method: "POST",
+        }),
+      );
+    },
+    async testComputerUse() {
+      return parseJson<ComputerUseTestResult>(
+        await fetch(`${baseUrl}/api/computer-use/test`, {
+          method: "POST",
+        }),
       );
     },
     /** Deep re-probe; `includeLatest` (default true) also hits package registries. */

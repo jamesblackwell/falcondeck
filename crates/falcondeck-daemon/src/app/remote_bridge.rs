@@ -246,6 +246,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "scheduled.list"
             | "scheduled.detail"
             | "scheduled.runs"
+            | "computerUse.read"
     )
 }
 
@@ -329,6 +330,10 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "scheduled.delete",
     "scheduled.run",
     "scheduled.runs",
+    "computerUse.read",
+    "computerUse.update",
+    "computerUse.restart",
+    "computerUse.test",
 ];
 
 impl AppState {
@@ -1833,6 +1838,32 @@ impl AppState {
                         })
                         .map_err(|error| error.to_string())
                 }
+                "computerUse.read" => serde_json::to_value(self.computer_use_status().await)
+                    .map_err(|error| format!("failed to serialize computer use status: {error}")),
+                "computerUse.update" => {
+                    let request = serde_json::from_value::<
+                        falcondeck_core::ComputerUseSettingsUpdate,
+                    >(params.clone())
+                    .map_err(|error| format!("invalid computer use payload: {error}"))?;
+                    serde_json::to_value(
+                        self.update_computer_use(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize computer use status: {error}"))
+                }
+                "computerUse.restart" => serde_json::to_value(
+                    self.restart_computer_use()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| format!("failed to serialize computer use status: {error}")),
+                "computerUse.test" => serde_json::to_value(
+                    self.test_computer_use()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| format!("failed to serialize computer use test: {error}")),
                 "thread.archive" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let thread_id = required(&["threadId", "thread_id"])?;
@@ -2260,6 +2291,27 @@ impl AppState {
                     ))
                 }
             }
+            "computerUse.update" => {
+                match serde_json::from_value::<falcondeck_core::ComputerUseSettingsUpdate>(
+                    params.clone(),
+                ) {
+                    Ok(request) => self
+                        .update_computer_use(request)
+                        .await
+                        .and_then(|status| serde_json::to_value(status).map_err(DaemonError::from)),
+                    Err(_) => Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    )),
+                }
+            }
+            "computerUse.restart" => self
+                .restart_computer_use()
+                .await
+                .and_then(|status| serde_json::to_value(status).map_err(DaemonError::from)),
+            "computerUse.test" => self
+                .test_computer_use()
+                .await
+                .and_then(|status| serde_json::to_value(status).map_err(DaemonError::from)),
             other => Err(DaemonError::BadRequest(format!(
                 "unsupported queued action `{other}`"
             ))),
@@ -2510,7 +2562,10 @@ mod tests {
     use falcondeck_core::{ContentLifecycle, ThreadStatus};
     use std::sync::Arc;
 
-    fn coalescer_thread_summary(status: ThreadStatus, title: &str) -> falcondeck_core::ThreadSummary {
+    fn coalescer_thread_summary(
+        status: ThreadStatus,
+        title: &str,
+    ) -> falcondeck_core::ThreadSummary {
         falcondeck_core::ThreadSummary {
             id: "thread-1".to_string(),
             workspace_id: "workspace-1".to_string(),
@@ -2602,8 +2657,11 @@ mod tests {
         let mut coalescer = EventCoalescer::default();
 
         for (index, text) in ["a", "ab", "abc"].iter().enumerate() {
-            let outgoing =
-                coalescer.push(coalescer_message(index as u64, text, ContentLifecycle::Streaming));
+            let outgoing = coalescer.push(coalescer_message(
+                index as u64,
+                text,
+                ContentLifecycle::Streaming,
+            ));
             assert!(
                 outgoing.is_empty(),
                 "streaming chunks should be held, not forwarded one by one"
@@ -2673,7 +2731,11 @@ mod tests {
             thread: coalescer_thread_summary(ThreadStatus::Idle, "idle"),
         };
         let outgoing = coalescer.push(coalescer_event(2, idle));
-        assert_eq!(outgoing.len(), 1, "the settled summary supersedes the held one");
+        assert_eq!(
+            outgoing.len(),
+            1,
+            "the settled summary supersedes the held one"
+        );
         assert!(matches!(
             &outgoing[0].event,
             UnifiedEvent::ThreadUpdated { thread } if thread.status == ThreadStatus::Idle

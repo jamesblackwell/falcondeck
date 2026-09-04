@@ -48,6 +48,9 @@ pub struct DaemonCapabilities {
     /// Whether this daemon owns and executes scheduled tasks.
     #[serde(default)]
     pub scheduled_tasks: bool,
+    /// Whether this desktop-local daemon can embed computer use.
+    #[serde(default)]
+    pub computer_use: bool,
 }
 
 /// Global FalconDeck preferences persisted by the daemon.
@@ -71,6 +74,9 @@ pub struct FalconDeckPreferences {
     /// Cheap models FalconDeck uses for its own background work.
     #[serde(default)]
     pub utility_models: UtilityModelPreferences,
+    /// Host-local computer-use settings. Older daemons omit this.
+    #[serde(default)]
+    pub computer_use: ComputerUsePreferences,
 }
 
 impl Default for FalconDeckPreferences {
@@ -82,8 +88,138 @@ impl Default for FalconDeckPreferences {
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
+            computer_use: ComputerUsePreferences::default(),
         }
     }
+}
+
+/// Host-local computer-use settings persisted with other preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUsePreferences {
+    /// User opted in. Default off until onboarding or Settings enables it.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Forward Cua's content-free telemetry. Default off inside FalconDeck.
+    #[serde(default)]
+    pub telemetry: bool,
+    /// Show Cua's agent-cursor overlay while the driver is acting.
+    #[serde(default = "default_true")]
+    pub overlay: bool,
+}
+
+impl Default for ComputerUsePreferences {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            telemetry: false,
+            overlay: true,
+        }
+    }
+}
+
+/// Partial update for host-local computer-use settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ComputerUseSettingsUpdate {
+    /// Optional opt-in switch.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Optional Cua telemetry switch.
+    #[serde(default)]
+    pub telemetry: Option<bool>,
+    /// Optional agent-cursor overlay switch.
+    #[serde(default)]
+    pub overlay: Option<bool>,
+}
+
+/// macOS TCC grants FalconDeck must hold for computer use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ComputerUsePermissions {
+    /// Accessibility (drive other apps).
+    #[serde(default)]
+    pub accessibility: bool,
+    /// Screen Recording (read pixels and window contents).
+    #[serde(default)]
+    pub screen_recording: bool,
+}
+
+/// One check from `cua-driver` `health_report`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUseHealthCheck {
+    /// Canonical check name (`tcc_accessibility`, `bundle_identity`, …).
+    pub name: String,
+    /// `pass`, `fail`, or `skip`.
+    pub status: String,
+    /// One-line summary, always present on a well-formed report.
+    #[serde(default)]
+    pub message: String,
+    /// Remediation hint when the check failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Parsed `health_report` used by the settings panel and spawn gate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUseHealth {
+    /// `ok`, `degraded`, or `failed`.
+    pub overall: String,
+    /// Driver semver from the report, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
+    /// Individual checks. Unknown names are retained.
+    #[serde(default)]
+    pub checks: Vec<ComputerUseHealthCheck>,
+}
+
+/// Live computer-use status for Settings and onboarding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUseStatus {
+    /// Desktop embedding, macOS 14+, and a bundled driver binary.
+    pub available: bool,
+    /// User switched computer use on.
+    pub enabled: bool,
+    /// macOS 14 or newer (or not macOS — then false).
+    pub macos_ok: bool,
+    /// Bundled or configured `cua-driver` binary exists.
+    pub binary_present: bool,
+    /// Current TCC preflight results for this process.
+    pub permissions: ComputerUsePermissions,
+    /// Pinned or last-reported driver version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_version: Option<String>,
+    /// Current embedded-daemon generation, when running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// Last successful or failed health probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<ComputerUseHealth>,
+    /// Cua telemetry setting currently applied (or last requested).
+    pub telemetry: bool,
+    /// Agent-cursor overlay setting.
+    pub overlay: bool,
+    /// Whether `cua-driver serve --embedded` is currently a child.
+    pub running: bool,
+    /// Last start/stop/probe error, when the driver is unhealthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+/// Result of Settings → Computer use → Test it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComputerUseTestResult {
+    /// Health plus a FalconDeck-window capture both succeeded.
+    pub ok: bool,
+    /// Health probe captured during the test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<ComputerUseHealth>,
+    /// JPEG data URL of a small thumbnail, when a capture was produced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_data_url: Option<String>,
+    /// Human-readable failure, when `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Screen Recording is granted but the capture looks blank.
+    #[serde(default)]
+    pub black_frame: bool,
 }
 
 /// True when `value` is one of the twelve theme-backed sidebar color tokens.

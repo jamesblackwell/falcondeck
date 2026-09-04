@@ -15,6 +15,12 @@ const CONTROL_SKILL_BODY: &str = include_str!("agent_context/SKILL.md");
 const MCP_SKILL_BODY: &str = include_str!("agent_context/falcondeck-mcp/SKILL.md");
 /// Bundled Pi MCP bridge extension body.
 pub const PI_EXTENSION_BODY: &str = include_str!("agent_context/falcondeck-pi-extension.js");
+const CUA_SKILL_BODY: &str = include_str!("agent_context/cua-driver/SKILL.md");
+const CUA_SKILL_MACOS: &str = include_str!("agent_context/cua-driver/MACOS.md");
+const CUA_SKILL_BROWSER: &str = include_str!("agent_context/cua-driver/BROWSER.md");
+const CUA_SKILL_RECORDING: &str = include_str!("agent_context/cua-driver/RECORDING.md");
+const CUA_SKILL_README: &str = include_str!("agent_context/cua-driver/README.md");
+const CUA_SKILL_VERSION: &str = include_str!("agent_context/cua-driver/VERSION");
 
 /// Directory (under the daemon state dir) holding staged bundled skills.
 pub const SKILLS_DIR_NAME: &str = "skills";
@@ -25,6 +31,9 @@ pub const SKILL_NAME: &str = "falcondeck-control";
 /// Name of the bundled FalconDeck MCP usage skill.
 pub const MCP_SKILL_NAME: &str = "falcondeck-mcp";
 
+/// Name of the bundled cua-driver computer-use skill.
+pub const COMPUTER_USE_SKILL_NAME: &str = "cua-driver";
+
 /// Published follow-up tool on the `falcondeck-extensions` MCP bridge.
 pub const SUGGEST_FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
 
@@ -33,6 +42,7 @@ pub const SUGGEST_FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
 pub struct BundledSkillPaths {
     pub control: PathBuf,
     pub mcp: PathBuf,
+    pub computer_use: Option<PathBuf>,
 }
 
 /// Root directory holding staged bundled skills for a daemon state path.
@@ -46,11 +56,21 @@ pub fn skills_root(state_path: &Path) -> PathBuf {
 /// Stages bundled skills so providers and agents can read them.
 /// Idempotent per file: identical content is left in place, a differing file
 /// is refreshed atomically so daemon upgrades pick up new content.
-pub fn stage_bundled_skills(state_path: &Path) -> io::Result<BundledSkillPaths> {
+pub fn stage_bundled_skills(
+    state_path: &Path,
+    computer_use: bool,
+) -> io::Result<BundledSkillPaths> {
     let _ = stage_pi_extension();
     Ok(BundledSkillPaths {
         control: stage_skill_file(state_path, SKILL_NAME, CONTROL_SKILL_BODY)?,
         mcp: stage_skill_file(state_path, MCP_SKILL_NAME, MCP_SKILL_BODY)?,
+        computer_use: if computer_use {
+            Some(stage_computer_use_skill(state_path)?)
+        } else {
+            let stale = skills_root(state_path).join(COMPUTER_USE_SKILL_NAME);
+            let _ = std::fs::remove_dir_all(stale);
+            None
+        },
     })
 }
 
@@ -92,16 +112,31 @@ pub fn stage_pi_extension_in(pi_agent_dir: &Path) -> io::Result<PathBuf> {
 
 fn stage_skill_file(state_path: &Path, name: &str, body: &str) -> io::Result<PathBuf> {
     let skill_dir = skills_root(state_path).join(name);
-    let skill_path = skill_dir.join("SKILL.md");
-    let existing = std::fs::read_to_string(&skill_path).ok();
+    stage_named_file(&skill_dir, "SKILL.md", body)
+}
+
+fn stage_computer_use_skill(state_path: &Path) -> io::Result<PathBuf> {
+    let skill_dir = skills_root(state_path).join(COMPUTER_USE_SKILL_NAME);
+    stage_named_file(&skill_dir, "SKILL.md", CUA_SKILL_BODY)?;
+    stage_named_file(&skill_dir, "MACOS.md", CUA_SKILL_MACOS)?;
+    stage_named_file(&skill_dir, "BROWSER.md", CUA_SKILL_BROWSER)?;
+    stage_named_file(&skill_dir, "RECORDING.md", CUA_SKILL_RECORDING)?;
+    stage_named_file(&skill_dir, "README.md", CUA_SKILL_README)?;
+    stage_named_file(&skill_dir, "VERSION", CUA_SKILL_VERSION)?;
+    Ok(skill_dir.join("SKILL.md"))
+}
+
+fn stage_named_file(dir: &Path, name: &str, body: &str) -> io::Result<PathBuf> {
+    let path = dir.join(name);
+    let existing = std::fs::read_to_string(&path).ok();
     if existing.as_deref() == Some(body) {
-        return Ok(skill_path);
+        return Ok(path);
     }
-    std::fs::create_dir_all(&skill_dir)?;
-    let tmp = skill_dir.join(".SKILL.md.tmp");
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{name}.tmp"));
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &skill_path)?;
-    Ok(skill_path)
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
 }
 
 /// Builds the short always-on instruction append. Skill paths are included
@@ -109,6 +144,7 @@ fn stage_skill_file(state_path: &Path, name: &str, body: &str) -> io::Result<Pat
 pub fn append_instructions(
     control_skill: Option<&Path>,
     mcp_skill: Option<&Path>,
+    computer_use_skill: Option<&Path>,
     suggest_follow_ups: bool,
 ) -> String {
     let mut text = String::from(
@@ -136,6 +172,12 @@ pub fn append_instructions(
             path.display()
         ));
     }
+    if let Some(path) = computer_use_skill {
+        text.push_str(&format!(
+            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI.",
+            path.display()
+        ));
+    }
     text.push_str("\n- Do not narrate FalconDeck internals unless the user asks.");
     text
 }
@@ -146,7 +188,7 @@ mod tests {
 
     #[test]
     fn append_nudges_mcp_use_and_hides_unstaged_skills() {
-        let without = append_instructions(None, None, false);
+        let without = append_instructions(None, None, None, false);
         assert!(without.contains("FalconDeck MCP tools"));
         assert!(without.contains("do not wait for the user to name them"));
         assert!(!without.contains("falcondeck_suggest_follow_ups"));
@@ -156,11 +198,14 @@ mod tests {
         let with = append_instructions(
             Some(Path::new("/tmp/skills/falcondeck-control/SKILL.md")),
             Some(Path::new("/tmp/skills/falcondeck-mcp/SKILL.md")),
+            Some(Path::new("/tmp/skills/cua-driver/SKILL.md")),
             true,
         );
         assert!(with.contains("falcondeck_suggest_follow_ups"));
         assert!(with.contains("/tmp/skills/falcondeck-mcp/SKILL.md"));
         assert!(with.contains("/tmp/skills/falcondeck-control/SKILL.md"));
+        assert!(with.contains("/tmp/skills/cua-driver/SKILL.md"));
+        assert!(with.contains("`cua-driver` MCP server"));
         assert!(!with.contains("Only mention or use FalconDeck when the user asks"));
     }
 
@@ -168,9 +213,10 @@ mod tests {
     fn staging_writes_both_skills_and_is_upgrade_aware() {
         let dir = std::env::temp_dir().join(format!("fd-skill-test-{}", std::process::id()));
         let state_path = dir.join("state.json");
-        let staged = stage_bundled_skills(&state_path).expect("stage");
+        let staged = stage_bundled_skills(&state_path, false).expect("stage");
         assert!(staged.control.is_file());
         assert!(staged.mcp.is_file());
+        assert!(staged.computer_use.is_none());
         assert_eq!(
             std::fs::read_to_string(&staged.mcp).expect("read mcp"),
             MCP_SKILL_BODY
@@ -179,19 +225,29 @@ mod tests {
             .and_then(|meta| meta.modified())
             .ok();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let again = stage_bundled_skills(&state_path).expect("stage again");
+        let again = stage_bundled_skills(&state_path, false).expect("stage again");
         assert_eq!(staged.control, again.control);
         let second = std::fs::metadata(&staged.control)
             .and_then(|meta| meta.modified())
             .ok();
         assert_eq!(first, second, "identical content is not rewritten");
         std::fs::write(&staged.mcp, "stale").expect("simulate old version");
-        stage_bundled_skills(&state_path).expect("restage");
+        stage_bundled_skills(&state_path, false).expect("restage");
         assert_eq!(
             std::fs::read_to_string(&staged.mcp).expect("read").as_str(),
             MCP_SKILL_BODY,
             "differing content is refreshed"
         );
+        let cua = stage_bundled_skills(&state_path, true).expect("stage cua");
+        let cua_path = cua.computer_use.expect("cua skill");
+        assert!(cua_path.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&cua_path).expect("read cua"),
+            CUA_SKILL_BODY
+        );
+        assert!(cua_path.parent().expect("dir").join("MACOS.md").is_file());
+        stage_bundled_skills(&state_path, false).expect("disable cua");
+        assert!(!cua_path.exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 

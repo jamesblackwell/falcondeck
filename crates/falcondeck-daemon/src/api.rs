@@ -120,6 +120,12 @@ pub fn router(state: AppState) -> Router {
             "/api/preferences",
             get(preferences).patch(update_preferences),
         )
+        .route(
+            "/api/computer-use",
+            get(computer_use).post(update_computer_use),
+        )
+        .route("/api/computer-use/restart", post(restart_computer_use))
+        .route("/api/computer-use/test", post(test_computer_use))
         .route("/api/backup", get(export_backup))
         .route("/api/backup/inspect", post(inspect_backup))
         .route("/api/backup/import", post(import_backup))
@@ -382,6 +388,29 @@ async fn update_preferences(
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<Json<falcondeck_core::FalconDeckPreferences>, DaemonError> {
     Ok(Json(state.update_preferences(request).await?))
+}
+
+async fn computer_use(State(state): State<AppState>) -> Json<falcondeck_core::ComputerUseStatus> {
+    Json(state.computer_use_status().await)
+}
+
+async fn update_computer_use(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::ComputerUseSettingsUpdate>,
+) -> Result<Json<falcondeck_core::ComputerUseStatus>, DaemonError> {
+    Ok(Json(state.update_computer_use(request).await?))
+}
+
+async fn restart_computer_use(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::ComputerUseStatus>, DaemonError> {
+    Ok(Json(state.restart_computer_use().await?))
+}
+
+async fn test_computer_use(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::ComputerUseTestResult>, DaemonError> {
+    Ok(Json(state.test_computer_use().await?))
 }
 
 async fn export_backup(
