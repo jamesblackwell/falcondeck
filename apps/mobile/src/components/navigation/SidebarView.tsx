@@ -44,6 +44,7 @@ import {
 } from "@falcondeck/client-core";
 
 import {
+  ActivityDiamond,
   Text,
   Button,
   EmptyState,
@@ -570,6 +571,43 @@ export const SidebarView = memo(function SidebarView({
               >
                 {item.workspaceName}
               </Text>
+              {/* Collapsed projects hide every thread row, so the rollup rides
+                  here instead: live work first, then what is waiting. */}
+              {!item.isOpen && (item.runningCount > 0 || item.unreadCount > 0) ? (
+                <View style={styles.workspaceCounts}>
+                  {item.runningCount > 0 ? (
+                    <View style={styles.workspaceCount}>
+                      <ActivityDiamond
+                        size={10}
+                        color={theme.colors.accent.default}
+                      />
+                      <Text variant="caption" color="muted" size="2xs">
+                        {item.runningCount}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {item.unreadCount > 0 ? (
+                    <View style={styles.workspaceCount}>
+                      <View
+                        style={[
+                          styles.workspaceCountDot,
+                          {
+                            backgroundColor:
+                              item.unreadTone === "danger"
+                                ? theme.colors.danger.default
+                                : item.unreadTone === "warning"
+                                  ? theme.colors.warning.default
+                                  : theme.colors.unread,
+                          },
+                        ]}
+                      />
+                      <Text variant="caption" color="muted" size="2xs">
+                        {item.unreadCount}
+                      </Text>
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
             </Pressable>
             <Button
               variant="ghost"
@@ -953,6 +991,22 @@ const styles = StyleSheet.create((theme) => ({
   workspaceName: {
     flex: 1,
   },
+  workspaceCounts: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  workspaceCount: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  workspaceCountDot: {
+    width: 8,
+    height: 8,
+    borderRadius: theme.radius.full,
+  },
+
   overflowRow: {
     flexDirection: "row",
     alignItems: "center",

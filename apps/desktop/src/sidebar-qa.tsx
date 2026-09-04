@@ -2,7 +2,9 @@
    Renders the real DesktopSidebar with sample projects/threads covering the
    thread-row states (harness badge, pinned, running, unread, Stopped) so row
    layout and hover behavior can be screenshot without launching the app.
-   `?theme=light|dark` picks the mode; `?width=200` narrows the sidebar. */
+   `?theme=light|dark` picks the mode; `?width=200` narrows the sidebar;
+   `?collapsed=workspace-1,workspace-2` folds projects shut to check the
+   inline running/unread rollup on their rows. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -23,6 +25,10 @@ if (theme === "light" || theme === "dark") {
   updateAppearance({ theme });
 }
 const width = Number(params.get("width")) || 280;
+const collapsedWorkspaceIds = (params.get("collapsed") ?? "")
+  .split(",")
+  .map((id) => id.trim())
+  .filter(Boolean);
 
 function workspace(overrides: Partial<WorkspaceSummary>): WorkspaceSummary {
   return {
@@ -162,6 +168,22 @@ const groups: ProjectGroup[] = [
         updated_at: minutesAgo(60 * 5),
       }),
       thread({
+        id: "thread-7",
+        workspace_id: "workspace-2",
+        title: "Waiting on an approval",
+        provider: "claude",
+        updated_at: minutesAgo(3),
+        attention: {
+          level: "awaiting_response",
+          badge_label: "Awaiting response",
+          unread: true,
+          pending_approval_count: 1,
+          pending_question_count: 0,
+          last_agent_activity_seq: 9,
+          last_read_seq: 4,
+        },
+      }),
+      thread({
         id: "thread-6",
         workspace_id: "workspace-2",
         title: "Stopped by shutdown",
@@ -185,6 +207,14 @@ createRoot(document.getElementById("root")!).render(
           groups={groups}
           selectedWorkspaceId="workspace-1"
           selectedThreadId="thread-1"
+          {...(collapsedWorkspaceIds.length > 0
+            ? {
+                // Controlled only when the query asks for it, so the rows stay
+                // clickable in the default fixture.
+                collapsedWorkspaceIds,
+                onWorkspaceCollapsedChange: () => {},
+              }
+            : {})}
           onSelectWorkspace={() => {}}
           onSelectThread={() => {}}
           onRenameThread={async () => {}}

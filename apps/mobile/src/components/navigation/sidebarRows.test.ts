@@ -36,6 +36,9 @@ describe('buildSidebarRows', () => {
         workspaceId: 'w1',
         workspaceName: 'project-one',
         isOpen: true,
+        runningCount: 0,
+        unreadCount: 0,
+        unreadTone: 'info',
       },
       expect.objectContaining({
         key: 'thread:t1',
@@ -148,6 +151,46 @@ describe('buildSidebarRows', () => {
       workspaceId: 'w1',
       workspaceName: 'Workspace',
       isOpen: true,
+      runningCount: 0,
+      unreadCount: 0,
+      unreadTone: 'info',
+    })
+  })
+
+  it('rolls up running and unread threads onto the workspace row', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project' }),
+          threads: [
+            thread({ id: 't1', workspace_id: 'w1', status: 'running' }),
+            thread({
+              id: 't2',
+              workspace_id: 'w1',
+              attention: {
+                level: 'none',
+                badge_label: null,
+                unread: true,
+                pending_approval_count: 0,
+                pending_question_count: 0,
+                last_agent_activity_seq: 0,
+                last_read_seq: 0,
+              },
+            }),
+            thread({ id: 't3', workspace_id: 'w1' }),
+          ],
+        },
+      ],
+      new Set(['w1']),
+      defaultCounts,
+      null,
+    )
+
+    expect(rows[1]).toMatchObject({
+      type: 'workspace',
+      runningCount: 1,
+      unreadCount: 1,
+      unreadTone: 'info',
     })
   })
 

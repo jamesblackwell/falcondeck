@@ -15,6 +15,7 @@ import {
   compareThreads,
   filterProjectGroupsByExtensions,
   partitionSidebarThreads,
+  summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
   threadProviderLabel,
   threadPriorityRank,
@@ -715,6 +716,10 @@ const ProjectGroupList = memo(function ProjectGroupList({
             }
           : undefined;
 
+        // Only the collapsed row renders these, but the summary is cheap and
+        // the group is memoised on scalars, so it costs nothing when open.
+        const attention = summarizeThreadAttention(group.threads);
+
         return (
           <React.Fragment key={workspaceId}>
             {showDropBefore ? <WorkspaceDropIndicator /> : null}
@@ -752,6 +757,9 @@ const ProjectGroupList = memo(function ProjectGroupList({
               dragHandleProps={dragHandleProps}
               open={!collapsedWorkspaces.has(workspaceId)}
               onOpenChange={(open) => onWorkspaceOpenChange(workspaceId, open)}
+              runningCount={attention.running}
+              unreadCount={attention.unread}
+              unreadTone={attention.unreadTone}
             >
               <ThreadList
                 group={group}

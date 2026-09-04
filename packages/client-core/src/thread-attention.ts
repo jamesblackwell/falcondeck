@@ -93,3 +93,48 @@ function resolveThreadAttentionLevel(
   if (thread.attention.unread || thread.attention.last_agent_activity_seq > thread.attention.last_read_seq) return 'unread'
   return 'none'
 }
+
+/** Inline rollup for a collapsed project row: what is live, what is waiting. */
+export type ThreadAttentionSummary = {
+  /** Threads with a turn in flight. */
+  running: number
+  /** Threads holding something the user has not seen or answered yet. */
+  unread: number
+  /** Severity of the unread group, so the row can tint its dot. */
+  unreadTone: 'info' | 'warning' | 'danger'
+}
+
+export function summarizeThreadAttention(
+  threads: readonly ThreadSummary[],
+): ThreadAttentionSummary {
+  let running = 0
+  let unread = 0
+  let hasError = false
+  let hasAwaiting = false
+
+  for (const thread of threads) {
+    const attention = deriveThreadAttentionPresentation(thread)
+    if (attention.level === 'running') {
+      running += 1
+      continue
+    }
+    // A failure or a finished turn only counts once it is still unseen —
+    // read history should leave the collapsed row blank.
+    if (attention.level === 'awaiting_response') {
+      unread += 1
+      hasAwaiting = true
+    } else if (
+      (attention.level === 'error' || attention.level === 'unread') &&
+      attention.unread
+    ) {
+      unread += 1
+      if (attention.level === 'error') hasError = true
+    }
+  }
+
+  return {
+    running,
+    unread,
+    unreadTone: hasError ? 'danger' : hasAwaiting ? 'warning' : 'info',
+  }
+}

@@ -1,6 +1,7 @@
 import {
   compareThreads,
   partitionSidebarThreads,
+  summarizeThreadAttention,
   type ProjectGroup,
   type ThreadSortMode,
   type ThreadSummary,
@@ -26,6 +27,14 @@ export type SidebarRow =
       workspaceId: string
       workspaceName: string
       isOpen: boolean
+      /**
+       * Rollup of the project's threads, rendered inline while it is
+       * collapsed. Kept as scalars so `sidebarRowsEqual` stays a shallow
+       * compare.
+       */
+      runningCount: number
+      unreadCount: number
+      unreadTone: 'info' | 'warning' | 'danger'
     }
   | {
       key: string
@@ -123,12 +132,16 @@ export function buildSidebarRows(
       group.workspace.path.split('/').pop() || group.workspace.path || 'Workspace'
     const isOpen = !collapsedWorkspaces.has(group.workspace.id)
 
+    const attention = summarizeThreadAttention(group.threads)
     const workspaceRow: SidebarRow = {
       key: `workspace:${group.workspace.id}`,
       type: 'workspace',
       workspaceId: group.workspace.id,
       workspaceName,
       isOpen,
+      runningCount: attention.running,
+      unreadCount: attention.unread,
+      unreadTone: attention.unreadTone,
     }
 
     const { pinnedInProject, unpinned } = partitionSidebarThreads(group.threads)

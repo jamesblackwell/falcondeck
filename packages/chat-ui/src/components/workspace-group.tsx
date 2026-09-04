@@ -5,7 +5,7 @@ import { FolderClosed, FolderOpen, Globe, Search, SquarePen } from 'lucide-react
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { workspaceColorCssVar } from '@falcondeck/client-core'
-import { cn } from '@falcondeck/ui'
+import { ActivityDiamond, cn } from '@falcondeck/ui'
 
 // Present when the workspace lives on an enrolled remote server rather than
 // this machine; rendered as a host subtitle with a connection dot.
@@ -30,7 +30,18 @@ export type WorkspaceGroupProps = {
   /** Controlled open state; omit to let the group own it. */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** Threads running inside this project; surfaced while it is collapsed. */
+  runningCount?: number
+  /** Threads waiting on the user; surfaced while it is collapsed. */
+  unreadCount?: number
+  unreadTone?: 'info' | 'warning' | 'danger'
   children: React.ReactNode
+}
+
+const UNREAD_DOT_CLASS: Record<'info' | 'warning' | 'danger', string> = {
+  info: 'bg-unread',
+  warning: 'bg-warning',
+  danger: 'bg-danger',
 }
 
 export const WorkspaceGroup = memo(function WorkspaceGroup({
@@ -45,6 +56,9 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   dragHandleProps,
   open,
   onOpenChange,
+  runningCount = 0,
+  unreadCount = 0,
+  unreadTone = 'info',
   children,
 }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
@@ -157,6 +171,41 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               ) : null}
             </span>
           </Collapsible.Trigger>
+          {/* Collapsed projects lose every per-thread indicator, so the row
+              carries the rollup instead: live work, then what is waiting.
+              Expanded projects show the real rows and need no summary. */}
+          {!isOpen && (runningCount > 0 || unreadCount > 0) ? (
+            <span
+              className="flex shrink-0 select-none items-center gap-2 self-center text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted"
+              title={[
+                runningCount > 0 ? `${runningCount} running` : null,
+                unreadCount > 0 ? `${unreadCount} unread` : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            >
+              {runningCount > 0 ? (
+                <span className="flex items-center gap-1">
+                  <ActivityDiamond size="xs" />
+                  {runningCount}
+                  <span className="sr-only">running</span>
+                </span>
+              ) : null}
+              {unreadCount > 0 ? (
+                <span className="flex items-center gap-1">
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      'h-2 w-2 rounded-full',
+                      UNREAD_DOT_CLASS[unreadTone],
+                    )}
+                  />
+                  {unreadCount}
+                  <span className="sr-only">unread</span>
+                </span>
+              ) : null}
+            </span>
+          ) : null}
           {onSearchThreads ? (
             <button
               type="button"

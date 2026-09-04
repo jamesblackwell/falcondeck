@@ -1158,6 +1158,67 @@ describe("DesktopSidebar", () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
+  it("summarizes running and unread threads on a collapsed project row", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({ id: "thread-1", title: "Running", status: "running" }),
+          thread({ id: "thread-2", title: "Also running", status: "running" }),
+          thread({
+            id: "thread-3",
+            title: "Unread",
+            attention: {
+              level: "none",
+              badge_label: null,
+              unread: false,
+              pending_approval_count: 0,
+              pending_question_count: 0,
+              last_agent_activity_seq: 3,
+              last_read_seq: 1,
+            },
+          }),
+          thread({ id: "thread-4", title: "Quiet" }),
+        ],
+      },
+    ];
+
+    render(
+      <DesktopSidebar
+        groups={groups}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-1"
+        collapsedWorkspaceIds={["workspace-1"]}
+        onWorkspaceCollapsedChange={() => {}}
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    );
+
+    const summary = screen.getByTitle("2 running \u00b7 1 unread");
+    expect(summary).toHaveTextContent("2");
+    expect(summary).toHaveTextContent("1");
+  });
+
+  it("leaves a collapsed project row blank when nothing needs attention", () => {
+    renderSidebar({
+      collapsedWorkspaceIds: ["workspace-1"],
+      onWorkspaceCollapsedChange: () => {},
+    });
+
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
+    expect(screen.queryByText("unread")).not.toBeInTheDocument();
+  });
+
+  it("drops the summary once the project is expanded", () => {
+    renderSidebar(
+      { collapsedWorkspaceIds: [], onWorkspaceCollapsedChange: () => {} },
+      { status: "running" },
+    );
+
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
+  });
+
   it("collapses the Projects section to hide every folder", () => {
     const onWorkspaceCollapsedChange = vi.fn();
     const groups: ProjectGroup[] = [
