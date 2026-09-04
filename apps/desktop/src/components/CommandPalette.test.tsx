@@ -193,6 +193,49 @@ describe("CommandPalette controlled requests", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("finds archived threads by title without listing them in the browse view", () => {
+    const onSelectThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [thread({ id: "live", title: "Live CPU overlay" })],
+        archivedThreads: [
+          thread({
+            id: "archived",
+            title: "React Native High CPU Investigation Plan",
+            is_archived: true,
+          }),
+        ],
+      },
+    ];
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={onSelectThread}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    expect(
+      screen.queryByRole("option", {
+        name: /React Native High CPU Investigation Plan/,
+      }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "high cpu" },
+    });
+
+    fireEvent.click(
+      screen.getByRole("option", {
+        name: /React Native High CPU Investigation Plan/,
+      }),
+    );
+    expect(onSelectThread).toHaveBeenCalledWith("workspace-1", "archived");
+  });
+
   it("lists unread and attention threads before quieter ones when opened", () => {
     const groups: ProjectGroup[] = [
       {

@@ -52,6 +52,7 @@ type PaletteItem = {
   section:
     | 'Needs attention'
     | 'Recent'
+    | 'Archived'
     | 'Message matches'
     | 'Actions'
     | 'Appearance'
@@ -635,7 +636,20 @@ export const CommandPalette = memo(function CommandPalette({
       })
       .sort((a, b) => PRIORITY_THREAD_COMPARATOR(a.thread, b.thread))
 
+    const archivedThreads = groups.flatMap((group) => {
+      const projectLabel = getProjectLabel(group.workspace.path)
+      return (group.archivedThreads ?? [])
+        .filter((thread) => !isUnusedPlaceholderThread(thread))
+        .map((thread) => ({
+          group,
+          thread,
+          projectLabel,
+          status: { label: 'Archived', tone: 'muted' as const },
+        }))
+    })
+
     const liveThreadIds = new Set(threads.map(({ thread }) => thread.id))
+    for (const { thread } of archivedThreads) liveThreadIds.add(thread.id)
     for (const id of searchCache.keys()) {
       if (!liveThreadIds.has(id)) searchCache.delete(id)
     }
@@ -686,6 +700,28 @@ export const CommandPalette = memo(function CommandPalette({
           run: () => onSelectThread(group.workspace.id, thread.id),
         })
       }
+    }
+
+    for (const { group, thread, projectLabel: label, status } of archivedThreads) {
+      result.push({
+        id: `thread:${thread.id}`,
+        kind: 'thread',
+        section: 'Archived',
+        label: thread.title,
+        sublabel: label,
+        projectId: group.workspace.id,
+        icon: { kind: 'status', tone: status.tone },
+        status,
+        time: timeAgo(thread.updated_at),
+        search: cachedThreadSearchFields(
+          searchCache,
+          thread.id,
+          thread.title,
+          `${label} ${group.workspace.path}`,
+          `archived chat conversation thread ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+        ),
+        run: () => onSelectThread(group.workspace.id, thread.id),
+      })
     }
 
     if (onOpenLibraryWorkspace) {
@@ -919,6 +955,9 @@ export const CommandPalette = memo(function CommandPalette({
     const index = new Map<string, { thread: ThreadSummary; group: ProjectGroup }>()
     for (const group of groups) {
       for (const thread of group.threads) index.set(thread.id, { thread, group })
+      for (const thread of group.archivedThreads ?? []) {
+        index.set(thread.id, { thread, group })
+      }
     }
     return index
   }, [groups, open])
@@ -948,6 +987,8 @@ export const CommandPalette = memo(function CommandPalette({
           rest.push(item)
         } else if (item.section === 'Needs attention') {
           if (attention.length < attentionLimit) attention.push(item)
+        } else if (item.section === 'Archived') {
+          continue
         } else if (recent.length < recentLimit) {
           recent.push(item)
         }
@@ -1021,9 +1062,11 @@ export const CommandPalette = memo(function CommandPalette({
       if (rows.length >= MAX_MESSAGE_MATCHES) break
       if (alreadyShown.has(match.thread_id)) continue
       const entry = threadIndex.get(match.thread_id)
-      if (!entry || entry.thread.is_archived) continue
+      if (!entry) continue
       const attention = deriveThreadAttentionPresentation(entry.thread)
-      const status = threadPaletteStatus(entry.thread, attention)
+      const status = entry.thread.is_archived
+        ? { label: 'Archived', tone: 'muted' as const }
+        : threadPaletteStatus(entry.thread, attention)
       rows.push({
         id: `message:${match.thread_id}`,
         kind: 'thread',
