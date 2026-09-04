@@ -1,8 +1,6 @@
 use falcondeck_core::{
     GitBranchesResponse, GitDiffResponse, GitFileStatus, GitStatusEntry, GitStatusResponse,
 };
-use std::path::Path;
-use tokio::fs;
 use tokio::process::Command;
 
 use crate::error::DaemonError;
@@ -258,40 +256,28 @@ pub async fn git_diff(
     }
 
     let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    let content = if diff.is_empty() && matches!(status, Some(GitFileStatus::Untracked)) {
-        load_untracked_file_content(workspace_path, path).await?
+    // Untracked, gitignored, and otherwise undiffable files still have
+    // contents the sidebar can show. Skip deleted paths: the file is gone.
+    let content = if diff.is_empty() && !matches!(status, Some(GitFileStatus::Deleted)) {
+        load_file_content(workspace_path, path).await
     } else {
         None
     };
     Ok(GitDiffResponse { diff, content })
 }
 
-async fn load_untracked_file_content(
-    workspace_path: &str,
-    path: Option<&str>,
-) -> Result<Option<String>, DaemonError> {
-    let Some(relative_path) = path else {
-        return Ok(None);
-    };
-
-    let full_path = Path::new(workspace_path).join(relative_path);
-    let metadata = match fs::metadata(&full_path).await {
-        Ok(metadata) => metadata,
-        Err(_) => return Ok(None),
-    };
-    if !metadata.is_file() {
-        return Ok(None);
+async fn load_file_content(workspace_path: &str, path: Option<&str>) -> Option<String> {
+    let path = path?;
+    match crate::workspace_files::read_file(workspace_path, path).await {
+        Ok(file) if !file.is_binary => file.content,
+        _ => None,
     }
-
-    let bytes = fs::read(&full_path)
-        .await
-        .map_err(|e| DaemonError::Rpc(format!("failed to read untracked file: {e}")))?;
-    Ok(String::from_utf8(bytes).ok())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::tempdir;
     use tokio::fs;
 
@@ -387,5 +373,67 @@ mod tests {
 
         assert_eq!(diff.diff, "");
         assert_eq!(diff.content.as_deref(), Some("line one\nline two\n"));
+    }
+
+    #[tokio::test]
+    async fn git_diff_returns_content_when_empty_regardless_of_status() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        fs::write(repo.join("draft.md"), "line one\n")
+            .await
+            .unwrap();
+
+        let diff = git_diff(
+            repo.to_str().unwrap(),
+            Some("draft.md"),
+            Some(&GitFileStatus::Modified),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(diff.diff, "");
+        assert_eq!(diff.content.as_deref(), Some("line one\n"));
+    }
+
+    #[tokio::test]
+    async fn git_diff_returns_content_for_gitignored_file() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        fs::write(repo.join(".gitignore"), "secret.md\n")
+            .await
+            .unwrap();
+        fs::write(repo.join("secret.md"), "hidden\n").await.unwrap();
+
+        let diff = git_diff(repo.to_str().unwrap(), Some("secret.md"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(diff.diff, "");
+        assert_eq!(diff.content.as_deref(), Some("hidden\n"));
+    }
+
+    #[tokio::test]
+    async fn git_diff_skips_content_for_deleted_status() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        fs::write(repo.join("gone.md"), "still on disk\n")
+            .await
+            .unwrap();
+
+        let diff = git_diff(
+            repo.to_str().unwrap(),
+            Some("gone.md"),
+            Some(&GitFileStatus::Deleted),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(diff.content, None);
     }
 }

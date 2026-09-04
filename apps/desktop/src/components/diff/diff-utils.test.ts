@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { homeRelativePath, statusLabel, statusToneClass } from './diff-utils'
+import { homeRelativePath, isMarkdownFilePath, statusLabel, statusToneClass } from './diff-utils'
 
 describe('homeRelativePath', () => {
   it('abbreviates a home directory on macOS and Linux', () => {
@@ -13,6 +13,17 @@ describe('homeRelativePath', () => {
     expect(homeRelativePath('/opt/builds/app')).toBe('/opt/builds/app')
     // A sibling of /Users that merely starts the same way is not a home dir.
     expect(homeRelativePath('/UsersData/app')).toBe('/UsersData/app')
+  })
+})
+
+describe('isMarkdownFilePath', () => {
+  it('recognizes markdown extensions', () => {
+    expect(isMarkdownFilePath('docs/qa/notes.md')).toBe(true)
+    expect(isMarkdownFilePath('README.MD')).toBe(true)
+    expect(isMarkdownFilePath('page.mdx')).toBe(true)
+    expect(isMarkdownFilePath('guide.markdown')).toBe(true)
+    expect(isMarkdownFilePath('src/App.tsx')).toBe(false)
+    expect(isMarkdownFilePath('notes.md.bak')).toBe(false)
   })
 })
 

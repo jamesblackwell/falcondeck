@@ -1338,6 +1338,8 @@ async fn git_diff(
 #[derive(serde::Deserialize)]
 struct WorkspaceFilesQuery {
     thread_id: Option<String>,
+    /// Substring filter applied to the whole tree, before the listing cap.
+    query: Option<String>,
 }
 
 async fn workspace_files(
@@ -1347,7 +1349,11 @@ async fn workspace_files(
 ) -> Result<Json<falcondeck_core::WorkspaceFilesResponse>, DaemonError> {
     Ok(Json(
         state
-            .workspace_files(&workspace_id, query.thread_id.as_deref())
+            .workspace_files(
+                &workspace_id,
+                query.thread_id.as_deref(),
+                query.query.as_deref(),
+            )
             .await?,
     ))
 }

@@ -1587,7 +1587,8 @@ impl AppState {
                 "workspace.files" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let thread_id = extract_string(&params, &["threadId", "thread_id"]);
-                    self.workspace_files(&workspace_id, thread_id.as_deref())
+                    let query = extract_string(&params, &["query"]);
+                    self.workspace_files(&workspace_id, thread_id.as_deref(), query.as_deref())
                         .await
                         .and_then(|files| serde_json::to_value(files).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())

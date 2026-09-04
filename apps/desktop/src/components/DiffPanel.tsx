@@ -16,6 +16,7 @@ import { useGitStatus } from '../hooks/useGitStatus'
 import { useGitDiff } from '../hooks/useGitDiff'
 import { useWorkspaceFile } from '../hooks/useWorkspaceFile'
 import { useWorkspaceFiles } from '../hooks/useWorkspaceFiles'
+import { isMarkdownFilePath } from './diff/diff-utils'
 import { DiffView } from './diff/DiffView'
 import { FileListView, type ReviewPanelTab } from './diff/FileListView'
 import { FileView } from './diff/FileView'
@@ -32,7 +33,11 @@ type ReviewApi = {
     status?: GitFileStatus | null,
     threadId?: string | null,
   ) => Promise<GitDiffResponse>
-  workspaceFiles: (workspaceId: string, threadId?: string | null) => Promise<WorkspaceFilesResponse>
+  workspaceFiles: (
+    workspaceId: string,
+    threadId?: string | null,
+    search?: string | null,
+  ) => Promise<WorkspaceFilesResponse>
   workspaceFile: (
     workspaceId: string,
     path: string,
@@ -81,6 +86,9 @@ export const DiffPanel = memo(function DiffPanel({
   const { toast } = useToast()
   // The overview opens first: it frames what the changes list is a list *of*.
   const [activeTab, setActiveTab] = useState<ReviewPanelTab>('info')
+  // Owned here rather than in the list because the file browser's query is a
+  // daemon-side search, not a filter over what the panel already has.
+  const [filterQuery, setFilterQuery] = useState('')
   const [isReviewPending, setIsReviewPending] = useState(false)
   const previewContextRef = useRef({ workspaceId, threadId })
   const selectedFile =
@@ -110,7 +118,7 @@ export const DiffPanel = memo(function DiffPanel({
     [status?.entries],
   )
   const selectedStatus = selectedFile
-    ? statusByPath.get(selectedFile)?.status ?? 'modified'
+    ? statusByPath.get(selectedFile)?.status ?? null
     : null
   const { diff, content, isLoading: isDiffLoading, error: diffError } = useGitDiff(
     selectedView === 'changes' && gitEnabled ? api : null,
@@ -129,6 +137,9 @@ export const DiffPanel = memo(function DiffPanel({
     workspaceId,
     threadId,
     activeTab === 'files' || (selectedFile != null && selectedView === 'files'),
+    // The changes tab filters its own small list locally, so only the file
+    // browser's query reaches the daemon.
+    activeTab === 'files' ? filterQuery : '',
   )
   const {
     file,
@@ -138,7 +149,7 @@ export const DiffPanel = memo(function DiffPanel({
     reload: reloadFile,
     save: saveFile,
   } = useWorkspaceFile(
-    selectedView === 'files' ? api : null,
+    selectedFile != null && selectedStatus !== 'deleted' ? api : null,
     workspaceId,
     threadId,
     selectedFile,
@@ -205,7 +216,19 @@ export const DiffPanel = memo(function DiffPanel({
     [selectFile, selectedFile, status?.entries],
   )
 
-  if (selectedFile && selectedView === 'files') {
+  const hasLoadedDiff =
+    !gitEnabled ||
+    selectedView !== 'changes' ||
+    diff !== null ||
+    diffError !== null
+  const hasParseableDiff = Boolean(diff)
+  // No git, no diff, or an explicit files-tab open: show the file itself so
+  // untracked / gitignored / casual-chat documents are still readable.
+  const showFileViewer =
+    selectedFile != null &&
+    (selectedView === 'files' || !gitEnabled || (hasLoadedDiff && !hasParseableDiff))
+
+  if (showFileViewer && selectedFile) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-1">
         <FileView
@@ -232,13 +255,19 @@ export const DiffPanel = memo(function DiffPanel({
   }
 
   if (selectedFile) {
+    const previewContent = content ?? file?.content ?? null
+    const waitingForMarkdown =
+      isMarkdownFilePath(selectedFile) &&
+      isFileLoading &&
+      previewContent == null
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-1">
         <DiffView
+          key={`${workspaceId}:${selectedFile}`}
           filePath={selectedFile}
           diff={diff}
-          content={content}
-          isLoading={isDiffLoading}
+          content={previewContent}
+          isLoading={(isDiffLoading && !hasParseableDiff) || waitingForMarkdown}
           error={diffError}
           onBack={() => onSelectionChange(null)}
           onOpenFile={selectedStatus === 'deleted' ? null : () => selectFile(selectedFile, 'files')}
@@ -268,6 +297,8 @@ export const DiffPanel = memo(function DiffPanel({
         onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
         onSelectChangedFile={selectChangedFile}
         onSelectWorkspaceFile={selectWorkspaceFile}
+        query={filterQuery}
+        onQueryChange={setFilterQuery}
         info={info}
         showChanges={gitEnabled}
       />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type {
   WorkspaceFileResponse,
@@ -26,26 +26,39 @@ export function useWorkspaceFile(
   filePath: string | null,
 ) {
   const [file, setFile] = useState<WorkspaceFileResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const [isLoading, setIsLoading] = useState(() => Boolean(api && workspaceId && filePath))
   const [isSaving, setIsSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const requestIdRef = useRef(0)
 
   const load = useCallback(async () => {
-    if (!api || !workspaceId || !filePath) return
+    const requestId = ++requestIdRef.current
+    if (!api || !workspaceId || !filePath) {
+      setFile(null)
+      setError(null)
+      setIsLoading(false)
+      return
+    }
     setIsLoading(true)
     setError(null)
     try {
-      setFile(await api.workspaceFile(workspaceId, filePath, threadId))
+      const next = await api.workspaceFile(workspaceId, filePath, threadId)
+      if (requestId !== requestIdRef.current) return
+      setFile(next)
     } catch (error) {
+      if (requestId !== requestIdRef.current) return
       setError(error instanceof Error ? error.message : 'Failed to read workspace file')
     } finally {
-      setIsLoading(false)
+      if (requestId === requestIdRef.current) setIsLoading(false)
     }
   }, [api, filePath, threadId, workspaceId])
 
   useEffect(() => {
     setFile(null)
     void load()
+    return () => {
+      requestIdRef.current += 1
+    }
   }, [load])
 
   const save = useCallback(

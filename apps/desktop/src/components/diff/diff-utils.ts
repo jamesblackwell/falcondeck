@@ -10,6 +10,13 @@ export function basePart(path: string) {
   return idx >= 0 ? path.slice(idx + 1) : path
 }
 
+/** Markdown documents the file rail can render instead of a source listing. */
+export function isMarkdownFilePath(path: string) {
+  const base = path.split('/').pop()?.toLowerCase() ?? ''
+  const ext = base.includes('.') ? base.split('.').pop() : ''
+  return ext === 'md' || ext === 'mdx' || ext === 'markdown'
+}
+
 /**
  * Shortens a home-directory path the way a shell prompt does, so a checkout
  * path fits one line in a narrow panel. The full path stays available for the

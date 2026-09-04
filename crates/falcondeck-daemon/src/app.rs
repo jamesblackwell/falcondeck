@@ -4158,8 +4158,10 @@ impl AppState {
         &self,
         workspace_id: &str,
         thread_id: Option<&str>,
+        query: Option<&str>,
     ) -> Result<falcondeck_core::WorkspaceFilesResponse, DaemonError> {
-        crate::workspace_files::list_files(&self.git_root(workspace_id, thread_id).await?).await
+        crate::workspace_files::list_files(&self.git_root(workspace_id, thread_id).await?, query)
+            .await
     }
 
     pub async fn workspace_file(

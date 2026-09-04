@@ -1,4 +1,4 @@
-import { memo, useDeferredValue, useMemo, useState } from 'react'
+import { memo, useDeferredValue, useMemo } from 'react'
 import {
   GitBranch,
   RefreshCw,
@@ -33,6 +33,9 @@ export type FileListViewProps = {
   onRefreshFiles: () => void
   onSelectChangedFile: (entry: GitStatusEntry) => void
   onSelectWorkspaceFile: (path: string) => void
+  /** Owned by the host: on the files tab it is a daemon-side search. */
+  query: string
+  onQueryChange: (query: string) => void
   onStartReview?: (() => void) | null
   isReviewPending?: boolean
   /** Context for the overview tab; omitted only by callers without a workspace. */
@@ -43,6 +46,10 @@ export type FileListViewProps = {
 
 const ROW_HEIGHT = 32
 const LIST_PADDING = 8
+// Mirrors the daemon's caps in `workspace_files.rs`. A cap that goes unmentioned
+// turns a truncated listing into a file the panel swears does not exist.
+const MAX_LISTED_FILES = 20_000
+const MAX_SEARCH_RESULTS = 500
 
 const FileRow = memo(function FileRow({
   entry,
@@ -86,12 +93,13 @@ export const FileListView = memo(function FileListView({
   onRefreshFiles,
   onSelectChangedFile,
   onSelectWorkspaceFile,
+  query,
+  onQueryChange,
   onStartReview = null,
   isReviewPending = false,
   info = null,
   showChanges = true,
 }: FileListViewProps) {
-  const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
   const statusByPath = useMemo(
     () => new Map(entries.map((entry) => [entry.path, entry])),
@@ -104,15 +112,15 @@ export const FileListView = memo(function FileListView({
         : entries,
     [deferredQuery, entries],
   )
-  const filteredFiles = useMemo(() => {
-    if (!deferredQuery) return files
-    const matches: string[] = []
-    for (const path of files) {
-      if (path.toLowerCase().includes(deferredQuery)) matches.push(path)
-      if (matches.length === 500) break
-    }
-    return matches
-  }, [deferredQuery, files])
+  // The daemon has already applied the query; this pass only hides rows left
+  // over from the previous search while the next one is still in flight.
+  const filteredFiles = useMemo(
+    () =>
+      deferredQuery
+        ? files.filter((path) => path.toLowerCase().includes(deferredQuery))
+        : files,
+    [deferredQuery, files],
+  )
   const rows = useVirtualRows(filteredEntries.length, ROW_HEIGHT)
   const tabs = (
     info
@@ -152,7 +160,7 @@ export const FileListView = memo(function FileListView({
               type="button"
               onClick={() => {
                 onTabChange(tab)
-                setQuery('')
+                onQueryChange('')
               }}
               aria-pressed={visibleTab === tab}
               className={`fd-focus flex h-full items-center border-b-2 px-2 pt-px text-[length:var(--fd-text-sm)] font-medium capitalize transition-colors ${
@@ -221,14 +229,14 @@ export const FileListView = memo(function FileListView({
             <span className="sr-only">Filter {visibleTab}</span>
             <input
               value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => onQueryChange(event.target.value)}
               placeholder={visibleTab === 'changes' ? 'Filter changed files' : 'Go to file'}
               className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
             />
             {query ? (
               <button
                 type="button"
-                onClick={() => setQuery('')}
+                onClick={() => onQueryChange('')}
                 aria-label="Clear filter"
                 className="fd-focus rounded-[var(--fd-radius-sm)] text-fg-faint hover:text-fg-secondary"
               >
@@ -281,17 +289,21 @@ export const FileListView = memo(function FileListView({
               </div>
             </div>
           )
-        ) : isFilesLoading && files.length === 0 ? (
+        ) : isFilesLoading && filteredFiles.length === 0 ? (
+          // The rows on screen belong to the previous query, so wait for the
+          // daemon rather than claiming this one found nothing.
           <ActivityDiamond size="lg" className="mx-auto mt-8 flex" />
         ) : filteredFiles.length === 0 ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
-            {deferredQuery ? 'No matching files' : 'No files found'}
+            {deferredQuery ? `No files match “${query.trim()}”` : 'No files found'}
           </div>
         ) : (
           <>
             {filesTruncated ? (
               <p className="border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-2xs)] text-warning">
-                Showing the first 20,000 files
+                {deferredQuery
+                  ? `More than ${MAX_SEARCH_RESULTS.toLocaleString()} matches — showing the first ${MAX_SEARCH_RESULTS.toLocaleString()}`
+                  : `Showing the first ${MAX_LISTED_FILES.toLocaleString()} files — search to reach the rest`}
               </p>
             ) : null}
             <FileTreeView

@@ -62,6 +62,7 @@ import {
   withComposerProvider,
   withComposerSelection,
   workspaceAgentCapabilities,
+  workspaceRelativeFilePath,
   threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
@@ -1153,13 +1154,13 @@ function AppInner() {
       setExtensionToolDetail(null);
       setDiffSelection({
         workspaceId: selectedWorkspaceId,
-        filePath,
+        filePath: workspaceRelativeFilePath(filePath, selectedWorkspace?.path),
         view,
         line: view === "files" ? line : null,
       });
       showRail();
     },
-    [selectedWorkspaceId, showRail],
+    [selectedWorkspace?.path, selectedWorkspaceId, showRail],
   );
   const handleOpenExtensionToolDetails = useCallback(
     (selection: ExtensionAgentToolDetailSelection) => {

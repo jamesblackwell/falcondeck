@@ -268,7 +268,11 @@ export type WorkspaceScopedApi = {
     status?: GitFileStatus | null,
     threadId?: string | null,
   ): Promise<GitDiffResponse>
-  workspaceFiles(workspaceId: string, threadId?: string | null): Promise<WorkspaceFilesResponse>
+  workspaceFiles(
+    workspaceId: string,
+    threadId?: string | null,
+    search?: string | null,
+  ): Promise<WorkspaceFilesResponse>
   workspaceFile(
     workspaceId: string,
     path: string,
@@ -730,8 +734,12 @@ export class HostConnection {
           status,
           thread_id: threadId,
         }),
-      workspaceFiles: (workspaceId, threadId) =>
-        this.rpc('workspace.files', { workspace_id: workspaceId, thread_id: threadId }),
+      workspaceFiles: (workspaceId, threadId, search) =>
+        this.rpc('workspace.files', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          query: search,
+        }),
       workspaceFile: (workspaceId, path, threadId) =>
         this.rpc('workspace.file.read', {
           workspace_id: workspaceId,

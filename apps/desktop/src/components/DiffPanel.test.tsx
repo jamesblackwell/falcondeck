@@ -9,7 +9,13 @@ const api = {
   gitStatus: vi.fn().mockResolvedValue({ branch: 'main', entries: [] }),
   gitDiff: vi.fn().mockResolvedValue({ diff: '', content: null }),
   workspaceFiles: vi.fn().mockResolvedValue({ files: [], truncated: false }),
-  workspaceFile: vi.fn(),
+  workspaceFile: vi.fn().mockResolvedValue({
+    path: 'README.md',
+    content: '# Hello\n',
+    is_binary: false,
+    truncated: false,
+    version: 'v1',
+  }),
   writeWorkspaceFile: vi.fn(),
 }
 
@@ -87,8 +93,102 @@ describe('DiffPanel', () => {
     const selection = { workspaceId: 'workspace-1', filePath: 'README.md', view: 'changes' as const }
     renderPanel(selection, 'thread-1', onSelectionChange)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Back to changed files' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to files' }))
 
     await waitFor(() => expect(onSelectionChange).toHaveBeenCalledWith(null))
+  })
+
+  it('shows an untracked markdown file instead of an empty diff', async () => {
+    api.gitDiff.mockResolvedValue({ diff: '', content: null })
+    api.workspaceFile.mockResolvedValue({
+      path: 'docs/qa/notes.md',
+      content: '# Audit\n\nPasses on mobile.',
+      is_binary: false,
+      truncated: false,
+      version: 'v1',
+    })
+    renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'docs/qa/notes.md', view: 'changes' },
+      'thread-1',
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Audit' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Preview' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText('Unable to load this file')).toBeNull()
+    expect(screen.queryByText(/untracked/i)).toBeNull()
+  })
+
+  it('keeps a real unified diff on the diff viewer', async () => {
+    api.gitDiff.mockResolvedValue({
+      diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n',
+      content: null,
+    })
+    renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'src/a.ts', view: 'changes' },
+      'thread-1',
+    )
+
+    expect(await screen.findByRole('button', { name: 'Back to changed files' })).toBeVisible()
+    expect(await screen.findByText('new')).toBeVisible()
+    expect(screen.getByText('old')).toBeVisible()
+  })
+
+  it('ignores a stale workspace file read after switching files', async () => {
+    let finishSlow: ((file: {
+      path: string
+      content: string
+      is_binary: boolean
+      truncated: boolean
+      version: string
+    }) => void) | undefined
+    const slow = new Promise<{
+      path: string
+      content: string
+      is_binary: boolean
+      truncated: boolean
+      version: string
+    }>((resolve) => {
+      finishSlow = resolve
+    })
+    api.gitDiff.mockResolvedValue({ diff: '', content: null })
+    api.workspaceFile.mockImplementation((_workspaceId: string, path: string) => {
+      if (path === 'slow.md') return slow
+      return Promise.resolve({
+        path,
+        content: '# Fast\n',
+        is_binary: false,
+        truncated: false,
+        version: 'v1',
+      })
+    })
+    const view = renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'slow.md', view: 'changes' },
+      'thread-1',
+    )
+    view.rerender(
+      <ToastProvider>
+        <DiffPanel
+          api={api}
+          workspaceId="workspace-1"
+          threadId="thread-1"
+          refreshTrigger={0}
+          selection={{ workspaceId: 'workspace-1', filePath: 'fast.md', view: 'changes' }}
+          onSelectionChange={vi.fn()}
+        />
+      </ToastProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Fast' })).toBeVisible()
+    finishSlow?.({
+      path: 'slow.md',
+      content: '# Slow\n',
+      is_binary: false,
+      truncated: false,
+      version: 'v1',
+    })
+    await waitFor(() => {
+      expect(screen.queryByRole('heading', { name: 'Slow' })).toBeNull()
+    })
+    expect(screen.getByRole('heading', { name: 'Fast' })).toBeVisible()
   })
 })

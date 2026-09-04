@@ -5429,6 +5429,15 @@ pub struct WorkspaceFileResponse {
     pub truncated: bool,
     /// Opaque filesystem version used for conflict-aware saves.
     pub version: Option<String>,
+    /// Base64-encoded bytes for previewable binary media (images, video, audio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    /// Best-effort MIME type for previewable media, including UTF-8 SVG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// On-disk size in bytes, including truncated and binary files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
 }
 
 /// Conflict-aware request to replace an existing workspace file.

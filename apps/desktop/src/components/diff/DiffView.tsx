@@ -11,6 +11,13 @@ import {
 } from '@falcondeck/chat-ui'
 import { ActivityDiamond, Button } from '@falcondeck/ui'
 
+import {
+  FilePreviewToggle,
+  MarkdownFileDocument,
+  shouldPreviewMarkdown,
+  useMarkdownPreviewMode,
+} from './markdown-file'
+
 export type DiffViewProps = {
   filePath: string
   diff: string | null
@@ -47,8 +54,13 @@ export const DiffView = memo(function DiffView({
 
   // Whole-file view only; the diff path highlights per file inside DiffFileSection.
   const showWholeFile = parsed.status !== 'ok' && content !== null
+  const canPreviewMarkdown = shouldPreviewMarkdown(filePath, content)
+  const { mode, setMode, showPreview } = useMarkdownPreviewMode(filePath, canPreviewMarkdown)
   const fileLanguage = useMemo(() => languageFromPath(filePath), [filePath])
-  const fileTokens = useShikiTokens(showWholeFile ? fileLines : [], fileLanguage)
+  const fileTokens = useShikiTokens(
+    showWholeFile && !showPreview ? fileLines : [],
+    fileLanguage,
+  )
 
   const isDisplayTooLarge =
     parsed.status === 'too-large' ||
@@ -70,6 +82,9 @@ export const DiffView = memo(function DiffView({
         <p className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
           {filePath}
         </p>
+        {canPreviewMarkdown ? (
+          <FilePreviewToggle mode={mode} onChange={setMode} />
+        ) : null}
         {onPrevious ? (
           <button type="button" onClick={onPrevious} aria-label="Previous changed file" className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary">
             <ChevronUp aria-hidden="true" className="h-3.5 w-3.5" />
@@ -98,6 +113,8 @@ export const DiffView = memo(function DiffView({
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
             File too large to display
           </div>
+        ) : showPreview && content !== null ? (
+          <MarkdownFileDocument text={content} />
         ) : fileRows.length > 0 ? (
           <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
             {fileRows.map((file, index) => (
@@ -117,7 +134,7 @@ export const DiffView = memo(function DiffView({
           </div>
         ) : (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
-            {diff === '' ? 'No diff available (file may be untracked)' : 'No changes to display'}
+            {diff === '' ? 'Unable to load this file' : 'No changes to display'}
           </div>
         )}
       </div>

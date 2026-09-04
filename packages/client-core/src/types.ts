@@ -1646,6 +1646,12 @@ export type WorkspaceFileResponse = {
   is_binary: boolean;
   truncated: boolean;
   version: string | null;
+  /** Base64-encoded bytes for previewable binary media. */
+  content_base64?: string | null;
+  /** Best-effort MIME type for previewable media, including UTF-8 SVG. */
+  mime_type?: string | null;
+  /** On-disk size in bytes, including truncated and binary files. */
+  size_bytes?: number | null;
 };
 
 export type WriteWorkspaceFilePayload = {

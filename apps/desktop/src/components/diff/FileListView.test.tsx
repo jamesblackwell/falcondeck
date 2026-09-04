@@ -1,7 +1,14 @@
+import { useState } from 'react'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { FileListView } from './FileListView'
+import { FileListView, type FileListViewProps } from './FileListView'
+
+// The query is host state now, so tests need a host to type into.
+function StatefulFileListView(props: Omit<FileListViewProps, 'query' | 'onQueryChange'>) {
+  const [query, setQuery] = useState('')
+  return <FileListView {...props} query={query} onQueryChange={setQuery} />
+}
 
 const entry = {
   path: 'src/App.tsx',
@@ -14,7 +21,7 @@ function renderView() {
   const onTabChange = vi.fn()
   const onSelectChangedFile = vi.fn()
   render(
-    <FileListView
+    <StatefulFileListView
       entries={[entry]}
       files={['README.md', 'src/App.tsx', 'src/utils.ts']}
       filesTruncated={false}
@@ -47,7 +54,7 @@ describe('FileListView', () => {
 
   it('offers the overview tab only when the host supplies its context', () => {
     const { unmount } = render(
-      <FileListView
+      <StatefulFileListView
         entries={[entry]}
         files={[]}
         filesTruncated={false}
@@ -73,6 +80,75 @@ describe('FileListView', () => {
 
     renderView()
     expect(screen.queryByRole('button', { name: 'info' })).not.toBeInTheDocument()
+  })
+
+  it('says the listing is capped so a missing file is not read as absent', () => {
+    render(
+      <StatefulFileListView
+        entries={[]}
+        files={['README.md']}
+        filesTruncated
+        branch="main"
+        activeTab="files"
+        isLoading={false}
+        isFilesLoading={false}
+        error={null}
+        filesError={null}
+        onTabChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onRefreshFiles={vi.fn()}
+        onSelectChangedFile={vi.fn()}
+        onSelectWorkspaceFile={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/Showing the first 20,000 files/)).toBeInTheDocument()
+  })
+
+  it('waits for the daemon rather than calling a pending search empty', () => {
+    const { rerender } = render(
+      <FileListView
+        entries={[]}
+        files={['README.md']}
+        filesTruncated={false}
+        branch="main"
+        activeTab="files"
+        isLoading={false}
+        isFilesLoading
+        error={null}
+        filesError={null}
+        onTabChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onRefreshFiles={vi.fn()}
+        onSelectChangedFile={vi.fn()}
+        onSelectWorkspaceFile={vi.fn()}
+        query="audit"
+        onQueryChange={vi.fn()}
+      />,
+    )
+    // The stale listing has no match, but the search is still running.
+    expect(screen.queryByText(/No files match/)).not.toBeInTheDocument()
+
+    rerender(
+      <FileListView
+        entries={[]}
+        files={[]}
+        filesTruncated={false}
+        branch="main"
+        activeTab="files"
+        isLoading={false}
+        isFilesLoading={false}
+        error={null}
+        filesError={null}
+        onTabChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onRefreshFiles={vi.fn()}
+        onSelectChangedFile={vi.fn()}
+        onSelectWorkspaceFile={vi.fn()}
+        query="audit"
+        onQueryChange={vi.fn()}
+      />,
+    )
+    expect(screen.getByText(/No files match/)).toBeInTheDocument()
   })
 
   it('switches to the file browser', () => {

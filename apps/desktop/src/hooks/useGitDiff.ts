@@ -18,11 +18,18 @@ export function useGitDiff(
   fileStatus: GitFileStatus | null,
   threadId: string | null = null,
 ) {
+  const isActive = Boolean(api && workspaceId && filePath)
   const [diff, setDiff] = useState<string | null>(null)
   const [content, setContent] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
+  const [isLoading, setIsLoading] = useState(isActive)
   const [error, setError] = useState<string | null>(null)
-  const isActive = Boolean(api && workspaceId && filePath)
+
+  useEffect(() => {
+    setDiff(null)
+    setContent(null)
+    setError(null)
+    setIsLoading(Boolean(api && workspaceId && filePath))
+  }, [api, filePath, threadId, workspaceId])
 
   useEffect(() => {
     if (!api || !workspaceId || !filePath) return
@@ -31,8 +38,6 @@ export function useGitDiff(
 
     const loadDiff = async () => {
       setIsLoading(true)
-      setDiff(null)
-      setContent(null)
       setError(null)
 
       try {

@@ -905,9 +905,14 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
-    async workspaceFiles(workspaceId: string, threadId?: string | null) {
+    async workspaceFiles(
+      workspaceId: string,
+      threadId?: string | null,
+      search?: string | null,
+    ) {
       const query = new URLSearchParams();
       if (threadId) query.set("thread_id", threadId);
+      if (search) query.set("query", search);
       const params = query.toString() ? `?${query.toString()}` : "";
       return parseJson<WorkspaceFilesResponse>(
         await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/files${params}`),
