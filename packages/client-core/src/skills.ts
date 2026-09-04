@@ -1,4 +1,9 @@
-import type { AgentProvider, SelectedSkillReference, SkillSummary } from './types'
+import type {
+  AgentProvider,
+  SelectedSkillReference,
+  SkillSourceKind,
+  SkillSummary,
+} from './types'
 
 export function canonicalSkillAlias(raw: string): string {
   const normalized = raw
@@ -46,6 +51,297 @@ export function composerSkillCatalog(
   return workspace?.skills ?? []
 }
 
+export type NativeSlashCommandId = 'goal' | 'mission' | 'compact'
+
+export type NativeSlashCommand = {
+  id: NativeSlashCommandId
+  alias: string
+  label: string
+  description: string
+}
+
+/** Built-in composer commands, scored with the same ranker as skills. */
+export const NATIVE_SLASH_COMMANDS: readonly NativeSlashCommand[] = [
+  {
+    id: 'goal',
+    alias: '/goal',
+    label: 'Goal',
+    description: 'Set a goal to keep pursuing',
+  },
+  {
+    id: 'mission',
+    alias: '/mission',
+    label: '/mission',
+    description: 'Draft a bounded mission for human review',
+  },
+  {
+    id: 'compact',
+    alias: '/compact',
+    label: '/compact',
+    description: 'Compact conversation history to free context',
+  },
+]
+
+const NATIVE_SLASH_COMMAND_BY_ID = Object.fromEntries(
+  NATIVE_SLASH_COMMANDS.map((command) => [command.id, command]),
+) as Record<NativeSlashCommandId, NativeSlashCommand>
+
+export type NativeSlashAvailability = {
+  goal?: boolean
+  mission?: boolean
+  compact?: boolean
+}
+
+export type SlashMatchSpan = {
+  field: 'alias' | 'label' | 'description'
+  /** Index into the displayed field string (alias includes a leading `/` when shown). */
+  start: number
+  length: number
+}
+
+type RankedSlashBase = {
+  score: number
+  match: SlashMatchSpan | null
+}
+
+export type RankedNativeSlashItem = RankedSlashBase & {
+  kind: 'native'
+  id: `native:${NativeSlashCommandId}`
+  command: NativeSlashCommand
+}
+
+export type RankedSkillSlashItem = RankedSlashBase & {
+  kind: 'skill'
+  id: string
+  skill: SkillSummary
+}
+
+export type RankedSlashItem = RankedNativeSlashItem | RankedSkillSlashItem
+
+/** Short source labels for slash-menu badges. */
+export function slashSkillSourceLabel(kind: SkillSourceKind): string {
+  switch (kind) {
+    case 'project_file':
+      return 'Project'
+    case 'home_file':
+      return 'User'
+    case 'provider_native':
+      return 'Built-in'
+  }
+}
+
+function isWordCharCode(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 97 && code <= 122)
+}
+
+type FieldHit = {
+  score: number
+  start: number
+  length: number
+}
+
+/**
+ * Prefix and hyphen/word-boundary hits only. Mid-word substrings are noise
+ * in a slash menu: `/fresh` must not select a skill whose description says
+ * "refresh".
+ */
+function scoreField(query: string, original: string): FieldHit | null {
+  if (!query || !original) return null
+  const target = original.toLocaleLowerCase()
+  let index = target.indexOf(query)
+  if (index === -1) return null
+  if (index === 0) {
+    const leftover = target.length - query.length
+    return {
+      score: leftover === 0 ? 0 : 10 + Math.min(leftover, 40),
+      start: 0,
+      length: query.length,
+    }
+  }
+  // Skip mid-word hits and keep scanning; "refresh the fresh draft" should
+  // still match `/fresh` on the later word.
+  while (index > 0 && isWordCharCode(target.charCodeAt(index - 1))) {
+    index = target.indexOf(query, index + 1)
+    if (index === -1) return null
+  }
+  return {
+    score: 40 + Math.min(index, 40),
+    start: index,
+    length: query.length,
+  }
+}
+
+const FIELD_WEIGHT = {
+  alias: 0,
+  label: 18,
+  description: 64,
+} as const
+
+/**
+ * Lower is better. Alias prefix beats alias word beats label beats a
+ * description word; mid-word hits never count.
+ */
+export function scoreSlashFields(
+  query: string,
+  fields: { alias: string; label: string; description?: string | null },
+): { score: number; match: SlashMatchSpan } | null {
+  const needle = query.trim().toLocaleLowerCase()
+  if (!needle) return { score: 0, match: { field: 'alias', start: 0, length: 0 } }
+
+  const aliasBare = canonicalSkillAlias(fields.alias).slice(1)
+  const candidates: {
+    field: SlashMatchSpan['field']
+    hit: FieldHit
+    weight: number
+  }[] = []
+
+  const aliasHit = scoreField(needle, aliasBare)
+  if (aliasHit) {
+    candidates.push({ field: 'alias', hit: aliasHit, weight: FIELD_WEIGHT.alias })
+  }
+  const labelHit = scoreField(needle, fields.label)
+  if (labelHit) {
+    candidates.push({ field: 'label', hit: labelHit, weight: FIELD_WEIGHT.label })
+  }
+  // One or two letters in a description ("c" in "current") is noise; alias
+  // prefixes still match from the first character.
+  if (fields.description && needle.length >= 3) {
+    const descriptionHit = scoreField(needle, fields.description)
+    if (descriptionHit) {
+      candidates.push({
+        field: 'description',
+        hit: descriptionHit,
+        weight: FIELD_WEIGHT.description,
+      })
+    }
+  }
+  if (candidates.length === 0) return null
+
+  let best = candidates[0]!
+  for (let index = 1; index < candidates.length; index += 1) {
+    const candidate = candidates[index]!
+    if (candidate.hit.score + candidate.weight < best.hit.score + best.weight) {
+      best = candidate
+    }
+  }
+  return {
+    score: best.hit.score + best.weight,
+    match: {
+      field: best.field,
+      start: best.hit.start,
+      length: best.hit.length,
+    },
+  }
+}
+
+function mapAliasHighlight(
+  displayedAlias: string,
+  match: SlashMatchSpan | null,
+): SlashMatchSpan | null {
+  if (!match || match.field !== 'alias') return match
+  if (displayedAlias.startsWith('/')) {
+    return { ...match, start: match.start + 1 }
+  }
+  return match
+}
+
+function nativeSlashIds(native: NativeSlashAvailability): NativeSlashCommandId[] {
+  const ids: NativeSlashCommandId[] = []
+  if (native.goal) ids.push('goal')
+  if (native.mission) ids.push('mission')
+  if (native.compact) ids.push('compact')
+  return ids
+}
+
+function rankedNativeItem(
+  id: NativeSlashCommandId,
+  score: number,
+  match: SlashMatchSpan | null,
+): RankedNativeSlashItem {
+  const command = NATIVE_SLASH_COMMAND_BY_ID[id]
+  const aliasDisplay = id === 'goal' ? command.label : command.alias
+  return {
+    kind: 'native',
+    id: `native:${id}`,
+    command,
+    score,
+    match:
+      match?.field === 'alias'
+        ? mapAliasHighlight(aliasDisplay, match)
+        : match,
+  }
+}
+
+function rankedSkillItem(
+  skill: SkillSummary,
+  score: number,
+  match: SlashMatchSpan | null,
+): RankedSkillSlashItem {
+  return {
+    kind: 'skill',
+    id: skill.id,
+    skill,
+    score,
+    match: mapAliasHighlight(skill.alias, match),
+  }
+}
+
+function slashItemSortKey(item: RankedSlashItem): string {
+  return item.kind === 'skill' ? item.skill.alias : item.command.alias
+}
+
+/**
+ * Ranked slash rows for the composer menu. Native commands and skills share
+ * one list so a skill prefix can outrank a weaker built-in, and so `/fresh`
+ * cannot lose to a description that merely contains "refresh".
+ */
+export function rankSlashSuggestions({
+  skills,
+  provider,
+  query,
+  native = {},
+}: {
+  skills: readonly SkillSummary[]
+  provider: AgentProvider
+  query: string
+  native?: NativeSlashAvailability
+}): RankedSlashItem[] {
+  const needle = query.trim().toLocaleLowerCase()
+  const supported = skills.filter((skill) =>
+    providerSupportsSkill(skill, provider),
+  )
+  const nativeIds = nativeSlashIds(native)
+
+  if (!needle) {
+    return [
+      ...nativeIds.map((id) => rankedNativeItem(id, 0, null)),
+      ...[...supported]
+        .sort((left, right) => left.alias.localeCompare(right.alias))
+        .map((skill) => rankedSkillItem(skill, 0, null)),
+    ]
+  }
+
+  const ranked: RankedSlashItem[] = []
+  for (const id of nativeIds) {
+    const command = NATIVE_SLASH_COMMAND_BY_ID[id]
+    const scored = scoreSlashFields(needle, command)
+    if (scored) ranked.push(rankedNativeItem(id, scored.score, scored.match))
+  }
+  for (const skill of supported) {
+    const scored = scoreSlashFields(needle, {
+      alias: skill.alias,
+      label: skill.label,
+      description: skill.description,
+    })
+    if (scored) ranked.push(rankedSkillItem(skill, scored.score, scored.match))
+  }
+  ranked.sort((left, right) => {
+    if (left.score !== right.score) return left.score - right.score
+    return slashItemSortKey(left).localeCompare(slashItemSortKey(right))
+  })
+  return ranked
+}
+
 /**
  * Provider-scoped slash rows. Unsupported skills are omitted rather than
  * shown greyed; the query only filters, it does not refetch.
@@ -55,18 +351,9 @@ export function filterSlashSkills(
   provider: AgentProvider,
   query: string,
 ): SkillSummary[] {
-  const needle = query.trim().toLowerCase()
-  return skills
-    .filter((skill) => providerSupportsSkill(skill, provider))
-    .filter((skill) => {
-      if (!needle) return true
-      return (
-        canonicalSkillAlias(skill.alias).includes(`/${needle}`) ||
-        skill.label.toLowerCase().includes(needle) ||
-        (skill.description ?? '').toLowerCase().includes(needle)
-      )
-    })
-    .sort((left, right) => left.alias.localeCompare(right.alias))
+  return rankSlashSuggestions({ skills, provider, query }).flatMap((item) =>
+    item.kind === 'skill' ? [item.skill] : [],
+  )
 }
 
 /**

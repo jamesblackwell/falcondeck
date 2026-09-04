@@ -29,15 +29,17 @@ import * as Haptics from 'expo-haptics'
 
 import {
   activeSlashQuery,
-  filterSlashSkills,
   insertTranscript,
   NO_AGENT_CAPABILITIES,
+  rankSlashSuggestions,
+  slashSkillSourceLabel,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
   type AgentProvider,
   type ImageInput,
   type ModelSummary,
   type ProviderOption,
+  type RankedSlashItem,
   type SkillSummary,
 } from '@falcondeck/client-core'
 
@@ -333,22 +335,27 @@ export const ChatInput = memo(function ChatInput({
     }
   }, [selectedProvider, slashOpen])
 
-  const filteredSkills = useMemo(
+  const slashItems = useMemo(
     () =>
-      filterSlashSkills(
-        liveSkills ?? skills,
-        selectedProvider,
-        slashQuery?.query ?? '',
-      ),
-    [liveSkills, selectedProvider, skills, slashQuery?.query],
+      rankSlashSuggestions({
+        skills: liveSkills ?? skills,
+        provider: selectedProvider,
+        query: slashQuery?.query ?? '',
+        native: {
+          goal: Boolean(onGoalCommand) && capabilities.supports_goals,
+          compact: compactCommandAvailable,
+        },
+      }),
+    [
+      capabilities.supports_goals,
+      compactCommandAvailable,
+      liveSkills,
+      onGoalCommand,
+      selectedProvider,
+      skills,
+      slashQuery?.query,
+    ],
   )
-  const showGoalCommand =
-    Boolean(onGoalCommand) &&
-    capabilities.supports_goals &&
-    'goal'.includes(slashQuery?.query.trim().toLowerCase() ?? '')
-  const showCompactCommand =
-    compactCommandAvailable &&
-    'compact'.includes(slashQuery?.query.trim().toLowerCase() ?? '')
 
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex: number) => {
@@ -521,6 +528,23 @@ export const ChatInput = memo(function ChatInput({
     onGoalCommand()
   }, [onChangeText, onGoalCommand, slashQuery, value])
 
+  const handleSlashItem = useCallback(
+    (item: RankedSlashItem) => {
+      if (item.kind === 'skill') {
+        handleInsertSkill(item.skill.alias)
+        return
+      }
+      if (item.command.id === 'goal') {
+        handleGoalCommand()
+        return
+      }
+      if (item.command.id === 'compact') {
+        handleInsertSkill(item.command.alias)
+      }
+    },
+    [handleGoalCommand, handleInsertSkill],
+  )
+
   const canSend = hasContent && !disabled && !sendDisabled
   const canStop = showStop && !disabled && !sendDisabled && !isStopping
   const canUsePrimary = showStop ? canStop : canSend
@@ -651,85 +675,87 @@ export const ChatInput = memo(function ChatInput({
         </Animated.View>
         {slashQuery ? (
           <View style={styles.skillMenu}>
-            {filteredSkills.length > 0 || showGoalCommand || showCompactCommand ? (
-              <>
-                {showGoalCommand ? (
-                  <Pressable
-                    style={[
-                      styles.skillItem,
-                      filteredSkills.length === 0 &&
-                        !showCompactCommand &&
-                        styles.skillItemLast,
-                    ]}
-                    onPress={handleGoalCommand}
-                    accessibilityRole="button"
-                    accessibilityLabel="Set a goal"
-                  >
-                    <Target
-                      size={theme.iconSize.sm}
-                      color={theme.colors.fg.muted}
-                    />
-                    <View style={styles.skillItemBody}>
-                      <Text color="primary" size="sm" weight="medium">
-                        Goal
-                      </Text>
-                      <Text variant="caption" color="secondary" size="xs">
-                        Set a goal to keep pursuing
-                      </Text>
-                    </View>
-                  </Pressable>
-                ) : null}
-                {showCompactCommand ? (
-                  <Pressable
-                    style={[
-                      styles.skillItem,
-                      filteredSkills.length === 0 && styles.skillItemLast,
-                    ]}
-                    onPress={() => handleInsertSkill('/compact')}
-                    accessibilityRole="button"
-                    accessibilityLabel="Compact conversation context"
-                  >
-                    <BookOpen
-                      size={theme.iconSize.sm}
-                      color={theme.colors.fg.muted}
-                    />
-                    <View style={styles.skillItemBody}>
-                      <View style={styles.skillHeading}>
-                        <View style={styles.skillAliasPill}>
-                          <Text
-                            variant="caption"
-                            size="2xs"
-                            color="secondary"
-                            weight="semibold"
-                          >
-                            /compact
-                          </Text>
-                        </View>
-                        <Text variant="caption" size="2xs" color="muted">
-                          harness
+            {slashItems.length > 0 ? (
+              slashItems.map((item, index) => {
+                const lastItem = index === slashItems.length - 1
+                if (item.kind === 'native' && item.command.id === 'goal') {
+                  return (
+                    <Pressable
+                      key={item.id}
+                      style={[
+                        styles.skillItem,
+                        lastItem && styles.skillItemLast,
+                      ]}
+                      onPress={() => handleSlashItem(item)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Set a goal"
+                    >
+                      <Target
+                        size={theme.iconSize.sm}
+                        color={theme.colors.fg.muted}
+                      />
+                      <View style={styles.skillItemBody}>
+                        <Text color="primary" size="sm" weight="medium">
+                          Goal
+                        </Text>
+                        <Text variant="caption" color="secondary" size="xs">
+                          {item.command.description}
                         </Text>
                       </View>
-                      <Text color="primary" size="sm" weight="medium">
-                        Compact context
-                      </Text>
-                      <Text variant="caption" color="secondary" size="xs">
-                        Compact conversation history to free context
-                      </Text>
-                    </View>
-                  </Pressable>
-                ) : null}
-                {filteredSkills.map((skill) => {
-                const lastItem =
-                  filteredSkills[filteredSkills.length - 1]?.id === skill.id
-
+                    </Pressable>
+                  )
+                }
+                if (item.kind === 'native' && item.command.id === 'compact') {
+                  return (
+                    <Pressable
+                      key={item.id}
+                      style={[
+                        styles.skillItem,
+                        lastItem && styles.skillItemLast,
+                      ]}
+                      onPress={() => handleSlashItem(item)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Compact conversation context"
+                    >
+                      <BookOpen
+                        size={theme.iconSize.sm}
+                        color={theme.colors.fg.muted}
+                      />
+                      <View style={styles.skillItemBody}>
+                        <View style={styles.skillHeading}>
+                          <View style={styles.skillAliasPill}>
+                            <Text
+                              variant="caption"
+                              size="2xs"
+                              color="secondary"
+                              weight="semibold"
+                            >
+                              {item.command.alias}
+                            </Text>
+                          </View>
+                          <Text variant="caption" size="2xs" color="muted">
+                            Harness
+                          </Text>
+                        </View>
+                        <Text color="primary" size="sm" weight="medium">
+                          Compact context
+                        </Text>
+                        <Text variant="caption" color="secondary" size="xs">
+                          {item.command.description}
+                        </Text>
+                      </View>
+                    </Pressable>
+                  )
+                }
+                if (item.kind !== 'skill') return null
                 return (
                   <Pressable
-                    key={skill.id}
+                    key={item.id}
                     style={[
                       styles.skillItem,
                       lastItem && styles.skillItemLast,
                     ]}
-                    onPress={() => handleInsertSkill(skill.alias)}
+                    onPress={() => handleSlashItem(item)}
                   >
                     <View style={styles.skillItemBody}>
                       <View style={styles.skillHeading}>
@@ -740,30 +766,31 @@ export const ChatInput = memo(function ChatInput({
                             color="secondary"
                             weight="semibold"
                           >
-                            {skill.alias}
+                            {item.skill.alias}
                           </Text>
                         </View>
                         <Text variant="caption" size="2xs" color="muted">
-                          {skill.source_kind.replace('_', ' ')}
+                          {slashSkillSourceLabel(item.skill.source_kind)}
                         </Text>
                       </View>
                       <Text color="primary" size="sm" weight="medium">
-                        {skill.label}
+                        {item.skill.label}
                       </Text>
-                      {skill.description ? (
+                      {item.skill.description ? (
                         <Text variant="caption" color="secondary" size="xs">
-                          {skill.description}
+                          {item.skill.description}
                         </Text>
                       ) : null}
                     </View>
                   </Pressable>
                 )
-                })}
-              </>
+              })
             ) : (
               <View style={styles.skillEmpty}>
                 <Text variant="caption" color="muted">
-                  No commands or skills match /{slashQuery.query}
+                  {slashQuery.query
+                    ? `No commands or skills match /${slashQuery.query}`
+                    : 'No commands or skills yet'}
                 </Text>
               </View>
             )}

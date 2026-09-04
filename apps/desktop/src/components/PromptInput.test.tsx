@@ -659,7 +659,7 @@ describe("PromptInput", () => {
     ) as HTMLTextAreaElement;
     textarea.setSelectionRange(8, 8);
     fireEvent.click(textarea);
-    expect(screen.queryByRole("button", { name: /mission/i })).toBeNull();
+    expect(screen.queryByRole("option", { name: /mission/i })).toBeNull();
 
     rerender(
       <PromptInput
@@ -672,7 +672,7 @@ describe("PromptInput", () => {
     textarea.setSelectionRange(8, 8);
     fireEvent.click(textarea);
 
-    const command = screen.getByRole("button", { name: /mission/i });
+    const command = screen.getByRole("option", { name: /mission/i });
     expect(command).toHaveTextContent("FalconDeck");
     expect(command).toHaveTextContent("human review");
     fireEvent.mouseDown(command);
@@ -720,6 +720,51 @@ describe("PromptInput", () => {
     expect(screen.queryByText(/only unavailable/)).not.toBeInTheDocument();
   });
 
+  it("ranks an alias prefix above a description that only contains the query mid-word", () => {
+    const onValueChange = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="/fresh"
+        onValueChange={onValueChange}
+        skills={[
+          {
+            id: "skill:copy-editing",
+            label: "Copy editing",
+            alias: "/copy-editing",
+            availability: "both",
+            providers: ["codex"],
+            source_kind: "project_file",
+            description:
+              "Edit, review, proofread, polish, tighten, or refresh existing marketing copy while preserving the core message.",
+          },
+          {
+            id: "skill:fresh-eyes-review",
+            label: "Fresh eyes review",
+            alias: "/fresh-eyes-review",
+            availability: "both",
+            providers: ["codex"],
+            source_kind: "project_file",
+            description:
+              "Reread recent code, catch obvious bugs/smells, and make focused cleanup fixes before handoff.",
+          },
+        ]}
+      />,
+    );
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    textarea.setSelectionRange(6, 6);
+    fireEvent.click(textarea);
+
+    const selected = screen.getByRole("option", { selected: true });
+    expect(selected).toHaveTextContent("/fresh-eyes-review");
+    expect(screen.queryByText("/copy-editing")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(textarea, { key: "Tab" });
+    expect(onValueChange).toHaveBeenCalledWith("/fresh-eyes-review ");
+  });
+
   it("refetches skills when the slash menu opens and filters locally while typing", async () => {
     const loadSkills = vi.fn(async () => [
       {
@@ -764,7 +809,7 @@ describe("PromptInput", () => {
     textarea.setSelectionRange(1, 1);
     fireEvent.click(textarea);
 
-    const emptyState = screen.getByText(/No commands or skills match/);
+    const emptyState = screen.getByText(/No commands or skills yet/);
     expect(emptyState.parentElement).toHaveClass("absolute", "bottom-full");
   });
 
@@ -784,8 +829,8 @@ describe("PromptInput", () => {
     textarea.setSelectionRange(6, 6);
     fireEvent.click(textarea);
 
-    const command = screen.getByRole("button", { name: /compact/i });
-    expect(command).toHaveTextContent("harness");
+    const command = screen.getByRole("option", { name: /compact/i });
+    expect(command).toHaveTextContent(/harness/i);
     fireEvent.mouseDown(command);
     expect(onValueChange).toHaveBeenCalledWith("/compact ");
   });

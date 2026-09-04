@@ -1,10 +1,8 @@
 import * as Popover from "@radix-ui/react-popover";
 import {
-  BookOpen,
   ChevronLeft,
   ImagePlus,
   Mic,
-  Orbit,
   Plus,
   Quote,
   Send,
@@ -33,14 +31,15 @@ import type {
   ImageInput,
   ModelSummary,
   ProviderOption,
+  RankedSlashItem,
   SkillSummary,
 } from "@falcondeck/client-core";
 import {
   activeSlashQuery,
   anyModelHasFastTier,
-  filterSlashSkills,
   modelFastTier,
   NO_AGENT_CAPABILITIES,
+  rankSlashSuggestions,
   resolveServiceTier,
 } from "@falcondeck/client-core";
 import { ActivityDiamond, Button, Tooltip, cn } from "@falcondeck/ui";
@@ -57,6 +56,7 @@ import {
   canRenderAttachmentImage,
 } from "./attachment-preview";
 import { GoalPanel, type GoalPanelProps } from "./goal-control";
+import { SlashCommandMenu } from "./slash-command-menu";
 import { formatVoiceDuration, VoiceWaveform } from "./voice-waveform";
 import { isComposingKeyboardEvent } from "../lib/keyboard";
 import type { QuotedSelection } from "../lib/quoted-selection";
@@ -371,35 +371,46 @@ export const PromptInput = memo(function PromptInput({
     };
   }, [selectedProvider, slashOpen]);
 
-  const filteredSkills = useMemo(
+  const slashItems = useMemo(
     () =>
-      filterSlashSkills(
-        liveSkills ?? skills,
-        selectedProvider,
-        slashQuery?.query ?? "",
-      ),
-    [liveSkills, selectedProvider, skills, slashQuery?.query],
+      rankSlashSuggestions({
+        skills: liveSkills ?? skills,
+        provider: selectedProvider,
+        query: slashQuery?.query ?? "",
+        native: {
+          goal: Boolean(goal),
+          mission: missionCommandAvailable,
+          compact: compactCommandAvailable,
+        },
+      }),
+    [
+      compactCommandAvailable,
+      goal,
+      liveSkills,
+      missionCommandAvailable,
+      selectedProvider,
+      skills,
+      slashQuery?.query,
+    ],
   );
-
-  const showGoalCommand =
-    Boolean(goal) &&
-    "goal".includes(slashQuery?.query.trim().toLowerCase() ?? "");
-  const showMissionCommand =
-    missionCommandAvailable &&
-    "mission".includes(slashQuery?.query.trim().toLowerCase() ?? "");
-  const showCompactCommand =
-    compactCommandAvailable &&
-    "compact".includes(slashQuery?.query.trim().toLowerCase() ?? "");
-  const nativeCommandCount =
-    (showGoalCommand ? 1 : 0) +
-    (showMissionCommand ? 1 : 0) +
-    (showCompactCommand ? 1 : 0);
-  const slashSuggestionCount =
-    filteredSkills.length + nativeCommandCount;
+  const slashSuggestionCount = slashItems.length;
+  const slashListId = `${textareaId}-slash`;
+  const clampedSlashIndex =
+    slashSuggestionCount === 0
+      ? 0
+      : Math.min(activeSkillIndex, slashSuggestionCount - 1);
+  const activeSlashItem = slashItems[clampedSlashIndex] ?? null;
 
   useEffect(() => {
     setActiveSkillIndex(0);
   }, [slashQuery?.query]);
+
+  useEffect(() => {
+    if (slashSuggestionCount === 0) return;
+    setActiveSkillIndex((current) =>
+      Math.min(current, slashSuggestionCount - 1),
+    );
+  }, [slashSuggestionCount]);
 
   useEffect(() => {
     setAttachmentInputNotice(null);
@@ -514,23 +525,6 @@ export const PromptInput = memo(function PromptInput({
     ],
   );
 
-  const activeSkill =
-    filteredSkills.length > 0 && activeSkillIndex >= nativeCommandCount
-      ? (filteredSkills[
-          Math.min(
-            activeSkillIndex - nativeCommandCount,
-            filteredSkills.length - 1,
-          )
-        ] ?? null)
-      : null;
-  const goalCommandActive = showGoalCommand && activeSkillIndex === 0;
-  const missionCommandActive =
-    showMissionCommand && activeSkillIndex === (showGoalCommand ? 1 : 0);
-  const compactCommandActive =
-    showCompactCommand &&
-    activeSkillIndex ===
-      (showGoalCommand ? 1 : 0) + (showMissionCommand ? 1 : 0);
-
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex?: number | null) => {
       if (disabled) {
@@ -580,6 +574,16 @@ export const PromptInput = memo(function PromptInput({
         );
         return;
       }
+      if (event.key === "Home") {
+        event.preventDefault();
+        setActiveSkillIndex(0);
+        return;
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        setActiveSkillIndex(slashSuggestionCount - 1);
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         setSlashQuery(null);
@@ -588,40 +592,10 @@ export const PromptInput = memo(function PromptInput({
       if (
         !hasCommandModifier &&
         (event.key === "Tab" || event.key === "Enter") &&
-        goalCommandActive
+        activeSlashItem
       ) {
         event.preventDefault();
-        openGoalCommand();
-        return;
-      }
-      if (
-        !hasCommandModifier &&
-        (event.key === "Tab" || event.key === "Enter") &&
-        missionCommandActive
-      ) {
-        event.preventDefault();
-        insertMissionPrompt();
-        return;
-      }
-      if (
-        !hasCommandModifier &&
-        (event.key === "Tab" || event.key === "Enter") &&
-        compactCommandActive
-      ) {
-        event.preventDefault();
-        insertSkillAlias("/compact");
-        return;
-      }
-      if (
-        !hasCommandModifier &&
-        (event.key === "Tab" || event.key === "Enter") &&
-        activeSkill
-      ) {
-        // Accept the highlighted row regardless of provider support — the
-        // composer is an editor, and completing an unavailable skill still
-        // beats a dead Tab. The row keeps its "unavailable" hint.
-        event.preventDefault();
-        insertSkillAlias(activeSkill.alias);
+        activateSlashItem(activeSlashItem);
         return;
       }
     }
@@ -795,6 +769,27 @@ export const PromptInput = memo(function PromptInput({
     setPlusMenuView("goal");
     setPlusMenuOpen(true);
   }, [goal, onValueChange, slashQuery, value]);
+
+  const activateSlashItem = useCallback(
+    (item: RankedSlashItem) => {
+      if (item.kind === "skill") {
+        insertSkillAlias(item.skill.alias);
+        return;
+      }
+      switch (item.command.id) {
+        case "goal":
+          openGoalCommand();
+          return;
+        case "mission":
+          insertMissionPrompt();
+          return;
+        case "compact":
+          insertSkillAlias(item.command.alias);
+          return;
+      }
+    },
+    [insertMissionPrompt, insertSkillAlias, openGoalCommand],
+  );
 
   return (
     <div className="mx-auto w-full max-w-3xl px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-3 md:pb-0">
@@ -1046,6 +1041,14 @@ export const PromptInput = memo(function PromptInput({
               value={value}
               disabled={disabled || Boolean(voice)}
               aria-label="Message composer"
+              aria-autocomplete={slashQuery ? "list" : undefined}
+              aria-controls={slashQuery ? slashListId : undefined}
+              aria-expanded={slashQuery ? true : undefined}
+              aria-activedescendant={
+                slashQuery && activeSlashItem
+                  ? `${slashListId}-${activeSlashItem.id}`
+                  : undefined
+              }
               onChange={handleChange}
               onKeyDown={handleKeyDown}
               onClick={handleCaretMove}
@@ -1081,131 +1084,14 @@ export const PromptInput = memo(function PromptInput({
         ) : null}
 
         {slashQuery && !disabled && !voice ? (
-          <div className="absolute right-3 bottom-full left-3 z-40 mb-2 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]">
-            {slashSuggestionCount > 0 ? (
-              <div className="max-h-64 overflow-y-auto py-1">
-                {showGoalCommand ? (
-                  <button
-                    type="button"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      openGoalCommand();
-                    }}
-                    className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
-                      goalCommandActive ? "bg-surface-3" : "hover:bg-surface-2"
-                    }`}
-                  >
-                    <Target
-                      className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted"
-                      aria-hidden="true"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[length:var(--fd-text-sm)] font-medium">
-                        Goal
-                      </div>
-                      <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
-                        Set a goal to keep pursuing
-                      </div>
-                    </div>
-                  </button>
-                ) : null}
-                {showMissionCommand ? (
-                  <button
-                    type="button"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      insertMissionPrompt();
-                    }}
-                    className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
-                      missionCommandActive
-                        ? "bg-surface-3"
-                        : "hover:bg-surface-2"
-                    }`}
-                  >
-                    <Orbit
-                      className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted"
-                      aria-hidden="true"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
-                        <span className="font-medium">/mission</span>
-                        <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
-                          FalconDeck
-                        </span>
-                      </div>
-                      <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
-                        Draft a bounded mission for human review
-                      </div>
-                    </div>
-                  </button>
-                ) : null}
-                {showCompactCommand ? (
-                  <button
-                    type="button"
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      insertSkillAlias("/compact");
-                    }}
-                    className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
-                      compactCommandActive
-                        ? "bg-surface-3"
-                        : "hover:bg-surface-2"
-                    }`}
-                  >
-                    <BookOpen
-                      className="mt-0.5 h-4 w-4 shrink-0 text-fg-muted"
-                      aria-hidden="true"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
-                        <span className="font-medium">/compact</span>
-                        <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
-                          harness
-                        </span>
-                      </div>
-                      <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
-                        Compact conversation history to free context
-                      </div>
-                    </div>
-                  </button>
-                ) : null}
-                {filteredSkills.map((skill, index) => {
-                  const active =
-                    index + nativeCommandCount === activeSkillIndex;
-                  return (
-                    <button
-                      key={skill.id}
-                      type="button"
-                      onMouseDown={(event) => {
-                        event.preventDefault();
-                        insertSkillAlias(skill.alias);
-                      }}
-                      className={`flex w-full items-start gap-3 px-3 py-2 text-left text-fg-primary transition-colors ${
-                        active ? "bg-surface-3" : "hover:bg-surface-2"
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
-                          <span className="font-medium">{skill.alias}</span>
-                          <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
-                            {skill.source_kind.replace("_", " ")}
-                          </span>
-                        </div>
-                        <div className="truncate text-[length:var(--fd-text-xs)] text-fg-secondary">
-                          {skill.description ?? skill.label}
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
-                No commands or skills match{" "}
-                <span className="font-medium">/{slashQuery.query}</span>
-              </div>
-            )}
-          </div>
+          <SlashCommandMenu
+            query={slashQuery.query}
+            items={slashItems}
+            activeIndex={clampedSlashIndex}
+            onActiveIndexChange={setActiveSkillIndex}
+            onSelect={activateSlashItem}
+            listId={slashListId}
+          />
         ) : null}
 
         {sendDisabled && sendDisabledReason ? (
