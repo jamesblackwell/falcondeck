@@ -557,6 +557,13 @@ async fn resolve_thread(
         AutomationThreadTarget::NewEachRun => {
             start_automation_thread(app, automation, workspace_id).await
         }
+        // `current` is pinned to a concrete thread when the definition is
+        // created or updated, so a stored value here means the definition
+        // bypassed the control service.
+        AutomationThreadTarget::Current => Err(
+            "automation has an unresolved \"current\" thread target; edit it to choose a thread"
+                .to_string(),
+        ),
         AutomationThreadTarget::Managed { thread_id } => {
             if let Some(thread_id) = thread_id
                 && let Ok(thread) = app.thread_summary(workspace_id, thread_id).await

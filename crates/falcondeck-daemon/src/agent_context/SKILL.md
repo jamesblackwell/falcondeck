@@ -69,10 +69,37 @@ workspace to review my inbox and surface anything requiring attention."
     "target": {
       "workspace_path": "/Users/james/www/sites/quizgecko",
       "provider": "codex",
-      "thread_strategy": "managed"
+      "thread": { "kind": "managed" }
     }
   },
   "idempotency_key": "weekday-inbox-review-v1"
+}
+```
+
+User (mid-conversation): "Check back on this in a couple of hours."
+
+The user expects the follow-up in this conversation, so the target uses
+`"thread": { "kind": "current" }`. FalconDeck pins it to the thread the
+request came from; you do not need to know your own thread id, and you
+should not pass `workspace_path` or `provider` for another conversation:
+
+```json
+{
+  "operation": "automation.create",
+  "arguments": {
+    "name": "Check back on the campaign",
+    "trigger": { "kind": "once", "run_at": "2026-08-17T15:00:00+01:00" },
+    "task": {
+      "kind": "prompt",
+      "instruction": "Check back on the email campaign work from earlier in this thread and report status."
+    },
+    "target": {
+      "workspace_path": "/Users/james/www/sites/quizgecko",
+      "provider": "codex",
+      "thread": { "kind": "current" }
+    }
+  },
+  "idempotency_key": "campaign-check-back-v1"
 }
 ```
 
@@ -91,8 +118,19 @@ agent and FalconDeck keeps only bounded run metadata.
   final reply is exactly that marker — ideal for "only tell me if something
   needs attention" automations.
 - **Targets**: a canonical workspace path (never a runtime workspace id), an
-  open provider id, and a thread strategy — `managed` (one remembered
-  thread), `existing`, or `new_per_run`.
+  open provider id, and a `thread` object whose `kind` is one of:
+  - `current` — continue in the thread making the request. Default for
+    anything the user asks for from inside a conversation: "check back
+    later", "remind me here", "re-run this tomorrow". Resolved to `existing`
+    on creation; the thread's provider and workspace override the supplied
+    ones.
+  - `managed` — one dedicated thread FalconDeck creates and reuses. For
+    standing schedules unrelated to the current conversation.
+  - `existing` — a specific `thread_id` the user chose.
+  - `new_each_run` — a clean thread every run. Only when the user wants no
+    prior context each time.
+  If the user's wording is ambiguous, prefer `current` and say which thread
+  the run will land in.
 - **Policies**: concurrency (`skip` default, `queue_one`, `allow`) and
   misfire (`skip` default, `run_once`). No automatic retries: provider tasks
   can have external side effects.

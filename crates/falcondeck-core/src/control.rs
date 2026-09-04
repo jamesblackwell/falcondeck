@@ -370,23 +370,39 @@ pub struct AutomationTarget {
 }
 
 /// Which native thread an automation runs in.
+///
+/// Choose by asking where the user expects to see the result. Work the user
+/// asked for from inside a conversation ("check back on this in two hours",
+/// "remind me here tomorrow", "re-run the report in this thread") belongs in
+/// that conversation: use `current`. Standing schedules that are not about
+/// the conversation they were created from get their own `managed` thread.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AutomationThreadTarget {
-    /// Default. FalconDeck creates a dedicated thread and remembers its id.
+    /// Continue in the thread the request is being made from, so the run
+    /// lands in the same conversation with its full context. Preferred for
+    /// follow-ups, check-ins and reminders the user asks for mid-conversation.
+    /// Resolved to `existing` when the automation is created; requires the
+    /// request to come from inside a FalconDeck thread.
+    Current,
+
+    /// A dedicated thread FalconDeck creates on first run and reuses after
+    /// that. Use for standing schedules unrelated to the current
+    /// conversation, such as a daily inbox review.
     Managed {
         /// Thread id once FalconDeck has created the managed thread.
         #[serde(default)]
         thread_id: Option<String>,
     },
 
-    /// Run in a user-selected existing thread.
+    /// Continue in a specific existing thread by id.
     Existing {
         /// The chosen thread id.
         thread_id: String,
     },
 
-    /// Create a clean native thread for every execution.
+    /// Create a clean native thread for every execution. Use only when each
+    /// run must start without prior context.
     NewEachRun,
 }
 

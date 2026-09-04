@@ -38,3 +38,8 @@ When the conversation has clearly moved on from its current title, call
 When the user asks to schedule work, change FalconDeck settings, or inspect
 automations, use `falcondeck_search` → `falcondeck_get` → `falcondeck_execute`.
 Read the `falcondeck-control` skill for schemas, revisions, and idempotency.
+
+Follow-ups the user asks for during a conversation ("check back in a few
+hours", "remind me here tomorrow") should run in this same thread: create the
+automation with `"thread": { "kind": "current" }`. Use a `managed` thread only
+for standing schedules that are not about this conversation.

@@ -712,10 +712,13 @@ impl ControlService {
         match capability.id {
             ops::SETTINGS_UPDATE => self.update_settings(&request.arguments).await,
             ops::AUTOMATION_CREATE => {
-                self.create_automation(&request.arguments, deps, settings, None)
+                self.create_automation(&request.arguments, context, deps, settings, None)
                     .await
             }
-            ops::AUTOMATION_UPDATE => self.update_automation(request, deps, settings, None).await,
+            ops::AUTOMATION_UPDATE => {
+                self.update_automation(request, context, deps, settings, None)
+                    .await
+            }
             ops::AUTOMATION_PAUSE => {
                 self.set_automation_state(request, AutomationState::Paused, None)
                     .await
@@ -790,11 +793,13 @@ impl ControlService {
     async fn create_automation(
         &self,
         arguments: &serde_json::Map<String, Value>,
+        context: &ControlRequestContext,
         deps: &ControlDeps<'_>,
         settings: &AgentControlSettings,
         owner: Option<AutomationOwner>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
-        let args: registry::CreateAutomationArgs = decode_arguments(arguments)?;
+        let mut args: registry::CreateAutomationArgs = decode_arguments(arguments)?;
+        Self::resolve_current_thread(&mut args.target, context, deps).await?;
         automations::validate_definition(
             &args.name,
             args.description.as_deref(),
@@ -846,17 +851,21 @@ impl ControlService {
     async fn update_automation(
         &self,
         request: &ControlExecuteRequest,
+        context: &ControlRequestContext,
         deps: &ControlDeps<'_>,
         settings: &AgentControlSettings,
         owner_extension_id: Option<&str>,
     ) -> Result<(Value, Vec<ControlDomain>), ControlError> {
-        let args: registry::UpdateAutomationArgs = decode_arguments(&request.arguments)?;
+        let mut args: registry::UpdateAutomationArgs = decode_arguments(&request.arguments)?;
         if args.is_empty() {
             return Err(ControlError::invalid_arguments(
                 "at least one automation field is required",
             ));
         }
         require_revision(request)?;
+        if let Some(target) = args.target.as_mut() {
+            Self::resolve_current_thread(target, context, deps).await?;
+        }
         let existing = self
             .automation(&args.automation_id)
             .await
@@ -1055,6 +1064,62 @@ impl ControlService {
             json!({ "ok": true, "message": "automation deleted", "id": automation_id }),
             vec![ControlDomain::Automations],
         ))
+    }
+
+    /// Pins a `current` thread target to the thread the request came from.
+    /// The stored definition is always concrete: `current` is a request-time
+    /// convenience so an agent can say "continue in this conversation"
+    /// without knowing its own thread id. The thread's provider and canonical
+    /// workspace path win over whatever the caller supplied, because the
+    /// point of `current` is that conversation.
+    async fn resolve_current_thread(
+        target: &mut falcondeck_core::control::AutomationTarget,
+        context: &ControlRequestContext,
+        deps: &ControlDeps<'_>,
+    ) -> Result<(), ControlError> {
+        if target.thread != falcondeck_core::control::AutomationThreadTarget::Current {
+            return Ok(());
+        }
+        let Some(thread_id) = context
+            .thread_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Err(ControlError::field(
+                "target.thread",
+                "thread kind \"current\" needs a request made from inside a FalconDeck thread; \
+                 this request is not attached to one, so use \"existing\" with a thread_id or \"managed\"",
+            ));
+        };
+        let Some(app) = deps.app else {
+            return Err(ControlError::new(
+                "daemon_unavailable",
+                "FalconDeck could not resolve the current thread for this automation.",
+                true,
+            ));
+        };
+        let workspace_path = context
+            .workspace_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or(target.workspace_path.as_str());
+        let Some((canonical_path, provider)) =
+            app.control_thread_target(workspace_path, thread_id).await
+        else {
+            return Err(ControlError::field(
+                "target.thread",
+                format!(
+                    "the current thread {thread_id} is no longer available in {workspace_path}"
+                ),
+            ));
+        };
+        target.workspace_path = canonical_path;
+        target.provider = provider;
+        target.thread = falcondeck_core::control::AutomationThreadTarget::Existing {
+            thread_id: thread_id.to_string(),
+        };
+        Ok(())
     }
 
     async fn validate_against_daemon(
@@ -1729,9 +1794,14 @@ impl ControlService {
                         "misfire_policy": misfire_policy,
                     });
                     let map = arguments.as_object().expect("automation arguments object");
+                    let system_context = ControlRequestContext {
+                        origin: ControlOrigin::System,
+                        ..Default::default()
+                    };
                     let (data, changed) = self
                         .create_automation(
                             map,
+                            &system_context,
                             &deps,
                             &settings,
                             Some(AutomationOwner {
@@ -1785,8 +1855,18 @@ impl ControlService {
                     expected_revision: Some(expected_revision),
                     idempotency_key: None,
                 };
+                let system_context = ControlRequestContext {
+                    origin: ControlOrigin::System,
+                    ..Default::default()
+                };
                 let (_, changed) = self
-                    .update_automation(&request, &deps, &settings, Some(extension_id))
+                    .update_automation(
+                        &request,
+                        &system_context,
+                        &deps,
+                        &settings,
+                        Some(extension_id),
+                    )
                     .await?;
                 domains.extend(changed);
             }

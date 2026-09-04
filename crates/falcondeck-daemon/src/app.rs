@@ -1442,11 +1442,72 @@ impl AppState {
         context: &falcondeck_core::control::ControlRequestContext,
     ) -> falcondeck_core::control::ControlExecuteResponse {
         let deps = crate::control::ControlDeps { app: Some(self) };
+        // Harnesses with one control server per workspace (Codex app-server)
+        // cannot tag the request with a thread, so bind it the same way the
+        // extensions bridge does: to the thread whose transcript is running
+        // this exact MCP call, or the single running thread in the workspace.
+        let inferred = match (
+            &context.origin,
+            &context.thread_id,
+            &context.workspace_path,
+            &context.provider,
+        ) {
+            (
+                falcondeck_core::control::ControlOrigin::Mcp,
+                None,
+                Some(workspace_path),
+                Some(provider),
+            ) => {
+                let call_arguments = serde_json::to_value(&request).unwrap_or(Value::Null);
+                self.resolve_workspace_bridge_thread(
+                    crate::connectors::BUILTIN_CONNECTOR_NAME,
+                    workspace_path,
+                    provider,
+                    "falcondeck_execute",
+                    &call_arguments,
+                )
+                .await
+            }
+            _ => None,
+        };
+        let bound_context;
+        let context = if let Some(thread_id) = inferred {
+            bound_context = falcondeck_core::control::ControlRequestContext {
+                thread_id: Some(thread_id),
+                ..context.clone()
+            };
+            &bound_context
+        } else {
+            context
+        };
         let (response, event) = self.inner.control.execute(request, context, &deps).await;
         if let Some(change) = event {
             self.emit_control_state_change(change);
         }
         response
+    }
+
+    /// Looks up a thread by its workspace path for automation targeting.
+    /// Returns the workspace's canonical path and the thread's provider so a
+    /// `current` thread target can be pinned to a concrete `existing` one.
+    pub(crate) async fn control_thread_target(
+        &self,
+        workspace_path: &str,
+        thread_id: &str,
+    ) -> Option<(String, AgentProvider)> {
+        let canonical = std::path::PathBuf::from(workspace_path)
+            .canonicalize()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| workspace_path.to_string());
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .values()
+            .find(|workspace| workspace.summary.path == canonical)?;
+        let thread = workspace.threads.get(thread_id)?;
+        Some((
+            workspace.summary.path.clone(),
+            thread.summary.provider.clone(),
+        ))
     }
 
     /// Whether a provider id can run on this daemon: a configured binary or
@@ -2752,6 +2813,7 @@ impl AppState {
         let inferred_bridge_thread = match trusted_bridge.as_ref() {
             Some(context) if context.thread_id.is_none() => {
                 self.resolve_workspace_bridge_thread(
+                    crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
                     &context.workspace_path,
                     &context.provider,
                     &request.name,
@@ -3031,6 +3093,7 @@ impl AppState {
     /// rule; ambiguity still fails closed.
     async fn resolve_workspace_bridge_thread(
         &self,
+        server: &str,
         workspace_path: &str,
         provider: &AgentProvider,
         tool_name: &str,
@@ -3052,6 +3115,7 @@ impl AppState {
                         .values()
                         .map(|thread| (&thread.summary, thread.items.as_slice())),
                     provider,
+                    server,
                     tool_name,
                     arguments,
                 );
@@ -4254,13 +4318,14 @@ fn unambiguous_running_thread_id<'a>(
 }
 
 /// Picks the one running thread whose transcript holds a still-running MCP
-/// call to the extensions bridge for `tool_name`. An exact argument match wins;
+/// call to `server` for `tool_name`. An exact argument match wins;
 /// when the harness reports arguments differently from what the bridge
 /// received, a unique tool-name match is accepted instead. Two threads
 /// executing the same call are ambiguous and yield `None`.
 fn thread_with_in_flight_bridge_call<'a>(
     threads: impl Iterator<Item = (&'a ThreadSummary, &'a [ConversationItem])>,
     provider: &AgentProvider,
+    server: &str,
     tool_name: &str,
     arguments: &Value,
 ) -> Option<String> {
@@ -4280,7 +4345,7 @@ fn thread_with_in_flight_bridge_call<'a>(
                 continue;
             }
             let Some(falcondeck_core::ToolCallDetail::Mcp {
-                server,
+                server: call_server,
                 tool,
                 arguments: call_arguments,
                 ..
@@ -4288,7 +4353,7 @@ fn thread_with_in_flight_bridge_call<'a>(
             else {
                 continue;
             };
-            if server != crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME || tool != tool_name {
+            if call_server != server || tool != tool_name {
                 continue;
             }
             has_name = true;

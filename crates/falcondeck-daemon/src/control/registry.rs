@@ -278,7 +278,7 @@ pub fn capabilities() -> &'static [Capability] {
         Capability {
             id: ops::AUTOMATION_CREATE,
             title: "Create automation",
-            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule.",
+            description: "Create a recurring, interval, one-time or conditional-prompt automation that runs an agent instruction on a schedule. When the user asks for a follow-up, check-in, reminder or re-run of what this conversation is doing, target thread kind \"current\" so the run continues in this thread with its context; reserve \"managed\" for standing schedules unrelated to the conversation and \"new_each_run\" for runs that must start clean.",
             domain: "automation",
             scopes: &[ControlScope::Host, ControlScope::Workspace],
             input_schema: schema::<CreateAutomationArgs>(),
@@ -317,7 +317,26 @@ pub fn capabilities() -> &'static [Capability] {
                     })
                 ),
                 example!(
-                    "One-time reminder tomorrow at 10:00",
+                    "User says \"check back on this in three hours\": one-time follow-up that continues in the current conversation",
+                    json!({
+                        "name": "Email campaign check-in",
+                        "trigger": {
+                            "kind": "once",
+                            "run_at": "2026-08-17T13:00:00+01:00"
+                        },
+                        "task": {
+                            "kind": "prompt",
+                            "instruction": "Check in on the email campaign work from earlier in this thread: confirm the sends went out, report open and click rates so far, and flag anything that needs a decision."
+                        },
+                        "target": {
+                            "workspace_path": "/Users/james/Code/quizgecko",
+                            "provider": "claude",
+                            "thread": { "kind": "current" }
+                        }
+                    })
+                ),
+                example!(
+                    "One-time reminder tomorrow at 10:00 that should start from a clean slate",
                     json!({
                         "name": "Release checklist review",
                         "trigger": {

@@ -2880,6 +2880,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         super::thread_with_in_flight_bridge_call(
             threads.into_iter(),
             &AgentProvider::CODEX,
+            crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
             "falcondeck_rename_thread",
             &title_b,
         )
@@ -2907,6 +2908,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         super::thread_with_in_flight_bridge_call(
             threads.into_iter(),
             &AgentProvider::CODEX,
+            crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
             "falcondeck_rename_thread",
             &title_b,
         )
@@ -2933,6 +2935,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         super::thread_with_in_flight_bridge_call(
             threads.into_iter(),
             &AgentProvider::CODEX,
+            crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
             "falcondeck_rename_thread",
             &title_a,
         )
@@ -2950,6 +2953,7 @@ fn workspace_bridge_binds_the_thread_executing_the_matching_mcp_call() {
         super::thread_with_in_flight_bridge_call(
             threads.into_iter(),
             &AgentProvider::CODEX,
+            crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME,
             "falcondeck_rename_thread",
             &title_a,
         )
@@ -7884,5 +7888,177 @@ async fn backup_and_restore_cycle_restores_preferences_workspaces_and_extensions
             .get("ws-1")
             .map(String::as_str),
         Some("cat-3")
+    );
+}
+
+#[tokio::test]
+async fn control_current_thread_target_pins_the_calling_thread() {
+    use falcondeck_core::control::{
+        AutomationThreadTarget, ControlExecuteRequest, ControlOrigin, ControlRequestContext,
+    };
+
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let workspace_path = workspace_path.canonicalize().unwrap();
+    let workspace_path_str = workspace_path.to_string_lossy().to_string();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([
+            (AgentProvider::CLAUDE, "claude".to_string()),
+            (AgentProvider::CODEX, "codex".to_string()),
+        ]),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    app.restore_control_state().await.unwrap();
+    let workspace_id = "workspace-1".to_string();
+    let make_thread = |id: &str, status: ThreadStatus| {
+        super::ManagedThread::new(ThreadSummary {
+            id: id.to_string(),
+            workspace_id: workspace_id.clone(),
+            title: id.to_string(),
+            provider: AgentProvider::CLAUDE,
+            native_session_id: None,
+            provider_transport: None,
+            handoff_from: None,
+            origin: None,
+            status,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+            is_pinned: false,
+            is_pinned_in_project: false,
+            goal: None,
+            queued_turns: Vec::new(),
+            variant: None,
+        })
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                kind: falcondeck_core::WorkspaceKind::Project,
+                id: workspace_id.clone(),
+                path: workspace_path_str.clone(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CLAUDE,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some("thread-a".to_string()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [
+                (
+                    "thread-a".to_string(),
+                    make_thread("thread-a", ThreadStatus::Running),
+                ),
+                (
+                    "thread-b".to_string(),
+                    make_thread("thread-b", ThreadStatus::Idle),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        },
+    );
+    let create = |name: &str| ControlExecuteRequest {
+        operation: "automation.create".to_string(),
+        arguments: json!({
+            "name": name,
+            "trigger": { "kind": "once", "run_at": "2099-01-01T10:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "Check back on this." },
+            "target": {
+                // Deliberately wrong provider: the current thread's wins.
+                "workspace_path": workspace_path_str,
+                "provider": "codex",
+                "thread": { "kind": "current" }
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: None,
+    };
+
+    // Explicit thread context (Claude, ACP): pinned to that thread.
+    let response = app
+        .control_execute(
+            create("tagged"),
+            &ControlRequestContext {
+                origin: ControlOrigin::Mcp,
+                provider: Some(AgentProvider::CLAUDE),
+                workspace_path: Some(workspace_path_str.clone()),
+                thread_id: Some("thread-a".to_string()),
+                device_id: None,
+            },
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let target: falcondeck_core::control::AutomationTarget =
+        serde_json::from_value(response.data.unwrap()["target"].clone()).unwrap();
+    assert_eq!(
+        target.thread,
+        AutomationThreadTarget::Existing {
+            thread_id: "thread-a".to_string()
+        }
+    );
+    assert_eq!(target.provider, AgentProvider::CLAUDE);
+    assert_eq!(target.workspace_path, workspace_path_str);
+
+    // No thread tag (Codex, one control server per workspace): the single
+    // running thread for that provider is the caller.
+    let response = app
+        .control_execute(
+            create("inferred"),
+            &ControlRequestContext {
+                origin: ControlOrigin::Mcp,
+                provider: Some(AgentProvider::CLAUDE),
+                workspace_path: Some(workspace_path_str.clone()),
+                thread_id: None,
+                device_id: None,
+            },
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let target: falcondeck_core::control::AutomationTarget =
+        serde_json::from_value(response.data.unwrap()["target"].clone()).unwrap();
+    assert_eq!(
+        target.thread,
+        AutomationThreadTarget::Existing {
+            thread_id: "thread-a".to_string()
+        }
+    );
+
+    // Outside any thread (desktop UI): `current` is meaningless and says so.
+    let response = app
+        .control_execute(create("desktop"), &ControlRequestContext::default())
+        .await;
+    assert!(!response.ok);
+    let error = response.error.unwrap();
+    assert_eq!(error.code, "invalid_arguments");
+    assert!(
+        error
+            .field_errors
+            .iter()
+            .any(|field| field.field == "target.thread"),
+        "{error:?}"
     );
 }
