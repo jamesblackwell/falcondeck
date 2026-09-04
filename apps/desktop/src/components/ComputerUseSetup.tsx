@@ -302,7 +302,8 @@ export function ComputerUseSetup({
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy === "test" || !baseUrl}
+              disabled={busy === "test" || !baseUrl || !status?.enabled}
+              title={status?.enabled ? undefined : "Turn on computer use before testing it."}
               onClick={() => void runTest()}
             >
               {busy === "test" ? <ActivityDiamond size="md" tone="current" /> : null}
@@ -347,7 +348,8 @@ export function ComputerUseSetup({
             <Button
               size="sm"
               variant="secondary"
-              disabled={busy === "test" || !baseUrl}
+              disabled={busy === "test" || !baseUrl || !status?.enabled}
+              title={status?.enabled ? undefined : "Turn on computer use before testing it."}
               onClick={() => void runTest()}
             >
               {busy === "test" ? <ActivityDiamond size="md" tone="current" /> : null}

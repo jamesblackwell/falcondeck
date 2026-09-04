@@ -204,7 +204,9 @@ impl ComputerUseHost {
         &self,
         prefs: &ComputerUsePreferences,
     ) -> Result<ComputerUseTestResult, String> {
-        let keep_running = prefs.enabled;
+        if !prefs.enabled {
+            return Err("Turn on computer use before testing it.".to_string());
+        }
         let connector = self
             .start_if_needed(prefs)
             .await?
@@ -222,9 +224,6 @@ impl ComputerUseHost {
             Ok(shot) => (shot.thumbnail_data_url, shot.black_frame, None),
             Err(error) => (None, false, Some(error)),
         };
-        if !keep_running {
-            self.stop().await;
-        }
         let tcc_ok = tcc_grants_ok(&health);
         Ok(ComputerUseTestResult {
             ok: tcc_ok && thumbnail_data_url.is_some(),
@@ -1084,6 +1083,21 @@ mod tests {
             Some("false")
         );
         assert!(!env.contains_key("CUA_DRIVER_RS_ENABLE_WAYLAND"));
+    }
+
+    #[tokio::test]
+    async fn test_capture_requires_computer_use_to_be_enabled() {
+        let host = ComputerUseHost::new(
+            Some("/path/that/must/not/be-started".to_string()),
+            Path::new("/tmp/falcondeck-state.json"),
+        );
+        let error = host
+            .test(&ComputerUsePreferences::default())
+            .await
+            .expect_err("disabled computer use must not start the driver");
+
+        assert_eq!(error, "Turn on computer use before testing it.");
+        assert!(host.inner.lock().await.child.is_none());
     }
 
     #[test]
