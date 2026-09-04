@@ -97,6 +97,20 @@ const groups: ProjectGroup[] = [
       path: "/Users/james/falcondeck",
       agents: [
         {
+          provider: "codex",
+          label: "Codex",
+          account: { status: "ready", label: "ready" },
+          models: [],
+          collaboration_modes: [],
+        },
+        {
+          provider: "claude",
+          label: "Claude",
+          account: { status: "ready", label: "ready" },
+          models: [],
+          collaboration_modes: [],
+        },
+        {
           provider: "opencode",
           label: "OpenCode",
           account: { status: "ready", label: "ready" },
@@ -218,6 +232,7 @@ createRoot(document.getElementById("root")!).render(
           onSelectWorkspace={() => {}}
           onSelectThread={() => {}}
           onRenameThread={async () => {}}
+          onForkThread={async () => {}}
           onArchiveThread={async () => {}}
           onDeleteThread={async () => {}}
           onTogglePinThread={async () => {}}

@@ -32,8 +32,6 @@ import {
   generateUserItemId,
   HandoffIncompleteError,
   handoffBlockedReason,
-  handoffDestinationSettings,
-  handoffThread,
   imageAttachmentSendBlockReason,
   insertTranscript,
   operationalConditionDismissalKey,
@@ -67,6 +65,7 @@ import {
   threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
+  workspaceProviderLabel,
   workspaceProviderOptions,
   threadForSelection,
   type AgentProvider,
@@ -2428,128 +2427,52 @@ function AppInner() {
     [apiFor, selectedWorkspace?.id],
   );
 
-  const handleHandoffProviderSelect = useCallback(
-    async (provider: AgentProvider) => {
-      if (
-        !selectedWorkspace ||
-        !selectedThread ||
-        provider === selectedThread.provider ||
-        handoffPendingProvider
-      ) {
-        return;
-      }
-      const client = apiFor(selectedWorkspace.id);
-      if (!client) return;
-
-      const destination = handoffDestinationSettings(
-        selectedWorkspace,
-        provider,
-        persistedComposerSelections,
-      );
-      const targetLabel = destination.destinationLabel;
-      const showHandoffThread = (handle: ThreadHandle) => {
-        const destinationKey = draftKeyFor(
-          handle.workspace.id,
-          handle.thread.id,
-        );
-        setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                workspaces: current.workspaces.map((workspace) =>
-                  workspace.id === handle.workspace.id
-                    ? handle.workspace
-                    : workspace,
+  /**
+   * Switches the UI onto a thread that continues another one (a fork or a
+   * cross-harness handoff) as soon as it exists, before its seed turn is sent.
+   * The destination is marked busy so its composer reads as sending until the
+   * turn lands.
+   */
+  const adoptLinkedThread = useCallback(
+    (handle: ThreadHandle) => {
+      const destinationKey = draftKeyFor(handle.workspace.id, handle.thread.id);
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              workspaces: current.workspaces.map((workspace) =>
+                workspace.id === handle.workspace.id
+                  ? handle.workspace
+                  : workspace,
+              ),
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (thread) => thread.id !== handle.thread.id,
                 ),
-                threads: [
-                  handle.thread,
-                  ...current.threads.filter(
-                    (thread) => thread.id !== handle.thread.id,
-                  ),
-                ],
-              }
-            : current,
-        );
-        conversationKeyRef.current = destinationKey;
-        setHandoffPendingThreadKey(destinationKey);
-        setSelectedWorkspaceId(handle.workspace.id);
-        setSelectedThreadId(handle.thread.id);
-        setThreadDetail({
-          workspace: handle.workspace,
-          thread: handle.thread,
-          items: [],
-          has_older: false,
-          oldest_item_id: null,
-          newest_item_id: null,
-          is_partial: false,
-        });
-      };
-
-      setHandoffPendingProvider(provider);
-      try {
-        await handoffThread(
-          client,
-          {
-            workspace: selectedWorkspace,
-            thread: selectedThread,
-            provider,
-            ...destination,
-          },
-          { onDestinationReady: showHandoffThread },
-        );
-        setActionError(null);
-        toast({
-          variant: "success",
-          title: `Continuing with ${targetLabel}`,
-          description:
-            "The source conversation was carried over verbatim. The original is unchanged.",
-        });
-      } catch (error: unknown) {
-        if (error instanceof HandoffIncompleteError) {
-          showHandoffThread(error.handle);
-          if (error.detail) setThreadDetail(error.detail);
-          if (!error.turnStarted) {
-            setDraftForConversation(
-              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
-              error.prompt,
-            );
-          }
-          setActionError(error.message);
-          toast({
-            variant: "warning",
-            title: `Linked ${targetLabel} thread created`,
-            description: error.turnStarted
-              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
-              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
-          });
-          return;
-        }
-        const message =
-          error instanceof Error ? error.message : "Failed to create handoff";
-        setActionError(message);
-        toast({
-          variant: "danger",
-          title: "Failed to create handoff",
-          description: message,
-        });
-      } finally {
-        setHandoffPendingProvider(null);
-        setHandoffPendingThreadKey(null);
-      }
+              ],
+            }
+          : current,
+      );
+      conversationKeyRef.current = destinationKey;
+      setHandoffPendingThreadKey(destinationKey);
+      setSelectedWorkspaceId(handle.workspace.id);
+      setSelectedThreadId(handle.thread.id);
+      setThreadDetail({
+        workspace: handle.workspace,
+        thread: handle.thread,
+        items: [],
+        has_older: false,
+        oldest_item_id: null,
+        newest_item_id: null,
+        is_partial: false,
+      });
     },
     [
-      apiFor,
-      handoffPendingProvider,
-      persistedComposerSelections,
-      selectedThread,
-      selectedWorkspace,
-      setActionError,
-      setDraftForConversation,
       setSelectedThreadId,
       setSelectedWorkspaceId,
       setSnapshot,
       setThreadDetail,
-      toast,
     ],
   );
 
@@ -4361,8 +4284,15 @@ function AppInner() {
     ],
   );
 
+  /**
+   * "Fork thread": continues a thread in a fresh, independent one. `provider`
+   * is the harness the fork runs on — the source thread's own by default, any
+   * other one turns the fork into a cross-harness handoff. Both shapes are one
+   * flow here so the composer's "continue in another harness" and the
+   * sidebar's fork dialog behave identically.
+   */
   const handleForkThread = useCallback(
-    async (workspaceId: string, threadId: string) => {
+    async (workspaceId: string, threadId: string, provider?: AgentProvider) => {
       const client = apiFor(workspaceId);
       if (!client) throw new Error(CONNECTION_COPY.notConnected);
       const thread = viewSnapshot?.threads.find(
@@ -4374,8 +4304,25 @@ function AppInner() {
       if (!thread || !workspace) {
         throw new Error("Thread not found");
       }
+      const target = provider ?? thread.provider;
+      const crossHarness = target !== thread.provider;
+      const targetLabel = workspaceProviderLabel(workspace, target);
+      // One in-flight destination at a time, so a double-tap cannot spawn two.
+      if (crossHarness && handoffPendingProvider) return;
+      if (crossHarness) setHandoffPendingProvider(target);
       try {
-        const handle = await forkThread(client, { workspace, thread });
+        const handle = await forkThread(
+          client,
+          {
+            workspace,
+            thread,
+            provider: target,
+            composer: persistedComposerSelections,
+          },
+          { onDestinationReady: adoptLinkedThread },
+        );
+        // A native fork returns in one call and never reports a destination,
+        // so the new thread is adopted here instead.
         setSnapshot((current) =>
           current
             ? {
@@ -4395,26 +4342,84 @@ function AppInner() {
         setSelectedWorkspaceId(handle.workspace.id);
         setSelectedThreadId(handle.thread.id);
         setActionError(null);
+        if (crossHarness) {
+          toast({
+            variant: "success",
+            title: `Continuing with ${targetLabel}`,
+            description:
+              "The source conversation was carried over verbatim. The original is unchanged.",
+          });
+        }
       } catch (error: unknown) {
+        const failureTitle = crossHarness
+          ? `Failed to continue with ${targetLabel}`
+          : "Failed to fork thread";
+        if (error instanceof HandoffIncompleteError) {
+          // The destination exists; only its seed turn is in doubt. Show it,
+          // and hand the prompt back to the composer when it never started.
+          adoptLinkedThread(error.handle);
+          if (error.detail) setThreadDetail(error.detail);
+          if (!error.turnStarted) {
+            setDraftForConversation(
+              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
+              error.prompt,
+            );
+          }
+          setActionError(error.message);
+          toast({
+            variant: "warning",
+            title: `Linked ${targetLabel} thread created`,
+            description: error.turnStarted
+              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
+              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
+          });
+          return;
+        }
         const msg =
           error instanceof Error ? error.message : "Failed to fork thread";
         setActionError(msg);
-        toast({
-          variant: "danger",
-          title: "Failed to fork thread",
-          description: msg,
-        });
+        toast({ variant: "danger", title: failureTitle, description: msg });
+        // Rethrown so the fork dialog keeps itself open and shows the reason.
+        throw error instanceof Error ? error : new Error(msg);
+      } finally {
+        setHandoffPendingProvider(null);
+        setHandoffPendingThreadKey(null);
       }
     },
     [
+      adoptLinkedThread,
       apiFor,
+      handoffPendingProvider,
+      persistedComposerSelections,
       setActionError,
+      setDraftForConversation,
       setSelectedThreadId,
       setSelectedWorkspaceId,
       setSnapshot,
+      setThreadDetail,
       toast,
       viewSnapshot,
     ],
+  );
+
+  /** The composer's "continue in another harness" row: a cross-harness fork. */
+  const handleHandoffProviderSelect = useCallback(
+    async (provider: AgentProvider) => {
+      if (
+        !selectedWorkspace ||
+        !selectedThread ||
+        provider === selectedThread.provider
+      ) {
+        return;
+      }
+      // The toast already carries the reason; nothing here shows a throw.
+      await handleForkThread(
+        selectedWorkspace.id,
+        selectedThread.id,
+        provider,
+      ).catch(() => {});
+    },
+    [handleForkThread, selectedThread, selectedWorkspace],
   );
 
   const handleRenameThread = useCallback(

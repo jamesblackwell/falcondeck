@@ -1412,6 +1412,59 @@ describe("DesktopSidebar", () => {
     });
   });
 
+  it("forks a thread onto its own harness by default", async () => {
+    const onForkThread = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({ onForkThread });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Fork thread" }));
+
+    // Swapping harnesses is the point of the dialog, but the thread's own is
+    // preselected so the old one-click behaviour survives as one keystroke.
+    expect(await screen.findByRole("radio", { name: /Codex/ })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    await waitFor(() => {
+      expect(onForkThread).toHaveBeenCalledWith(
+        "workspace-1",
+        "thread-1",
+        "codex",
+      );
+    });
+  });
+
+  it("forks a thread onto another harness when one is picked", async () => {
+    const onForkThread = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({ onForkThread });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Fork thread" }));
+    fireEvent.click(await screen.findByRole("radio", { name: /Claude/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    await waitFor(() => {
+      expect(onForkThread).toHaveBeenCalledWith(
+        "workspace-1",
+        "thread-1",
+        "claude",
+      );
+    });
+  });
+
+  it("keeps the fork dialog open and shows why a fork failed", async () => {
+    const onForkThread = vi
+      .fn()
+      .mockRejectedValue(new Error("Nothing to fork yet"));
+    renderSidebar({ onForkThread });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Fork thread" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fork" }));
+
+    expect(await screen.findByText("Nothing to fork yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fork" })).toBeInTheDocument();
+  });
+
   it("archives a thread from the right-click menu after confirmation", async () => {
     const { onArchiveThread } = renderSidebar();
 

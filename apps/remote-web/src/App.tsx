@@ -40,8 +40,6 @@ import {
   forkThread,
   HandoffIncompleteError,
   handoffBlockedReason,
-  handoffDestinationSettings,
-  handoffThread,
   generateBoxKeyPair,
   generateUserItemId,
   imageAttachmentSendBlockReason,
@@ -108,6 +106,7 @@ import {
   threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
+  workspaceProviderLabel,
   workspaceProviderOptions,
   threadForSelection,
   type AgentProvider,
@@ -4216,121 +4215,118 @@ function RemoteApp() {
     [callRpc, submitQueuedAction],
   );
 
-  async function handleForkThread(workspaceId: string, threadId: string) {
-    const workspace = snapshot?.workspaces.find(
-      (entry) => entry.id === workspaceId,
-    );
-    const thread = snapshot?.threads.find((entry) => entry.id === threadId);
-    if (!workspace || !thread) {
-      reportError(new Error("Thread not found"), "Failed to fork thread");
-      return;
-    }
-    try {
-      const handle = await forkThread(forkApi, { workspace, thread });
+  /**
+   * Switches the UI onto a thread that continues another one (a fork or a
+   * cross-harness handoff) as soon as it exists, before its seed turn is sent.
+   */
+  const adoptLinkedThread = useCallback(
+    (handle: ThreadHandle) => {
+      const destinationKey = draftKeyFor(handle.workspace.id, handle.thread.id);
+      const emptyDetail: ThreadDetail = {
+        workspace: handle.workspace,
+        thread: handle.thread,
+        items: [],
+        has_older: false,
+        oldest_item_id: null,
+        newest_item_id: null,
+        is_partial: false,
+      };
       setSnapshot((current) =>
         current
           ? {
               ...current,
-              workspaces: current.workspaces.map((entry) =>
-                entry.id === handle.workspace.id ? handle.workspace : entry,
+              workspaces: current.workspaces.map((workspace) =>
+                workspace.id === handle.workspace.id
+                  ? handle.workspace
+                  : workspace,
               ),
               threads: [
                 handle.thread,
                 ...current.threads.filter(
-                  (entry) => entry.id !== handle.thread.id,
+                  (thread) => thread.id !== handle.thread.id,
                 ),
               ],
             }
           : current,
       );
+      conversationKeyRef.current = destinationKey;
+      threadDetailRef.current = emptyDetail;
+      setHandoffPendingThreadKey(destinationKey);
+      setThreadDetail(emptyDetail);
       setSelectedWorkspaceId(handle.workspace.id);
       setSelectedThreadId(handle.thread.id);
-      setError(null);
-    } catch (e) {
-      reportError(e, "Failed to fork thread");
-    }
-  }
+    },
+    [],
+  );
 
-  const handleHandoffProviderSelect = useCallback(
-    async (provider: AgentProvider) => {
-      if (
-        !selectedWorkspace ||
-        !selectedThread ||
-        provider === selectedThread.provider
-      ) {
+  /**
+   * "Fork thread": continues a thread in a fresh, independent one. `provider`
+   * is the harness the fork runs on — the source thread's own by default, any
+   * other one turns the fork into a cross-harness handoff.
+   */
+  const handleForkThread = useCallback(
+    async (workspaceId: string, threadId: string, provider?: AgentProvider) => {
+      const workspace = snapshot?.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      );
+      const thread = snapshot?.threads.find((entry) => entry.id === threadId);
+      if (!workspace || !thread) {
+        reportError(new Error("Thread not found"), "Failed to fork thread");
         return;
       }
-      if (handoffPendingRef.current) return;
-      handoffPendingRef.current = true;
-      setHandoffPending(true);
-
-      const destination = handoffDestinationSettings(
-        selectedWorkspace,
-        provider,
-        persistedComposerSelections,
-      );
-      const targetLabel = destination.destinationLabel;
-      const showHandoffThread = (handle: ThreadHandle) => {
-        const destinationKey = draftKeyFor(
-          handle.workspace.id,
-          handle.thread.id,
+      const target = provider ?? thread.provider;
+      const crossHarness = target !== thread.provider;
+      const targetLabel = workspaceProviderLabel(workspace, target);
+      // One in-flight destination at a time, so a double-tap cannot spawn two.
+      if (crossHarness && handoffPendingRef.current) return;
+      if (crossHarness) {
+        handoffPendingRef.current = true;
+        setHandoffPending(true);
+      }
+      try {
+        const handle = await forkThread(
+          forkApi,
+          {
+            workspace,
+            thread,
+            provider: target,
+            composer: persistedComposerSelections,
+          },
+          { onDestinationReady: adoptLinkedThread },
         );
-        const emptyDetail: ThreadDetail = {
-          workspace: handle.workspace,
-          thread: handle.thread,
-          items: [],
-          has_older: false,
-          oldest_item_id: null,
-          newest_item_id: null,
-          is_partial: false,
-        };
+        // A native fork returns in one call and never reports a destination,
+        // so the new thread is adopted here instead.
         setSnapshot((current) =>
           current
             ? {
                 ...current,
-                workspaces: current.workspaces.map((workspace) =>
-                  workspace.id === handle.workspace.id
-                    ? handle.workspace
-                    : workspace,
+                workspaces: current.workspaces.map((entry) =>
+                  entry.id === handle.workspace.id ? handle.workspace : entry,
                 ),
                 threads: [
                   handle.thread,
                   ...current.threads.filter(
-                    (thread) => thread.id !== handle.thread.id,
+                    (entry) => entry.id !== handle.thread.id,
                   ),
                 ],
               }
             : current,
         );
-        conversationKeyRef.current = destinationKey;
-        threadDetailRef.current = emptyDetail;
-        setHandoffPendingThreadKey(destinationKey);
-        setThreadDetail(emptyDetail);
         setSelectedWorkspaceId(handle.workspace.id);
         setSelectedThreadId(handle.thread.id);
-      };
-
-      try {
-        await handoffThread(
-          forkApi,
-          {
-            workspace: selectedWorkspace,
-            thread: selectedThread,
-            provider,
-            ...destination,
-          },
-          { onDestinationReady: showHandoffThread },
-        );
         setError(null);
-        toast({
-          variant: "success",
-          title: `Continuing with ${targetLabel}`,
-          description:
-            "The source conversation was carried over verbatim. The original is unchanged.",
-        });
+        if (crossHarness) {
+          toast({
+            variant: "success",
+            title: `Continuing with ${targetLabel}`,
+            description:
+              "The source conversation was carried over verbatim. The original is unchanged.",
+          });
+        }
       } catch (error: unknown) {
         if (error instanceof HandoffIncompleteError) {
-          showHandoffThread(error.handle);
+          // The destination exists; only its seed turn is in doubt.
+          adoptLinkedThread(error.handle);
           if (error.detail) {
             threadDetailRef.current = error.detail;
             setThreadDetail(error.detail);
@@ -4351,7 +4347,14 @@ function RemoteApp() {
           });
           return;
         }
-        reportError(error, "Failed to create handoff");
+        reportError(
+          error,
+          crossHarness
+            ? `Failed to continue with ${targetLabel}`
+            : "Failed to fork thread",
+        );
+        // Rethrown so the fork dialog keeps itself open and shows the reason.
+        throw error instanceof Error ? error : new Error("Failed to fork thread");
       } finally {
         handoffPendingRef.current = false;
         setHandoffPending(false);
@@ -4359,14 +4362,34 @@ function RemoteApp() {
       }
     },
     [
+      adoptLinkedThread,
       forkApi,
       persistedComposerSelections,
       reportError,
-      selectedThread,
-      selectedWorkspace,
       setDraftForConversation,
+      snapshot,
       toast,
     ],
+  );
+
+  /** The composer's "continue in another harness" row: a cross-harness fork. */
+  const handleHandoffProviderSelect = useCallback(
+    async (provider: AgentProvider) => {
+      if (
+        !selectedWorkspace ||
+        !selectedThread ||
+        provider === selectedThread.provider
+      ) {
+        return;
+      }
+      // The toast already carries the reason; nothing here shows a throw.
+      await handleForkThread(
+        selectedWorkspace.id,
+        selectedThread.id,
+        provider,
+      ).catch(() => {});
+    },
+    [handleForkThread, selectedThread, selectedWorkspace],
   );
 
   // Set by "Mark as unread" so the auto-read effect does not undo it while

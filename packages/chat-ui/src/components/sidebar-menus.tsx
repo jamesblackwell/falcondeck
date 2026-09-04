@@ -17,10 +17,23 @@ import {
   X,
 } from 'lucide-react'
 
-import type { ThreadSummary, ThreadTag, WorkspaceColorId } from '@falcondeck/client-core'
-import { WORKSPACE_COLOR_IDS, workspaceColorCssVar } from '@falcondeck/client-core'
+import type {
+  AgentProvider,
+  ThreadSummary,
+  ThreadTag,
+  WorkspaceColorId,
+  WorkspaceSummary,
+} from '@falcondeck/client-core'
+import {
+  forkBlockedReason,
+  threadSupportsNativeFork,
+  WORKSPACE_COLOR_IDS,
+  workspaceColorCssVar,
+  workspaceProviderOptions,
+} from '@falcondeck/client-core'
 import { Button, Input, cn } from '@falcondeck/ui'
 
+import { ProviderIcon } from './provider-icon'
 import { ThreadStageIcon } from './thread-stage-icon'
 
 // Must match the rendered menu width below (`w-60`), or the viewport clamp
@@ -1187,6 +1200,178 @@ export const AddThreadStageDialog = memo(function AddThreadStageDialog({
           </Button>
           <Button type="submit" disabled={!value.trim()} aria-busy={pending}>
             {pending ? 'Adding…' : 'Add'}
+          </Button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+})
+
+/**
+ * "Fork thread" destination picker. A fork always continues the conversation
+ * in a fresh thread, but the harness it lands on is a real choice — swapping
+ * agents mid-problem is the point of the product — so the source harness is
+ * preselected and Enter forks with it, exactly as the menu item used to.
+ */
+export const ForkThreadDialog = memo(function ForkThreadDialog({
+  target,
+  provider,
+  error,
+  pending,
+  onProviderChange,
+  onClose,
+  onSubmit,
+}: {
+  target: {
+    workspaceId: string
+    thread: ThreadSummary
+    workspace: WorkspaceSummary
+  } | null
+  /** Selected destination harness; defaults to the thread's own. */
+  provider: AgentProvider
+  error: string | null
+  pending: boolean
+  onProviderChange: (provider: AgentProvider) => void
+  onClose: () => void
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const { thread, workspace } = target
+  const options = workspaceProviderOptions(workspace)
+  const blocked = forkBlockedReason(thread, provider)
+  const selectedLabel =
+    options.find((option) => option.provider === provider)?.label ?? provider
+  const isCrossHarness = provider !== thread.provider
+
+  let mechanism: string
+  if (isCrossHarness) {
+    mechanism = `Hands this conversation to ${selectedLabel} in a new thread.`
+    if (thread.variant) {
+      mechanism += ' It runs in the project folder, not the isolated copy.'
+    }
+  } else if (
+    threadSupportsNativeFork(thread, workspace) &&
+    thread.latest_turn_id
+  ) {
+    mechanism = `Branches the ${selectedLabel} session at its last turn.`
+  } else {
+    mechanism = `Replays this conversation into a new ${selectedLabel} session.`
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-fork-thread-title"
+        onSubmit={onSubmit}
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <div className="space-y-1">
+          <h2
+            id="fd-fork-thread-title"
+            className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+          >
+            Fork thread
+          </h2>
+          <p className="truncate text-[length:var(--fd-text-sm)] text-fg-muted">
+            {thread.title || 'New thread'}
+          </p>
+        </div>
+
+        <div
+          role="radiogroup"
+          aria-label="Fork onto harness"
+          className="mt-4 space-y-1"
+        >
+          {options.map((option) => {
+            const isSelected = option.provider === provider
+            const isSource = option.provider === thread.provider
+            return (
+              <label
+                key={option.provider}
+                className={cn(
+                  'fd-focus-within flex cursor-pointer items-center gap-2.5 rounded-[var(--fd-radius-lg)] border px-3 py-2 transition-colors',
+                  // Selection and keyboard focus coincide in a radio group, so
+                  // the row stays neutral and lets the accent check (and the
+                  // focus ring) carry the state instead of stacking greens.
+                  isSelected
+                    ? 'border-border-strong bg-surface-2'
+                    : 'border-transparent hover:bg-surface-2',
+                  pending && 'pointer-events-none opacity-60',
+                )}
+              >
+                {/* A real radio group: arrow keys move between harnesses and
+                    Enter submits, so forking with the current harness stays a
+                    single keystroke. */}
+                <input
+                  type="radio"
+                  name="fd-fork-harness"
+                  className="sr-only"
+                  value={option.provider}
+                  checked={isSelected}
+                  autoFocus={isSelected}
+                  disabled={pending}
+                  onChange={() => onProviderChange(option.provider)}
+                />
+                <ProviderIcon
+                  provider={option.provider}
+                  className="h-4 w-4 shrink-0"
+                />
+                <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+                  {option.label}
+                </span>
+                {isSource ? (
+                  <span className="fd-microlabel shrink-0 text-fg-faint">
+                    Current
+                  </span>
+                ) : null}
+                <Check
+                  aria-hidden="true"
+                  className={cn(
+                    'h-4 w-4 shrink-0 text-accent',
+                    !isSelected && 'invisible',
+                  )}
+                />
+              </label>
+            )
+          })}
+        </div>
+
+        <p className="mt-3 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          {blocked ?? `${mechanism} The original is untouched.`}
+        </p>
+        {error ? (
+          <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
+            {error}
+          </p>
+        ) : null}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onClose}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={pending || Boolean(blocked)}
+            aria-busy={pending}
+          >
+            {pending ? 'Forking…' : 'Fork'}
           </Button>
         </div>
       </form>

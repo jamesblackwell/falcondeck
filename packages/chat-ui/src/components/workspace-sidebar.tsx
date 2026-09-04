@@ -22,6 +22,7 @@ import {
 } from "@falcondeck/client-core";
 import type {
   ActiveExtensionThreadFilter,
+  AgentProvider,
   ExtensionSidebarFilterDefinition,
   ExtensionSnapshot,
   LibraryWorkspace,
@@ -30,6 +31,7 @@ import type {
   ThreadSummary,
   ThreadTag,
   WorkspaceColorId,
+  WorkspaceSummary,
 } from "@falcondeck/client-core";
 import {
   ActivityDiamond,
@@ -51,6 +53,7 @@ import {
   AddThreadStageDialog,
   CloseWorkspaceDialog,
   DeleteThreadDialog,
+  ForkThreadDialog,
   RemoveWorkspaceDialog,
   RenameThreadDialog,
   ThreadContextMenu,
@@ -112,10 +115,15 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     threadId: string,
   ) => Promise<string>;
-  /** Continues a thread in a fresh, independent copy; the source is unchanged. */
+  /**
+   * Continues a thread in a fresh, independent copy; the source is unchanged.
+   * `provider` is the harness the user picked for the fork, which defaults to
+   * the source thread's own.
+   */
   onForkThread?: (
     workspaceId: string,
     threadId: string,
+    provider: AgentProvider,
   ) => Promise<void> | void;
   onTogglePinThread?: (
     workspaceId: string,
@@ -902,6 +910,14 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   } | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isDeletingThread, setIsDeletingThread] = useState(false);
+  const [forkTarget, setForkTarget] = useState<{
+    workspaceId: string;
+    thread: ThreadSummary;
+    workspace: WorkspaceSummary;
+  } | null>(null);
+  const [forkProvider, setForkProvider] = useState<AgentProvider>("codex");
+  const [forkError, setForkError] = useState<string | null>(null);
+  const [isForkingThread, setIsForkingThread] = useState(false);
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{
@@ -1528,9 +1544,51 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const handleForkFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onForkThread) return;
     const { workspaceId, thread } = threadContextMenu;
+    const workspace = groups.find(
+      (group) => group.workspace.id === workspaceId,
+    )?.workspace;
     setThreadContextMenu(null);
-    void Promise.resolve(onForkThread(workspaceId, thread.id)).catch(() => {});
-  }, [onForkThread, threadContextMenu]);
+    if (!workspace) {
+      // Nothing to read the harness list from; fork onto the thread's own.
+      void Promise.resolve(
+        onForkThread(workspaceId, thread.id, thread.provider),
+      ).catch(() => {});
+      return;
+    }
+    setForkProvider(thread.provider);
+    setForkError(null);
+    setForkTarget({ workspaceId, thread, workspace });
+  }, [groups, onForkThread, threadContextMenu]);
+
+  const closeForkDialog = useCallback(() => {
+    if (isForkingThread) return;
+    setForkTarget(null);
+    setForkError(null);
+  }, [isForkingThread]);
+
+  const handleForkSubmit = useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!forkTarget || !onForkThread || isForkingThread) return;
+      setIsForkingThread(true);
+      setForkError(null);
+      try {
+        await onForkThread(
+          forkTarget.workspaceId,
+          forkTarget.thread.id,
+          forkProvider,
+        );
+        setForkTarget(null);
+      } catch (error) {
+        setForkError(
+          error instanceof Error ? error.message : "Failed to fork thread",
+        );
+      } finally {
+        setIsForkingThread(false);
+      }
+    },
+    [forkProvider, forkTarget, isForkingThread, onForkThread],
+  );
 
   const handleRequestRenameThreadFromRow = useCallback(
     ({
@@ -1978,6 +2036,21 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   }, [deleteTarget, isDeletingThread]);
 
   useEffect(() => {
+    if (!forkTarget) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || isForkingThread) return;
+      setForkTarget(null);
+      setForkError(null);
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [forkTarget, isForkingThread]);
+
+  useEffect(() => {
     if (!removeTarget) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2384,6 +2457,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         pending={isDeletingThread}
         onClose={closeDeleteDialog}
         onConfirm={handleConfirmDeleteThread}
+      />
+      <ForkThreadDialog
+        target={forkTarget}
+        provider={forkProvider}
+        error={forkError}
+        pending={isForkingThread}
+        onProviderChange={setForkProvider}
+        onClose={closeForkDialog}
+        onSubmit={handleForkSubmit}
       />
       <RenameThreadDialog
         target={renameTarget}

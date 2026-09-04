@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { forkThread, threadSupportsNativeFork } from "./fork-thread";
+import {
+  forkBlockedReason,
+  forkThread,
+  threadSupportsNativeFork,
+} from "./fork-thread";
 import type {
   ForkThreadPayload,
   SendTurnPayload,
@@ -268,6 +272,66 @@ describe("forkThread", () => {
     );
     expect(api.forkThread).not.toHaveBeenCalled();
     expect(api.startThread).not.toHaveBeenCalled();
+  });
+
+  it("reports the new thread before its seed turn is sent", async () => {
+    const api = makeApi();
+    const workspace = makeWorkspace();
+    const thread = makeThread({ provider: "claude" });
+    const onDestinationReady = vi.fn(() => {
+      // The destination exists and is titled by the time the UI hears about
+      // it, so switching to it early cannot show an untitled thread.
+      expect(api.sendTurn).not.toHaveBeenCalled();
+    });
+
+    await forkThread(api, { workspace, thread }, { onDestinationReady });
+
+    expect(onDestinationReady).toHaveBeenCalledTimes(1);
+    expect(api.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands the thread to another harness when forked onto one", async () => {
+    const api = makeApi();
+    const workspace = makeWorkspace();
+    const thread = makeThread({ provider: "codex", latest_turn_id: "turn-9" });
+
+    await forkThread(api, { workspace, thread, provider: "claude" });
+
+    // Never the native fork: that would branch the Codex session, not move
+    // the work to Claude.
+    expect(api.forkThread).not.toHaveBeenCalled();
+    expect(api.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "claude",
+        handoff_from: { thread_id: thread.id, provider: "codex" },
+      }),
+    );
+    expect(api.updateThread).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Fix the login bug · Claude" }),
+    );
+    expect(api.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("forks an isolated thread onto another harness but not its own", async () => {
+    const variant = {
+      slug: "fix-login",
+      path: "/tmp/variants/fix-login",
+      branch: "falcondeck/fix-login",
+      kind: "worktree" as const,
+    };
+    const thread = makeThread({ variant });
+
+    expect(forkBlockedReason(thread)).toMatch(/isolated thread/);
+    expect(forkBlockedReason(thread, "codex")).toMatch(/isolated thread/);
+    expect(forkBlockedReason(thread, "claude")).toBeNull();
+
+    const api = makeApi();
+    await forkThread(api, {
+      workspace: makeWorkspace(),
+      thread,
+      provider: "claude",
+    });
+    expect(api.startThread).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to fork a thread with no conversation yet", async () => {
