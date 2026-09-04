@@ -26,10 +26,10 @@ import type {
 } from '@falcondeck/client-core'
 import {
   forkBlockedReason,
+  forkProviderOptions,
   threadSupportsNativeFork,
   WORKSPACE_COLOR_IDS,
   workspaceColorCssVar,
-  workspaceProviderOptions,
 } from '@falcondeck/client-core'
 import { Button, Input, cn } from '@falcondeck/ui'
 
@@ -1241,7 +1241,7 @@ export const ForkThreadDialog = memo(function ForkThreadDialog({
   }
 
   const { thread, workspace } = target
-  const options = workspaceProviderOptions(workspace)
+  const options = forkProviderOptions(workspace, thread)
   const blocked = forkBlockedReason(thread, provider)
   const selectedLabel =
     options.find((option) => option.provider === provider)?.label ?? provider

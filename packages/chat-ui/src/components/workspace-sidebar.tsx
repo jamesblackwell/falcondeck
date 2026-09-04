@@ -14,6 +14,7 @@ import {
 import {
   compareThreads,
   filterProjectGroupsByExtensions,
+  forkProviderOptions,
   partitionSidebarThreads,
   summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
@@ -1548,8 +1549,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       (group) => group.workspace.id === workspaceId,
     )?.workspace;
     setThreadContextMenu(null);
-    if (!workspace) {
-      // Nothing to read the harness list from; fork onto the thread's own.
+    // With no workspace to read harnesses from, or only the thread's own on
+    // offer, the picker would present no choice — fork straight away.
+    if (!workspace || forkProviderOptions(workspace, thread).length <= 1) {
       void Promise.resolve(
         onForkThread(workspaceId, thread.id, thread.provider),
       ).catch(() => {});

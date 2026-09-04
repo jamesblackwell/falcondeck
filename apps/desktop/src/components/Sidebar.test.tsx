@@ -1451,6 +1451,41 @@ describe("DesktopSidebar", () => {
     });
   });
 
+  it("forks without asking when the project offers one harness", async () => {
+    const onForkThread = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({
+      onForkThread,
+      groups: [
+        {
+          workspace: workspace({
+            agents: [
+              {
+                provider: "codex",
+                label: "Codex",
+                account: { status: "ready", label: "ready" },
+                models: [],
+                collaboration_modes: [],
+              },
+            ],
+          }),
+          threads: [thread()],
+        },
+      ],
+    });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Fork thread" }));
+
+    await waitFor(() => {
+      expect(onForkThread).toHaveBeenCalledWith(
+        "workspace-1",
+        "thread-1",
+        "codex",
+      );
+    });
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  });
+
   it("keeps the fork dialog open and shows why a fork failed", async () => {
     const onForkThread = vi
       .fn()

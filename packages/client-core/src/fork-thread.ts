@@ -1,3 +1,8 @@
+import {
+  workspaceProviderLabel,
+  workspaceProviderOptions,
+  type ProviderOption,
+} from "./collaboration";
 import { buildForkPrompt } from "./handoff";
 import {
   handoffDestinationSettings,
@@ -56,6 +61,29 @@ export function threadSupportsNativeFork(
     workspace.agents.find((agent) => agent.provider === thread.provider)
       ?.capabilities?.supports_forking,
   );
+}
+
+/**
+ * The harnesses "Fork thread" can target for this thread: every harness the
+ * workspace advertises, plus the thread's own when the workspace no longer
+ * lists it. A harness that has since been uninstalled still has to be
+ * offerable, or the picker would open with nothing selected.
+ */
+export function forkProviderOptions(
+  workspace: WorkspaceSummary,
+  thread: Pick<ThreadSummary, "provider">,
+): ProviderOption[] {
+  const options = workspaceProviderOptions(workspace);
+  if (options.some((option) => option.provider === thread.provider)) {
+    return options;
+  }
+  return [
+    {
+      provider: thread.provider,
+      label: workspaceProviderLabel(workspace, thread.provider),
+    },
+    ...options,
+  ];
 }
 
 /**
