@@ -191,6 +191,10 @@ export async function handleDemoRpc<T>(
     case 'thread.archive':
       return { ok: true } as T
 
+    case 'thread.unarchive':
+      if (!threadId) throw new Error(DEMO_UNAVAILABLE_MESSAGE)
+      return patchThread(threadId, { is_archived: false }) as T
+
     // There is one workspace in the demo; "new chat" opens a thread in it.
     case 'chat.create':
       return demoWorkspace as T

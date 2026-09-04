@@ -996,7 +996,7 @@ describe('useRelayConnection session rotation', () => {
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
         'snapshot.current',
         {
-          include_archived_threads: false,
+          include_archived_threads: true,
           include_thread_plans: false,
           include_thread_diffs: false,
           include_agent_skills: false,

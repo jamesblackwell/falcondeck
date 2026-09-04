@@ -408,7 +408,7 @@ export function useRelayConnection() {
             // Sidebar only: full plans and full diffs (Codex hangs the patch
             // off every ThreadSummary) dominate the encrypted payload and are
             // not rendered in the project list. Archived chats stay in so the
-            // per-project Archived disclosure can restore them.
+            // per-project archived view can restore them.
             include_archived_threads: true,
             include_thread_plans: false,
             include_thread_diffs: false,

@@ -648,7 +648,7 @@ describe('client-core conversation helpers', () => {
     ])
   })
 
-  it('removes a thread from the list when an update archives it', () => {
+  it('keeps a thread in the snapshot when an update archives it', () => {
     const snapshot = {
       daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
       workspaces: [workspace()],
@@ -667,9 +667,9 @@ describe('client-core conversation helpers', () => {
       },
     }
 
-    expect(applySnapshotEvent(snapshot, event)?.threads.map((entry) => entry.id)).toEqual([
-      'thread-2',
-    ])
+    const next = applySnapshotEvent(snapshot, event)
+    expect(next?.threads.map((entry) => entry.id)).toEqual(['thread-1', 'thread-2'])
+    expect(next?.threads.find((entry) => entry.id === 'thread-1')?.is_archived).toBe(true)
   })
 
   it('normalizes raw tool-call items delivered through conversation-item events', () => {
