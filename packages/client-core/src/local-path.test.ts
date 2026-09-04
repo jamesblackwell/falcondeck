@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import {
   decodeFileUrl,
+  looksLikeWorkspaceFileReference,
   parseLocalFilePath,
   parseWorkspaceFilePath,
+  parseWorkspaceFileReference,
   splitLocalPathSegments,
+  workspaceFileReferenceFromLocalPath,
+  workspaceRelativeFilePath,
 } from './local-path'
 
 describe('parseLocalFilePath', () => {
@@ -95,6 +99,38 @@ describe('parseWorkspaceFilePath', () => {
   })
 })
 
+describe('workspaceRelativeFilePath', () => {
+  const root = '/Users/James/www/sites/quizgecko'
+
+  it('keeps already-relative workspace paths', () => {
+    expect(workspaceRelativeFilePath('docs/qa/notes.md', root)).toBe(
+      'docs/qa/notes.md',
+    )
+    expect(workspaceRelativeFilePath('./src/App.tsx', root)).toBe('src/App.tsx')
+  })
+
+  it('strips the workspace root from an absolute path inside it', () => {
+    expect(
+      workspaceRelativeFilePath(`${root}/docs/qa/2026-09-mobile-ux-audit.md`, root),
+    ).toBe('docs/qa/2026-09-mobile-ux-audit.md')
+    expect(
+      workspaceRelativeFilePath(`${root}/`, root),
+    ).toBe(`${root}/`)
+  })
+
+  it('leaves absolute paths outside the workspace alone', () => {
+    expect(
+      workspaceRelativeFilePath('/Users/James/www/sites/other/README.md', root),
+    ).toBe('/Users/James/www/sites/other/README.md')
+  })
+
+  it('returns the original path when no workspace root is known', () => {
+    expect(
+      workspaceRelativeFilePath('/Users/James/www/sites/quizgecko/README.md', null),
+    ).toBe('/Users/James/www/sites/quizgecko/README.md')
+  })
+})
+
 describe('splitLocalPathSegments', () => {
   it('extracts known roots and leaves web routes alone', () => {
     expect(
@@ -122,5 +158,53 @@ describe('splitLocalPathSegments', () => {
     expect(splitLocalPathSegments('no paths here')).toEqual([
       { kind: 'text', value: 'no paths here' },
     ])
+  })
+})
+
+describe('parseWorkspaceFileReference', () => {
+  it('keeps the first line of every citation form', () => {
+    expect(parseWorkspaceFileReference('src/app.ts:12')).toEqual({ path: 'src/app.ts', line: 12 })
+    expect(parseWorkspaceFileReference('src/app.ts:12:4')).toEqual({ path: 'src/app.ts', line: 12 })
+    expect(parseWorkspaceFileReference('src/app.ts:12-20')).toEqual({ path: 'src/app.ts', line: 12 })
+    expect(parseWorkspaceFileReference('./src/app.ts#L12-L20')).toEqual({ path: 'src/app.ts', line: 12 })
+    expect(parseWorkspaceFileReference('README.md')).toEqual({ path: 'README.md', line: null })
+  })
+
+  it('rejects absolute paths and traversal', () => {
+    expect(parseWorkspaceFileReference('/etc/passwd')).toBeNull()
+    expect(parseWorkspaceFileReference('../secret.txt:3')).toBeNull()
+  })
+})
+
+describe('looksLikeWorkspaceFileReference', () => {
+  it('accepts relative paths and file names with extensions', () => {
+    expect(looksLikeWorkspaceFileReference('apps/desktop/src/App.tsx:1150')).toBe(true)
+    expect(looksLikeWorkspaceFileReference('./README.md')).toBe(true)
+    expect(looksLikeWorkspaceFileReference('vite.config.ts')).toBe(true)
+    expect(looksLikeWorkspaceFileReference('Makefile')).toBe(false)
+  })
+
+  it('rejects code, identifiers, URLs and absolute paths', () => {
+    expect(looksLikeWorkspaceFileReference('process.env.HOME')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('foo.bar()')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('@falcondeck/ui')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('--no-verify')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('https://example.com/a.ts')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('/Users/qa/a.ts')).toBe(false)
+    expect(looksLikeWorkspaceFileReference('git commit -m "x"')).toBe(false)
+  })
+})
+
+describe('workspaceFileReferenceFromLocalPath', () => {
+  it('maps an absolute path under the root to a reference with its line', () => {
+    expect(
+      workspaceFileReferenceFromLocalPath('/Users/qa/repo/src/app.ts:12', '/Users/qa/repo/'),
+    ).toEqual({ path: 'src/app.ts', line: 12 })
+  })
+
+  it('returns null outside the root, at the root, or without a root', () => {
+    expect(workspaceFileReferenceFromLocalPath('/Users/qa/other/a.ts', '/Users/qa/repo')).toBeNull()
+    expect(workspaceFileReferenceFromLocalPath('/Users/qa/repo', '/Users/qa/repo')).toBeNull()
+    expect(workspaceFileReferenceFromLocalPath('/Users/qa/repo/a.ts', null)).toBeNull()
   })
 })

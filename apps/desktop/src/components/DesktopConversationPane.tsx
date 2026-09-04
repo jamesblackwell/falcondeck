@@ -30,6 +30,7 @@ import {
   type LocalPathHandler,
   type LocalPathKindResolver,
   type OpenFileDiff,
+  type WorkspaceFileResolver,
   type QuotedSelection,
   type ReadAloudController,
   type WebLinkOpener,
@@ -83,6 +84,10 @@ type DesktopConversationPaneProps = {
   queuedAttachmentBaseUrl?: string | null;
   canSteerQueuedTurn?: boolean;
   onOpenFile?: OpenFileDiff | null;
+  /** Absolute checkout path, so absolute paths inside it open in the rail. */
+  workspaceRoot?: string | null;
+  resolveWorkspaceFile?: WorkspaceFileResolver | null;
+  workspaceFilesVersion?: number;
   onLocalPath?: LocalPathHandler | null;
   /** Editors offered in the local path context menu (desktop only). */
   localPathEditors?: readonly LocalPathEditor[] | null;
@@ -147,6 +152,9 @@ export function DesktopConversationPane({
   queuedAttachmentBaseUrl,
   canSteerQueuedTurn,
   onOpenFile,
+  workspaceRoot = null,
+  resolveWorkspaceFile = null,
+  workspaceFilesVersion = 0,
   onLocalPath,
   localPathEditors,
   describeLocalPath,
@@ -235,6 +243,9 @@ export function DesktopConversationPane({
         isLoadingOlder={isLoadingOlderMessages}
         onLoadOlder={onLoadOlderMessages}
         onOpenFile={onOpenFile}
+        workspaceRoot={workspaceRoot}
+        resolveWorkspaceFile={resolveWorkspaceFile}
+        workspaceFilesVersion={workspaceFilesVersion}
         onLocalPath={onLocalPath}
         localPathEditors={localPathEditors}
         describeLocalPath={describeLocalPath}

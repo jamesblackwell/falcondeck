@@ -30,7 +30,11 @@ import {
 } from "@falcondeck/client-core";
 import { ActivityDiamond, EmptyState, cn } from "@falcondeck/ui";
 
-import { FileDiffProvider, type OpenFileDiff } from "../lib/file-diff-context";
+import {
+  FileDiffProvider,
+  type OpenFileDiff,
+  type WorkspaceFileResolver,
+} from "../lib/file-diff-context";
 import {
   LocalPathProvider,
   type LocalPathEditor,
@@ -180,6 +184,9 @@ export const Conversation = memo(function Conversation({
   isLoadingOlder = false,
   onLoadOlder,
   onOpenFile = null,
+  workspaceRoot = null,
+  resolveWorkspaceFile = null,
+  workspaceFilesVersion = 0,
   onLocalPath = null,
   localPathEditors = null,
   describeLocalPath = null,
@@ -213,6 +220,13 @@ export const Conversation = memo(function Conversation({
   onLoadOlder?: () => void;
   /** Opens a file's diff in the host's side panel; omit where there is none. */
   onOpenFile?: OpenFileDiff | null;
+  /** Absolute path of the workspace checkout. Absolute paths inside it open
+      in the side panel instead of through the OS. */
+  workspaceRoot?: string | null;
+  /** Confirms a relative path names a workspace file before it becomes a link. */
+  resolveWorkspaceFile?: WorkspaceFileResolver | null;
+  /** Bumps when the host's file listing changes so links re-check themselves. */
+  workspaceFilesVersion?: number;
   /** Opens or reveals an absolute local path; omit on clients without a local disk. */
   onLocalPath?: LocalPathHandler | null;
   /** Editors offered in the path context menu; omit where there is no local disk. */
@@ -902,7 +916,12 @@ export const Conversation = memo(function Conversation({
   }, [smoothScrollToBottom]);
 
   return (
-    <FileDiffProvider onOpenFile={onOpenFile}>
+    <FileDiffProvider
+      onOpenFile={onOpenFile}
+      workspaceRoot={workspaceRoot}
+      resolveWorkspaceFile={resolveWorkspaceFile}
+      workspaceFilesVersion={workspaceFilesVersion}
+    >
       <WebLinkProvider onOpenLink={onOpenExternalLink}>
         <LocalPathProvider
           onLocalPath={onLocalPath}

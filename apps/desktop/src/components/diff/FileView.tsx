@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { ArrowLeft, Check, Pencil, RotateCcw, Save, X } from 'lucide-react'
 
 import { HighlightedFileLine, languageFromPath, useShikiTokens } from '@falcondeck/chat-ui'
@@ -9,6 +9,7 @@ import { FileTypeIcon } from './FileTypeIcon'
 
 export const FileView = memo(function FileView({
   filePath,
+  line = null,
   file,
   isLoading,
   isSaving,
@@ -18,6 +19,8 @@ export const FileView = memo(function FileView({
   onSave,
 }: {
   filePath: string
+  /** Line to scroll into view and highlight, e.g. from a `path:12` citation. */
+  line?: number | null
   file: WorkspaceFileResponse | null
   isLoading: boolean
   isSaving: boolean
@@ -34,6 +37,17 @@ export const FileView = memo(function FileView({
   }, [file?.content, filePath])
 
   const lines = useMemo(() => (file?.content ?? '').replace(/\r\n/g, '\n').split('\n'), [file?.content])
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const targetLine = line != null && line >= 1 && line <= lines.length ? line : null
+  // Scroll once the requested line has rendered; a later click on the same
+  // file with a new line re-runs this without remounting the viewer.
+  useEffect(() => {
+    if (targetLine == null || file?.content == null) return
+    const row = scrollRef.current?.querySelector<HTMLElement>(
+      `[data-line="${targetLine}"]`,
+    )
+    row?.scrollIntoView({ block: 'center' })
+  }, [file?.content, targetLine])
   const language = useMemo(() => languageFromPath(filePath), [filePath])
   // Keep very large source files readable without sending thousands of lines
   // through the syntax highlighter on open.
@@ -135,7 +149,7 @@ export const FileView = memo(function FileView({
           {error}
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         {isLoading ? (
           <ActivityDiamond size="lg" className="mx-auto mt-8 flex" />
         ) : file?.is_binary ? (
@@ -158,12 +172,13 @@ export const FileView = memo(function FileView({
           />
         ) : file?.content != null ? (
           <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
-            {lines.map((line, index) => (
+            {lines.map((text, index) => (
               <HighlightedFileLine
                 key={index}
                 lineNumber={index + 1}
-                text={line}
+                text={text}
                 tokens={tokens?.[index] ?? null}
+                active={index + 1 === targetLine}
               />
             ))}
           </div>

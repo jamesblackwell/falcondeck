@@ -4,6 +4,36 @@ import { describe, expect, it, vi } from 'vitest'
 import { FileView } from './FileView'
 
 describe('FileView', () => {
+  it('scrolls to and highlights the cited line', () => {
+    const scrollIntoView = vi.fn()
+    Element.prototype.scrollIntoView = scrollIntoView
+    render(
+      <FileView
+        filePath="src/app.ts"
+        line={2}
+        file={{
+          path: 'src/app.ts',
+          content: 'one\ntwo\nthree',
+          is_binary: false,
+          truncated: false,
+          version: '1',
+        }}
+        isLoading={false}
+        isSaving={false}
+        error={null}
+        onBack={vi.fn()}
+        onReload={vi.fn()}
+        onSave={vi.fn()}
+      />,
+    )
+
+    const row = screen.getByText('two').closest('[data-line]')
+    expect(row?.getAttribute('data-line')).toBe('2')
+    expect(row?.className).toContain('bg-accent/10')
+    expect(screen.getByText('one').closest('[data-line]')?.className).not.toContain('bg-accent/10')
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' })
+  })
+
   it('calls back when the preview arrow is clicked', () => {
     const onBack = vi.fn()
     render(

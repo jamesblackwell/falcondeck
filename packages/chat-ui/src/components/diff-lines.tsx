@@ -175,14 +175,25 @@ export const HighlightedFileLine = memo(function HighlightedFileLine({
   lineNumber,
   tokens,
   text,
+  active = false,
 }: {
   lineNumber: number
   tokens: ThemedToken[] | null
   text: string
+  /** The line a transcript citation pointed at. */
+  active?: boolean
 }) {
   return (
-    <div className="flex">
-      <span className="sticky left-0 z-10 w-12 shrink-0 select-none bg-surface-1 pr-2 text-right text-fg-muted">
+    <div
+      data-line={lineNumber}
+      className={cn('flex', active && 'bg-accent/10')}
+    >
+      <span
+        className={cn(
+          'sticky left-0 z-10 w-12 shrink-0 select-none pr-2 text-right',
+          active ? 'bg-accent/10 font-semibold text-accent' : 'bg-surface-1 text-fg-muted',
+        )}
+      >
         {lineNumber}
       </span>
       <span className="whitespace-pre">

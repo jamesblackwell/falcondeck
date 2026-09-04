@@ -189,6 +189,7 @@ import {
 import { DesktopConversationPane } from "./components/DesktopConversationPane";
 import { ExtensionsPanel } from "./components/settings/ExtensionsPanel";
 import { useVoiceRecorder } from "./hooks/useVoiceRecorder";
+import { useWorkspaceFileIndex } from "./hooks/useWorkspaceFileIndex";
 import { DesktopSidebar } from "./components/Sidebar";
 import { DesktopShell } from "./components/DesktopShell";
 import type { DiffPanelSelection } from "./components/DiffPanel";
@@ -1143,13 +1144,18 @@ function AppInner() {
   // Transcript file links share the right rail: structured file changes open
   // their current diff, while Markdown workspace links open the file browser.
   const handleOpenFileDiff = useCallback(
-    (filePath: string, view: "changes" | "files" = "changes") => {
+    (
+      filePath: string,
+      view: "changes" | "files" = "changes",
+      line: number | null = null,
+    ) => {
       if (!selectedWorkspaceId) return;
       setExtensionToolDetail(null);
       setDiffSelection({
         workspaceId: selectedWorkspaceId,
         filePath,
         view,
+        line: view === "files" ? line : null,
       });
       showRail();
     },
@@ -1268,6 +1274,13 @@ function AppInner() {
   // own bump to refresh the changes rail after a branch switch.
   const [localGitBump, setLocalGitBump] = useState(0);
   const combinedGitRefreshTrigger = gitRefreshTrigger + localGitBump;
+  // Lets transcript paths like `src/app.ts:12` link only to files that exist.
+  const workspaceFileIndex = useWorkspaceFileIndex(
+    isRemoteWorkspaceSelected ? null : apiFor(selectedWorkspaceId),
+    selectedWorkspaceId,
+    selectedThread?.id ?? null,
+    combinedGitRefreshTrigger,
+  );
   // Branch state feeds the new-thread context bar only: threads pin their
   // checkout at creation, and remote hosts have no local repo to ask.
   const {
@@ -5955,6 +5968,11 @@ function AppInner() {
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.
               onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}
+              workspaceRoot={
+                isRemoteWorkspaceSelected ? null : selectedWorkspace?.path ?? null
+              }
+              resolveWorkspaceFile={workspaceFileIndex.resolve}
+              workspaceFilesVersion={workspaceFileIndex.version}
               onLocalPath={
                 isTauriDesktop() && !isRemoteWorkspaceSelected
                   ? handleLocalPath

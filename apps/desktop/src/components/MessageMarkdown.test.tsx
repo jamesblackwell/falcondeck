@@ -605,8 +605,24 @@ describe("local file paths", () => {
 
     fireEvent.click(screen.getByText(filePath));
 
-    expect(onOpenFile).toHaveBeenCalledWith(filePath, "files");
+    expect(onOpenFile).toHaveBeenCalledWith(filePath, "files", null);
     expect(onLocalPath).not.toHaveBeenCalled();
+  });
+
+  it("carries the line from an agent-linked file into the file browser", () => {
+    const onOpenFile = vi.fn();
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile}>
+        <MessageMarkdown
+          text="See [App.tsx:12](apps/desktop/src/App.tsx#L12-L20)"
+          defer={false}
+        />
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(screen.getByText("App.tsx:12"));
+
+    expect(onOpenFile).toHaveBeenCalledWith("apps/desktop/src/App.tsx", "files", 12);
   });
 
   it("offers local file actions for an absolute agent-linked workspace file", async () => {
@@ -691,5 +707,112 @@ describe("external link context menu", () => {
     expect(anchor.getAttribute("target")).toBe("_blank");
     fireEvent.contextMenu(anchor);
     expect(screen.queryByRole("menu")).toBeNull();
+  });
+});
+
+describe("workspace file references", () => {
+  it("links inline-code relative paths the host confirms exist", () => {
+    const onOpenFile = vi.fn();
+    const resolve = vi.fn((path: string) => path === "apps/desktop/src/App.tsx");
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile} resolveWorkspaceFile={resolve}>
+        <MessageMarkdown
+          text="Fixed in `apps/desktop/src/App.tsx:1150` and `foo.bar`"
+          defer={false}
+        />
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(screen.getByText("apps/desktop/src/App.tsx:1150"));
+    expect(onOpenFile).toHaveBeenCalledWith("apps/desktop/src/App.tsx", "files", 1150);
+    expect(screen.getByText("foo.bar").tagName).toBe("CODE");
+    expect(resolve).toHaveBeenCalledWith("foo.bar");
+  });
+
+  it("links a relative path after an async lookup resolves", async () => {
+    const onOpenFile = vi.fn();
+    const resolve = vi.fn(async () => true);
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile} resolveWorkspaceFile={resolve}>
+        <MessageMarkdown text="Edit `src/main.rs`" defer={false} />
+      </FileDiffProvider>,
+    );
+
+    expect(screen.getByText("src/main.rs").tagName).toBe("CODE");
+    await waitFor(() =>
+      expect(screen.getByText("src/main.rs").tagName).toBe("BUTTON"),
+    );
+    fireEvent.click(screen.getByText("src/main.rs"));
+    expect(onOpenFile).toHaveBeenCalledWith("src/main.rs", "files", null);
+  });
+
+  it("keeps relative paths plain without a resolver or when the file is missing", () => {
+    const onOpenFile = vi.fn();
+    const { rerender } = render(
+      <FileDiffProvider onOpenFile={onOpenFile}>
+        <MessageMarkdown text="See `src/missing.ts`" defer={false} />
+      </FileDiffProvider>,
+    );
+    // No resolver: the host cannot vouch for the path, but a path with a
+    // directory is worth offering; the rail reports a missing file itself.
+    expect(screen.getByText("src/missing.ts").tagName).toBe("BUTTON");
+
+    rerender(
+      <FileDiffProvider onOpenFile={onOpenFile} resolveWorkspaceFile={() => false}>
+        <MessageMarkdown text="See `src/missing.ts`" defer={false} />
+      </FileDiffProvider>,
+    );
+    expect(screen.getByText("src/missing.ts").tagName).toBe("CODE");
+  });
+
+  it("never links bare file names the host cannot confirm", () => {
+    render(
+      <FileDiffProvider onOpenFile={vi.fn()} resolveWorkspaceFile={() => null}>
+        <MessageMarkdown text="Check `package.json` and `src/index.ts`" defer={false} />
+      </FileDiffProvider>,
+    );
+    expect(screen.getByText("package.json").tagName).toBe("CODE");
+    expect(screen.getByText("src/index.ts").tagName).toBe("BUTTON");
+  });
+
+  it("opens absolute paths inside the workspace in the file browser", () => {
+    const onOpenFile = vi.fn();
+    const onLocalPath = vi.fn();
+    const root = "/Users/James/www/sites/falcondeck";
+    render(
+      <FileDiffProvider onOpenFile={onOpenFile} workspaceRoot={root}>
+        <LocalPathProvider onLocalPath={onLocalPath}>
+          <MessageMarkdown
+            text={`Edited ${root}/apps/desktop/src/App.tsx:42 and \`${root}/README.md\`, also /tmp/out.log`}
+            defer={false}
+          />
+        </LocalPathProvider>
+      </FileDiffProvider>,
+    );
+
+    fireEvent.click(screen.getByText(`${root}/apps/desktop/src/App.tsx:42`));
+    expect(onOpenFile).toHaveBeenCalledWith("apps/desktop/src/App.tsx", "files", 42);
+    fireEvent.click(screen.getByText(`${root}/README.md`));
+    expect(onOpenFile).toHaveBeenCalledWith("README.md", "files", null);
+    fireEvent.click(screen.getByRole("link", { name: "Open /tmp/out.log" }));
+    expect(onLocalPath).toHaveBeenCalledWith("open", "/tmp/out.log");
+    expect(onLocalPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("still offers local actions for an in-workspace absolute path", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const root = "/Users/James/project";
+    render(
+      <FileDiffProvider onOpenFile={vi.fn()} workspaceRoot={root}>
+        <LocalPathProvider onLocalPath={vi.fn()}>
+          <MessageMarkdown text={`Saved \`${root}/src/App.tsx\``} defer={false} />
+        </LocalPathProvider>
+      </FileDiffProvider>,
+    );
+
+    fireEvent.contextMenu(screen.getByText(`${root}/src/App.tsx`));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Copy Path" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${root}/src/App.tsx`));
   });
 });

@@ -52,6 +52,8 @@ export type DiffPanelSelection = {
   workspaceId: string
   filePath: string
   view?: ReviewPanelTab
+  /** 1-based line the file viewer scrolls to and highlights. */
+  line?: number | null
 }
 
 export type DiffPanelProps = {
@@ -209,6 +211,7 @@ export const DiffPanel = memo(function DiffPanel({
         <FileView
           key={`${workspaceId}:${selectedFile}`}
           filePath={selectedFile}
+          line={selection?.line ?? null}
           file={file}
           isLoading={isFileLoading}
           isSaving={isSaving}

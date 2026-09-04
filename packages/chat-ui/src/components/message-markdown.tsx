@@ -16,18 +16,25 @@ import {
   agentDirectiveLabel,
   fenceLanguageFromClassName,
   isMermaidLanguage,
+  looksLikeWorkspaceFileReference,
   parseLocalFilePath,
-  parseWorkspaceFilePath,
+  parseWorkspaceFileReference,
   safeExternalUrl,
   splitAgentMessageSegments,
   splitLocalPathSegments,
   splitSlashCommandSegments,
+  workspaceFileReferenceFromLocalPath,
   type AgentDirectiveAttribute,
+  type WorkspaceFileReference,
 } from "@falcondeck/client-core";
 
 import { cn } from "@falcondeck/ui";
 
-import { WorkspaceFileLink } from "../lib/file-diff-context";
+import {
+  WorkspaceFileLink,
+  useFileDiffContext,
+  useWorkspaceFileExists,
+} from "../lib/file-diff-context";
 import { LocalPathLink } from "../lib/local-path-context";
 import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
@@ -139,12 +146,25 @@ function markdownNodeText(children: React.ReactNode): string {
   return "";
 }
 
-function workspaceFilePathFromMarkdownLink(
+type MarkdownFileTarget = WorkspaceFileReference & {
+  localPath: string | null;
+};
+
+function workspaceFileTargetFromMarkdownLink(
   href: string | undefined,
   children: React.ReactNode,
-) {
-  const hrefPath = parseWorkspaceFilePath(href);
-  if (hrefPath) return { filePath: hrefPath, localPath: null };
+  workspaceRoot: string | null,
+): MarkdownFileTarget | null {
+  const hrefReference = parseWorkspaceFileReference(href);
+  if (hrefReference) return { ...hrefReference, localPath: null };
+
+  const localPath = parseLocalFilePath(href ?? "");
+  // An absolute target inside the checkout opens in the rail; the absolute
+  // path is kept so the context menu can still reach the real file.
+  const inWorkspace = localPath
+    ? workspaceFileReferenceFromLocalPath(localPath, workspaceRoot)
+    : null;
+  if (inWorkspace) return { ...inWorkspace, localPath };
 
   // Agents sometimes make the target an absolute path from their own runtime
   // while displaying the portable workspace-relative path. Prefer that label
@@ -157,29 +177,149 @@ function workspaceFilePathFromMarkdownLink(
   ) {
     return null;
   }
-  const labelPath = parseWorkspaceFilePath(label);
-  if (!labelPath) return null;
+  const labelReference = parseWorkspaceFileReference(label);
+  if (!labelReference) return null;
+  if (!localPath) return { ...labelReference, localPath: null };
 
-  const localPath = parseLocalFilePath(href ?? "");
-  if (!localPath) return { filePath: labelPath, localPath: null };
-
-  const normalizedLocalPath = localPath
-    .replace(/\\/g, "/")
-    .replace(/#L\d+(?:-L?\d+)?$/i, "")
-    .replace(/:\d+(?::\d+)?$/, "");
-  return normalizedLocalPath.endsWith(`/${labelPath}`)
-    ? { filePath: labelPath, localPath }
+  const normalizedLocalPath =
+    parseWorkspaceFileReference(
+      localPath.replace(/\\/g, "/").replace(/^\//, ""),
+    )?.path ?? null;
+  return normalizedLocalPath?.endsWith(`/${labelReference.path}`) ||
+    normalizedLocalPath === labelReference.path
+    ? { ...labelReference, localPath }
     : null;
 }
 
-function MarkdownLocalPath({ children }: { children?: React.ReactNode }) {
+function MarkdownAnchor({
+  href,
+  children,
+}: {
+  href?: string;
+  children?: React.ReactNode;
+}) {
+  // react-markdown's defaultUrlTransform already strips javascript: etc.
+  // Empty href means the URL was rejected — render plain text, not a dead link.
+  // Desktop installs a capture-phase click handler that opens safe absolute
+  // URLs in the system browser (Tauri/WKWebView ignores target="_blank").
+  // Remote web relies on target="_blank" + rel for a real browser tab.
+  // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
+  // stretching the message bubble past the column edge.
+  const fileContext = useFileDiffContext();
+  const safeHref = safeMarkdownLinkUrl(href);
+  if (safeHref) {
+    return (
+      <WebLinkAnchor href={safeHref} className={linkClassName}>
+        {children}
+      </WebLinkAnchor>
+    );
+  }
+  const target = workspaceFileTargetFromMarkdownLink(
+    href,
+    children,
+    fileContext?.workspaceRoot ?? null,
+  );
+  if (target) {
+    return (
+      <WorkspaceFileLink
+        filePath={target.path}
+        line={target.line}
+        localPath={target.localPath}
+        className="[overflow-wrap:anywhere]"
+      >
+        {children}
+      </WorkspaceFileLink>
+    );
+  }
+  const localPath = parseLocalFilePath(href ?? "");
+  if (localPath) {
+    return (
+      <LocalPathLink path={localPath} variant="text">
+        {children}
+      </LocalPathLink>
+    );
+  }
+  return <span className="[overflow-wrap:anywhere]">{children}</span>;
+}
+
+/**
+ * An absolute path in prose or inline code. Inside the workspace checkout it
+ * opens in the rail like any other workspace file; elsewhere it goes to the
+ * OS through the local-path handler.
+ */
+function MarkdownLocalPath({
+  path,
+  variant,
+  children,
+}: {
+  path: string;
+  variant: "text" | "code";
+  children?: React.ReactNode;
+}) {
+  const fileContext = useFileDiffContext();
+  const reference = workspaceFileReferenceFromLocalPath(
+    path,
+    fileContext?.workspaceRoot ?? null,
+  );
+  if (reference) {
+    return (
+      <WorkspaceFileLink
+        filePath={reference.path}
+        line={reference.line}
+        localPath={path}
+        className={variant === "code" ? inlineCodeClassName : undefined}
+      >
+        {children}
+      </WorkspaceFileLink>
+    );
+  }
+  return (
+    <LocalPathLink path={path} variant={variant}>
+      {children}
+    </LocalPathLink>
+  );
+}
+
+function MarkdownProseLocalPath({ children }: { children?: React.ReactNode }) {
   const text = markdownNodeText(children);
   const path = parseLocalFilePath(text);
   if (!path) return <>{children}</>;
   return (
-    <LocalPathLink path={path} variant="text">
+    <MarkdownLocalPath path={path} variant="text">
       {children}
-    </LocalPathLink>
+    </MarkdownLocalPath>
+  );
+}
+
+/**
+ * Inline code that looks like a relative path (`src/app.ts:12`). It only
+ * becomes a link once the host confirms the file exists, or cannot rule it
+ * out for a path with a directory in it; everything else stays plain code so
+ * `foo.bar` in prose never turns into a dead link.
+ */
+function MarkdownWorkspaceFileCandidate({
+  code,
+  children,
+}: {
+  code: string;
+  children?: React.ReactNode;
+}) {
+  const reference = parseWorkspaceFileReference(code);
+  const exists = useWorkspaceFileExists(reference?.path ?? "");
+  const fileContext = useFileDiffContext();
+  const plain = <code className={inlineCodeClassName}>{children}</code>;
+  if (!reference || !fileContext) return plain;
+  const linkable =
+    exists === true || (exists === null && reference.path.includes("/"));
+  if (!linkable) return plain;
+  return (
+    <WorkspaceFileLink
+      filePath={reference.path}
+      line={reference.line}
+      className={inlineCodeClassName}
+    >
+      {children}
+    </WorkspaceFileLink>
   );
 }
 
@@ -303,6 +443,12 @@ export function normalizeMarkdownForStreaming(text: string): string {
 const linkClassName =
   "[overflow-wrap:anywhere] text-accent underline decoration-accent/40 underline-offset-2 hover:decoration-accent";
 
+// [overflow-wrap:anywhere] breaks a long identifier only when it cannot
+// fit; break-all shattered every one of them mid-token. The 1px block
+// padding keeps inline code from inflating the line box in dense prose.
+const inlineCodeClassName =
+  "[overflow-wrap:anywhere] rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-px font-mono text-[length:calc(0.9em*var(--fd-scale-code,1))]";
+
 function hasControlOrWhitespace(value: string) {
   return Array.from(value).some((character) => {
     const code = character.charCodeAt(0);
@@ -360,19 +506,19 @@ function markdownCodeComponent(highlight: boolean) {
     const localPath = parseLocalFilePath(code);
     if (localPath) {
       return (
-        <LocalPathLink path={localPath} variant="code">
+        <MarkdownLocalPath path={localPath} variant="code">
           {children}
-        </LocalPathLink>
+        </MarkdownLocalPath>
       );
     }
-    return (
-      // [overflow-wrap:anywhere] breaks a long identifier only when it cannot
-      // fit; break-all shattered every one of them mid-token. The 1px block
-      // padding keeps inline code from inflating the line box in dense prose.
-      <code className="[overflow-wrap:anywhere] rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-px font-mono text-[length:calc(0.9em*var(--fd-scale-code,1))]">
-        {children}
-      </code>
-    );
+    if (looksLikeWorkspaceFileReference(code)) {
+      return (
+        <MarkdownWorkspaceFileCandidate code={code}>
+          {children}
+        </MarkdownWorkspaceFileCandidate>
+      );
+    }
+    return <code className={inlineCodeClassName}>{children}</code>;
   };
 }
 
@@ -468,45 +614,10 @@ const markdownComponents = {
     );
   },
   a({ href, children }: { href?: string; children?: React.ReactNode }) {
-    // react-markdown's defaultUrlTransform already strips javascript: etc.
-    // Empty href means the URL was rejected — render plain text, not a dead link.
-    // Desktop installs a capture-phase click handler that opens safe absolute
-    // URLs in the system browser (Tauri/WKWebView ignores target="_blank").
-    // Remote web relies on target="_blank" + rel for a real browser tab.
-    // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
-    // stretching the message bubble past the column edge.
-    const safeHref = safeMarkdownLinkUrl(href);
-    if (safeHref) {
-      return (
-        <WebLinkAnchor href={safeHref} className={linkClassName}>
-          {children}
-        </WebLinkAnchor>
-      );
-    }
-    const workspaceFilePath = workspaceFilePathFromMarkdownLink(href, children);
-    if (workspaceFilePath) {
-      return (
-        <WorkspaceFileLink
-          filePath={workspaceFilePath.filePath}
-          localPath={workspaceFilePath.localPath}
-          className="[overflow-wrap:anywhere]"
-        >
-          {children}
-        </WorkspaceFileLink>
-      );
-    }
-    const localPath = parseLocalFilePath(href ?? "");
-    if (localPath) {
-      return (
-        <LocalPathLink path={localPath} variant="text">
-          {children}
-        </LocalPathLink>
-      );
-    }
-    return <span className="[overflow-wrap:anywhere]">{children}</span>;
+    return <MarkdownAnchor href={href}>{children}</MarkdownAnchor>;
   },
   localpath({ children }: { children?: React.ReactNode }) {
-    return <MarkdownLocalPath>{children}</MarkdownLocalPath>;
+    return <MarkdownProseLocalPath>{children}</MarkdownProseLocalPath>;
   },
   img({ src, alt }: { src?: string; alt?: string }) {
     const externalUrl = safeExternalUrl(src);
