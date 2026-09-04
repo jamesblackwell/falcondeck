@@ -77,6 +77,21 @@ export type ProviderUsageWindow = {
   cost?: ProviderUsageCost | null;
 };
 
+/** One banked provider usage-limit reset, e.g. a Codex "Full reset" credit. */
+export type ProviderUsageResetCredit = {
+  id: string;
+  title: string;
+  expires_at?: string | null;
+  description?: string | null;
+};
+
+/** Banked usage-limit resets for a provider subscription. */
+export type ProviderUsageResetCredits = {
+  /** Authoritative redeemable count; may exceed `credits.length`. */
+  available_count: number;
+  credits: ProviderUsageResetCredit[];
+};
+
 /**
  * Live usage snapshot for one provider subscription. Discriminated on
  * `status` so clients can render the windows, a sign-in hint, or an error
@@ -88,6 +103,8 @@ export type ProviderUsage =
       account_email: string | null;
       plan_label: string | null;
       windows: ProviderUsageWindow[];
+      /** Banked usage-limit resets. Older daemons omit this. */
+      reset_credits?: ProviderUsageResetCredits | null;
     }
   | { status: "not_installed" }
   | { status: "unauthenticated" }
@@ -123,6 +140,23 @@ export type ProviderUsageOverview = {
 export type ProviderUsageRequest = {
   /** When true, skip the daemon cache and re-query provider dashboards. */
   refresh?: boolean;
+};
+
+/** Body for consuming a Codex banked rate-limit reset. */
+export type ConsumeProviderResetCreditRequest = {
+  credit_id?: string | null;
+  redeem_request_id?: string | null;
+};
+
+export type ConsumeProviderResetCreditOutcome =
+  | "reset"
+  | "nothing_to_reset"
+  | "no_credit"
+  | "already_redeemed";
+
+export type ConsumeProviderResetCreditResponse = {
+  outcome: ConsumeProviderResetCreditOutcome;
+  usage: ProviderUsageOverview;
 };
 
 export type AgentCapabilitySummary = {

@@ -3581,6 +3581,33 @@ pub struct ProviderUsageCost {
     pub limit_usd_cents: u64,
 }
 
+/// One banked provider usage-limit reset, e.g. a Codex "Full reset" credit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageResetCredit {
+    /// Opaque backend identifier used to redeem this credit.
+    pub id: String,
+    /// Display title, e.g. `"Full reset"`.
+    pub title: String,
+    /// ISO-8601 timestamp when this credit expires, when the provider reports
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// Backend-supplied description, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Banked usage-limit resets for a provider subscription.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageResetCredits {
+    /// Authoritative number of redeemable credits. May be greater than
+    /// `credits.len()` when the backend caps the detail list.
+    pub available_count: u32,
+    /// Detail rows for available credits, when the backend provides them.
+    #[serde(default)]
+    pub credits: Vec<ProviderUsageResetCredit>,
+}
+
 /// Live usage snapshot for one provider subscription. Discriminated on
 /// `status` so clients can render the windows, a sign-in hint, or an error
 /// without inventing placeholder numbers.
@@ -3600,6 +3627,10 @@ pub enum ProviderUsage {
         /// Usage windows reported for the plan.
         #[serde(default)]
         windows: Vec<ProviderUsageWindow>,
+        /// Banked usage-limit resets, when the provider reports them. Older
+        /// daemons omit this; clients treat missing as none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reset_credits: Option<ProviderUsageResetCredits>,
     },
     /// The harness CLI is not installed on this host.
     #[default]
@@ -3668,6 +3699,42 @@ pub struct ProviderUsageOverview {
 pub struct ProviderUsageRequest {
     /// When true, skip the daemon cache and re-query provider dashboards.
     pub refresh: bool,
+}
+
+/// Body for `POST /api/provider-usage/codex/reset-credits/consume` and the
+/// `providers.usage.consumeReset` remote RPC.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsumeProviderResetCreditRequest {
+    /// Specific credit to redeem. Omit to let the backend pick one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credit_id: Option<String>,
+    /// Idempotency key. Reuse when retrying the same click.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redeem_request_id: Option<String>,
+}
+
+/// What Codex did with a banked reset-credit consume request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumeProviderResetCreditOutcome {
+    /// The credit was consumed and at least one usage window was reset.
+    Reset,
+    /// Nothing was eligible to reset; the credit was not consumed.
+    NothingToReset,
+    /// The account has no available banked reset.
+    NoCredit,
+    /// This idempotency key already completed a reset.
+    AlreadyRedeemed,
+}
+
+/// Response for consuming a Codex banked rate-limit reset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsumeProviderResetCreditResponse {
+    /// What the Codex backend did with the credit.
+    pub outcome: ConsumeProviderResetCreditOutcome,
+    /// Fresh usage snapshot after the consume attempt.
+    pub usage: ProviderUsageOverview,
 }
 
 /// Summary of a single thread within a workspace.

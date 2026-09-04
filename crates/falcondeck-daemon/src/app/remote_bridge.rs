@@ -313,6 +313,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "providers.read",
     "providers.update",
     "providers.usage",
+    "providers.usage.consumeReset",
     "harnesses.read",
     "harnesses.refresh",
     "harnesses.upgrade",
@@ -1168,6 +1169,18 @@ impl AppState {
                         .unwrap_or(false);
                     serde_json::to_value(self.provider_usage_overview(refresh).await)
                         .map_err(|error| format!("failed to serialize provider usage: {error}"))
+                }
+                "providers.usage.consumeReset" => {
+                    let request = serde_json::from_value::<
+                        falcondeck_core::ConsumeProviderResetCreditRequest,
+                    >(params.clone())
+                    .unwrap_or_default();
+                    serde_json::to_value(
+                        self.consume_codex_reset_credit(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize reset consume: {error}"))
                 }
                 "harnesses.refresh" => {
                     let request = serde_json::from_value::<falcondeck_core::HarnessRefreshRequest>(

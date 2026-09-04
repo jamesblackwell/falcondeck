@@ -16,8 +16,11 @@ import {
   CardTitle,
 } from '@falcondeck/ui'
 import type {
+  ConsumeProviderResetCreditResponse,
   ProviderUsage,
   ProviderUsageOverview,
+  ProviderUsageResetCredit,
+  ProviderUsageResetCredits,
   ProviderUsageWindow,
 } from '@falcondeck/client-core'
 import { RefreshCw } from 'lucide-react'
@@ -143,6 +146,50 @@ function usageIdentity(usage: ProviderUsage | undefined): {
   return { planLabel: null, accountEmail: null }
 }
 
+function resetCreditsFrom(usage: ProviderUsage | undefined): ProviderUsageResetCredits | null {
+  if (usage?.status !== 'ok') return null
+  const credits = usage.reset_credits
+  if (!credits || (credits.available_count <= 0 && credits.credits.length === 0)) return null
+  return credits
+}
+
+function formatCreditExpiry(expiresAt: string | null | undefined): string | null {
+  if (!expiresAt) return null
+  const expires = new Date(expiresAt)
+  if (Number.isNaN(expires.getTime())) return null
+  if (expires.getTime() <= Date.now()) return 'Expired'
+  return `Expires ${expires.toLocaleString(undefined, {
+    day: '2-digit',
+    month: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })}`
+}
+
+function consumeOutcomeToast(
+  outcome: ConsumeProviderResetCreditResponse['outcome'],
+): {
+  variant: 'success' | 'danger' | 'warning' | 'default'
+  title: string
+  description?: string
+} {
+  switch (outcome) {
+    case 'reset':
+      return { variant: 'success', title: 'Codex usage limits were reset' }
+    case 'nothing_to_reset':
+      return {
+        variant: 'default',
+        title: 'Nothing to reset',
+        description: 'This credit is still available.',
+      }
+    case 'no_credit':
+      return { variant: 'warning', title: 'No Codex reset credits available' }
+    case 'already_redeemed':
+      return { variant: 'default', title: 'That reset was already used' }
+  }
+}
+
 function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
   const reset = formatReset(window.resets_at)
   return (
@@ -173,12 +220,77 @@ function UsageWindowRow({ window }: { window: ProviderUsageWindow }) {
   )
 }
 
+function UsageResetCredits({
+  credits,
+  consumingId,
+  onUseReset,
+}: {
+  credits: ProviderUsageResetCredits
+  consumingId: string | null
+  onUseReset: (credit: ProviderUsageResetCredit | null) => void
+}) {
+  const rows =
+    credits.credits.length > 0
+      ? credits.credits
+      : [{ id: 'available', title: 'Full reset' }]
+  const unnamed = credits.credits.length === 0
+  return (
+    <div className="space-y-2">
+      <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+        Usage limit resets
+      </p>
+      <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle">
+        {rows.map((credit, index) => {
+          const expiry = formatCreditExpiry(credit.expires_at)
+          const busy = consumingId != null
+          return (
+            <div
+              key={credit.id}
+              className={`flex items-center justify-between gap-3 px-3 py-2.5 ${
+                index > 0 ? 'border-t border-border-subtle' : ''
+              }`}
+            >
+              <div className="min-w-0">
+                <p className="text-[length:var(--fd-text-sm)] text-fg-primary">{credit.title}</p>
+                {expiry ? (
+                  <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{expiry}</p>
+                ) : unnamed ? (
+                  <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                    {credits.available_count === 1
+                      ? '1 reset available'
+                      : `${credits.available_count} resets available`}
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy || expiry === 'Expired'}
+                onClick={() => onUseReset(unnamed ? null : credit)}
+              >
+                {busy && (consumingId === credit.id || consumingId === '*') ? (
+                  <ActivityDiamond size="md" tone="current" />
+                ) : null}
+                Use reset
+              </Button>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function UsageBody({
   config,
   usage,
+  consumingId,
+  onUseReset,
 }: {
   config: ProviderConfig
   usage: ProviderUsage | undefined
+  consumingId: string | null
+  onUseReset: (credit: ProviderUsageResetCredit | null) => void
 }) {
   if (!usage) {
     return (
@@ -186,8 +298,9 @@ function UsageBody({
     )
   }
   switch (usage.status) {
-    case 'ok':
-      if (usage.windows.length === 0) {
+    case 'ok': {
+      const resetCredits = resetCreditsFrom(usage)
+      if (usage.windows.length === 0 && !resetCredits) {
         return (
           <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
             No usage limits reported for this plan.
@@ -199,8 +312,16 @@ function UsageBody({
           {usage.windows.map((window, index) => (
             <UsageWindowRow key={`${window.label}-${index}`} window={window} />
           ))}
+          {resetCredits && config.key === 'codex' ? (
+            <UsageResetCredits
+              credits={resetCredits}
+              consumingId={consumingId}
+              onUseReset={onUseReset}
+            />
+          ) : null}
         </div>
       )
+    }
     case 'unauthenticated':
       return (
         <p className="text-[length:var(--fd-text-sm)] text-fg-muted">{config.signInHint}</p>
@@ -222,6 +343,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
   const [overview, setOverview] = useState<ProviderUsageOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [consumingId, setConsumingId] = useState<string | null>(null)
 
   const fetchOverview = useCallback(
     async (mode: 'initial' | 'refresh') => {
@@ -257,6 +379,46 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
   useEffect(() => {
     void fetchOverview('initial')
   }, [fetchOverview])
+
+  const handleUseReset = useCallback(
+    async (credit: ProviderUsageResetCredit | null) => {
+      if (!baseUrl || consumingId) return
+      const confirmed = window.confirm(
+        'Using this reset refreshes your 5-hour and weekly Codex limits and moves the weekly reset date to about seven days from now. Use it?',
+      )
+      if (!confirmed) return
+      const consumeKey = credit?.id ?? '*'
+      setConsumingId(consumeKey)
+      try {
+        const response = await fetch(
+          `${baseUrl}/api/provider-usage/codex/reset-credits/consume`,
+          {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              credit_id: credit?.id ?? null,
+            }),
+          },
+        )
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(payload?.error ?? falconDeckHttpError(response.status))
+        }
+        const result = (await response.json()) as ConsumeProviderResetCreditResponse
+        setOverview(result.usage)
+        onToast(consumeOutcomeToast(result.outcome))
+      } catch (cause) {
+        onToast({
+          variant: 'danger',
+          title: 'Could not use Codex reset',
+          description: cause instanceof Error ? cause.message : String(cause),
+        })
+      } finally {
+        setConsumingId(null)
+      }
+    },
+    [baseUrl, consumingId, onToast],
+  )
 
   const visibleProviders = PROVIDERS.filter((config) => {
     const usage = overview?.[config.key]
@@ -352,7 +514,12 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
                     </div>
                   </div>
                   <div className="mt-3 space-y-3">
-                    <UsageBody config={config} usage={usage} />
+                    <UsageBody
+                      config={config}
+                      usage={usage}
+                      consumingId={config.key === 'codex' ? consumingId : null}
+                      onUseReset={handleUseReset}
+                    />
                   </div>
                 </div>
               )

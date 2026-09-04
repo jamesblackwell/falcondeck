@@ -403,6 +403,147 @@ describe('UsagePanel', () => {
     expect(await screen.findByText(/Last refreshed 3 minutes ago/)).toBeInTheDocument()
   })
 
+  it('renders Codex banked reset credits with expiry', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(
+          overviewWith({
+            claude_code: { status: 'not_installed' },
+            codex: {
+              status: 'ok',
+              account_email: 'dev@example.com',
+              plan_label: 'Pro',
+              windows: [
+                {
+                  label: '5-hour limit',
+                  used_percent: 40,
+                  resets_at: null,
+                },
+              ],
+              reset_credits: {
+                available_count: 2,
+                credits: [
+                  {
+                    id: 'RateLimitResetCredit_1',
+                    title: 'Full reset',
+                    expires_at: '2099-09-21T00:02:00.000Z',
+                  },
+                  {
+                    id: 'RateLimitResetCredit_2',
+                    title: 'Full reset',
+                    expires_at: '2099-10-04T02:11:00.000Z',
+                  },
+                ],
+              },
+            },
+          }),
+        ),
+      ),
+    )
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Usage limit resets')).toBeInTheDocument()
+    expect(screen.getAllByText('Full reset')).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Use reset' })).toHaveLength(2)
+    expect(screen.getAllByText(/Expires /)).toHaveLength(2)
+  })
+
+  it('confirms before consuming a Codex reset and refreshes usage', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onToast = vi.fn()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          overviewWith({
+            claude_code: { status: 'not_installed' },
+            codex: {
+              status: 'ok',
+              account_email: 'dev@example.com',
+              plan_label: 'Pro',
+              windows: [{ label: 'Weekly limit', used_percent: 90, resets_at: null }],
+              reset_credits: {
+                available_count: 1,
+                credits: [
+                  {
+                    id: 'RateLimitResetCredit_1',
+                    title: 'Full reset',
+                    expires_at: '2099-09-21T00:02:00.000Z',
+                  },
+                ],
+              },
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          outcome: 'reset',
+          usage: overviewWith({
+            claude_code: { status: 'not_installed' },
+            codex: {
+              status: 'ok',
+              account_email: 'dev@example.com',
+              plan_label: 'Pro',
+              windows: [{ label: 'Weekly limit', used_percent: 0, resets_at: null }],
+            },
+          }),
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use reset' }))
+    expect(confirmSpy).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+    })
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      'http://127.0.0.1:4317/api/provider-usage/codex/reset-credits/consume',
+    )
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      credit_id: 'RateLimitResetCredit_1',
+    })
+    expect(await screen.findByText('0% used')).toBeInTheDocument()
+    expect(onToast).toHaveBeenCalledWith({
+      variant: 'success',
+      title: 'Codex usage limits were reset',
+    })
+    confirmSpy.mockRestore()
+  })
+
+  it('does not consume a reset when confirmation is cancelled', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(
+        overviewWith({
+          claude_code: { status: 'not_installed' },
+          codex: {
+            status: 'ok',
+            account_email: null,
+            plan_label: 'Pro',
+            windows: [],
+            reset_credits: {
+              available_count: 1,
+              credits: [{ id: 'RateLimitResetCredit_1', title: 'Full reset' }],
+            },
+          },
+        }),
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use reset' }))
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
+  })
+
   it('shows an inline retry when the initial load fails', async () => {
     const fetchMock = vi
       .fn()

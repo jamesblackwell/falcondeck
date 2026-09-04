@@ -33,6 +33,8 @@ import type {
   SpeechCredentialStatus,
   SpeechRewriteRequest,
   SpeechRewriteResponse,
+  ConsumeProviderResetCreditRequest,
+  ConsumeProviderResetCreditResponse,
   ProviderUsageOverview,
   SelectedSkillReference,
   SkillSummary,
@@ -243,6 +245,20 @@ export function createDaemonApiClient(baseUrl: string) {
       const query = options?.refresh ? "?refresh=true" : "";
       return parseJson<ProviderUsageOverview>(
         await fetch(`${baseUrl}/api/provider-usage${query}`),
+      );
+    },
+    async consumeCodexResetCredit(
+      request: ConsumeProviderResetCreditRequest = {},
+    ) {
+      return parseJson<ConsumeProviderResetCreditResponse>(
+        await fetch(
+          `${baseUrl}/api/provider-usage/codex/reset-credits/consume`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(request),
+          },
+        ),
       );
     },
     async saveSpeechCredential(apiKey: string) {

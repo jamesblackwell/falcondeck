@@ -84,6 +84,12 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   week). When the top-level meter is weekly-only, the daemon also reads
   `additional_rate_limits` so a reintroduced 5-hour window still appears.
   API-key logins report "no subscription usage limits" instead of numbers.
+  Banked "Full reset" credits come from the sibling
+  `/wham/rate-limit-reset-credits` endpoint (same token). The usage payload's
+  `rate_limit_reset_credits.available_count` is enough to show a count when
+  the detail request fails. `POST /api/provider-usage/codex/reset-credits/consume`
+  (RPC `providers.usage.consumeReset`) redeems one credit; Codex only spends
+  it when at least one window actually resets.
 - Claude Code reads the CLI's keychain entry (macOS) or
   `~/.claude/.credentials.json` and calls the Anthropic OAuth usage
   endpoint. Expired tokens report `expired` — the daemon never refreshes

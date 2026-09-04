@@ -50,6 +50,34 @@ describe("createDaemonApiClient sendTurn", () => {
     );
   });
 
+  it("consumes a Codex reset credit through the daemon endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          outcome: "reset",
+          usage: {
+            codex: { status: "unauthenticated" },
+            claude_code: { status: "not_installed" },
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await createDaemonApiClient(
+      "http://daemon.test",
+    ).consumeCodexResetCredit({ credit_id: "RateLimitResetCredit_1" });
+
+    expect(result.outcome).toBe("reset");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/provider-usage/codex/reset-credits/consume",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("lists workspace skills for the selected provider", async () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>

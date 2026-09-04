@@ -1,7 +1,9 @@
 //! Live subscription usage snapshots for supported harnesses.
 //!
 //! Reads the same read-only dashboards the harness CLIs expose: Codex queries
-//! the ChatGPT usage endpoint with the token from `~/.codex/auth.json`, Claude
+//! the ChatGPT usage endpoint with the token from `~/.codex/auth.json` and,
+//! when signed in with ChatGPT, the sibling rate-limit-reset-credits
+//! endpoint for banked "Full reset" credits, Claude
 //! Code queries the Anthropic OAuth usage endpoint with the token from the
 //! CLI's keychain entry (macOS) or `~/.claude/.credentials.json`, Grok Build
 //! queries the CLI-proxy billing endpoint with the token from
@@ -32,13 +34,16 @@ use std::time::{Duration, Instant};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
 use falcondeck_core::{
-    AgentProvider, ProviderUsage, ProviderUsageCost, ProviderUsageOverview, ProviderUsageWindow,
+    AgentProvider, ConsumeProviderResetCreditOutcome, ConsumeProviderResetCreditRequest,
+    ConsumeProviderResetCreditResponse, ProviderUsage, ProviderUsageCost, ProviderUsageOverview,
+    ProviderUsageResetCredit, ProviderUsageResetCredits, ProviderUsageWindow,
 };
 use serde_json::Value;
 #[cfg(not(test))]
 use tokio::fs;
 
 use super::AppState;
+use crate::error::DaemonError;
 
 const USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +53,10 @@ const USAGE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const USAGE_ERROR_CACHE_TTL: Duration = Duration::from_secs(45);
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_RESET_CREDITS_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CODEX_RESET_CREDITS_CONSUME_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 const CHATGPT_AUTH_CLAIM_PATH: &str = "https://api.openai.com/auth";
 const CHATGPT_PROFILE_CLAIM_PATH: &str = "https://api.openai.com/profile";
 const FIVE_HOUR_WINDOW_SECONDS: i64 = 18_000;
@@ -100,6 +109,56 @@ fn clamp_percent(value: f64) -> u32 {
 fn epoch_seconds_to_iso(seconds: Option<i64>) -> Option<String> {
     DateTime::<Utc>::from_timestamp(seconds?, 0)
         .map(|datetime| datetime.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn timestamp_value_to_iso(value: Option<&Value>) -> Option<String> {
+    let value = value.filter(|value| !value.is_null())?;
+    if let Some(seconds) = value.as_i64() {
+        return epoch_seconds_to_iso(Some(normalize_epoch_seconds(seconds)));
+    }
+    if let Some(seconds) = value.as_u64() {
+        return epoch_seconds_to_iso(Some(normalize_epoch_seconds(seconds as i64)));
+    }
+    if let Some(seconds) = value.as_f64() {
+        if !seconds.is_finite() {
+            return None;
+        }
+        return epoch_seconds_to_iso(Some(normalize_epoch_seconds(seconds.round() as i64)));
+    }
+    value
+        .as_str()
+        .and_then(|raw| normalize_iso_timestamp(Some(raw)))
+}
+
+fn normalize_epoch_seconds(seconds: i64) -> i64 {
+    // ChatGPT sometimes returns milliseconds.
+    if seconds.abs() > 10_000_000_000 {
+        seconds / 1_000
+    } else {
+        seconds
+    }
+}
+
+fn usage_ok(
+    account_email: Option<String>,
+    plan_label: Option<String>,
+    windows: Vec<ProviderUsageWindow>,
+) -> ProviderUsage {
+    usage_ok_with_reset_credits(account_email, plan_label, windows, None)
+}
+
+fn usage_ok_with_reset_credits(
+    account_email: Option<String>,
+    plan_label: Option<String>,
+    windows: Vec<ProviderUsageWindow>,
+    reset_credits: Option<ProviderUsageResetCredits>,
+) -> ProviderUsage {
+    ProviderUsage::Ok {
+        account_email,
+        plan_label,
+        windows,
+        reset_credits,
+    }
 }
 
 fn normalize_iso_timestamp(value: Option<&str>) -> Option<String> {
@@ -537,7 +596,65 @@ fn codex_has_label(windows: &[ProviderUsageWindow], label: &str) -> bool {
     windows.iter().any(|window| window.label == label)
 }
 
-fn normalize_codex_usage(raw: &Value, account_email: Option<String>) -> ProviderUsage {
+fn json_u32(value: Option<&Value>) -> Option<u32> {
+    u32::try_from(json_u64(value)?).ok()
+}
+
+fn credit_status_is_available(status: Option<&str>) -> bool {
+    match status {
+        None => true,
+        Some(status) => status.eq_ignore_ascii_case("available"),
+    }
+}
+
+fn normalize_codex_reset_credit(credit: &Value) -> Option<ProviderUsageResetCredit> {
+    if !credit.is_object() {
+        return None;
+    }
+    if !credit_status_is_available(credit.get("status").and_then(Value::as_str)) {
+        return None;
+    }
+    let id = non_empty_string(credit.get("id"))?;
+    let title = non_empty_string(credit.get("title")).unwrap_or_else(|| "Full reset".to_string());
+    Some(ProviderUsageResetCredit {
+        id,
+        title,
+        expires_at: timestamp_value_to_iso(json_field(credit, "expiresAt", "expires_at")),
+        description: non_empty_string(credit.get("description")),
+    })
+}
+
+fn normalize_codex_reset_credits(
+    usage: &Value,
+    details: Option<&Value>,
+) -> Option<ProviderUsageResetCredits> {
+    let mut credits = Vec::new();
+    let mut detail_count = None;
+    if let Some(details) = details {
+        if let Some(count) = json_u32(json_field(details, "availableCount", "available_count")) {
+            detail_count = Some(count);
+        }
+        if let Some(Value::Array(rows)) = details.get("credits") {
+            credits.extend(rows.iter().filter_map(normalize_codex_reset_credit));
+        }
+    }
+    let usage_count = json_field(usage, "rateLimitResetCredits", "rate_limit_reset_credits")
+        .and_then(|summary| json_u32(json_field(summary, "availableCount", "available_count")));
+    let available_count = detail_count.or(usage_count).unwrap_or(credits.len() as u32);
+    if available_count == 0 && credits.is_empty() {
+        return None;
+    }
+    Some(ProviderUsageResetCredits {
+        available_count: available_count.max(credits.len() as u32),
+        credits,
+    })
+}
+
+fn normalize_codex_usage(
+    raw: &Value,
+    account_email: Option<String>,
+    reset_credit_details: Option<&Value>,
+) -> ProviderUsage {
     let malformed = || ProviderUsage::Error {
         message: "Codex usage response was malformed.".to_string(),
         plan_label: None,
@@ -591,31 +708,15 @@ fn normalize_codex_usage(raw: &Value, account_email: Option<String>) -> Provider
         }
         Some(_) => return malformed(),
     }
-    ProviderUsage::Ok {
+    usage_ok_with_reset_credits(
         account_email,
-        plan_label: codex_plan_label(plan_type),
+        codex_plan_label(plan_type),
         windows,
-    }
+        normalize_codex_reset_credits(raw, reset_credit_details),
+    )
 }
 
-async fn fetch_codex_usage() -> ProviderUsage {
-    let Some(raw) = read_codex_auth_raw().await else {
-        return ProviderUsage::Unauthenticated;
-    };
-    let credentials = match parse_codex_auth(&raw) {
-        CodexAuthRead::ChatGpt(credentials) => credentials,
-        CodexAuthRead::ApiKey => {
-            return ProviderUsage::Error {
-                message:
-                    "Codex is authenticated with an API key, which has no subscription usage limits."
-                        .to_string(),
-                plan_label: None,
-                account_email: None,
-            };
-        }
-        CodexAuthRead::Missing => return ProviderUsage::Unauthenticated,
-    };
-
+fn codex_chatgpt_headers(credentials: &CodexChatGptCredentials) -> Vec<(&'static str, String)> {
     let mut headers: Vec<(&'static str, String)> = vec![
         (
             "authorization",
@@ -629,8 +730,40 @@ async fn fetch_codex_usage() -> ProviderUsage {
     if credentials.is_fedramp_account {
         headers.push(("x-openai-fedramp", "true".to_string()));
     }
+    headers
+}
 
-    let Ok(response) = fetch_usage_json(CODEX_USAGE_URL, &headers).await else {
+fn codex_api_key_usage() -> ProviderUsage {
+    ProviderUsage::Error {
+        message: "Codex is authenticated with an API key, which has no subscription usage limits."
+            .to_string(),
+        plan_label: None,
+        account_email: None,
+    }
+}
+
+async fn load_codex_chatgpt_credentials() -> Result<CodexChatGptCredentials, ProviderUsage> {
+    let Some(raw) = read_codex_auth_raw().await else {
+        return Err(ProviderUsage::Unauthenticated);
+    };
+    match parse_codex_auth(&raw) {
+        CodexAuthRead::ChatGpt(credentials) => Ok(credentials),
+        CodexAuthRead::ApiKey => Err(codex_api_key_usage()),
+        CodexAuthRead::Missing => Err(ProviderUsage::Unauthenticated),
+    }
+}
+
+async fn fetch_codex_usage() -> ProviderUsage {
+    let credentials = match load_codex_chatgpt_credentials().await {
+        Ok(credentials) => credentials,
+        Err(status) => return status,
+    };
+    let headers = codex_chatgpt_headers(&credentials);
+    let (usage_response, credits_response) = tokio::join!(
+        fetch_usage_json(CODEX_USAGE_URL, &headers),
+        fetch_usage_json(CODEX_RESET_CREDITS_URL, &headers),
+    );
+    let Ok(response) = usage_response else {
         return ProviderUsage::Error {
             message: "Codex usage request failed.".to_string(),
             plan_label: None,
@@ -645,13 +778,97 @@ async fn fetch_codex_usage() -> ProviderUsage {
             account_email: None,
         },
         _ => match response.body {
-            Some(body) => normalize_codex_usage(&body, credentials.account_email),
+            Some(body) => {
+                let credit_details = credits_response.ok().and_then(|credits| {
+                    (200..300)
+                        .contains(&credits.status)
+                        .then_some(credits.body)
+                        .flatten()
+                });
+                normalize_codex_usage(&body, credentials.account_email, credit_details.as_ref())
+            }
             None => ProviderUsage::Error {
                 message: "Codex usage response was malformed.".to_string(),
                 plan_label: None,
                 account_email: None,
             },
         },
+    }
+}
+
+fn parse_codex_reset_consume_outcome(body: &Value) -> Option<ConsumeProviderResetCreditOutcome> {
+    let raw = json_field(body, "outcome", "outcome")
+        .and_then(Value::as_str)
+        .or_else(|| json_field(body, "code", "code").and_then(Value::as_str))?;
+    match raw {
+        "reset" => Some(ConsumeProviderResetCreditOutcome::Reset),
+        "nothingToReset" | "nothing_to_reset" => {
+            Some(ConsumeProviderResetCreditOutcome::NothingToReset)
+        }
+        "noCredit" | "no_credit" => Some(ConsumeProviderResetCreditOutcome::NoCredit),
+        "alreadyRedeemed" | "already_redeemed" => {
+            Some(ConsumeProviderResetCreditOutcome::AlreadyRedeemed)
+        }
+        _ => None,
+    }
+}
+
+async fn consume_codex_reset_credit_http(
+    request: &ConsumeProviderResetCreditRequest,
+) -> Result<ConsumeProviderResetCreditOutcome, DaemonError> {
+    let credentials = match load_codex_chatgpt_credentials().await {
+        Ok(credentials) => credentials,
+        Err(ProviderUsage::Unauthenticated) => {
+            return Err(DaemonError::BadRequest(
+                "Codex is not signed in. Run `codex login`, then try again.".to_string(),
+            ));
+        }
+        Err(ProviderUsage::Error { message, .. }) => {
+            return Err(DaemonError::BadRequest(message));
+        }
+        Err(_) => {
+            return Err(DaemonError::BadRequest(
+                "Codex is not signed in. Run `codex login`, then try again.".to_string(),
+            ));
+        }
+    };
+
+    let mut headers = codex_chatgpt_headers(&credentials);
+    headers.push(("content-type", "application/json".to_string()));
+    let redeem_request_id = request
+        .redeem_request_id
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut body = serde_json::json!({ "redeem_request_id": redeem_request_id });
+    if let Some(credit_id) = request
+        .credit_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        body["credit_id"] = serde_json::Value::String(credit_id.to_string());
+    }
+    let response =
+        post_usage_json_body(CODEX_RESET_CREDITS_CONSUME_URL, &headers, &body.to_string())
+            .await
+            .map_err(|_| DaemonError::Rpc("Codex reset request failed.".to_string()))?;
+    match response.status {
+        401 => Err(DaemonError::BadRequest(
+            "Your Codex session expired. Run `codex`, then try again.".to_string(),
+        )),
+        status if !(200..300).contains(&status) => Err(DaemonError::Rpc(format!(
+            "Codex reset request failed (HTTP {status})."
+        ))),
+        _ => {
+            let Some(body) = response.body else {
+                return Err(DaemonError::Rpc(
+                    "Codex reset response was malformed.".to_string(),
+                ));
+            };
+            parse_codex_reset_consume_outcome(&body)
+                .ok_or_else(|| DaemonError::Rpc("Codex reset response was malformed.".to_string()))
+        }
     }
 }
 
@@ -927,11 +1144,7 @@ fn normalize_claude_usage(
         }
     }
     windows.extend(claude_scoped_windows(raw.get("limits")));
-    ProviderUsage::Ok {
-        account_email,
-        plan_label: claude_plan_label(credentials),
-        windows,
-    }
+    usage_ok(account_email, claude_plan_label(credentials), windows)
 }
 
 async fn fetch_claude_usage() -> ProviderUsage {
@@ -1142,11 +1355,7 @@ fn normalize_grok_usage(
             cost: None,
         });
     }
-    ProviderUsage::Ok {
-        account_email,
-        plan_label,
-        windows,
-    }
+    usage_ok(account_email, plan_label, windows)
 }
 
 async fn fetch_grok_usage() -> ProviderUsage {
@@ -1425,11 +1634,7 @@ fn normalize_cursor_usage(
             });
         }
     }
-    ProviderUsage::Ok {
-        account_email,
-        plan_label,
-        windows,
-    }
+    usage_ok(account_email, plan_label, windows)
 }
 
 async fn fetch_cursor_usage() -> ProviderUsage {
@@ -1626,11 +1831,7 @@ fn normalize_agy_usage(
     account_email: Option<String>,
     plan_label: Option<String>,
 ) -> ProviderUsage {
-    ProviderUsage::Ok {
-        account_email,
-        plan_label,
-        windows: normalize_agy_summary(summary),
-    }
+    usage_ok(account_email, plan_label, normalize_agy_summary(summary))
 }
 
 #[cfg(not(test))]
@@ -1977,11 +2178,7 @@ fn normalize_zai_usage(raw: &Value) -> ProviderUsage {
             .or_else(|| non_empty_string(raw.get("level")))
             .as_deref(),
     );
-    ProviderUsage::Ok {
-        account_email: None,
-        plan_label,
-        windows: normalize_zai_limits(payload),
-    }
+    usage_ok(None, plan_label, normalize_zai_limits(payload))
 }
 
 #[cfg(not(test))]
@@ -2119,6 +2316,25 @@ impl AppState {
         let overview = self.fetch_provider_usage_overview().await;
         *self.inner.usage_cache.lock().unwrap() = Some((Instant::now(), overview.clone()));
         overview
+    }
+
+    /// Redeems one Codex banked rate-limit reset, then returns a fresh usage
+    /// snapshot. The credit is only consumed when Codex reports `reset`.
+    pub async fn consume_codex_reset_credit(
+        &self,
+        request: ConsumeProviderResetCreditRequest,
+    ) -> Result<ConsumeProviderResetCreditResponse, DaemonError> {
+        if !crate::agent_binary::agent_binary_available_cached(
+            "codex",
+            &self.provider_bin(&AgentProvider::CODEX),
+        ) {
+            return Err(DaemonError::BadRequest(
+                "Codex is not installed on this Mac.".to_string(),
+            ));
+        }
+        let outcome = consume_codex_reset_credit_http(&request).await?;
+        let usage = self.provider_usage_overview(true).await;
+        Ok(ConsumeProviderResetCreditResponse { outcome, usage })
     }
 
     async fn fetch_provider_usage_overview(&self) -> ProviderUsageOverview {
@@ -2444,7 +2660,7 @@ mod tests {
         });
 
         assert_eq!(
-            normalize_codex_usage(&raw, Some("codex@example.com".to_string())),
+            normalize_codex_usage(&raw, Some("codex@example.com".to_string()), None),
             ProviderUsage::Ok {
                 account_email: Some("codex@example.com".to_string()),
                 plan_label: Some("Pro".to_string()),
@@ -2462,6 +2678,7 @@ mod tests {
                         cost: None,
                     },
                 ],
+                reset_credits: None,
             }
         );
     }
@@ -2499,7 +2716,7 @@ mod tests {
         });
 
         assert_eq!(
-            normalize_codex_usage(&raw, None),
+            normalize_codex_usage(&raw, None, None),
             ProviderUsage::Ok {
                 account_email: None,
                 plan_label: Some("Pro".to_string()),
@@ -2517,6 +2734,7 @@ mod tests {
                         cost: None,
                     },
                 ],
+                reset_credits: None,
             }
         );
     }
@@ -2537,7 +2755,7 @@ mod tests {
         });
 
         assert_eq!(
-            normalize_codex_usage(&raw, None),
+            normalize_codex_usage(&raw, None, None),
             ProviderUsage::Ok {
                 account_email: None,
                 plan_label: Some("Pro".to_string()),
@@ -2555,6 +2773,7 @@ mod tests {
                         cost: None,
                     },
                 ],
+                reset_credits: None,
             }
         );
     }
@@ -2562,11 +2781,12 @@ mod tests {
     #[test]
     fn normalize_codex_usage_allows_absent_rate_limits() {
         assert_eq!(
-            normalize_codex_usage(&json!({ "plan_type": "plus" }), None),
+            normalize_codex_usage(&json!({ "plan_type": "plus" }), None, None),
             ProviderUsage::Ok {
                 account_email: None,
                 plan_label: Some("Plus".to_string()),
                 windows: Vec::new(),
+                reset_credits: None,
             }
         );
     }
@@ -2574,7 +2794,7 @@ mod tests {
     #[test]
     fn normalize_codex_usage_flags_malformed_payloads() {
         let raw = json!({ "rate_limit": { "primary_window": { "used_percent": "lots" } } });
-        match normalize_codex_usage(&raw, None) {
+        match normalize_codex_usage(&raw, None, None) {
             ProviderUsage::Error { message, .. } => {
                 assert!(message.contains("malformed"));
             }
@@ -2638,6 +2858,7 @@ mod tests {
                         cost: None,
                     },
                 ],
+                reset_credits: None,
             }
         );
     }
@@ -2693,6 +2914,7 @@ mod tests {
                     resets_at: None,
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -2721,6 +2943,7 @@ mod tests {
                     resets_at: None,
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -2846,6 +3069,7 @@ mod tests {
                     resets_at: Some("2026-06-19T22:00:00.000Z".to_string()),
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -2876,6 +3100,173 @@ mod tests {
             }
             other => panic!("expected ok variant, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalize_codex_usage_maps_reset_credit_details() {
+        let raw = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": { "used_percent": 12, "limit_window_seconds": 18_000 },
+            },
+            "rate_limit_reset_credits": { "available_count": 2 },
+        });
+        let details = json!({
+            "available_count": 2,
+            "credits": [
+                {
+                    "id": "RateLimitResetCredit_1",
+                    "status": "available",
+                    "title": "Full reset",
+                    "expires_at": "2026-09-21T00:02:00Z",
+                },
+                {
+                    "id": "RateLimitResetCredit_used",
+                    "status": "redeemed",
+                    "title": "Full reset",
+                    "expires_at": "2026-10-04T02:11:00Z",
+                },
+                {
+                    "id": "RateLimitResetCredit_2",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "expires_at": 1_759_546_260_i64,
+                },
+            ],
+        });
+        match normalize_codex_usage(&raw, None, Some(&details)) {
+            ProviderUsage::Ok {
+                reset_credits: Some(credits),
+                ..
+            } => {
+                assert_eq!(credits.available_count, 2);
+                assert_eq!(credits.credits.len(), 2);
+                assert_eq!(credits.credits[0].id, "RateLimitResetCredit_1");
+                assert_eq!(credits.credits[0].title, "Full reset");
+                assert_eq!(
+                    credits.credits[0].expires_at.as_deref(),
+                    Some("2026-09-21T00:02:00.000Z")
+                );
+                assert_eq!(credits.credits[1].id, "RateLimitResetCredit_2");
+                assert_eq!(credits.credits[1].title, "Full reset");
+            }
+            other => panic!("expected ok with reset credits, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_codex_usage_keeps_count_when_details_are_missing() {
+        let raw = json!({
+            "plan_type": "plus",
+            "rate_limit_reset_credits": { "available_count": 1 },
+        });
+        match normalize_codex_usage(&raw, None, None) {
+            ProviderUsage::Ok {
+                reset_credits: Some(credits),
+                ..
+            } => {
+                assert_eq!(credits.available_count, 1);
+                assert!(credits.credits.is_empty());
+            }
+            other => panic!("expected count-only reset credits, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_codex_usage_attaches_reset_credits_and_survives_detail_errors() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_codex_auth_file().lock().unwrap() = Some(codex_auth_json("token"));
+        test_http_fixtures().lock().unwrap().insert(
+            CODEX_USAGE_URL.to_string(),
+            ok_response(json!({
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": { "used_percent": 40, "limit_window_seconds": 18_000 },
+                },
+                "rate_limit_reset_credits": { "available_count": 2 },
+            })),
+        );
+        test_http_fixtures().lock().unwrap().insert(
+            CODEX_RESET_CREDITS_URL.to_string(),
+            ok_response(json!({
+                "available_count": 2,
+                "credits": [{
+                    "id": "RateLimitResetCredit_1",
+                    "status": "available",
+                    "title": "Full reset",
+                    "expires_at": "2026-09-21T00:02:00Z",
+                }],
+            })),
+        );
+        match fetch_codex_usage().await {
+            ProviderUsage::Ok {
+                reset_credits: Some(credits),
+                ..
+            } => {
+                assert_eq!(credits.available_count, 2);
+                assert_eq!(credits.credits[0].id, "RateLimitResetCredit_1");
+            }
+            other => panic!("expected reset credits, got {other:?}"),
+        }
+
+        test_http_fixtures()
+            .lock()
+            .unwrap()
+            .insert(CODEX_RESET_CREDITS_URL.to_string(), error_response(503));
+        match fetch_codex_usage().await {
+            ProviderUsage::Ok {
+                windows,
+                reset_credits: Some(credits),
+                ..
+            } => {
+                assert_eq!(windows.len(), 1);
+                assert_eq!(credits.available_count, 2);
+                assert!(credits.credits.is_empty());
+            }
+            other => panic!("expected usage without credit details, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn consume_codex_reset_credit_maps_backend_outcomes() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        *test_codex_auth_file().lock().unwrap() = Some(codex_auth_json("token"));
+        test_http_fixtures().lock().unwrap().insert(
+            CODEX_RESET_CREDITS_CONSUME_URL.to_string(),
+            ok_response(json!({ "code": "nothingToReset", "windows_reset": 0 })),
+        );
+        assert_eq!(
+            consume_codex_reset_credit_http(&ConsumeProviderResetCreditRequest {
+                credit_id: Some("RateLimitResetCredit_1".to_string()),
+                redeem_request_id: Some("req-1".to_string()),
+            })
+            .await
+            .expect("consume"),
+            ConsumeProviderResetCreditOutcome::NothingToReset
+        );
+
+        test_http_fixtures().lock().unwrap().insert(
+            CODEX_RESET_CREDITS_CONSUME_URL.to_string(),
+            ok_response(json!({ "outcome": "reset" })),
+        );
+        assert_eq!(
+            consume_codex_reset_credit_http(&ConsumeProviderResetCreditRequest::default())
+                .await
+                .expect("consume"),
+            ConsumeProviderResetCreditOutcome::Reset
+        );
+    }
+
+    #[tokio::test]
+    async fn consume_codex_reset_credit_requires_chatgpt_login() {
+        let _guard = usage_test_guard().await;
+        clear_fixtures();
+        let error = consume_codex_reset_credit_http(&ConsumeProviderResetCreditRequest::default())
+            .await
+            .expect_err("signed out");
+        assert!(error.to_string().contains("not signed in"));
     }
 
     fn grok_auth_json(token: &str, email: &str, expires_at: &str) -> String {
@@ -2963,6 +3354,7 @@ mod tests {
                     resets_at: Some("2026-08-23T11:52:18.016Z".to_string()),
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -3001,6 +3393,7 @@ mod tests {
                 account_email: None,
                 plan_label: Some("SuperGrok".to_string()),
                 windows: Vec::new(),
+                reset_credits: None,
             }
         );
     }
@@ -3108,6 +3501,7 @@ mod tests {
                     resets_at: Some("2026-08-23T11:52:18.000Z".to_string()),
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -3195,6 +3589,7 @@ mod tests {
                         limit_usd_cents: 40000,
                     }),
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -3326,6 +3721,7 @@ mod tests {
                         limit_usd_cents: 40000,
                     }),
                 }],
+                reset_credits: None,
             }
         );
     }
@@ -3395,7 +3791,7 @@ mod tests {
                 {}
             ]
         });
-        match normalize_codex_usage(&raw, None) {
+        match normalize_codex_usage(&raw, None, None) {
             ProviderUsage::Ok { windows, .. } => {
                 assert_eq!(windows.len(), 1);
                 assert_eq!(windows[0].label, "Weekly limit");
@@ -3453,6 +3849,7 @@ mod tests {
                 account_email,
                 plan_label,
                 windows,
+                ..
             } => {
                 assert_eq!(account_email.as_deref(), Some("james@example.com"));
                 assert_eq!(plan_label.as_deref(), Some("Google AI Pro"));
@@ -3566,6 +3963,7 @@ mod tests {
                         cost: None,
                     },
                 ],
+                reset_credits: None,
             }
         );
     }
@@ -3717,6 +4115,7 @@ mod tests {
                     resets_at: epoch_millis_to_iso(Some(&json!(1_788_078_815_019_i64))),
                     cost: None,
                 }],
+                reset_credits: None,
             }
         );
     }

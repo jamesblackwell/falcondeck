@@ -272,6 +272,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/skills/{skill_name}", delete(uninstall_library_skill))
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/provider-usage", get(read_provider_usage))
+        .route(
+            "/api/provider-usage/codex/reset-credits/consume",
+            post(consume_codex_reset_credit),
+        )
         .route("/api/harnesses", get(read_harnesses))
         .route("/api/harnesses/refresh", post(refresh_harnesses))
         .route("/api/harnesses/upgrade", post(upgrade_harness))
@@ -1072,6 +1076,13 @@ async fn read_provider_usage(
     Query(request): Query<falcondeck_core::ProviderUsageRequest>,
 ) -> Result<Json<falcondeck_core::ProviderUsageOverview>, DaemonError> {
     Ok(Json(state.provider_usage_overview(request.refresh).await))
+}
+
+async fn consume_codex_reset_credit(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::ConsumeProviderResetCreditRequest>,
+) -> Result<Json<falcondeck_core::ConsumeProviderResetCreditResponse>, DaemonError> {
+    Ok(Json(state.consume_codex_reset_credit(request).await?))
 }
 
 async fn refresh_harnesses(
