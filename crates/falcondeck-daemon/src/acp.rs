@@ -675,6 +675,67 @@ fn write_providers_file_locked(state_dir: &Path, providers: &Value) -> Result<()
         .map_err(|error| format!("failed to replace {}: {error}", path.display()))
 }
 
+/// Exports all ACP providers from providers.json for backup.
+pub fn backup_acp_providers(state_dir: &Path) -> Vec<falcondeck_core::AcpProviderBackupEntry> {
+    let entries = providers_entries(state_dir);
+    let mut list = Vec::new();
+    for (id, val) in entries {
+        if AgentProvider::is_reserved_id(&id) {
+            continue;
+        }
+        if let Ok(config) = serde_json::from_value::<AcpProviderConfig>(val) {
+            list.push(falcondeck_core::AcpProviderBackupEntry {
+                id,
+                label: config.label,
+                command: config.command,
+                env: config.env,
+                transport: match config.transport {
+                    ProviderTransport::Auto => Some("auto".to_string()),
+                    ProviderTransport::Native => Some("native".to_string()),
+                    ProviderTransport::Acp => Some("acp".to_string()),
+                },
+            });
+        }
+    }
+    list.sort_by(|a, b| a.id.cmp(&b.id));
+    list
+}
+
+/// Restores ACP providers from backup into providers.json.
+pub fn restore_acp_providers(
+    state_dir: &Path,
+    providers: &[falcondeck_core::AcpProviderBackupEntry],
+) -> usize {
+    if providers.is_empty() {
+        return 0;
+    }
+    let mut entries = providers_entries(state_dir);
+    let mut count = 0;
+    for provider in providers {
+        if AgentProvider::is_reserved_id(&provider.id) {
+            continue;
+        }
+        let mut obj = serde_json::Map::new();
+        obj.insert("label".to_string(), Value::String(provider.label.clone()));
+        obj.insert(
+            "command".to_string(),
+            serde_json::to_value(&provider.command).unwrap_or_else(|_| Value::Array(Vec::new())),
+        );
+        obj.insert(
+            "env".to_string(),
+            serde_json::to_value(&provider.env)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        );
+        if let Some(transport) = &provider.transport {
+            obj.insert("transport".to_string(), Value::String(transport.clone()));
+        }
+        entries.insert(provider.id.clone(), Value::Object(obj));
+        count += 1;
+    }
+    let _ = write_providers_file(state_dir, &Value::Object(entries));
+    count
+}
+
 /// Loads ACP provider configs from `<state_dir>/providers.json`.
 ///
 /// A missing file means no extra providers; a malformed file is surfaced in

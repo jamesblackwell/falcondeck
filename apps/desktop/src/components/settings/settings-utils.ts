@@ -5,6 +5,7 @@ import type {
   TrustedDevice,
 } from "@falcondeck/client-core";
 import {
+  Archive,
   Blocks,
   Bot,
   Keyboard,
@@ -32,7 +33,8 @@ export type SettingsSectionId =
   | "connectors"
   | "extensions"
   | "speech"
-  | "remote";
+  | "remote"
+  | "backup";
 
 export type SettingsNavItem = {
   id: SettingsSectionId;
@@ -107,6 +109,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Remote access",
     description: "Pairing, devices, and relay status",
     icon: Wifi,
+  },
+  {
+    id: "backup",
+    label: "Backup & Data",
+    description: "Export, import, and reset app state",
+    icon: Archive,
   },
 ];
 

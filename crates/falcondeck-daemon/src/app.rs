@@ -3180,6 +3180,210 @@ impl AppState {
         Ok(updated)
     }
 
+    pub async fn export_backup(&self) -> Result<falcondeck_core::FalconDeckBackup, DaemonError> {
+        let preferences = self.preferences().await;
+
+        let mut workspaces_map = HashMap::new();
+        let saved = self.inner.saved_workspaces.lock().await;
+        for (path, ws) in saved.iter() {
+            workspaces_map.insert(
+                path.clone(),
+                falcondeck_core::WorkspaceBackupEntry {
+                    path: ws.path.clone(),
+                    id: ws.id.clone(),
+                    in_sidebar: ws.in_sidebar,
+                    default_provider: ws.default_provider.clone(),
+                    pinned_thread_ids: ws.pinned_thread_ids.clone(),
+                    project_pinned_thread_ids: ws.project_pinned_thread_ids.clone(),
+                    archived_thread_ids: ws.archived_thread_ids.clone(),
+                },
+            );
+        }
+        let live_workspaces = self.inner.workspaces.lock().await;
+        for ws in live_workspaces.values() {
+            let normalized_path = normalize_workspace_path(&ws.summary.path);
+            let archived_thread_ids = ws
+                .threads
+                .values()
+                .filter(|t| t.summary.is_archived)
+                .map(|t| t.summary.id.clone())
+                .collect();
+            let pinned_thread_ids = ws
+                .threads
+                .values()
+                .filter(|t| t.summary.is_pinned)
+                .map(|t| t.summary.id.clone())
+                .collect();
+            let project_pinned_thread_ids = ws
+                .threads
+                .values()
+                .filter(|t| t.summary.is_pinned_in_project && !t.summary.is_pinned)
+                .map(|t| t.summary.id.clone())
+                .collect();
+            workspaces_map.insert(
+                normalized_path.clone(),
+                falcondeck_core::WorkspaceBackupEntry {
+                    path: normalized_path,
+                    id: Some(ws.summary.id.clone()),
+                    in_sidebar: true,
+                    default_provider: Some(ws.summary.default_provider.clone()),
+                    pinned_thread_ids,
+                    project_pinned_thread_ids,
+                    archived_thread_ids,
+                },
+            );
+        }
+        let mut workspaces: Vec<_> = workspaces_map.into_values().collect();
+        workspaces.sort_by(|a, b| a.path.cmp(&b.path));
+
+        let extensions = self.inner.extensions.lock().await.backup_data();
+        let control = Some(self.control().backup_data().await);
+        let connectors = crate::connectors::backup_mcp_servers();
+        let state_dir = self
+            .inner
+            .state_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        let providers = crate::acp::backup_acp_providers(state_dir);
+
+        Ok(falcondeck_core::FalconDeckBackup {
+            version: falcondeck_core::BACKUP_SCHEMA_VERSION,
+            created_at: Utc::now(),
+            app_version: Some(self.inner.daemon.version.clone()),
+            daemon: falcondeck_core::DaemonBackupData {
+                preferences,
+                workspaces,
+                extensions,
+                control,
+                connectors,
+                providers,
+            },
+            client: None,
+        })
+    }
+
+    pub async fn import_backup(
+        &self,
+        request: falcondeck_core::ImportBackupRequest,
+    ) -> Result<falcondeck_core::ImportBackupResponse, DaemonError> {
+        let mut response = falcondeck_core::ImportBackupResponse::default();
+
+        // 1. Preferences
+        let prefs = request.backup.daemon.preferences;
+        if let Err(err) = persist_preferences(&self.inner.preferences_path, &prefs).await {
+            tracing::warn!(%err, "failed to persist imported preferences");
+        } else {
+            *self.inner.preferences.lock().await = prefs.clone();
+            response.preferences_restored = true;
+            self.emit(
+                None,
+                None,
+                UnifiedEvent::PreferencesUpdated { preferences: prefs },
+            );
+        }
+
+        // 2. Extensions
+        let ext_count = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .restore_backup_data(request.backup.daemon.extensions)
+            .await?;
+        response.extensions_imported = ext_count;
+
+        // 3. Control (automations & settings)
+        if let Some(control_backup) = request.backup.daemon.control {
+            match self.control().restore_backup_data(control_backup).await {
+                Ok(count) => response.automations_imported = count,
+                Err(err) => tracing::warn!(%err, "failed to restore automations"),
+            }
+        }
+
+        // 4. Connectors
+        response.connectors_imported =
+            crate::connectors::restore_mcp_servers(&request.backup.daemon.connectors);
+
+        // 5. Providers
+        let state_dir = self
+            .inner
+            .state_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        response.providers_imported =
+            crate::acp::restore_acp_providers(state_dir, &request.backup.daemon.providers);
+
+        // 6. Workspaces
+        for ws in request.backup.daemon.workspaces {
+            let target_path = request
+                .path_mappings
+                .get(&ws.path)
+                .cloned()
+                .unwrap_or(ws.path);
+            let normalized = normalize_workspace_path(&target_path);
+            if Path::new(&normalized).is_dir() {
+                let connect_req = falcondeck_core::ConnectWorkspaceRequest {
+                    path: normalized.clone(),
+                    kind: falcondeck_core::WorkspaceKind::Project,
+                };
+                let persisted_ws = PersistedWorkspaceState {
+                    path: normalized.clone(),
+                    id: ws.id,
+                    current_thread_id: None,
+                    updated_at: Some(Utc::now()),
+                    default_provider: ws.default_provider,
+                    last_error: None,
+                    archived_thread_ids: ws.archived_thread_ids,
+                    pinned_thread_ids: ws.pinned_thread_ids,
+                    project_pinned_thread_ids: ws.project_pinned_thread_ids,
+                    thread_states: Vec::new(),
+                    in_sidebar: ws.in_sidebar,
+                };
+                match self
+                    .connect_workspace_internal(connect_req, Some(&persisted_ws))
+                    .await
+                {
+                    Ok(_) => response.workspaces_imported += 1,
+                    Err(err) => {
+                        tracing::warn!(%err, path = %normalized, "failed to connect imported workspace");
+                        response.workspaces_skipped += 1;
+                    }
+                }
+            } else {
+                let persisted_ws = PersistedWorkspaceState {
+                    path: normalized.clone(),
+                    id: ws.id,
+                    current_thread_id: None,
+                    updated_at: Some(Utc::now()),
+                    default_provider: ws.default_provider,
+                    last_error: None,
+                    archived_thread_ids: ws.archived_thread_ids,
+                    pinned_thread_ids: ws.pinned_thread_ids,
+                    project_pinned_thread_ids: ws.project_pinned_thread_ids,
+                    thread_states: Vec::new(),
+                    in_sidebar: ws.in_sidebar,
+                };
+                self.inner
+                    .saved_workspaces
+                    .lock()
+                    .await
+                    .insert(normalized, persisted_ws);
+                response.workspaces_skipped += 1;
+            }
+        }
+
+        let _ = self.persist_local_state().await;
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+
+        Ok(response)
+    }
+
     pub async fn connect_workspace(
         &self,
         request: ConnectWorkspaceRequest,

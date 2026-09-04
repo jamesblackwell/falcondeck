@@ -48,6 +48,10 @@ import type {
   TurnInputItem,
   SuggestThreadTitleResponse,
   UpdatePreferencesPayload,
+  FalconDeckBackup,
+  BackupSummary,
+  ImportBackupRequest,
+  ImportBackupResponse,
   UpdateScheduledTaskPayload,
   SetThreadGoalPayload,
   StartReviewPayload,
@@ -205,6 +209,29 @@ export function createDaemonApiClient(baseUrl: string) {
             body: JSON.stringify(payload),
           }),
         ),
+      );
+    },
+    async exportBackup() {
+      return parseJson<FalconDeckBackup>(
+        await fetch(`${baseUrl}/api/backup`),
+      );
+    },
+    async inspectBackup(backup: FalconDeckBackup) {
+      return parseJson<BackupSummary>(
+        await fetch(`${baseUrl}/api/backup/inspect`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(backup),
+        }),
+      );
+    },
+    async importBackup(request: ImportBackupRequest) {
+      return parseJson<ImportBackupResponse>(
+        await fetch(`${baseUrl}/api/backup/import`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        }),
       );
     },
     async speechCredentialStatus() {

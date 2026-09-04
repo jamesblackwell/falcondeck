@@ -5,12 +5,15 @@
 //! It also exports the cryptography helpers used by the pairing protocol.
 #![deny(missing_docs)]
 
+/// Backup and restore protocol types.
+pub mod backup;
 /// Shared wire types for the agent control interface.
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
+pub use backup::*;
 
 use std::collections::BTreeMap;
 

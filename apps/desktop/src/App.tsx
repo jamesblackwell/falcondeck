@@ -3897,6 +3897,41 @@ function AppInner() {
     setActiveExtensionPanelKey(null);
   }, []);
 
+  const handleOpenBackupSettings = useCallback(() => {
+    setSettingsSection("backup");
+    setSettingsRequestKey((current) => current + 1);
+    setIsSettingsOpen(true);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+    setIsExtensionsOpen(false);
+    setIsPluginsOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(({ listen }) => {
+      if (disposed) return;
+      void listen<string>("falcondeck:menu-action", (event) => {
+        if (
+          event.payload === "export_backup" ||
+          event.payload === "import_backup"
+        ) {
+          handleOpenBackupSettings();
+        }
+      }).then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      });
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [handleOpenBackupSettings]);
+
   const handleOpenScheduled = useCallback(() => {
     setIsSettingsOpen(false);
     setIsScheduledOpen(true);
@@ -5542,6 +5577,7 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onOpenSettings={handleOpenSettings}
+            onOpenBackup={handleOpenBackupSettings}
             onOpenUsage={handleOpenUsage}
             onOpenActivity={handleOpenActivity}
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}

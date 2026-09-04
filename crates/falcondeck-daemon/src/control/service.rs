@@ -1501,6 +1501,42 @@ impl ControlService {
         self.state.lock().await.settings.clone()
     }
 
+    /// Exports agent control settings and automations for backup.
+    pub async fn backup_data(&self) -> falcondeck_core::ControlBackupData {
+        let state = self.state.lock().await;
+        falcondeck_core::ControlBackupData {
+            settings: Some(state.settings.clone()),
+            automations: state.automations.clone(),
+        }
+    }
+
+    /// Restores agent control automations and settings from backup.
+    pub async fn restore_backup_data(
+        &self,
+        data: falcondeck_core::ControlBackupData,
+    ) -> Result<usize, String> {
+        let mut state = self.state.lock().await;
+        let mut next = state.clone();
+        if let Some(settings) = data.settings {
+            next.settings = settings;
+        }
+        let mut imported_count = 0;
+        for automation in data.automations {
+            if let Some(existing) = next.automations.iter_mut().find(|a| a.id == automation.id) {
+                *existing = automation;
+            } else {
+                next.automations.push(automation);
+                imported_count += 1;
+            }
+        }
+        next.store_revision = next.store_revision.saturating_add(1);
+        store::persist(&self.path, &next)
+            .await
+            .map_err(|err| err.0.message)?;
+        *state = next;
+        Ok(imported_count)
+    }
+
     /// Owner-only Automation projection for one extension host invocation.
     pub async fn owned_automations(
         &self,

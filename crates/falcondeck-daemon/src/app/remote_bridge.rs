@@ -1049,6 +1049,31 @@ impl AppState {
                 }
                 "preferences.read" => serde_json::to_value(self.preferences().await)
                     .map_err(|error| format!("failed to serialize preferences: {error}")),
+                "backup.export" => serde_json::to_value(
+                    self.export_backup()
+                        .await
+                        .map_err(|err| format!("failed to export backup: {err}"))?,
+                )
+                .map_err(|error| format!("failed to serialize backup: {error}")),
+                "backup.inspect" => {
+                    let backup =
+                        serde_json::from_value::<falcondeck_core::FalconDeckBackup>(params.clone())
+                            .map_err(|error| format!("invalid backup payload: {error}"))?;
+                    serde_json::to_value(backup.summarize())
+                        .map_err(|error| format!("failed to serialize backup summary: {error}"))
+                }
+                "backup.import" => {
+                    let request = serde_json::from_value::<falcondeck_core::ImportBackupRequest>(
+                        params.clone(),
+                    )
+                    .map_err(|error| format!("invalid backup import payload: {error}"))?;
+                    serde_json::to_value(
+                        self.import_backup(request)
+                            .await
+                            .map_err(|err| format!("failed to import backup: {err}"))?,
+                    )
+                    .map_err(|error| format!("failed to serialize backup import response: {error}"))
+                }
                 "control.get" => {
                     let request = serde_json::from_value::<ControlGetRequest>(params.clone())
                         .map_err(|error| format!("invalid control read payload: {error}"))?;

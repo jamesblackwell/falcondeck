@@ -22,6 +22,7 @@ import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
+import { BackupPanel } from "./settings/BackupPanel";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import { UsagePanel } from "./settings/UsagePanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
@@ -131,6 +132,8 @@ export function SettingsView(props: SettingsViewProps) {
               baseUrl={props.baseUrl}
               onToast={props.onToast}
             />
+          ) : activeSection === "backup" ? (
+            <BackupPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "general" ? (
             <GeneralSettingsPanel
               workspace={props.workspace}

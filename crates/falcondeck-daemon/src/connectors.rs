@@ -917,6 +917,54 @@ fn toml_string(value: &str) -> String {
     out
 }
 
+/// Exports user-configured global MCP servers for backup.
+pub fn backup_mcp_servers() -> Vec<falcondeck_core::McpServerBackupEntry> {
+    let servers = read_connectors_file(&global_connectors_path());
+    servers
+        .into_iter()
+        .map(|(name, entry)| falcondeck_core::McpServerBackupEntry {
+            name,
+            command: entry.command,
+            args: entry.args,
+            env: entry.env,
+            url: entry.url,
+            headers: entry.headers,
+            disabled: !entry.enabled,
+        })
+        .collect()
+}
+
+/// Restores user-configured global MCP servers from backup.
+pub fn restore_mcp_servers(entries: &[falcondeck_core::McpServerBackupEntry]) -> usize {
+    if entries.is_empty() {
+        return 0;
+    }
+    let path = global_connectors_path();
+    let mut servers = read_connectors_file(&path);
+    let mut count = 0;
+    for entry in entries {
+        if entry.name.is_empty() || entry.name == BUILTIN_CONNECTOR_NAME {
+            continue;
+        }
+        let connector = ConnectorEntry {
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            env: entry.env.clone(),
+            url: entry.url.clone(),
+            headers: entry.headers.clone(),
+            auth: None,
+            enabled: !entry.disabled,
+            providers: Vec::new(),
+            extra: BTreeMap::new(),
+        };
+        servers.insert(entry.name.clone(), connector);
+        count += 1;
+    }
+    let val = serde_json::to_value(&servers).unwrap_or_else(|_| serde_json::json!({}));
+    let _ = write_mcp_servers_at(&path, &val);
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

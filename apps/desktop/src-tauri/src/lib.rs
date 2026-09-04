@@ -1169,6 +1169,83 @@ fn focus_main_window(app: AppHandle) -> Result<(), String> {
     window.set_focus().map_err(|error| error.to_string())
 }
 
+fn setup_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let handle = app.handle();
+    let app_submenu = SubmenuBuilder::new(handle, "FalconDeck")
+        .about(None)
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let file_submenu = SubmenuBuilder::new(handle, "File")
+        .item(
+            &MenuItemBuilder::with_id("export_backup", "Export Full Backup…")
+                .accelerator("CmdOrCtrl+Shift+E")
+                .build(handle)?,
+        )
+        .item(
+            &MenuItemBuilder::with_id("import_backup", "Import Backup…")
+                .accelerator("CmdOrCtrl+Shift+I")
+                .build(handle)?,
+        )
+        .separator()
+        .close_window()
+        .build()?;
+
+    let edit_submenu = SubmenuBuilder::new(handle, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let view_submenu = SubmenuBuilder::new(handle, "View").fullscreen().build()?;
+
+    let window_submenu = SubmenuBuilder::new(handle, "Window")
+        .minimize()
+        .separator()
+        .close_window()
+        .build()?;
+
+    let menu = MenuBuilder::new(handle)
+        .items(&[
+            &app_submenu,
+            &file_submenu,
+            &edit_submenu,
+            &view_submenu,
+            &window_submenu,
+        ])
+        .build()?;
+
+    app.set_menu(menu)?;
+
+    app.on_menu_event(move |app_handle, event| {
+        use tauri::Emitter;
+        match event.id().as_ref() {
+            "export_backup" => {
+                let _ = app_handle.emit("falcondeck:menu-action", "export_backup");
+            }
+            "import_backup" => {
+                let _ = app_handle.emit("falcondeck:menu-action", "import_backup");
+            }
+            _ => {}
+        }
+    });
+
+    Ok(())
+}
+
 pub fn run() {
     // The updater enables rustls' Ring provider while the daemon enables
     // AWS-LC. With both compiled, rustls deliberately refuses to guess and
@@ -1218,6 +1295,10 @@ pub fn run() {
 
             dictation::initialize(app.handle());
             dictation::create_overlay_window(app.handle())?;
+
+            if let Err(err) = setup_menu(app) {
+                eprintln!("Failed to setup native app menu: {err}");
+            }
 
             if cfg!(debug_assertions) {
                 return Ok(());

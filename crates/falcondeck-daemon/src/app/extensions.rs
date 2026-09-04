@@ -597,6 +597,34 @@ impl ExtensionRegistry {
             .collect()
     }
 
+    pub(super) fn backup_data(&self) -> falcondeck_core::ExtensionsBackupData {
+        falcondeck_core::ExtensionsBackupData {
+            enabled: self.persisted.enabled.clone(),
+            grants: self.persisted.grants.clone(),
+            storage: self.persisted.storage.clone(),
+        }
+    }
+
+    pub(super) async fn restore_backup_data(
+        &mut self,
+        data: falcondeck_core::ExtensionsBackupData,
+    ) -> Result<usize, DaemonError> {
+        let mut count = 0;
+        for (id, enabled) in data.enabled {
+            self.persisted.enabled.insert(id, enabled);
+            count += 1;
+        }
+        for (id, grants) in data.grants {
+            self.persisted.grants.insert(id, grants);
+        }
+        for (id, storage) in data.storage {
+            self.persisted.storage.insert(id, storage);
+        }
+        let _ = self.discover().await;
+        self.persist().await?;
+        Ok(count)
+    }
+
     pub(super) fn validate_action_input(input: &Value) -> Result<(), DaemonError> {
         if serde_json::to_vec(input)?.len() > MAX_ACTION_INPUT_BYTES {
             return Err(DaemonError::BadRequest(format!(

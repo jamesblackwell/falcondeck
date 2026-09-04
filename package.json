@@ -15,6 +15,9 @@
     "extension:validate": "node ./scripts/validate-extensions.mjs",
     "extension:validate:test": "node --test ./scripts/validate-extensions.test.mjs",
     "extension:frontend:typecheck": "tsc -p tsconfig.extension-frontends.json",
+    "state:fresh": "./scripts/state-stash.sh stash",
+    "state:restore": "./scripts/state-stash.sh restore",
+    "state:status": "./scripts/state-stash.sh status",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

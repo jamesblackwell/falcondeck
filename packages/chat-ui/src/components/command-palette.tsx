@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import {
   Check,
   Activity,
+  Archive,
   FolderClosed,
   Gauge,
   Keyboard,
@@ -472,6 +473,7 @@ export type CommandPaletteProps = {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
+  onOpenBackup?: () => void
   onOpenUsage?: () => void
   onOpenActivity?: () => void
   onOpenKeyboardShortcuts?: () => void
@@ -499,6 +501,7 @@ export const CommandPalette = memo(function CommandPalette({
   onSelectThread,
   onNewThread,
   onOpenSettings,
+  onOpenBackup,
   onOpenUsage,
   onOpenActivity,
   onOpenKeyboardShortcuts,
@@ -773,6 +776,21 @@ export const CommandPalette = memo(function CommandPalette({
         run: onOpenSettings,
       })
     }
+    if (onOpenBackup) {
+      result.push({
+        id: 'backup',
+        kind: 'action',
+        section: 'Actions',
+        label: 'Backup & Data',
+        icon: { kind: 'glyph', Glyph: Archive },
+        search: normalizeSearchFields({
+          primary: 'Backup & Data',
+          secondary: 'Export, import, and restore app state',
+          keywords: 'backup export import restore state data migration',
+        }),
+        run: onOpenBackup,
+      })
+    }
     if (onOpenUsage) {
       result.push({
         id: 'usage',
@@ -844,7 +862,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.

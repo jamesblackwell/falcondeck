@@ -1978,3 +1978,102 @@ export type TerminalServerFrame =
   | { type: "terminal_exited"; exit_code: number | null }
   | { type: "terminal_error"; message: string }
   | { type: "terminal_pong" };
+
+export type WorkspaceBackupEntry = {
+  path: string;
+  id?: string | null;
+  in_sidebar: boolean;
+  default_provider?: string | null;
+  pinned_thread_ids: string[];
+  project_pinned_thread_ids: string[];
+  archived_thread_ids: string[];
+};
+
+export type ExtensionsBackupData = {
+  enabled: Record<string, boolean>;
+  grants: Record<string, string[]>;
+  storage: Record<string, Record<string, unknown>>;
+};
+
+export type ControlBackupData = {
+  settings?: unknown;
+  automations: unknown[];
+};
+
+export type McpServerBackupEntry = {
+  name: string;
+  command?: string | null;
+  args: string[];
+  env: Record<string, string>;
+  url?: string | null;
+  headers: Record<string, string>;
+  disabled: boolean;
+};
+
+export type AcpProviderBackupEntry = {
+  id: string;
+  label: string;
+  command: string[];
+  env: Record<string, string>;
+  transport?: string | null;
+};
+
+export type ClientBackupData = {
+  appearance?: unknown;
+  sounds?: unknown;
+  shortcuts?: unknown;
+  dictation?: unknown;
+  ui_preferences?: unknown;
+};
+
+export type DaemonBackupData = {
+  preferences: FalconDeckPreferences;
+  workspaces: WorkspaceBackupEntry[];
+  extensions: ExtensionsBackupData;
+  control?: ControlBackupData | null;
+  connectors: McpServerBackupEntry[];
+  providers: AcpProviderBackupEntry[];
+};
+
+export type FalconDeckBackup = {
+  version: number;
+  created_at: string;
+  app_version?: string | null;
+  daemon: DaemonBackupData;
+  client?: ClientBackupData | null;
+};
+
+export type BackupWorkspaceStatus = {
+  path: string;
+  exists_on_disk: boolean;
+};
+
+export type BackupSummary = {
+  version: number;
+  created_at: string;
+  app_version?: string | null;
+  workspace_count: number;
+  workspaces: BackupWorkspaceStatus[];
+  extension_count: number;
+  extensions: string[];
+  automation_count: number;
+  connector_count: number;
+  provider_count: number;
+  has_client_preferences: boolean;
+};
+
+export type ImportBackupRequest = {
+  backup: FalconDeckBackup;
+  path_mappings?: Record<string, string>;
+};
+
+export type ImportBackupResponse = {
+  workspaces_imported: number;
+  workspaces_skipped: number;
+  extensions_imported: number;
+  automations_imported: number;
+  connectors_imported: number;
+  providers_imported: number;
+  preferences_restored: boolean;
+};
+
