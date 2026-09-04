@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { ProviderIcon } from '@falcondeck/chat-ui'
 import {
@@ -344,6 +344,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [consumingId, setConsumingId] = useState<string | null>(null)
+  const pendingRedeemRequestIds = useRef(new Map<string, string>())
 
   const fetchOverview = useCallback(
     async (mode: 'initial' | 'refresh') => {
@@ -388,6 +389,14 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
       )
       if (!confirmed) return
       const consumeKey = credit?.id ?? '*'
+      let redeemRequestId = pendingRedeemRequestIds.current.get(consumeKey)
+      if (!redeemRequestId) {
+        redeemRequestId =
+          typeof globalThis.crypto?.randomUUID === 'function'
+            ? globalThis.crypto.randomUUID()
+            : `codex-reset-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        pendingRedeemRequestIds.current.set(consumeKey, redeemRequestId)
+      }
       setConsumingId(consumeKey)
       try {
         const response = await fetch(
@@ -397,6 +406,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               credit_id: credit?.id ?? null,
+              redeem_request_id: redeemRequestId,
             }),
           },
         )
@@ -405,6 +415,7 @@ export function UsagePanel({ baseUrl, onToast, hideHeader = false }: UsagePanelP
           throw new Error(payload?.error ?? falconDeckHttpError(response.status))
         }
         const result = (await response.json()) as ConsumeProviderResetCreditResponse
+        pendingRedeemRequestIds.current.delete(consumeKey)
         setOverview(result.usage)
         onToast(consumeOutcomeToast(result.outcome))
       } catch (cause) {

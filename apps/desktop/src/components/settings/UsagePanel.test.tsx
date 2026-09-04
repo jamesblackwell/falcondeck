@@ -506,12 +506,63 @@ describe('UsagePanel', () => {
     )
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
       credit_id: 'RateLimitResetCredit_1',
+      redeem_request_id: expect.any(String),
     })
     expect(await screen.findByText('0% used')).toBeInTheDocument()
     expect(onToast).toHaveBeenCalledWith({
       variant: 'success',
       title: 'Codex usage limits were reset',
     })
+    confirmSpy.mockRestore()
+  })
+
+  it('reuses the reset redemption id after an ambiguous failure', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onToast = vi.fn()
+    const initialUsage = overviewWith({
+      claude_code: { status: 'not_installed' },
+      codex: {
+        status: 'ok',
+        account_email: 'dev@example.com',
+        plan_label: 'Pro',
+        windows: [{ label: 'Weekly limit', used_percent: 90, resets_at: null }],
+        reset_credits: {
+          available_count: 1,
+          credits: [{ id: 'RateLimitResetCredit_1', title: 'Full reset' }],
+        },
+      },
+    })
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(initialUsage))
+      .mockRejectedValueOnce(new Error('connection lost'))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          outcome: 'already_redeemed',
+          usage: initialUsage,
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<UsagePanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Use reset' }))
+    await waitFor(() => {
+      expect(onToast).toHaveBeenCalledWith({
+        variant: 'danger',
+        title: 'Could not use Codex reset',
+        description: 'connection lost',
+      })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Use reset' }))
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+    })
+
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))
+    const retryBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))
+    expect(firstBody.redeem_request_id).toEqual(expect.any(String))
+    expect(retryBody.redeem_request_id).toBe(firstBody.redeem_request_id)
     confirmSpy.mockRestore()
   })
 
