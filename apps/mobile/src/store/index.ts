@@ -6,6 +6,7 @@ export {
 } from './connection-log-store'
 export {
   persistSessionCacheNow,
+  setConversationUpdatesPaused,
   useSessionStore,
   useGroups,
   useSelectedWorkspace,

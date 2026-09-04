@@ -558,6 +558,16 @@ function buildCacheFromState(state: SessionState): MobileSessionCache | null {
 const CACHE_PERSIST_THROTTLE_MS = 1_000;
 let lastCachePersistAt = 0;
 let trailingCachePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let conversationUpdatesPaused = false;
+
+/**
+ * The front drawer completely hides the transcript. While it is open, keep
+ * global summaries current but defer the selected transcript to the
+ * authoritative thread.detail refresh that runs when the drawer closes.
+ */
+export function setConversationUpdatesPaused(paused: boolean): void {
+  conversationUpdatesPaused = paused;
+}
 
 /**
  * The state a write was last derived from. Every field the cache reads is
@@ -651,6 +661,27 @@ function isStreamingEvent(event: EventEnvelope): boolean {
 
 function shouldPersistCacheAfterEvents(events: EventEnvelope[]): boolean {
   return events.some((event) => !isStreamingEvent(event));
+}
+
+// Global summaries stay live for status, attention, and the sidebar. Mobile
+// retains transcript bodies only for the selected visible thread; every
+// selection (and drawer close) refreshes authoritative thread.detail.
+function shouldApplyEventToSessionState(
+  state: SessionState,
+  event: EventEnvelope,
+): boolean {
+  const daemonEvent = event.event;
+  const isConversationContent =
+    daemonEvent.type === 'conversation-item-added' ||
+    daemonEvent.type === 'conversation-item-updated' ||
+    daemonEvent.type === 'realtime-item-added' ||
+    daemonEvent.type === 'text';
+  if (!isConversationContent) return true;
+  return (
+    !conversationUpdatesPaused &&
+    event.thread_id !== null &&
+    event.thread_id === state.selectedThreadId
+  );
 }
 
 function persistStateCache(state: SessionState) {
@@ -772,14 +803,24 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   ...initialState,
 
   applyDaemonEvent: (event) => {
-    set((state) => applyEventsToState(state, [event]));
-    if (shouldPersistCacheAfterEvents([event])) persistStateCache(get());
+    let applied = false;
+    set((state) => {
+      applied = shouldApplyEventToSessionState(state, event);
+      return applied ? applyEventsToState(state, [event]) : state;
+    });
+    if (applied && shouldPersistCacheAfterEvents([event])) persistStateCache(get());
   },
 
   applyDaemonEvents: (events) => {
     if (events.length === 0) return;
-    set((state) => applyEventsToState(state, events));
-    if (shouldPersistCacheAfterEvents(events)) persistStateCache(get());
+    let appliedEvents = events;
+    set((state) => {
+      appliedEvents = events.filter((event) =>
+        shouldApplyEventToSessionState(state, event),
+      );
+      return applyEventsToState(state, appliedEvents);
+    });
+    if (shouldPersistCacheAfterEvents(appliedEvents)) persistStateCache(get());
   },
 
   setPreferences: (preferences) => {
@@ -1135,10 +1176,12 @@ export function useSelectedThread() {
   );
 }
 
-export function useSelectedThreadHistory() {
+export function useSelectedThreadHistory(options?: { pause?: boolean }) {
+  const pause = options?.pause === true;
+  const frozenHistory = useRef<ThreadHistoryState | null>(null);
   return useSessionStore((s) => {
     const selectedThreadId = s.selectedThreadId;
-    if (
+    const live = (
       !selectedThreadId ||
       !threadForSelection(
         s.snapshot?.threads ?? EMPTY_THREADS,
@@ -1146,8 +1189,14 @@ export function useSelectedThreadHistory() {
         selectedThreadId,
       )
     )
-      return EMPTY_HISTORY;
-    return s.threadHistory[selectedThreadId] ?? EMPTY_HISTORY;
+      ? EMPTY_HISTORY
+      : (s.threadHistory[selectedThreadId] ?? EMPTY_HISTORY);
+    if (!pause) {
+      frozenHistory.current = live;
+      return live;
+    }
+    if (frozenHistory.current == null) frozenHistory.current = live;
+    return frozenHistory.current;
   });
 }
 

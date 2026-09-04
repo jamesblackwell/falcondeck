@@ -10,6 +10,7 @@ import {
 import {
   __resetSessionCachePersistThrottleForTests,
   persistSessionCacheNow,
+  setConversationUpdatesPaused,
   useSessionStore,
 } from './session-store'
 import {
@@ -27,6 +28,7 @@ import {
 } from '../test/factories'
 
 function resetStore() {
+  setConversationUpdatesPaused(false)
   useSessionStore.getState().reset()
 }
 
@@ -122,6 +124,64 @@ describe('session-store', () => {
       applyDaemonEvent(conversationItemAddedEvent(msg, 'other-thread'))
 
       expect(useSessionStore.getState().threadDetail?.items).toHaveLength(0)
+      expect(useSessionStore.getState().threadItems['other-thread']).toBeUndefined()
+    })
+
+    it('ignores background transcript content while applying its thread summary', () => {
+      const background = thread({
+        id: 'thread-2',
+        workspace_id: 'workspace-1',
+        status: 'running',
+        title: 'Background',
+      })
+      const { applyDaemonEvent } = useSessionStore.getState()
+      applyDaemonEvent(
+        snapshotEvent(snapshot({ threads: [thread(), background] })),
+      )
+      resetMMKV()
+      setMobileSessionCacheKey(new Uint8Array(32).fill(7))
+      __resetSessionCachePersistThrottleForTests()
+
+      applyDaemonEvent(
+        conversationItemAddedEvent(
+          assistantMessage('background-message', 'Streaming elsewhere'),
+          background.id,
+        ),
+      )
+      applyDaemonEvent(
+        threadUpdatedEvent({ ...background, title: 'Background updated' }),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.selectedThreadId).toBe('thread-1')
+      expect(state.threadItems[background.id]).toBeUndefined()
+      expect(loadMobileSessionCache()).toBeNull()
+      expect(
+        state.snapshot?.threads.find((entry) => entry.id === background.id),
+      ).toMatchObject({ title: 'Background updated', status: 'running' })
+    })
+
+    it('ignores selected transcript content while paused but keeps its summary live', () => {
+      const selected = thread({ status: 'running' })
+      const { applyDaemonEvent } = useSessionStore.getState()
+      applyDaemonEvent(snapshotEvent(snapshot({ threads: [selected] })))
+      setConversationUpdatesPaused(true)
+
+      applyDaemonEvent(
+        conversationItemAddedEvent(
+          assistantMessage('paused-message', 'Hidden by drawer'),
+        ),
+      )
+      applyDaemonEvent(
+        threadUpdatedEvent({ ...selected, title: 'Still updating' }),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.threadItems[selected.id]).toBeUndefined()
+      expect(state.snapshot?.threads[0]).toMatchObject({
+        title: 'Still updating',
+        status: 'running',
+      })
     })
   })
 

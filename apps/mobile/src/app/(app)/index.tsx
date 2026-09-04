@@ -62,6 +62,7 @@ import {
   useSelectedWorkspace,
   useUIStore,
   openConnectionDebug,
+  setConversationUpdatesPaused,
 } from "@/store";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { useInterruptTurn } from "@/hooks/useInterruptTurn";
@@ -142,7 +143,9 @@ export default function HomeScreen() {
   );
   const activeInteractiveRequest = interactiveQueue[0] ?? null;
   const selectedThread = useSelectedThread();
-  const selectedThreadHistory = useSelectedThreadHistory();
+  const selectedThreadHistory = useSelectedThreadHistory({
+    pause: pauseLiveTranscript,
+  });
   const selectedThreadDetailError = useSelectedThreadDetailError();
   const conversationItems = useConversationItems({ pause: pauseLiveTranscript });
   const workspace = useSelectedWorkspace();
@@ -191,7 +194,6 @@ export default function HomeScreen() {
     connectionStatus,
     error,
     isEncrypted,
-    hasSyncedOnce,
     machinePresence,
     sessionId,
   } = useRelayStore(
@@ -199,7 +201,6 @@ export default function HomeScreen() {
       connectionStatus: s.connectionStatus,
       error: s.error,
       isEncrypted: s.isEncrypted,
-      hasSyncedOnce: s.hasSyncedOnce,
       machinePresence: s.machinePresence,
       sessionId: s.sessionId,
     })),
@@ -251,7 +252,6 @@ export default function HomeScreen() {
     respondApproval,
     respondInteractive,
     loadThreadDetail,
-    prefetchRecentThreadDetails,
     retryResponse,
     loadWorkspaceSkills,
     handoffToProvider,
@@ -1173,6 +1173,16 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    setConversationUpdatesPaused(pauseLiveTranscript);
+    return () => setConversationUpdatesPaused(false);
+  }, [pauseLiveTranscript]);
+
+  useEffect(() => {
+    if (pauseLiveTranscript) {
+      setDetailLoadingThreadId(null);
+      setIsLoadingOlder(false);
+      return;
+    }
     if (
       !selectedWorkspaceId ||
       !selectedThreadId ||
@@ -1224,18 +1234,11 @@ export default function HomeScreen() {
     daemonRpcReady,
     isEncrypted,
     loadThreadDetail,
+    pauseLiveTranscript,
     scrollToBottomIfFollowing,
     selectedThreadId,
     selectedWorkspaceId,
   ]);
-
-  // Warm the handful of most recently updated threads in the background once
-  // the session is encrypted and synced, so tapping between them renders from
-  // cache instantly instead of "Loading thread…".
-  useEffect(() => {
-    if (!isEncrypted || !hasSyncedOnce || !daemonRpcReady) return;
-    void prefetchRecentThreadDetails();
-  }, [daemonRpcReady, hasSyncedOnce, isEncrypted, prefetchRecentThreadDetails]);
 
   // Opening a thread starts at the bottom of the cached items via the list's
   // startRenderingFromBottom (the detail-load effect snaps past any newer
