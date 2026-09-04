@@ -974,6 +974,31 @@ impl AppState {
         Ok(falcondeck_core::SuggestThreadTitleResponse { title })
     }
 
+    /// Republishes the count of background tasks still running on a parked
+    /// thread. The turn is over, so nothing else will bump this thread until
+    /// one of those tasks reports and wakes the agent again.
+    async fn publish_background_task_count(&self, workspace_id: &str, thread_id: &str, count: u32) {
+        let mut changed = false;
+        let updated = self
+            .with_thread_mut(workspace_id, thread_id, |thread| {
+                changed = thread.attention.background_task_count != count;
+                thread.attention.background_task_count = count;
+            })
+            .await;
+        // A no-op update would re-broadcast the whole summary to every client
+        // on each task event; only say something when the count moved.
+        if updated.is_err() || !changed {
+            return;
+        }
+        if let Ok(thread) = self.thread_summary(workspace_id, thread_id).await {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+    }
+
     async fn finalize_claude_turn_at_result(
         &self,
         workspace_id: &str,
@@ -982,6 +1007,7 @@ impl AppState {
         mut turn_error: Option<String>,
         saw_agent_output: bool,
         result_reported_success: bool,
+        background_task_count: u32,
     ) -> bool {
         if result_reported_success && !saw_agent_output && turn_error.is_none() {
             turn_error =
@@ -1009,6 +1035,7 @@ impl AppState {
             .with_thread_mut(workspace_id, thread_id, |thread| {
                 thread.status = ThreadStatus::Idle;
                 thread.last_error = None;
+                thread.attention.background_task_count = background_task_count;
                 thread.updated_at = settled_at;
             })
             .await;
@@ -1145,6 +1172,12 @@ impl AppState {
         // Sub-agent step log per spawning tool call: (kept steps, dropped count).
         let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
         let mut background_tasks = HashSet::<String>::new();
+        // Every task the CLI still lists, blocking or not. A backgrounded
+        // shell command does not hold the turn open, but it does mean the
+        // agent is not finished with the thread: its notification wakes the
+        // parent for another turn. The thread reports the count so the UI can
+        // say "idle, but work is still in flight" instead of "done".
+        let mut outstanding_tasks = HashSet::<String>::new();
         let mut background_task_tools = HashMap::<String, String>::new();
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
@@ -1363,12 +1396,22 @@ impl AppState {
                                 }
                             }
                             if let Some(tasks) = claude_background_tasks(&value) {
-                                background_tasks = tasks;
+                                background_tasks = tasks.blocking;
+                                outstanding_tasks = tasks.all;
+                                if parked_between_turns {
+                                    self.publish_background_task_count(
+                                        &workspace_id,
+                                        &thread_id,
+                                        outstanding_tasks.len() as u32,
+                                    )
+                                    .await;
+                                }
                             }
                             if let Some(task) = claude_task_started(&value) {
                                 if task.holds_turn_open {
                                     background_tasks.insert(task.task_id.clone());
                                 }
+                                outstanding_tasks.insert(task.task_id.clone());
                                 // Recorded for every task, blocking or not: a
                                 // backgrounded command still needs its spawning
                                 // tool card settled when it eventually reports.
@@ -1376,6 +1419,14 @@ impl AppState {
                             }
                             if let Some(task) = claude_task_finished(&value) {
                                 background_tasks.remove(&task.task_id);
+                                if outstanding_tasks.remove(&task.task_id) && parked_between_turns {
+                                    self.publish_background_task_count(
+                                        &workspace_id,
+                                        &thread_id,
+                                        outstanding_tasks.len() as u32,
+                                    )
+                                    .await;
+                                }
                                 let tool_id = task
                                     .tool_use_id
                                     .or_else(|| background_task_tools.remove(&task.task_id));
@@ -1708,6 +1759,7 @@ impl AppState {
                                                 turn_error.clone(),
                                                 saw_agent_output,
                                                 result_reported_success,
+                                                outstanding_tasks.len() as u32,
                                             )
                                             .await
                                     {
@@ -1723,6 +1775,11 @@ impl AppState {
                                         subagent_steps.clear();
                                         background_tasks.clear();
                                         background_task_tools.clear();
+                                        // `outstanding_tasks` deliberately
+                                        // survives the park: those tasks
+                                        // outlive the turn, and their
+                                        // notifications are what start the
+                                        // next one.
                                         running_tool_titles.clear();
                                         last_line_at = tokio::time::Instant::now();
                                         stall_warned = false;
@@ -1902,6 +1959,10 @@ impl AppState {
                     ThreadStatus::Idle
                 };
                 thread.last_error = final_error.clone();
+                // The CLI process is gone, so no background task can wake this
+                // thread again; a leftover count would advertise work that
+                // died with it.
+                thread.attention.background_task_count = 0;
                 thread.updated_at = settled_at;
             })
             .await;
@@ -2973,25 +3034,40 @@ fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
     task_type.is_some_and(|task_type| task_type.contains("agent"))
 }
 
-fn claude_background_tasks(value: &Value) -> Option<HashSet<String>> {
+/// The CLI's authoritative task list, split by what it means for the turn.
+struct ClaudeBackgroundTasks {
+    /// Tasks that must keep the turn open — async agents only.
+    blocking: HashSet<String>,
+    /// Every task still listed, including backgrounded shell commands. They
+    /// do not hold the turn, but they do wake it when they report.
+    all: HashSet<String>,
+}
+
+fn claude_background_tasks(value: &Value) -> Option<ClaudeBackgroundTasks> {
     if value.get("type").and_then(Value::as_str) != Some("system")
         || value.get("subtype").and_then(Value::as_str) != Some("background_tasks_changed")
     {
         return None;
     }
-    Some(
-        value
-            .get("tasks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|task| {
-                claude_task_holds_turn_open(task.get("task_type").and_then(Value::as_str))
-            })
-            .filter_map(|task| task.get("task_id").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect(),
-    )
+    let mut tasks = ClaudeBackgroundTasks {
+        blocking: HashSet::new(),
+        all: HashSet::new(),
+    };
+    for task in value
+        .get("tasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(task_id) = task.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if claude_task_holds_turn_open(task.get("task_type").and_then(Value::as_str)) {
+            tasks.blocking.insert(task_id.to_string());
+        }
+        tasks.all.insert(task_id.to_string());
+    }
+    Some(tasks)
 }
 
 struct ClaudeTaskStarted {
@@ -3456,7 +3532,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            tasks,
+            tasks.blocking,
+            HashSet::from(["agent-1".to_string(), "agent-2".to_string()])
+        );
+        assert_eq!(
+            tasks.all,
             HashSet::from(["agent-1".to_string(), "agent-2".to_string()])
         );
     }
@@ -3477,7 +3557,13 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(tasks, HashSet::from(["agent-1".to_string()]));
+        assert_eq!(tasks.blocking, HashSet::from(["agent-1".to_string()]));
+        // It still counts as outstanding work: the thread parks, but the
+        // command is live and its notification will start the next turn.
+        assert_eq!(
+            tasks.all,
+            HashSet::from(["bash-1".to_string(), "agent-1".to_string()])
+        );
     }
 
     #[test]

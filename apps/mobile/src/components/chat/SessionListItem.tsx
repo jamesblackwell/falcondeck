@@ -62,6 +62,8 @@ function SessionListItemInner({
           <View style={[styles.dot, { backgroundColor: theme.colors.danger.default }]} />
         ) : presentation.level === 'awaiting_response' ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.warning.default }]} />
+        ) : presentation.showBackgroundActivity ? (
+          <ActivityDiamond size={14} color={theme.colors.accent.default} variant="outline" />
         ) : presentation.showUnreadDot ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.unread }]} />
         ) : null}

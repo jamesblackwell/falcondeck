@@ -654,6 +654,7 @@ export function normalizeThreadSummary(
       unread: thread.attention?.unread ?? false,
       pending_approval_count: thread.attention?.pending_approval_count ?? 0,
       pending_question_count: thread.attention?.pending_question_count ?? 0,
+      background_task_count: thread.attention?.background_task_count ?? 0,
       last_agent_activity_seq: thread.attention?.last_agent_activity_seq ?? 0,
       last_read_seq: thread.attention?.last_read_seq ?? 0,
     },

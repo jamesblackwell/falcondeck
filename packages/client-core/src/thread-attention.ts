@@ -13,6 +13,12 @@ export type ThreadAttentionPresentation = {
   showSpinner: boolean
   showUnreadDot: boolean
   showBadge: boolean
+  /** Background tasks still running on a thread whose turn has ended. */
+  backgroundTaskCount: number
+  /** The turn is over but work the agent started is still in flight, and it
+   * will wake the thread when that work reports. Distinct from `showSpinner`:
+   * nothing is generating output right now. */
+  showBackgroundActivity: boolean
   indicatorTone: 'neutral' | 'info' | 'warning' | 'danger' | 'accent'
 }
 
@@ -54,6 +60,8 @@ export function deriveThreadAttentionPresentation(
     thread.attention.unread ||
     thread.attention.last_agent_activity_seq > thread.attention.last_read_seq
 
+  const backgroundTaskCount = thread.attention.background_task_count ?? 0
+
   const level = resolveThreadAttentionLevel(thread, pendingApprovalCount, pendingQuestionCount)
 
   return {
@@ -65,6 +73,10 @@ export function deriveThreadAttentionPresentation(
     showSpinner: level === 'running',
     showUnreadDot: level === 'unread',
     showBadge: level === 'awaiting_response' && Boolean(badgeLabel),
+    backgroundTaskCount,
+    // A running turn already shows a spinner; the background mark is for the
+    // gap the user reads as "finished" when it is not.
+    showBackgroundActivity: backgroundTaskCount > 0 && level !== 'running',
     indicatorTone:
       level === 'error'
         ? 'danger'

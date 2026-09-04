@@ -59,3 +59,42 @@ describe('ThreadItem timestamp', () => {
     ).toContain('2025')
   })
 })
+
+describe('ThreadItem background activity', () => {
+  /** The turn parked but the work it started has not: without this mark the
+   *  row is indistinguishable from a finished thread, and the agent starts
+   *  talking again out of nowhere. */
+  it('marks an idle thread whose background work is still running', () => {
+    const base = thread('2026-08-31T14:08:59Z')
+    render(
+      <ThreadItem
+        thread={{
+          ...base,
+          attention: { ...base.attention, background_task_count: 1 },
+        }}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+      />,
+    )
+
+    expect(
+      screen.getByRole('img', { name: 'Background task still running' }),
+    ).toBeInTheDocument()
+  })
+
+  it('says nothing when no background work is outstanding', () => {
+    render(
+      <ThreadItem
+        thread={thread('2026-08-31T14:08:59Z')}
+        workspaceId="workspace-1"
+        isSelected={false}
+        onSelect={() => {}}
+      />,
+    )
+
+    expect(
+      screen.queryByRole('img', { name: /Background task/ }),
+    ).not.toBeInTheDocument()
+  })
+})

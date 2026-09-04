@@ -13,6 +13,14 @@ import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 import { ProviderIcon } from './provider-icon'
 import { ThreadStageIcon } from './thread-stage-icon'
 
+/** The row's only explanation of the outline diamond, so it names the state
+ *  rather than the mechanism. */
+function backgroundActivityLabel(count: number) {
+  return count === 1
+    ? 'Background task still running'
+    : `${count} background tasks still running`
+}
+
 export type ThreadItemArchiveHandler = (
   workspaceId: string,
   threadId: string,
@@ -173,6 +181,15 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-danger" />
             ) : attention.level === 'awaiting_response' ? (
               <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
+            ) : attention.showBackgroundActivity ? (
+              <span
+                role="img"
+                aria-label={backgroundActivityLabel(attention.backgroundTaskCount)}
+                title={backgroundActivityLabel(attention.backgroundTaskCount)}
+                className="flex items-center justify-center"
+              >
+                <ActivityDiamond variant="outline" />
+              </span>
             ) : attention.showUnreadDot ? (
               <span className="h-2.5 w-2.5 rounded-full bg-unread" />
             ) : null}
@@ -388,6 +405,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.attention.badge_label === b.attention.badge_label &&
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
     a.attention.pending_question_count === b.attention.pending_question_count &&
+    a.attention.background_task_count === b.attention.background_task_count &&
     a.attention.last_agent_activity_seq ===
       b.attention.last_agent_activity_seq &&
     a.attention.last_read_seq === b.attention.last_read_seq

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { ThreadSummary } from './types'
 import {
+  deriveThreadAttentionPresentation,
   summarizeThreadAttention,
   wasTurnInterruptedByShutdown,
 } from './thread-attention'
@@ -111,5 +112,57 @@ describe('summarizeThreadAttention', () => {
       }),
     ])
     expect(failed).toEqual({ running: 0, unread: 2, unreadTone: 'danger' })
+  })
+})
+
+describe('background activity', () => {
+  /** A parked Claude turn that backgrounded a command reads as finished
+   *  everywhere else; the outline diamond is the only thing that says the
+   *  agent will be back. */
+  it('marks a parked thread whose background work is still running', () => {
+    const presentation = deriveThreadAttentionPresentation(
+      thread({
+        status: 'idle',
+        attention: {
+          level: 'unread',
+          badge_label: null,
+          unread: true,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          background_task_count: 2,
+          last_agent_activity_seq: 4,
+          last_read_seq: 1,
+        },
+      }),
+    )
+
+    expect(presentation.showBackgroundActivity).toBe(true)
+    expect(presentation.backgroundTaskCount).toBe(2)
+    expect(presentation.showSpinner).toBe(false)
+  })
+
+  it('defers to the running spinner while a turn is live', () => {
+    const presentation = deriveThreadAttentionPresentation(
+      thread({
+        status: 'running',
+        attention: {
+          level: 'running',
+          badge_label: null,
+          unread: false,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          background_task_count: 1,
+          last_agent_activity_seq: 4,
+          last_read_seq: 4,
+        },
+      }),
+    )
+
+    expect(presentation.showSpinner).toBe(true)
+    expect(presentation.showBackgroundActivity).toBe(false)
+  })
+
+  it('stays quiet for daemons that do not report the count', () => {
+    expect(deriveThreadAttentionPresentation(thread()).showBackgroundActivity).toBe(false)
   })
 })

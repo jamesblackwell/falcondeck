@@ -599,6 +599,11 @@ export type ThreadAttention = {
   unread: boolean;
   pending_approval_count: number;
   pending_question_count: number;
+  /** Background work (backgrounded shell commands, async agents) still
+   * running after the turn parked. The thread is idle, but the agent is not
+   * finished with it: one of these reporting starts the next turn. Optional
+   * because older daemons don't send it. */
+  background_task_count?: number;
   last_agent_activity_seq: number;
   last_read_seq: number;
 };

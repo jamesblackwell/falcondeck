@@ -63,6 +63,18 @@ export const SessionHeader = memo(function SessionHeader({
         {thread ? (
           thread.status === 'running' ? (
             <ActivityDiamond size="md" />
+          ) : (thread.attention.background_task_count ?? 0) > 0 ? (
+            // The turn is over, but work it started is still live and will
+            // wake the thread. An idle dot here reads as "nothing is
+            // happening", which is how a thread appears to restart itself.
+            <span
+              role="img"
+              aria-label="Background work still running"
+              title="Background work still running"
+              className="flex items-center justify-center"
+            >
+              <ActivityDiamond size="md" variant="outline" />
+            </span>
           ) : (
             <StatusIndicator status={threadStatusDisplay(thread.status)} size="md" />
           )

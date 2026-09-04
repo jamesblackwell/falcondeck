@@ -3801,6 +3801,11 @@ pub struct ThreadAttention {
     /// Number of pending questions.
     #[serde(default)]
     pub pending_question_count: u32,
+    /// Background work still running after the turn parked: backgrounded
+    /// shell commands and async agents that will wake the thread when they
+    /// report. The thread is idle, but the agent is not done with it.
+    #[serde(default)]
+    pub background_task_count: u32,
     /// Last agent-originated event sequence in the thread.
     #[serde(default)]
     pub last_agent_activity_seq: u64,
