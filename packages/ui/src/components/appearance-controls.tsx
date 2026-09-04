@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { Monitor, Moon, Sun } from 'lucide-react'
 
 import {
@@ -10,6 +10,8 @@ import {
   SANS_FONT_OPTIONS,
   SURFACE_SCALE_OPTIONS,
   THEME_OPTIONS,
+  previewAppearance,
+  resolveTheme,
   sanitizeFontName,
   updateAppearance,
   usePersistedAppearance,
@@ -125,13 +127,141 @@ function ColorThemePicker({
   )
 }
 
+/** Tiny window chrome painted from a palette's own preview quartet. */
+function ThemeWindowPreview({ preview }: { preview: PalettePreview }) {
+  return (
+    <span
+      aria-hidden
+      className="relative block h-12 w-full overflow-hidden rounded-[var(--fd-radius-md)] ring-1 ring-inset ring-fg-primary/15"
+      style={{ background: preview.bg }}
+    >
+      <span
+        className="absolute inset-x-1.5 top-1.5 bottom-1 rounded-[var(--fd-radius-sm)]"
+        style={{ background: preview.surface }}
+      />
+      <span
+        className="absolute left-3 top-3 h-1 w-7 rounded-full"
+        style={{ background: preview.fg, opacity: 0.72 }}
+      />
+      <span
+        className="absolute left-3 top-6 h-1 w-4 rounded-full"
+        style={{ background: preview.fg, opacity: 0.32 }}
+      />
+      <span
+        className="absolute right-3 top-3 h-2 w-2 rounded-full"
+        style={{ background: preview.accent }}
+      />
+    </span>
+  )
+}
+
+function previewColorTheme(option: ColorThemeOption) {
+  previewAppearance(
+    option.appearance === 'light'
+      ? { theme: 'light', lightColorTheme: option.value }
+      : { theme: 'dark', darkColorTheme: option.value },
+  )
+}
+
+/**
+ * Visual palette cards for setup surfaces. Hover/focus tries the theme on;
+ * click persists. Unmount rolls an unfinished preview back.
+ */
+function ColorThemeGallery({
+  title,
+  hint,
+  value,
+  options,
+  onValueChange,
+}: {
+  title: string
+  hint: string
+  value: ColorThemeSetting
+  options: readonly ColorThemeOption[]
+  onValueChange: (value: string) => void
+}) {
+  useEffect(() => () => previewAppearance(null), [])
+
+  return (
+    <section className="space-y-3" role="group" aria-label={title}>
+      <GroupLabel title={title} hint={hint} />
+      <div
+        className="grid grid-cols-3 gap-2"
+        onMouseLeave={() => previewAppearance(null)}
+      >
+        {options.map((option) => {
+          const selected = option.value === value
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={selected}
+              aria-label={option.label}
+              title={option.description}
+              onClick={() => onValueChange(option.value)}
+              onMouseEnter={() => previewColorTheme(option)}
+              onFocus={() => previewColorTheme(option)}
+              onBlur={() => previewAppearance(null)}
+              className={cn(optionClass(selected), 'flex min-w-0 flex-col gap-2 p-2')}
+            >
+              <ThemeWindowPreview preview={option.preview} />
+              <span className="truncate text-[length:var(--fd-text-2xs)] font-medium text-fg-primary">
+                {option.label}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+type ThemeControlsPresentation = 'compact' | 'gallery'
+
+function PaletteField({
+  presentation,
+  title,
+  hint,
+  value,
+  options,
+  onValueChange,
+}: {
+  presentation: ThemeControlsPresentation
+  title: string
+  hint: string
+  value: ColorThemeSetting
+  options: readonly ColorThemeOption[]
+  onValueChange: (value: string) => void
+}) {
+  const props = { title, hint, value, options, onValueChange }
+  return presentation === 'gallery' ? (
+    <ColorThemeGallery {...props} />
+  ) : (
+    <ColorThemePicker {...props} />
+  )
+}
+
 /**
  * Theme-mode and palette pickers backed by the shared appearance store.
  * Kept separate from typography controls so focused surfaces such as
  * onboarding can offer appearance without exposing every display setting.
+ *
+ * `gallery` is the onboarding presentation: the active appearance becomes a
+ * visual palette grid (hover to try on), and the other mode stays a compact
+ * dropdown so both light and dark can still be set.
  */
-export function ThemeControls() {
+export function ThemeControls({
+  presentation = 'compact',
+}: {
+  presentation?: ThemeControlsPresentation
+} = {}) {
   const appearance = usePersistedAppearance()
+  const featured =
+    presentation === 'gallery'
+      ? appearance.theme === 'system'
+        ? resolveTheme(appearance.theme)
+        : appearance.theme
+      : null
 
   return (
     <div className="space-y-6">
@@ -159,7 +289,8 @@ export function ThemeControls() {
         </div>
       </section>
 
-      <ColorThemePicker
+      <PaletteField
+        presentation={featured === 'light' ? 'gallery' : 'compact'}
         title="Light theme"
         hint="Used when FalconDeck or this device is in light appearance."
         value={appearance.lightColorTheme}
@@ -169,7 +300,8 @@ export function ThemeControls() {
         }
       />
 
-      <ColorThemePicker
+      <PaletteField
+        presentation={featured === 'dark' ? 'gallery' : 'compact'}
         title="Dark theme"
         hint="Used when FalconDeck or this device is in dark appearance."
         value={appearance.darkColorTheme}
@@ -351,16 +483,54 @@ const SURFACE_TWEAK_ROWS: SurfaceTweakRow[] = [
   { label: 'Code', scaleKey: 'codeScale', weightKey: 'codeWeight' },
 ]
 
+function TypographyPreview() {
+  return (
+    <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2">
+      <div className="border-b border-border-subtle px-4 py-3">
+        <p className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-fg-muted">
+          Interface
+        </p>
+        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-primary">
+          The quick brown fox jumps over the lazy dog.
+        </p>
+      </div>
+      <div className="fd-type-scope fd-scope-chat border-b border-border-subtle px-4 py-3">
+        <p className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-fg-muted">
+          Chat
+        </p>
+        <p className="mt-1 text-[length:var(--fd-text-md)] leading-[var(--fd-leading-relaxed)] text-fg-primary">
+          Transcripts read in this face, with <strong>emphasis</strong> and{' '}
+          <code className="rounded-[var(--fd-radius-sm)] bg-surface-4 px-1 py-px font-mono text-[length:calc(0.9em*var(--fd-scale-code,1))]">
+            code
+          </code>.
+        </p>
+      </div>
+      <div className="px-4 py-3">
+        <p className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-fg-muted">
+          Code
+        </p>
+        <pre className="mt-1 overflow-x-auto font-mono text-[length:var(--fd-text-sm)] text-fg-secondary">
+          <code>{'fn main() {\n    println!("hello");\n}'}</code>
+        </pre>
+      </div>
+    </div>
+  )
+}
+
 /**
  * Font and text-size pickers backed by the shared appearance store.
  * Kept separate from ThemeControls so onboarding can offer type without the
  * per-surface fine-tune matrix that belongs in Settings.
+ *
+ * `preview` adds a live interface/chat/code sample — used on the onboarding
+ * fonts step, not in Settings where the rest of the app is already visible.
  */
-export function TypographyControls() {
+export function TypographyControls({ preview = false }: { preview?: boolean } = {}) {
   const appearance = usePersistedAppearance()
 
   return (
     <div className="space-y-6">
+      {preview ? <TypographyPreview /> : null}
       <FontFamilyPicker
         title="Interface font"
         hint="Used for all app text outside of code."

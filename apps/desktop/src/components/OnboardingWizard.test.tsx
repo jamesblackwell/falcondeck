@@ -8,8 +8,10 @@ import { DEFAULT_APPEARANCE, updateAppearance } from '@falcondeck/ui'
 import {
   clearStoredOnboarding,
   readStoredOnboarding,
+  readStoredOnboardingResume,
   shouldShowFirstRunOnboarding,
   writeStoredOnboarding,
+  writeStoredOnboardingResume,
 } from '../preferences'
 import {
   ONBOARDING_STEP_INDEX,
@@ -108,6 +110,25 @@ describe('onboarding flag helpers', () => {
       'last_updated',
     )
   })
+
+  it('round-trips an in-progress resume step and clears it on complete or rerun', () => {
+    writeStoredOnboardingResume('computerUse')
+    expect(readStoredOnboardingResume()).toBe('computerUse')
+    writeStoredOnboarding({
+      completedAt: '2026-08-17T00:00:00.000Z',
+      skipped: false,
+      wizardVersion: 1,
+    })
+    expect(readStoredOnboardingResume()).toBeNull()
+
+    writeStoredOnboardingResume('computerUse')
+    window.localStorage.setItem('falcondeck.desktop.thread-sort.v1', 'last_updated')
+    clearStoredOnboarding()
+    expect(readStoredOnboardingResume()).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.desktop.thread-sort.v1')).toBe(
+      'last_updated',
+    )
+  })
 })
 
 describe('shouldShowFirstRunOnboarding', () => {
@@ -165,6 +186,7 @@ describe('OnboardingWizard', () => {
     vi.clearAllMocks()
     act(() => updateAppearance(DEFAULT_APPEARANCE))
     window.localStorage.clear()
+    delete window.__TAURI_INTERNALS__
   })
 
   it('opens on the welcome step and skips via the explicit skip button', () => {
@@ -201,12 +223,22 @@ describe('OnboardingWizard', () => {
       'aria-pressed',
       'true',
     )
-    expect(screen.getByLabelText('Light theme')).toBeInTheDocument()
+    // jsdom has no matchMedia, so system resolves to light and the light
+    // palettes render as a gallery; dark stays a compact dropdown.
+    expect(screen.getByRole('group', { name: 'Light theme' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Falcon Light' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
     expect(screen.getByLabelText('Dark theme')).toBeInTheDocument()
-    expect(screen.getByLabelText('Interface font')).toBeInTheDocument()
-    expect(screen.getByLabelText('Chat font')).toBeInTheDocument()
-    expect(screen.getByLabelText('Code font')).toBeInTheDocument()
-    expect(screen.getByText('Text size')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Interface font')).toBeNull()
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'One Light' }))
+    })
+    expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
+      lightColorTheme: 'one-light',
+    })
 
     act(() => {
       fireEvent.click(screen.getByRole('button', { name: 'Dark' }))
@@ -216,9 +248,152 @@ describe('OnboardingWizard', () => {
       'aria-pressed',
       'true',
     )
+    expect(screen.getByRole('group', { name: 'Dark theme' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Falcon Dark' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
     expect(document.documentElement.dataset.theme).toBe('dark')
     expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
       theme: 'dark',
+    })
+  })
+
+  it('splits fonts onto the next step with a live sample', () => {
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.appearance })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    expect(screen.getByText('Fonts and size')).toBeInTheDocument()
+    expect(screen.getByText('Interface')).toBeInTheDocument()
+    expect(screen.getByText('The quick brown fox jumps over the lazy dog.')).toBeInTheDocument()
+    expect(screen.getByText(/Transcripts read in this face/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Interface font')).toBeInTheDocument()
+    expect(screen.getByLabelText('Chat font')).toBeInTheDocument()
+    expect(screen.getByLabelText('Code font')).toBeInTheDocument()
+    expect(screen.getByText('Text size')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'System' })).toBeNull()
+
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: 'Large' }))
+    })
+    expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
+      fontScale: 1.15,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(screen.getByText('Dictate on this computer')).toBeInTheDocument()
+  })
+
+  it('offers computer-use permission grants after dictation', () => {
+    window.__TAURI_INTERNALS__ = {}
+    mockedInvoke.mockResolvedValue({
+      accessibility: false,
+      screenRecording: false,
+      macosOk: true,
+      macosMajor: 15,
+      supported: true,
+    })
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.computerUse })
+
+    expect(screen.getByText('Let agents use your Mac')).toBeInTheDocument()
+    expect(screen.getByText('Accessibility')).toBeInTheDocument()
+    expect(screen.getByText('Screen Recording')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Grant' })).toHaveLength(2)
+    expect(
+      screen.getByRole('button', { name: 'Restart FalconDeck' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText(/Setup continues on this step/),
+    ).toBeInTheDocument()
+  })
+
+  it('reopens the computer-use step after an in-progress restart', async () => {
+    window.__TAURI_INTERNALS__ = {}
+    mockedInvoke.mockResolvedValue({
+      accessibility: true,
+      screenRecording: true,
+      macosOk: true,
+      macosMajor: 15,
+      supported: true,
+    })
+    writeStoredOnboardingResume('computerUse')
+
+    renderWizard()
+
+    expect(await screen.findByText('Let agents use your Mac')).toBeInTheDocument()
+    expect(readStoredOnboardingResume()).toBe('computerUse')
+  })
+
+  it('asks the app to restart from the computer-use step', async () => {
+    window.__TAURI_INTERNALS__ = {}
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'restart_app') return
+      return {
+        accessibility: false,
+        screenRecording: false,
+        macosOk: true,
+        macosMajor: 15,
+        supported: true,
+      }
+    })
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.computerUse })
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Restart FalconDeck' }),
+    )
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('restart_app')
+    })
+    expect(readStoredOnboardingResume()).toBe('computerUse')
+  })
+
+  it('enables computer use on continue after a restart even while grants are still loading', async () => {
+    window.__TAURI_INTERNALS__ = {}
+    let resolvePermissions: (value: unknown) => void = () => {}
+    const pendingPermissions = new Promise((resolve) => {
+      resolvePermissions = resolve
+    })
+    mockedInvoke.mockImplementation(async (command) => {
+      if (command === 'computer_use_permission_status') return pendingPermissions
+      return {}
+    })
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        enabled: true,
+        available: true,
+        macos_ok: true,
+        permissions: { accessibility: true, screen_recording: true },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    writeStoredOnboardingResume('computerUse')
+    renderWizard()
+
+    expect(await screen.findByText('Let agents use your Mac')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    expect(screen.getByText('Optional: OpenRouter')).toBeInTheDocument()
+
+    resolvePermissions({
+      accessibility: true,
+      screenRecording: true,
+      macosOk: true,
+      macosMajor: 15,
+      supported: true,
+    })
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:4317/api/computer-use',
+        expect.objectContaining({ method: 'POST' }),
+      )
+    })
+    const post = fetchMock.mock.calls.find(
+      (call) => (call[1] as { method?: string } | undefined)?.method === 'POST',
+    )
+    expect(JSON.parse((post?.[1] as { body: string }).body)).toEqual({
+      enabled: true,
     })
   })
 
@@ -311,6 +486,7 @@ describe('OnboardingWizard', () => {
     expect(onToast).toHaveBeenCalledWith({
       variant: 'success',
       title: 'Pi updated',
+      description: 'Updated the install FalconDeck uses on This Mac.',
     })
   })
 
@@ -339,15 +515,17 @@ describe('OnboardingWizard', () => {
   it('keeps keyboard focus inside the modal', () => {
     renderWizard()
 
-    const skip = screen.getByRole('button', { name: 'Skip setup' })
+    const first = screen.getByRole('button', {
+      name: 'Or restore from a previous backup',
+    })
     const continueButton = screen.getByRole('button', { name: 'Continue' })
 
     continueButton.focus()
     fireEvent.keyDown(continueButton, { key: 'Tab' })
-    expect(skip).toHaveFocus()
+    expect(first).toHaveFocus()
 
-    skip.focus()
-    fireEvent.keyDown(skip, { key: 'Tab', shiftKey: true })
+    first.focus()
+    fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
     expect(continueButton).toHaveFocus()
   })
 
@@ -389,5 +567,80 @@ describe('OnboardingWizard', () => {
     expect(
       screen.queryByRole('button', { name: 'Enable notifications' }),
     ).toBeNull()
+  })
+
+  it('allows restoring from a backup archive in step 0', async () => {
+    const summary = {
+      version: 1,
+      created_at: '2026-09-04T12:00:00Z',
+      workspace_count: 2,
+      workspaces: [],
+      extension_count: 3,
+      extensions: [],
+      automation_count: 1,
+      connector_count: 0,
+      provider_count: 0,
+    }
+    const importResult = {
+      workspaces_imported: 2,
+      workspaces_failed: [],
+      extensions_imported: 3,
+      automations_imported: 1,
+      connectors_imported: 0,
+      providers_imported: 0,
+    }
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.endsWith('/inspect')) {
+        return Promise.resolve(jsonResponse(summary))
+      }
+      if (url.endsWith('/import')) {
+        return Promise.resolve(jsonResponse(importResult))
+      }
+      return Promise.resolve(jsonResponse({}))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onToast = vi.fn()
+    const onComplete = vi.fn()
+    renderWizard({
+      baseUrl: 'http://127.0.0.1:4317',
+      onToast,
+      onComplete,
+      initialStep: ONBOARDING_STEP_INDEX.welcome,
+    })
+
+    expect(
+      screen.getByRole('button', { name: /Or restore from a previous backup/i }),
+    ).toBeInTheDocument()
+
+    const backupData = {
+      version: 1,
+      created_at: '2026-09-04T12:00:00Z',
+      daemon: {
+        preferences: {},
+        workspaces: [],
+        extensions: { enabled: [], grants: {}, storage: {} },
+        control: { settings: null, automations: [] },
+        connectors: { mcp_servers: [] },
+        providers: { acp_providers: [] },
+      },
+    }
+    const file = new File([JSON.stringify(backupData)], 'falcondeck-backup.json', {
+      type: 'application/json',
+    })
+    const input = screen.getByTestId('onboarding-backup-file-input')
+
+    fireEvent.change(input, { target: { files: [file] } })
+
+    await waitFor(() => {
+      expect(onToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          variant: 'success',
+          title: 'Backup restored',
+        }),
+      )
+      expect(onComplete).toHaveBeenCalledWith(false)
+    })
   })
 })

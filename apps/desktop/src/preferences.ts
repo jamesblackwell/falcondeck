@@ -7,6 +7,7 @@ import type {
 import { isThreadSortMode, normalizePreferences } from '@falcondeck/client-core'
 
 const ONBOARDING_STORAGE_KEY = 'falcondeck.desktop.onboarding.v1'
+const ONBOARDING_RESUME_STORAGE_KEY = 'falcondeck.desktop.onboarding.resume.v1'
 const THINKING_DISPLAY_STORAGE_KEY = 'falcondeck.desktop.thinking-display.v1'
 const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
 const COLLAPSED_WORKSPACES_STORAGE_KEY =
@@ -61,6 +62,7 @@ export function writeStoredOnboarding(record: StoredOnboardingRecord) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(record))
+    clearStoredOnboardingResume()
   } catch {
     // Storage can be unavailable; the in-session memory value stays
     // authoritative and the wizard simply re-runs next launch.
@@ -68,13 +70,61 @@ export function writeStoredOnboarding(record: StoredOnboardingRecord) {
 }
 
 /**
- * The Settings → General rerun control. Deletes only the onboarding flag;
- * projects, threads, keys, and daemon state all survive.
+ * In-progress wizard step, so a mid-setup app restart (needed for macOS
+ * Accessibility / Screen Recording grants) can reopen the same step.
+ * Stable ids match `ONBOARDING_STEP_INDEX` keys (`computerUse`, not a number).
+ */
+export function readStoredOnboardingResume(): string | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(ONBOARDING_RESUME_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed === 'string' && parsed.length > 0) return parsed
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as { step?: unknown }).step === 'string' &&
+      (parsed as { step: string }).step.length > 0
+    ) {
+      return (parsed as { step: string }).step
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredOnboardingResume(step: string) {
+  if (typeof window === 'undefined' || step.length === 0) return
+  try {
+    window.localStorage.setItem(
+      ONBOARDING_RESUME_STORAGE_KEY,
+      JSON.stringify({ step }),
+    )
+  } catch {
+    // Ignore storage failures; restart still works, it just opens on Welcome.
+  }
+}
+
+export function clearStoredOnboardingResume() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(ONBOARDING_RESUME_STORAGE_KEY)
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+/**
+ * The Settings → General rerun control. Deletes the completed flag and any
+ * in-progress resume step; projects, threads, keys, and daemon state survive.
  */
 export function clearStoredOnboarding() {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.removeItem(ONBOARDING_STORAGE_KEY)
+    window.localStorage.removeItem(ONBOARDING_RESUME_STORAGE_KEY)
   } catch {
     // Ignore storage failures.
   }

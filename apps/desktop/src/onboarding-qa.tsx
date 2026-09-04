@@ -1,7 +1,7 @@
 /* Standalone first-run onboarding fixture: `npm run dev` → /onboarding-qa.html.
    Walks the real OnboardingWizard without launching Tauri. Appearance and
    dictation writes go to this browser's localStorage (same keys as the app).
-   `?step=welcome|appearance|dictation|openrouter|tools|project|finish` jumps
+   `?step=welcome|appearance|fonts|dictation|computerUse|openrouter|tools|project|finish` jumps
    in, `?theme=light|dark` picks the mode, `?workspaces=1` pretends a project
    is already connected, `?baseUrl=` points the OpenRouter + harness steps at
    a live daemon. */
@@ -44,6 +44,10 @@ const STEP_ALIASES: Record<string, number> = Object.fromEntries(
   ONBOARDING_STEPS.map((label, index) => [label.toLowerCase(), index]),
 );
 STEP_ALIASES.openrouter = ONBOARDING_STEP_INDEX.openrouter;
+STEP_ALIASES.computeruse = ONBOARDING_STEP_INDEX.computerUse;
+STEP_ALIASES["computer-use"] = ONBOARDING_STEP_INDEX.computerUse;
+STEP_ALIASES.typography = ONBOARDING_STEP_INDEX.fonts;
+STEP_ALIASES.type = ONBOARDING_STEP_INDEX.fonts;
 
 function parseStep(value: string | null): number {
   if (!value) return 0;
@@ -79,7 +83,7 @@ const MOCK_OVERVIEW: HarnessesOverview = {
       installed: true,
       version: "1.0.0",
       update_available: false,
-      upgrade_command: "npm install -g @anthropic-ai/claude-code",
+      upgrade_command: "curl -fsSL https://claude.ai/install.sh | bash",
       account_status: "Logged in",
     },
     {

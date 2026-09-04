@@ -28,7 +28,22 @@ import {
   RefreshCw,
   Terminal,
 } from "lucide-react";
+import { ComputerUseSetup } from "./ComputerUseSetup";
+import {
+  readComputerUsePermissions,
+  type ComputerUsePermissionStatus,
+} from "../computer-use";
 import { DictationSetup, SpeechCredentialField } from "./DictationSetup";
+import {
+  HarnessInstallPaths,
+  harnessHasDivergentInstall,
+  upgradeFinishedDescription,
+} from "./HarnessInstallPaths";
+import { inspectBackupFile, executeImportBackup } from "../backup-service";
+import {
+  readStoredOnboardingResume,
+  writeStoredOnboardingResume,
+} from "../preferences";
 
 export type OnboardingToast = {
   variant: "success" | "danger" | "warning" | "default";
@@ -56,7 +71,9 @@ type OnboardingWizardProps = {
 export const ONBOARDING_STEPS = [
   "Welcome",
   "Appearance",
+  "Fonts",
   "Dictation",
+  "Computer use",
   "OpenRouter",
   "Tools",
   "Project",
@@ -65,20 +82,36 @@ export const ONBOARDING_STEPS = [
 export const ONBOARDING_STEP_INDEX = {
   welcome: 0,
   appearance: 1,
-  dictation: 2,
-  openrouter: 3,
-  tools: 4,
-  project: 5,
-  finish: 6,
+  fonts: 2,
+  dictation: 3,
+  computerUse: 4,
+  openrouter: 5,
+  tools: 6,
+  project: 7,
+  finish: 8,
 } as const;
 const STEPS = ONBOARDING_STEPS;
 const STEP_INDEX = ONBOARDING_STEP_INDEX;
 const JOB_POLL_INTERVAL_MS = 1500;
 
+function onboardingStepId(index: number): string {
+  const match = (
+    Object.entries(STEP_INDEX) as Array<[keyof typeof STEP_INDEX, number]>
+  ).find(([, value]) => value === index);
+  return match?.[0] ?? "welcome";
+}
+
+function onboardingStepFromId(id: string | null): number | null {
+  if (!id || !Object.hasOwn(STEP_INDEX, id)) return null;
+  return STEP_INDEX[id as keyof typeof STEP_INDEX];
+}
+
 type ActiveJob = {
   jobId: string;
   harnessId: string;
   action: "install" | "update";
+  targetSource: string | null;
+  unusedInstallCount: number;
 };
 
 type MacNotificationPermission = "default" | "denied" | "granted" | "unsupported";
@@ -101,13 +134,16 @@ export function OnboardingWizard({
   onAddProject,
   onToast,
   onComplete,
-  initialStep = 0,
+  initialStep,
   onStepChange,
   overlayClassName,
 }: OnboardingWizardProps) {
-  const [step, setStep] = useState(() =>
-    Math.min(Math.max(initialStep, 0), STEPS.length - 1),
-  );
+  const [step, setStep] = useState(() => {
+    if (typeof initialStep === "number") {
+      return Math.min(Math.max(initialStep, 0), STEPS.length - 1);
+    }
+    return onboardingStepFromId(readStoredOnboardingResume()) ?? 0;
+  });
   const [overview, setOverview] = useState<HarnessesOverview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isProbing, setIsProbing] = useState(false);
@@ -116,12 +152,48 @@ export function OnboardingWizard({
   const [notificationPermission, setNotificationPermission] =
     useState<MacNotificationPermission>("default");
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
+  const [computerUsePermissions, setComputerUsePermissions] =
+    useState<ComputerUsePermissionStatus | null>(null);
+  const [isRestoringBackup, setIsRestoringBackup] = useState(false);
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<number | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
+
+  const handleBackupFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !baseUrl) return;
+
+    setIsRestoringBackup(true);
+    try {
+      const { backup, summary } = await inspectBackupFile(file, baseUrl);
+      await executeImportBackup(backup, {}, baseUrl);
+      onToast({
+        variant: "success",
+        title: "Backup restored",
+        description: `Restored ${summary.workspace_count} workspace(s) and ${summary.extension_count} extension(s).`,
+      });
+      onComplete(false);
+    } catch (err) {
+      onToast({
+        variant: "danger",
+        title: "Could not restore backup",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setIsRestoringBackup(false);
+      if (backupFileInputRef.current) {
+        backupFileInputRef.current.value = "";
+      }
+    }
+  };
 
   useEffect(() => {
     onStepChange?.(step);
   }, [step, onStepChange]);
+
+  useEffect(() => {
+    writeStoredOnboardingResume(onboardingStepId(step));
+  }, [step]);
 
   useEffect(() => {
     nextRef.current?.focus();
@@ -163,6 +235,14 @@ export function OnboardingWizard({
               ? {
                   variant: "success",
                   title: `${job.label} ${activeJob.action === "update" ? "updated" : "installed"}`,
+                  description:
+                    activeJob.action === "update"
+                      ? upgradeFinishedDescription({
+                          hostLabel: "This Mac",
+                          targetSource: activeJob.targetSource,
+                          unusedInstallCount: activeJob.unusedInstallCount,
+                        })
+                      : undefined,
                 }
               : {
                   variant: "danger",
@@ -205,6 +285,8 @@ export function OnboardingWizard({
           jobId,
           harnessId: harness.id,
           action: harness.installed ? "update" : "install",
+          targetSource: harness.install_source ?? null,
+          unusedInstallCount: harness.extra_installs?.length ?? 0,
         });
       } catch (error) {
         onToast({
@@ -259,7 +341,7 @@ export function OnboardingWizard({
       event.currentTarget.querySelectorAll<HTMLElement>(
         'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
       ),
-    );
+    ).filter((element) => element.tabIndex >= 0);
     const first = focusable[0];
     const last = focusable.at(-1);
     if (!first || !last) {
@@ -283,6 +365,15 @@ export function OnboardingWizard({
         overlayClassName,
       )}
     >
+      <input
+        type="file"
+        ref={backupFileInputRef}
+        onChange={handleBackupFileSelected}
+        accept=".json,application/json"
+        tabIndex={-1}
+        className="hidden"
+        data-testid="onboarding-backup-file-input"
+      />
       <div
         role="dialog"
         aria-modal="true"
@@ -330,9 +421,19 @@ export function OnboardingWizard({
               <p className="max-w-md text-[length:var(--fd-text-sm)] text-fg-muted">
                 FalconDeck orchestrates coding agents — Codex, Claude Code,
                 OpenCode, and friends — from this computer. This takes about a
-                minute: pick a look, optionally set up dictation, check your
-                tools, and connect a project.
+                minute: pick a look, optionally set up dictation and computer
+                use, check your tools, and connect a project.
               </p>
+              <button
+                type="button"
+                onClick={() => backupFileInputRef.current?.click()}
+                disabled={isRestoringBackup}
+                className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary underline underline-offset-4 cursor-pointer"
+              >
+                {isRestoringBackup
+                  ? "Restoring backup archive…"
+                  : "Or restore from a previous backup"}
+              </button>
             </div>
           ) : null}
 
@@ -346,13 +447,31 @@ export function OnboardingWizard({
                   Choose your appearance
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Pick a theme, fonts, and text size. Changes apply immediately
-                  and can be adjusted later in Settings → Appearance.
+                  Light, dark, or follow this Mac. Palettes apply immediately.
                 </p>
               </div>
-              <div className="mx-auto w-full max-w-lg space-y-6 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
-                <ThemeControls />
-                <TypographyControls />
+              <div className="mx-auto w-full max-w-xl">
+                <ThemeControls presentation="gallery" />
+              </div>
+            </div>
+          ) : null}
+
+          {step === STEP_INDEX.fonts ? (
+            <div className="space-y-5">
+              <div className="text-center">
+                <h2
+                  id="onboarding-title"
+                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
+                >
+                  Fonts and size
+                </h2>
+                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
+                  Interface, chat, and code. Fine-tune stays in Settings →
+                  Appearance.
+                </p>
+              </div>
+              <div className="mx-auto w-full max-w-lg">
+                <TypographyControls preview />
               </div>
             </div>
           ) : null}
@@ -376,6 +495,36 @@ export function OnboardingWizard({
                 baseUrl={baseUrl}
                 onToast={onToast}
                 compact
+              />
+            </div>
+          ) : null}
+
+          {step === STEP_INDEX.computerUse ? (
+            <div className="space-y-4">
+              <div className="text-center">
+                <h2
+                  id="onboarding-title"
+                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
+                >
+                  Let agents use your Mac
+                </h2>
+                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
+                  Grant Accessibility and Screen Recording to FalconDeck.
+                  Agents can then click and type in other apps without a
+                  second permission prompt. Continue turns this on once both
+                  permissions are granted.
+                </p>
+              </div>
+              <ComputerUseSetup
+                baseUrl={baseUrl}
+                onToast={onToast}
+                compact
+                onPermissionsChange={setComputerUsePermissions}
+                onBeforeAppRestart={() => {
+                  // Flush before `restart_app`: invoke() is async and the
+                  // process is killed without waiting for a later effect.
+                  writeStoredOnboardingResume("computerUse");
+                }}
               />
             </div>
           ) : null}
@@ -472,6 +621,9 @@ export function OnboardingWizard({
                               <Badge variant={status.variant}>
                                 {status.label}
                               </Badge>
+                              {harnessHasDivergentInstall(harness) ? (
+                                <Badge variant="warning">Another install</Badge>
+                              ) : null}
                               {harness.version ? (
                                 <span className="font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
                                   v{harness.version}
@@ -481,6 +633,7 @@ export function OnboardingWizard({
                                 </span>
                               ) : null}
                             </div>
+                            <HarnessInstallPaths harness={harness} />
                             {harness.account_status ? (
                               <p className="mt-0.5 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                                 {harness.account_status}
@@ -662,7 +815,39 @@ export function OnboardingWizard({
               <Button
                 ref={nextRef}
                 type="button"
-                onClick={() => setStep((current) => current + 1)}
+                onClick={() => {
+                  if (step === STEP_INDEX.computerUse && api) {
+                    const enableIfGranted = (granted: boolean) => {
+                      if (!granted) return;
+                      void api.updateComputerUse({ enabled: true }).catch(() => {
+                        onToast({
+                          variant: "warning",
+                          title: "Computer use was not enabled",
+                          description:
+                            "You can turn it on later in Settings → Computer use.",
+                        });
+                      });
+                    };
+                    if (computerUsePermissions) {
+                      enableIfGranted(
+                        computerUsePermissions.accessibility &&
+                          computerUsePermissions.screenRecording,
+                      );
+                    } else {
+                      // After a permission restart the grant probe may still
+                      // be in flight; don't skip enable because state is null.
+                      void readComputerUsePermissions()
+                        .then((permissions) => {
+                          enableIfGranted(
+                            permissions.accessibility &&
+                              permissions.screenRecording,
+                          );
+                        })
+                        .catch(() => {});
+                    }
+                  }
+                  setStep((current) => current + 1);
+                }}
               >
                 Continue
               </Button>

@@ -2,7 +2,7 @@
 
 > Status: **Phase 1 implemented** (2026-08-17, extended 2026-09-02) — flag +
 > gating (`shouldShowFirstRunOnboarding`), `OnboardingWizard` (welcome /
-> appearance / dictation / optional OpenRouter speech key / tools / project /
+> appearance / fonts / dictation / computer use / optional OpenRouter speech key / tools / project /
 > finish), rerun control in Settings → General, browser fixture at
 > `/onboarding-qa.html`, and the client-core harness methods (`harnesses`,
 > `refreshHarnesses`, `upgradeHarness`, `harnessUpgradeJob`). Phases 2–4
@@ -21,22 +21,29 @@ assistant. Every step is skippable; the whole flow is skippable. Rough
 sequence:
 
 1. **Welcome** — brand moment, one sentence on what FalconDeck is.
-2. **Choose your appearance** — System/Light/Dark, named light and dark
-   themes, interface/chat/code fonts, and text size. Same device-local
-   `fd-appearance` record as Settings → Appearance; fine-tune stays in
-   Settings.
-3. **Dictate on this computer** — enable system-wide dictation, pick a
+2. **Choose your appearance** — System/Light/Dark and named light/dark
+   palettes. The active appearance is a visual gallery; the other mode stays
+   a compact dropdown. Same device-local `fd-appearance` record as Settings
+   → Appearance.
+3. **Fonts and size** — interface/chat/code fonts and text size, with a live
+   sample. Fine-tune stays in Settings → Appearance.
+4. **Dictate on this computer** — enable system-wide dictation, pick a
    shortcut (Right Command and fn are suggested; any other key or chord can
    be recorded), hold/toggle mode, optionally enable voice rewrite and its
    shortcut. Apple Speech is the zero-key default. Microphone, engine, and
    rewrite prompt stay in Settings → Speech.
-4. **Optional: OpenRouter** — one speech key on this computer unlocks
+5. **Let agents use your Mac** — grant Accessibility and Screen Recording to
+   FalconDeck. Continue enables bundled computer use; Skip setup leaves it
+   off. macOS caches those grants per process, so the step offers Restart
+   FalconDeck; the in-progress step is stored device-locally and the wizard
+   reopens there after relaunch. Fine-tune stays in Settings → Computer use.
+6. **Optional: OpenRouter** — one speech key on this computer unlocks
    read-aloud, voice rewrite, and cloud transcription. Continue skips it.
-5. **Check your tools** — probe installed harnesses (Claude Code, Codex,
+7. **Check your tools** — probe installed harnesses (Claude Code, Codex,
    OpenCode, Gemini, Pi), show version / update / sign-in state, offer
    one-click install and update.
-6. **Add your first project** — directory picker → `connectWorkspace`.
-7. **Finish** — request notification permission explicitly.
+8. **Add your first project** — directory picker → `connectWorkspace`.
+9. **Finish** — request notification permission explicitly.
 
 The OpenCode + OpenRouter *provider* quick path (install OpenCode, register
 the agent, store `OPENROUTER_API_KEY` for models) is still Phase 2 and is a
@@ -109,12 +116,14 @@ wizard against a mocked harness inventory; `?step=`, `?theme=`,
 `?workspaces=`, and `?baseUrl=` jump around. Appearance and dictation writes
 hit this browser's localStorage, same keys as the app.
 
-### Step 2 — Choose your appearance
+### Step 2 — Choose your appearance, then fonts
 
-Reuse `ThemeControls` and `TypographyControls` from `@falcondeck/ui` so
-onboarding and Settings → Appearance update the same device-local
-`fd-appearance` record. Mode, palette, font, and text-size changes apply
-immediately; the per-surface fine-tune matrix stays in Settings. No
+Two short steps, still reusing `ThemeControls` and `TypographyControls` from
+`@falcondeck/ui` so onboarding and Settings → Appearance update the same
+device-local `fd-appearance` record. The theme step uses the gallery
+presentation (visual palette cards, hover to try on). The fonts step adds a
+live interface/chat/code sample. Mode, palette, font, and text-size changes
+apply immediately; the per-surface fine-tune matrix stays in Settings. No
 onboarding-only draft state or extra completion write is needed.
 
 ### Step 3 — Check your tools
