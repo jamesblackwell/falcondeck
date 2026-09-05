@@ -82,6 +82,30 @@ struct ConnectorEntry {
     extra: BTreeMap<String, Value>,
 }
 
+impl ConnectorEntry {
+    fn uses_oauth(&self, name: &str) -> bool {
+        if let Some(auth) = &self.auth {
+            return auth == "oauth";
+        }
+        // Older and pasted catalog entries may contain only a URL. Broker
+        // their login here instead of triggering a harness-specific login
+        // for a server that exists only in our launch overrides. Match both
+        // name and URL so a workspace override cannot receive another
+        // endpoint's token, and preserve explicitly supplied credentials.
+        self.command
+            .as_ref()
+            .is_none_or(|command| command.trim().is_empty())
+            && !self
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("Authorization"))
+            && crate::connector_catalog::get(name).is_some_and(|server| {
+                server.auth == crate::connector_catalog::CatalogAuth::Oauth
+                    && self.url.as_deref() == Some(server.url)
+            })
+    }
+}
+
 /// Reserved connector name for the built-in FalconDeck control server. A
 /// user-authored connector with this name is ignored with a warning rather
 /// than overriding the built-in server.
@@ -380,9 +404,9 @@ pub async fn materialize_mcp_servers(workspace_path: &str, provider: &str) -> Ve
     merged.extend(read_connectors_file(&workspace_path));
     let oauth_names = merged
         .iter()
-        .filter(|(_, entry)| {
+        .filter(|(name, entry)| {
             entry.enabled
-                && entry.auth.as_deref() == Some("oauth")
+                && entry.uses_oauth(name)
                 && (entry.providers.is_empty()
                     || entry
                         .providers
@@ -419,6 +443,7 @@ fn load_mcp_servers_from(
             {
                 return None;
             }
+            let uses_oauth = entry.uses_oauth(&name);
             let transport = match (entry.command, entry.url) {
                 (Some(command), _) if !command.trim().is_empty() => McpTransport::Stdio {
                     command,
@@ -427,7 +452,7 @@ fn load_mcp_servers_from(
                 },
                 (_, Some(url)) if !url.trim().is_empty() => {
                     let mut headers = entry.headers;
-                    if entry.auth.as_deref() == Some("oauth") {
+                    if uses_oauth {
                         if let Some(token) = crate::connector_oauth::access_token(&name) {
                             headers
                                 .entry("Authorization".to_string())
@@ -435,7 +460,7 @@ fn load_mcp_servers_from(
                         } else {
                             tracing::warn!(
                                 server = %name,
-                                "skipping OAuth connector without a current access token"
+                                "skipping OAuth connector without a current access token; connect it in Plugins"
                             );
                             return None;
                         }
@@ -1578,6 +1603,86 @@ mod tests {
                 .map(String::as_str),
             Some("secret-token")
         );
+    }
+
+    #[test]
+    fn url_only_catalog_oauth_uses_falcondeck_login() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        let connectors = write(
+            dir.path(),
+            r#"{"mcpServers":{"sentry":{"url":"https://mcp.sentry.dev/mcp"}}}"#,
+        );
+        let missing = dir.path().join("missing.json");
+        for provider in ["codex", "claude", "opencode"] {
+            assert!(load_mcp_servers_from(&connectors, &missing, provider).is_empty());
+        }
+        for (expires_at, expected_count) in [(Some(1), 0), (None, 1)] {
+            crate::connector_oauth::save_token(
+                "sentry",
+                crate::connector_oauth::StoredToken {
+                    access_token: "sentry-test-token".into(),
+                    refresh_token: None,
+                    expires_at,
+                    token_endpoint: "https://mcp.sentry.dev/token".into(),
+                    client_id: "cid".into(),
+                },
+            )
+            .unwrap();
+            for provider in ["codex", "claude", "opencode"] {
+                let servers = load_mcp_servers_from(&connectors, &missing, provider);
+                assert_eq!(servers.len(), expected_count);
+                if expected_count == 1 {
+                    let McpTransport::Http { headers, .. } = &servers[0].transport else {
+                        panic!("http");
+                    };
+                    assert_eq!(headers["Authorization"], "Bearer sentry-test-token");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn catalog_oauth_inference_preserves_custom_connectors() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        crate::connector_oauth::save_token(
+            "sentry",
+            crate::connector_oauth::StoredToken {
+                access_token: "must-not-leak".into(),
+                refresh_token: None,
+                expires_at: None,
+                token_endpoint: "https://mcp.sentry.dev/token".into(),
+                client_id: "cid".into(),
+            },
+        )
+        .unwrap();
+        for entry in [
+            json!({"url": "https://custom.example/mcp"}),
+            json!({"url": "https://mcp.sentry.dev/mcp", "auth": "custom"}),
+            json!({"url": "https://mcp.sentry.dev/mcp", "headers": {"authorization": "Bearer manual"}}),
+            json!({"command": "custom-sentry", "url": "https://mcp.sentry.dev/mcp"}),
+        ] {
+            let connectors = write(
+                dir.path(),
+                &json!({"mcpServers": {"sentry": entry}}).to_string(),
+            );
+            let servers =
+                load_mcp_servers_from(&connectors, &dir.path().join("missing.json"), "codex");
+            assert_eq!(servers.len(), 1);
+            if let McpTransport::Http { headers, .. } = &servers[0].transport {
+                assert!(
+                    !headers
+                        .values()
+                        .any(|value| value.contains("must-not-leak"))
+                );
+                if entry.get("headers").is_some() {
+                    assert_eq!(headers["authorization"], "Bearer manual");
+                }
+            }
+        }
     }
 
     #[test]

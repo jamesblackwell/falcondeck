@@ -78,6 +78,14 @@ Per-server optional fields:
   `Authorization: Bearer` at spawn. API-key servers (GitHub PAT, fal,
   Context7) store the key in `connectors.json` headers. Harnesses do not run
   their own OAuth login.
+- URL-only entries whose name and exact URL match an OAuth server in the
+  catalog (including Sentry) use that same FalconDeck login, even without an
+  explicit `auth: "oauth"`. Custom endpoints, commands, explicit auth modes,
+  and manually supplied Authorization headers keep their existing behavior.
+  Expired tokens are refreshed before launch. If no current token is available,
+  the connector is omitted from the agent launch until the user selects
+  **Plugins → Connect**. Do not use `codex mcp login` for these connectors:
+  FalconDeck passes them as launch overrides, not as saved Codex CLI config.
 - Plugin logos are cached under `~/.falcondeck/cache/logos` (0600). The daemon
   fetches from [logo.dev](https://www.logo.dev/) when
   `FALCONDECK_LOGO_DEV_TOKEN` (or `LOGO_DEV_PUBLISHABLE_KEY`) is set, otherwise
