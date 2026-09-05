@@ -1,3 +1,4 @@
+import { cancelRelayTransport, receiveRelayTransport, sendRelayTransport } from './relay-transport'
 // Framework-free relay client for talking to a remote falcondeck-daemon
 // (an enrolled server host) over the E2E-encrypted relay. This is the same
 // protocol remote-web speaks, extracted so desktop and mobile can hold one
@@ -296,6 +297,7 @@ export class RemoteHostClient {
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRpc.delete(requestId)
+        cancelRelayTransport(socket, requestId)
         reject(new Error(`Timed out waiting for ${method}`))
       }, RELAY_RPC_TIMEOUT_MS)
       this.pendingRpc.set(requestId, {
@@ -305,12 +307,12 @@ export class RemoteHostClient {
         method,
       })
       try {
-        socket.send(JSON.stringify({
+        sendRelayTransport(socket, JSON.stringify({
           type: 'rpc-call',
           request_id: requestId,
           method,
           params: encrypted,
-        } satisfies RelayClientMessage))
+        } satisfies RelayClientMessage), requestId)
       } catch (error) {
         clearTimeout(timeout)
         this.pendingRpc.delete(requestId)
@@ -332,7 +334,7 @@ export class RemoteHostClient {
 
   private send(message: RelayClientMessage) {
     if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(message))
+      sendRelayTransport(this.socket, JSON.stringify(message))
     }
   }
 
@@ -385,7 +387,7 @@ export class RemoteHostClient {
       .then((ticket) => {
         if (generation !== this.generation || !this.running) return
         const socket = new WebSocket(
-          `${relayWsBase(relayUrl)}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
+          `${relayWsBase(relayUrl)}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}&transport=chunks-v1`,
         )
         this.socket = socket
         this.connectTimeout = setTimeout(() => {
@@ -421,7 +423,9 @@ export class RemoteHostClient {
           if (generation !== this.generation) return
           let payload: RelayServerMessage
           try {
-            payload = JSON.parse(String(message.data)) as RelayServerMessage
+            const complete = receiveRelayTransport(socket, String(message.data))
+            if (complete === null) return
+            payload = JSON.parse(complete) as RelayServerMessage
           } catch {
             this.callbacks.onError?.('Received malformed relay message')
             return

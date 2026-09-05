@@ -1,3 +1,4 @@
+import { cancelRelayTransport, sendRelayTransport } from '@falcondeck/client-core'
 /**
  * Relay connection store.
  *
@@ -823,7 +824,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     if (_socket?.readyState !== WebSocket.OPEN) {
       throw new Error(RELAY_TRANSPORT_ERRORS.notReady)
     }
-    _socket.send(JSON.stringify(message))
+    sendRelayTransport(_socket, JSON.stringify(message), message.type === 'rpc-call' ? message.request_id : undefined)
     /* v8 ignore stop */
   },
 
@@ -842,11 +843,17 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     }
 
     const requestId = `${options?.requestIdPrefix ?? 'mobile-rpc'}-${_rpcRequestCounter++}`
+    const requestSocket = _socket
+    const requestCrypto = _sessionCrypto
     const encrypted = await get()._encryptJson(params)
+    if (_socket !== requestSocket || _sessionCrypto !== requestCrypto) {
+      throw new Error('Remote connection changed before the request could be sent')
+    }
 
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         _pendingRpc.delete(requestId)
+        if (requestSocket) cancelRelayTransport(requestSocket, requestId)
         // Fire-and-forget callers swallow rejections, so the debug overlay is
         // the only place a silently dying RPC (mark-read, prefetch) shows up.
         logConnection('warn', `${method} timed out waiting for a response`)
@@ -893,7 +900,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       if (!payload.error) {
         const message = relayRpcFailureMessage(payload.failure, pending.method)
         logConnection('warn', message)
-        pending.reject(new Error(message))
+        pending.reject(Object.assign(new Error(message), { failure: payload.failure }))
         return true
       }
 

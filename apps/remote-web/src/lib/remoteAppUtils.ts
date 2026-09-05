@@ -1,3 +1,4 @@
+import { sendRelayTransport } from '@falcondeck/client-core';
 import {
   applyEventsToThreadDetail,
   applyConversationEventsToItems,
@@ -191,7 +192,7 @@ export function reasoningOptions(
 }
 
 export function sendRelayMessage(socket: WebSocket, message: RelayClientMessage) {
-  socket.send(JSON.stringify(message))
+  sendRelayTransport(socket, JSON.stringify(message), message.type === 'rpc-call' ? message.request_id : undefined)
 }
 
 export function connectionLabel(status: string) {

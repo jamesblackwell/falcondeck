@@ -1354,11 +1354,14 @@ dependencies = [
  "chrono",
  "crypto_box",
  "ed25519-dalek",
+ "futures-util",
  "rand 0.8.7",
  "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

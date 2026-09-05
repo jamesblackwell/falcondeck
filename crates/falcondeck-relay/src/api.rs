@@ -113,6 +113,8 @@ struct UpdatesRequestQuery {
 struct WebSocketQuery {
     session_id: String,
     ticket: String,
+    transport: Option<String>,
+    compact_index: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -298,7 +300,17 @@ async fn updates_ws(
             // unauthenticated-handshake budget before entering that loop.
             drop(handshake_permit);
             match authentication {
-                Ok(auth) => socket_loop(socket, state, auth).await,
+                Ok(auth) => {
+                    socket_loop(
+                        socket,
+                        state,
+                        auth,
+                        query.transport.as_deref()
+                            == Some(falcondeck_core::relay_transport::TRANSPORT_VERSION),
+                        query.compact_index.unwrap_or(false),
+                    )
+                    .await
+                }
                 Err(error) => {
                     let _ = send_raw_error(socket, error.to_string()).await;
                 }
@@ -306,7 +318,13 @@ async fn updates_ws(
         }))
 }
 
-async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
+async fn socket_loop(
+    socket: WebSocket,
+    state: AppState,
+    auth: SessionAuth,
+    chunks: bool,
+    compact_index: bool,
+) {
     let (peer_id, mut rx, ready) = match state
         .register_peer(&auth.session_id, auth.role.clone(), auth.device_id.clone())
         .await
@@ -318,7 +336,23 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
         }
     };
 
-    let (mut sender, mut receiver) = socket.split();
+    if compact_index {
+        state
+            .set_peer_compact_index(&auth.session_id, &peer_id)
+            .await;
+    }
+    let (sink, stream) = socket.split();
+    let sink = sink.with(|text: String| {
+        futures_util::future::ready(Ok::<_, axum::Error>(Message::Text(text.into())))
+    });
+    let stream = stream.map(|message| match message {
+        Ok(Message::Text(text)) => Ok(text.to_string()),
+        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => Ok(r#"{"type":"ping"}"#.to_string()),
+        Ok(_) => Err("relay socket closed or unsupported frame".to_string()),
+        Err(error) => Err(error.to_string()),
+    });
+    let (mut sender, mut receiver, _transport) =
+        falcondeck_core::relay_transport::spawn_transport(sink, stream, chunks);
     if send_message_with_timeout(&mut sender, &ready)
         .await
         .is_err()
@@ -349,7 +383,8 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                     None => break,
                 }
             }
-            incoming = receiver.next() => {
+            incoming = receiver.recv() => {
+                let incoming = incoming.map(|r| r.map(|m| Message::Text(m.text.into())));
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         last_activity = tokio::time::Instant::now();
@@ -492,28 +527,36 @@ async fn register_push_token(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Bound websocket sends so a peer that stops reading (zero TCP window)
-/// cannot stall the socket loop forever; on timeout the connection is torn
-/// down and `unregister_peer` runs.
+/// Queue without holding the socket reader behind a stalled write.
 async fn send_message_with_timeout(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    sender: &mut falcondeck_core::relay_transport::TransportSender,
     message: &RelayServerMessage,
-) -> Result<(), axum::Error> {
-    tokio::time::timeout(
-        tokio::time::Duration::from_secs(10),
-        send_message(sender, message),
+) -> Result<(), String> {
+    if matches!(message, RelayServerMessage::Ready { .. }) {
+        return sender
+            .send_barrier(serde_json::to_string(message).map_err(|e| e.to_string())?)
+            .await;
+    }
+    let urgent = matches!(
+        message,
+        RelayServerMessage::Pong
+            | RelayServerMessage::ActionRequested { .. }
+            | RelayServerMessage::Update {
+                update: falcondeck_core::RelayUpdate {
+                    body: falcondeck_core::RelayUpdateBody::SessionBootstrap { .. },
+                    ..
+                }
+            }
+            | RelayServerMessage::RpcRequest { .. }
+            | RelayServerMessage::RpcResult { .. }
+            | RelayServerMessage::RpcRegistered { .. }
+            | RelayServerMessage::RpcUnregistered { .. }
+            | RelayServerMessage::Error { .. }
+    );
+    sender.send(
+        serde_json::to_string(message).map_err(|e| e.to_string())?,
+        urgent,
     )
-    .await
-    .map_err(|elapsed| axum::Error::new(std::io::Error::other(elapsed.to_string())))?
-}
-
-async fn send_message(
-    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    message: &RelayServerMessage,
-) -> Result<(), axum::Error> {
-    let payload = serde_json::to_string(message)
-        .map_err(|error| axum::Error::new(std::io::Error::other(error.to_string())))?;
-    sender.send(Message::Text(payload.into())).await
 }
 
 async fn send_raw_error(mut socket: WebSocket, message: String) -> Result<(), axum::Error> {

@@ -10,6 +10,8 @@ export * from "./snapshot";
 export * from "./image-prepare";
 export * from "./remote-session";
 export * from "./remote-rpc";
+export * from "./relay-transport";
+export * from "./sync-index";
 export * from "./transport-timeout";
 export * from "./remote-host-client";
 export * from "./relay-url";

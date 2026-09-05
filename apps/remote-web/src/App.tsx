@@ -1,3 +1,4 @@
+import { cancelRelayTransport, receiveRelayTransport } from '@falcondeck/client-core';
 import {
   Suspense,
   lazy,
@@ -1440,7 +1441,7 @@ function RemoteApp() {
       .then((ticket) => {
         if (!isCurrent) return;
         socket = new WebSocket(
-          `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
+          `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}&transport=chunks-v1`,
         );
         socketRef.current = socket;
         connectTimeout = window.setTimeout(() => {
@@ -1483,7 +1484,9 @@ function RemoteApp() {
           if (!isCurrent) return;
           let payload: RelayServerMessage;
           try {
-            payload = JSON.parse(message.data) as RelayServerMessage;
+            const complete = receiveRelayTransport(socket!, String(message.data));
+            if (complete === null) return;
+            payload = JSON.parse(complete) as RelayServerMessage;
           } catch {
             if (isCurrent) {
               failCurrentConnection("Received malformed relay message");
@@ -2255,6 +2258,7 @@ function RemoteApp() {
       return new Promise<T>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
           pendingRpc.current.delete(requestId);
+          cancelRelayTransport(socket, requestId);
           reject(new Error(`Timed out waiting for ${method}`));
         }, RELAY_RPC_TIMEOUT_MS);
         pendingRpc.current.set(requestId, {

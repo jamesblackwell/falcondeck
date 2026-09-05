@@ -1139,6 +1139,8 @@ export type DaemonRestorePhase =
   "loading_persisted_state" | "hydrating_workspaces" | "ready";
 
 export type DaemonSnapshot = {
+  /** Local compact-index coverage; absent on legacy/full snapshots. */
+  sync_index?: import('./sync-index').SyncIndexCoverage;
   daemon: {
     version: string;
     started_at: string;
@@ -1898,11 +1900,13 @@ export type SessionKeyMaterial = {
 };
 
 export type EncryptedEnvelope = {
+  snapshot_hint?: boolean;
   encryption_variant: EncryptionVariant;
   ciphertext: string;
 };
 
 export type RelayUpdateBody =
+  | { t: "snapshot-invalidated" }
   | { t: "session-bootstrap"; material: SessionKeyMaterial }
   | { t: "encrypted"; envelope: EncryptedEnvelope }
   | { t: "action-status"; action: QueuedRemoteAction }
@@ -2188,4 +2192,3 @@ export type ImportBackupResponse = {
   providers_imported: number;
   preferences_restored: boolean;
 };
-

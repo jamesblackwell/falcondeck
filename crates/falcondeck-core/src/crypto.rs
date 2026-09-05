@@ -618,6 +618,7 @@ pub fn encrypt_bytes(
     bundle.extend_from_slice(&ciphertext);
 
     Ok(EncryptedEnvelope {
+        snapshot_hint: false,
         encryption_variant: EncryptionVariant::DataKeyV1,
         ciphertext: BASE64.encode(bundle),
     })

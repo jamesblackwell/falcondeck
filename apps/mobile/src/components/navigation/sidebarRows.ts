@@ -10,6 +10,7 @@ import {
 
 export const VISIBLE_THREAD_LIMIT = 5
 export const SHOW_MORE_STEP = 10
+
 export const CHATS_ARCHIVED_KEY = 'chats'
 
 const EMPTY_ARCHIVED = new Set<string>()
@@ -103,6 +104,8 @@ export function buildSidebarRows(
   showChatsSection = false,
   chatsCollapsed = false,
   expandedArchivedWorkspaces: ReadonlySet<string> = EMPTY_ARCHIVED,
+  remoteCounts: Record<string, import('@falcondeck/client-core').WorkspaceIndexCount> = {},
+  remoteCursors: Record<string, number | null> = {},
 ): SidebarRow[] {
   const compare = compareThreads(sortMode)
   const chatGroups = groups.filter((group) => group.workspace.kind === 'casual')
@@ -172,20 +175,29 @@ export function buildSidebarRows(
           })),
         ]
 
+  for (const group of chatGroups) {
+    const remaining = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
+      : Math.max(remoteCursors[`${group.workspace.id}:${sortMode}`] === undefined ? 0 : 1, (remoteCounts[group.workspace.id]?.total ?? 0) - group.threads.length)
+    if (remaining > 0) chatRows.push({ key: `overflow:${group.workspace.id}`, type: 'overflow',
+      workspaceId: group.workspace.id, hiddenCount: remaining, visibleCount: group.threads.length,
+      isExpanded: false, isCollapsed: chatsCollapsed })
+  }
+
   const projectRows = projectGroups.flatMap((group) => {
     const workspaceName =
       group.workspace.path.split('/').pop() || group.workspace.path || 'Workspace'
     const isOpen = !collapsedWorkspaces.has(group.workspace.id)
 
     const attention = summarizeThreadAttention(group.threads)
+    const remote = remoteCounts[group.workspace.id]
     const workspaceRow: SidebarRow = {
       key: `workspace:${group.workspace.id}`,
       type: 'workspace',
       workspaceId: group.workspace.id,
       workspaceName,
       isOpen,
-      runningCount: attention.running,
-      unreadCount: attention.unread,
+      runningCount: Math.max(attention.running, remote?.running ?? 0),
+      unreadCount: Math.max(attention.unread, remote?.unread ?? 0),
       unreadTone: attention.unreadTone,
     }
 
@@ -201,7 +213,9 @@ export function buildSidebarRows(
       selectedThreadId != null ? sortedUnpinned.findIndex((t) => t.id === selectedThreadId) : -1
     const effectiveCount = selectedIndex >= requestedCount ? selectedIndex + 1 : requestedCount
     const visibleUnpinned = sortedUnpinned.slice(0, effectiveCount)
-    const hiddenCount = Math.max(0, sortedUnpinned.length - visibleUnpinned.length)
+    const missing = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
+      : Math.max(remoteCursors[`${group.workspace.id}:${sortMode}`] === undefined ? 0 : 1, (remote?.total ?? 0) - group.threads.length)
+    const hiddenCount = Math.max(0, sortedUnpinned.length - visibleUnpinned.length) + missing
     const canCollapse = hiddenCount === 0 && sortedUnpinned.length > VISIBLE_THREAD_LIMIT
     const visible = [...sortedPinnedInProject, ...visibleUnpinned]
 
@@ -281,9 +295,7 @@ export function buildSidebarRows(
             key: 'section:chats',
             type: 'section' as const,
             title: 'Chats' as const,
-            ...(chatRows.length > 0 || archivedChatRows.length > 0
-              ? { isOpen: !chatsCollapsed }
-              : {}),
+            ...(chatRows.length > 0 || archivedChatRows.length > 0 ? { isOpen: !chatsCollapsed } : {}),
           },
           ...chatRows,
           ...archivedChatRows,

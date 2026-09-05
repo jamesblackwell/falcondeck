@@ -1536,6 +1536,7 @@ export function normalizeDaemonSnapshot(
       ? snapshot.restore_phase
       : undefined;
   return {
+    ...(snapshot.sync_index ? { sync_index: snapshot.sync_index } : {}),
     daemon: {
       version: snapshot.daemon?.version ?? "unknown",
       started_at: snapshot.daemon?.started_at ?? new Date(0).toISOString(),

@@ -666,6 +666,7 @@ impl BudgetedRelayMessage {
 struct PeerQueue {
     tx: mpsc::Sender<BudgetedRelayMessage>,
     available_bytes: Arc<Semaphore>,
+    compact_index: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PeerQueue {
@@ -682,12 +683,25 @@ impl PeerQueue {
             Self {
                 tx,
                 available_bytes: Arc::new(Semaphore::new(max_bytes)),
+                compact_index: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
             rx,
         )
     }
 
-    fn try_send(&self, message: RelayServerMessage) -> Result<(), ()> {
+    fn try_send(&self, mut message: RelayServerMessage) -> Result<(), ()> {
+        if self
+            .compact_index
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            match &mut message {
+                RelayServerMessage::Update { update } => compact_snapshot_update(update),
+                RelayServerMessage::Sync { updates, .. } => {
+                    updates.iter_mut().for_each(compact_snapshot_update)
+                }
+                _ => {}
+            }
+        }
         let message_bytes = serde_json::to_vec(&message).map_err(|_| ())?.len().max(1);
         let permits = u32::try_from(message_bytes).map_err(|_| ())?;
         let permit = Arc::clone(&self.available_bytes)
@@ -1722,6 +1736,19 @@ impl AppState {
         ))
     }
 
+    pub async fn set_peer_compact_index(&self, session_id: &str, peer_id: &str) {
+        let store = self.inner.store.lock().await;
+        if let Some(peer) = store
+            .live_sessions
+            .get(session_id)
+            .and_then(|live| live.peers.get(peer_id))
+        {
+            peer.tx
+                .compact_index
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     pub async fn after_peer_ready(&self, session_id: &str, role: RelayPeerRole) {
         if matches!(role, RelayPeerRole::Daemon) {
             self.dispatch_pending_actions(session_id).await;
@@ -1985,6 +2012,11 @@ impl AppState {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
                         "only daemon peers may submit durable updates".to_string(),
+                    ));
+                }
+                if matches!(body, RelayUpdateBody::SnapshotInvalidated) {
+                    return Err(RelayError::Unauthorized(
+                        "snapshot invalidations are relay projections".into(),
                     ));
                 }
                 self.append_update(session_id, body, PersistMode::Deferred)
@@ -3270,6 +3302,30 @@ impl AppState {
     }
 
     async fn broadcast_presence(&self, session_id: &str) {
+        {
+            let store = self.inner.store.lock().await;
+            if let Some(live) = store.live_sessions.get(session_id) {
+                let full_snapshots_required = live.peers.values().any(|peer| {
+                    matches!(peer.role, RelayPeerRole::Client)
+                        && !peer
+                            .tx
+                            .compact_index
+                            .load(std::sync::atomic::Ordering::Acquire)
+                });
+                for (peer_id, peer) in &live.peers {
+                    if matches!(peer.role, RelayPeerRole::Daemon) {
+                        self.queue_message(
+                            session_id,
+                            peer_id,
+                            &peer.tx,
+                            RelayServerMessage::SyncProfile {
+                                full_snapshots_required,
+                            },
+                        );
+                    }
+                }
+            }
+        }
         let presence = {
             let store = self.inner.store.lock().await;
             let Some(session) = store.data.sessions.get(session_id) else {
@@ -3437,6 +3493,13 @@ impl AppState {
         else {
             return Ok(());
         };
+        let mut response = response;
+        if tx.compact_index.load(std::sync::atomic::Ordering::Acquire) {
+            response
+                .updates
+                .iter_mut()
+                .for_each(compact_snapshot_update);
+        }
         for message in sync_messages(response) {
             self.queue_message(session_id, peer_id, &tx, message);
         }
@@ -4234,6 +4297,12 @@ fn prune_state(
     report
 }
 
+fn compact_snapshot_update(update: &mut RelayUpdate) {
+    if matches!(&update.body, RelayUpdateBody::Encrypted { envelope } if envelope.snapshot_hint) {
+        update.body = RelayUpdateBody::SnapshotInvalidated;
+    }
+}
+
 /// Cheap, conservative retained-memory estimate. Encrypted ciphertext makes
 /// up almost all production replay volume; the fixed allowance covers the
 /// enum, strings, ids, timestamps, and collection allocation overhead without
@@ -4242,6 +4311,7 @@ fn estimated_update_retained_bytes(update: &RelayUpdate) -> usize {
     const ENTRY_OVERHEAD_BYTES: usize = 512;
 
     let payload_bytes = match &update.body {
+        RelayUpdateBody::SnapshotInvalidated => 0,
         RelayUpdateBody::Encrypted { envelope } => envelope.ciphertext.len(),
         RelayUpdateBody::SessionBootstrap { material } => {
             material.pairing_id.len()
@@ -4458,6 +4528,62 @@ mod tests {
         secret_verifier, strip_rpc_request_id_namespace, sync_messages, verify_secret,
     };
 
+    #[test]
+    fn compact_peers_skip_snapshot_bytes_without_changing_replay_identity() {
+        let update = RelayUpdate {
+            id: "snapshot-1".into(),
+            seq: 42,
+            created_at: Utc::now(),
+            body: RelayUpdateBody::Encrypted {
+                envelope: EncryptedEnvelope {
+                    encryption_variant: EncryptionVariant::DataKeyV1,
+                    ciphertext: "x".repeat(1024 * 1024),
+                    snapshot_hint: true,
+                },
+            },
+        };
+        let (compact, mut compact_rx) = PeerQueue::new_with_byte_budget(4, 4096);
+        compact
+            .compact_index
+            .store(true, std::sync::atomic::Ordering::Release);
+        compact
+            .try_send(falcondeck_core::RelayServerMessage::Update {
+                update: update.clone(),
+            })
+            .unwrap();
+        let received = compact_rx.try_recv().unwrap();
+        match received.message() {
+            falcondeck_core::RelayServerMessage::Update { update } => {
+                assert_eq!(update.seq, 42);
+                assert_eq!(update.id, "snapshot-1");
+                assert!(matches!(update.body, RelayUpdateBody::SnapshotInvalidated));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let (legacy, _) = PeerQueue::new_with_byte_budget(4, 4096);
+        assert!(
+            legacy
+                .try_send(falcondeck_core::RelayServerMessage::Update {
+                    update: update.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            matches!(update.body, RelayUpdateBody::Encrypted { .. }),
+            "stored replay stays legacy compatible"
+        );
+        let mut ordinary = update;
+        if let RelayUpdateBody::Encrypted { envelope } = &mut ordinary.body {
+            envelope.snapshot_hint = false;
+        }
+        assert!(
+            compact
+                .try_send(falcondeck_core::RelayServerMessage::Update { update: ordinary })
+                .is_err(),
+            "ordinary events must not be discarded"
+        );
+    }
+
     fn rate_limits(client_capacity: u32, global_capacity: u32) -> PairingRateLimits {
         PairingRateLimits {
             client_capacity,
@@ -4595,6 +4721,7 @@ mod tests {
             seq,
             body: RelayUpdateBody::Encrypted {
                 envelope: EncryptedEnvelope {
+                    snapshot_hint: false,
                     encryption_variant: EncryptionVariant::DataKeyV1,
                     ciphertext: "ciphertext".to_string(),
                 },
@@ -4855,6 +4982,7 @@ mod tests {
                 seq,
                 body: RelayUpdateBody::Encrypted {
                     envelope: EncryptedEnvelope {
+                        snapshot_hint: false,
                         encryption_variant: EncryptionVariant::DataKeyV1,
                         ciphertext: "x".repeat(450 * 1024),
                     },

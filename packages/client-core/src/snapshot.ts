@@ -14,6 +14,7 @@ import {
   normalizeScheduledTaskRun,
   normalizeThreadSummary,
 } from "./normalization";
+import { trackSyncIndexEvent } from './sync-index';
 import { prepareImageFile } from "./image-prepare";
 
 export type SnapshotSelection = {
@@ -437,6 +438,7 @@ export function applySnapshotEvent(
     return normalizeDaemonSnapshot(daemonEvent.snapshot);
   }
   if (!snapshot) return snapshot;
+  snapshot = trackSyncIndexEvent(snapshot, { ...event, event: daemonEvent });
   switch (daemonEvent.type) {
     case "thread-started":
       return {

@@ -1,6 +1,9 @@
+import { useSessionStore } from '@/store'
+import { loadSyncThreadPage } from '@/hooks/sync-index'
 import {
   memo,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -66,6 +69,7 @@ import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
 import {
   buildSidebarRows,
   SHOW_MORE_STEP,
+  VISIBLE_THREAD_LIMIT,
   sidebarRowsEqual,
   type SidebarRow,
 } from "./sidebarRows";
@@ -171,6 +175,8 @@ export const SidebarView = memo(function SidebarView({
   // Cached projects stay on screen while a reconnect snapshot is in flight.
   // The banner is the only extra voice if that wait actually drags.
   const syncStatus = useSessionSyncStatus();
+  const syncIndex = useSessionStore(s => s.snapshot?.sync_index);
+  const remoteCounts = syncIndex?.counts;
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
     () => new Set(),
@@ -263,6 +269,32 @@ export const SidebarView = memo(function SidebarView({
     [activeExtensionFilters],
   );
 
+  // Fetch one bounded page per expanded scope. Filters need complete scope,
+  // so continue one page at a time, yielding between store commits.
+  const pageScopes = groups.filter(group => group.workspace.kind === "casual"
+    ? !chatsCollapsed : !collapsedWorkspaces.has(group.workspace.id))
+    .map(group => group.workspace.id).join("\n");
+  useEffect(() => {
+    if (!syncIndex?.token) return;
+    let cancelled = false;
+    const token = syncIndex.token;
+    void (async () => {
+      for (const workspaceId of pageScopes.split("\n").filter(Boolean)) {
+        while (!cancelled) {
+          const current = useSessionStore.getState().snapshot?.sync_index;
+          if (!current || current.token !== token) return;
+          const cursor = current.cursors[`${workspaceId}:${sortMode}`];
+          if (cursor === null || (cursor !== undefined && !activeExtensionFilterCount)) break;
+          await loadSyncThreadPage(workspaceId, sortMode, activeExtensionFilterCount ? 50 : VISIBLE_THREAD_LIMIT);
+          const next = useSessionStore.getState().snapshot?.sync_index;
+          if (next?.token !== token || next.cursors[`${workspaceId}:${sortMode}`] === cursor) break;
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [syncIndex?.token, pageScopes, sortMode, activeExtensionFilterCount]);
+
   // Starting a thread should never depend on first finding a project row: the
   // open one is the obvious target, and the top of the list stands in before
   // anything is selected.
@@ -286,6 +318,8 @@ export const SidebarView = memo(function SidebarView({
         Boolean(onNewChat),
         chatsCollapsed,
         expandedArchivedWorkspaces,
+        activeExtensionFilterCount ? undefined : remoteCounts,
+        syncIndex?.cursors,
       ),
     [
       displayGroups,
@@ -296,6 +330,9 @@ export const SidebarView = memo(function SidebarView({
       onNewChat,
       chatsCollapsed,
       expandedArchivedWorkspaces,
+      remoteCounts,
+      syncIndex?.cursors,
+      activeExtensionFilterCount,
     ],
   );
   // Selecting a visible thread rebuilds builtRows with identical content;
@@ -368,6 +405,7 @@ export const SidebarView = memo(function SidebarView({
 
   const handleOverflowPress = useCallback(
     (workspaceId: string, visibleCount: number, isExpanded: boolean) => {
+      if (!isExpanded) void loadSyncThreadPage(workspaceId, sortMode);
       setVisibleThreadCounts((prev) => {
         const next = new Map(prev);
         if (isExpanded) {
@@ -378,7 +416,7 @@ export const SidebarView = memo(function SidebarView({
         return next;
       });
     },
-    [],
+    [sortMode],
   );
 
   const handleArchivedToggle = useCallback((workspaceId: string) => {

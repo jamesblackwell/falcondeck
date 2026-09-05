@@ -649,6 +649,123 @@ async fn peer_registration_rechecks_device_revocation_after_ticket_consumption()
 }
 
 #[tokio::test]
+async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut daemon, _) = connect_async(daemon_url).await.unwrap();
+    let (mut phone, _) = connect_async(format!(
+        "{client_url}&transport=chunks-v1&compact_index=true"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        phone
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .unwrap()
+            .contains("transport-ready")
+    );
+    assert!(matches!(
+        recv_server_message(&mut daemon).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut phone).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::RpcRegister {
+            method: "test.echo".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut daemon).await,
+        RelayServerMessage::RpcRegistered { .. }
+    ));
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::Update {
+            body: RelayUpdateBody::Encrypted {
+                envelope: test_envelope(&"x".repeat(256 * 1024)),
+            },
+        },
+    )
+    .await;
+    timeout(TokioDuration::from_secs(2), async {
+        loop {
+            let frame = phone.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if value["type"] == "transport-chunk" {
+                assert!(frame.to_text().unwrap().len() <= 16 * 1024);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Deliberately withhold chunk credit. Requests and responses still pass.
+    send_client_message(
+        &mut phone,
+        &RelayClientMessage::RpcCall {
+            request_id: "urgent".into(),
+            method: "test.echo".into(),
+            params: test_envelope("request"),
+        },
+    )
+    .await;
+    let RelayServerMessage::RpcRequest { request_id, .. } = recv_server_message(&mut daemon).await
+    else {
+        panic!("missing request");
+    };
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::RpcResult {
+            request_id,
+            ok: true,
+            result: Some(test_envelope("reply")),
+            error: None,
+        },
+    )
+    .await;
+    timeout(TokioDuration::from_millis(500), async {
+        loop {
+            let frame = phone.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_ne!(value["type"], "transport-chunk", "bulk exceeded its credit");
+            if value["type"] == "rpc-result" {
+                assert_eq!(value["request_id"], "urgent");
+                assert_eq!(value["ok"], true);
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn websocket_fanout_and_rpc_forwarding_work() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -3672,7 +3789,9 @@ async fn recv_server_message(
         };
         let parsed = serde_json::from_str::<RelayServerMessage>(&text).unwrap();
         match parsed {
-            RelayServerMessage::Presence { .. } | RelayServerMessage::ActionUpdated { .. } => {}
+            RelayServerMessage::Presence { .. }
+            | RelayServerMessage::ActionUpdated { .. }
+            | RelayServerMessage::SyncProfile { .. } => {}
             RelayServerMessage::Update { ref update }
                 if matches!(
                     update.body,
@@ -3839,6 +3958,7 @@ fn forged_bundle_for(
 
 fn test_envelope(marker: &str) -> EncryptedEnvelope {
     EncryptedEnvelope {
+        snapshot_hint: false,
         encryption_variant: EncryptionVariant::DataKeyV1,
         ciphertext: format!("opaque-{marker}"),
     }

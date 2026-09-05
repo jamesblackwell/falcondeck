@@ -1,7 +1,9 @@
+import { requestInitialSync, loadSyncExtensions } from './sync-index'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 
 import {
+  receiveRelayTransport,
   captureRelayDisplayFrame,
   decryptToUtf8,
   encryptedDaemonEventEnvelope,
@@ -239,6 +241,7 @@ export function useRelayConnection() {
   const deviceId = useRelayStore((s) => s.deviceId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
+  const syncIndexToken = useSessionStore((s) => s.snapshot?.sync_index?.token)
   // A boolean, not the snapshot itself: this hook runs in the root layout, so
   // subscribing to the object the store replaces on every applied event batch
   // re-rendered the entire app tree at relay frame rate. Only the transition
@@ -276,6 +279,7 @@ export function useRelayConnection() {
   const pendingSnapshotEvents = useRef<EventEnvelope[]>([])
   const pendingSnapshotEventSeqs = useRef<Set<number>>(new Set())
   const snapshotRaceOverflowed = useRef(false)
+  const pendingIndexInvalidation = useRef(false)
   const pendingSnapshotCursor = useRef<number | null>(null)
   const snapshotAfterCrypto = useRef(false)
   // RPC finished while a flush still held unbuffered events. Apply this
@@ -295,7 +299,7 @@ export function useRelayConnection() {
   const checkpointPendingSnapshotCursor = useCallback((allowSnapshotRequestInFlight = false) => {
     const relay = useRelayStore.getState()
     if (!useSessionStore.getState().snapshot) return
-    if (!allowSnapshotRequestInFlight && snapshotRequestInFlight.current) return
+    if (pendingIndexInvalidation.current || (!allowSnapshotRequestInFlight && snapshotRequestInFlight.current)) return
     if (
       pendingEncrypted.current.length > 0 ||
       pendingSnapshotEvents.current.length > 0 ||
@@ -323,6 +327,17 @@ export function useRelayConnection() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!syncIndexToken || !hasSyncedOnce) return
+    let current = true
+    let retry: ReturnType<typeof setTimeout> | undefined
+    const load = () => { void loadSyncExtensions(syncIndexToken).catch(() => {
+      if (current) retry = setTimeout(load, 10_000)
+    }) }
+    load()
+    return () => { current = false; if (retry) clearTimeout(retry) }
+  }, [syncIndexToken, hasSyncedOnce])
+
   const applyAuthoritativeSnapshot = useCallback((nextSnapshot: DaemonSnapshot) => {
     const racedEvents = pendingSnapshotEvents.current
     const events: EventEnvelope[] = [
@@ -345,6 +360,7 @@ export function useRelayConnection() {
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
+    pendingIndexInvalidation.current = false
     parkedAuthoritativeSnapshot.current = null
     snapshotRequestInFlight.current = false
 
@@ -402,7 +418,7 @@ export function useRelayConnection() {
     let appliedThisAttempt = false
     try {
       const nextSnapshot = normalizeDaemonSnapshot(
-        await relay._callRpc<DaemonSnapshot>(
+        await requestInitialSync(relay, useSessionStore.getState().selectedThreadId, () => relay._callRpc<DaemonSnapshot>(
           'snapshot.current',
           {
             // Sidebar only: full plans and full diffs (Codex hangs the patch
@@ -420,7 +436,7 @@ export function useRelayConnection() {
             include_workspace_skills: false,
           },
           { requestIdPrefix: 'mobile-snapshot' },
-        ),
+        )),
       )
       if (requestGeneration !== snapshotRequestGeneration.current) return
       if (shouldRefetchSnapshotApplication(snapshotRaceOverflowed.current)) {
@@ -552,7 +568,7 @@ export function useRelayConnection() {
         // sync. While updates are parked the cursor must stay before them.
         const advanceCursor = (seq: number) => {
           if (pendingEncrypted.current.length > 0) return
-          if (snapshotRequestInFlight.current || !useSessionStore.getState().snapshot) {
+          if (snapshotRequestInFlight.current || pendingIndexInvalidation.current || !useSessionStore.getState().snapshot) {
             pendingSnapshotCursor.current = Math.max(
               pendingSnapshotCursor.current ?? 0,
               seq,
@@ -565,6 +581,19 @@ export function useRelayConnection() {
 
         for (let index = 0; index < batch.length; index += 1) {
           const update = batch[index]
+
+          if (update.body.t === 'snapshot-invalidated') {
+            pendingIndexInvalidation.current = true
+            // Replay predates the RPC started from this sync's presence marker.
+            // A live invalidation raced with its capture needs one replacement.
+            if (snapshotRequestInFlight.current && update.seq >= (syncedPresenceFloor.current ?? 0)) {
+              snapshotRaceOverflowed.current = true
+            }
+            pendingSnapshotCursor.current = Math.max(pendingSnapshotCursor.current ?? 0, update.seq)
+            if (relay._getSessionCrypto()) void requestSnapshot()
+            else snapshotAfterCrypto.current = true
+            continue
+          }
 
           if (update.body.t === 'session-bootstrap') {
             await relay._processBootstrap(update)
@@ -605,7 +634,7 @@ export function useRelayConnection() {
             // at or above the sync response's next_seq and may replace it.
             if (
               syncedPresenceFloor.current === null ||
-              update.seq >= syncedPresenceFloor.current
+              update.seq >= (syncedPresenceFloor.current ?? 0)
             ) {
               nextPresence = update.body.presence
             }
@@ -758,7 +787,7 @@ export function useRelayConnection() {
           shouldPersistRelayFlushCursor(pendingRelayUpdates.current.length) &&
           canCheckpointReplayCursor({
             authoritativeSnapshot: !!useSessionStore.getState().snapshot,
-            snapshotRequestInFlight: snapshotRequestInFlight.current,
+            snapshotRequestInFlight: snapshotRequestInFlight.current || pendingIndexInvalidation.current,
             pendingSnapshotEventCount: pendingSnapshotEvents.current.length,
             snapshotRaceOverflowed: snapshotRaceOverflowed.current,
             parkedUpdateCount: pendingEncrypted.current.length,
@@ -782,7 +811,7 @@ export function useRelayConnection() {
       // cursor stays stuck and every reconnect replays the truncation.
       const truncationCursor = pendingRelayUpdates.current.length === 0 && canCheckpointReplayCursor({
         authoritativeSnapshot: !!useSessionStore.getState().snapshot,
-        snapshotRequestInFlight: snapshotRequestInFlight.current,
+        snapshotRequestInFlight: snapshotRequestInFlight.current || pendingIndexInvalidation.current,
         pendingSnapshotEventCount: pendingSnapshotEvents.current.length,
         snapshotRaceOverflowed: snapshotRaceOverflowed.current,
         parkedUpdateCount: pendingEncrypted.current.length,
@@ -907,6 +936,7 @@ export function useRelayConnection() {
     snapshotRaceOverflowed.current = false
     pendingSnapshotCursor.current = null
     snapshotAfterCrypto.current = false
+    pendingIndexInvalidation.current = false
     parkedAuthoritativeSnapshot.current = null
     snapshotWaitingForDaemon.current = false
     snapshotRetryAttempt.current = 0
@@ -1101,7 +1131,7 @@ export function useRelayConnection() {
       .then((ticket) => {
         if (!isCurrent) return
         const socket = new WebSocket(
-          `${wsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
+          `${wsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}&transport=chunks-v1&compact_index=true`,
         )
         activeSocket = socket
         relay._setSocket(socket)
@@ -1142,7 +1172,9 @@ export function useRelayConnection() {
           if (!isCurrent || useRelayStore.getState().sessionId !== sessionId) return
           let payload: RelayServerMessage
           try {
-            payload = JSON.parse(msg.data) as RelayServerMessage
+            const complete = receiveRelayTransport(socket, String(msg.data))
+            if (complete === null) return
+            payload = JSON.parse(complete) as RelayServerMessage
           } catch {
             relay._setError('Received malformed relay message')
             socket.close()

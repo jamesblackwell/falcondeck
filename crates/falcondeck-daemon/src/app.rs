@@ -100,6 +100,7 @@ mod runtime_health;
 mod scheduled_tasks;
 mod speech;
 mod storage;
+mod sync_index;
 mod thread_search;
 mod threads;
 mod utility_model;
@@ -498,6 +499,9 @@ struct InnerState {
     /// Coalesces at-least-once relay delivery for mutating RPCs across bridge
     /// reconnects so an action cannot execute twice in one daemon process.
     remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator,
+    sync_indexes: Mutex<sync_index::SyncIndexCache>,
+    remote_rpc_slots: Arc<tokio::sync::Semaphore>,
+    remote_urgent_rpc_slots: Arc<tokio::sync::Semaphore>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
     /// a job is meaningless across a daemon restart, since the background task
     /// driving it is gone.
@@ -1093,6 +1097,9 @@ impl AppState {
                     unresumed_remote: None,
                 }),
                 remote_rpc_deduplicator: remote_bridge::RemoteRpcDeduplicator::default(),
+                sync_indexes: Mutex::new(sync_index::SyncIndexCache::default()),
+                remote_rpc_slots: Arc::new(tokio::sync::Semaphore::new(8)),
+                remote_urgent_rpc_slots: Arc::new(tokio::sync::Semaphore::new(4)),
                 provision_jobs: Mutex::new(HashMap::new()),
                 harness_cache: StdMutex::new(HashMap::new()),
                 usage_cache: StdMutex::new(None),
@@ -2328,6 +2335,10 @@ impl AppState {
     }
 
     pub async fn snapshot(&self) -> DaemonSnapshot {
+        self.snapshot_projection(false).await
+    }
+
+    async fn snapshot_projection(&self, compact: bool) -> DaemonSnapshot {
         // Reading providers.json resolves each configured binary, and a
         // missing binary falls through to a blocking login-shell probe —
         // never do that while holding the global workspaces lock, which
@@ -2430,17 +2441,25 @@ impl AppState {
         let mut threads = workspaces
             .values()
             .flat_map(|workspace| {
-                workspace.threads.values().map(|thread| {
-                    let mut summary = thread.summary.clone();
-                    let (pending_approval_count, pending_question_count) =
-                        interactive_request_counts(&interactive_requests, &summary.id);
-                    refresh_thread_attention(
-                        &mut summary,
-                        pending_approval_count,
-                        pending_question_count,
-                    );
-                    summary
-                })
+                workspace
+                    .threads
+                    .values()
+                    .filter(|thread| !compact || !thread.summary.is_archived)
+                    .map(|thread| {
+                        let mut summary = if compact {
+                            sync_index::row(&thread.summary)
+                        } else {
+                            thread.summary.clone()
+                        };
+                        let (pending_approval_count, pending_question_count) =
+                            interactive_request_counts(&interactive_requests, &summary.id);
+                        refresh_thread_attention(
+                            &mut summary,
+                            pending_approval_count,
+                            pending_question_count,
+                        );
+                        summary
+                    })
             })
             .collect::<Vec<_>>();
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
@@ -3270,13 +3289,6 @@ impl AppState {
             None,
             UnifiedEvent::PreferencesUpdated {
                 preferences: updated.clone(),
-            },
-        );
-        self.emit(
-            None,
-            None,
-            UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
             },
         );
         Ok(updated)

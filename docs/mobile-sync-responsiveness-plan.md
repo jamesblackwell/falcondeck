@@ -260,3 +260,84 @@ paired phone first and compare request latency, snapshot count/bytes, reconnect
 success, and UI responsiveness before broader activation. Do not restart the
 Mac from this planning task. Compression is a later measured option, after
 removing repeated data and proving bounded scheduling; it cannot replace either.
+
+**Implementation notes — 5 September 2026**
+
+The first implementation adds independent socket pumps on the daemon and relay,
+shared negotiated `chunks-v1` framing, byte-bounded queues, and reserved RPC
+admission. Wire fragments stay below 16 KiB and use one outstanding credit.
+Small RPCs and key bootstrap messages can pass between bulk fragments. Key
+rotation cancels an old in-progress transfer and discards old-generation RPC
+results. Incomplete transfers have a 30-second idle deadline and a 15-minute
+maximum lifetime; each peer can reassemble one logical message up to 40 MiB.
+
+The framing preserves the existing encrypted envelope, including its AEAD nonce
+and tag, rather than introducing independently encrypted fragments. This keeps
+relay storage and legacy peers compatible: the relay fragments opaque JSON on
+both socket hops, and clients authenticate the complete original envelope before
+applying it. Fragment headers grant flow control only; they are not authenticated
+application state. Persisted replay remains complete logical updates.
+
+Mobile requests `sync.index`, then `sync.threads` pages and the frozen extension
+projection. Threads are projected before cloning large plans/diffs/prompts;
+identical provider and model catalogs are referenced once. Initial rows use a
+64 KiB JSON target, subsequent pages a 48 KiB ceiling and up to 50 rows. Expanded
+projects initially request five rows, with ten more on demand. Filters load the
+necessary expanded scopes sequentially. Arbitrarily large project metadata or
+individual extension documents can exceed the initial target; the transport
+still bounds their queued bytes, but those cases need separate profiling.
+
+An opaque token identifies each immutable index, retained for ten minutes within
+a 32 MiB / 16-view cache. Pages from an expired or replaced view cannot silently
+mix into a new base. The mobile client tracks intervening thread and extension
+changes so late pages cannot overwrite live data or resurrect removals. It holds
+the replay checkpoint behind an invalidation until replacement state is applied.
+Same-launch reconnects retain their existing base and replay cursor; cold starts
+still obtain a fresh compact base because the disk cache intentionally prunes
+rows and model data. No durable daemon revision journal or conversation database
+has been added.
+
+Compact-capable mobile peers receive small snapshot invalidation markers instead
+of full snapshot ciphertext. The relay projects those markers per peer while
+retaining the original encrypted update for legacy replay. With only compact
+peers, the daemon emits small encrypted invalidations; a legacy peer joining
+requests full pushes again. Preference changes now use their complete targeted
+event without also emitting a full snapshot. Remote web adopts chunk framing and
+retains its existing full-snapshot API and fields.
+
+Measured regression results:
+
+- The synthetic 40-project / 2,000-thread fixture, including repeated model
+  catalogs and large diffs, produces 64,886 bytes of initial index JSON versus
+  12,641,104 bytes for the full fixture. Pages cover the entire frozen scope
+  without duplicates, and expired tokens explicitly require recovery.
+- The socket harness limits writes to 512 kbit/s and delays chunk acknowledgements
+  by 150 ms. During a 5 MiB bulk transfer, ten small RPCs measured 394 ms p95;
+  bulk also made progress. This is a deterministic local transport simulation,
+  not a physical-network or iPhone rendering measurement.
+- Shared-client tests: 610 passed. Mobile full-suite run: 1,030 passed and two
+  failures in existing session-store bucket tests. Both failures reproduce from
+  pre-change commit `147b798` in a separate checkout.
+
+Physical iPhone release profiling, large single-artifact range loading, and a
+persistent epoch/revision resume protocol remain separate follow-through work.
+Do not treat the transport benchmark as evidence that the 50 ms JavaScript-task
+or input-to-render targets have been met. Deploy the relay before the new daemon;
+coordinate the Mac restart separately, then verify mobile and mixed-version
+clients before broader rollout.
+
+Review status: the repository helper was run with `--mode local`, then retried
+with `--mode local --thinking medium`. Both configured OpenCode/GLM runs exhausted
+their 32,000-token output allowance without returning a structured review. Neither
+is a clean review. An alternate reviewer has been requested; deployment remains
+pending. Additional checks passed: daemon snapshot (11), preferences (4), bridge
+(22), relay unit (40), and relay integration (51), including an actual WebSocket
+RPC delivered while bulk chunk credit was withheld. The staged mobile patch also
+passed typechecking and 57 focused tests in an isolated checkout, preserving the
+other agent's archive changes outside this commit.
+
+Incomplete outbound RPC transfers now carry request IDs for cancellation. A
+client timeout discards remaining queued chunks and cancels any partial transfer;
+it cannot revoke a request whose final chunk already reached the relay. Such a
+timeout still has an unknown execution outcome and must not trigger a blind
+mutation retry.

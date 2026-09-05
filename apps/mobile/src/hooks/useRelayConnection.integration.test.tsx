@@ -21,6 +21,18 @@ import { cleanup, renderComponent } from '@/test/render'
 
 import { useRelayConnection } from './useRelayConnection'
 
+function compactSnapshot() {
+  const base = snapshot()
+  return { token: 'index-test', snapshot: base, agent_catalogs: [], model_catalogs: [[]],
+    workspace_agents: {}, workspace_models: {}, counts: {} }
+}
+
+function installSyncRpc(call: ReturnType<typeof vi.fn>) {
+  useRelayStore.getState()._callRpc = ((method: string, ...args: unknown[]) =>
+    method === 'sync.extensions' ? Promise.resolve({ catalog: [], views: [] }) : call(method, ...args)
+  ) as typeof originalCallRpc
+}
+
 const originalFailPendingRpcs = useRelayStore.getState()._failPendingRpcs
 const originalDecryptJson = useRelayStore.getState()._decryptJson
 const originalCallRpc = useRelayStore.getState()._callRpc
@@ -682,15 +694,15 @@ describe('useRelayConnection session rotation', () => {
     })
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
 
-    let resolveFirstSnapshot!: (value: ReturnType<typeof snapshot>) => void
-    const firstSnapshot = new Promise<ReturnType<typeof snapshot>>((resolve) => {
+    let resolveFirstSnapshot!: (value: ReturnType<typeof compactSnapshot>) => void
+    const firstSnapshot = new Promise<ReturnType<typeof compactSnapshot>>((resolve) => {
       resolveFirstSnapshot = resolve
     })
     const callRpc = vi
       .fn()
       .mockReturnValueOnce(firstSnapshot)
-      .mockResolvedValueOnce(snapshot())
-    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+      .mockResolvedValueOnce(compactSnapshot())
+    installSyncRpc(callRpc)
 
     let resolveDecrypt!: (value: unknown) => void
     const pendingDecrypt = new Promise<unknown>((resolve) => {
@@ -751,7 +763,7 @@ describe('useRelayConnection session rotation', () => {
     // The snapshot response loses the race to the still-running decrypt.
     // Park it until this frame finishes; do not throw it away and refetch.
     await act(async () => {
-      resolveFirstSnapshot(snapshot())
+      resolveFirstSnapshot(compactSnapshot())
       await Promise.resolve()
       await Promise.resolve()
     })
@@ -810,8 +822,8 @@ describe('useRelayConnection session rotation', () => {
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
     useRelayStore.getState()._setLastReceivedSeq(0)
 
-    const callRpc = vi.fn().mockResolvedValue(snapshot())
-    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+    const callRpc = vi.fn().mockResolvedValue(compactSnapshot())
+    installSyncRpc(callRpc)
 
     renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
@@ -834,7 +846,7 @@ describe('useRelayConnection session rotation', () => {
         }),
       })
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
-        'snapshot.current',
+        'sync.index',
         expect.anything(),
         expect.anything(),
       ))
@@ -886,7 +898,7 @@ describe('useRelayConnection session rotation', () => {
       await useRelayStore.getState().claimPairing()
     })
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
-    useRelayStore.getState()._callRpc = vi.fn().mockResolvedValue(snapshot()) as typeof originalCallRpc
+    useRelayStore.getState()._callRpc = vi.fn().mockResolvedValue(compactSnapshot()) as typeof originalCallRpc
 
     renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
@@ -969,8 +981,8 @@ describe('useRelayConnection session rotation', () => {
     expect(useSessionStore.getState().snapshot).not.toBeNull()
     expect(useRelayStore.getState().hasSyncedOnce).toBe(false)
 
-    const callRpc = vi.fn().mockResolvedValue(snapshot())
-    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+    const callRpc = vi.fn().mockResolvedValue(compactSnapshot())
+    installSyncRpc(callRpc)
 
     renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
@@ -994,12 +1006,9 @@ describe('useRelayConnection session rotation', () => {
         }),
       })
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
-        'snapshot.current',
+        'sync.index',
         {
-          include_archived_threads: true,
-          include_thread_plans: false,
-          include_thread_diffs: false,
-          include_agent_skills: false,
+          selected_thread_id: 'thread-1',
         },
         expect.anything(),
       ))
@@ -1040,8 +1049,8 @@ describe('useRelayConnection session rotation', () => {
     const callRpc = vi
       .fn()
       .mockRejectedValueOnce(new Error(failure))
-      .mockResolvedValue(snapshot())
-    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+      .mockResolvedValue(compactSnapshot())
+    installSyncRpc(callRpc)
 
     // The retry can land within the same flush, so observe the transient
     // states through a subscription instead of sampling between awaits.
@@ -1120,8 +1129,8 @@ describe('useRelayConnection session rotation', () => {
     })
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
 
-    const callRpc = vi.fn().mockResolvedValue(snapshot())
-    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+    const callRpc = vi.fn().mockResolvedValue(compactSnapshot())
+    installSyncRpc(callRpc)
 
     renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))

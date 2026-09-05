@@ -11,6 +11,10 @@ pub mod backup;
 pub mod control;
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
+/// Bounded, multiplexed relay socket transport.
+pub mod relay_transport;
+/// Compact, revision-bound remote index pages.
+pub mod sync_index;
 /// Terminal session contract for daemon-owned PTY sessions.
 pub mod terminal;
 pub use backup::*;
@@ -4910,6 +4914,10 @@ pub struct SessionKeyMaterial {
 /// Encrypted payload envelope shared across daemon, relay, and clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedEnvelope {
+    /// Availability-only hint: compact clients refetch instead of transferring
+    /// a full snapshot. Never used to authenticate or apply application state.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot_hint: bool,
     /// Encryption scheme used by the payload.
     #[serde(default)]
     pub encryption_variant: EncryptionVariant,
@@ -4921,6 +4929,9 @@ pub struct EncryptedEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "t", rename_all = "kebab-case")]
 pub enum RelayUpdateBody {
+    /// Compact clients must obtain a fresh authoritative index for this cursor.
+    /// Generated per peer by the relay, never persisted in place of ciphertext.
+    SnapshotInvalidated,
     /// Bootstrap update that establishes a session key.
     SessionBootstrap {
         /// Signed session bootstrap payload.
@@ -5418,6 +5429,12 @@ pub struct RegisterPushTokenRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum RelayServerMessage {
+    /// Server-owned delivery requirements of currently connected clients.
+    /// Only sent to daemons; old relays omit it and retain full-snapshot mode.
+    SyncProfile {
+        /// At least one client still requires legacy full snapshot pushes.
+        full_snapshots_required: bool,
+    },
     /// Initial ready message returned after websocket authentication.
     Ready {
         /// Session identifier for the connection.
