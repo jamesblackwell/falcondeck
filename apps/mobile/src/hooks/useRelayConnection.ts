@@ -417,6 +417,7 @@ export function useRelayConnection() {
             // and nothing reads it. The composer uses `workspace.skills`,
             // refreshed by its own RPC.
             include_agent_skills: false,
+            include_workspace_skills: false,
           },
           { requestIdPrefix: 'mobile-snapshot' },
         ),

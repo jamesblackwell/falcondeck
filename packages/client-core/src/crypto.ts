@@ -23,6 +23,18 @@ const WRAPPED_KEY_VERSION = 0
 // explicitly delete and zero the only JS-owned key bytes.
 const aesKeyCache = new WeakMap<Uint8Array, Promise<CryptoKey>>()
 
+/** Native clients can move AES off their JavaScript input thread without
+ * changing the authenticated wire format. Install once at app startup. */
+export interface AesGcmBackend {
+  encrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>
+  decrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): Promise<Uint8Array>
+  forgetKey(key: Uint8Array): void
+}
+let aesGcmBackend: AesGcmBackend | null = null
+export function setAesGcmBackend(backend: AesGcmBackend | null): void {
+  aesGcmBackend = backend
+}
+
 function getWebCrypto() {
   const webCrypto = globalThis.crypto
   if (!webCrypto) {
@@ -153,6 +165,7 @@ async function importAesKey(dataKey: Uint8Array) {
 }
 
 async function encryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array) {
+  if (aesGcmBackend) return aesGcmBackend.encrypt(dataKey, nonce, plaintext)
   if (hasSubtleCrypto()) {
     const key = await importAesKey(dataKey)
     return new Uint8Array(
@@ -168,6 +181,7 @@ async function encryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, plaintext: 
 }
 
 async function decryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array) {
+  if (aesGcmBackend) return aesGcmBackend.decrypt(dataKey, nonce, ciphertext)
   if (hasSubtleCrypto()) {
     const key = await importAesKey(dataKey)
     return new Uint8Array(
@@ -192,6 +206,7 @@ export type SessionCryptoState = {
 
 export function destroySessionCrypto(state: SessionCryptoState | null | undefined) {
   if (!state) return
+  aesGcmBackend?.forgetKey(state.dataKey)
   aesKeyCache.delete(state.dataKey)
   state.dataKey.fill(0)
   state.material = null

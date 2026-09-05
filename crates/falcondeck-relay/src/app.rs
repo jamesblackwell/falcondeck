@@ -2196,6 +2196,13 @@ impl AppState {
         }
         if let Some(live) = store.live_sessions.get(session_id) {
             for (peer_id, peer) in &live.peers {
+                // The daemon owns these updates and ignores their echo. Large
+                // echoes otherwise delay inbound RPCs on the same socket.
+                if matches!(peer.role, RelayPeerRole::Daemon)
+                    && matches!(update.body, RelayUpdateBody::Encrypted { .. })
+                {
+                    continue;
+                }
                 self.queue_message(
                     session_id,
                     peer_id,

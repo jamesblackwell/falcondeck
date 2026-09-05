@@ -765,6 +765,14 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         }
     );
 
+    // The update still reaches clients and replay, but must not queue a
+    // potentially multi-megabyte echo ahead of the next daemon RPC.
+    send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+    assert_eq!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Pong
+    );
+
     send_client_message(
         &mut client_ws,
         &RelayClientMessage::Sync { after_seq: Some(0) },
@@ -2310,7 +2318,11 @@ async fn persisted_updates_survive_restart() {
         },
     )
     .await;
-    let _ = recv_until_update(&mut daemon_ws).await;
+    send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+    assert_eq!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Pong
+    );
     tokio::time::sleep(TokioDuration::from_millis(250)).await;
 
     server.task.abort();
@@ -2375,7 +2387,11 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
             },
         )
         .await;
-        let _ = recv_until_update(&mut daemon_ws).await;
+        send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+        assert_eq!(
+            recv_server_message(&mut daemon_ws).await,
+            RelayServerMessage::Pong
+        );
     }
 
     // Pruning runs in the background; the health endpoint keeps a
@@ -2433,7 +2449,11 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
             },
         )
         .await;
-        let _ = recv_until_update(&mut daemon_ws).await;
+        send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+        assert_eq!(
+            recv_server_message(&mut daemon_ws).await,
+            RelayServerMessage::Pong
+        );
     }
 
     trigger_prune(&server).await;
@@ -2562,7 +2582,11 @@ async fn replay_retention_is_bounded_by_payload_bytes() {
             },
         )
         .await;
-        let _ = recv_until_update(&mut daemon_ws).await;
+        send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+        assert_eq!(
+            recv_server_message(&mut daemon_ws).await,
+            RelayServerMessage::Pong
+        );
     }
 
     trigger_prune(&server).await;
@@ -2894,7 +2918,11 @@ async fn persisted_state_does_not_store_plaintext_session_markers() {
         },
     )
     .await;
-    let _ = recv_until_update(&mut daemon_ws).await;
+    send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+    assert_eq!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Pong
+    );
 
     let persisted = std::fs::read_to_string(state_path).unwrap();
     assert!(
@@ -3227,7 +3255,11 @@ async fn presence_updates_supersede_older_presence_history() {
             },
         )
         .await;
-        let _ = recv_until_update(&mut daemon_ws).await;
+        send_client_message(&mut daemon_ws, &RelayClientMessage::Ping).await;
+        assert_eq!(
+            recv_server_message(&mut daemon_ws).await,
+            RelayServerMessage::Pong
+        );
         daemon_ws.close(None).await.unwrap();
         // Give the relay time to notice the disconnect and append the
         // corresponding presence update.

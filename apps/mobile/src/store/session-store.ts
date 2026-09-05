@@ -39,6 +39,28 @@ import { useUIStore } from './ui-store';
 
 const MAX_CACHED_THREADS = 5;
 const MAX_CACHED_ITEMS = 150;
+const MAX_CACHED_HISTORY_CHARS = 64 * 1024;
+const cachedItemSizes = new WeakMap<ConversationItem, number>();
+
+// Keep a contiguous suffix so paging can recover omitted messages. A count
+// limit alone lets one tool result turn every cache write into megabytes of
+// synchronous JSON, AES and base64 work on the input thread.
+function cacheableHistoryItems(items: ConversationItem[]): ConversationItem[] {
+  let remaining = MAX_CACHED_HISTORY_CHARS;
+  let first = items.length;
+  while (first > Math.max(0, items.length - MAX_CACHED_ITEMS)) {
+    const item = items[first - 1];
+    let size = cachedItemSizes.get(item);
+    if (size === undefined) {
+      size = JSON.stringify(item).length;
+      cachedItemSizes.set(item, size);
+    }
+    if (size > remaining) break;
+    remaining -= size;
+    first -= 1;
+  }
+  return items.slice(first);
+}
 /**
  * Threads kept in the cached snapshot. Deep enough that every project in the
  * sidebar still has its recent conversations offline, far short of the
@@ -476,7 +498,7 @@ function cacheableSnapshot(
 
   return {
     ...snapshot,
-    threads,
+    threads: threads.map((thread) => ({ ...thread, latest_plan: null, latest_diff: null })),
     workspaces: snapshot.workspaces.map((workspace) => {
       const { skills: _skills, ...rest } = workspace;
       return {
@@ -517,8 +539,8 @@ function buildCacheFromState(state: SessionState): MobileSessionCache | null {
       );
       if (items.length === 0) return [];
 
-      const cachedItems =
-        items.length > MAX_CACHED_ITEMS ? items.slice(items.length - MAX_CACHED_ITEMS) : items;
+      const cachedItems = cacheableHistoryItems(items);
+      if (cachedItems.length === 0) return [];
       const existingHistory = state.threadHistory[threadId] ?? EMPTY_HISTORY;
       const hasOlder = existingHistory.hasOlder || cachedItems.length < items.length;
       const isPartial = existingHistory.isPartial || cachedItems.length < items.length;

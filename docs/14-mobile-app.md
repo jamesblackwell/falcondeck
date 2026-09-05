@@ -16,7 +16,7 @@ Last updated: 2026-08-28
 | Animations | react-native-reanimated v4 |
 | State | Zustand 5 (relay, session, UI stores) |
 | Storage | react-native-mmkv (fast KV), expo-secure-store (keys) |
-| Crypto | @noble/ciphers, tweetnacl (E2E encryption) |
+| Crypto | Expo native async AES-GCM for relay payloads; @noble/ciphers for bounded offline storage; tweetnacl for pairing |
 | Lists | @shopify/flash-list v2 |
 | Icons | lucide-react-native |
 
@@ -214,3 +214,22 @@ no longer exists.
 | `TypeError: property is not writable` on launch | Duplicate react-native in bundle | Check the singleton mappings in `metro.config.js` |
 | `Incompatible React versions` | Root react differs from mobile | Pin both package manifests to the Expo-supported version |
 | Xcode 26 SDK errors | EAS defaulted to beta Xcode | Pin `ios.image` in eas.json |
+
+### Sync latency diagnostics
+
+Mobile requests snapshots without thread plans/diffs or skill catalogs. Skills
+are loaded through `workspace.skills`; model catalogs remain in snapshots.
+The relay retains encrypted updates for client replay but does not echo them
+back to daemon peers, which already own and ignore those updates.
+
+Daemon logs identify RPC receipt, response queueing (including dispatch and
+encoding duration), and socket write completion by request ID. The gap between
+queueing and completion, minus the write duration, indicates bridge queue delay.
+Socket writes taking at least one second are also logged with their byte count.
+These records contain routing metadata, timings and sizes, never RPC payloads.
+
+The phone installs Expo's native asynchronous AES backend at startup, preserving
+the existing authenticated wire format. Offline histories retain a contiguous
+suffix of at most 150 items and 64 Ki serialized characters per thread, for up
+to five threads. Omitted history is marked partial and fetched from the daemon;
+full plans and diffs are not copied into the offline snapshot.

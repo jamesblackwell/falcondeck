@@ -1,15 +1,5 @@
-/**
- * Crypto adapter for React Native.
- *
- * Re-exports client-core crypto functions. The client-core crypto module uses:
- * - `crypto.getRandomValues` — available in Hermes
- * - `crypto.subtle` (AES-GCM) — available in Expo SDK 54 / Hermes
- * - `btoa` / `atob` — available in Hermes
- * - `tweetnacl` — pure JS, works everywhere
- *
- * If `crypto.subtle` is not available (older RN/Hermes), install `expo-crypto`
- * and call `installWebCryptoPolyfill()` before any encrypt/decrypt calls.
- */
+/** Shared wire-format helpers. App startup installs Expo native async AES;
+ * crypto.subtle is not assumed to exist in Hermes. */
 
 export {
   generateBoxKeyPair,

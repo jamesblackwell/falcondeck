@@ -3216,6 +3216,11 @@ impl AppState {
                 }
             }
         }
+        if !request.include_workspace_skills {
+            for workspace in &mut snapshot.workspaces {
+                workspace.skills.clear();
+            }
+        }
         snapshot
     }
 

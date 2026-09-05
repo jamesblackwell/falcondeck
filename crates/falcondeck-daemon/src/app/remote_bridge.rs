@@ -877,6 +877,8 @@ impl AppState {
         method: String,
         params: EncryptedEnvelope,
     ) -> Result<(), String> {
+        let started = tokio::time::Instant::now();
+        tracing::info!(%request_id, %method, "remote rpc received");
         let params: Value = match decrypt_json(data_key, &params) {
             Ok(params) => params,
             Err(error) => {
@@ -916,7 +918,10 @@ impl AppState {
                 ),
             }
         };
-        let message = self.remote_rpc_result_message(data_key, request_id, rpc_result)?;
+        let dispatched_ms = started.elapsed().as_millis();
+        let message = self.remote_rpc_result_message(data_key, request_id.clone(), rpc_result)?;
+        tracing::info!(%request_id, %method, dispatched_ms,
+            elapsed_ms = started.elapsed().as_millis(), "remote rpc response queued");
         outbox
             .send(RemoteRpcOutboxMessage {
                 key_generation,
@@ -1033,6 +1038,10 @@ impl AppState {
                             .unwrap_or(true)
                     };
                     let request = SnapshotRequest {
+                        include_workspace_skills: rpc_bool(
+                            "includeWorkspaceSkills",
+                            "include_workspace_skills",
+                        ),
                         include_archived_threads: rpc_bool(
                             "includeArchivedThreads",
                             "include_archived_threads",
@@ -2540,10 +2549,24 @@ async fn send_relay_message(
 ) -> Result<(), String> {
     let payload = serde_json::to_string(message)
         .map_err(|error| format!("failed to encode relay message: {error}"))?;
-    writer
+    let started = tokio::time::Instant::now();
+    let bytes = payload.len();
+    let result = writer
         .send(Message::Text(payload.into()))
         .await
-        .map_err(|error| format!("failed to send relay message: {error}"))
+        .map_err(|error| format!("failed to send relay message: {error}"));
+    if let RelayClientMessage::RpcResult { request_id, .. } = message {
+        tracing::info!(%request_id, bytes, elapsed_ms = started.elapsed().as_millis(),
+            success = result.is_ok(), "remote rpc response socket write finished");
+    } else if started.elapsed() >= Duration::from_secs(1) {
+        tracing::warn!(
+            bytes,
+            elapsed_ms = started.elapsed().as_millis(),
+            success = result.is_ok(),
+            "slow relay socket write"
+        );
+    }
+    result
 }
 
 /// Reads a string field that distinguishes "absent" from an explicit `null`:

@@ -6684,7 +6684,8 @@ async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
         "provider": "codex",
         "label": "Codex",
         "account": { "status": "ready", "label": "ready" },
-        "skills": [skill],
+        "skills": [skill.clone()],
+        "models": [{ "id": "model", "label": "Model", "is_default": true, "supported_reasoning_efforts": [] }],
     }))
     .expect("agent fixture");
 
@@ -6698,7 +6699,7 @@ async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
                 path: workspace_path.to_string_lossy().to_string(),
                 status: WorkspaceStatus::Ready,
                 agents: vec![agent],
-                skills: Vec::new(),
+                skills: vec![skill],
                 default_provider: AgentProvider::CODEX,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
@@ -6734,6 +6735,19 @@ async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
         slim.workspaces[0].skills.len(),
         full.workspaces[0].skills.len()
     );
+    let lean = app
+        .snapshot_with_request(&SnapshotRequest {
+            include_workspace_skills: false,
+            include_agent_skills: false,
+            ..SnapshotRequest::default()
+        })
+        .await;
+    assert!(lean.workspaces[0].skills.is_empty());
+    assert!(lean.workspaces[0].agents[0].skills.is_empty());
+    assert_eq!(lean.workspaces[0].agents[0].models.len(), 1);
+    let unchanged = app.snapshot().await;
+    assert_eq!(unchanged.workspaces[0].skills.len(), 1);
+    assert_eq!(unchanged.workspaces[0].agents[0].models.len(), 1);
 }
 
 #[tokio::test]

@@ -717,6 +717,25 @@ describe('session-store', () => {
       expect(live?.agents[0]?.models).toHaveLength(1)
     })
 
+    it('bounds encrypted history by size without mutating live messages or losing pagination', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot()))
+      const items = [
+        assistantMessage('old', 'old'),
+        assistantMessage('large', 'x'.repeat(1_000_000)),
+        assistantMessage('recent', 'recent'),
+      ]
+      useSessionStore.getState().setThreadDetail(threadDetail({ items }))
+      __resetSessionCachePersistThrottleForTests()
+      useSessionStore.getState().selectThread('workspace-1', 'thread-1')
+      // Selection defers persistence so taps can paint first.
+      persistSessionCacheNow()
+      const cached = loadMobileSessionCache()!
+      expect(cached.threadHistories['thread-1'].items.map((item) => item.id)).toEqual(['recent'])
+      expect(cached.threadHistories['thread-1']).toMatchObject({ has_older: true, is_partial: true, oldest_item_id: 'recent' })
+      expect(useSessionStore.getState().threadItems['thread-1']).toHaveLength(3)
+      expect(JSON.stringify(cached).length).toBeLessThan(64 * 1024)
+    })
+
     it('caps cached threads while keeping the selected thread', () => {
       const threads = Array.from({ length: 260 }, (_, index) =>
         thread({ id: `t${index}`, workspace_id: 'workspace-1' }),

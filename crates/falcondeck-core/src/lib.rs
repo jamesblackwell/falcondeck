@@ -2030,6 +2030,9 @@ pub struct SnapshotRequest {
     /// clients drop it rather than encrypting and shipping it on every sync.
     #[serde(default = "default_true")]
     pub include_agent_skills: bool,
+    /// Workspace skills can be fetched separately through workspace.skills.
+    #[serde(default = "default_true")]
+    pub include_workspace_skills: bool,
 }
 
 impl Default for SnapshotRequest {
@@ -2039,6 +2042,7 @@ impl Default for SnapshotRequest {
             include_thread_plans: true,
             include_thread_diffs: true,
             include_agent_skills: true,
+            include_workspace_skills: true,
         }
     }
 }

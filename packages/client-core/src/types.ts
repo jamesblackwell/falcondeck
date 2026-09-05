@@ -1465,6 +1465,8 @@ export type ThreadTokenUsage = {
 };
 
 export type SnapshotRequest = {
+  include_agent_skills?: boolean | null;
+  include_workspace_skills?: boolean | null;
   include_archived_threads?: boolean | null;
   include_thread_plans?: boolean | null;
   include_thread_diffs?: boolean | null;
