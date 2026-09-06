@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Duration;
+use falcondeck_core::relay_transport::{CHUNK_BYTES, WINDOW_CHUNKS};
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     IdentityVariant, PairingAuthority, PairingChallengeRequest, PairingChallengeResponse,
@@ -708,24 +709,28 @@ async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
         &mut daemon,
         &RelayClientMessage::Update {
             body: RelayUpdateBody::Encrypted {
-                envelope: test_envelope(&"x".repeat(256 * 1024)),
+                // Larger than one send window, so credit is required to finish.
+                envelope: test_envelope(&"x".repeat(2 * WINDOW_CHUNKS * CHUNK_BYTES)),
             },
         },
     )
     .await;
+    let mut chunks = 0usize;
     timeout(TokioDuration::from_secs(2), async {
         loop {
             let frame = phone.next().await.unwrap().unwrap();
             let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
             if value["type"] == "transport-chunk" {
                 assert!(frame.to_text().unwrap().len() <= 16 * 1024);
+                chunks += 1;
                 break;
             }
         }
     })
     .await
     .unwrap();
-    // Deliberately withhold chunk credit. Requests and responses still pass.
+    // Deliberately withhold chunk credit. Requests and responses still pass,
+    // and bulk stops once the send window is exhausted.
     send_client_message(
         &mut phone,
         &RelayClientMessage::RpcCall {
@@ -753,7 +758,10 @@ async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
         loop {
             let frame = phone.next().await.unwrap().unwrap();
             let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            assert_ne!(value["type"], "transport-chunk", "bulk exceeded its credit");
+            if value["type"] == "transport-chunk" {
+                chunks += 1;
+                continue;
+            }
             if value["type"] == "rpc-result" {
                 assert_eq!(value["request_id"], "urgent");
                 assert_eq!(value["ok"], true);
@@ -763,6 +771,13 @@ async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
     })
     .await
     .unwrap();
+    assert!(chunks <= WINDOW_CHUNKS, "bulk exceeded its credit: {chunks} chunks");
+    assert!(
+        timeout(TokioDuration::from_millis(300), phone.next())
+            .await
+            .is_err(),
+        "bulk must wait for credit after a full window"
+    );
 }
 
 #[tokio::test]

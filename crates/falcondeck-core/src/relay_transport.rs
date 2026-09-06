@@ -23,6 +23,16 @@ pub const MAX_MESSAGE_BYTES: usize = 40 * 1024 * 1024;
 const QUEUE_BYTES: usize = MAX_MESSAGE_BYTES + 1024 * 1024;
 const URGENT_BYTES: usize = 512 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
+/// Chunks a sender keeps in flight before it needs an acknowledgement. One
+/// chunk per round trip capped multi-megabyte transcripts at ~200 KB/s even on
+/// a fast link and blew the relay's 30 s RPC lifetime from a phone; a window of
+/// 32 (352 KB) fills a typical link while still bounding buffered bulk data.
+/// Receivers acknowledge every chunk in order, so a windowed sender stays
+/// compatible with peers that still send one chunk at a time.
+pub const WINDOW_CHUNKS: usize = 32;
+/// Acknowledgements the reader may queue for the writer. A windowed peer can
+/// deliver a whole window before the writer finishes one chunk of its own.
+const CONTROL_QUEUE: usize = 4 * WINDOW_CHUNKS;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -216,7 +226,7 @@ where
 {
     let (urgent_tx, mut urgent_rx) = mpsc::channel::<Outbound>(128);
     let (ordered_tx, mut ordered_rx) = mpsc::channel::<Outbound>(128);
-    let (control_tx, mut control_rx) = mpsc::channel::<Frame>(8);
+    let (control_tx, mut control_rx) = mpsc::channel::<Frame>(CONTROL_QUEUE);
     let (ack_tx, mut ack_rx) = watch::channel((0u64, 0u32));
     let (incoming_tx, incoming_rx) = mpsc::channel(32);
     let enabled = Arc::new(AtomicBool::new(server_chunks));
@@ -380,35 +390,52 @@ where
                 let bytes = message.text.len();
                 if enabled.load(Ordering::Acquire) && bytes > CHUNK_BYTES {
                     transfer_id += 1;
-                    for (index, chunk) in message.text.as_bytes().chunks(CHUNK_BYTES).enumerate() {
+                    let chunks: Vec<&[u8]> = message.text.as_bytes().chunks(CHUNK_BYTES).collect();
+                    let total_chunks = chunks.len();
+                    let mut next = 0usize;
+                    let mut acked = 0usize;
+                    let deadline = tokio::time::sleep(DEADLINE); tokio::pin!(deadline);
+                    loop {
                         if message.generation != generation.load(Ordering::Acquire) {
-                            write_frame(&mut sink, Frame::TransportCancel { id: transfer_id }).await?; break;
+                            write_frame(&mut sink, Frame::TransportCancel { id: transfer_id }).await?;
+                            break;
                         }
-                        for _ in 0..8 {
-                            let Ok(mut urgent) = urgent_rx.try_recv() else { break; };
-                            if urgent.generation == generation.load(Ordering::Acquire) {
-                                write(&mut sink, std::mem::take(&mut urgent.text)).await?;
-                                if let Some(done) = urgent.completed.take() { let _ = done.send(Ok(())); }
+                        // Absorb acknowledgements that arrived while writing.
+                        {
+                            let (id, index) = *ack_rx.borrow_and_update();
+                            if id == transfer_id && (index as usize + 1) > acked {
+                                acked = index as usize + 1;
+                                deadline.as_mut().reset(Instant::now() + DEADLINE);
                             }
                         }
-                        write_frame(&mut sink, Frame::TransportChunk { id: transfer_id, index: index as u32, total: bytes, data: STANDARD.encode(chunk) }).await?;
-                        let deadline = tokio::time::sleep(DEADLINE); tokio::pin!(deadline);
-                        // One outstanding chunk bounds buffered bulk data. Incoming reads and
-                        // urgent replies continue while this receiver consumes it.
-                        loop {
-                            if message.generation != generation.load(Ordering::Acquire) || *ack_rx.borrow() == (transfer_id, index as u32) { break; }
-                            tokio::select! {
-                                biased;
-                                control = control_rx.recv() => { write_frame(&mut sink, control.ok_or("relay reader stopped")?).await?; }
-                                _ = &mut deadline => return Err("relay chunk acknowledgement timed out".into()),
-                                changed = generation_rx.changed() => { changed.map_err(|_| "relay generation owner closed")?; }
-                                changed = ack_rx.changed() => { changed.map_err(|_| "relay reader stopped")?; }
-                                urgent = urgent_rx.recv() => {
-                                    let mut urgent = urgent.ok_or("relay urgent queue closed")?;
-                                    if urgent.generation == generation.load(Ordering::Acquire) {
-                                        write(&mut sink, std::mem::take(&mut urgent.text)).await?;
-                                        if let Some(done) = urgent.completed.take() { let _ = done.send(Ok(())); }
-                                    }
+                        if acked >= total_chunks { break; }
+                        // Fill the window. Urgent replies still slip in between chunks.
+                        while next < total_chunks && next - acked < WINDOW_CHUNKS {
+                            for _ in 0..8 {
+                                let Ok(mut urgent) = urgent_rx.try_recv() else { break; };
+                                if urgent.generation == generation.load(Ordering::Acquire) {
+                                    write(&mut sink, std::mem::take(&mut urgent.text)).await?;
+                                    if let Some(done) = urgent.completed.take() { let _ = done.send(Ok(())); }
+                                }
+                            }
+                            while let Ok(frame) = control_rx.try_recv() { write_frame(&mut sink, frame).await?; }
+                            write_frame(&mut sink, Frame::TransportChunk { id: transfer_id, index: next as u32, total: bytes, data: STANDARD.encode(chunks[next]) }).await?;
+                            next += 1;
+                            if message.generation != generation.load(Ordering::Acquire) { break; }
+                        }
+                        // The window is full (or fully sent): wait for credit. Incoming
+                        // reads and urgent replies continue while the peer consumes it.
+                        tokio::select! {
+                            biased;
+                            control = control_rx.recv() => { write_frame(&mut sink, control.ok_or("relay reader stopped")?).await?; }
+                            _ = &mut deadline => return Err("relay chunk acknowledgement timed out".into()),
+                            changed = generation_rx.changed() => { changed.map_err(|_| "relay generation owner closed")?; }
+                            changed = ack_rx.changed() => { changed.map_err(|_| "relay reader stopped")?; }
+                            urgent = urgent_rx.recv() => {
+                                let mut urgent = urgent.ok_or("relay urgent queue closed")?;
+                                if urgent.generation == generation.load(Ordering::Acquire) {
+                                    write(&mut sink, std::mem::take(&mut urgent.text)).await?;
+                                    if let Some(done) = urgent.completed.take() { let _ = done.send(Ok(())); }
                                 }
                             }
                         }
@@ -442,11 +469,25 @@ mod tests {
         }));
         let (sender, mut incoming, _guard) = spawn_transport(sink, stream, true);
         assert!(wire_rx.recv().await.unwrap().contains("transport-ready"));
-        sender.send("x".repeat(CHUNK_BYTES * 8), false).unwrap();
-        let first: serde_json::Value =
-            serde_json::from_str(&wire_rx.recv().await.unwrap()).unwrap();
-        assert_eq!(first["type"], "transport-chunk");
-        // Withhold the receiver's chunk credit, simulating a saturated phone.
+        sender
+            .send("x".repeat(CHUNK_BYTES * (WINDOW_CHUNKS + 8)), false)
+            .unwrap();
+        // A full window leaves without credit; the receiver withholds it,
+        // simulating a saturated phone.
+        let mut transfer_id = 0;
+        for expected in 0..WINDOW_CHUNKS {
+            let frame: serde_json::Value =
+                serde_json::from_str(&wire_rx.recv().await.unwrap()).unwrap();
+            assert_eq!(frame["type"], "transport-chunk");
+            assert_eq!(frame["index"], expected as u64);
+            transfer_id = frame["id"].as_u64().unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), wire_rx.recv())
+                .await
+                .is_err(),
+            "bulk must wait for credit"
+        );
         peer_tx
             .send(Ok(r#"{"type":"rpc-request","request_id":"fast"}"#.into()))
             .await
@@ -465,9 +506,31 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(reply.contains("rpc-result"));
-        assert!(wire_rx.try_recv().is_err(), "bulk must wait for credit");
+        // One acknowledgement opens exactly one chunk of credit.
+        peer_tx
+            .send(Ok(serde_json::to_string(&Frame::TransportAck {
+                id: transfer_id,
+                index: 0,
+            })
+            .unwrap()))
+            .await
+            .unwrap();
+        let frame: serde_json::Value = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_millis(200), wire_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(frame["index"], WINDOW_CHUNKS as u64);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), wire_rx.recv())
+                .await
+                .is_err(),
+            "credit is per acknowledgement"
+        );
         sender.advance_generation();
-        let cancel = tokio::time::timeout(Duration::from_millis(100), wire_rx.recv())
+        let cancel = tokio::time::timeout(Duration::from_millis(200), wire_rx.recv())
             .await
             .unwrap()
             .unwrap();
@@ -478,6 +541,59 @@ mod tests {
             .unwrap();
         sender.send("new-key-result".into(), true).unwrap();
         assert_eq!(wire_rx.recv().await.unwrap(), "new-key-result");
+    }
+
+    #[tokio::test]
+    async fn windowed_sender_is_not_bound_by_round_trip_time() {
+        let (wire_tx, mut wire_rx) = mpsc::channel::<String>(64);
+        let (peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(64);
+        let sink = Box::pin(futures_util::sink::unfold(wire_tx, |tx, text| async move {
+            tx.send(text).await.map_err(|e| e.to_string())?;
+            Ok::<_, String>(tx)
+        }));
+        let stream = Box::pin(futures_util::stream::unfold(peer_rx, |mut rx| async {
+            rx.recv().await.map(|v| (v, rx))
+        }));
+        let (sender, _incoming, _guard) = spawn_transport(sink, stream, true);
+        wire_rx.recv().await.unwrap();
+        // 3 MB ≈ a full Codex transcript; 150 ms RTT ≈ a phone on LTE.
+        let text = "x".repeat(3 * 1024 * 1024);
+        let expected_chunks = text.len().div_ceil(CHUNK_BYTES);
+        let started = Instant::now();
+        let (done_tx, done_rx) = oneshot::channel();
+        sender.enqueue(text, false, Some(done_tx)).unwrap();
+        let acknowledgements = peer_tx.clone();
+        let peer = tokio::spawn(async move {
+            let mut received = 0usize;
+            while let Some(text) = wire_rx.recv().await {
+                if let Ok(Frame::TransportChunk { id, index, .. }) = serde_json::from_str(&text) {
+                    received += 1;
+                    let ack = acknowledgements.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        let _ = ack
+                            .send(Ok(serde_json::to_string(&Frame::TransportAck { id, index }).unwrap()))
+                            .await;
+                    });
+                    if received == expected_chunks {
+                        break;
+                    }
+                }
+            }
+            received
+        });
+        tokio::time::timeout(Duration::from_secs(10), done_rx)
+            .await
+            .expect("transfer completes")
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(peer.await.unwrap(), expected_chunks);
+        // Stop-and-wait would need expected_chunks × 150 ms ≈ 42 s here.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "3 MB at 150 ms RTT took {elapsed:?}"
+        );
     }
 
     #[tokio::test]

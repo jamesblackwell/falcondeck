@@ -3,12 +3,18 @@ import { base64ToBytes, bytesToBase64 } from './crypto'
 /** Matches falcondeck-core::relay_transport; each encoded frame is <16 KiB. */
 export const RELAY_CHUNK_BYTES = 11 * 1024
 export const RELAY_MESSAGE_BYTES = 40 * 1024 * 1024
+/** Chunks kept in flight before an acknowledgement is required. One chunk per
+ * round trip made a 480 KB handoff prompt take ~7 s from a phone; the window
+ * fills the link while bounding buffered data. Receivers acknowledge every
+ * chunk in order, so this stays compatible with one-at-a-time peers. */
+export const RELAY_WINDOW_CHUNKS = 16
 const QUEUE_BYTES = RELAY_MESSAGE_BYTES + 1024 * 1024
 const encoder = new TextEncoder()
 const decoder = new TextDecoder('utf-8', { fatal: true })
 
 type Socket = Pick<WebSocket, 'send' | 'close' | 'readyState'> & Partial<Pick<WebSocket, 'bufferedAmount' | 'addEventListener'>>
-type Transfer = { id: number; index: number; bytes: Uint8Array; offset: number; requestId?: string }
+/** `sent` chunks are on the wire; `acked` of them are confirmed. */
+type Transfer = { id: number; bytes: Uint8Array; sent: number; acked: number; requestId?: string }
 
 /** Transport-only fragments. The original encrypted envelope is authenticated
  * by the existing crypto path after complete reassembly, before applying state. */
@@ -16,7 +22,7 @@ export class RelayTransport {
   private enabled = false
   private nextId = 0
   private outgoing: Transfer | null = null
-  private incoming: (Transfer & { started: number }) | null = null
+  private incoming: { id: number; index: number; bytes: Uint8Array; offset: number; started: number } | null = null
   private queued: { bytes: Uint8Array; requestId?: string }[] = []
   private queuedBytes = 0
   private sendTimer: ReturnType<typeof setTimeout> | null = null
@@ -54,15 +60,18 @@ export class RelayTransport {
         return null
       case 'transport-ack': {
         const tx = this.outgoing
-        if (!tx || frame.id !== tx.id || frame.index !== tx.index) return null
+        // Acknowledgements arrive in order; anything else is stale.
+        if (!tx || frame.id !== tx.id || frame.index !== tx.acked) return null
         this.clearSendTimer()
-        tx.offset = Math.min(tx.bytes.length, tx.offset + RELAY_CHUNK_BYTES)
-        tx.index++
-        if (tx.offset === tx.bytes.length) {
+        tx.acked++
+        if (tx.acked === chunkCount(tx.bytes)) {
           this.queuedBytes -= tx.bytes.length
           this.outgoing = null
           this.startNext()
-        } else this.writeChunk()
+        } else {
+          this.writeChunks()
+          this.armSendTimer()
+        }
         return null
       }
       case 'transport-cancel':
@@ -128,17 +137,29 @@ export class RelayTransport {
 
   private startNext() {
     if (this.outgoing || !this.queued.length) return
-    this.outgoing = { id: ++this.nextId, index: 0, offset: 0, ...this.queued.shift()! }
-    this.writeChunk()
+    this.outgoing = { id: ++this.nextId, sent: 0, acked: 0, ...this.queued.shift()! }
+    this.writeChunks()
+    this.armSendTimer()
   }
 
-  private writeChunk() {
+  /** Fill the window: send every chunk the peer has credit for. */
+  private writeChunks() {
     const tx = this.outgoing!
+    const total = chunkCount(tx.bytes)
+    while (tx.sent < total && tx.sent - tx.acked < RELAY_WINDOW_CHUNKS) {
+      const offset = tx.sent * RELAY_CHUNK_BYTES
+      this.socket.send(JSON.stringify({
+        type: 'transport-chunk', id: tx.id, index: tx.sent, total: tx.bytes.length,
+        data: bytesToBase64(tx.bytes.subarray(offset, offset + RELAY_CHUNK_BYTES)),
+      }))
+      tx.sent++
+    }
+  }
+
+  /** The peer must acknowledge progress within the deadline or the link is dead. */
+  private armSendTimer() {
+    this.clearSendTimer()
     this.sendTimer = setTimeout(() => this.fail(), 30_000)
-    this.socket.send(JSON.stringify({
-      type: 'transport-chunk', id: tx.id, index: tx.index, total: tx.bytes.length,
-      data: bytesToBase64(tx.bytes.subarray(tx.offset, tx.offset + RELAY_CHUNK_BYTES)),
-    }))
   }
 
   private clearSendTimer() {
@@ -154,6 +175,8 @@ export class RelayTransport {
 
   private fail() { this.dispose(); this.socket.close() }
 }
+
+function chunkCount(bytes: Uint8Array) { return Math.ceil(bytes.length / RELAY_CHUNK_BYTES) }
 
 const transports = new WeakMap<Socket, RelayTransport>()
 function transport(socket: Socket) {
