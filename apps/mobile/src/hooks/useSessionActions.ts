@@ -878,8 +878,12 @@ export function useSessionActions() {
         return;
       }
       if (!isRelayTransportError(error)) {
+        const message =
+          error instanceof Error ? error.message : "Failed to create handoff";
         relay._setError(
-          error instanceof Error ? error.message : "Failed to create handoff",
+          /timed out/i.test(message)
+            ? "Handoff timed out while copying this conversation. Nothing was created; try again."
+            : message,
         );
       }
     } finally {

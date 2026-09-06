@@ -1532,6 +1532,11 @@ export default function HomeScreen() {
             Boolean(attachmentSendBlockReason) ||
             isPreparingSelectedHandoff
           }
+          statusNotice={
+            handoffPending && !isPreparingSelectedHandoff
+              ? "Preparing handoff… copying this conversation to the new thread"
+              : undefined
+          }
           sendDisabledReason={
             // Submitting is transient and self-evident; only surface a reason
             // when the block is something the user has to act on.

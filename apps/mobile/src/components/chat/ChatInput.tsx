@@ -87,6 +87,8 @@ interface ChatInputProps {
   sendDisabled?: boolean
   /** Accessible explanation for a temporarily unavailable send/stop action. */
   sendDisabledReason?: string
+  /** Progress of a background action on this thread, such as a handoff copying its transcript. */
+  statusNotice?: string
   placeholder?: string
   attachments: ImageInput[]
   skills: SkillSummary[]
@@ -227,6 +229,7 @@ export const ChatInput = memo(function ChatInput({
   disabled,
   sendDisabled = false,
   sendDisabledReason,
+  statusNotice,
   placeholder = 'Ask anything',
   attachments,
   skills,
@@ -797,6 +800,17 @@ export const ChatInput = memo(function ChatInput({
               </View>
             )}
           </View>
+        ) : null}
+        {statusNotice ? (
+          <Text
+            variant="caption"
+            color="accent"
+            size="xs"
+            accessibilityLiveRegion="polite"
+            style={styles.sendDisabledReason}
+          >
+            {statusNotice}
+          </Text>
         ) : null}
         {hasContent && sendDisabled && sendDisabledReason ? (
           <Text
