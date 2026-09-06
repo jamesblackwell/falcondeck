@@ -285,25 +285,27 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
                 ) : null}
               </>
             )}
-            {canHandoff && !searching ? (
-              <SheetRow
-                label="Continue in another harness…"
-                description={
-                  handoffDisabledReason ??
-                  'Creates a linked thread; this one stays unchanged'
-                }
-                disabled={Boolean(handoffDisabledReason)}
-                trailing="arrow"
-                onPress={() => {
-                  if (handoffDisabledReason) return
-                  void Haptics.selectionAsync()
-                  setPanel('handoff')
-                }}
-              />
-            ) : null}
           </>
         ) : null}
       </ScrollView>
+      {panel === 'model' && canHandoff && !searching ? (
+        <View style={styles.footer}>
+          <SheetRow
+            label="Continue in another harness…"
+            description={
+              handoffDisabledReason ??
+              'Creates a linked thread; this one stays unchanged'
+            }
+            disabled={Boolean(handoffDisabledReason)}
+            trailing="arrow"
+            onPress={() => {
+              if (handoffDisabledReason) return
+              void Haptics.selectionAsync()
+              setPanel('handoff')
+            }}
+          />
+        </View>
+      ) : null}
     </NativeSheet>
   )
 })
@@ -400,6 +402,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   list: {
     maxHeight: 360,
+  },
+  /** Pinned below the scrollable model list so the handoff entry stays
+      reachable no matter how many models the agent advertises. */
+  footer: {
+    marginTop: theme.spacing[2],
+    paddingTop: theme.spacing[2],
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.colors.border.default,
   },
   searchInput: {
     minHeight: theme.minTouchTarget,

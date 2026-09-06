@@ -1,4 +1,5 @@
 import React from 'react'
+import { ScrollView } from 'react-native'
 import { act } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -188,6 +189,32 @@ describe('ComposerModelSheet', () => {
     expect(onHandoffProviderSelect).toHaveBeenCalledWith('claude')
     expect(props.onClose).toHaveBeenCalledTimes(1)
     expect(props.onSelectProvider).not.toHaveBeenCalled()
+  })
+
+  it('pins the handoff entry below the scrollable model list', () => {
+    const { renderer } = renderSheet({
+      showProviderSelector: false,
+      models: Array.from({ length: 12 }, (_, index) => ({
+        id: `model-${index}`,
+        label: `Model ${index}`,
+        is_default: index === 0,
+        default_reasoning_effort: 'medium',
+        supported_reasoning_efforts: [],
+      })),
+      handoffProviders: [{ provider: 'claude', label: 'Claude' }],
+      onHandoffProviderSelect: vi.fn(),
+    })
+
+    const entry = renderer.root.findByProps({
+      accessibilityLabel: 'Continue in another harness…',
+    })
+    let node = entry.parent
+    let insideScroll = false
+    while (node) {
+      if (node.type === ScrollView) insideScroll = true
+      node = node.parent
+    }
+    expect(insideScroll).toBe(false)
   })
 
   it('keeps the handoff entry visible and inert while blocked', () => {
