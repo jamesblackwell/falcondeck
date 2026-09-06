@@ -210,6 +210,19 @@ async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
 
     assert_eq!(first.status, WorkspaceStatus::Connecting);
     assert_eq!(second.id, first.id);
+    let claude = first
+        .agents
+        .iter()
+        .find(|agent| agent.provider == AgentProvider::CLAUDE)
+        .unwrap();
+    assert!(claude.models.iter().any(|model| model.id == "sonnet"));
+    let index = app.sync_index_open(Some(&first.id)).await.unwrap();
+    assert!(
+        index
+            .agent_catalogs
+            .iter()
+            .any(|agent| agent.provider == AgentProvider::CLAUDE && !agent.models.is_empty())
+    );
     tokio::time::timeout(TokioDuration::from_secs(5), async {
         while !tokio::fs::try_exists(&launch_log).await.unwrap_or(false) {
             sleep(TokioDuration::from_millis(25)).await;
@@ -4474,6 +4487,12 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     assert_eq!(workspace.status, WorkspaceStatus::Disconnected);
     assert!(workspace.last_error.is_some());
     assert_eq!(workspace.default_provider, AgentProvider::CLAUDE);
+    assert!(
+        workspace
+            .agents
+            .iter()
+            .any(|agent| agent.provider == AgentProvider::CLAUDE && !agent.models.is_empty())
+    );
     assert_eq!(workspace.current_thread_id.as_deref(), Some("thread-1"));
 
     let thread = &final_snapshot.threads[0];

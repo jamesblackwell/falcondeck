@@ -1760,6 +1760,10 @@ impl AppState {
     ) -> Result<WorkspaceSummary, DaemonError> {
         let path_string = normalize_workspace_path(&persisted_workspace.path);
         let now = Utc::now();
+        // Claude's picker catalog is local config plus curated aliases. Publish
+        // it before workspace bootstrap: provider.hydrate only warms optional
+        // runtimes, and a slow Codex connect must not block Claude selection.
+        let claude_models = crate::claude::list_models().await;
         let acp_agents = self.acp_agent_summaries();
         let mut workspaces = self.inner.workspaces.lock().await;
         // Reuse the persisted id (or an already-registered entry's id) so
@@ -1880,7 +1884,7 @@ impl AppState {
                             status: falcondeck_core::AccountStatus::Unknown,
                             label: "Claude reconnecting".to_string(),
                         },
-                        models: Vec::new(),
+                        models: claude_models,
                         collaboration_modes: Vec::new(),
                         skills: Vec::new(),
                         capabilities: AgentCapabilitySummary::claude(),
