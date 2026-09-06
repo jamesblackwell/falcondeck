@@ -29,6 +29,7 @@ fn duration_seconds_or(seconds: i64, default_seconds: i64) -> Duration {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
+        .with_ansi(false)
         .with_env_filter(
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "falcondeck_relay=info,tower_http=info".to_string()),

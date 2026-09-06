@@ -336,6 +336,8 @@ async fn socket_loop(
         }
     };
 
+    let opened_at = tokio::time::Instant::now();
+    tracing::info!(session_id = %auth.session_id, %peer_id, role = ?auth.role, chunks, compact_index, "relay peer opened");
     if compact_index {
         state
             .set_peer_compact_index(&auth.session_id, &peer_id)
@@ -345,9 +347,16 @@ async fn socket_loop(
     let sink = sink.with(|text: String| {
         futures_util::future::ready(Ok::<_, axum::Error>(Message::Text(text.into())))
     });
-    let stream = stream.map(|message| match message {
+    // Capture only the numeric close code, never a peer-controlled close reason.
+    let close_code = Arc::new(std::sync::atomic::AtomicU16::new(0));
+    let observed_close_code = Arc::clone(&close_code);
+    let stream = stream.map(move |message| match message {
         Ok(Message::Text(text)) => Ok(text.to_string()),
         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => Ok(r#"{"type":"ping"}"#.to_string()),
+        Ok(Message::Close(frame)) => {
+            observed_close_code.store(frame.map(|f| f.code).unwrap_or(1005), std::sync::atomic::Ordering::Relaxed);
+            Err("peer closed websocket".to_string())
+        }
         Ok(_) => Err("relay socket closed or unsupported frame".to_string()),
         Err(error) => Err(error.to_string()),
     });
@@ -357,6 +366,7 @@ async fn socket_loop(
         .await
         .is_err()
     {
+        tracing::info!(session_id = %auth.session_id, %peer_id, reason = "ready_write_failed", "relay peer closed");
         state.unregister_peer(&auth.session_id, &peer_id).await;
         return;
     }
@@ -371,16 +381,23 @@ async fn socket_loop(
     let mut idle_check = tokio::time::interval(tokio::time::Duration::from_secs(10));
     idle_check.tick().await; // consume the immediate first tick
 
-    loop {
+    let mut received_messages = 0u64;
+    let mut received_bytes = 0u64;
+    let mut queued_messages = 0u64;
+    let mut invalid_messages = 0u64;
+    let mut handler_errors = 0u64;
+    let mut max_handler_ms = 0u64;
+    let close_reason = loop {
         tokio::select! {
             maybe_message = rx.recv() => {
                 match maybe_message {
                     Some(message) => {
                         if send_message_with_timeout(&mut sender, message.message()).await.is_err() {
-                            break;
+                            break "outbound_queue_failed";
                         }
+                        queued_messages += 1;
                     }
-                    None => break,
+                    None => break "peer_queue_closed",
                 }
             }
             incoming = receiver.recv() => {
@@ -388,13 +405,17 @@ async fn socket_loop(
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
                         last_activity = tokio::time::Instant::now();
+                        received_messages += 1;
+                        received_bytes += text.len() as u64;
                         let parsed = serde_json::from_str::<RelayClientMessage>(&text);
                         match parsed {
                             Ok(message) => {
+                                let started = tokio::time::Instant::now();
                                 if let Err(error) = state
                                     .handle_message(&auth.session_id, &peer_id, auth.role.clone(), message)
                                     .await
                                 {
+                                    handler_errors += 1;
                                     let server_message = RelayServerMessage::Error {
                                         message: error.to_string(),
                                     };
@@ -402,11 +423,13 @@ async fn socket_loop(
                                         .await
                                         .is_err()
                                     {
-                                        break;
+                                        break "error_queue_failed";
                                     }
                                 }
+                                max_handler_ms = max_handler_ms.max(started.elapsed().as_millis() as u64);
                             }
                             Err(error) => {
+                                invalid_messages += 1;
                                 let server_message = RelayServerMessage::Error {
                                     message: format!("invalid websocket payload: {error}"),
                                 };
@@ -414,12 +437,12 @@ async fn socket_loop(
                                     .await
                                     .is_err()
                                 {
-                                    break;
+                                    break "error_queue_failed";
                                 }
                             }
                         }
                     }
-                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Close(_))) => break "peer_close",
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
                         last_activity = tokio::time::Instant::now();
                     }
@@ -432,7 +455,7 @@ async fn socket_loop(
                             .await
                             .is_err()
                         {
-                            break;
+                            break "error_queue_failed";
                         }
                     }
                     Some(Err(_)) => {
@@ -446,26 +469,27 @@ async fn socket_loop(
                             ),
                         };
                         let _ = send_message_with_timeout(&mut sender, &server_message).await;
-                        break;
+                        break "transport_receive_error";
                     }
-                    None => break,
+                    None => break "transport_ended",
                 }
             }
             _ = idle_check.tick() => {
                 state.sweep_expired_rpcs(&auth.session_id).await;
                 if last_activity.elapsed() > idle_timeout {
-                    tracing::warn!(
-                        session_id = %auth.session_id,
-                        peer_id = %peer_id,
-                        "peer idle for {:?}, closing connection",
-                        last_activity.elapsed()
-                    );
-                    break;
+                    break "idle_timeout";
                 }
             }
         }
-    }
+    };
 
+    let close_code = close_code.load(std::sync::atomic::Ordering::Relaxed);
+    let reason = if close_code != 0 { "peer_close" } else { close_reason };
+    tracing::info!(session_id = %auth.session_id, %peer_id, role = ?auth.role, reason, close_code,
+        duration_ms = opened_at.elapsed().as_millis() as u64,
+        idle_ms = last_activity.elapsed().as_millis() as u64,
+        received_messages, received_bytes, queued_messages, invalid_messages, handler_errors, max_handler_ms,
+        "relay peer closed");
     state.unregister_peer(&auth.session_id, &peer_id).await;
 }
 

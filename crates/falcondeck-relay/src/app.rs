@@ -531,6 +531,7 @@ struct LiveSession {
 }
 
 struct PendingRpc {
+    started_at: std::time::Instant,
     method: String,
     requester_peer_id: String,
     /// Daemon peer currently serving the call; `None` while the call is
@@ -664,6 +665,7 @@ impl BudgetedRelayMessage {
 
 #[derive(Clone)]
 struct PeerQueue {
+    slow_rpc_log: Arc<std::sync::Mutex<crate::diagnostics::SlowRpcLogBudget>>,
     tx: mpsc::Sender<BudgetedRelayMessage>,
     available_bytes: Arc<Semaphore>,
     compact_index: Arc<std::sync::atomic::AtomicBool>,
@@ -681,6 +683,7 @@ impl PeerQueue {
         let (tx, rx) = mpsc::channel(capacity);
         (
             Self {
+                slow_rpc_log: Arc::new(std::sync::Mutex::new(Default::default())),
                 tx,
                 available_bytes: Arc::new(Semaphore::new(max_bytes)),
                 compact_index: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2415,6 +2418,7 @@ impl AppState {
                     live.pending_rpc.insert(
                         namespaced_request_id.clone(),
                         PendingRpc {
+                            started_at: std::time::Instant::now(),
                             method: method.clone(),
                             requester_peer_id: peer_id.to_string(),
                             responder_peer_id: Some(owner_peer_id.clone()),
@@ -2441,6 +2445,7 @@ impl AppState {
                     live.pending_rpc.insert(
                         namespaced_request_id.clone(),
                         PendingRpc {
+                            started_at: std::time::Instant::now(),
                             method: method.clone(),
                             requester_peer_id: peer_id.to_string(),
                             responder_peer_id: None,
@@ -2531,7 +2536,9 @@ impl AppState {
         for (request_id, method, requester_peer_id, tx) in expired {
             warn!(
                 session_id,
-                request_id, method, "relay rpc request timed out before the daemon replied"
+                request_id, requester_peer_id, method,
+                deadline_ms = PENDING_RPC_TTL_SECONDS * 1000,
+                "relay rpc request timed out before the daemon replied"
             );
             self.queue_message(
                 session_id,
@@ -2577,6 +2584,7 @@ impl AppState {
                         );
                         live.pending_rpc.insert(request_id.clone(), pending);
                     } else {
+                        let elapsed_ms = pending.started_at.elapsed().as_millis() as u64;
                         response = live.peers.get(&pending.requester_peer_id).map(|peer| {
                             (
                                 strip_rpc_request_id_namespace(
@@ -2585,6 +2593,8 @@ impl AppState {
                                 ),
                                 pending.requester_peer_id.clone(),
                                 peer.tx.clone(),
+                                pending.method.clone(),
+                                elapsed_ms,
                             )
                         });
                     }
@@ -2598,8 +2608,17 @@ impl AppState {
         }
 
         self.notify_expired_rpcs(session_id, expired);
-        if let Some((request_id, requester_peer_id, tx)) = response {
-            tracing::debug!(session_id, %request_id, %requester_peer_id, ok, "relay rpc response routed");
+        if let Some((request_id, requester_peer_id, tx, method, elapsed_ms)) = response {
+            let ciphertext_bytes = result.as_ref().or(error.as_ref()).map_or(0, |value| value.ciphertext.len());
+            tracing::debug!(session_id, %request_id, %requester_peer_id, responder_peer_id = peer_id, method, elapsed_ms, ciphertext_bytes, ok, "relay rpc response prepared for requester queue");
+            if elapsed_ms >= 2000 {
+                let suppressed = tx.slow_rpc_log.lock().unwrap_or_else(|e| e.into_inner())
+                    .take(std::time::Instant::now());
+                if let Some(suppressed) = suppressed {
+                    tracing::info!(session_id, request_id, requester_peer_id, responder_peer_id = peer_id,
+                        method, elapsed_ms, ciphertext_bytes, ok, suppressed, "relay slow rpc response");
+                }
+            }
             self.queue_message(
                 session_id,
                 &requester_peer_id,

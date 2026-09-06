@@ -7,6 +7,7 @@
 pub mod api;
 pub mod app;
 pub mod error;
+mod diagnostics;
 pub(crate) mod persistence;
 
 pub use api::router;
