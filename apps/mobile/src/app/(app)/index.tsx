@@ -1546,9 +1546,8 @@ export default function HomeScreen() {
           attachments={attachments}
           skills={workspace?.skills ?? []}
           loadSkills={loadWorkspaceSkills}
-          // No live or cached models means the harness catalog is still
-          // hydrating (the daemon fills OpenCode's list via a later snapshot).
-          modelsLoading={Boolean(workspace) && effectiveModels.length === 0}
+          // An empty catalog after sync is an empty state, not an active load.
+          modelsLoading={isSyncing && effectiveModels.length === 0}
           models={effectiveModels}
           selectedModel={selectedModel}
           selectedEffort={selectedEffort}

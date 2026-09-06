@@ -90,6 +90,7 @@ function persistRelayCheckpointThrottled(): void {
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
 const RELAY_PING_INTERVAL_MS = 15_000
+const RELAY_SILENCE_TIMEOUT_MS = 45_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
@@ -105,14 +106,16 @@ const SNAPSHOT_REFETCH_DELAY_MS = 1_000
  * iOS still suspends the app after a short background window; if that killed
  * the socket, waiting for the dead socket to error plus the backoff delay
  * makes resume feel slow. When the app returns to the foreground and the
- * socket is not OPEN, reconnect immediately. A healthy OPEN socket is a
- * successful hold — do nothing.
+ * socket is dead or has stopped receiving traffic, reconnect immediately.
+ * Keep an in-progress connection: its existing timeout owns recovery.
  */
 export function shouldReconnectOnAppForeground(
   nextAppState: string,
   socketReadyState: number | null,
+  silenceMs = 0,
 ) {
-  return nextAppState === 'active' && socketReadyState !== WebSocket.OPEN
+  return nextAppState === 'active' && socketReadyState !== WebSocket.CONNECTING &&
+    (socketReadyState !== WebSocket.OPEN || silenceMs >= RELAY_SILENCE_TIMEOUT_MS)
 }
 
 /**
@@ -899,6 +902,7 @@ export function useRelayConnection() {
     let isCurrent = true
     let shouldReconnect = true
     let activeSocket: WebSocket | null = null
+    let lastReceivedAt = Date.now()
     let pingInterval: ReturnType<typeof setInterval> | null = null
     let backoffResetTimer: ReturnType<typeof setTimeout> | null = null
     // Effect-run-local timers: a component-level ref here would let a stale
@@ -1105,7 +1109,7 @@ export function useRelayConnection() {
           logConnection('info', 'App left the foreground; pinging the relay to hold the session.')
         }
       }
-      if (!shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null)) return
+      if (!shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null, Date.now() - lastReceivedAt)) return
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = null
@@ -1151,8 +1155,15 @@ export function useRelayConnection() {
           }
           endConnectionAction('socket')
           logConnection('success', 'Relay socket connected.')
-          // The relay drops peers that stay silent for 45s.
+          lastReceivedAt = Date.now()
+          // OPEN alone does not prove the network path survived an app switch.
           pingInterval = setInterval(() => {
+            if (Date.now() - lastReceivedAt >= RELAY_SILENCE_TIMEOUT_MS) {
+              logConnection('warn', 'Relay stopped responding; reconnecting.')
+              socket.close()
+              scheduleReconnect()
+              return
+            }
             sendRelayPing(socket)
           }, RELAY_PING_INTERVAL_MS)
           // Resetting backoff immediately would defeat it when the relay
@@ -1170,6 +1181,7 @@ export function useRelayConnection() {
 
         socket.onmessage = (msg) => {
           if (!isCurrent || useRelayStore.getState().sessionId !== sessionId) return
+          lastReceivedAt = Date.now()
           let payload: RelayServerMessage
           try {
             const complete = receiveRelayTransport(socket, String(msg.data))

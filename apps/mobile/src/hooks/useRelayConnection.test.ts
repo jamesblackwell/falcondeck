@@ -16,7 +16,7 @@ describe('foreground reconnect trigger', () => {
   it('reconnects when foregrounding with a dead socket', () => {
     expect(shouldReconnectOnAppForeground('active', WebSocket.CLOSED)).toBe(true)
     expect(shouldReconnectOnAppForeground('active', WebSocket.CLOSING)).toBe(true)
-    expect(shouldReconnectOnAppForeground('active', WebSocket.CONNECTING)).toBe(true)
+    expect(shouldReconnectOnAppForeground('active', WebSocket.CONNECTING)).toBe(false)
   })
 
   it('reconnects when foregrounding with no socket at all', () => {
@@ -25,6 +25,12 @@ describe('foreground reconnect trigger', () => {
 
   it('does nothing when foregrounding with a healthy open socket', () => {
     expect(shouldReconnectOnAppForeground('active', WebSocket.OPEN)).toBe(false)
+  })
+
+  it('replaces an OPEN socket after a silent background interval', () => {
+    expect(shouldReconnectOnAppForeground('active', WebSocket.OPEN, 45_000)).toBe(true)
+    expect(shouldReconnectOnAppForeground('active', WebSocket.OPEN, 44_999)).toBe(false)
+    expect(shouldReconnectOnAppForeground('active', WebSocket.CONNECTING, 90_000)).toBe(false)
   })
 
   it('does not reconnect just because the app left the foreground', () => {

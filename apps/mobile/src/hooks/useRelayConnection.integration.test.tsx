@@ -140,6 +140,56 @@ describe('useRelayConnection session rotation', () => {
     vi.useRealTimers()
   })
 
+  it('detects a silent OPEN socket and lets incoming traffic renew its lease', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'timeout-ticket' }) } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useRelayStore.getState().setPairingCode(securePairingCode('CONNECT-TIMEOUT'))
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+
+    vi.spyOn(Math, 'random').mockReturnValue(0)
+    vi.useFakeTimers()
+    renderRelayConnection()
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(TestWebSocket.instances).toHaveLength(1)
+
+    const socket = TestWebSocket.instances[0]!
+    act(() => {
+      socket.readyState = TestWebSocket.OPEN
+      socket.onopen?.()
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: 'pong' }) }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    expect(socket.close).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    expect(socket.close).toHaveBeenCalledOnce()
+    expect(useRelayStore.getState().connectionStatus).toBe('disconnected')
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })
+    expect(TestWebSocket.instances).toHaveLength(2)
+  })
+
   it('reconnects when a connecting socket ignores close and schedules only one retry', async () => {
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)

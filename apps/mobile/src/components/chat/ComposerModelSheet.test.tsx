@@ -251,6 +251,17 @@ describe('ComposerModelSheet', () => {
     expect(onHandoffProviderSelect).toHaveBeenCalledWith('claude')
   })
 
+  it('keeps the default model selectable when sync returns an empty catalog', () => {
+    const onSelectModel = vi.fn()
+    const { renderer } = renderSheet({
+      models: [], modelsLoading: false, selectedModel: null,
+      showProviderSelector: false, onSelectModel,
+    })
+    expect(textOf(renderer)).not.toContain('Loading models…')
+    act(() => renderer.root.findByProps({ accessibilityLabel: 'Default' }).props.onPress())
+    expect(onSelectModel).toHaveBeenCalledWith(null)
+  })
+
   it('shows a loading placeholder while the catalog is empty', () => {
     const { renderer } = renderSheet({
       models: [],
