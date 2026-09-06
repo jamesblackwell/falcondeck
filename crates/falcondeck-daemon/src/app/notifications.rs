@@ -1202,7 +1202,7 @@ pub(super) async fn ingest_notification(
                 let item = params.get("item").unwrap_or(&params);
                 let item_id = extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
                 let kind =
-                    extract_string(item, &["kind", "type"]).unwrap_or_else(|| "tool".to_string());
+                    extract_string(item, &["type", "kind"]).unwrap_or_else(|| "tool".to_string());
                 if let Some(message) = codex_assistant_conversation_item(
                     item,
                     notification_timestamp(method, &params).unwrap_or_else(Utc::now),
@@ -1367,7 +1367,7 @@ pub(super) async fn ingest_notification(
                 let item = params.get("item").unwrap_or(&params);
                 let item_id = extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
                 let kind =
-                    extract_string(item, &["kind", "type"]).unwrap_or_else(|| "tool".to_string());
+                    extract_string(item, &["type", "kind"]).unwrap_or_else(|| "tool".to_string());
                 if let Some(message) = codex_assistant_conversation_item(
                     item,
                     notification_timestamp(method, &params).unwrap_or_else(Utc::now),

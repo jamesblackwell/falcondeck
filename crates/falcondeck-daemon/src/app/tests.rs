@@ -8095,3 +8095,69 @@ async fn control_current_thread_target_pins_the_calling_thread() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn codex_sub_agent_activity_items_render_as_tool_calls() {
+    // Codex `subAgentActivity` items carry a data field named `kind`
+    // (`started`/`interacted`). Classifying by `kind` before `type` turned
+    // every one of them into an "Unsupported output: sub agent activity" card.
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    for method in ["item/started", "item/completed"] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            method,
+            json!({
+                "threadId": "thread-1",
+                "timestamp": "2026-09-06T13:41:16Z",
+                "item": {
+                    "id": "call_JVbEWEDUw1QOT0gCUuLJSTbN",
+                    "type": "subAgentActivity",
+                    "kind": "started",
+                    "agentThreadId": "01a076f3-ac7f-7f10-9b8f-0ebe12fc4908",
+                    "agentPath": "/root/mobile_audit"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let items = workspaces["workspace-1"].threads["thread-1"].items.as_slice();
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, ConversationItem::Unsupported { .. })),
+        "sub-agent activity must not fall through to unsupported: {items:?}"
+    );
+    assert!(matches!(
+        items,
+        [ConversationItem::ToolCall { title, detail, .. }]
+            if title == "Sub-agent started"
+                && matches!(
+                    detail.as_deref(),
+                    Some(falcondeck_core::ToolCallDetail::SubagentActivity {
+                        activity,
+                        agent_thread_id,
+                        agent_path,
+                    }) if activity == "started"
+                        && agent_thread_id == "01a076f3-ac7f-7f10-9b8f-0ebe12fc4908"
+                        && agent_path == "/root/mobile_audit"
+                )
+    ), "{items:?}");
+}
