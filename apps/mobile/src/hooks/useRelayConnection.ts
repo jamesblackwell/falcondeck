@@ -91,6 +91,7 @@ function persistRelayCheckpointThrottled(): void {
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
 const RELAY_PING_INTERVAL_MS = 15_000
 const RELAY_SILENCE_TIMEOUT_MS = 45_000
+const RELAY_HEALTH_CHECK_INTERVAL_MS = 5_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
@@ -903,6 +904,7 @@ export function useRelayConnection() {
     let shouldReconnect = true
     let activeSocket: WebSocket | null = null
     let lastReceivedAt = Date.now()
+    let lastPingAt = Date.now()
     let pingInterval: ReturnType<typeof setInterval> | null = null
     let backoffResetTimer: ReturnType<typeof setTimeout> | null = null
     // Effect-run-local timers: a component-level ref here would let a stale
@@ -1156,6 +1158,7 @@ export function useRelayConnection() {
           endConnectionAction('socket')
           logConnection('success', 'Relay socket connected.')
           lastReceivedAt = Date.now()
+          lastPingAt = lastReceivedAt
           // OPEN alone does not prove the network path survived an app switch.
           pingInterval = setInterval(() => {
             if (Date.now() - lastReceivedAt >= RELAY_SILENCE_TIMEOUT_MS) {
@@ -1164,8 +1167,11 @@ export function useRelayConnection() {
               scheduleReconnect()
               return
             }
-            sendRelayPing(socket)
-          }, RELAY_PING_INTERVAL_MS)
+            if (Date.now() - lastPingAt >= RELAY_PING_INTERVAL_MS) {
+              sendRelayPing(socket)
+              lastPingAt = Date.now()
+            }
+          }, RELAY_HEALTH_CHECK_INTERVAL_MS)
           // Resetting backoff immediately would defeat it when the relay
           // closes the socket right after the handshake.
           backoffResetTimer = setTimeout(() => {

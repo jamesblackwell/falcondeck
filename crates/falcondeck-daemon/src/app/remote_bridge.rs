@@ -980,15 +980,14 @@ impl AppState {
         };
         let dispatched_ms = started.elapsed().as_millis();
         let message = self.remote_rpc_result_message(data_key, request_id.clone(), rpc_result)?;
-        tracing::info!(%request_id, %method, dispatched_ms,
-            elapsed_ms = started.elapsed().as_millis(), "remote rpc response queued");
-        outbox
-            .send_result(
-                serde_json::to_string(&message).map_err(|e| e.to_string())?,
-                key_generation,
-            )
-            .await
-            .map_err(|error| format!("rpc outbox closed: {error}"))
+        let encoded = serde_json::to_string(&message).map_err(|e| e.to_string())?;
+        tracing::info!(%request_id, %method, dispatched_ms, key_generation,
+            response_bytes = encoded.len(), elapsed_ms = started.elapsed().as_millis(),
+            "remote rpc response prepared");
+        let result = outbox.send_result(encoded, key_generation).await;
+        tracing::info!(%request_id, %method, ok = result.is_ok(),
+            elapsed_ms = started.elapsed().as_millis(), "remote rpc response queue completed");
+        result.map_err(|error| format!("rpc outbox closed: {error}"))
     }
 
     async fn send_remote_action_failure(

@@ -511,3 +511,24 @@ build: desktop-prepare
 clean:
 	$(CARGO) clean
 	rm -rf $(DESKTOP_DIR)/dist $(REMOTE_WEB_DIR)/dist $(SITE_DIR)/dist $(MOBILE_DIR)/ios/DerivedData
+
+# Isolated simulator/network lab; never restarts the live desktop daemon.
+.PHONY: reliability-up reliability-down reliability-smoke reliability-run reliability-soak reliability-replay reliability-simulator reliability-pair reliability-test
+reliability-up:
+	python3 scripts/reliability/lab.py up
+reliability-down:
+	python3 scripts/reliability/lab.py down
+reliability-smoke:
+	python3 scripts/reliability/lab.py smoke
+reliability-run:
+	python3 scripts/reliability/lab.py run --scenario $(or $(SCENARIO),healthy) --seed $(or $(SEED),1) --cycles $(or $(CYCLES),5) --outage $(or $(OUTAGE),5)
+reliability-soak:
+	python3 scripts/reliability/lab.py soak --seed $(or $(SEED),1) --cycles $(or $(CYCLES),100)
+reliability-replay:
+	python3 scripts/reliability/lab.py replay "$(RUN)"
+reliability-simulator:
+	python3 scripts/reliability/lab.py simulator
+reliability-pair:
+	python3 scripts/reliability/lab.py pair-ui
+reliability-test:
+	python3 -m unittest discover -s scripts/reliability -p 'test_*.py'

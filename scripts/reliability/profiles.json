@@ -1,0 +1,21 @@
+{
+  "healthy": [],
+  "constrained": [
+    {"type":"latency","stream":"downstream","attributes":{"latency":100,"jitter":30}},
+    {"type":"latency","stream":"upstream","attributes":{"latency":100,"jitter":30}},
+    {"type":"bandwidth","stream":"downstream","attributes":{"rate":125}},
+    {"type":"bandwidth","stream":"upstream","attributes":{"rate":31}}
+  ],
+  "severe": [
+    {"type":"latency","stream":"downstream","attributes":{"latency":350,"jitter":100}},
+    {"type":"latency","stream":"upstream","attributes":{"latency":350,"jitter":100}},
+    {"type":"bandwidth","stream":"downstream","attributes":{"rate":31}},
+    {"type":"bandwidth","stream":"upstream","attributes":{"rate":8}}
+  ],
+  "blackhole": [
+    {"type":"timeout","stream":"upstream","attributes":{"timeout":0}},
+    {"type":"timeout","stream":"downstream","attributes":{"timeout":0}}
+  ],
+  "downstream-blackhole": [{"type":"timeout","stream":"downstream","attributes":{"timeout":0}}],
+  "upstream-blackhole": [{"type":"timeout","stream":"upstream","attributes":{"timeout":0}}]
+}

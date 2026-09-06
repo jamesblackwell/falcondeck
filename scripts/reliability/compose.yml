@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: ${LAB_DB_PASSWORD}
+      POSTGRES_DB: lab
+    ports: ["127.0.0.1:${LAB_DB_PORT}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  proxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    ports:
+      - "127.0.0.1:${LAB_PROXY_API}:8474"
+      - "127.0.0.1:${LAB_PHONE_PORT}:8666"
+      - "127.0.0.1:${LAB_DAEMON_PROXY_PORT}:8667"
+    cap_add: [NET_ADMIN]
+  netem:
+    build:
+      context: .
+      dockerfile: Dockerfile.netem
+    network_mode: service:proxy
+    cap_add: [NET_ADMIN]
+    depends_on: [proxy]

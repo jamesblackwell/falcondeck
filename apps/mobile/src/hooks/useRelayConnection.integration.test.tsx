@@ -179,11 +179,11 @@ describe('useRelayConnection session rotation', () => {
       socket.readyState = TestWebSocket.OPEN
       socket.onopen?.()
     })
-    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000) })
     act(() => socket.onmessage?.({ data: JSON.stringify({ type: 'pong' }) }))
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
     expect(socket.close).not.toHaveBeenCalled()
-    await act(async () => { await vi.advanceTimersByTimeAsync(15_000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(19_000) })
     expect(socket.close).toHaveBeenCalledOnce()
     expect(useRelayStore.getState().connectionStatus).toBe('disconnected')
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000) })

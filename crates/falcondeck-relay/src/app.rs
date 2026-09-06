@@ -2068,6 +2068,7 @@ impl AppState {
                     false,
                 )?;
                 validate_bounded_text("rpc method", &method, MAX_RPC_METHOD_LENGTH, false)?;
+                tracing::debug!(session_id, peer_id, %request_id, %method, "relay rpc received");
                 self.forward_rpc_call(session_id, peer_id, request_id, method, params)
                     .await;
             }
@@ -2088,6 +2089,7 @@ impl AppState {
                     MAX_RPC_REQUEST_ID_LENGTH,
                     false,
                 )?;
+                tracing::debug!(session_id, peer_id, %request_id, ok, "relay rpc response received");
                 self.resolve_rpc(session_id, peer_id, request_id, ok, result, error)
                     .await;
             }
@@ -2597,6 +2599,7 @@ impl AppState {
 
         self.notify_expired_rpcs(session_id, expired);
         if let Some((request_id, requester_peer_id, tx)) = response {
+            tracing::debug!(session_id, %request_id, %requester_peer_id, ok, "relay rpc response routed");
             self.queue_message(
                 session_id,
                 &requester_peer_id,

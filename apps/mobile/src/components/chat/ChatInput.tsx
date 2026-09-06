@@ -650,6 +650,8 @@ export const ChatInput = memo(function ChatInput({
           style={[styles.inputSlot, draftIsEmpty ? slotStyle : null]}
         >
           <TextInput
+            testID="message-composer"
+            accessibilityLabel="Message"
             ref={attachInput}
             style={[
               styles.input,
