@@ -380,8 +380,9 @@ def main():
     p=sub.add_parser('soak');p.add_argument('--cycles',type=int,default=100);p.add_argument('--seed',type=int,default=1);p.set_defaults(run=lambda a:suite(['flapping'],a.cycles,a.seed))
     p=sub.add_parser('replay');p.add_argument('report',type=Path);p.set_defaults(run=replay)
     p=sub.add_parser('report');p.set_defaults(run=lambda _:__import__('report').write())
+    p=sub.add_parser('campaign');p.add_argument('--suite',choices=['protocol','mobile','all'],default='all');p.add_argument('--seeds',type=__import__('campaign').seeds,default=[1]);p.add_argument('--retries',type=int,choices=range(3),default=1);p.set_defaults(run=lambda a:__import__('campaign').run(a))
     p=sub.add_parser('pair-code');p.set_defaults(run=lambda _:print(pairing(load())))
-    p=sub.add_parser('run');p.add_argument('--scenario',default='healthy',choices=['healthy','constrained','severe','packet-loss','blackhole','downstream-blackhole','upstream-blackhole','daemon-blackhole','bulk','send-reply-loss','restart-daemon','ui-send','draft-relaunch','model-picker','flapping','background','mobile-blackhole']);p.add_argument('--seed',type=int,default=1);p.add_argument('--cycles',type=int,default=5);p.add_argument('--outage',type=float,default=5);p.set_defaults(run=lambda a:__import__('scenarios').run(a))
+    p=sub.add_parser('run');p.add_argument('--scenario',default='healthy',choices=['healthy','constrained','severe','packet-loss','blackhole','downstream-blackhole','upstream-blackhole','daemon-blackhole','bulk','send-reply-loss','restart-daemon','ui-send','ui-send-reply-loss','concurrent-reads','urgent-during-sync','draft-relaunch','model-picker','flapping','background','mobile-blackhole']);p.add_argument('--seed',type=int,default=1);p.add_argument('--cycles',type=int,default=5);p.add_argument('--outage',type=float,default=5);p.set_defaults(run=lambda a:__import__('scenarios').run(a))
     args=parser.parse_args()
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'controller.lock').open('w') as lock:

@@ -6,8 +6,72 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import lab
+import argparse
+import io
+import campaign
+import scenarios
 
 class LabTests(unittest.TestCase):
+    def test_failed_probe_startup_cleans_up_before_next_case(self):
+        from unittest.mock import Mock
+        process=Mock(stdin=io.StringIO(),stdout=io.StringIO())
+        process.poll.return_value=None
+        with tempfile.TemporaryDirectory() as directory, patch.object(lab,'command'), \
+             patch.object(scenarios.subprocess,'Popen',return_value=process), \
+             patch.object(lab,'wait',side_effect=TimeoutError('encrypted session unavailable')):
+            with self.assertRaises(TimeoutError):
+                scenarios.Probe({},Path(directory))
+        process.terminate.assert_called_once()
+        process.wait.assert_called_once_with(timeout=5)
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+
+    def test_campaign_retry_preserves_intermittent_failure(self):
+        case=argparse.Namespace(scenario='healthy',seed=1,cycles=3,outage=0)
+        attempts=iter([scenarios.ScenarioFailure(Path('/failed/report.json'),'timeout'),Path('/passed/report.json')])
+        def run(_):
+            value=next(attempts)
+            if isinstance(value,Exception):raise value
+            return value
+        result=campaign.exercise(case,1,run)
+        self.assertEqual(result['status'],'intermittent')
+        self.assertEqual([a['passed'] for a in result['attempts']],[False,True])
+
+    def test_campaign_stops_retrying_success_and_does_not_swallow_interrupt(self):
+        case=argparse.Namespace(scenario='healthy')
+        with patch.object(scenarios,'run',return_value=Path('/passed/report.json')) as run:
+            self.assertEqual(campaign.exercise(case,2,run)['status'],'passed')
+            self.assertEqual(run.call_count,1)
+        with self.assertRaises(KeyboardInterrupt):
+            campaign.exercise(case,2,lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    def test_campaign_exhausts_failed_case_without_hiding_evidence(self):
+        case=argparse.Namespace(scenario='healthy')
+        with patch.object(scenarios,'run',side_effect=scenarios.ScenarioFailure(Path('/failed/report.json'),'timeout')) as run:
+            result=campaign.exercise(case,1,run)
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(len(result['attempts']),2)
+
+    def test_campaign_continues_after_failure_and_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            state={'daemon_url':'http://localhost','phone_url':'http://localhost','fixture':{}}
+            results=[]
+            def exercise(case, _):
+                results.append(case.scenario)
+                passed=case.scenario=='second'
+                return {'case':vars(case),'status':'passed' if passed else 'failed',
+                        'attempts':[{'passed':passed,'report':str(root/'runs'/case.scenario/'report.json')}]}
+            with patch.object(lab,'ROOT',root), patch.object(lab,'load',return_value=state), patch.object(lab,'http'), \
+                 patch.object(campaign,'PROTOCOL',[('first',0),('second',0)]), patch.object(campaign,'exercise',side_effect=exercise):
+                with self.assertRaises(SystemExit) as exit:
+                    campaign.run(argparse.Namespace(suite='protocol',seeds=[1],retries=1))
+            self.assertEqual(exit.exception.code,1)
+            self.assertEqual(results,['first','second'])
+            saved=json.loads(next(root.glob('campaigns/*/campaign.json')).read_text())
+            self.assertEqual(saved['status'],'failures-found')
+            self.assertEqual(len(saved['results']),2)
+
     def test_profile_changes_clear_previous_faults_before_installing_new_ones(self):
         requests=[]
         def request(url, body=None, method=None):

@@ -26,6 +26,7 @@ make reliability-run SCENARIO=packet-loss SEED=12
 make reliability-run SCENARIO=bulk
 make reliability-soak CYCLES=100 SEED=7
 make reliability-replay RUN=var/reliability/runs/<run>/report.json
+make reliability-campaign SUITE=all SEEDS=19
 make reliability-down
 ```
 
@@ -41,11 +42,48 @@ uses Xcode's DerivedData. The app bundle hash is recorded in each report.
 Supported scenarios: healthy, constrained, severe, packet-loss, blackhole,
 downstream-blackhole, upstream-blackhole, daemon-blackhole, bulk,
 send-reply-loss, restart-daemon, flapping, background, mobile-blackhole,
-ui-send, draft-relaunch, and model-picker. Scenarios are executable independently;
+ui-send, ui-send-reply-loss, concurrent-reads, urgent-during-sync, draft-relaunch, and model-picker. Scenarios are executable independently;
 `smoke` is intentionally a small fast subset. UI scenarios require a paired
 simulator with a conversation selected; initial pairing currently selects one
 through the normal app startup flow. They fail explicitly if prerequisites are
 missing. They do not silently pass or fall back to demo mode.
+
+## Autonomous bug discovery
+
+`make reliability-campaign` runs a bounded matrix on the existing lab. Use
+`SUITE=protocol` for twelve encrypted-RPC cases, `SUITE=mobile` for six simulator
+cases, or `SUITE=all`. `SEEDS=19,37` repeats the matrix with recorded fault seeds;
+the current packet-loss case uses these seeds, while deterministic cases repeat
+to sample scheduling differences. At most five seeds are accepted.
+
+The campaign continues after scenario failures and retries each failed case once
+by default (`RETRIES=0`, `1`, or `2`). Its exit code remains nonzero when any
+attempt failed, including a failure followed by a pass. An interrupted campaign
+stays marked interrupted. It saves an incremental `campaign.json` and linked
+`summary.md` under `var/reliability/campaigns/`. Individual reports can be replayed
+with the existing replay command. Fault cleanup runs after every attempt.
+
+The initial discovery plan is:
+
+1. Establish a healthy baseline and compare constrained, severe, and packet-loss
+   reads. Queue twelve concurrent index requests to check dispatch and consistency, including prompt overload rejection and a
+   subsequent successful read. Send a message during the burst to test reserved
+   urgent capacity and a five-second acknowledgement bound.
+2. Interrupt each direction and the daemon leg; restart the daemon; verify recovery.
+3. Lose a send reply after native execution, both through the encrypted probe and
+   the actual mobile Send button. Verify one execution and a visible recovered reply.
+4. Exercise draft persistence, model selection, a silent connection, and a
+   90-second background outage on the simulator.
+5. Retain the strict large-history test and its failures. Diagnose each candidate
+   using correlated logs, reproduce it independently, fix the owning layer, then
+   replay the same case and run the related tests and required code review.
+
+Repeated failure is a triage signal, not an automatic product-bug classification.
+Distinguish fixture/automation faults from runtime defects. Do not inflate timeouts
+or retry mutations to make a test green. A campaign is deliberately sequential:
+it owns shared proxies, daemon, and simulator state, so concurrent scenarios would
+contaminate each other's measurements. The runner does not deploy production apps
+or schedule itself; invoke it after relevant changes for the same repeatable loop.
 
 ## Fault semantics
 

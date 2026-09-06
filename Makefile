@@ -513,7 +513,9 @@ clean:
 	rm -rf $(DESKTOP_DIR)/dist $(REMOTE_WEB_DIR)/dist $(SITE_DIR)/dist $(MOBILE_DIR)/ios/DerivedData
 
 # Isolated simulator/network lab; never restarts the live desktop daemon.
-.PHONY: reliability-up reliability-down reliability-smoke reliability-run reliability-soak reliability-replay reliability-simulator reliability-pair reliability-test
+.PHONY: reliability-up reliability-down reliability-smoke reliability-run reliability-soak reliability-replay reliability-simulator reliability-pair reliability-test reliability-campaign
+reliability-campaign:
+	python3 scripts/reliability/lab.py campaign --suite $(or $(SUITE),all) --seeds $(or $(SEEDS),1) --retries $(or $(RETRIES),1)
 reliability-up:
 	python3 scripts/reliability/lab.py up
 reliability-down:

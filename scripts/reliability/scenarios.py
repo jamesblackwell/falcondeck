@@ -11,6 +11,11 @@ import time
 import uuid
 import lab
 
+class ScenarioFailure(RuntimeError):
+    def __init__(self, report_path, error):
+        super().__init__(str(error))
+        self.report_path = report_path
+
 class Probe:
     def __init__(self, state, directory):
         lab.command(['node_modules/.bin/esbuild','scripts/reliability/probe.ts','--bundle','--platform=node',
@@ -31,7 +36,13 @@ class Probe:
                     self.messages.put(message)
                 except ValueError: pass
         self.reader = threading.Thread(target=read,daemon=True);self.reader.start()
-        lab.wait(lambda:self.ready(),timeout=45,description='encrypted probe session')
+        try:
+            lab.wait(lambda:self.ready(),timeout=45,description='encrypted probe session')
+        except BaseException:
+            # The caller has no Probe instance yet when construction fails.
+            # Close here so a failed case cannot leave a client in the next run.
+            self.close()
+            raise
     def pump(self):
         if self.process.poll() is not None:
             raise RuntimeError('Probe exited; see probe.stderr')
@@ -59,7 +70,9 @@ class Probe:
             self.process.terminate()
             try:self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:self.process.kill();self.process.wait()
-        self.reader.join(timeout=2);self.log.close();self.error_log.close()
+        self.reader.join(timeout=2)
+        self.process.stdin.close();self.process.stdout.close()
+        self.log.close();self.error_log.close()
 
 
 def execution_count(state, operation):
@@ -77,7 +90,7 @@ def run(args):
         def expired(*_): raise TimeoutError('Scenario watchdog deadline exceeded')
         previous=signal.signal(signal.SIGALRM,expired)
         signal.alarm(int(180+args.cycles*60+args.outage))
-        try: _run(args)
+        try: return _run(args)
         finally: signal.alarm(0);signal.signal(signal.SIGALRM,previous)
 
 
@@ -136,6 +149,32 @@ def _run(args):
             restored=time.monotonic()
             lab.wait(lambda:probe.ready(),timeout=45,description='probe reconnect')
             result=control();step('recovered',duration_ms=(time.monotonic()-restored)*1000)
+        elif args.scenario in ['concurrent-reads','urgent-during-sync']:
+            set_profile('constrained')
+            # Queue a burst before awaiting any response to exercise independent dispatch.
+            pending=[probe.send('sync.index') for _ in range(12)]
+            if args.scenario=='urgent-during-sync':
+                operation='LAB-'+uuid.uuid4().hex
+                sent=time.monotonic()
+                urgent=probe.send('turn.start',{'workspace_id':workspace,'thread_id':thread,'inputs':[{'type':'text','text':operation}]})
+                lab.wait(lambda:execution_count(state,operation)>0,timeout=5,description='urgent execution during sync')
+                execution_ms=(time.monotonic()-sent)*1000
+                response=probe.response(urgent)
+                step('urgent.result',ok=response['ok'],duration_ms=response['duration_ms'],execution_ms=execution_ms)
+                assert response['ok'], 'Urgent send failed during sync'
+                assert response['duration_ms']<5000, 'Urgent acknowledgement stalled behind sync'
+                assert execution_count(state,operation)==1, 'Urgent send executed more than once'
+            responses=[probe.response(identifier) for identifier in pending]
+            step('concurrent.results',results=[{k:v for k,v in r.items() if k!='result'} for r in responses])
+            accepted=[r for r in responses if r['ok']]
+            rejected=[r for r in responses if not r['ok']]
+            assert accepted, 'No concurrent index request made progress'
+            # The daemon intentionally bounds admission; overload must fail promptly,
+            # without executing or poisoning the next request once slots are released.
+            assert all('Desktop is busy; this request was not executed.' in r.get('error','') and r['duration_ms']<2000 for r in rejected), 'Unexpected or slow overload failure'
+            expected={t['id'] for t in snapshot['threads']}
+            assert all({t['id'] for t in r['result']['snapshot']['threads']}==expected for r in accepted), 'Concurrent index lost threads'
+            result=control();step('concurrent.recovered',duration_ms=result['duration_ms'],accepted=len(accepted),rejected=len(rejected))
         elif args.scenario=='bulk':
             set_profile('constrained')
             pending=probe.send('thread.detail',{'workspace_id':workspace,'thread_id':'lab-thread-0'})
@@ -166,7 +205,7 @@ def _run(args):
             lab.start_process(state,'daemon',record['args'],state['daemon_env'])
             lab.wait(lambda:read_ready(probe),timeout=60,description='daemon RPC registration recovery')
             step('daemon.restarted')
-        elif args.scenario in ['ui-send','draft-relaunch','model-picker']:
+        elif args.scenario in ['ui-send','ui-send-reply-loss','draft-relaunch','model-picker']:
             if not state.get('simulator'):raise RuntimeError('Pair the simulator first')
             if any(n.get('AXLabel')=='Close sidebar' and n.get('frame',{}).get('x',-1)>=0 for n in lab.nodes(lab.ui(state))):
                 lab.tap(state,'Close sidebar')
@@ -189,8 +228,14 @@ def _run(args):
                              timeout=20,description='restored draft')
                     step('draft.restored')
                 else:
+                    if args.scenario=='ui-send-reply-loss':
+                        set_profile('downstream-blackhole')
                     lab.tap(state,'Send message')
                     lab.wait(lambda:execution_count(state,operation)>0,timeout=30,description='UI message execution')
+                    if args.scenario=='ui-send-reply-loss':
+                        step('send.executed.before.reply',executions=execution_count(state,operation))
+                        time.sleep(args.outage)
+                        set_profile('reset');set_profile('healthy')
                     lab.wait(lambda:('RECEIVED '+operation) in json.dumps(lab.ui(state)),timeout=30,description='visible response')
                     assert execution_count(state,operation)==1
                     step('ui.send.confirmed',executions=1)
@@ -230,6 +275,8 @@ def _run(args):
     except BaseException as error:
         report['error']=str(error)
         lab.capture(state,directory,'failure')
+        if isinstance(error, Exception):
+            raise ScenarioFailure(directory/'report.json', error) from error
         raise
     finally:
         try:lab.netem(state)
@@ -240,6 +287,7 @@ def _run(args):
         if probe:probe.close()
         (directory/'report.json').write_text(json.dumps(report,indent=2))
         print(f'Report: {directory}/report.json',flush=True)
+    return directory/'report.json'
 
 
 def read_ready(probe):
