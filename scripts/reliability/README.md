@@ -73,7 +73,9 @@ The initial discovery plan is:
 3. Lose a send reply after native execution, both through the encrypted probe and
    the actual mobile Send button. Test both a short interruption and 40 seconds,
    beyond the client's 35-second delivery deadline. Verify one execution and a
-   visible recovered reply.
+   visible recovered reply, with the delivered text absent from the composer.
+   Checking execution and the transcript alone misses the duplicate-send risk
+   when a timeout restores text that the desktop already accepted.
 4. Exercise draft persistence, model selection, a silent connection, and a
    90-second background outage on the simulator.
 5. Retain the strict large-history test and its failures. Diagnose each candidate

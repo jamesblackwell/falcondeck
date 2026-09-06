@@ -238,6 +238,9 @@ def _run(args):
                         set_profile('reset');set_profile('healthy')
                     lab.wait(lambda:('RECEIVED '+operation) in json.dumps(lab.ui(state)),timeout=30,description='visible response')
                     assert execution_count(state,operation)==1
+                    lab.wait(lambda:any(n.get('AXUniqueId')=='message-composer' and operation not in (n.get('AXValue') or '')
+                                        for n in lab.nodes(lab.ui(state))),
+                             timeout=5,description='delivered message removed from composer')
                     step('ui.send.confirmed',executions=1)
             lab.capture(state,directory,'ui-complete')
         elif args.scenario=='flapping':
