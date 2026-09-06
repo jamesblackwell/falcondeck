@@ -51,7 +51,7 @@ missing. They do not silently pass or fall back to demo mode.
 ## Autonomous bug discovery
 
 `make reliability-campaign` runs a bounded matrix on the existing lab. Use
-`SUITE=protocol` for twelve encrypted-RPC cases, `SUITE=mobile` for six simulator
+`SUITE=protocol` for twelve encrypted-RPC cases, `SUITE=mobile` for seven simulator
 cases, or `SUITE=all`. `SEEDS=19,37` repeats the matrix with recorded fault seeds;
 the current packet-loss case uses these seeds, while deterministic cases repeat
 to sample scheduling differences. At most five seeds are accepted.
@@ -71,7 +71,9 @@ The initial discovery plan is:
    urgent capacity and a five-second acknowledgement bound.
 2. Interrupt each direction and the daemon leg; restart the daemon; verify recovery.
 3. Lose a send reply after native execution, both through the encrypted probe and
-   the actual mobile Send button. Verify one execution and a visible recovered reply.
+   the actual mobile Send button. Test both a short interruption and 40 seconds,
+   beyond the client's 35-second delivery deadline. Verify one execution and a
+   visible recovered reply.
 4. Exercise draft persistence, model selection, a silent connection, and a
    90-second background outage on the simulator.
 5. Retain the strict large-history test and its failures. Diagnose each candidate

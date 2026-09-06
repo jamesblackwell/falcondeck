@@ -13,7 +13,7 @@ PROTOCOL = [
     ('upstream-blackhole', 3), ('daemon-blackhole', 3),
     ('send-reply-loss', 0), ('restart-daemon', 0), ('bulk', 0),
 ]
-MOBILE = [('ui-send', 0), ('ui-send-reply-loss', 3), ('draft-relaunch', 0),
+MOBILE = [('ui-send', 0), ('ui-send-reply-loss', 3), ('ui-send-reply-loss', 40), ('draft-relaunch', 0),
           ('model-picker', 0), ('mobile-blackhole', 55), ('background', 90)]
 
 
@@ -43,13 +43,13 @@ def write(directory, report):
     temporary.write_text(json.dumps(report, indent=2))
     temporary.replace(directory/'campaign.json')
     rows = ['# Bug discovery campaign', '', f"Status: {report['status']}", '',
-            '| Scenario | Seed | Result | Attempts |', '| --- | --- | --- | --- |']
+            '| Scenario | Seed | Outage | Result | Attempts |', '| --- | --- | --- | --- | --- |']
     for result in report['results']:
         links = ', '.join(f"[{i+1}: {'pass' if a['passed'] else 'fail'}]({Path(a['report']).relative_to(lab.ROOT).as_posix()})"
                           for i,a in enumerate(result['attempts']))
         # Reports live two levels below ROOT; keep links portable with the evidence folder.
         links = links.replace('](runs/', '](../../runs/')
-        rows.append(f"| {result['case']['scenario']} | {result['case']['seed']} | {result['status']} | {links} |")
+        rows.append(f"| {result['case']['scenario']} | {result['case']['seed']} | {result['case']['outage']}s | {result['status']} | {links} |")
     rows += ['', 'A retry never erases a failure. Repeated failures require root-cause triage; they are not automatically product bugs.',
              'Seeds reproduce the fault schedule, not OS scheduling. These are bounded samples, not a certification.', '']
     (directory/'summary.md').write_text('\n'.join(rows))
