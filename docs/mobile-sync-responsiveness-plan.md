@@ -329,8 +329,10 @@ clients before broader rollout.
 Review status: the repository helper was run with `--mode local`, then retried
 with `--mode local --thinking medium`. Both configured OpenCode/GLM runs exhausted
 their 32,000-token output allowance without returning a structured review. Neither
-is a clean review. An alternate reviewer has been requested; deployment remains
-pending. Additional checks passed: daemon snapshot (11), preferences (4), bridge
+is a clean review. The subsequent authorized Codex review completed successfully:
+`.agents/skills/autoreview/scripts/autoreview --engine codex --mode commit --commit 52b9275`.
+It reported no accepted/actionable findings at the repository's default P0
+threshold. Deployment remains pending. Additional checks passed: daemon snapshot (11), preferences (4), bridge
 (22), relay unit (40), and relay integration (51), including an actual WebSocket
 RPC delivered while bulk chunk credit was withheld. The staged mobile patch also
 passed typechecking and 57 focused tests in an isolated checkout, preserving the
