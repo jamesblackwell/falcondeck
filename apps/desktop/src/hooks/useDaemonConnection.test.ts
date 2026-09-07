@@ -179,6 +179,93 @@ describe('useDaemonConnection thread restoration', () => {
     await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
   })
 
+  it.each(['visible', 'hidden'] as const)(
+    'applies workspace readiness when a queued paint stalls and visibility becomes %s',
+    async (nextVisibility) => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+      const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(91)
+      const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame')
+      const { result, unmount } = renderHook(() => useDaemonConnection())
+      try {
+        await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+        act(() => {
+          mocks.eventHandler?.({
+            seq: 1,
+            emitted_at: '2026-08-08T12:00:01Z',
+            workspace_id: 'workspace-1',
+            thread_id: null,
+            event: { type: 'workspace-updated', workspace: daemonSnapshot('ready').workspaces[0] },
+          })
+          visibility.mockReturnValue(nextVisibility)
+          document.dispatchEvent(new Event('visibilitychange'))
+        })
+        expect(requestFrame).toHaveBeenCalledTimes(1)
+        expect(result.current.snapshot?.workspaces[0]?.status).toBe('connecting')
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(50)
+        })
+
+        expect(result.current.snapshot?.workspaces[0]?.status).toBe('ready')
+        expect(cancelFrame).toHaveBeenCalledWith(91)
+      } finally {
+        unmount()
+        visibility.mockRestore()
+        requestFrame.mockRestore()
+        cancelFrame.mockRestore()
+        vi.useRealTimers()
+      }
+    },
+  )
+
+  it.each(['paint', 'unmount'] as const)(
+    'cancels both pending event callbacks on %s',
+    async (completion) => {
+      let frame: FrameRequestCallback | null = null
+      const requestFrame = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+        frame = callback
+        return 91
+      })
+      const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame')
+      const clearTimer = vi.spyOn(window, 'clearTimeout')
+      const { result, unmount } = renderHook(() => useDaemonConnection())
+      const originalSetTimeout = window.setTimeout.bind(window)
+      let fallback: number | null = null
+      const setTimer = vi.spyOn(window, 'setTimeout').mockImplementation((callback, delay) => {
+        const timer = originalSetTimeout(callback, delay)
+        if (delay === 50) fallback = timer
+        return timer
+      })
+      try {
+        await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+        act(() => mocks.eventHandler?.({
+          seq: 1,
+          emitted_at: '2026-08-08T12:00:01Z',
+          workspace_id: 'workspace-1',
+          thread_id: null,
+          event: { type: 'workspace-updated', workspace: daemonSnapshot('ready').workspaces[0] },
+        }))
+        expect(frame).not.toBeNull()
+        expect(fallback).not.toBeNull()
+        if (completion === 'paint') {
+          act(() => frame?.(performance.now()))
+          expect(result.current.snapshot?.workspaces[0]?.status).toBe('ready')
+        } else {
+          unmount()
+        }
+        expect(cancelFrame).toHaveBeenCalledWith(91)
+        expect(clearTimer).toHaveBeenCalledWith(fallback)
+      } finally {
+        unmount()
+        requestFrame.mockRestore()
+        cancelFrame.mockRestore()
+        clearTimer.mockRestore()
+        setTimer.mockRestore()
+      }
+    },
+  )
+
   it('clears a previous detail error when starting a new thread', async () => {
     mocks.threadDetail.mockRejectedValueOnce(new Error('old thread failed'))
     const { result } = renderHook(() => useDaemonConnection())
@@ -273,11 +360,17 @@ describe('useDaemonConnection thread restoration', () => {
     const cancelFrame = vi.spyOn(window, 'cancelAnimationFrame')
     const random = vi.spyOn(Math, 'random').mockReturnValue(0.5)
     let reconnect: (() => void) | null = null
+    let queuedFallback: (() => void) | null = null
+    const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout')
     const setTimeoutSpy = vi
       .spyOn(window, 'setTimeout')
       .mockImplementation((callback, delay) => {
         if (delay === 500 && typeof callback === 'function') {
           reconnect = callback as () => void
+        }
+        if (delay === 50 && typeof callback === 'function') {
+          queuedFallback = callback as () => void
+          return 93
         }
         return 92
       })
@@ -297,6 +390,7 @@ describe('useDaemonConnection thread restoration', () => {
       })
     })
     expect(queuedFrame).not.toBeNull()
+    expect(queuedFallback).not.toBeNull()
 
     const freshSnapshot = daemonSnapshot('ready')
     freshSnapshot.threads[0] = {
@@ -319,15 +413,18 @@ describe('useDaemonConnection thread restoration', () => {
         expect(result.current.snapshot?.threads[0]?.title).toBe('Fresh reconnect status'),
       )
       expect(cancelFrame).toHaveBeenCalledWith(91)
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(93)
 
       // Even a host that dispatches an already-cancelled callback cannot
       // replay the old event because the queue was emptied with the frame.
       act(() => queuedFrame?.(performance.now()))
+      act(() => queuedFallback?.())
       expect(result.current.snapshot?.threads[0]?.title).toBe('Fresh reconnect status')
     } finally {
       setTimeoutSpy.mockRestore()
       requestFrame.mockRestore()
       cancelFrame.mockRestore()
+      clearTimeoutSpy.mockRestore()
       random.mockRestore()
     }
   })

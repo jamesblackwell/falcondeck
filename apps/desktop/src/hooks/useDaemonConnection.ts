@@ -120,6 +120,8 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
   const flushEvents = useCallback(() => {
     const startedAt = performanceTracingEnabled ? performance.now() : 0
+    if (eventFrameRef.current !== null) window.cancelAnimationFrame(eventFrameRef.current)
+    if (eventTimerRef.current !== null) window.clearTimeout(eventTimerRef.current)
     eventFrameRef.current = null
     eventTimerRef.current = null
     const events = pendingEventsRef.current
@@ -199,14 +201,13 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
     pendingEventsRef.current.push(event)
     if (eventFrameRef.current !== null || eventTimerRef.current !== null) return
-    // requestAnimationFrame can be suspended for a hidden webview. Continue
-    // draining at a low rate in the background so a long-running turn cannot
-    // accumulate an unbounded event queue while the app is minimised.
-    if (document.visibilityState === 'hidden') {
-      eventTimerRef.current = window.setTimeout(flushEvents, 50)
-    } else {
+    // A queued paint can be suspended when the webview becomes occluded,
+    // even before visibilityState changes. Race every paint with a bounded
+    // fallback; the winner cancels both so old callbacks cannot steal a batch.
+    if (document.visibilityState !== 'hidden') {
       eventFrameRef.current = window.requestAnimationFrame(flushEvents)
     }
+    eventTimerRef.current = window.setTimeout(flushEvents, 50)
   }, [flushEvents])
 
   useEffect(() => clearPendingEvents, [clearPendingEvents])
