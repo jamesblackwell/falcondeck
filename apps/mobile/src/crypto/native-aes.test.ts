@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { webcrypto } from 'node:crypto'
 import { AESEncryptionKey } from 'expo-crypto'
-import { decryptJson, destroySessionCrypto, encryptJson, setAesGcmBackend } from '@falcondeck/client-core'
+import { decryptJson, destroySessionCrypto, encryptJson, RelayDecryptionError, setAesGcmBackend } from '@falcondeck/client-core'
 import { installNativeAes } from './native-aes'
 
 // Model Expo's native byte/tag contract with independent WebCrypto AES.
@@ -46,7 +46,45 @@ describe('native relay AES', () => {
     const key = new Uint8Array(32).fill(5)
     const existing = await encryptJson(key, { text: 'secret' })
     installNativeAes()
-    await expect(decryptJson(new Uint8Array(32).fill(6), existing)).rejects.toThrow()
+    await expect(decryptJson(new Uint8Array(32).fill(6), existing)).rejects.toBeInstanceOf(RelayDecryptionError)
+  })
+
+  it('shares one native key import across a concurrent encrypt/decrypt burst', async () => {
+    installNativeAes()
+    const key = new Uint8Array(32).fill(8)
+    const values = Array.from({ length: 20 }, (_, index) => ({ index, text: 'parallel 🔐' }))
+    const encrypted = await Promise.all(values.map(value => encryptJson(key, value)))
+    const decrypted = await Promise.all(encrypted.map(value => decryptJson(key, value)))
+    expect(decrypted).toEqual(values)
+    expect(AESEncryptionKey.import).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a transient native import failure instead of caching a rejected promise forever', async () => {
+    installNativeAes()
+    const key = new Uint8Array(32).fill(9)
+    vi.mocked(AESEncryptionKey.import).mockRejectedValueOnce(new Error('native import unavailable'))
+    await expect(encryptJson(key, {})).rejects.toThrow('native import unavailable')
+    const encrypted = await encryptJson(key, { recovered: true })
+    await expect(decryptJson(key, encrypted)).resolves.toEqual({ recovered: true })
+    expect(AESEncryptionKey.import).toHaveBeenCalledTimes(2)
+  })
+
+  it('copies key bytes before an asynchronous native import can race with session teardown', async () => {
+    installNativeAes()
+    const key = new Uint8Array(32).fill(10)
+    const expectedKey = new Uint8Array(key)
+    const importKey = vi.mocked(AESEncryptionKey.import)
+    const implementation = importKey.getMockImplementation()!
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    importKey.mockImplementationOnce(async (...args) => { await gate; return implementation(...args) })
+    const encrypted = encryptJson(key, { inFlight: true })
+    destroySessionCrypto({ dataKey: key, material: null })
+    release()
+    const envelope = await encrypted
+    setAesGcmBackend(null)
+    await expect(decryptJson(expectedKey, envelope)).resolves.toEqual({ inFlight: true })
+    expect(key).toEqual(new Uint8Array(32))
   })
 
   it('releases cached native key handles on session teardown', async () => {

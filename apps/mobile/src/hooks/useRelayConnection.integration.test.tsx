@@ -610,7 +610,7 @@ describe('useRelayConnection session rotation', () => {
 
     // Each decrypt burns past the display-frame budget so the backlog spreads
     // across several frames — the exact shape that used to re-stream old text.
-    let now = 0
+    let now = Date.now()
     vi.spyOn(Date, 'now').mockImplementation(() => now)
 
     useRelayStore.getState().setPairingCode(securePairingCode('REPLAY'))

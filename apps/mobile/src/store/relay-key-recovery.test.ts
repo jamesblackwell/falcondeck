@@ -1,37 +1,46 @@
-import { afterEach, expect, it, vi } from 'vitest'
-import nacl from 'tweetnacl'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import {
-  buildPairingPublicKeyBundle, bytesToBase64, deriveIdentityKeyPair,
-  encryptJson, generateBoxKeyPair, REMOTE_SESSION_STORAGE_VERSION,
-  secretKeyToBase64, type SessionKeyMaterial, type RelayClientMessage,
+  bytesToBase64, encryptJson, RelayDecryptionError, secretKeyToBase64,
+  type RelayClientMessage,
 } from '@falcondeck/client-core'
-import { setJson } from '@/storage/mmkv'
-import { persistClientSecretKey, persistClientToken, persistDataKey } from '@/storage/secure'
+import { getJson } from '@/storage/mmkv'
+import { loadClientSecretKey, loadClientToken, loadDataKey } from '@/storage/secure'
+import { restoreTestRelaySession } from '@/test/relay-session'
 import { useRelayStore } from './relay-store'
 
 const originalSend = useRelayStore.getState()._sendMessage
+const originalDecrypt = useRelayStore.getState()._decryptJson
+
+async function startRpc(timeoutMs?: number) {
+  type RpcCall = Extract<RelayClientMessage, { type: 'rpc-call' }>
+  let sent!: (message: RpcCall) => void
+  const outgoing = new Promise<RpcCall>(resolve => { sent = resolve })
+  const send = vi.fn((message: RelayClientMessage) => {
+    if (message.type === 'rpc-call') sent(message)
+  })
+  useRelayStore.setState({ _sendMessage: send })
+  const result = useRelayStore.getState()._callRpc('sync.index', {}, { timeoutMs })
+  return { call: await outgoing, result, send }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+beforeEach(() => { useRelayStore.getState()._setSocket(null) })
 afterEach(() => {
   useRelayStore.getState()._failPendingRpcs('test complete')
-  useRelayStore.setState({ _sendMessage: originalSend })
+  useRelayStore.setState({ _sendMessage: originalSend, _decryptJson: originalDecrypt })
+  useRelayStore.getState()._setSocket(null)
   useRelayStore.getState()._setSessionCrypto(null)
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
-it('recovers a persisted wrong key through a signed bootstrap and successfully decrypts the retried sync', async () => {
-  const phone = generateBoxKeyPair()
-  const daemon = generateBoxKeyPair()
-  const phoneBundle = buildPairingPublicKeyBundle(phone)
-  const daemonBundle = buildPairingPublicKeyBundle(daemon)
-  const correctKey = new Uint8Array(32).fill(42)
-  await persistClientSecretKey(secretKeyToBase64(phone))
-  await persistClientToken('test-token')
-  await persistDataKey(bytesToBase64(new Uint8Array(32).fill(13)))
-  setJson('relay.session', {
-    version: REMOTE_SESSION_STORAGE_VERSION, relayUrl: 'https://relay.test',
-    pairingCode: '', pairingId: 'pairing', sessionId: 'session', deviceId: 'phone',
-    daemonPublicKey: daemonBundle.public_key,
-    daemonIdentityPublicKey: daemonBundle.identity_public_key, lastReceivedSeq: 10,
-  })
-  await useRelayStore.getState().restoreSession()
+it.each([true, false])('recovers a persisted wrong key through a signed bootstrap (RPC ok=%s)', async (ok) => {
+  const { dataKey: correctKey, phone, persisted, bootstrap } = await restoreTestRelaySession()
   const sent: RelayClientMessage[] = []
   useRelayStore.setState({ _sendMessage: message => { sent.push(message) } })
 
@@ -41,42 +50,21 @@ it('recovers a persisted wrong key through a signed bootstrap and successfully d
   const first = sent[0]
   if (first.type !== 'rpc-call') throw new Error('missing RPC')
   await useRelayStore.getState()._handleRpcResult({
-    type: 'rpc-result', request_id: first.request_id, ok: false, result: null,
-    error: await encryptJson(correctKey, { message: 'invalid remote rpc payload' }),
+    type: 'rpc-result', request_id: first.request_id, ok,
+    result: ok ? await encryptJson(correctKey, { token: 'fresh' }) : null,
+    error: ok ? null : await encryptJson(correctKey, { message: 'invalid remote rpc payload' }),
   })
   await rejected
   expect(useRelayStore.getState()._getSessionCrypto()).toBeNull()
   expect(sent.filter(message => message.type === 'ephemeral')).toHaveLength(1)
   expect(useRelayStore.getState().sessionId).toBe('session')
-
-  const ephemeral = nacl.box.keyPair()
-  const nonce = new Uint8Array(24).fill(7)
-  const wrapped = nacl.box(correctKey, nonce, phone.publicKey, ephemeral.secretKey)
-  const material: SessionKeyMaterial = {
-    encryption_variant: 'data_key_v1', identity_variant: 'ed25519_v1',
-    pairing_id: 'pairing', session_id: 'session',
-    daemon_public_key: daemonBundle.public_key,
-    daemon_identity_public_key: daemonBundle.identity_public_key,
-    client_public_key: phoneBundle.public_key,
-    client_identity_public_key: phoneBundle.identity_public_key,
-    client_wrapped_data_key: { encryption_variant: 'data_key_v1', wrapped_key:
-      bytesToBase64(new Uint8Array([0, ...ephemeral.publicKey, ...nonce, ...wrapped])) },
-    daemon_wrapped_data_key: null, signature: '',
-  }
-  const signingPayload = [
-    'falcondeck-session-bootstrap-v1', 'data_key_v1', 'ed25519_v1',
-    material.pairing_id, material.session_id, material.daemon_public_key,
-    material.daemon_identity_public_key, material.client_public_key,
-    material.client_identity_public_key, material.client_wrapped_data_key.wrapped_key, '',
-  ].join('\n')
-  material.signature = bytesToBase64(nacl.sign.detached(
-    new TextEncoder().encode(signingPayload), deriveIdentityKeyPair(daemon).secretKey,
-  ))
-  await useRelayStore.getState()._processBootstrap({
-    id: 'bootstrap', seq: 11, created_at: new Date().toISOString(),
-    body: { t: 'session-bootstrap', material },
-  })
+  expect(await loadClientSecretKey()).toBe(secretKeyToBase64(phone))
+  expect(await loadClientToken()).toBe('test-token')
+  expect(getJson('relay.session')).toEqual(persisted)
+  expect(await loadDataKey()).toBe(bytesToBase64(new Uint8Array(32).fill(13)))
+  await useRelayStore.getState()._processBootstrap(bootstrap())
   expect(useRelayStore.getState()._getSessionCrypto()?.dataKey).toEqual(correctKey)
+  expect(await loadDataKey()).toBe(bytesToBase64(correctKey))
   const retry = useRelayStore.getState()._callRpc('sync.index', {})
   await vi.waitFor(() => expect(sent.filter(message => message.type === 'rpc-call')).toHaveLength(2))
   const last = sent.at(-1)!
@@ -86,6 +74,10 @@ it('recovers a persisted wrong key through a signed bootstrap and successfully d
     result: await encryptJson(correctKey, { token: 'fresh' }),
   })
   await expect(retry).resolves.toEqual({ token: 'fresh' })
+  // A subsequent cold restore must use the repaired Keychain value.
+  useRelayStore.getState()._setSessionCrypto(null)
+  await useRelayStore.getState().restoreSession()
+  expect(useRelayStore.getState()._getSessionCrypto()?.dataKey).toEqual(correctKey)
 })
 
 it('does not let a stale recovery erase a newer session key', () => {
@@ -142,4 +134,109 @@ it('rejects an RPC immediately on disconnect even while native decryption is pen
   } finally {
     useRelayStore.setState({ _decryptJson: originalDecrypt })
   }
+})
+
+it('coalesces concurrent authentication failures into one bootstrap and rejects every pending RPC', async () => {
+  const { dataKey } = await restoreTestRelaySession()
+  const first = await startRpc()
+  const second = await startRpc()
+  const rejected = Promise.all([
+    expect(first.result).rejects.toThrow('Refreshing the secure connection'),
+    expect(second.result).rejects.toThrow('Refreshing the secure connection'),
+  ])
+  const encrypted = await encryptJson(dataKey, {})
+  await Promise.all([first, second].map(({ call }) => useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: call.request_id, ok: true, result: encrypted, error: null,
+  })))
+  await rejected
+  expect(second.send.mock.calls.filter(([message]) => message.type === 'ephemeral')).toHaveLength(1)
+  expect(await useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: first.call.request_id, ok: true, result: encrypted, error: null,
+  })).toBe(false)
+})
+
+it.each(['application error', 'malformed envelope'] as const)('retains a good key after an RPC %s', async kind => {
+  const { dataKey } = await restoreTestRelaySession(new Uint8Array(32).fill(42))
+  const crypto = useRelayStore.getState()._getSessionCrypto()
+  const { call, result, send } = await startRpc()
+  const rejected = expect(result).rejects.toThrow(kind === 'application error' ? 'workspace not found' : 'Encrypted payload is malformed')
+  const envelope = await encryptJson(dataKey, { message: 'workspace not found' })
+  await useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: call.request_id, ok: false, result: null,
+    error: kind === 'application error' ? envelope : { ...envelope, ciphertext: '' },
+  })
+  await rejected
+  expect(useRelayStore.getState()._getSessionCrypto()).toBe(crypto)
+  expect(send.mock.calls.filter(([message]) => message.type === 'ephemeral')).toHaveLength(0)
+})
+
+it.each(['success', 'authentication failure'] as const)('discards a late decrypt %s after key rotation', async outcome => {
+  const { dataKey } = await restoreTestRelaySession()
+  const { call, result, send } = await startRpc()
+  const rejected = expect(result).rejects.toThrow()
+  const pending = deferred<unknown>()
+  useRelayStore.setState({ _decryptJson: <T>() => pending.promise as Promise<T> })
+  const handling = useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: call.request_id, ok: true,
+    result: await encryptJson(dataKey, { token: 'old' }), error: null,
+  })
+  const current = { dataKey: new Uint8Array(dataKey), material: null }
+  useRelayStore.getState()._setSessionCrypto(current)
+  if (outcome === 'success') pending.resolve({ token: 'obsolete' })
+  else pending.reject(new RelayDecryptionError(new Error('old native operation failed')))
+  await handling
+  await rejected
+  expect(useRelayStore.getState()._getSessionCrypto()).toBe(current)
+  expect(current.dataKey).toEqual(dataKey)
+  expect(send.mock.calls.filter(([message]) => message.type === 'ephemeral')).toHaveLength(0)
+})
+
+it('rejects a response from a replaced socket without decrypting it or discarding its still-valid key', async () => {
+  const { dataKey } = await restoreTestRelaySession(new Uint8Array(32).fill(42))
+  const { call, result } = await startRpc()
+  const rejected = expect(result).rejects.toThrow('Remote connection changed')
+  const decrypt = vi.fn(originalDecrypt)
+  useRelayStore.setState({ _decryptJson: <T>(envelope: Parameters<typeof originalDecrypt>[0]) => decrypt(envelope) as Promise<T> })
+  const crypto = useRelayStore.getState()._getSessionCrypto()
+  useRelayStore.getState()._setSocket({} as WebSocket)
+  await useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: call.request_id, ok: true,
+    result: await encryptJson(dataKey, {}), error: null,
+  })
+  await rejected
+  expect(decrypt).not.toHaveBeenCalled()
+  expect(useRelayStore.getState()._getSessionCrypto()).toBe(crypto)
+})
+
+it('keeps the RPC deadline active during native decryption and ignores the eventual result', async () => {
+  await restoreTestRelaySession(new Uint8Array(32).fill(42))
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const { call, result } = await startRpc(1000)
+  const rejected = expect(result).rejects.toThrow('Timed out waiting for sync.index')
+  const pending = deferred<unknown>()
+  useRelayStore.setState({ _decryptJson: <T>() => pending.promise as Promise<T> })
+  const handling = useRelayStore.getState()._handleRpcResult({
+    type: 'rpc-result', request_id: call.request_id, ok: true, result: call.params, error: null,
+  })
+  await vi.advanceTimersByTimeAsync(1000)
+  await rejected
+  pending.resolve({ token: 'too late' })
+  await handling
+  expect(vi.getTimerCount()).toBe(0)
+})
+
+it.each(['tampered signature', 'another session', 'another daemon'] as const)('rejects a bootstrap for %s without losing the working key', async kind => {
+  const { bootstrap, dataKey } = await restoreTestRelaySession(new Uint8Array(32).fill(42))
+  const crypto = useRelayStore.getState()._getSessionCrypto()
+  const update = bootstrap(11, kind === 'another session'
+    ? { session_id: 'other-session' }
+    : kind === 'another daemon' ? { daemon_public_key: bytesToBase64(new Uint8Array(32).fill(99)) } : {})
+  if (kind === 'tampered signature' && update.body.t === 'session-bootstrap') {
+    update.body.material.signature = bytesToBase64(new Uint8Array(64))
+  }
+  await useRelayStore.getState()._processBootstrap(update)
+  expect(useRelayStore.getState().error).toBeTruthy()
+  expect(useRelayStore.getState()._getSessionCrypto()).toBe(crypto)
+  expect(crypto?.dataKey).toEqual(dataKey)
+  expect(await loadDataKey()).toBe(bytesToBase64(dataKey))
 })
