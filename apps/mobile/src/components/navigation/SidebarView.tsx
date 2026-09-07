@@ -54,6 +54,7 @@ import {
   EmptyState,
   OptionSheet,
   SyncBanner,
+  Spinner,
 } from "@/components/ui";
 import {
   readStoredChatsCollapsed,
@@ -174,7 +175,7 @@ export const SidebarView = memo(function SidebarView({
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   // Cached projects stay on screen while a reconnect snapshot is in flight.
-  // The banner is the only extra voice if that wait actually drags.
+  // Page requests continue after the initial snapshot is ready.
   const syncStatus = useSessionSyncStatus();
   const syncIndex = useSessionStore(s => s.snapshot?.sync_index);
   const remoteCounts = syncIndex?.counts;
@@ -274,6 +275,21 @@ export const SidebarView = memo(function SidebarView({
     [activeExtensionFilters],
   );
 
+  const [loadingPages, setLoadingPages] = useState<ReadonlySet<string>>(new Set());
+  const loadPage = useCallback(async (workspaceId: string, sort: ThreadSortMode, limit?: number) => {
+    const key = `${useSessionStore.getState().snapshot?.sync_index?.token}:${workspaceId}:${sort}`;
+    setLoadingPages(current => new Set(current).add(key));
+    try {
+      await loadSyncThreadPage(workspaceId, sort, limit);
+    } finally {
+      setLoadingPages(current => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }
+  }, []);
+
   // Fetch one bounded page per expanded scope. Filters need complete scope,
   // so continue one page at a time, yielding between store commits.
   const pageScopes = groups.filter(group => group.workspace.kind === "casual"
@@ -290,7 +306,7 @@ export const SidebarView = memo(function SidebarView({
           if (!current || current.token !== token) return;
           const cursor = current.cursors[`${workspaceId}:${sortMode}`];
           if (cursor === null || (cursor !== undefined && !activeExtensionFilterCount)) break;
-          await loadSyncThreadPage(workspaceId, sortMode, activeExtensionFilterCount ? 50 : VISIBLE_THREAD_LIMIT);
+          await loadPage(workspaceId, sortMode, activeExtensionFilterCount ? 50 : VISIBLE_THREAD_LIMIT);
           const next = useSessionStore.getState().snapshot?.sync_index;
           if (next?.token !== token || next.cursors[`${workspaceId}:${sortMode}`] === cursor) break;
           await new Promise(resolve => setTimeout(resolve, 0));
@@ -298,7 +314,7 @@ export const SidebarView = memo(function SidebarView({
       }
     })();
     return () => { cancelled = true; };
-  }, [syncIndex?.token, pageScopes, sortMode, activeExtensionFilterCount]);
+  }, [syncIndex?.token, pageScopes, sortMode, activeExtensionFilterCount, loadPage]);
 
   // Starting a thread should never depend on first finding a project row: the
   // open one is the obvious target, and the top of the list stands in before
@@ -410,7 +426,7 @@ export const SidebarView = memo(function SidebarView({
 
   const handleOverflowPress = useCallback(
     (workspaceId: string, visibleCount: number, isExpanded: boolean) => {
-      if (!isExpanded) void loadSyncThreadPage(workspaceId, sortMode);
+      if (!isExpanded) void loadPage(workspaceId, sortMode);
       setVisibleThreadCounts((prev) => {
         const next = new Map(prev);
         if (isExpanded) {
@@ -421,7 +437,7 @@ export const SidebarView = memo(function SidebarView({
         return next;
       });
     },
-    [sortMode],
+    [sortMode, loadPage],
   );
 
   const handleArchivedToggle = useCallback((workspaceId: string) => {
@@ -707,6 +723,7 @@ export const SidebarView = memo(function SidebarView({
       }
 
       if (item.type === "overflow") {
+        const isLoading = loadingPages.has(`${syncIndex?.token}:${item.workspaceId}:${sortMode}`);
         return (
           <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
             <Pressable
@@ -719,15 +736,18 @@ export const SidebarView = memo(function SidebarView({
                 )
               }
               accessibilityRole="button"
-              accessibilityState={{ expanded: item.isExpanded }}
+              disabled={isLoading}
+              accessibilityState={{ expanded: item.isExpanded, busy: isLoading, disabled: isLoading }}
             >
-              <ChevronDown
-                size={12}
-                color={theme.colors.fg.muted}
-                style={item.isExpanded ? styles.chevronFlipped : undefined}
-              />
+              {isLoading ? <Spinner size={theme.iconSize.xs} color={theme.colors.fg.muted} /> : (
+                <ChevronDown
+                  size={12}
+                  color={theme.colors.fg.muted}
+                  style={item.isExpanded ? styles.chevronFlipped : undefined}
+                />
+              )}
               <Text variant="caption" color="muted">
-                {item.isExpanded ? "Show less" : "Show more"}
+                {isLoading ? "Loading tasks…" : item.isExpanded ? "Show less" : "Show more"}
               </Text>
             </Pressable>
           </CollapsibleRow>
@@ -762,6 +782,8 @@ export const SidebarView = memo(function SidebarView({
       toggleWorkspaceCollapse,
       toggleChatsCollapsed,
       handleOverflowPress,
+      loadingPages,
+      syncIndex?.token,
       handleArchivedToggle,
       threadTagsById,
       workspaceColors,
@@ -795,6 +817,12 @@ export const SidebarView = memo(function SidebarView({
       ) : null}
 
       <SyncBanner status={syncStatus} />
+      {!syncStatus.isBusy && loadingPages.size > 0 ? (
+        <View style={styles.loadingStatus} accessibilityRole="progressbar" accessibilityLabel="Loading tasks" accessibilityLiveRegion="polite">
+          <Spinner size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+          <Text variant="caption" color="muted">Loading tasks…</Text>
+        </View>
+      ) : null}
 
       <View style={styles.list}>
         {rows.length === 0 ? (
@@ -940,6 +968,13 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[1],
+  },
+  loadingStatus: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[2],
   },
   list: {
     flex: 1,

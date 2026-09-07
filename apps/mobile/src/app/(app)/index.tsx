@@ -507,6 +507,7 @@ export default function HomeScreen() {
   const showThinking = shouldShowThinkingIndicator(
     presentation,
     isThreadRunning || isPreparingSelectedHandoff,
+    isSubmitting && selectedThread?.status !== "waiting_for_input",
   );
   const isSelectedThreadLoading =
     !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
@@ -1364,7 +1365,7 @@ export default function HomeScreen() {
               color={theme.colors.accent.default}
             />
           </View>
-        ) : !selectedThread && blocks.length === 0 ? (
+        ) : !selectedThread && blocks.length === 0 && !showThinking ? (
           <View style={styles.newThreadState}>
             <Text variant="heading" color="primary">
               {workspace?.kind === "casual" ? "What’s on your mind?" : "Let's build"}
@@ -1377,6 +1378,7 @@ export default function HomeScreen() {
           </View>
         ) : blocks.length === 0 &&
           isSelectedThreadLoading &&
+          !showThinking &&
           !isPreparingSelectedHandoff ? (
           <View style={styles.syncState}>
             <ActivityDiamond
@@ -1390,6 +1392,7 @@ export default function HomeScreen() {
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
+          !showThinking &&
           !isPreparingSelectedHandoff &&
           selectedThreadDetailError ? (
           <View style={styles.syncState}>
@@ -1409,6 +1412,7 @@ export default function HomeScreen() {
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
+          !showThinking &&
           !isPreparingSelectedHandoff ? (
           <EmptyState
             title="No messages yet"
@@ -1462,7 +1466,7 @@ export default function HomeScreen() {
             }
             ListFooterComponent={
               <>
-                {showThinking ? <ThinkingIndicator /> : null}
+                {showThinking ? <ThinkingIndicator submitting={isSubmitting && !isThreadRunning && !isPreparingSelectedHandoff} /> : null}
                 <View style={styles.listBottomSpacer} />
               </>
             }

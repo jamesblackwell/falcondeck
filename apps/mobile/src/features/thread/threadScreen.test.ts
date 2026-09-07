@@ -21,6 +21,12 @@ describe('threadScreen helpers', () => {
     expect(getWorkspaceTitle('/tmp/falcondeck')).toBe('falcondeck')
   })
 
+  it('shows immediate submission feedback before running arrives and clears after failure', () => {
+    expect(shouldShowThinkingIndicator(presentation([]), false, true)).toBe(true)
+    expect(shouldShowThinkingIndicator(presentation([]), false, false)).toBe(false)
+    expect(shouldShowThinkingIndicator(presentation([]), true, false)).toBe(true)
+  })
+
   it('shows thinking while a running thread has no blocks yet', () => {
     expect(shouldShowThinkingIndicator(presentation([]), true)).toBe(true)
   })

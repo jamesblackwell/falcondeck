@@ -8,14 +8,14 @@ import { ActivityDiamond, Text } from '@/components/ui'
     It shares the work-session header's geometry and diamond: the two swap
     in the same slot under the transcript, and matching metrics keep that
     handoff from moving a pixel. */
-export const ThinkingIndicator = memo(function ThinkingIndicator() {
+export const ThinkingIndicator = memo(function ThinkingIndicator({ submitting = false }: { submitting?: boolean }) {
   const { theme } = useUnistyles()
 
   return (
-    <View style={styles.row}>
+    <View style={styles.row} accessibilityRole="progressbar" accessibilityLiveRegion="polite" accessibilityLabel={submitting ? "Sending message" : "Thinking"}>
       <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.accent.default} />
       <Text variant="label" color="muted">
-        Thinking…
+        {submitting ? 'Sending…' : 'Thinking…'}
       </Text>
     </View>
   )

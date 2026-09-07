@@ -8,8 +8,9 @@ export function getWorkspaceTitle(path: string | null | undefined): string {
 export function shouldShowThinkingIndicator(
   presentation: ConversationPresentation,
   isThreadRunning: boolean,
+  isSubmitting = false,
 ): boolean {
-  if (!isThreadRunning) return false
+  if (!isThreadRunning) return isSubmitting
   if (presentation.live_activity_groups.length > 0) return false
 
   const blocks = presentation.history_blocks
