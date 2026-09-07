@@ -3042,6 +3042,7 @@ pub(crate) fn tool_display_metadata(
         summary_hint,
         test_summary,
         provider_output_summary: None,
+        output_total_bytes: None,
     }
 }
 

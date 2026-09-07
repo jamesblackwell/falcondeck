@@ -42,6 +42,19 @@ import {
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
+/**
+ * Mobile pages travel over the relay in 11 KB chunks, so bytes are latency.
+ * Ship image references instead of inline previews, cut tool output at a few
+ * KB, and keep a tail page at its item limit; renderers fetch the full item
+ * through `thread.item` only when it is actually looked at. A screenshot-heavy
+ * Codex page measured 1.7 MB with everything inlined and ~140 KB with this.
+ */
+export const MOBILE_THREAD_DETAIL_OPTIONS = {
+  inline_images: false,
+  tool_output_bytes: 2048,
+  strict_limit: true,
+  compact_workspace: true,
+} as const;
 // Prefetch waits this long after the first snapshot before its first fetch:
 // users open a thread right after launch, and the prefetch must not compete
 // with (or queue ahead of) that foreground load.
@@ -58,7 +71,7 @@ const FOREGROUND_DETAIL_LOAD_POLL_MS = 200;
  * keep every request far inside that deadline and the destination is told
  * the transcript starts mid-conversation.
  */
-const HANDOFF_TRANSCRIPT_PAGE_ITEMS = 40;
+const HANDOFF_TRANSCRIPT_PAGE_ITEMS = 20;
 
 const waitForForegroundDetailLoads = async () => {
   while (activeForegroundDetailLoads > 0) {
@@ -514,12 +527,14 @@ export function useSessionActions() {
                   mode: "before",
                   before_item_id: beforeItemId,
                   limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
+                  ...MOBILE_THREAD_DETAIL_OPTIONS,
                 }
               : {
                   workspace_id: workspaceId,
                   thread_id: threadId,
                   mode: "tail",
                   limit: THREAD_DETAIL_TAIL_LIMIT,
+                  ...MOBILE_THREAD_DETAIL_OPTIONS,
                 },
             {
               requestIdPrefix: options?.older
@@ -642,6 +657,7 @@ export function useSessionActions() {
               thread_id: thread.id,
               mode: "tail",
               limit: THREAD_DETAIL_TAIL_LIMIT,
+              ...MOBILE_THREAD_DETAIL_OPTIONS,
             },
             { requestIdPrefix: "mobile-prefetch" },
           ),
@@ -853,6 +869,11 @@ export function useSessionActions() {
           provider,
           ...destination,
           transcriptPageItems: HANDOFF_TRANSCRIPT_PAGE_ITEMS,
+          // Whatever is already on screen for this thread is free context.
+          seedItems:
+            session.threadDetail?.thread.id === thread.id
+              ? session.threadDetail.items
+              : null,
         },
         {
           onDestinationReady: (handle) => {

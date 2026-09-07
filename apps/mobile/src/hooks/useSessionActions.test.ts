@@ -1174,6 +1174,10 @@ describe("loadThreadDetail", () => {
         thread_id: "thread-1",
         mode: "tail",
         limit: 150,
+        inline_images: false,
+        tool_output_bytes: 2048,
+        strict_limit: true,
+        compact_workspace: true,
       },
       { requestIdPrefix: "mobile-detail" },
     );
@@ -1244,6 +1248,10 @@ describe("loadThreadDetail", () => {
         mode: "before",
         before_item_id: "msg-2",
         limit: 100,
+        inline_images: false,
+        tool_output_bytes: 2048,
+        strict_limit: true,
+        compact_workspace: true,
       },
       { requestIdPrefix: "mobile-detail-older" },
     );

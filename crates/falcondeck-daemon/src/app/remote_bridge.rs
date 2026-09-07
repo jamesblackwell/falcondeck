@@ -239,6 +239,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "sync.extensions"
             | "control.get"
             | "thread.detail"
+            | "thread.item"
             | "preferences.read"
             | "speech.status"
             | "speech.models"
@@ -272,6 +273,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     // pair adjacent so the relay cannot advertise a ready daemon while the
     // required detail handler is still waiting in its registration queue.
     "thread.detail",
+    "thread.item",
     "sync.index",
     "sync.threads",
     "sync.extensions",
@@ -1571,10 +1573,41 @@ impl AppState {
                             &params,
                             &["beforeItemId", "before_item_id"],
                         ),
+                        inline_images: params
+                            .get("inline_images")
+                            .or_else(|| params.get("inlineImages"))
+                            .and_then(Value::as_bool),
+                        tool_output_bytes: params
+                            .get("tool_output_bytes")
+                            .or_else(|| params.get("toolOutputBytes"))
+                            .and_then(Value::as_u64)
+                            .and_then(|value| {
+                                (value <= usize::MAX as u64).then_some(value as usize)
+                            }),
+                        strict_limit: params
+                            .get("strict_limit")
+                            .or_else(|| params.get("strictLimit"))
+                            .and_then(Value::as_bool),
+                        compact_workspace: params
+                            .get("compact_workspace")
+                            .or_else(|| params.get("compactWorkspace"))
+                            .and_then(Value::as_bool),
                     };
                     self.thread_detail_with_request(&request)
                         .await
                         .and_then(|detail| serde_json::to_value(detail).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                // One full conversation item, with inline image previews and
+                // untruncated tool output. Pairs with a `thread.detail` page
+                // that asked for `inline_images: false` / `tool_output_bytes`.
+                "thread.item" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    let item_id = required(&["itemId", "item_id"])?;
+                    self.thread_item(&workspace_id, &thread_id, &item_id)
+                        .await
+                        .and_then(|item| serde_json::to_value(item).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
                 "thread.update" => {

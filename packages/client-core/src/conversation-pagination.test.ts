@@ -179,6 +179,67 @@ describe("mergeThreadDetailPage", () => {
     });
   });
 
+  it("keeps the daemon cursor when a tail page pins the turn's prompt above its window", () => {
+    // Strict mobile pages: prompt (older) + the last 3 items; the cursor
+    // names the first contiguous item, not the pinned prompt.
+    const prompt: ConversationItem = {
+      kind: "user_message",
+      id: "user-1",
+      text: "fix it",
+      attachments: [],
+      created_at: "2026-08-09T11:00:00Z",
+    };
+    const page: ThreadDetail = {
+      ...detail(["tool-5", "tool-6", "tool-7"], { hasOlder: true }),
+      items: [prompt, assistant("tool-5"), assistant("tool-6"), assistant("tool-7")],
+      oldest_item_id: "tool-5",
+    };
+
+    const merged = mergeThreadDetailPage(null, page, "refresh");
+    expect(merged.oldest_item_id).toBe("tool-5");
+    expect(merged.items.map((item) => item.id)).toEqual([
+      "user-1",
+      "tool-5",
+      "tool-6",
+      "tool-7",
+    ]);
+
+    // An older page that still doesn't reach the prompt lands under it.
+    const older = detail(["tool-2", "tool-3", "tool-4"], { hasOlder: true });
+    const prepended = mergeThreadDetailPage(merged, older, "prepend");
+    expect(prepended.items.map((item) => item.id)).toEqual([
+      "user-1",
+      "tool-2",
+      "tool-3",
+      "tool-4",
+      "tool-5",
+      "tool-6",
+      "tool-7",
+    ]);
+    expect(prepended.oldest_item_id).toBe("tool-2");
+
+    // The page that contains the prompt replaces the pinned copy in place.
+    const oldest: ThreadDetail = {
+      ...detail(["tool-0", "tool-1"]),
+      items: [prompt, assistant("tool-0"), assistant("tool-1")],
+      oldest_item_id: "user-1",
+    };
+    const complete = mergeThreadDetailPage(prepended, oldest, "prepend");
+    expect(complete.items.map((item) => item.id)).toEqual([
+      "user-1",
+      "tool-0",
+      "tool-1",
+      "tool-2",
+      "tool-3",
+      "tool-4",
+      "tool-5",
+      "tool-6",
+      "tool-7",
+    ]);
+    expect(complete.oldest_item_id).toBe("user-1");
+    expect(complete.has_older).toBe(false);
+  });
+
   it("never merges pages belonging to different threads", () => {
     const page = detail(["other"], { threadId: "thread-2" });
     expect(mergeThreadDetailPage(detail(["current"]), page, "prepend")).toBe(

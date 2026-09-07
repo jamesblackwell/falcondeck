@@ -97,7 +97,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   return (
     <View style={styles.row}>
       <View style={styles.bubble}>
-        <AttachmentPreviewList attachments={item.attachments} />
+        <AttachmentPreviewList attachments={item.attachments} itemId={item.id} />
         <View style={collapsed ? styles.clampedText : null}>
           <View
             collapsable={false}

@@ -489,6 +489,10 @@ async fn final_assistant_text(
             mode: ThreadDetailMode::Full,
             limit: None,
             before_item_id: None,
+            inline_images: None,
+            tool_output_bytes: None,
+            strict_limit: None,
+            compact_workspace: None,
         })
         .await
         .ok()?;

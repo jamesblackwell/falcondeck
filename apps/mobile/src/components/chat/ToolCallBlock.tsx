@@ -47,6 +47,10 @@ import {
 
 import { ActivityDiamond, Text } from "@/components/ui";
 import { mediaAudioPlayer } from "@/lib/media-audio-player";
+import {
+  toolOutputIsTruncated,
+  useFullThreadItem,
+} from "@/lib/thread-item-loader";
 import { ArtifactShareButton } from "./ArtifactShareButton";
 import { CodeBlock } from "./CodeBlock";
 import { ImagePreviewModal } from "./ImagePreviewModal";
@@ -76,6 +80,13 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const lifecycle = toolLifecycle(item);
   const awaitingApproval = lifecycle === "awaiting_approval";
   const { chevronStyle, isOpen, toggle } = useCollapsible(defaultOpen, item.id);
+  // Pages cut long output at a few KB; the full text is fetched only once the
+  // card is actually opened, and the item updates in place when it lands.
+  const outputTruncated = toolOutputIsTruncated(item);
+  const fullItem = useFullThreadItem(
+    item.id,
+    outputTruncated && (isOpen || awaitingApproval),
+  );
 
   const lifecycleLabel = toolLifecycleLabel(lifecycle);
   const commandDetail =
@@ -319,18 +330,61 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           </>
         )}
       </Pressable>
-      {hasContent && awaitingApproval ? (
+      {hasContent && (awaitingApproval || isOpen) ? (
         <View style={styles.body}>
           <ToolDetailBody item={item} />
-        </View>
-      ) : hasContent && isOpen ? (
-        <View style={styles.body}>
-          <ToolDetailBody item={item} />
+          {outputTruncated ? (
+            <TruncatedOutputNotice
+              status={fullItem.status}
+              totalBytes={item.display.output_total_bytes ?? 0}
+              onRetry={fullItem.retry}
+            />
+          ) : null}
         </View>
       ) : null}
     </View>
   );
 });
+
+function TruncatedOutputNotice({
+  status,
+  totalBytes,
+  onRetry,
+}: {
+  status: "idle" | "loading" | "ready" | "error";
+  totalBytes: number;
+  onRetry: () => void;
+}) {
+  const { theme } = useUnistyles();
+  if (status === "error") {
+    return (
+      <Pressable
+        style={styles.truncatedNotice}
+        onPress={onRetry}
+        accessibilityRole="button"
+        accessibilityLabel="Couldn't load the full output. Retry"
+      >
+        <Text variant="caption" size="xs" color="danger">
+          Couldn't load the full output ({formatArtifactSize(totalBytes)}).
+          Tap to retry.
+        </Text>
+      </Pressable>
+    );
+  }
+  return (
+    <View
+      style={styles.truncatedNotice}
+      accessible
+      accessibilityLiveRegion="polite"
+      accessibilityLabel="Loading full output"
+    >
+      <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+      <Text variant="caption" size="xs" color="muted">
+        Loading the full output ({formatArtifactSize(totalBytes)})…
+      </Text>
+    </View>
+  );
+}
 
 function ToolDetailBody({ item }: { item: ToolCall }) {
   const detail = item.detail;
@@ -1352,6 +1406,12 @@ const styles = StyleSheet.create((theme) => ({
     borderTopColor: theme.colors.border.subtle,
     paddingTop: theme.spacing[2],
     gap: theme.spacing[2],
+  },
+  truncatedNotice: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    paddingTop: theme.spacing[2],
   },
   commandDetail: {
     gap: theme.spacing[2],

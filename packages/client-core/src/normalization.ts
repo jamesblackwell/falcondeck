@@ -2121,6 +2121,11 @@ export function normalizeToolCallDisplay(value: unknown): ToolCallDisplay {
     provider_output_summary: normalizeToolProviderOutputSummary(
       display.provider_output_summary,
     ),
+    ...(typeof display.output_total_bytes === "number" &&
+    Number.isFinite(display.output_total_bytes) &&
+    display.output_total_bytes > 0
+      ? { output_total_bytes: display.output_total_bytes }
+      : {}),
   };
 }
 

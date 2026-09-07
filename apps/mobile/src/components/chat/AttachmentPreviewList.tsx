@@ -10,19 +10,24 @@ import {
   type ImageInput,
 } from "@falcondeck/client-core";
 
-import { Text } from "@/components/ui";
+import { ActivityDiamond, Text } from "@/components/ui";
+import { imageNeedsFetch, useFullThreadItem } from "@/lib/thread-item-loader";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 
 interface AttachmentPreviewListProps {
   attachments: ImageInput[];
   onRemoveAttachment?: (attachmentId: string) => void;
   disabled?: boolean;
+  /** Transcript item that owns these attachments. Set for history messages
+   * so stripped previews can be fetched on demand; composer drafts omit it. */
+  itemId?: string;
 }
 
 export const AttachmentPreviewList = memo(function AttachmentPreviewList({
   attachments,
   onRemoveAttachment,
   disabled = false,
+  itemId,
 }: AttachmentPreviewListProps) {
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
     null,
@@ -55,6 +60,7 @@ export const AttachmentPreviewList = memo(function AttachmentPreviewList({
             key={attachment.id}
             attachment={attachment}
             disabled={disabled}
+            itemId={itemId}
             onPreview={openPreview}
             onRemoveAttachment={onRemoveAttachment}
           />
@@ -73,11 +79,13 @@ export const AttachmentPreviewList = memo(function AttachmentPreviewList({
 const AttachmentCard = memo(function AttachmentCard({
   attachment,
   disabled,
+  itemId,
   onPreview,
   onRemoveAttachment,
 }: {
   attachment: ImageInput;
   disabled: boolean;
+  itemId?: string;
   onPreview: (attachment: ImageInput) => void;
   onRemoveAttachment?: (attachmentId: string) => void;
 }) {
@@ -86,6 +94,11 @@ const AttachmentCard = memo(function AttachmentCard({
   const label = imageInputLabel(attachment);
   const url = attachment.url.trim();
   const renderable = isSafeNativeImageUrl(url) && failedUrl !== url;
+  // History pages ship attachment references; fetch the preview on demand.
+  const needsFetch = Boolean(itemId) && !renderable && imageNeedsFetch(attachment);
+  const fullItem = useFullThreadItem(itemId ?? "", needsFetch);
+  const fetching =
+    needsFetch && (fullItem.status === "loading" || fullItem.status === "idle");
 
   useEffect(() => setFailedUrl(null), [url]);
 
@@ -110,6 +123,18 @@ const AttachmentCard = memo(function AttachmentCard({
             onError={() => setFailedUrl(url)}
           />
         </Pressable>
+      ) : fetching ? (
+        <View
+          style={styles.unavailable}
+          accessible
+          accessibilityLabel={`${label}, loading image`}
+          accessibilityLiveRegion="polite"
+        >
+          <ActivityDiamond
+            size={theme.iconSize.sm}
+            color={theme.colors.accent.default}
+          />
+        </View>
       ) : (
         <View
           style={styles.unavailable}

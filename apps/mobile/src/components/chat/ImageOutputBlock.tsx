@@ -12,6 +12,10 @@ import {
 } from "@falcondeck/client-core";
 
 import { ActivityDiamond, Text } from "@/components/ui";
+import {
+  imageItemNeedsFetch,
+  useFullThreadItem,
+} from "@/lib/thread-item-loader";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { useExternalUrl } from "./useExternalUrl";
 
@@ -30,6 +34,14 @@ export const ImageOutputBlock = memo(function ImageOutputBlock({
   const safeUrl = isSafeMediaUrl(url, "image");
   const failed = url.length > 0 && failedUrl === url;
   const active = lifecycle === "pending" || lifecycle === "streaming";
+  // Pages carry image references, not bytes; the preview is fetched when
+  // the block renders and the item updates in place with a data URL.
+  const needsFetch =
+    !safeUrl && !active && lifecycle !== "error" && imageItemNeedsFetch(item);
+  const fullItem = useFullThreadItem(item.id, needsFetch);
+  const fetching =
+    needsFetch && (fullItem.status === "loading" || fullItem.status === "idle");
+  const fetchFailed = needsFetch && fullItem.status === "error";
   const alt =
     item.image.alt_text?.trim() ||
     item.title?.trim() ||
@@ -58,7 +70,9 @@ export const ImageOutputBlock = memo(function ImageOutputBlock({
         <View
           style={[
             styles.media,
-            image || active ? styles.mediaCanvas : styles.mediaUnavailable,
+            image || active || fetching
+              ? styles.mediaCanvas
+              : styles.mediaUnavailable,
           ]}
         >
           {image ? (
@@ -85,6 +99,38 @@ export const ImageOutputBlock = memo(function ImageOutputBlock({
                 Generating image…
               </Text>
             </View>
+          ) : fetching ? (
+            <View
+              style={styles.placeholder}
+              accessible
+              accessibilityLabel="Loading image"
+              accessibilityLiveRegion="polite"
+            >
+              <ActivityDiamond
+                size={theme.iconSize.sm}
+                color={theme.colors.accent.default}
+              />
+              <Text variant="caption" color="muted">
+                Loading image…
+              </Text>
+            </View>
+          ) : fetchFailed ? (
+            <Pressable
+              style={styles.placeholder}
+              onPress={fullItem.retry}
+              accessible
+              accessibilityRole="button"
+              accessibilityLabel="Couldn't load the image. Retry"
+            >
+              <CircleX
+                accessible={false}
+                size={theme.iconSize.sm}
+                color={theme.colors.danger.default}
+              />
+              <Text variant="caption" color="danger">
+                Couldn't load the image. Tap to retry.
+              </Text>
+            </Pressable>
           ) : (
             <View
               style={styles.placeholder}

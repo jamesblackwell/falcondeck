@@ -3710,6 +3710,10 @@ impl AppState {
                 mode: falcondeck_core::ThreadDetailMode::Full,
                 limit: None,
                 before_item_id: None,
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: None,
+                compact_workspace: None,
             },
         )
         .await
@@ -3720,6 +3724,17 @@ impl AppState {
         request: &ThreadDetailRequest,
     ) -> Result<ThreadDetail, DaemonError> {
         workspace_ops::thread_detail(self, request).await
+    }
+
+    /// One conversation item with inline previews and full tool output; the
+    /// on-demand counterpart of a trimmed `thread.detail` page.
+    pub async fn thread_item(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<ConversationItem, DaemonError> {
+        workspace_ops::thread_item(self, workspace_id, thread_id, item_id).await
     }
 
     pub async fn set_thread_goal(

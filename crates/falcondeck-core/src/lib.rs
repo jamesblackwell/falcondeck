@@ -566,6 +566,11 @@ pub struct ToolCallDisplay {
     /// Cheap provider-output signals for transcript grouping and collapsed rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_output_summary: Option<ToolProviderOutputSummary>,
+    /// Set only when a detail window truncated `output` (see
+    /// `ThreadDetailRequest::tool_output_bytes`); holds the untruncated byte
+    /// length so clients can offer the full text on demand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_total_bytes: Option<u64>,
 }
 
 /// Provider-independent counts derived without decoding the retained raw output.
@@ -861,6 +866,7 @@ impl Default for ToolCallDisplay {
             summary_hint: None,
             test_summary: None,
             provider_output_summary: None,
+            output_total_bytes: None,
         }
     }
 }
@@ -2318,6 +2324,26 @@ pub struct ThreadDetailRequest {
     /// Optional item id that bounds a `before` history page.
     #[serde(default)]
     pub before_item_id: Option<String>,
+    /// When `Some(false)`, image and attachment previews are not inlined as
+    /// data URLs (a screenshot-heavy page shrinks by hundreds of KB); clients
+    /// fetch the renderable item on demand through `thread.item`.
+    #[serde(default)]
+    pub inline_images: Option<bool>,
+    /// Optional byte cap for captured tool output in the returned window.
+    /// Truncated items carry `display.output_total_bytes`; `thread.item`
+    /// returns the full output.
+    #[serde(default)]
+    pub tool_output_bytes: Option<usize>,
+    /// When `Some(true)`, a tail page honours `limit` exactly instead of
+    /// growing to the start of the latest turn. The prompt that started the
+    /// turn is still prepended so the page never opens mid-turn without it.
+    #[serde(default)]
+    pub strict_limit: Option<bool>,
+    /// When `Some(true)`, the returned workspace summary carries no agent,
+    /// skill, or model catalogs (~260 KB on a busy workspace). Clients that
+    /// already hold the snapshot only read the workspace id from a page.
+    #[serde(default)]
+    pub compact_workspace: Option<bool>,
 }
 
 /// Image attachment metadata used in turn inputs and conversation history.

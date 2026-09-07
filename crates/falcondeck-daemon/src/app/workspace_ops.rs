@@ -4616,7 +4616,11 @@ pub(super) async fn thread_detail(
         .threads
         .get(&request.thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-    let workspace_summary = workspace.summary.clone();
+    let workspace_summary = if request.compact_workspace.unwrap_or(false) {
+        compact_workspace_summary(&workspace.summary)
+    } else {
+        workspace.summary.clone()
+    };
     let thread_summary = thread.summary.clone();
     let mut detail = thread_detail_window(&thread.items, request)?;
     settle_thread_detail_items(&mut detail.items, &thread.summary, Utc::now());
@@ -4645,7 +4649,25 @@ pub(super) async fn thread_detail(
         .lock()
         .expect("acp hydration set poisoned")
         .contains(&(request.workspace_id.clone(), request.thread_id.clone()));
-    let items = with_renderable_attachment_previews_for_items(detail.items).await;
+    // Mobile pages ask for references instead of inline image bytes and a
+    // capped tool output: a screenshot-heavy Codex page measured 1.7 MB with
+    // both inlined, ~140 KB without. `thread.item` restores either on demand.
+    let items = if request.inline_images.unwrap_or(true) {
+        with_renderable_attachment_previews_for_items(detail.items).await
+    } else {
+        detail
+            .items
+            .into_iter()
+            .map(without_inline_image_data)
+            .collect()
+    };
+    let items = match request.tool_output_bytes {
+        Some(cap) => items
+            .into_iter()
+            .map(|item| with_tool_output_capped(item, cap))
+            .collect(),
+        None => items,
+    };
 
     Ok(ThreadDetail {
         workspace: workspace_summary,
@@ -4659,6 +4681,103 @@ pub(super) async fn thread_detail(
         // loading state instead of rendering a brand-new empty conversation.
         is_partial: detail.is_partial || acp_hydrating || needs_native_hydration,
     })
+}
+
+/// One stored conversation item with inline image previews and untruncated
+/// tool output — the on-demand counterpart of a page built with
+/// `inline_images: false` or `tool_output_bytes`. Only items the client has
+/// already seen in a page are ever requested, so a thread that still needs a
+/// provider resume simply reports the item as missing.
+pub(super) async fn thread_item(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    item_id: &str,
+) -> Result<ConversationItem, DaemonError> {
+    let (item, thread_summary) = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let item = thread
+            .items
+            .iter()
+            .find(|item| conversation_item_id(item) == item_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound("conversation item not found".to_string()))?;
+        (item, thread.summary.clone())
+    };
+    let mut items = vec![item];
+    settle_thread_detail_items(&mut items, &thread_summary, Utc::now());
+    let item = items.pop().expect("one settled item");
+    Ok(super::conversation_helpers::with_renderable_attachment_previews(item).await)
+}
+
+/// The workspace summary without its catalogs. Every page used to repeat the
+/// agents' skill and model lists (~260 KB on a busy workspace) although page
+/// consumers only read the workspace id.
+fn compact_workspace_summary(summary: &WorkspaceSummary) -> WorkspaceSummary {
+    WorkspaceSummary {
+        agents: Vec::new(),
+        skills: Vec::new(),
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        ..summary.clone()
+    }
+}
+
+/// Drops inline image bytes from an item so a page carries only references.
+/// A stripped URL is empty; the local path and MIME type stay so a client can
+/// tell "fetch me" from "nothing to show", and `thread.item` restores the
+/// preview from the stored item.
+fn without_inline_image_data(mut item: ConversationItem) -> ConversationItem {
+    fn strip(url: &mut String) {
+        if url.trim_start().starts_with("data:") {
+            url.clear();
+        }
+    }
+    match &mut item {
+        ConversationItem::UserMessage { attachments, .. } => {
+            for attachment in attachments {
+                strip(&mut attachment.url);
+            }
+        }
+        ConversationItem::Image { image, .. } => strip(&mut image.url),
+        _ => {}
+    }
+    item
+}
+
+/// Smallest cap a client can ask for: enough for the collapsed row label
+/// (which reads the head of the output) and a useful preview when expanded.
+const MIN_TOOL_OUTPUT_CAP_BYTES: usize = 512;
+
+/// Truncates captured tool output to `cap` bytes on a character boundary and
+/// records the untruncated length on the display metadata. Items at or under
+/// the cap are returned untouched (no marker), so clients only fetch on demand
+/// for the outputs that were actually cut.
+fn with_tool_output_capped(mut item: ConversationItem, cap: usize) -> ConversationItem {
+    let cap = cap.max(MIN_TOOL_OUTPUT_CAP_BYTES);
+    if let ConversationItem::ToolCall {
+        output: Some(output),
+        display,
+        ..
+    } = &mut item
+        && output.len() > cap
+    {
+        let total = output.len() as u64;
+        let mut end = cap;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.truncate(end);
+        display.output_total_bytes = Some(total);
+    }
+    item
 }
 
 /// Whether a native OpenCode thread's transcript must be rehydrated from the
@@ -4753,7 +4872,10 @@ fn thread_detail_window(
         ThreadDetailMode::Tail => {
             let limit = clamp_limit(request.limit, DEFAULT_TAIL_LIMIT);
             let mut start = items.len().saturating_sub(limit);
-            if let Some(user_start) = latest_user_message_index(items)
+            // A strict page never grows past `limit`: the prompt is still
+            // prepended below, but a 400-item turn is paged, not shipped whole.
+            if !request.strict_limit.unwrap_or(false)
+                && let Some(user_start) = latest_user_message_index(items)
                 && user_start < start
             {
                 let from_user = items.len() - user_start;
@@ -4761,7 +4883,10 @@ fn thread_detail_window(
                     start = user_start;
                 }
             }
-            let mut window = items[start..].to_vec();
+            // `oldest_item_id` is the contiguous window's first item, computed
+            // before the prompt is prepended: a `before` page keyed on the
+            // prompt would skip everything between it and the window.
+            let mut detail = build_window(items[start..].to_vec(), start > 0, start > 0);
             // A verbose Codex turn can emit more items than the requested
             // tail. Keep the prompt that started it even when the rest of
             // that turn has to stay capped.
@@ -4770,14 +4895,15 @@ fn thread_detail_window(
             {
                 let user = items[user_start].clone();
                 let user_id = conversation_item_id(&user);
-                if !window
+                if !detail
+                    .items
                     .iter()
                     .any(|item| conversation_item_id(item) == user_id)
                 {
-                    window.insert(0, user);
+                    detail.items.insert(0, user);
                 }
             }
-            Ok(build_window(window, start > 0, start > 0))
+            Ok(detail)
         }
         ThreadDetailMode::Before => {
             let before_item_id = request.before_item_id.as_ref().ok_or_else(|| {
@@ -6365,6 +6491,10 @@ mod tests {
                 mode: ThreadDetailMode::Tail,
                 limit: Some(2),
                 before_item_id: None,
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: None,
+                compact_workspace: None,
             },
         )
         .unwrap();
@@ -6396,6 +6526,10 @@ mod tests {
                 mode: ThreadDetailMode::Tail,
                 limit: Some(3),
                 before_item_id: None,
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: None,
+                compact_workspace: None,
             },
         )
         .unwrap();
@@ -6411,6 +6545,145 @@ mod tests {
     }
 
     #[test]
+    fn strict_tail_window_honours_the_limit_and_still_prepends_the_prompt() {
+        let mut items = vec![user_message("user-1", "keep this prompt")];
+        items.extend((0..8).map(|index| assistant_message(&format!("tool-{index}"))));
+
+        let detail = thread_detail_window(
+            &items,
+            &ThreadDetailRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                mode: ThreadDetailMode::Tail,
+                limit: Some(3),
+                before_item_id: None,
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: Some(true),
+                compact_workspace: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            detail
+                .items
+                .iter()
+                .map(conversation_item_id)
+                .collect::<Vec<_>>(),
+            vec!["user-1", "tool-5", "tool-6", "tool-7"]
+        );
+        assert!(detail.has_older);
+        assert!(detail.is_partial);
+        assert_eq!(detail.oldest_item_id.as_deref(), Some("tool-5"));
+    }
+
+    #[test]
+    fn tool_output_cap_truncates_on_a_char_boundary_and_records_the_total() {
+        let output = format!("{}é{}", "a".repeat(511), "b".repeat(2000));
+        let item = ConversationItem::ToolCall {
+            id: "tool-1".to_string(),
+            title: "cat".to_string(),
+            tool_kind: "command".to_string(),
+            status: "completed".to_string(),
+            output: Some(output.clone()),
+            exit_code: Some(0),
+            display: Box::default(),
+            detail: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+
+        let capped = with_tool_output_capped(item.clone(), 512);
+        let ConversationItem::ToolCall {
+            output: Some(capped_output),
+            display,
+            ..
+        } = &capped
+        else {
+            panic!("tool call expected");
+        };
+        // 512 lands inside the two-byte `é`; the cut backs up to 511.
+        assert_eq!(capped_output.len(), 511);
+        assert_eq!(display.output_total_bytes, Some(output.len() as u64));
+
+        // Requests below the floor are raised to it, and short outputs stay
+        // unmarked so clients never fetch what they already have.
+        let floor = with_tool_output_capped(item.clone(), 1);
+        let ConversationItem::ToolCall { output: Some(o), .. } = &floor else {
+            panic!("tool call expected");
+        };
+        assert_eq!(o.len(), 511);
+        let untouched = with_tool_output_capped(item, 10_000);
+        assert_eq!(
+            untouched,
+            ConversationItem::ToolCall {
+                id: "tool-1".to_string(),
+                title: "cat".to_string(),
+                tool_kind: "command".to_string(),
+                status: "completed".to_string(),
+                output: Some(output),
+                exit_code: Some(0),
+                display: Box::default(),
+                detail: None,
+                created_at: match &untouched {
+                    ConversationItem::ToolCall { created_at, .. } => *created_at,
+                    _ => unreachable!(),
+                },
+                completed_at: None,
+            }
+        );
+    }
+
+    #[test]
+    fn stripping_inline_images_keeps_paths_and_leaves_references_alone() {
+        let image = ConversationItem::Image {
+            id: "img-1".to_string(),
+            title: Some("shot.png".to_string()),
+            image: falcondeck_core::ConversationImage {
+                id: "img-1-image".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "data:image/png;base64,AAAA".to_string(),
+                local_path: Some("/tmp/shot.png".to_string()),
+                alt_text: None,
+            },
+            lifecycle: falcondeck_core::ContentLifecycle::Complete,
+            created_at: Utc::now(),
+        };
+        let ConversationItem::Image { image, .. } = without_inline_image_data(image) else {
+            panic!("image expected");
+        };
+        assert_eq!(image.url, "");
+        assert_eq!(image.local_path.as_deref(), Some("/tmp/shot.png"));
+        assert_eq!(image.mime_type.as_deref(), Some("image/png"));
+
+        let message = user_message("user-1", "see attached");
+        let ConversationItem::UserMessage { mut attachments, .. } = message else {
+            panic!("user message expected");
+        };
+        attachments.push(falcondeck_core::ImageInput {
+            id: "att-1".to_string(),
+            name: None,
+            mime_type: None,
+            url: "https://example.com/a.png".to_string(),
+            local_path: None,
+        });
+        let stripped = without_inline_image_data(ConversationItem::UserMessage {
+            id: "user-1".to_string(),
+            text: "see attached".to_string(),
+            attachments,
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        });
+        let ConversationItem::UserMessage { attachments, .. } = stripped else {
+            panic!("user message expected");
+        };
+        assert_eq!(attachments[0].url, "https://example.com/a.png");
+    }
+
+    #[test]
     fn thread_detail_window_prepends_the_latest_user_message_when_the_turn_exceeds_the_page_cap() {
         let mut items = vec![user_message("user-1", "keep this prompt")];
         items.extend((0..501).map(|index| assistant_message(&format!("tool-{index}"))));
@@ -6423,6 +6696,10 @@ mod tests {
                 mode: ThreadDetailMode::Tail,
                 limit: Some(3),
                 before_item_id: None,
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: None,
+                compact_workspace: None,
             },
         )
         .unwrap();
@@ -6454,6 +6731,10 @@ mod tests {
                 mode: ThreadDetailMode::Before,
                 limit: Some(2),
                 before_item_id: Some("msg-4".to_string()),
+                inline_images: None,
+                tool_output_bytes: None,
+                strict_limit: None,
+                compact_workspace: None,
             },
         )
         .unwrap();

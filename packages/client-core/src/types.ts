@@ -551,6 +551,9 @@ export type ToolCallDisplay = {
   test_summary?: ToolTestSummary | null;
   /** Optional because older daemons leave provider output inspection to clients. */
   provider_output_summary?: ToolProviderOutputSummary | null;
+  /** Present only when a detail page truncated `output`; the untruncated
+   * byte length. `thread.item` returns the full text. */
+  output_total_bytes?: number | null;
 };
 
 export type ToolCommandAction = {
@@ -1505,6 +1508,18 @@ export type ThreadDetailRequest = {
   mode?: ThreadDetailMode | null;
   limit?: number | null;
   before_item_id?: string | null;
+  /** `false` ships image references instead of inline data URLs; fetch the
+   * renderable item with `thread.item`. Older daemons ignore it. */
+  inline_images?: boolean | null;
+  /** Byte cap for tool output in the page; truncated items carry
+   * `display.output_total_bytes`. Older daemons ignore it. */
+  tool_output_bytes?: number | null;
+  /** `true` keeps a tail page at `limit` items instead of growing to the
+   * start of the latest turn. Older daemons ignore it. */
+  strict_limit?: boolean | null;
+  /** `true` drops the agent/skill/model catalogs from the page's workspace
+   * summary; clients read only its id. Older daemons ignore it. */
+  compact_workspace?: boolean | null;
 };
 
 export type EventEnvelope = {

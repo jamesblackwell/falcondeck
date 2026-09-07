@@ -194,6 +194,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_thread),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/items/{item_id}",
+            get(thread_item),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/suggest-title",
             post(suggest_thread_title),
         )
@@ -740,6 +744,10 @@ async fn thread_detail(
                 mode: query.mode,
                 limit: query.limit,
                 before_item_id: query.before_item_id,
+                inline_images: query.inline_images,
+                tool_output_bytes: query.tool_output_bytes,
+                strict_limit: query.strict_limit,
+                compact_workspace: query.compact_workspace,
             })
             .await?,
     ))
@@ -753,6 +761,23 @@ struct ThreadDetailQuery {
     limit: Option<usize>,
     #[serde(default)]
     before_item_id: Option<String>,
+    #[serde(default)]
+    inline_images: Option<bool>,
+    #[serde(default)]
+    tool_output_bytes: Option<usize>,
+    #[serde(default)]
+    strict_limit: Option<bool>,
+    #[serde(default)]
+    compact_workspace: Option<bool>,
+}
+
+async fn thread_item(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id, item_id)): Path<(String, String, String)>,
+) -> Result<Json<falcondeck_core::ConversationItem>, DaemonError> {
+    Ok(Json(
+        state.thread_item(&workspace_id, &thread_id, &item_id).await?,
+    ))
 }
 
 async fn update_thread(

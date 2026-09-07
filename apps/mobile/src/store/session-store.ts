@@ -433,9 +433,16 @@ function historyStateForItems(
   items: ConversationItem[],
   fallback: Partial<ThreadHistoryState> = {},
 ): ThreadHistoryState {
+  // The daemon's cursor names the first item of the contiguous window. A
+  // tail page may carry the turn's prompt pinned above that window, so
+  // items[0] is only the cursor when no better one survives the merge.
+  const retainedCursor =
+    fallback.oldestItemId && items.some((item) => item.id === fallback.oldestItemId)
+      ? fallback.oldestItemId
+      : null;
   return {
     hasOlder: fallback.hasOlder ?? false,
-    oldestItemId: items[0]?.id ?? fallback.oldestItemId ?? null,
+    oldestItemId: retainedCursor ?? items[0]?.id ?? fallback.oldestItemId ?? null,
     newestItemId: items.at(-1)?.id ?? fallback.newestItemId ?? null,
     isPartial: fallback.isPartial ?? false,
   };

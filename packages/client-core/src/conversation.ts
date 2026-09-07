@@ -556,16 +556,27 @@ export function mergeThreadDetailPage(
 
   let items: ConversationItem[];
   let hasOlder: boolean;
+  // Cursor for the next older page: the first item of the contiguous window,
+  // which the daemon reports separately because a tail page may carry the
+  // turn's prompt pinned above it. Falls back to items[0] for old daemons.
+  let oldestItemId: string | null;
 
   if (mode === "prepend") {
     const pageKeys = new Set(page.items.map(conversationItemKey));
-    items = [
-      ...page.items,
-      ...current.items.filter(
-        (item) => !pageKeys.has(conversationItemKey(item)),
-      ),
-    ];
+    const retained = current.items.filter(
+      (item) => !pageKeys.has(conversationItemKey(item)),
+    );
+    // A prompt pinned above the current window predates the older page;
+    // keep it on top until the page that actually contains it arrives.
+    const pinned =
+      retained[0]?.kind === "user_message" &&
+      page.items.length > 0 &&
+      retained[0].created_at < page.items[0].created_at
+        ? retained.shift()
+        : undefined;
+    items = [...(pinned ? [pinned] : []), ...page.items, ...retained];
     hasOlder = page.has_older;
+    oldestItemId = page.oldest_item_id ?? page.items[0]?.id ?? null;
   } else {
     const currentIndexes = new Map(
       current.items.map(
@@ -584,9 +595,14 @@ export function mergeThreadDetailPage(
     if (overlapIndex === -1) {
       items = page.items;
       hasOlder = page.has_older;
+      oldestItemId = page.oldest_item_id ?? null;
     } else {
       items = [...current.items.slice(0, overlapIndex), ...page.items];
       hasOlder = overlapIndex > 0 ? current.has_older : page.has_older;
+      oldestItemId =
+        overlapIndex > 0
+          ? (current.oldest_item_id ?? null)
+          : (page.oldest_item_id ?? null);
     }
 
     // A just-sent user message can fall out of the daemon tail once a
@@ -645,11 +661,13 @@ export function mergeThreadDetailPage(
     }
   }
 
+  const cursorRetained =
+    oldestItemId != null && items.some((item) => item.id === oldestItemId);
   return {
     ...page,
     items,
     has_older: hasOlder,
-    oldest_item_id: items[0]?.id ?? null,
+    oldest_item_id: cursorRetained ? oldestItemId : (items[0]?.id ?? null),
     newest_item_id: items.at(-1)?.id ?? null,
     // A continuous merged window is partial exactly while the daemon says
     // more history remains before its oldest retained item.
