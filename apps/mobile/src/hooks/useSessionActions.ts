@@ -49,11 +49,11 @@ const RECENT_THREAD_PREFETCH_LIMIT = 5;
  * Codex page measured 1.7 MB with everything inlined and ~140 KB with this.
  */
 /**
- * First page size for the phone. The desktop constant (150) is more than a
- * phone screen shows and, over the relay, page bytes are the wait; the
- * remaining history stays one "Load older" tap away.
+ * First page size for the phone. Twenty recent items fit a screenful plus
+ * context; sampled active threads were 34–71% smaller than fifty-item pages.
+ * The remaining history stays one "Load older" tap away.
  */
-export const MOBILE_THREAD_DETAIL_TAIL_LIMIT = 50;
+export const MOBILE_THREAD_DETAIL_TAIL_LIMIT = 20;
 export const MOBILE_THREAD_DETAIL_OPTIONS = {
   inline_images: false,
   tool_output_bytes: 2048,
