@@ -1639,14 +1639,14 @@ describe("handoffToProvider", () => {
       harness.unmount();
     }
 
-    // Budgeted: a full read of a long thread outlives the relay deadline.
+    // Paged: a full read of a long thread outlives the relay deadline.
     expect(rpc).toHaveBeenCalledWith(
       "thread.detail",
       expect.objectContaining({
         workspace_id: "w1",
         thread_id: "t1",
         mode: "tail",
-        limit: 150,
+        limit: 40,
       }),
       { requestIdPrefix: "mobile-handoff-detail" },
     );
