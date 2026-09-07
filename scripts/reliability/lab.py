@@ -288,9 +288,11 @@ def nodes(tree):
 
 def fill(state, label, value):
     if label=='Message':
-        command(['axe','tap','--id','message-composer','--udid',state['simulator']])
+        command(['axe','tap','--id','message-composer','--post-delay','0.5','--udid',state['simulator']])
     else:
-        tap(state,label)
+        # Focus arrives asynchronously on a fresh simulator. Cmd+A sent in
+        # the tap's turn can be ignored, causing paste to append to the URL.
+        command(['axe','tap','--label',label,'--post-delay','0.5','--udid',state['simulator']])
     command(['xcrun','simctl','pbcopy',state['simulator']],input=value)
     command(['axe','key-combo','--key','4','--modifiers','227','--udid',state['simulator']])
     command(['axe','key-combo','--key','25','--modifiers','227','--udid',state['simulator']])
