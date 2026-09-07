@@ -4,11 +4,11 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native'
 
 const SHOW_JUMP_OFFSET = 200
 const RESUME_FOLLOW_OFFSET = 44
-// A peek this far from the tail is a read-back, not finger jitter. Layout
+// Ignore only subpixel rounding when detecting a read-back. Layout
 // corrections on old / freshly-loaded threads routinely move the raw offset
 // by more than this while the viewport stays put, so we compare distance
 // from the tail rather than y.
-const UPWARD_PEEK = 8
+const UPWARD_PEEK = 1
 // FlashList's own bottom-pinning, permanently off: a negative threshold makes
 // its bound detection skip the near-bottom bookkeeping entirely.
 const AUTOSCROLL_DISABLED = -1
@@ -95,6 +95,7 @@ export function useScrollToBottom<T>() {
       distance > dragStartDistanceRef.current + UPWARD_PEEK
     ) {
       suppressFollowResumeRef.current = true
+      isFollowingRef.current = false
     }
     const nextVisible = distance > SHOW_JUMP_OFFSET
     if (nextVisible === showJumpButtonRef.current) return
@@ -117,6 +118,7 @@ export function useScrollToBottom<T>() {
   )
 
   const resumeFollowing = useCallback(() => {
+    dragStartDistanceRef.current = null
     suppressFollowResumeRef.current = false
     setFollowing(true)
     // No scrollToEnd: the reader is already at the tail. Animating shut a
@@ -127,7 +129,8 @@ export function useScrollToBottom<T>() {
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const startDistance = dragStartDistanceRef.current
       const endDistance = distanceFromBottom(event)
-      dragStartDistanceRef.current = null
+      // Keep the start distance through momentum: release can precede most
+      // of the movement in a short fling.
       fingerDownRef.current = false
       // Only resume when the drag ended near the bottom AND moved toward it.
       // An upward peek — even one whose raw offset rose because a row above
@@ -139,7 +142,11 @@ export function useScrollToBottom<T>() {
         suppressFollowResumeRef.current = true
         return
       }
-      if (endDistance <= RESUME_FOLLOW_OFFSET) {
+      if (
+        startDistance !== null &&
+        endDistance < startDistance - UPWARD_PEEK &&
+        endDistance <= RESUME_FOLLOW_OFFSET
+      ) {
         resumeFollowing()
       }
     },
@@ -148,10 +155,15 @@ export function useScrollToBottom<T>() {
 
   const onMomentumScrollEnd = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const startDistance = dragStartDistanceRef.current
+      const endDistance = distanceFromBottom(event)
+      dragStartDistanceRef.current = null
       if (suppressFollowResumeRef.current) return
       if (
         !isFollowingRef.current &&
-        distanceFromBottom(event) <= RESUME_FOLLOW_OFFSET
+        startDistance !== null &&
+        endDistance < startDistance - UPWARD_PEEK &&
+        endDistance <= RESUME_FOLLOW_OFFSET
       ) {
         resumeFollowing()
       }
@@ -174,6 +186,7 @@ export function useScrollToBottom<T>() {
     (animated = true) => {
       showJumpButtonRef.current = false
       setShowJumpButton(false)
+      dragStartDistanceRef.current = null
       suppressFollowResumeRef.current = false
       setFollowing(true)
       if (animated) {

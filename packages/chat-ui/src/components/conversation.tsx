@@ -257,6 +257,7 @@ export const Conversation = memo(function Conversation({
   const readAloudThreadKeyRef = useRef<string | null>(threadKey);
   const lastRestoredThreadKeyRef = useRef<string | null>(null);
   const stickyToBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
   /// Distance from the tail as of the last scroll or resize observation —
   /// the reader's position *before* the current commit landed. The send snap
   /// judges against this rather than a live read, because a live read after
@@ -485,7 +486,7 @@ export const Conversation = memo(function Conversation({
         scrollPositionsRef.current.delete(key);
         scrollPositionsRef.current.set(key, {
           scrollTop: el.scrollTop,
-          stickToBottom: distanceFromBottom <= AUTO_SCROLL_THRESHOLD,
+          stickToBottom: stickyToBottomRef.current,
         });
       }
       return distanceFromBottom;
@@ -498,6 +499,7 @@ export const Conversation = memo(function Conversation({
   const writeScrollTop = useCallback((el: HTMLDivElement, value: number) => {
     el.scrollTop = value;
     programmaticScrollTopRef.current = el.scrollTop;
+    lastScrollTopRef.current = el.scrollTop;
   }, []);
 
   const cancelSmoothScroll = useCallback(() => {
@@ -588,7 +590,7 @@ export const Conversation = memo(function Conversation({
 
     pinToBottomFrameRef.current = window.requestAnimationFrame(() => {
       pinToBottomFrameRef.current = window.requestAnimationFrame(() => {
-        scrollToBottom();
+        if (stickyToBottomRef.current) scrollToBottom();
         pinToBottomFrameRef.current = null;
       });
     });
@@ -613,7 +615,7 @@ export const Conversation = memo(function Conversation({
 
     writeScrollTop(el, clampScrollTop(savedPosition.scrollTop, el));
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
+    stickyToBottomRef.current = false;
     setShowJump(distanceFromBottom > JUMP_THRESHOLD);
     persistScrollPosition();
   }, [
@@ -641,11 +643,17 @@ export const Conversation = memo(function Conversation({
     const isProgrammaticEcho =
       programmaticScrollTopRef.current !== null &&
       Math.abs(el.scrollTop - programmaticScrollTopRef.current) < 1;
-    if (isNearBottom) {
-      stickyToBottomRef.current = true;
-    } else if (!isProgrammaticEcho) {
-      stickyToBottomRef.current = false;
+    if (!isProgrammaticEcho) {
+      const delta = el.scrollTop - lastScrollTopRef.current;
+      // Near the bottom is not permission to undo an upward scroll.
+      if (delta < -1 || !isNearBottom) {
+        stickyToBottomRef.current = false;
+      } else if (delta > 1 && isNearBottom) {
+        stickyToBottomRef.current = true;
+      }
     }
+    lastScrollTopRef.current = el.scrollTop;
+    programmaticScrollTopRef.current = null;
     setSelectedExcerpt(null);
     setShowJump(
       !stickyToBottomRef.current && distanceFromBottom > JUMP_THRESHOLD,
@@ -891,12 +899,24 @@ export const Conversation = memo(function Conversation({
     const el = scrollRef.current;
     if (!el) return;
 
-    const cancel = () => cancelSmoothScroll();
-    el.addEventListener("wheel", cancel, { passive: true });
+    const cancel = () => {
+      cancelSmoothScroll();
+      if (pinToBottomFrameRef.current !== null) {
+        window.cancelAnimationFrame(pinToBottomFrameRef.current);
+        pinToBottomFrameRef.current = null;
+      }
+    };
+    const wheel = (event: WheelEvent) => {
+      cancel();
+      // Wheel input precedes the scroll event; a resize in between must not
+      // pin over the first few pixels of the reader's gesture.
+      if (event.deltaY < 0) stickyToBottomRef.current = false;
+    };
+    el.addEventListener("wheel", wheel, { passive: true });
     el.addEventListener("touchstart", cancel, { passive: true });
     el.addEventListener("mousedown", cancel);
     return () => {
-      el.removeEventListener("wheel", cancel);
+      el.removeEventListener("wheel", wheel);
       el.removeEventListener("touchstart", cancel);
       el.removeEventListener("mousedown", cancel);
     };

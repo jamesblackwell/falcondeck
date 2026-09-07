@@ -177,6 +177,30 @@ describe('useScrollToBottom', () => {
     expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
+  it.each([4, 8])('keeps a %ipx upward peek detached through momentum and refresh', (peek) => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(500 - peek))
+      hook.value.onContentSizeChange()
+      hook.value.onMomentumScrollEnd(scrollEvent(480))
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('does not re-arm before an upward fling whose release has not moved yet', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(480))
+      hook.value.onScrollEndDrag(scrollEvent(480))
+      hook.value.onContentSizeChange()
+      hook.value.onMomentumScrollEnd(scrollEvent(470))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
   it('resumes following when a drag ends near the bottom without pulling up', () => {
     const hook = renderHook()
 
@@ -252,6 +276,19 @@ describe('useScrollToBottom', () => {
     })
     act(() => {
       hook.value.resetScrollState()
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(2)
+  })
+
+  it('forgets the old gesture after an explicit jump to the bottom', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(470))
+      hook.value.scrollToBottom(false)
+      // New content arrives before the native scroll catches up.
+      hook.value.onScroll(scrollEvent(500, 1100))
       hook.value.onContentSizeChange()
     })
     expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(2)
