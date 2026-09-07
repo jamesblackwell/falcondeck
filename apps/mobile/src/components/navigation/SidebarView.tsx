@@ -66,6 +66,7 @@ import {
 import { SessionListItem } from "@/components/chat";
 import { useCollapsible } from "@/components/chat/useCollapsible";
 import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
+import { useRelativeTimeTick } from "@/hooks/useRelativeTimeTick";
 import {
   buildSidebarRows,
   SHOW_MORE_STEP,
@@ -177,6 +178,10 @@ export const SidebarView = memo(function SidebarView({
   const syncStatus = useSessionSyncStatus();
   const syncIndex = useSessionStore(s => s.snapshot?.sync_index);
   const remoteCounts = syncIndex?.counts;
+  // Rows only repaint when their own inputs move, and an idle thread's summary
+  // never does — without this the "9h" a row was born with is still there a
+  // day later. It reaches the cells through renderRow (the list's extraData).
+  const nowTick = useRelativeTimeTick();
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
     () => new Set(),
@@ -737,12 +742,14 @@ export const SidebarView = memo(function SidebarView({
             isSelected={selectedThreadId === item.thread.id}
             onSelectThread={onSelectThread}
             onOpenThreadOptions={openThreadOptions}
+            nowTick={nowTick}
             tags={threadTagsById?.[item.thread.id]}
           />
         </CollapsibleRow>
       );
     },
     [
+      nowTick,
       onNewThread,
       onNewChat,
       onSelectThread,

@@ -538,4 +538,36 @@ describe("SidebarView component", () => {
     expect(textOf(r)).toContain("Blocked thread");
     expect(textOf(r)).not.toContain("Done thread");
   });
+  it("ages thread timestamps as the clock moves, not only when a thread changes", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-03-16T12:00:00Z"));
+      const groups: ProjectGroup[] = [
+        {
+          workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+          threads: [
+            thread({
+              id: "t1",
+              workspace_id: "w1",
+              title: "Quiet thread",
+              updated_at: "2026-03-16T11:55:00Z",
+            }),
+          ],
+        },
+      ];
+      const r = renderComponent(<SidebarView {...base} groups={groups} />);
+      expect(textOf(r)).toContain("5m");
+
+      // Nothing about the thread changes here — only the wall clock. A row
+      // that repaints solely on its own props would still read "5m".
+      act(() => {
+        vi.advanceTimersByTime(60 * 60_000);
+      });
+
+      expect(textOf(r)).toContain("1h");
+      expect(textOf(r)).not.toContain("5m");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
