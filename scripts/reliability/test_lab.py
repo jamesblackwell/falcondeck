@@ -12,6 +12,18 @@ import campaign
 import scenarios
 
 class LabTests(unittest.TestCase):
+    def test_compact_probe_negotiation_is_explicit(self):
+        from unittest.mock import Mock
+        for compact in [False,True]:
+            process=Mock(stdin=io.StringIO(),stdout=io.StringIO())
+            process.poll.return_value=None
+            with tempfile.TemporaryDirectory() as directory, patch.object(lab,'command'), \
+                 patch.object(scenarios.subprocess,'Popen',return_value=process) as spawn, \
+                 patch.object(lab,'wait'):
+                probe=scenarios.Probe({},Path(directory),compact_index=compact)
+                self.assertEqual('--compact-index' in spawn.call_args.args[0],compact)
+                probe.close()
+
     def test_failed_probe_startup_cleans_up_before_next_case(self):
         from unittest.mock import Mock
         process=Mock(stdin=io.StringIO(),stdout=io.StringIO())

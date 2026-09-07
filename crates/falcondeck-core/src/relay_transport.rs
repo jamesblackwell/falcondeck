@@ -22,6 +22,9 @@ pub const CHUNK_BYTES: usize = 11 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 40 * 1024 * 1024;
 const QUEUE_BYTES: usize = MAX_MESSAGE_BYTES + 1024 * 1024;
 const URGENT_BYTES: usize = 512 * 1024;
+// Compact index and thread-page replies exceed one fragment after encryption.
+// Send these bounded envelopes between bulk chunks instead of behind all history.
+const MAX_URGENT_MESSAGE_BYTES: usize = 128 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
 /// Chunks a sender keeps in flight before it needs an acknowledgement. One
 /// chunk per round trip capped multi-megabyte transcripts at ~200 KB/s even on
@@ -92,7 +95,7 @@ pub struct TransportSender {
 
 impl TransportSender {
     /// Enqueue an application message without waiting for socket capacity.
-    /// Large replies use the ordered lane even when their request was urgent.
+    /// Replies larger than the compact-envelope limit use the ordered lane.
     pub fn send(&self, text: String, urgent: bool) -> Result<(), String> {
         self.enqueue(text, urgent, None)
     }
@@ -106,7 +109,7 @@ impl TransportSender {
         if text.len() > MAX_MESSAGE_BYTES {
             return Err("relay message exceeds transport limit".into());
         }
-        let urgent = urgent && text.len() <= CHUNK_BYTES;
+        let urgent = urgent && text.len() <= MAX_URGENT_MESSAGE_BYTES;
         let (tx, budget) = if urgent {
             (&self.urgent, &self.urgent_bytes)
         } else {
@@ -148,7 +151,7 @@ impl TransportSender {
         if text.len() > MAX_MESSAGE_BYTES {
             return Err("relay result exceeds transport limit".into());
         }
-        let (tx, budget) = if text.len() <= CHUNK_BYTES {
+        let (tx, budget) = if text.len() <= MAX_URGENT_MESSAGE_BYTES {
             (&self.urgent, &self.urgent_bytes)
         } else {
             (&self.ordered, &self.ordered_bytes)
@@ -388,7 +391,7 @@ where
                 if message.generation != generation.load(Ordering::Acquire) { continue; }
                 let started = Instant::now();
                 let bytes = message.text.len();
-                if enabled.load(Ordering::Acquire) && bytes > CHUNK_BYTES {
+                if !urgent && enabled.load(Ordering::Acquire) && bytes > CHUNK_BYTES {
                     transfer_id += 1;
                     let chunks: Vec<&[u8]> = message.text.as_bytes().chunks(CHUNK_BYTES).collect();
                     let total_chunks = chunks.len();
@@ -572,7 +575,11 @@ mod tests {
                     tokio::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(150)).await;
                         let _ = ack
-                            .send(Ok(serde_json::to_string(&Frame::TransportAck { id, index }).unwrap()))
+                            .send(Ok(serde_json::to_string(&Frame::TransportAck {
+                                id,
+                                index,
+                            })
+                            .unwrap()))
                             .await;
                     });
                     if received == expected_chunks {
@@ -597,7 +604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_link_keeps_small_replies_responsive_during_multi_megabyte_sync() {
+    async fn slow_link_keeps_compact_and_small_replies_responsive_during_multi_megabyte_sync() {
         let (wire_tx, mut wire_rx) = mpsc::channel::<String>(4);
         let (peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(4);
         let sink = Box::pin(futures_util::sink::unfold(
@@ -617,12 +624,17 @@ mod tests {
         sender.send("x".repeat(5 * 1024 * 1024), false).unwrap();
         let acknowledgements = peer_tx.clone();
         let (replies_tx, mut replies_rx) = mpsc::channel(4);
+        let (started_tx, started_rx) = oneshot::channel();
         let chunks = Arc::new(AtomicU64::new(0));
         let received_chunks = chunks.clone();
         let peer = tokio::spawn(async move {
+            let mut started_tx = Some(started_tx);
             while let Some(text) = wire_rx.recv().await {
                 if let Ok(Frame::TransportChunk { id, index, .. }) = serde_json::from_str(&text) {
                     received_chunks.fetch_add(1, Ordering::Relaxed);
+                    if let Some(started_tx) = started_tx.take() {
+                        started_tx.send(()).unwrap();
+                    }
                     tokio::time::sleep(Duration::from_millis(150)).await;
                     acknowledgements
                         .send(Ok(serde_json::to_string(&Frame::TransportAck {
@@ -637,7 +649,9 @@ mod tests {
                 }
             }
         });
+        started_rx.await.unwrap();
         let mut latencies = Vec::new();
+        let mut compact_latencies = Vec::new();
         for n in 0..10 {
             let started = Instant::now();
             peer_tx.send(Ok(format!("request-{n}"))).await.unwrap();
@@ -646,29 +660,110 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            sender
-                .send(format!("reply-{}", request.text), true)
-                .unwrap();
-            let reply = tokio::time::timeout(Duration::from_secs(2), replies_rx.recv())
+            // The production compact index's encrypted envelope is about 86 KiB,
+            // well above one chunk. Exercise daemon results and relay forwarding.
+            let expected = if n == 0 || n == 5 {
+                serde_json::json!({ "type": "rpc-result", "ciphertext": "x".repeat(86 * 1024) })
+                    .to_string()
+            } else {
+                format!("reply-{}", request.text)
+            };
+            if n == 0 {
+                sender.send_result(expected.clone(), 0).await.unwrap();
+            } else {
+                sender.send(expected.clone(), true).unwrap();
+            }
+            let reply = tokio::time::timeout(Duration::from_secs(3), replies_rx.recv())
                 .await
-                .unwrap()
+                .expect("interactive reply must not wait for the 5 MiB bulk transfer")
                 .unwrap();
-            assert_eq!(reply, format!("reply-request-{n}"));
-            latencies.push(started.elapsed().as_millis());
+            assert_eq!(reply, expected);
+            if n == 0 || n == 5 {
+                compact_latencies.push(started.elapsed().as_millis());
+            } else {
+                latencies.push(started.elapsed().as_millis());
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         latencies.sort();
         eprintln!(
-            "512 kbit/s + 150 ms RTT: small RPC p95={} ms; bulk chunks={}",
-            latencies[9],
+            "512 kbit/s + 150 ms RTT: small RPC worst={} ms; 86 KiB replies={compact_latencies:?} ms; bulk chunks={}",
+            latencies.last().unwrap(),
             chunks.load(Ordering::Relaxed)
         );
-        assert!(latencies[9] < 2000);
+        assert!(*latencies.last().unwrap() < 2000);
+        assert!(compact_latencies.iter().all(|elapsed| *elapsed < 3000));
         assert!(
             chunks.load(Ordering::Relaxed) > 1,
             "bulk also makes progress"
         );
         peer.abort();
+    }
+
+    #[tokio::test]
+    async fn compact_reply_during_assembly_preserves_the_bulk_message() {
+        let (wire_tx, mut wire_rx) = mpsc::channel::<String>(4);
+        let (peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(4);
+        let sink = Box::pin(futures_util::sink::unfold(wire_tx, |tx, text| async move {
+            tx.send(text).await.map_err(|e| e.to_string())?;
+            Ok::<_, String>(tx)
+        }));
+        let stream = Box::pin(futures_util::stream::unfold(peer_rx, |mut rx| async {
+            rx.recv().await.map(|v| (v, rx))
+        }));
+        let (_sender, mut incoming, _guard) = spawn_transport(sink, stream, true);
+        wire_rx.recv().await.unwrap();
+        let bulk = "x".repeat(CHUNK_BYTES * 2);
+        let compact = serde_json::json!({
+            "type": "rpc-result", "ciphertext": "y".repeat(86 * 1024),
+        })
+        .to_string();
+        for (index, chunk) in bulk.as_bytes().chunks(CHUNK_BYTES).enumerate() {
+            peer_tx
+                .send(Ok(serde_json::to_string(&Frame::TransportChunk {
+                    id: 1,
+                    index: index as u32,
+                    total: bulk.len(),
+                    data: STANDARD.encode(chunk),
+                })
+                .unwrap()))
+                .await
+                .unwrap();
+            wire_rx.recv().await.unwrap();
+            if index == 0 {
+                peer_tx.send(Ok(compact.clone())).await.unwrap();
+                assert_eq!(incoming.recv().await.unwrap().unwrap().text, compact);
+            }
+        }
+        assert_eq!(incoming.recv().await.unwrap().unwrap().text, bulk);
+    }
+
+    #[tokio::test]
+    async fn compact_replies_keep_urgent_admission_byte_bounded() {
+        // Block the initial Ready write so queued messages retain their permits.
+        let sink = Box::pin(futures_util::sink::unfold((), |(), _text: String| async {
+            std::future::pending::<Result<(), String>>().await
+        }));
+        let stream = futures_util::stream::pending::<Result<String, String>>();
+        let (sender, _incoming, _guard) = spawn_transport(sink, stream, true);
+        for _ in 0..URGENT_BYTES / MAX_URGENT_MESSAGE_BYTES {
+            sender
+                .send("x".repeat(MAX_URGENT_MESSAGE_BYTES), true)
+                .unwrap();
+        }
+        assert!(sender.send("full".into(), true).is_err());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                sender.send_result("full".into(), 0),
+            )
+            .await
+            .is_err(),
+            "async results must also honor the urgent byte budget"
+        );
+        sender
+            .send("x".repeat(MAX_URGENT_MESSAGE_BYTES + 1), true)
+            .expect("oversized replies retain their separate ordered budget");
     }
 
     #[tokio::test]

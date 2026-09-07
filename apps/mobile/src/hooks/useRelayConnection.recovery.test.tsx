@@ -1,7 +1,8 @@
 import React from 'react'
+import { AppState } from 'react-native'
 import { act } from 'react-test-renderer'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { decryptJson, encryptJson, normalizeDaemonSnapshot, type RelayClientMessage, type RelayServerMessage } from '@falcondeck/client-core'
+import { decryptJson, encryptJson, expandSyncIndex, normalizeDaemonSnapshot, type RelayClientMessage, type RelayServerMessage } from '@falcondeck/client-core'
 import { useRelayStore } from '@/store/relay-store'
 import { useSessionStore } from '@/store/session-store'
 import { snapshot, snapshotEvent } from '@/test/factories'
@@ -74,6 +75,136 @@ async function connect(savedKey: Uint8Array | null) {
 async function advance(ms: number) {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 }
+
+it('does not let presence traffic turn one failed index request into an immediate retry storm', async () => {
+  const { socket } = await connect(new Uint8Array(32).fill(42))
+  const presence = { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null }
+  socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
+  await advance(1)
+  expect(socket.indexRequests()).toHaveLength(1)
+  socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[0]!.request_id,
+    ok: false, result: null, error: null, failure: 'timed_out' })
+  await advance(1)
+  expect(useRelayStore.getState().syncDiagnostics.nextRetryAt).not.toBeNull()
+  for (let index = 0; index < 100; index += 1) socket.receive({ type: 'presence', presence })
+  await advance(1)
+  expect(socket.indexRequests()).toHaveLength(1)
+  await advance(999)
+  expect(socket.indexRequests()).toHaveLength(2)
+})
+
+it('probes a suspended OPEN socket on foreground and replaces it within three seconds if silent', async () => {
+  let changeState: (state: 'background' | 'active') => void = () => { throw new Error('missing AppState listener') }
+  vi.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+    changeState = listener
+    return { remove: vi.fn() }
+  })
+  const { socket } = await connect(new Uint8Array(32).fill(42))
+  act(() => changeState('background'))
+  await advance(5000)
+  const sentBeforeForeground = socket.sent.length
+  act(() => changeState('active'))
+  expect(socket.sent.slice(sentBeforeForeground)).toContainEqual({ type: 'ping' })
+  await advance(2999)
+  expect(socket.close).not.toHaveBeenCalled()
+  await advance(1)
+  expect(socket.close).toHaveBeenCalledOnce()
+  expect(RelaySocket.instances).toHaveLength(2)
+})
+
+it.each(['pong', 'presence'] as const)('keeps the foreground socket when %s confirms the path is alive', async (type) => {
+  let changeState: (state: 'background' | 'active') => void = () => { throw new Error('missing AppState listener') }
+  vi.spyOn(AppState, 'addEventListener').mockImplementation((_event, listener) => {
+    changeState = listener
+    return { remove: vi.fn() }
+  })
+  const { socket } = await connect(new Uint8Array(32).fill(42))
+  act(() => changeState('background'))
+  await advance(5000)
+  act(() => changeState('active'))
+  await advance(1000)
+  if (type === 'pong') socket.receive({ type: 'pong' })
+  else socket.receive({ type: 'presence', presence: {
+    session_id: 'session', daemon_connected: false, daemon_rpc_ready: false, last_seen_at: null,
+  } })
+  await advance(3000)
+  expect(socket.close).not.toHaveBeenCalled()
+  expect(RelaySocket.instances).toHaveLength(1)
+})
+
+it('recovers from a malformed transport frame even when native close never emits onclose', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  const { socket } = await connect(new Uint8Array(32).fill(42))
+  socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false,
+    presence: { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null } })
+  await advance(1)
+  expect(socket.indexRequests()).toHaveLength(1)
+  // A bad/incomplete transfer must terminate its pending requests now. The
+  // native close event is not a prerequisite for our retry or recovery.
+  act(() => socket.onmessage?.({ data: '{"type":"transport-chunk","id":7,"index":4,"total":8,"data":"bad"}' }))
+  await advance(1)
+  expect(socket.close).toHaveBeenCalledOnce()
+  expect(useRelayStore.getState().connectionStatus).toBe('disconnected')
+  expect(useRelayStore.getState().isSyncing).toBe(false)
+  await advance(1000)
+  expect(RelaySocket.instances).toHaveLength(2)
+  expect(socket.indexRequests()).toHaveLength(1)
+})
+
+it('restarts interrupted extension hydration after reconnect even when the index token is unchanged', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  const { socket } = await connect(new Uint8Array(32).fill(42))
+  const base = normalizeDaemonSnapshot(snapshot())
+  act(() => {
+    useSessionStore.setState({ snapshot: expandSyncIndex({ token: 'same-index', snapshot: base,
+      agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {} }) })
+    useRelayStore.getState()._finishSync()
+  })
+  const extensionCalls = (connection: RelaySocket) => connection.sent.filter(message =>
+    message.type === 'rpc-call' && message.method === 'sync.extensions')
+  await advance(1)
+  expect(extensionCalls(socket)).toHaveLength(0)
+  socket.receive({ type: 'ready', session_id: 'session', role: 'client', next_seq: 11 })
+  await advance(1)
+  expect(extensionCalls(socket)).toHaveLength(1)
+  act(() => { socket.close(); socket.onclose?.() })
+  await advance(1000)
+  expect(RelaySocket.instances).toHaveLength(2)
+  const replacement = RelaySocket.instances[1]!
+  act(() => { replacement.readyState = RelaySocket.OPEN; replacement.onopen?.() })
+  replacement.receive({ type: 'ready', session_id: 'session', role: 'client', next_seq: 11 })
+  await advance(1)
+  expect(extensionCalls(replacement)).toHaveLength(1)
+  expect(useSessionStore.getState().snapshot?.sync_index?.token).toBe('same-index')
+})
+
+it('does not let a suspended decrypt from an old socket block the replacement socket bootstrap', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0)
+  const { socket, bootstrap, dataKey } = await connect(new Uint8Array(32).fill(42))
+  let finishOldDecrypt!: (text: string) => void
+  const decrypt = vi.spyOn(useRelayStore.getState(), '_decryptUtf8').mockImplementationOnce(() =>
+    new Promise<string>(resolve => { finishOldDecrypt = resolve }))
+  socket.receive({ type: 'update', update: {
+    id: 'old-encrypted', seq: 11, created_at: new Date().toISOString(),
+    body: { t: 'encrypted', envelope: await encryptJson(dataKey, {}) },
+  } })
+  await advance(20)
+  expect(decrypt).toHaveBeenCalledOnce()
+  act(() => { socket.close(); socket.onclose?.() })
+  await advance(1000)
+  const replacement = RelaySocket.instances[1]!
+  act(() => { replacement.readyState = RelaySocket.OPEN; replacement.onopen?.() })
+  replacement.receive({ type: 'update', update: bootstrap(12) })
+  try {
+    await advance(20)
+    expect(useRelayStore.getState().isEncrypted).toBe(true)
+  } finally {
+    finishOldDecrypt('{}')
+    await advance(1)
+  }
+  expect(useRelayStore.getState().isEncrypted).toBe(true)
+  expect(useRelayStore.getState()._getSocket()).toBe(replacement)
+})
 
 it('retries a lost bootstrap every five seconds, stops after success, and cleans up on unmount', async () => {
   const { socket, bootstrap } = await connect(null)

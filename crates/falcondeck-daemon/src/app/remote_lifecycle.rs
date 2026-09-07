@@ -55,6 +55,63 @@ impl From<String> for RemoteBridgeError {
     }
 }
 
+pub(super) struct RemoteBridgeRetry {
+    next_delay_seconds: u64,
+}
+
+impl Default for RemoteBridgeRetry {
+    fn default() -> Self {
+        Self {
+            next_delay_seconds: 1,
+        }
+    }
+}
+
+impl RemoteBridgeRetry {
+    pub(super) fn connected(&mut self) {
+        self.next_delay_seconds = 1;
+    }
+
+    fn delay_after_failure(&mut self, transient: bool) -> Duration {
+        let delay = Duration::from_secs(self.next_delay_seconds);
+        self.next_delay_seconds =
+            (self.next_delay_seconds * 2).min(if transient { 10 } else { 16 });
+        delay
+    }
+}
+
+// Only fixed diagnostic categories enter the log: HTTP errors can include a
+// ticket URL or arbitrary response body, neither of which should be retained.
+fn remote_bridge_failure_reason(message: &str) -> &'static str {
+    if message.contains("chunk acknowledgement timed out") {
+        "chunk_ack_timeout"
+    } else if message.contains("byte budget exhausted") || message.contains("queue unavailable") {
+        "outbound_queue_full"
+    } else if message.contains("went quiet") {
+        "inbound_idle_timeout"
+    } else if message.contains("barrier timed out") {
+        "bootstrap_write_timeout"
+    } else if message.contains("socket write timed out") {
+        "socket_write_timeout"
+    } else if message.contains("transfer expired") {
+        "inbound_transfer_timeout"
+    } else if message.contains("acknowledgement queue full") {
+        "ack_queue_full"
+    } else if is_remote_bridge_auth_error(message) {
+        "authentication_error"
+    } else if message.contains("websocket ticket") {
+        "ticket_request_failed"
+    } else if message.contains("failed to connect") || message.contains("connection timed out") {
+        "socket_connect_failed"
+    } else if message.contains("disconnected") || message.contains("socket closed") {
+        "socket_closed"
+    } else if message.contains("relay websocket error") {
+        "socket_receive_error"
+    } else {
+        "bridge_error"
+    }
+}
+
 fn relay_error_detail_from_body(body: &str) -> Option<String> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -571,7 +628,7 @@ impl AppState {
         daemon_token: String,
         mut command_rx: mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) {
-        let mut backoff_seconds = 1u64;
+        let mut retry = RemoteBridgeRetry::default();
         loop {
             let Some(pairing) = ({
                 let remote = self.inner.remote.lock().await;
@@ -580,17 +637,19 @@ impl AppState {
                 break;
             };
 
+            let attempt_started = tokio::time::Instant::now();
             let result = self
                 .wait_for_claim_and_connect(
                     relay_url.clone(),
                     daemon_token.clone(),
                     pairing.clone(),
                     &mut command_rx,
+                    &mut retry,
                 )
                 .await;
             match result {
                 Ok(()) => {
-                    backoff_seconds = 1;
+                    retry.connected();
                 }
                 Err(error) => {
                     let error_msg = error.message().to_string();
@@ -619,7 +678,7 @@ impl AppState {
                             && is_remote_bridge_missing_session_error(&error_msg))
                     {
                         RemoteConnectionStatus::Error
-                    } else if !is_transient && backoff_seconds >= 8 {
+                    } else if !is_transient && retry.next_delay_seconds >= 8 {
                         RemoteConnectionStatus::Offline
                     } else {
                         RemoteConnectionStatus::Degraded
@@ -651,13 +710,14 @@ impl AppState {
                     if should_clear_pairing || should_reset_persisted_remote {
                         break;
                     }
-                    if is_transient {
-                        sleep(Duration::from_secs(backoff_seconds)).await;
-                        backoff_seconds = (backoff_seconds * 2).min(10);
-                    } else {
-                        sleep(Duration::from_secs(backoff_seconds)).await;
-                        backoff_seconds = (backoff_seconds * 2).min(16);
-                    }
+                    let retry_delay = retry.delay_after_failure(is_transient);
+                    tracing::warn!(
+                        reason = remote_bridge_failure_reason(error.message()),
+                        attempt_ms = attempt_started.elapsed().as_millis(),
+                        retry_ms = retry_delay.as_millis(),
+                        "remote relay bridge disconnected; reconnecting"
+                    );
+                    sleep(retry_delay).await;
                 }
             }
         }
@@ -738,6 +798,7 @@ impl AppState {
         daemon_token: String,
         mut pairing: RemotePairingState,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
+        retry: &mut RemoteBridgeRetry,
     ) -> Result<(), RemoteBridgeError> {
         // If we already have a trusted device with a session, skip polling the
         // pairing endpoint entirely. Older trusted sessions may not have a
@@ -886,6 +947,7 @@ impl AppState {
             pairing,
             client_bundle,
             command_rx,
+            retry,
         )
         .await
     }
@@ -1490,4 +1552,148 @@ pub(super) fn current_pairing_for_remote_attempt(
     }
 
     remote.pairing.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn live_bridge_resets_backoff_before_a_later_socket_disconnect() {
+        use axum::{
+            Json, Router,
+            extract::WebSocketUpgrade,
+            routing::{get, post},
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_url = format!("http://{}", listener.local_addr().unwrap());
+        let (connected_tx, mut connected_rx) = mpsc::channel(1);
+        let relay = Router::new()
+            .route(
+                "/v1/sessions/session/ws-ticket",
+                post(|| async {
+                    Json(falcondeck_core::RelayWebSocketTicketResponse {
+                        ticket: "test-ticket".into(),
+                        expires_at: Utc::now() + chrono::Duration::minutes(1),
+                    })
+                }),
+            )
+            .route(
+                "/v1/updates/ws",
+                get(move |upgrade: WebSocketUpgrade| {
+                    let connected_tx = connected_tx.clone();
+                    async move {
+                        upgrade.on_upgrade(move |mut socket| async move {
+                            // The first heartbeat is sent only after the bridge has
+                            // registered its RPCs and entered the connected loop.
+                            while let Some(Ok(message)) = socket.recv().await {
+                                if let axum::extract::ws::Message::Text(text) = message
+                                    && serde_json::from_str::<Value>(&text).unwrap()["type"]
+                                        == "ping"
+                                {
+                                    connected_tx.try_send(()).unwrap();
+                                    socket
+                                        .send(axum::extract::ws::Message::Close(None))
+                                        .await
+                                        .unwrap();
+                                    break;
+                                }
+                            }
+                        })
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, relay).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        let pairing = RemotePairingState {
+            pairing_id: "pairing".into(),
+            pairing_code: String::new(),
+            session_id: Some("session".into()),
+            device_id: Some("device".into()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            client_bundle: None,
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: [7; 32],
+        };
+        let (_commands, mut commands) = mpsc::unbounded_channel();
+        let mut retry = RemoteBridgeRetry::default();
+        for _ in 0..8 {
+            retry.delay_after_failure(true);
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            app.connect_remote_session(
+                relay_url,
+                "daemon-token".into(),
+                "session".into(),
+                pairing,
+                None,
+                &mut commands,
+                &mut retry,
+            ),
+        )
+        .await;
+        server.abort();
+        let error = result.unwrap().err().expect("the peer closed the socket");
+        assert!(
+            connected_rx.try_recv().is_ok(),
+            "the bridge failed before its first heartbeat: {}",
+            error.message()
+        );
+        assert_eq!(retry.delay_after_failure(true), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn connected_session_resets_retry_delay_after_previous_outages() {
+        let mut retry = RemoteBridgeRetry::default();
+        for _ in 0..8 {
+            retry.delay_after_failure(true);
+        }
+        retry.connected();
+        assert_eq!(retry.delay_after_failure(true), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn consecutive_connection_failures_back_off_to_a_bounded_delay() {
+        let mut retry = RemoteBridgeRetry::default();
+        let delays: Vec<_> = (0..6)
+            .map(|_| retry.delay_after_failure(true).as_secs())
+            .collect();
+        assert_eq!(delays, [1, 2, 4, 8, 10, 10]);
+    }
+
+    #[test]
+    fn persistent_failures_keep_the_longer_backoff_cap() {
+        let mut retry = RemoteBridgeRetry::default();
+        let delays: Vec<_> = (0..6)
+            .map(|_| retry.delay_after_failure(false).as_secs())
+            .collect();
+        assert_eq!(delays, [1, 2, 4, 8, 16, 16]);
+    }
+
+    #[test]
+    fn bridge_diagnostics_distinguish_transport_timeouts_without_logging_payloads() {
+        assert_eq!(
+            [
+                "relay websocket error: relay chunk acknowledgement timed out",
+                "relay websocket went quiet; reconnecting",
+                "relay outbound byte budget exhausted",
+                "failed to issue relay websocket ticket: https://relay.invalid/?ticket=secret",
+            ]
+            .map(remote_bridge_failure_reason),
+            [
+                "chunk_ack_timeout",
+                "inbound_idle_timeout",
+                "outbound_queue_full",
+                "ticket_request_failed",
+            ]
+        );
+    }
 }

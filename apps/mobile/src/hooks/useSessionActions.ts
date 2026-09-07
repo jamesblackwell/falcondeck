@@ -146,6 +146,14 @@ function showHandoffDestination(handle: ThreadHandle) {
 
 export function useSessionActions() {
   const detailRequestVersion = useRef(0);
+  // A reconnect effect and an explicit retry can request the same page before
+  // the first completes. Share its transfer and normalization, but never share
+  // work from a replaced socket or encryption key.
+  const detailRequests = useRef(new Map<string, {
+    socket: ReturnType<ReturnType<typeof useRelayStore.getState>["_getSocket"]>;
+    crypto: ReturnType<ReturnType<typeof useRelayStore.getState>["_getSessionCrypto"]>;
+    promise: Promise<ThreadDetail>;
+  }>());
   const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
   const handoffPendingRef = useRef(false);
   const [handoffPending, setHandoffPending] = useState(false);
@@ -495,6 +503,8 @@ export function useSessionActions() {
     ) => {
       const relay = useRelayStore.getState();
       const relaySessionId = relay.sessionId;
+      const requestSocket = relay._getSocket();
+      const requestCrypto = relay._getSessionCrypto();
       const session = useSessionStore.getState();
       // The demo workspace has no daemon to page against: its transcripts are
       // whatever is already cached locally, and there is never anything older.
@@ -521,37 +531,49 @@ export function useSessionActions() {
       if (trackForegroundLoad) {
         activeForegroundDetailLoads += 1;
       }
+      const requestKey = JSON.stringify([
+        relay.relayUrl, relaySessionId, workspaceId, threadId, beforeItemId,
+      ]);
+      let pending = detailRequests.current.get(requestKey);
       try {
-        const detail = normalizeThreadDetail(
-          await relay._callRpc<ThreadDetail>(
-            "thread.detail",
-            options?.older
-              ? {
-                  workspace_id: workspaceId,
-                  thread_id: threadId,
-                  mode: "before",
-                  before_item_id: beforeItemId,
-                  limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
-                  ...MOBILE_THREAD_DETAIL_OPTIONS,
-                }
-              : {
-                  workspace_id: workspaceId,
-                  thread_id: threadId,
-                  mode: "tail",
-                  limit: MOBILE_THREAD_DETAIL_TAIL_LIMIT,
-                  ...MOBILE_THREAD_DETAIL_OPTIONS,
-                },
-            {
-              requestIdPrefix: options?.older
-                ? "mobile-detail-older"
-                : "mobile-detail",
-            },
-          ),
-        );
+        if (!pending || pending.socket !== requestSocket || pending.crypto !== requestCrypto) {
+          pending = {
+            socket: requestSocket,
+            crypto: requestCrypto,
+            promise: relay._callRpc<ThreadDetail>(
+              "thread.detail",
+              options?.older
+                ? {
+                    workspace_id: workspaceId,
+                    thread_id: threadId,
+                    mode: "before",
+                    before_item_id: beforeItemId,
+                    limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
+                    ...MOBILE_THREAD_DETAIL_OPTIONS,
+                  }
+                : {
+                    workspace_id: workspaceId,
+                    thread_id: threadId,
+                    mode: "tail",
+                    limit: MOBILE_THREAD_DETAIL_TAIL_LIMIT,
+                    ...MOBILE_THREAD_DETAIL_OPTIONS,
+                  },
+              {
+                requestIdPrefix: options?.older
+                  ? "mobile-detail-older"
+                  : "mobile-detail",
+              },
+            ).then(normalizeThreadDetail),
+          };
+          detailRequests.current.set(requestKey, pending);
+        }
+        const detail = await pending.promise;
 
         const activeSession = useSessionStore.getState();
         const isStale =
           useRelayStore.getState().sessionId !== relaySessionId ||
+          useRelayStore.getState()._getSocket() !== requestSocket ||
+          useRelayStore.getState()._getSessionCrypto() !== requestCrypto ||
           (!options?.older &&
             requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
@@ -576,6 +598,8 @@ export function useSessionActions() {
         const activeSession = useSessionStore.getState();
         const isStale =
           useRelayStore.getState().sessionId !== relaySessionId ||
+          useRelayStore.getState()._getSocket() !== requestSocket ||
+          useRelayStore.getState()._getSessionCrypto() !== requestCrypto ||
           (!options?.older &&
             requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
@@ -605,6 +629,9 @@ export function useSessionActions() {
         }
         return null;
       } finally {
+        if (detailRequests.current.get(requestKey) === pending) {
+          detailRequests.current.delete(requestKey);
+        }
         if (trackForegroundLoad) {
           activeForegroundDetailLoads -= 1;
         }

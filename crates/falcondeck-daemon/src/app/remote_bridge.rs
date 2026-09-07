@@ -26,6 +26,7 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use super::remote_lifecycle::RemoteBridgeRetry;
 use super::{
     AppState, EVENT_COALESCE_INTERVAL, EventCoalescer, RemoteBridgeCommand, RemoteBridgeError,
     RemotePairingState, extract_string, parse_agent_provider, parse_interactive_response_params,
@@ -362,6 +363,7 @@ impl AppState {
         mut pairing: RemotePairingState,
         client_bundle: Option<PairingPublicKeyBundle>,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
+        retry: &mut RemoteBridgeRetry,
     ) -> Result<(), RemoteBridgeError> {
         let ws_ticket = self
             .fetch_relay_ws_ticket(&relay_url, &session_id, &daemon_token)
@@ -441,6 +443,11 @@ impl AppState {
             remote.status = RemoteConnectionStatus::Connected;
             remote.last_error = None;
         }
+        // A connected session normally exits with an error when its socket
+        // eventually drops. Reset here, not in the supervisor's unreachable
+        // successful-return path, so old outages do not delay a fresh retry.
+        retry.connected();
+        tracing::info!(%session_id, "remote relay bridge connected");
 
         // Once the transport is live, persistence failures are durability
         // warnings rather than connection failures. Tearing down a healthy

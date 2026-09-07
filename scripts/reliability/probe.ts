@@ -3,7 +3,17 @@ import { createInterface } from 'node:readline'
 import { readFileSync } from 'node:fs'
 import WebSocket from 'ws'
 import { claimHostPairing, RemoteHostClient } from '../../packages/client-core/src/remote-host-client'
-Object.assign(globalThis, { WebSocket })
+// Exercise the phone's compact-sync negotiation as well as the legacy host
+// client. Otherwise a synthetic full snapshot can hide the path under test.
+const compactIndex = process.argv.includes('--compact-index')
+class ProbeWebSocket extends WebSocket {
+  constructor(address: string) {
+    const url = new URL(address)
+    if (compactIndex) url.searchParams.set('compact_index', 'true')
+    super(url)
+  }
+}
+Object.assign(globalThis, { WebSocket: ProbeWebSocket })
 const state = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const emit = (value: object) => console.log(JSON.stringify({ at: performance.now(), ...value }))
 const pairing = await fetch(state.daemon_url + '/api/remote/pairing', {
@@ -15,7 +25,7 @@ const client = new RemoteHostClient(session, {
   onPresence: presence => emit({ event: 'presence', presence }),
   onEvents: events => emit({ event: 'events', count: events.length, types: events.map(e => e.event.type) }),
   onError: error => emit({ event: 'error', error }),
-  onHistoryTruncated: async () => { await client.rpc('snapshot.current', {}) },
+  onHistoryTruncated: async () => { await client.rpc(compactIndex ? 'sync.index' : 'snapshot.current', {}) },
 })
 client.start()
 createInterface({ input: process.stdin }).on('line', async line => {

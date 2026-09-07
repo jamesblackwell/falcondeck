@@ -132,4 +132,89 @@ describe("loadFullThreadItem", () => {
     const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
     expect(item?.kind === "tool_call" && item.output).toBe("recovered");
   });
+
+  it("never reuses an item from a different paired session", async () => {
+    const rpc = vi.fn()
+      .mockResolvedValueOnce(toolCall("tool-1", "old daemon"))
+      .mockResolvedValueOnce(toolCall("tool-1", "new daemon"));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    await loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    useRelayStore.setState({ sessionId: "session-2" });
+    useSessionStore.setState({
+      threadItems: { "thread-1": [toolCall("tool-1", "head", 40_000)] },
+    } as never);
+
+    await loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+
+    expect(rpc).toHaveBeenCalledTimes(2);
+    const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
+    expect(item?.kind === "tool_call" && item.output).toBe("new daemon");
+  });
+
+  it("bounds an image-heavy render to two concurrent full-item transfers", async () => {
+    const completions: ((item: ConversationItem) => void)[] = [];
+    const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
+      completions.push(resolve);
+    }));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    const loads = [1, 2, 3, 4].map((id) =>
+      loadFullThreadItem("workspace-1", "thread-1", `tool-${id}`),
+    );
+    await Promise.resolve();
+    expect(rpc).toHaveBeenCalledTimes(2);
+
+    completions[0]!(toolCall("tool-1", "one"));
+    await loads[0];
+    expect(rpc).toHaveBeenCalledTimes(3);
+    completions[1]!(toolCall("tool-2", "two"));
+    await loads[1];
+    expect(rpc).toHaveBeenCalledTimes(4);
+    completions[2]!(toolCall("tool-3", "three"));
+    completions[3]!(toolCall("tool-4", "four"));
+    await Promise.all(loads);
+  });
+
+  it("drops queued thumbnails when the reader changes threads", async () => {
+    const completions: ((item: ConversationItem) => void)[] = [];
+    const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
+      completions.push(resolve);
+    }));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    const first = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    const second = loadFullThreadItem("workspace-1", "thread-1", "tool-2");
+    const queued = loadFullThreadItem("workspace-1", "thread-1", "tool-3");
+    await Promise.resolve();
+    useSessionStore.setState({ selectedThreadId: "thread-2" });
+    completions[0]!(toolCall("tool-1", "late"));
+    completions[1]!(toolCall("tool-2", "late"));
+
+    expect(await queued).toBeNull();
+    await Promise.all([first, second]);
+    expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let old-session transfers block or overwrite the new session", async () => {
+    const completions: ((item: ConversationItem) => void)[] = [];
+    const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
+      completions.push(resolve);
+    }));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    const first = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    const second = loadFullThreadItem("workspace-1", "thread-1", "tool-2");
+    const queued = loadFullThreadItem("workspace-1", "thread-1", "tool-3");
+    await Promise.resolve();
+    useRelayStore.setState({ sessionId: "session-2" });
+    const current = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    await Promise.resolve();
+    expect(rpc).toHaveBeenCalledTimes(3);
+    completions[2]!(toolCall("tool-1", "new session"));
+    await current;
+    completions[0]!(toolCall("tool-1", "stale"));
+    completions[1]!(toolCall("tool-2", "stale"));
+
+    expect(await Promise.all([first, second, queued])).toEqual([null, null, null]);
+    expect(rpc).toHaveBeenCalledTimes(3);
+    const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
+    expect(item?.kind === "tool_call" && item.output).toBe("new session");
+  });
 });

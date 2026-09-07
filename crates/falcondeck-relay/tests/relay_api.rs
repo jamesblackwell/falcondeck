@@ -650,6 +650,241 @@ async fn peer_registration_rechecks_device_revocation_after_ticket_consumption()
 }
 
 #[tokio::test]
+async fn compact_replay_projects_large_snapshots_without_discarding_small_live_events() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (daemon_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    let mut snapshot = test_envelope(&"s".repeat(3 * 1024 * 1024));
+    snapshot.snapshot_hint = true;
+    for envelope in [snapshot.clone(), test_envelope("new-thread-title")] {
+        server
+            .state
+            .handle_message(
+                &claim.session_id,
+                &daemon_id,
+                RelayPeerRole::Daemon,
+                RelayClientMessage::Update {
+                    body: RelayUpdateBody::Encrypted { envelope },
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let (phone_id, mut phone_rx, _) = server
+        .state
+        .register_peer(
+            &claim.session_id,
+            RelayPeerRole::Client,
+            Some(claim.device_id.clone()),
+        )
+        .await
+        .unwrap();
+    server
+        .state
+        .set_peer_compact_index(&claim.session_id, &phone_id)
+        .await;
+    server
+        .state
+        .handle_message(
+            &claim.session_id,
+            &phone_id,
+            RelayPeerRole::Client,
+            RelayClientMessage::Sync { after_seq: Some(0) },
+        )
+        .await
+        .unwrap();
+    let replay = phone_rx.recv().await.unwrap();
+    let RelayServerMessage::Sync {
+        updates,
+        history_truncated,
+        ..
+    } = replay.message()
+    else {
+        panic!("expected compact replay");
+    };
+    assert!(!history_truncated);
+    assert!(matches!(
+        updates.first().map(|update| &update.body),
+        Some(RelayUpdateBody::SnapshotInvalidated)
+    ));
+    assert!(
+        matches!(updates.last().map(|update| &update.body), Some(RelayUpdateBody::Encrypted { envelope }) if envelope == &test_envelope("new-thread-title"))
+    );
+    let history = server
+        .state
+        .session_updates(&claim.session_id, &pairing.daemon_token, 0, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&history.updates[0].body, RelayUpdateBody::Encrypted { envelope } if envelope == &snapshot)
+    );
+    assert_eq!(updates[0].seq, history.updates[0].seq);
+    assert_eq!(updates[0].id, history.updates[0].id);
+}
+
+#[tokio::test]
+async fn multi_megabyte_replay_does_not_queue_ahead_of_initial_sync_rpc() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon).await;
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::RpcRegister {
+            method: "sync.index".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        recv_server_message(&mut daemon).await,
+        RelayServerMessage::RpcRegistered { .. }
+    ));
+    let replay_envelope = test_envelope(&"x".repeat(3 * 1024 * 1024));
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::Update {
+            body: RelayUpdateBody::Encrypted {
+                envelope: replay_envelope.clone(),
+            },
+        },
+    )
+    .await;
+    send_client_message(&mut daemon, &RelayClientMessage::Ping).await;
+    assert_eq!(
+        recv_server_message(&mut daemon).await,
+        RelayServerMessage::Pong
+    );
+
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut phone, _) = connect_async(format!(
+        "{client_url}&transport=chunks-v1&compact_index=true"
+    ))
+    .await
+    .unwrap();
+    assert!(
+        phone
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .to_text()
+            .unwrap()
+            .contains("transport-ready")
+    );
+    let _ = recv_server_message(&mut phone).await;
+    let started = std::time::Instant::now();
+    send_client_message(&mut phone, &RelayClientMessage::Sync { after_seq: Some(0) }).await;
+    send_client_message(
+        &mut phone,
+        &RelayClientMessage::RpcCall {
+            request_id: "initial-index".into(),
+            method: "sync.index".into(),
+            params: test_envelope("index-request"),
+        },
+    )
+    .await;
+
+    // A backlog must yield a small recovery marker, never even start a bulk
+    // transfer. Withheld credit on that transfer used to block real index
+    // replies, which are larger than the tiny urgent-RPC test fixtures.
+    let RelayServerMessage::Sync {
+        updates,
+        history_truncated,
+        ..
+    } = recv_server_message(&mut phone).await
+    else {
+        panic!("expected recovery marker before the index response");
+    };
+    assert!(updates.is_empty());
+    assert!(history_truncated);
+    let RelayServerMessage::RpcRequest { request_id, .. } = recv_server_message(&mut daemon).await
+    else {
+        panic!("expected initial index request");
+    };
+    let result = test_envelope(&"i".repeat(CHUNK_BYTES * 2));
+    let result_bytes = serde_json::to_vec(&RelayServerMessage::RpcResult {
+        request_id: "initial-index".into(),
+        ok: true,
+        result: Some(result.clone()),
+        error: None,
+        failure: None,
+    })
+    .unwrap()
+    .len();
+    send_client_message(
+        &mut daemon,
+        &RelayClientMessage::RpcResult {
+            request_id,
+            ok: true,
+            result: Some(result),
+            error: None,
+        },
+    )
+    .await;
+
+    let mut received_chunks = 0usize;
+    timeout(TokioDuration::from_secs(2), async {
+        while received_chunks < result_bytes.div_ceil(CHUNK_BYTES) {
+            let frame = phone.next().await.unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if value["type"] != "transport-chunk" {
+                continue;
+            }
+            assert_eq!(value["total"], result_bytes);
+            assert_eq!(value["index"], received_chunks);
+            received_chunks += 1;
+            phone
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "transport-ack", "id": value["id"], "index": value["index"],
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("index result must not wait behind replay");
+    eprintln!(
+        "3 MiB retained backlog: {received_chunks} index chunks delivered in {:?}",
+        started.elapsed()
+    );
+
+    // Choosing snapshot recovery must not remove the daemon-owned replay.
+    let history = server
+        .state
+        .session_updates(&claim.session_id, &claim.client_token, 0, None)
+        .await
+        .unwrap();
+    assert!(history.updates.iter().any(|update| matches!(&update.body,
+        RelayUpdateBody::Encrypted { envelope } if envelope == &replay_envelope
+    )));
+}
+
+#[tokio::test]
 async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();

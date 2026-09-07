@@ -274,6 +274,27 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn blocked_snapshot_metadata_does_not_block_thread_reads_or_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        let extensions = app.inner.extensions.lock().await;
+        let index = app.sync_index_open(None);
+        tokio::pin!(index);
+        assert!(futures_util::poll!(&mut index).is_pending());
+        assert!(
+            app.inner.workspaces.try_lock().is_ok(),
+            "an optional metadata lock must not hold every thread read/update hostage"
+        );
+        assert!(app.inner.interactive_requests.try_lock().is_ok());
+        drop(extensions);
+        index.await.unwrap();
+    }
+
     fn fixture() -> DaemonSnapshot {
         let now = "2026-09-05T12:00:00Z";
         serde_json::from_value(json!({

@@ -156,3 +156,14 @@ or weaken the fixture. Protocol-level replay-pruning/key-rotation tests remain
 in `docs/remote-sync-qa.md`; the lab does not yet orchestrate every permutation
 of those cases through the simulator. Physical-device certification, automatic
 failure-sequence minimization, and CI scheduling are separate extensions.
+## Compact mobile profile
+
+Pass `--compact-index` to a `lab.py run` command to negotiate the same compact
+sync profile as mobile. The report records this flag; without it the probe
+retains the full-snapshot host-client profile. Test both when changing relay
+scheduling, since a healthy compact cold start alone does not exercise bulk
+snapshot contention.
+
+```sh
+python3 scripts/reliability/lab.py run --scenario constrained --cycles 5 --compact-index
+```

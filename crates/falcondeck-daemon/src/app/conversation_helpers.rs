@@ -1509,8 +1509,10 @@ pub(super) fn settle_tool_call_items(
             } if is_transient_tool_status(status) => {
                 *status = settlement.status().to_string();
                 *completed_at = Some(settled_at);
+                let output_total_bytes = display.output_total_bytes;
                 **display =
                     tool_display_metadata(title, tool_kind, status, *exit_code, output.as_deref());
+                display.output_total_bytes = output_total_bytes;
                 updated.push(item.clone());
             }
             ConversationItem::FileChange {

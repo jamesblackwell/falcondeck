@@ -43,14 +43,17 @@ pub(crate) const RELAY_WS_MAX_MESSAGE_BYTES: usize = 40 << 20;
 const PEER_QUEUE_MAX_BYTES: usize = RELAY_WS_MAX_MESSAGE_BYTES + (1 << 20);
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 /// Keep replay responses small enough that a slow client can process a
-/// reconnect incrementally. A single unusually large encrypted update is
-/// still sent on its own; the websocket's 24 MiB cap remains the final guard.
+/// reconnect incrementally.
 const WS_SYNC_CHUNK_MAX_UPDATES: usize = 128;
 const WS_SYNC_CHUNK_MAX_BYTES: usize = 512 << 10;
 /// Reconnect replay is only a fast-path. Beyond this window clients rebuild
 /// from `snapshot.current`, which avoids flooding their bounded decrypt queues
 /// with an arbitrarily large burst of stale incremental state.
 const WS_SYNC_REPLAY_MAX_UPDATES: usize = 1_024;
+/// Replay shares the bulk lane with large thread replies. A memory-safe
+/// 40 MiB replay still starves those replies for minutes
+/// on a phone; recover from the current daemon state above this small budget.
+const WS_SYNC_REPLAY_MAX_BYTES: usize = 512 << 10;
 /// How long a claim challenge stays valid; challenges are single-use and a
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
@@ -121,7 +124,7 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
     // the skipped window ends and let it rebuild from the daemon snapshot;
     // live updates emitted after this marker are still delivered normally and
     // are raced against that snapshot by the clients.
-    if response.cursor.history_truncated || response.updates.len() > WS_SYNC_REPLAY_MAX_UPDATES {
+    if response.cursor.history_truncated || !replay_fits_budget(response.updates.iter(), false) {
         return vec![RelayServerMessage::Sync {
             updates: Vec::new(),
             next_seq: response.next_seq,
@@ -149,19 +152,16 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
             presence: response.presence.clone(),
         })
         .collect::<Vec<_>>();
-    // The websocket task cannot drain its own outbound queue until this
-    // whole Sync handler returns. If the replay batch itself exceeds that
-    // queue's byte budget, per-message enqueueing disconnects the peer after
-    // only a prefix and every reconnect repeats the same failure. Recover
-    // from the daemon snapshot before enqueueing any partial replay instead.
+    // Keep the exact serialized size bounded too; estimates above avoid
+    // serializing large discarded payloads but are not a wire-size contract.
     let replay_wire_bytes = messages.iter().fold(0usize, |total, message| {
         total.saturating_add(
             serde_json::to_vec(message)
                 .map(|bytes| bytes.len())
-                .unwrap_or(PEER_QUEUE_MAX_BYTES),
+                .unwrap_or(WS_SYNC_REPLAY_MAX_BYTES),
         )
     });
-    if replay_wire_bytes >= PEER_QUEUE_MAX_BYTES {
+    if replay_wire_bytes >= WS_SYNC_REPLAY_MAX_BYTES {
         return vec![RelayServerMessage::Sync {
             updates: Vec::new(),
             next_seq: response.next_seq,
@@ -172,11 +172,30 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
     messages
 }
 
+fn replay_fits_budget<'a>(
+    updates: impl Iterator<Item = &'a RelayUpdate>,
+    compact_index: bool,
+) -> bool {
+    let mut bytes = 1024usize;
+    for (index, update) in updates.enumerate() {
+        let update_bytes = if compact_index
+            && matches!(&update.body, RelayUpdateBody::Encrypted { envelope } if envelope.snapshot_hint)
+        {
+            768
+        } else {
+            sync_wire_bytes(update)
+        };
+        bytes = bytes.saturating_add(update_bytes);
+        if index >= WS_SYNC_REPLAY_MAX_UPDATES || bytes >= WS_SYNC_REPLAY_MAX_BYTES {
+            return false;
+        }
+    }
+    true
+}
+
 /// Wire-size estimate for chunking decisions without a serde pass per
-/// update. `estimated_update_retained_bytes` undercounts encrypted payloads
-/// (their ciphertext rides JSON as base64, ~4/3 the raw size), so round up
-/// generously; `WS_SYNC_CHUNK_MAX_BYTES` is a comfort cap and the websocket
-/// frame limit remains the final guard.
+/// update. Ciphertext is already base64 in retained state; extra headroom
+/// covers JSON routing fields and string escaping in other update variants.
 fn sync_wire_bytes(update: &RelayUpdate) -> usize {
     let retained = estimated_update_retained_bytes(update);
     retained.saturating_add(retained / 2)
@@ -3468,22 +3487,43 @@ impl AppState {
         store: &Store,
         session_id: &str,
         after_seq: u64,
+        compact_index: bool,
     ) -> Result<RelayUpdatesResponse, RelayError> {
         let session = store
             .data
             .sessions
             .get(session_id)
             .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
-        let history_truncated = session.history_truncated(after_seq);
+        let candidates = session
+            .updates
+            .iter()
+            .filter(|update| update.seq > after_seq);
+        let history_truncated = session.history_truncated(after_seq)
+            || !replay_fits_budget(candidates.clone(), compact_index);
+        let updates = if history_truncated {
+            Vec::new()
+        } else {
+            candidates
+                .map(|update| {
+                    if compact_index
+                        && matches!(&update.body, RelayUpdateBody::Encrypted { envelope } if envelope.snapshot_hint)
+                    {
+                        RelayUpdate {
+                            id: update.id.clone(),
+                            seq: update.seq,
+                            created_at: update.created_at,
+                            body: RelayUpdateBody::SnapshotInvalidated,
+                        }
+                    } else {
+                        update.clone()
+                    }
+                })
+                .collect()
+        };
 
         Ok(RelayUpdatesResponse {
             session_id: session_id.to_string(),
-            updates: session
-                .updates
-                .iter()
-                .filter(|update| update.seq > after_seq)
-                .cloned()
-                .collect(),
+            updates,
             next_seq: session.next_seq(),
             cursor: SyncCursor {
                 session_id: session_id.to_string(),
@@ -3506,7 +3546,6 @@ impl AppState {
         // append_update_locked's live fanout. This closes the only window in
         // which a newer live update could jump ahead of replay chunks.
         let store = self.inner.store.lock().await;
-        let response = self.session_updates_for_ws_locked(&store, session_id, after_seq)?;
         let Some(tx) = store
             .live_sessions
             .get(session_id)
@@ -3515,13 +3554,12 @@ impl AppState {
         else {
             return Ok(());
         };
-        let mut response = response;
-        if tx.compact_index.load(std::sync::atomic::Ordering::Acquire) {
-            response
-                .updates
-                .iter_mut()
-                .for_each(compact_snapshot_update);
-        }
+        let response = self.session_updates_for_ws_locked(
+            &store,
+            session_id,
+            after_seq,
+            tx.compact_index.load(std::sync::atomic::Ordering::Acquire),
+        )?;
         for message in sync_messages(response) {
             self.queue_message(session_id, peer_id, &tx, message);
         }
@@ -4993,6 +5031,122 @@ mod tests {
                 ..
             } if updates.is_empty()
         ));
+    }
+
+    #[test]
+    fn replay_budget_counts_the_whole_window_not_just_individual_updates() {
+        let mut update = test_update(1);
+        let RelayUpdateBody::Encrypted { envelope } = &mut update.body else {
+            unreachable!();
+        };
+        envelope.ciphertext = "x".repeat(200 * 1024);
+        assert!(super::replay_fits_budget(std::iter::once(&update), false));
+        assert!(!super::replay_fits_budget(
+            [&update, &update].into_iter(),
+            false
+        ));
+    }
+
+    #[test]
+    fn replay_budget_measures_compact_snapshots_as_invalidation_markers() {
+        let mut update = test_update(1);
+        let RelayUpdateBody::Encrypted { envelope } = &mut update.body else {
+            unreachable!();
+        };
+        envelope.ciphertext = "x".repeat(3 * 1024 * 1024);
+        envelope.snapshot_hint = true;
+        assert!(super::replay_fits_budget(std::iter::once(&update), true));
+        assert!(!super::replay_fits_budget(std::iter::once(&update), false));
+        let RelayUpdateBody::Encrypted { envelope } = &mut update.body else {
+            unreachable!();
+        };
+        envelope.snapshot_hint = false;
+        assert!(!super::replay_fits_budget(std::iter::once(&update), true));
+    }
+
+    #[test]
+    fn small_replay_keeps_its_events_order_and_cursor() {
+        let updates = (1..=129).map(test_update).collect::<Vec<_>>();
+        let response = RelayUpdatesResponse {
+            session_id: "session-1".into(),
+            updates: updates.clone(),
+            next_seq: 130,
+            cursor: SyncCursor {
+                session_id: "session-1".into(),
+                next_seq: 130,
+                last_acknowledged_seq: 0,
+                requires_bootstrap: true,
+                history_truncated: false,
+            },
+            presence: MachinePresence {
+                session_id: "session-1".into(),
+                daemon_connected: true,
+                daemon_rpc_ready: true,
+                last_seen_at: None,
+            },
+        };
+        let replay = sync_messages(response)
+            .into_iter()
+            .flat_map(|message| {
+                let super::RelayServerMessage::Sync {
+                    updates,
+                    history_truncated,
+                    next_seq,
+                    ..
+                } = message
+                else {
+                    panic!("expected replay sync");
+                };
+                assert!(!history_truncated);
+                assert_eq!(next_seq, 130);
+                updates
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replay, updates);
+    }
+
+    #[test]
+    fn multi_megabyte_replay_yields_to_interactive_sync_before_queue_admission() {
+        let mut update = test_update(1);
+        let RelayUpdateBody::Encrypted { envelope } = &mut update.body else {
+            unreachable!();
+        };
+        envelope.ciphertext = "x".repeat(3 * 1024 * 1024);
+        let response = RelayUpdatesResponse {
+            session_id: "session-1".into(),
+            updates: vec![update],
+            next_seq: 2,
+            cursor: SyncCursor {
+                session_id: "session-1".into(),
+                next_seq: 2,
+                last_acknowledged_seq: 0,
+                requires_bootstrap: true,
+                history_truncated: false,
+            },
+            presence: MachinePresence {
+                session_id: "session-1".into(),
+                daemon_connected: true,
+                daemon_rpc_ready: true,
+                last_seen_at: None,
+            },
+        };
+
+        let messages = sync_messages(response);
+        let queued_bytes: usize = messages
+            .iter()
+            .map(|message| serde_json::to_vec(message).unwrap().len())
+            .sum();
+        eprintln!("3 MiB retained event: {queued_bytes} replay bytes queued");
+        assert!(matches!(
+            messages.as_slice(),
+            [super::RelayServerMessage::Sync {
+                updates,
+                history_truncated: true,
+                next_seq: 2,
+                ..
+            }] if updates.is_empty()
+        ));
+        assert!(queued_bytes < 1024);
     }
 
     #[test]

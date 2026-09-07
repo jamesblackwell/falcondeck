@@ -113,7 +113,7 @@ use remote_bridge::*;
 use remote_lifecycle::*;
 pub(crate) use speech::*;
 use storage::*;
-use threads::{interactive_request_counts, refresh_thread_attention};
+use threads::refresh_thread_attention;
 
 const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str =
@@ -2354,8 +2354,6 @@ impl AppState {
             .collect::<std::collections::HashSet<_>>();
 
         let saved_workspaces = self.inner.saved_workspaces.lock().await.clone();
-        let workspaces = self.inner.workspaces.lock().await;
-        let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
         let extensions = self.inner.extensions.lock().await.snapshot();
         let scheduled_tasks = self.inner.scheduled_tasks.lock().await.summaries();
@@ -2382,6 +2380,32 @@ impl AppState {
             .iter()
             .map(|(thread_id, usage)| (thread_id.clone(), usage.clone()))
             .collect();
+
+        let mut interactive_request_list = self
+            .inner
+            .interactive_requests
+            .lock()
+            .await
+            .values()
+            .map(|request| request.request.clone())
+            .collect::<Vec<_>>();
+        interactive_request_list.sort_by_key(|request| std::cmp::Reverse(request.created_at));
+        let mut request_counts = HashMap::<&str, (u32, u32)>::new();
+        for request in &interactive_request_list {
+            if let Some(thread_id) = request.thread_id.as_deref() {
+                let (approvals, questions) = request_counts.entry(thread_id).or_default();
+                match request.kind {
+                    InteractiveRequestKind::Question => *questions += 1,
+                    InteractiveRequestKind::Approval | InteractiveRequestKind::PlanApproval => {
+                        *approvals += 1;
+                    }
+                }
+            }
+        }
+
+        // Snapshot metadata may be waiting on disk-backed extension changes.
+        // Never hold the thread read/update lock across those unrelated waits.
+        let workspaces = self.inner.workspaces.lock().await;
 
         // Reconcile providers.json edits onto each workspace's agent list:
         // additions appear (placeholder entries; live runtimes refine the
@@ -2455,8 +2479,10 @@ impl AppState {
                         } else {
                             thread.summary.clone()
                         };
-                        let (pending_approval_count, pending_question_count) =
-                            interactive_request_counts(&interactive_requests, &summary.id);
+                        let (pending_approval_count, pending_question_count) = request_counts
+                            .get(summary.id.as_str())
+                            .copied()
+                            .unwrap_or_default();
                         refresh_thread_attention(
                             &mut summary,
                             pending_approval_count,
@@ -2467,12 +2493,6 @@ impl AppState {
             })
             .collect::<Vec<_>>();
         threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
-
-        let mut interactive_request_list = interactive_requests
-            .values()
-            .map(|request| request.request.clone())
-            .collect::<Vec<_>>();
-        interactive_request_list.sort_by_key(|request| std::cmp::Reverse(request.created_at));
 
         DaemonSnapshot {
             daemon: self.inner.daemon.clone(),

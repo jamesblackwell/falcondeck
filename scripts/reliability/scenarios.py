@@ -17,12 +17,13 @@ class ScenarioFailure(RuntimeError):
         self.report_path = report_path
 
 class Probe:
-    def __init__(self, state, directory):
+    def __init__(self, state, directory, compact_index=False):
         lab.command(['node_modules/.bin/esbuild','scripts/reliability/probe.ts','--bundle','--platform=node',
                      '--format=esm','--packages=external','--outfile=var/reliability/probe.mjs'], capture_output=True)
         self.log = (directory/'probe.jsonl').open('w')
         self.error_log = (directory/'probe.stderr').open('w')
-        self.process = subprocess.Popen(['node',str(lab.ROOT/'probe.mjs'),str(lab.STATE)],
+        self.process = subprocess.Popen(['node',str(lab.ROOT/'probe.mjs'),str(lab.STATE),
+            *(['--compact-index'] if compact_index else [])],
             cwd=lab.REPO,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.error_log,text=True,bufsize=1)
         self.messages = queue.Queue()
         self.responses = {}
@@ -103,7 +104,8 @@ def _run(args):
             'daemon_sha256':state['processes']['daemon'].get('sha256'),
             'relay_sha256':state['processes']['relay'].get('sha256'),
             'dirty':lab.output(['git','status','--short']), 'seed':args.seed,'scenario':args.scenario,
-            'fixture':state['fixture'], 'outage':args.outage, 'cycles':args.cycles,'app_sha256':state.get('app_sha256'), 'steps':[], 'passed':False}
+            'fixture':state['fixture'], 'outage':args.outage, 'cycles':args.cycles,'app_sha256':state.get('app_sha256'),
+            'compact_index':getattr(args,'compact_index',False), 'steps':[], 'passed':False}
     probe=None
     def step(name, **data):
         event={'name':name,'at':time.monotonic(),**data};report['steps'].append(event)
@@ -122,7 +124,7 @@ def _run(args):
         lab.netem(state)
         set_profile('healthy');set_profile('healthy','daemon')
         calibrate()
-        probe=Probe(state,directory)
+        probe=Probe(state,directory,compact_index=report['compact_index'])
         baseline=probe.rpc('sync.index');step('baseline',duration_ms=baseline['duration_ms'],bytes=baseline['bytes'])
         snapshot=baseline['result']['snapshot']
         workspace=snapshot['workspaces'][0]['id'];thread=snapshot['threads'][0]['id']
@@ -138,6 +140,8 @@ def _run(args):
             for _ in range(args.cycles):
                 result=control();samples.append(result['duration_ms'])
             step('rpc.samples',samples_ms=samples)
+            if report['compact_index'] and args.scenario=='constrained':
+                assert max(samples)<3000, 'Compact project sync exceeded 3s on the constrained link'
         elif args.scenario in ['blackhole','downstream-blackhole','upstream-blackhole','daemon-blackhole']:
             link='daemon' if args.scenario=='daemon-blackhole' else 'phone'
             profile_name='blackhole' if link=='daemon' else args.scenario

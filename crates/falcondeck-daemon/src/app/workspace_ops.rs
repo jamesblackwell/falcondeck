@@ -4694,18 +4694,7 @@ pub(super) async fn thread_detail(
     let items = if request.inline_images.unwrap_or(true) {
         with_renderable_attachment_previews_for_items(detail.items).await
     } else {
-        detail
-            .items
-            .into_iter()
-            .map(without_inline_image_data)
-            .collect()
-    };
-    let items = match request.tool_output_bytes {
-        Some(cap) => items
-            .into_iter()
-            .map(|item| with_tool_output_capped(item, cap))
-            .collect(),
-        None => items,
+        detail.items
     };
 
     Ok(ThreadDetail {
@@ -4761,11 +4750,20 @@ pub(super) async fn thread_item(
 /// consumers only read the workspace id.
 fn compact_workspace_summary(summary: &WorkspaceSummary) -> WorkspaceSummary {
     WorkspaceSummary {
+        id: summary.id.clone(),
+        path: summary.path.clone(),
+        kind: summary.kind.clone(),
+        status: summary.status.clone(),
         agents: Vec::new(),
         skills: Vec::new(),
+        default_provider: summary.default_provider.clone(),
         models: Vec::new(),
         collaboration_modes: Vec::new(),
-        ..summary.clone()
+        account: summary.account.clone(),
+        current_thread_id: summary.current_thread_id.clone(),
+        connected_at: summary.connected_at,
+        updated_at: summary.updated_at,
+        last_error: summary.last_error.clone(),
     }
 }
 
@@ -4773,22 +4771,61 @@ fn compact_workspace_summary(summary: &WorkspaceSummary) -> WorkspaceSummary {
 /// A stripped URL is empty; the local path and MIME type stay so a client can
 /// tell "fetch me" from "nothing to show", and `thread.item` restores the
 /// preview from the stored item.
-fn without_inline_image_data(mut item: ConversationItem) -> ConversationItem {
-    fn strip(url: &mut String) {
+fn without_inline_image_data(item: &ConversationItem) -> ConversationItem {
+    fn reference_url(url: &str) -> String {
         if url.trim_start().starts_with("data:") {
-            url.clear();
+            String::new()
+        } else {
+            url.to_string()
         }
     }
-    match &mut item {
-        ConversationItem::UserMessage { attachments, .. } => {
-            for attachment in attachments {
-                strip(&mut attachment.url);
-            }
-        }
-        ConversationItem::Image { image, .. } => strip(&mut image.url),
-        _ => {}
+    match item {
+        ConversationItem::UserMessage {
+            id,
+            text,
+            attachments,
+            turn_id,
+            previous_turn_id,
+            created_at,
+        } => ConversationItem::UserMessage {
+            id: id.clone(),
+            text: text.clone(),
+            attachments: attachments
+                .iter()
+                .map(|image| ImageInput {
+                    id: image.id.clone(),
+                    name: image.name.clone(),
+                    mime_type: image.mime_type.clone(),
+                    url: reference_url(&image.url),
+                    local_path: image.local_path.clone(),
+                })
+                .collect(),
+            turn_id: turn_id.clone(),
+            previous_turn_id: previous_turn_id.clone(),
+            created_at: *created_at,
+        },
+        ConversationItem::Image {
+            id,
+            title,
+            image,
+            lifecycle,
+            created_at,
+        } => ConversationItem::Image {
+            id: id.clone(),
+            title: title.clone(),
+            image: falcondeck_core::ConversationImage {
+                id: image.id.clone(),
+                name: image.name.clone(),
+                mime_type: image.mime_type.clone(),
+                url: reference_url(&image.url),
+                local_path: image.local_path.clone(),
+                alt_text: image.alt_text.clone(),
+            },
+            lifecycle: *lifecycle,
+            created_at: *created_at,
+        },
+        _ => item.clone(),
     }
-    item
 }
 
 /// Smallest cap a client can ask for: enough for the collapsed row label
@@ -4799,13 +4836,20 @@ const MIN_TOOL_OUTPUT_CAP_BYTES: usize = 512;
 /// records the untruncated length on the display metadata. Items at or under
 /// the cap are returned untouched (no marker), so clients only fetch on demand
 /// for the outputs that were actually cut.
-fn with_tool_output_capped(mut item: ConversationItem, cap: usize) -> ConversationItem {
+fn with_tool_output_capped(item: &ConversationItem, cap: usize) -> ConversationItem {
     let cap = cap.max(MIN_TOOL_OUTPUT_CAP_BYTES);
     if let ConversationItem::ToolCall {
+        id,
+        title,
+        tool_kind,
+        status,
         output: Some(output),
+        exit_code,
         display,
-        ..
-    } = &mut item
+        detail,
+        created_at,
+        completed_at,
+    } = item
         && output.len() > cap
     {
         let total = output.len() as u64;
@@ -4813,10 +4857,39 @@ fn with_tool_output_capped(mut item: ConversationItem, cap: usize) -> Conversati
         while end > 0 && !output.is_char_boundary(end) {
             end -= 1;
         }
-        output.truncate(end);
+        let mut display = display.clone();
         display.output_total_bytes = Some(total);
+        return ConversationItem::ToolCall {
+            id: id.clone(),
+            title: title.clone(),
+            tool_kind: tool_kind.clone(),
+            status: status.clone(),
+            output: Some(output[..end].to_string()),
+            exit_code: *exit_code,
+            display,
+            detail: detail.clone(),
+            created_at: *created_at,
+            completed_at: *completed_at,
+        };
     }
-    item
+    item.clone()
+}
+
+fn project_thread_detail_item(
+    item: &ConversationItem,
+    request: &ThreadDetailRequest,
+) -> ConversationItem {
+    // Project before cloning: truncating an owned String retains its original
+    // allocation, and copying multi-MB outputs here holds the workspace lock.
+    if matches!(item, ConversationItem::ToolCall { .. })
+        && let Some(cap) = request.tool_output_bytes
+    {
+        return with_tool_output_capped(item, cap);
+    }
+    if request.inline_images == Some(false) {
+        return without_inline_image_data(item);
+    }
+    item.clone()
 }
 
 /// Whether a native OpenCode thread's transcript must be rehydrated from the
@@ -4893,6 +4966,12 @@ fn thread_detail_window(
     let clamp_limit = |limit: Option<usize>, default_limit| {
         limit.unwrap_or(default_limit).clamp(1, MAX_PAGE_SIZE)
     };
+    let project = |items: &[ConversationItem]| {
+        items
+            .iter()
+            .map(|item| project_thread_detail_item(item, request))
+            .collect()
+    };
     let build_window =
         |window: Vec<ConversationItem>, has_older: bool, is_partial: bool| ThreadDetailWindow {
             oldest_item_id: window
@@ -4907,7 +4986,7 @@ fn thread_detail_window(
         };
 
     match request.mode {
-        ThreadDetailMode::Full => Ok(build_window(items.to_vec(), false, false)),
+        ThreadDetailMode::Full => Ok(build_window(project(items), false, false)),
         ThreadDetailMode::Tail => {
             let limit = clamp_limit(request.limit, DEFAULT_TAIL_LIMIT);
             let mut start = items.len().saturating_sub(limit);
@@ -4925,14 +5004,14 @@ fn thread_detail_window(
             // `oldest_item_id` is the contiguous window's first item, computed
             // before the prompt is prepended: a `before` page keyed on the
             // prompt would skip everything between it and the window.
-            let mut detail = build_window(items[start..].to_vec(), start > 0, start > 0);
+            let mut detail = build_window(project(&items[start..]), start > 0, start > 0);
             // A verbose Codex turn can emit more items than the requested
             // tail. Keep the prompt that started it even when the rest of
             // that turn has to stay capped.
             if let Some(user_start) = latest_user_message_index(items)
                 && user_start < start
             {
-                let user = items[user_start].clone();
+                let user = project_thread_detail_item(&items[user_start], request);
                 let user_id = conversation_item_id(&user);
                 if !detail
                     .items
@@ -4958,7 +5037,7 @@ fn thread_detail_window(
                 })?;
             let limit = clamp_limit(request.limit, DEFAULT_BEFORE_LIMIT);
             let start = before_index.saturating_sub(limit);
-            let window = items[start..before_index].to_vec();
+            let window = project(&items[start..before_index]);
             Ok(build_window(window, start > 0, true))
         }
     }
@@ -6657,7 +6736,7 @@ mod tests {
             completed_at: None,
         };
 
-        let capped = with_tool_output_capped(item.clone(), 512);
+        let capped = with_tool_output_capped(&item, 512);
         let ConversationItem::ToolCall {
             output: Some(capped_output),
             display,
@@ -6672,12 +6751,15 @@ mod tests {
 
         // Requests below the floor are raised to it, and short outputs stay
         // unmarked so clients never fetch what they already have.
-        let floor = with_tool_output_capped(item.clone(), 1);
-        let ConversationItem::ToolCall { output: Some(o), .. } = &floor else {
+        let floor = with_tool_output_capped(&item, 1);
+        let ConversationItem::ToolCall {
+            output: Some(o), ..
+        } = &floor
+        else {
             panic!("tool call expected");
         };
         assert_eq!(o.len(), 511);
-        let untouched = with_tool_output_capped(item, 10_000);
+        let untouched = with_tool_output_capped(&item, 10_000);
         assert_eq!(
             untouched,
             ConversationItem::ToolCall {
@@ -6714,7 +6796,7 @@ mod tests {
             lifecycle: falcondeck_core::ContentLifecycle::Complete,
             created_at: Utc::now(),
         };
-        let ConversationItem::Image { image, .. } = without_inline_image_data(image) else {
+        let ConversationItem::Image { image, .. } = without_inline_image_data(&image) else {
             panic!("image expected");
         };
         assert_eq!(image.url, "");
@@ -6732,7 +6814,7 @@ mod tests {
             url: "https://example.com/a.png".to_string(),
             local_path: None,
         });
-        let stripped = without_inline_image_data(ConversationItem::UserMessage {
+        let stripped = without_inline_image_data(&ConversationItem::UserMessage {
             id: "user-1".to_string(),
             text: "see attached".to_string(),
             attachments,
@@ -6744,6 +6826,137 @@ mod tests {
             panic!("user message expected");
         };
         assert_eq!(attachments[0].url, "https://example.com/a.png");
+    }
+
+    #[test]
+    fn compact_thread_windows_do_not_copy_or_retain_discarded_payload_allocations() {
+        let payload = "a".repeat(8 * 1024 * 1024);
+        let tool = ConversationItem::ToolCall {
+            id: "tool-1".into(),
+            title: "large output".into(),
+            tool_kind: "command".into(),
+            status: "running".into(),
+            output: Some(payload.clone()),
+            exit_code: Some(0),
+            display: Box::default(),
+            detail: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        let prompt = ConversationItem::UserMessage {
+            id: "prompt".into(),
+            text: "inspect this".into(),
+            attachments: vec![ImageInput {
+                id: "attachment".into(),
+                name: Some("image.png".into()),
+                mime_type: Some("image/png".into()),
+                url: format!("data:image/png;base64,{payload}"),
+                local_path: Some("/tmp/image.png".into()),
+            }],
+            turn_id: Some("turn-1".into()),
+            previous_turn_id: Some("turn-0".into()),
+            created_at: Utc::now(),
+        };
+        let items = vec![
+            prompt,
+            assistant_message("middle"),
+            tool,
+            assistant_message("last"),
+        ];
+        for mode in [
+            ThreadDetailMode::Full,
+            ThreadDetailMode::Tail,
+            ThreadDetailMode::Before,
+        ] {
+            let mut detail = thread_detail_window(
+                &items,
+                &ThreadDetailRequest {
+                    workspace_id: "workspace".into(),
+                    thread_id: "thread".into(),
+                    mode,
+                    limit: Some(2),
+                    before_item_id: Some("last".into()),
+                    inline_images: Some(false),
+                    tool_output_bytes: Some(512),
+                    strict_limit: Some(true),
+                    compact_workspace: Some(true),
+                },
+            )
+            .unwrap();
+            settle_tool_call_items(&mut detail.items, Utc::now(), ToolSettlement::Completed);
+            for item in detail.items {
+                match item {
+                    ConversationItem::ToolCall {
+                        output: Some(output),
+                        display,
+                        status,
+                        ..
+                    } => {
+                        assert_eq!(output, payload[..512]);
+                        assert_eq!(display.output_total_bytes, Some(payload.len() as u64));
+                        assert_eq!(status, "completed");
+                        assert_eq!(output.capacity(), 512, "capped output must not retain 8 MB");
+                    }
+                    ConversationItem::UserMessage {
+                        attachments,
+                        previous_turn_id,
+                        ..
+                    } => {
+                        assert_eq!(previous_turn_id.as_deref(), Some("turn-0"));
+                        assert_eq!(attachments[0].url.capacity(), 0);
+                        assert_eq!(attachments[0].local_path.as_deref(), Some("/tmp/image.png"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Projection must not mutate the daemon's source needed by thread.item.
+        let ConversationItem::ToolCall {
+            output: Some(output),
+            ..
+        } = &items[2]
+        else {
+            panic!("tool expected");
+        };
+        assert_eq!(output.len(), payload.len());
+    }
+
+    #[test]
+    #[ignore = "release-mode allocation/copy benchmark; run explicitly with --release --ignored"]
+    fn compact_tool_projection_copy_benchmark() {
+        let tool = ConversationItem::ToolCall {
+            id: "tool".into(),
+            title: "large output".into(),
+            tool_kind: "command".into(),
+            status: "completed".into(),
+            output: Some("x".repeat(32 * 1024 * 1024)),
+            exit_code: Some(0),
+            display: Box::default(),
+            detail: None,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        let started = std::time::Instant::now();
+        for _ in 0..50 {
+            let mut cloned = std::hint::black_box(&tool).clone();
+            if let ConversationItem::ToolCall {
+                output: Some(output),
+                ..
+            } = &mut cloned
+            {
+                output.truncate(512);
+            }
+            std::hint::black_box(cloned);
+        }
+        let clone_then_truncate = started.elapsed();
+        let started = std::time::Instant::now();
+        for _ in 0..50 {
+            std::hint::black_box(with_tool_output_capped(std::hint::black_box(&tool), 512));
+        }
+        eprintln!(
+            "50 x 32 MiB tool previews: clone-then-truncate {clone_then_truncate:?}, bounded projection {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

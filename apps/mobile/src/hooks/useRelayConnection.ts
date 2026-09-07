@@ -91,6 +91,7 @@ function persistRelayCheckpointThrottled(): void {
 const RELAY_PING_INTERVAL_MS = 15_000
 const RELAY_SILENCE_TIMEOUT_MS = 45_000
 const RELAY_HEALTH_CHECK_INTERVAL_MS = 5_000
+const RELAY_FOREGROUND_PROBE_TIMEOUT_MS = 3_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
@@ -341,7 +342,7 @@ export function useRelayConnection() {
   }, [])
 
   useEffect(() => {
-    if (!syncIndexToken || !hasSyncedOnce) return
+    if (!isEncrypted || !syncIndexToken || !hasSyncedOnce) return
     let current = true
     let retry: ReturnType<typeof setTimeout> | undefined
     const load = () => { void loadSyncExtensions(syncIndexToken).catch(() => {
@@ -349,7 +350,7 @@ export function useRelayConnection() {
     }) }
     load()
     return () => { current = false; if (retry) clearTimeout(retry) }
-  }, [syncIndexToken, hasSyncedOnce])
+  }, [syncIndexToken, hasSyncedOnce, isEncrypted])
 
   const applyAuthoritativeSnapshot = useCallback((nextSnapshot: DaemonSnapshot) => {
     const racedEvents = pendingSnapshotEvents.current
@@ -406,7 +407,8 @@ export function useRelayConnection() {
 
   const requestSnapshot = useCallback(async () => {
     const relay = useRelayStore.getState()
-    if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
+    if (!relay._getSessionCrypto() || snapshotRequestInFlight.current ||
+        snapshotRetryTimer.current !== null || snapshotRefetchTimer.current !== null) return
     const presence = relay.machinePresence
     if (!presence?.daemon_connected || presence.daemon_rpc_ready === false) {
       snapshotWaitingForDaemon.current = true
@@ -609,8 +611,18 @@ export function useRelayConnection() {
           }
 
           if (update.body.t === 'session-bootstrap') {
+            const previousCrypto = relay._getSessionCrypto()
             await relay._processBootstrap(update)
             if (flushGeneration !== relayFlushGeneration.current) return
+            // A verified replacement key resolves the reason for the failed
+            // request. Resume now; ordinary presence/events still respect the
+            // one scheduled retry instead of hammering sync.index each frame.
+            if (relay._getSessionCrypto() && relay._getSessionCrypto() !== previousCrypto &&
+                snapshotRetryTimer.current !== null) {
+              clearTimeout(snapshotRetryTimer.current)
+              snapshotRetryTimer.current = null
+              snapshotRetryAttempt.current = 0
+            }
             if (pendingEncrypted.current.length > 0) {
               batch.splice(index + 1, 0, ...pendingEncrypted.current)
               pendingEncrypted.current = []
@@ -833,42 +845,46 @@ export function useRelayConnection() {
         persistRelayCheckpointThrottled()
       }
     } finally {
-      relayFlushInProgress.current = false
-      const parked = parkedAuthoritativeSnapshot.current
-      if (
-        parked &&
-        parked.generation === snapshotRequestGeneration.current
-      ) {
-        if (shouldRefetchSnapshotApplication(snapshotRaceOverflowed.current)) {
-          parkedAuthoritativeSnapshot.current = null
-          snapshotRequestInFlight.current = false
-          pendingSnapshotEvents.current = []
-          pendingSnapshotEventSeqs.current.clear()
-          snapshotRaceOverflowed.current = false
-          const relay = useRelayStore.getState()
-          relay._setSyncing(true)
-          if (!snapshotRefetchTimer.current) {
-            relay._setSyncRetry(null, Date.now() + SNAPSHOT_REFETCH_DELAY_MS)
-            snapshotRefetchTimer.current = setTimeout(() => {
-              snapshotRefetchTimer.current = null
-              void requestSnapshot()
-            }, SNAPSHOT_REFETCH_DELAY_MS)
+      // Native decryption may complete after reconnect. Its old finally must
+      // not unlock a new flush, apply its parked snapshot, or own its timers.
+      if (flushGeneration === relayFlushGeneration.current) {
+        relayFlushInProgress.current = false
+        const parked = parkedAuthoritativeSnapshot.current
+        if (
+          parked &&
+          parked.generation === snapshotRequestGeneration.current
+        ) {
+          if (shouldRefetchSnapshotApplication(snapshotRaceOverflowed.current)) {
+            parkedAuthoritativeSnapshot.current = null
+            snapshotRequestInFlight.current = false
+            pendingSnapshotEvents.current = []
+            pendingSnapshotEventSeqs.current.clear()
+            snapshotRaceOverflowed.current = false
+            const relay = useRelayStore.getState()
+            relay._setSyncing(true)
+            if (!snapshotRefetchTimer.current) {
+              relay._setSyncRetry(null, Date.now() + SNAPSHOT_REFETCH_DELAY_MS)
+              snapshotRefetchTimer.current = setTimeout(() => {
+                snapshotRefetchTimer.current = null
+                void requestSnapshot()
+              }, SNAPSHOT_REFETCH_DELAY_MS)
+            }
+          } else {
+            applyAuthoritativeSnapshot(parked.snapshot)
           }
-        } else {
-          applyAuthoritativeSnapshot(parked.snapshot)
         }
-      }
-      if (pendingRelayUpdates.current.length > 0 && relayFlushFrame.current === null && relayFlushTimeout.current === null) {
-        if (globalThis.requestAnimationFrame) {
-          relayFlushFrame.current = globalThis.requestAnimationFrame(() => {
-            relayFlushFrame.current = null
-            void flushRelayUpdates()
-          })
-        } else {
-          relayFlushTimeout.current = globalThis.setTimeout(() => {
-            relayFlushTimeout.current = null
-            void flushRelayUpdates()
-          }, 0)
+        if (pendingRelayUpdates.current.length > 0 && relayFlushFrame.current === null && relayFlushTimeout.current === null) {
+          if (globalThis.requestAnimationFrame) {
+            relayFlushFrame.current = globalThis.requestAnimationFrame(() => {
+              relayFlushFrame.current = null
+              void flushRelayUpdates()
+            })
+          } else {
+            relayFlushTimeout.current = globalThis.setTimeout(() => {
+              relayFlushTimeout.current = null
+              void flushRelayUpdates()
+            }, 0)
+          }
         }
       }
     }
@@ -913,6 +929,7 @@ export function useRelayConnection() {
     // "bootstrap retry silently stops" bug).
     let bootstrapRetryTimer: ReturnType<typeof setTimeout> | null = null
     let connectTimeout: ReturnType<typeof setTimeout> | null = null
+    let foregroundProbeTimer: ReturnType<typeof setTimeout> | null = null
     const snapshotEventSeqs = pendingSnapshotEventSeqs.current
     const relayUrl = relay.relayUrl.trim().replace(/\/$/, '')
     const wsUrl = relayUrl.startsWith('https://')
@@ -935,6 +952,7 @@ export function useRelayConnection() {
     bufferedReplayEvents.current = []
     pendingRelayUpdates.current = []
     relayFlushGeneration.current += 1
+    relayFlushInProgress.current = false
     snapshotRequestGeneration.current += 1
     snapshotRequestInFlight.current = false
     relay._setSyncing(false)
@@ -984,6 +1002,10 @@ export function useRelayConnection() {
       if (connectTimeout !== null) {
         clearTimeout(connectTimeout)
         connectTimeout = null
+      }
+      if (foregroundProbeTimer !== null) {
+        clearTimeout(foregroundProbeTimer)
+        foregroundProbeTimer = null
       }
     }
 
@@ -1055,6 +1077,7 @@ export function useRelayConnection() {
       syncedPresenceFloor.current = null
       pendingRelayUpdates.current = []
       relayFlushGeneration.current += 1
+      relayFlushInProgress.current = false
       snapshotRequestGeneration.current += 1
       snapshotRequestInFlight.current = false
       relay._setSyncing(false)
@@ -1102,6 +1125,15 @@ export function useRelayConnection() {
       useRelayStore.getState()._setError(message)
     }
 
+    const reconnectImmediately = () => {
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current)
+        reconnectTimer.current = null
+      }
+      reconnectAttempt.current = 0
+      setReconnectGeneration((value) => value + 1)
+    }
+
     // Native code asks iOS for ~30s of background time so a short app switch
     // can keep this socket. Ping immediately: JS timers may freeze, and the
     // relay drops silent peers after 45s. If the socket is still dead when
@@ -1109,6 +1141,10 @@ export function useRelayConnection() {
     const appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
       if (!isCurrent || !shouldReconnect) return
       if (nextAppState !== 'active') {
+        if (foregroundProbeTimer !== null) {
+          clearTimeout(foregroundProbeTimer)
+          foregroundProbeTimer = null
+        }
         persistSessionCacheNow()
         relay._persistSession()
       }
@@ -1117,14 +1153,26 @@ export function useRelayConnection() {
           logConnection('info', 'App left the foreground; pinging the relay to hold the session.')
         }
       }
-      if (!shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null, Date.now() - lastReceivedAt)) return
-      if (reconnectTimer.current) {
-        clearTimeout(reconnectTimer.current)
-        reconnectTimer.current = null
+      if (shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null, Date.now() - lastReceivedAt)) {
+        logConnection('info', 'App returned to the foreground; reconnecting right away.')
+        reconnectImmediately()
+        return
       }
-      reconnectAttempt.current = 0
-      logConnection('info', 'App returned to the foreground; reconnecting right away.')
-      setReconnectGeneration((value) => value + 1)
+      if (nextAppState !== 'active' || activeSocket?.readyState !== WebSocket.OPEN) return
+      // Native OPEN survives short network changes even when the path is dead.
+      // Check it now rather than spending the next RPC's whole timeout on it.
+      if (!sendRelayPing(activeSocket)) {
+        reconnectImmediately()
+        return
+      }
+      lastPingAt = Date.now()
+      if (foregroundProbeTimer !== null) clearTimeout(foregroundProbeTimer)
+      foregroundProbeTimer = setTimeout(() => {
+        foregroundProbeTimer = null
+        if (!isCurrent || !shouldReconnect) return
+        logConnection('warn', 'Relay did not answer the foreground probe; reconnecting.')
+        reconnectImmediately()
+      }, RELAY_FOREGROUND_PROBE_TIMEOUT_MS)
     })
 
     void fetchWithTimeout(`${relayUrl}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
@@ -1192,14 +1240,22 @@ export function useRelayConnection() {
         socket.onmessage = (msg) => {
           if (!isCurrent || useRelayStore.getState().sessionId !== sessionId) return
           lastReceivedAt = Date.now()
+          if (foregroundProbeTimer !== null) {
+            clearTimeout(foregroundProbeTimer)
+            foregroundProbeTimer = null
+          }
           let payload: RelayServerMessage
           try {
             const complete = receiveRelayTransport(socket, String(msg.data))
             if (complete === null) return
             payload = JSON.parse(complete) as RelayServerMessage
-          } catch {
-            relay._setError('Received malformed relay message')
+          } catch (error) {
+            logConnection('warn', 'Relay transport failed; reconnecting',
+              error instanceof Error ? error.message : 'Received malformed relay message')
             socket.close()
+            // Native close can be delayed or omitted after a transport error.
+            // Fail pending requests and schedule recovery ourselves now.
+            scheduleReconnect()
             return
           }
 
@@ -1222,6 +1278,7 @@ export function useRelayConnection() {
                   'Event backlog overflowed; reconnecting for snapshot recovery.',
                 )
                 socket.close()
+                scheduleReconnect()
                 return
               }
               if (payload.presence) {
@@ -1277,6 +1334,7 @@ export function useRelayConnection() {
                   'Event backlog overflowed; reconnecting for snapshot recovery.',
                 )
                 socket.close()
+                scheduleReconnect()
                 return
               }
               pendingRelayUpdates.current.push(payload.update)
@@ -1389,6 +1447,7 @@ export function useRelayConnection() {
       pendingTruncationNextSeq.current = null
       pendingRelayUpdates.current = []
       relayFlushGeneration.current += 1
+      relayFlushInProgress.current = false
       snapshotRequestGeneration.current += 1
       snapshotRequestInFlight.current = false
       pendingSnapshotEvents.current = []

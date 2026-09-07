@@ -28,14 +28,36 @@ type ImageItem = Extract<ConversationItem, { kind: "image" }>;
 export type FullItemStatus = "idle" | "loading" | "ready" | "error";
 
 const RESOLVED_CACHE_LIMIT = 48;
+const MAX_CONCURRENT_ITEM_LOADS = 2;
 
 const inflight = new Map<string, Promise<ConversationItem | null>>();
 const resolved = new Map<string, ConversationItem>();
 const failed = new Set<string>();
 const listeners = new Set<() => void>();
+let transferSlots = { scope: "", active: 0, waiting: [] as (() => void)[] };
 
-function key(threadId: string, itemId: string) {
-  return `${threadId}/${itemId}`;
+function key(
+  relayUrl: string,
+  sessionId: string | null,
+  workspaceId: string,
+  threadId: string,
+  itemId: string,
+) {
+  return JSON.stringify([relayUrl, sessionId, workspaceId, threadId, itemId]);
+}
+
+function acquireTransferSlot(slots: typeof transferSlots): Promise<void> {
+  if (slots.active < MAX_CONCURRENT_ITEM_LOADS) {
+    slots.active += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => slots.waiting.push(resolve));
+}
+
+function releaseTransferSlot(slots: typeof transferSlots) {
+  const next = slots.waiting.shift();
+  if (next) next();
+  else slots.active -= 1;
 }
 
 function notify() {
@@ -49,8 +71,7 @@ function subscribe(listener: () => void) {
   };
 }
 
-function remember(threadId: string, itemId: string, item: ConversationItem) {
-  const cacheKey = key(threadId, itemId);
+function remember(cacheKey: string, item: ConversationItem) {
   resolved.delete(cacheKey);
   resolved.set(cacheKey, item);
   while (resolved.size > RESOLVED_CACHE_LIMIT) {
@@ -115,7 +136,11 @@ export function loadFullThreadItem(
   threadId: string,
   itemId: string,
 ): Promise<ConversationItem | null> {
-  const cacheKey = key(threadId, itemId);
+  const relay = useRelayStore.getState();
+  if (!relay.sessionId || isDemoSession(relay.sessionId)) return Promise.resolve(null);
+  const relaySessionId = relay.sessionId;
+  const relayUrl = relay.relayUrl;
+  const cacheKey = key(relayUrl, relaySessionId, workspaceId, threadId, itemId);
   const cached = resolved.get(cacheKey);
   if (cached) {
     applyResolved(threadId, cached);
@@ -124,12 +149,24 @@ export function loadFullThreadItem(
   const pending = inflight.get(cacheKey);
   if (pending) return pending;
 
-  const relay = useRelayStore.getState();
-  if (isDemoSession(relay.sessionId)) return Promise.resolve(null);
-  const relaySessionId = relay.sessionId;
-
+  const scope = JSON.stringify([relayUrl, relaySessionId]);
+  if (transferSlots.scope !== scope) {
+    // Requests on the old pairing must not hold the new daemon's queue open.
+    transferSlots = { scope, active: 0, waiting: [] };
+  }
+  const slots = transferSlots;
+  const ownsSession = () => {
+    const current = useRelayStore.getState();
+    return current.sessionId === relaySessionId && current.relayUrl === relayUrl;
+  };
   const request = (async () => {
+    // Virtualized lists mount ahead of the viewport. Don't let a screenful of
+    // multi-megabyte images consume every transfer slot at once.
+    await acquireTransferSlot(slots);
     try {
+      const session = useSessionStore.getState();
+      if (!ownsSession() || session.selectedWorkspaceId !== workspaceId ||
+          session.selectedThreadId !== threadId) return null;
       const item = normalizeConversationItem(
         await relay._callRpc<ConversationItem>(
           "thread.item",
@@ -137,15 +174,16 @@ export function loadFullThreadItem(
           { requestIdPrefix: "mobile-item" },
         ),
       );
-      if (useRelayStore.getState().sessionId !== relaySessionId) return null;
+      if (!ownsSession()) return null;
       failed.delete(cacheKey);
-      remember(threadId, itemId, item);
+      remember(cacheKey, item);
       applyResolved(threadId, item);
       return item;
     } catch (error) {
-      failed.add(cacheKey);
+      if (ownsSession()) failed.add(cacheKey);
       throw error;
     } finally {
+      releaseTransferSlot(slots);
       inflight.delete(cacheKey);
       notify();
     }
@@ -160,6 +198,7 @@ export function resetThreadItemLoaderForTests() {
   inflight.clear();
   resolved.clear();
   failed.clear();
+  transferSlots = { scope: "", active: 0, waiting: [] };
 }
 
 function statusFor(cacheKey: string): FullItemStatus {
@@ -180,7 +219,11 @@ export function useFullThreadItem(
 ): { status: FullItemStatus; retry: () => void } {
   const workspaceId = useSessionStore((state) => state.selectedWorkspaceId);
   const threadId = useSessionStore((state) => state.selectedThreadId);
-  const cacheKey = threadId ? key(threadId, itemId) : null;
+  const sessionId = useRelayStore((state) => state.sessionId);
+  const relayUrl = useRelayStore((state) => state.relayUrl);
+  const cacheKey = workspaceId && threadId && sessionId
+    ? key(relayUrl, sessionId, workspaceId, threadId, itemId)
+    : null;
   const status = useSyncExternalStore(
     subscribe,
     () => (cacheKey ? statusFor(cacheKey) : "idle"),

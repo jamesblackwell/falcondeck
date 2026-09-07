@@ -362,7 +362,7 @@ def replay(args):
     if state['fixture']!=report['fixture']:
         raise RuntimeError('Restore the recorded fixture settings before replay')
     scenarios.run(argparse.Namespace(scenario=report['scenario'],seed=report['seed'],
-                  cycles=report['cycles'],outage=report['outage']))
+                  cycles=report['cycles'],outage=report['outage'],compact_index=report.get('compact_index',False)))
 
 
 def main():
@@ -383,6 +383,7 @@ def main():
     p=sub.add_parser('campaign');p.add_argument('--suite',choices=['protocol','mobile','all'],default='all');p.add_argument('--seeds',type=__import__('campaign').seeds,default=[1]);p.add_argument('--retries',type=int,choices=range(3),default=1);p.set_defaults(run=lambda a:__import__('campaign').run(a))
     p=sub.add_parser('pair-code');p.set_defaults(run=lambda _:print(pairing(load())))
     p=sub.add_parser('run');p.add_argument('--scenario',default='healthy',choices=['healthy','constrained','severe','packet-loss','blackhole','downstream-blackhole','upstream-blackhole','daemon-blackhole','bulk','send-reply-loss','restart-daemon','ui-send','ui-send-reply-loss','concurrent-reads','urgent-during-sync','draft-relaunch','model-picker','flapping','background','mobile-blackhole']);p.add_argument('--seed',type=int,default=1);p.add_argument('--cycles',type=int,default=5);p.add_argument('--outage',type=float,default=5);p.set_defaults(run=lambda a:__import__('scenarios').run(a))
+    p.add_argument('--compact-index',action='store_true',help='Negotiate the same compact-sync profile as the mobile app')
     args=parser.parse_args()
     ROOT.mkdir(parents=True,exist_ok=True)
     with (ROOT/'controller.lock').open('w') as lock:

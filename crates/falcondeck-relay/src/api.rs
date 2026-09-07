@@ -354,7 +354,10 @@ async fn socket_loop(
         Ok(Message::Text(text)) => Ok(text.to_string()),
         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => Ok(r#"{"type":"ping"}"#.to_string()),
         Ok(Message::Close(frame)) => {
-            observed_close_code.store(frame.map(|f| f.code).unwrap_or(1005), std::sync::atomic::Ordering::Relaxed);
+            observed_close_code.store(
+                frame.map(|f| f.code).unwrap_or(1005),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             Err("peer closed websocket".to_string())
         }
         Ok(_) => Err("relay socket closed or unsupported frame".to_string()),
@@ -458,15 +461,12 @@ async fn socket_loop(
                             break "error_queue_failed";
                         }
                     }
-                    Some(Err(_)) => {
-                        // Oversized frames are the most likely receive
-                        // failure; tell the peer why before dropping so it
-                        // does not silently reconnect into the same wall.
+                    Some(Err(error)) => {
+                        let reason = transport_failure_reason(&error);
+                        tracing::warn!(session_id = %auth.session_id, %peer_id, reason,
+                            "relay peer transport failed");
                         let server_message = RelayServerMessage::Error {
-                            message: format!(
-                                "websocket message could not be received; \
-                                 messages must not exceed {WS_MAX_MESSAGE_BYTES} bytes"
-                            ),
+                            message: format!("Relay transport interrupted ({reason}); reconnecting"),
                         };
                         let _ = send_message_with_timeout(&mut sender, &server_message).await;
                         break "transport_receive_error";
@@ -491,6 +491,26 @@ async fn socket_loop(
         received_messages, received_bytes, queued_messages, invalid_messages, handler_errors, max_handler_ms,
         "relay peer closed");
     state.unregister_peer(&auth.session_id, &peer_id).await;
+}
+
+// Transport errors may contain peer-controlled text. Retain the failure class,
+// never payloads, and do not misdiagnose every disconnect as an oversized frame.
+fn transport_failure_reason(error: &str) -> &'static str {
+    if error.contains("chunk acknowledgement timed out") {
+        "chunk_ack_timeout"
+    } else if error.contains("transfer expired") {
+        "transfer_timeout"
+    } else if error.contains("acknowledgement queue full") {
+        "ack_queue_full"
+    } else if error.contains("socket write timed out") {
+        "write_timeout"
+    } else if error.contains("too large") || error.contains("MessageTooLong") {
+        "message_too_large"
+    } else if error.contains("transfer") || error.contains("chunk") {
+        "invalid_transfer"
+    } else {
+        "connection_closed"
+    }
 }
 
 async fn submit_action(
@@ -663,6 +683,25 @@ mod tests {
     use std::sync::Arc;
 
     use super::{WS_MAX_MESSAGE_BYTES, acquire_ws_handshake_permit, auth_token};
+
+    #[test]
+    fn transport_diagnostics_preserve_failure_class_without_peer_text() {
+        assert_eq!(
+            [
+                "relay chunk acknowledgement timed out",
+                "relay transfer expired",
+                "inconsistent relay transfer",
+                "peer closed: private-payload"
+            ]
+            .map(super::transport_failure_reason),
+            [
+                "chunk_ack_timeout",
+                "transfer_timeout",
+                "invalid_transfer",
+                "connection_closed"
+            ]
+        );
+    }
 
     #[test]
     fn websocket_limit_has_headroom_for_an_encrypted_image_turn() {
