@@ -39,6 +39,7 @@ import {
   triggerMessageFailedHaptic,
 } from "@/lib/haptics";
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
+import { beginSelectedThreadDetailRead } from "./selected-thread-detail-read";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
 /**
@@ -152,6 +153,7 @@ export function useSessionActions() {
   const detailRequests = useRef(new Map<string, {
     socket: ReturnType<ReturnType<typeof useRelayStore.getState>["_getSocket"]>;
     crypto: ReturnType<ReturnType<typeof useRelayStore.getState>["_getSessionCrypto"]>;
+    ownsTailRead: () => boolean;
     promise: Promise<ThreadDetail>;
   }>());
   const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
@@ -535,11 +537,14 @@ export function useSessionActions() {
         relay.relayUrl, relaySessionId, workspaceId, threadId, beforeItemId,
       ]);
       let pending = detailRequests.current.get(requestKey);
+      let ownsTailRead = pending?.ownsTailRead ?? (() => true);
       try {
-        if (!pending || pending.socket !== requestSocket || pending.crypto !== requestCrypto) {
+        if (!pending || pending.socket !== requestSocket || pending.crypto !== requestCrypto || !pending.ownsTailRead()) {
+          ownsTailRead = options?.older ? () => true : beginSelectedThreadDetailRead();
           pending = {
             socket: requestSocket,
             crypto: requestCrypto,
+            ownsTailRead,
             promise: relay._callRpc<ThreadDetail>(
               "thread.detail",
               options?.older
@@ -571,6 +576,7 @@ export function useSessionActions() {
 
         const activeSession = useSessionStore.getState();
         const isStale =
+          !ownsTailRead() ||
           useRelayStore.getState().sessionId !== relaySessionId ||
           useRelayStore.getState()._getSocket() !== requestSocket ||
           useRelayStore.getState()._getSessionCrypto() !== requestCrypto ||
@@ -597,6 +603,7 @@ export function useSessionActions() {
       } catch (e) {
         const activeSession = useSessionStore.getState();
         const isStale =
+          !ownsTailRead() ||
           useRelayStore.getState().sessionId !== relaySessionId ||
           useRelayStore.getState()._getSocket() !== requestSocket ||
           useRelayStore.getState()._getSessionCrypto() !== requestCrypto ||

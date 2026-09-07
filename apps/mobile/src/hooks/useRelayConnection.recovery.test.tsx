@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { decryptJson, encryptJson, expandSyncIndex, normalizeDaemonSnapshot, type RelayClientMessage, type RelayServerMessage } from '@falcondeck/client-core'
 import { useRelayStore } from '@/store/relay-store'
 import { useSessionStore } from '@/store/session-store'
-import { snapshot, snapshotEvent } from '@/test/factories'
+import { assistantMessage, snapshot, snapshotEvent, threadDetail } from '@/test/factories'
 import { cleanup, renderComponent } from '@/test/render'
 import { restoreTestRelaySession } from '@/test/relay-session'
 import { useRelayConnection } from './useRelayConnection'
@@ -75,6 +75,57 @@ async function connect(savedKey: Uint8Array | null) {
 async function advance(ms: number) {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 }
+
+it.each(['snapshot-invalidated', 'history-truncated'] as const)(
+  'repairs the open transcript after %s even though the socket and selection stay healthy',
+  async (loss) => {
+    const { socket, dataKey } = await connect(new Uint8Array(32).fill(42))
+    const base = normalizeDaemonSnapshot(snapshot())
+    const presence = { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null }
+    socket.receive({ type: 'ready', session_id: 'session', role: 'client', next_seq: 11 })
+    socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
+    await advance(1)
+    const indexResult = async (token: string) => encryptJson(dataKey, { token, snapshot: base,
+      agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {} })
+    socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[0]!.request_id,
+      ok: true, error: null, result: await indexResult('before-loss') })
+    await advance(20)
+    act(() => {
+      useSessionStore.getState().selectThread('workspace-1', 'thread-1')
+      useSessionStore.getState().setThreadDetail(threadDetail({
+        items: [{ kind: 'assistant_message', id: 'reply', text: 'Half of the reply',
+          created_at: '2026-03-16T10:01:00Z', lifecycle: 'streaming' }],
+      }))
+    })
+    expect(useRelayStore.getState().hasSyncedOnce).toBe(true)
+
+    // The daemon completed the reply, but its terminal update was lost.
+    // Both recovery markers currently refresh only the sidebar/index.
+    if (loss === 'snapshot-invalidated') {
+      socket.receive({ type: 'update', update: {
+        id: 'gap', seq: 12, created_at: new Date().toISOString(), body: { t: 'snapshot-invalidated' },
+      } })
+    } else {
+      socket.receive({ type: 'sync', updates: [], next_seq: 13, history_truncated: true, presence })
+    }
+    await advance(20)
+    expect(socket.indexRequests()).toHaveLength(2)
+    socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[1]!.request_id,
+      ok: true, error: null, result: await indexResult('after-loss') })
+    await advance(20)
+    expect(useRelayStore.getState()).toMatchObject({ isEncrypted: true, isSyncing: false })
+    expect(useSessionStore.getState().selectedThreadId).toBe('thread-1')
+    const detailCalls = socket.sent.filter((message): message is Extract<RelayClientMessage, { type: 'rpc-call' }> =>
+      message.type === 'rpc-call' && message.method === 'thread.detail')
+    expect(detailCalls).toHaveLength(1)
+    socket.receive({ type: 'rpc-result', request_id: detailCalls[0]!.request_id, ok: true, error: null,
+      result: await encryptJson(dataKey, threadDetail({ items: [assistantMessage('reply', 'The complete reply')] })) })
+    await advance(20)
+    expect(useSessionStore.getState().threadItems['thread-1']).toMatchObject([
+      { id: 'reply', text: 'The complete reply', lifecycle: 'complete' },
+    ])
+  },
+)
 
 it('does not let presence traffic turn one failed index request into an immediate retry storm', async () => {
   const { socket } = await connect(new Uint8Array(32).fill(42))

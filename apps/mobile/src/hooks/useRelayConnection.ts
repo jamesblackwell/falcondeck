@@ -1,5 +1,6 @@
 import { requestInitialSync, loadSyncExtensions } from './sync-index'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createRelayTranscriptRecovery } from './relay-transcript-recovery'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 
 import {
@@ -251,6 +252,7 @@ function needsAuthoritativeSnapshot() {
 }
 
 export function useRelayConnection() {
+  const transcriptRecovery = useMemo(() => createRelayTranscriptRecovery(), [])
   const sessionId = useRelayStore((s) => s.sessionId)
   const deviceId = useRelayStore((s) => s.deviceId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
@@ -403,7 +405,8 @@ export function useRelayConnection() {
     const relay = useRelayStore.getState()
     relay._setError(null)
     relay._finishSync()
-  }, [checkpointPendingSnapshotCursor])
+    transcriptRecovery.snapshotApplied()
+  }, [checkpointPendingSnapshotCursor, transcriptRecovery])
 
   const requestSnapshot = useCallback(async () => {
     const relay = useRelayStore.getState()
@@ -598,6 +601,7 @@ export function useRelayConnection() {
           const update = batch[index]
 
           if (update.body.t === 'snapshot-invalidated') {
+            transcriptRecovery.invalidate()
             pendingIndexInvalidation.current = true
             // Replay predates the RPC started from this sync's presence marker.
             // A live invalidation raced with its capture needs one replacement.
@@ -635,6 +639,7 @@ export function useRelayConnection() {
               // the drained window has a silent gap; rebuild derived state
               // from a fresh snapshot instead of trusting the partial replay.
               evictedWhileParked.current = false
+              transcriptRecovery.invalidate()
               snapshotAfterCrypto.current = true
             }
             if (deferredBootstrapSeq === null) {
@@ -888,7 +893,7 @@ export function useRelayConnection() {
         }
       }
     }
-  }, [applyAuthoritativeSnapshot, checkpointPendingSnapshotCursor, requestSnapshot])
+  }, [applyAuthoritativeSnapshot, checkpointPendingSnapshotCursor, requestSnapshot, transcriptRecovery])
 
   const scheduleRelayFlush = useCallback(() => {
     if (relayFlushFrame.current !== null || relayFlushTimeout.current !== null) {
@@ -1065,6 +1070,7 @@ export function useRelayConnection() {
       // onclose arrives as well, keep the existing retry for this failure.
       if (reconnectTimer.current !== null) return
       clearSocketTimers()
+      transcriptRecovery.cancel()
       realtimeAudioPlayer.stop()
       relay._setConnectionStatus('disconnected')
       relay._setMachinePresence(null)
@@ -1286,6 +1292,7 @@ export function useRelayConnection() {
                 relay._setMachinePresence(payload.presence)
               }
               if (payload.history_truncated) {
+                transcriptRecovery.invalidate()
                 // Updates were lost server-side; recover from a fresh
                 // snapshot.current. Keep the in-memory list on screen so the
                 // sidebar does not flash empty while that RPC is in flight —
@@ -1438,6 +1445,7 @@ export function useRelayConnection() {
       realtimeAudioPlayer.stop()
       appStateSubscription.remove()
       clearSocketTimers()
+      transcriptRecovery.cancel()
       activeSocket?.close()
       relay._setSocket(null)
       relay._failPendingRpcs(RELAY_TRANSPORT_ERRORS.closed)
@@ -1484,6 +1492,7 @@ export function useRelayConnection() {
     processRpcResult,
     requestSnapshot,
     scheduleRelayFlush,
+    transcriptRecovery,
   ])
 
   useEffect(() => {
