@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Mutex, MutexGuard, atomic::Ordering},
+    sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
 };
 
 use chrono::Utc;
@@ -17,7 +17,7 @@ use falcondeck_core::{
         verify_pairing_public_key_bundle,
     },
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, future::BoxFuture};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
@@ -28,9 +28,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::remote_lifecycle::RemoteBridgeRetry;
 use super::{
-    AppState, EVENT_COALESCE_INTERVAL, EventCoalescer, RemoteBridgeCommand, RemoteBridgeError,
-    RemotePairingState, extract_string, parse_agent_provider, parse_interactive_response_params,
-    parse_thread_isolation, relay_request_error,
+    AppState, CachedEnvelope, EVENT_COALESCE_INTERVAL, EventCoalescer, RemoteBridgeCommand,
+    RemoteBridgeError, RemotePairingState, extract_string, parse_agent_provider,
+    parse_interactive_response_params, parse_thread_isolation, relay_request_error,
 };
 use crate::error::DaemonError;
 
@@ -397,7 +397,6 @@ impl AppState {
             full_snapshots_required: true,
         };
 
-        let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
         // Detect silently-dead connections: outbound sends can keep buffering
         // long after the peer is gone, so track inbound traffic (pongs count)
         // and force a reconnect when the relay goes quiet for several
@@ -424,20 +423,6 @@ impl AppState {
         let initial_snapshot_due = tokio::time::Instant::now() + Duration::from_secs(1);
         let mut initial_snapshot_pending = true;
 
-        while let Ok(event) = events.try_recv() {
-            if event.seq >= fence_seq {
-                send_relay_message(
-                    &writer,
-                    &remote_event_message(
-                        &pairing.data_key,
-                        &event,
-                        writer.full_snapshots_required,
-                    )?,
-                )
-                .await?;
-            }
-        }
-
         {
             let mut remote = self.inner.remote.lock().await;
             remote.status = RemoteConnectionStatus::Connected;
@@ -448,6 +433,14 @@ impl AppState {
         // successful-return path, so old outages do not delay a fresh retry.
         retry.connected();
         tracing::info!(%session_id, "remote relay bridge connected");
+        send_relay_message(&writer, &RelayClientMessage::Ping).await?;
+        // interval() ticks immediately. Re-registering all methods on that
+        // tick doubled the startup burst beyond the 128-message urgent queue.
+        let mut heartbeat = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            Duration::from_secs(15),
+        );
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Once the transport is live, persistence failures are durability
         // warnings rather than connection failures. Tearing down a healthy
@@ -477,39 +470,58 @@ impl AppState {
         let mut coalescer = EventCoalescer::default();
         let mut coalesce_flush = tokio::time::interval(EVENT_COALESCE_INTERVAL);
         coalesce_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut pending_delivery: Option<BoxFuture<'static, Result<(), String>>> = None;
+        let mut snapshot_pending = false;
         loop {
+            if pending_delivery.is_none() && snapshot_pending {
+                snapshot_pending = false;
+                let app = self.clone();
+                let mut snapshot_writer = writer.clone();
+                let data_key = pairing.data_key;
+                pending_delivery = Some(Box::pin(async move {
+                    app.publish_remote_snapshot(&mut snapshot_writer, &data_key, key_generation)
+                        .await
+                }));
+            }
             tokio::select! {
+                result = async {
+                    match pending_delivery.as_mut() {
+                        Some(delivery) => delivery.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    result?;
+                    pending_delivery = None;
+                }
                 _ = tokio::time::sleep_until(initial_snapshot_due), if initial_snapshot_pending => {
                     initial_snapshot_pending = false;
                     if writer.full_snapshots_required {
-                        self.publish_remote_snapshot(&mut writer, &pairing.data_key).await?;
+                        snapshot_pending = true;
                     }
                 }
-                event = events.recv() => {
+                // Backpressure pauses only event intake. The broadcast remains
+                // bounded; RPC requests, heartbeats and key changes keep running.
+                event = events.recv(), if pending_delivery.is_none() => {
                     match event {
                         Ok(event) => {
                             if event.seq < min_forward_seq {
                                 continue;
                             }
-                            for outgoing in coalescer.push(event) {
-                                send_relay_message(
-                                    &writer,
-                                    &remote_event_message(&pairing.data_key, &outgoing, writer.full_snapshots_required)?,
-                                ).await?;
+                            let outgoing = coalescer.push(event);
+                            if !outgoing.is_empty() {
+                                pending_delivery = Some(Box::pin(send_remote_events(
+                                    writer.clone(), pairing.data_key, key_generation, outgoing,
+                                )));
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
                             // Held updates predate the snapshot about to be
                             // sent, so they go first or not at all.
-                            for outgoing in coalescer.drain() {
-                                send_relay_message(
-                                    &writer,
-                                    &remote_event_message(&pairing.data_key, &outgoing, writer.full_snapshots_required)?,
-                                ).await?;
-                            }
-                            self.publish_remote_snapshot(&mut writer, &pairing.data_key)
-                                .await?;
+                            pending_delivery = Some(Box::pin(send_remote_events(
+                                writer.clone(), pairing.data_key, key_generation, coalescer.drain(),
+                            )));
+                            snapshot_pending = true;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(RemoteBridgeError::Persistent(
@@ -518,13 +530,10 @@ impl AppState {
                         }
                     }
                 }
-                _ = coalesce_flush.tick(), if !coalescer.is_empty() => {
-                    for outgoing in coalescer.drain() {
-                        send_relay_message(
-                            &writer,
-                            &remote_event_message(&pairing.data_key, &outgoing, writer.full_snapshots_required)?,
-                        ).await?;
-                    }
+                _ = coalesce_flush.tick(), if !coalescer.is_empty() && pending_delivery.is_none() => {
+                    pending_delivery = Some(Box::pin(send_remote_events(
+                        writer.clone(), pairing.data_key, key_generation, coalescer.drain(),
+                    )));
                 }
                 _ = heartbeat.tick() => {
                     if last_inbound.elapsed() > INBOUND_IDLE_TIMEOUT {
@@ -552,6 +561,9 @@ impl AppState {
                             } => {
                                 key_generation = key_generation.wrapping_add(1);
                                 writer.advance_generation();
+                                pending_delivery = None;
+                                coalescer.drain();
+                                snapshot_pending = false;
                                 pairing = *next_pairing;
                                 let result = async {
                                     for client_bundle in &client_bundles {
@@ -565,6 +577,7 @@ impl AppState {
                                     self.publish_remote_snapshot(
                                         &mut writer,
                                         &pairing.data_key,
+                                        key_generation,
                                     )
                                     .await
                                 }
@@ -624,10 +637,10 @@ impl AppState {
                                         initial_snapshot_pending = false;
                                         // A new bridge may represent a restarted daemon. Repair cached
                                         // views once, without pushing a second full bootstrap.
-                                        send_relay_message(&writer, &snapshot_invalidation(&pairing.data_key)?).await?;
+                                        snapshot_pending = true;
                                     }
                                     if full_snapshots_required && !was_required {
-                                        self.publish_remote_snapshot(&mut writer, &pairing.data_key).await?;
+                                        snapshot_pending = true;
                                     }
                                 }
                                 RelayServerMessage::RpcRequest { request_id, method, params } => {
@@ -851,9 +864,15 @@ impl AppState {
         &self,
         writer: &mut RelayWriter,
         data_key: &[u8; 32],
+        key_generation: u64,
     ) -> Result<(), String> {
         if !writer.full_snapshots_required {
-            return send_relay_message(writer, &snapshot_invalidation(data_key)?).await;
+            return send_ordered_relay_message(
+                writer,
+                &snapshot_invalidation(data_key)?,
+                key_generation,
+            )
+            .await;
         }
         let mut snapshot = self.snapshot().await;
         // No client reads the per-agent skill catalog, and it is repeated once
@@ -872,13 +891,14 @@ impl AppState {
             thread_id: None,
             event: UnifiedEvent::Snapshot { snapshot },
         };
-        send_relay_message(
+        send_ordered_relay_message(
             writer,
             &RelayClientMessage::Update {
                 body: RelayUpdateBody::Encrypted {
                     envelope: encrypt_remote_daemon_event(data_key, &snapshot_event)?,
                 },
             },
+            key_generation,
         )
         .await
     }
@@ -2672,18 +2692,40 @@ async fn register_remote_rpc_methods(writer: &mut RelayWriter) -> Result<(), Str
     Ok(())
 }
 
+async fn send_remote_events(
+    writer: RelayWriter,
+    data_key: [u8; 32],
+    key_generation: u64,
+    events: Vec<Arc<CachedEnvelope>>,
+) -> Result<(), String> {
+    for event in events {
+        let message = remote_event_message(&data_key, &event, writer.full_snapshots_required)?;
+        send_ordered_relay_message(&writer, &message, key_generation).await?;
+    }
+    Ok(())
+}
+
+async fn send_ordered_relay_message(
+    writer: &RelayWriter,
+    message: &RelayClientMessage,
+    key_generation: u64,
+) -> Result<(), String> {
+    let payload = serde_json::to_string(message)
+        .map_err(|error| format!("failed to encode relay message: {error}"))?;
+    writer.send_ordered(payload, key_generation).await
+}
+
 async fn send_relay_message(
     writer: &RelayWriter,
     message: &RelayClientMessage,
 ) -> Result<(), String> {
     let payload = serde_json::to_string(message)
         .map_err(|error| format!("failed to encode relay message: {error}"))?;
-    let urgent = matches!(
+    let control = matches!(
         message,
         RelayClientMessage::Ping
             | RelayClientMessage::RpcRegister { .. }
             | RelayClientMessage::RpcUnregister { .. }
-            | RelayClientMessage::RpcResult { .. }
     );
     if matches!(
         message,
@@ -2692,8 +2734,13 @@ async fn send_relay_message(
         }
     ) {
         writer.send_barrier(payload).await
+    } else if control {
+        writer.send_control(payload)
     } else {
-        writer.send(payload, urgent)
+        writer.send(
+            payload,
+            matches!(message, RelayClientMessage::RpcResult { .. }),
+        )
     }
 }
 
@@ -2704,6 +2751,10 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
         .find_map(|key| params.get(key))
         .map(|value| value.as_str().map(ToOwned::to_owned))
 }
+
+#[cfg(test)]
+#[path = "remote_bridge_backpressure_tests.rs"]
+mod backpressure_tests;
 
 #[cfg(test)]
 mod tests {

@@ -85,6 +85,18 @@ impl RemoteBridgeRetry {
 fn remote_bridge_failure_reason(message: &str) -> &'static str {
     if message.contains("chunk acknowledgement timed out") {
         "chunk_ack_timeout"
+    } else if message.contains("byte budget exhausted (ordered)") {
+        "ordered_byte_budget_full"
+    } else if message.contains("byte budget exhausted (urgent)") {
+        "urgent_byte_budget_full"
+    } else if message.contains("byte budget exhausted (control)") {
+        "control_byte_budget_full"
+    } else if message.contains("queue unavailable (ordered count)") {
+        "ordered_message_queue_full"
+    } else if message.contains("queue unavailable (urgent count)") {
+        "urgent_message_queue_full"
+    } else if message.contains("queue unavailable (control count)") {
+        "control_message_queue_full"
     } else if message.contains("byte budget exhausted") || message.contains("queue unavailable") {
         "outbound_queue_full"
     } else if message.contains("went quiet") {
@@ -1586,7 +1598,7 @@ mod tests {
                     async move {
                         upgrade.on_upgrade(move |mut socket| async move {
                             // The first heartbeat is sent only after the bridge has
-                            // registered its RPCs and entered the connected loop.
+                            // registered its RPCs and entered the connected state.
                             while let Some(Ok(message)) = socket.recv().await {
                                 if let axum::extract::ws::Message::Text(text) = message
                                     && serde_json::from_str::<Value>(&text).unwrap()["type"]
@@ -1693,6 +1705,29 @@ mod tests {
                 "inbound_idle_timeout",
                 "outbound_queue_full",
                 "ticket_request_failed",
+            ]
+        );
+    }
+
+    #[test]
+    fn bridge_diagnostics_identify_the_saturated_lane_and_budget() {
+        assert_eq!(
+            [
+                "relay outbound byte budget exhausted (ordered)",
+                "relay outbound byte budget exhausted (urgent)",
+                "relay outbound byte budget exhausted (control)",
+                "relay outbound queue unavailable (ordered count)",
+                "relay outbound queue unavailable (urgent count)",
+                "relay outbound queue unavailable (control count)",
+            ]
+            .map(remote_bridge_failure_reason),
+            [
+                "ordered_byte_budget_full",
+                "urgent_byte_budget_full",
+                "control_byte_budget_full",
+                "ordered_message_queue_full",
+                "urgent_message_queue_full",
+                "control_message_queue_full",
             ]
         );
     }

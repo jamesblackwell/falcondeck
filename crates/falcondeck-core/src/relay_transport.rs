@@ -22,6 +22,13 @@ pub const CHUNK_BYTES: usize = 11 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 40 * 1024 * 1024;
 const QUEUE_BYTES: usize = MAX_MESSAGE_BYTES + 1024 * 1024;
 const URGENT_BYTES: usize = 512 * 1024;
+// RPC backpressure must not consume heartbeat/bootstrap admission. Both classes
+// still share one FIFO urgent queue and its original total byte/count limits.
+const CONTROL_BYTES: usize = 64 * 1024;
+const RPC_BYTES: usize = URGENT_BYTES - CONTROL_BYTES;
+const URGENT_MESSAGES: usize = 128;
+const RPC_MESSAGES: usize = 16;
+const CONTROL_MESSAGES: usize = URGENT_MESSAGES - RPC_MESSAGES;
 // Compact index and thread-page replies exceed one fragment after encryption.
 // Send these bounded envelopes between bulk chunks instead of behind all history.
 const MAX_URGENT_MESSAGE_BYTES: usize = 128 * 1024;
@@ -80,6 +87,13 @@ struct Outbound {
     queued: Instant,
     completed: Option<oneshot::Sender<Result<(), String>>>,
     _permit: OwnedSemaphorePermit,
+    _message_permit: Option<OwnedSemaphorePermit>,
+}
+
+enum OutboundPriority {
+    Ordered,
+    Urgent,
+    Control,
 }
 
 /// The only producer interface to a socket's writer. Both lanes are byte bounded.
@@ -88,6 +102,9 @@ pub struct TransportSender {
     urgent: mpsc::Sender<Outbound>,
     ordered: mpsc::Sender<Outbound>,
     urgent_bytes: Arc<Semaphore>,
+    urgent_messages: Arc<Semaphore>,
+    control_bytes: Arc<Semaphore>,
+    control_messages: Arc<Semaphore>,
     ordered_bytes: Arc<Semaphore>,
     generation: Arc<AtomicU64>,
     generation_notice: watch::Sender<u64>,
@@ -97,42 +114,74 @@ impl TransportSender {
     /// Enqueue an application message without waiting for socket capacity.
     /// Replies larger than the compact-envelope limit use the ordered lane.
     pub fn send(&self, text: String, urgent: bool) -> Result<(), String> {
-        self.enqueue(text, urgent, None)
+        let priority = if urgent && text.len() <= MAX_URGENT_MESSAGE_BYTES {
+            OutboundPriority::Urgent
+        } else {
+            OutboundPriority::Ordered
+        };
+        self.enqueue(text, priority, None)
+    }
+
+    /// Reserve admission for connection control independently of queued RPCs.
+    pub fn send_control(&self, text: String) -> Result<(), String> {
+        self.enqueue(text, OutboundPriority::Control, None)
     }
 
     fn enqueue(
         &self,
         text: String,
-        urgent: bool,
+        priority: OutboundPriority,
         completed: Option<oneshot::Sender<Result<(), String>>>,
     ) -> Result<(), String> {
         if text.len() > MAX_MESSAGE_BYTES {
             return Err("relay message exceeds transport limit".into());
         }
-        let urgent = urgent && text.len() <= MAX_URGENT_MESSAGE_BYTES;
-        let (tx, budget) = if urgent {
-            (&self.urgent, &self.urgent_bytes)
-        } else {
-            (&self.ordered, &self.ordered_bytes)
+        if matches!(priority, OutboundPriority::Control) && text.len() > CONTROL_BYTES {
+            return Err("relay control message exceeds transport limit".into());
+        }
+        let (tx, budget, messages, lane) = match priority {
+            OutboundPriority::Control => (
+                &self.urgent,
+                &self.control_bytes,
+                Some(&self.control_messages),
+                "control",
+            ),
+            OutboundPriority::Urgent => (
+                &self.urgent,
+                &self.urgent_bytes,
+                Some(&self.urgent_messages),
+                "urgent",
+            ),
+            OutboundPriority::Ordered => (&self.ordered, &self.ordered_bytes, None, "ordered"),
         };
+        let message_permit = messages
+            .map(|messages| messages.clone().try_acquire_owned())
+            .transpose()
+            .map_err(|_| format!("relay outbound queue unavailable ({lane} count)"))?;
         let permit = budget
             .clone()
             .try_acquire_many_owned(text.len().max(1) as u32)
-            .map_err(|_| "relay outbound byte budget exhausted")?;
+            .map_err(|_| format!("relay outbound byte budget exhausted ({lane})"))?;
         tx.try_send(Outbound {
             text,
             generation: self.generation.load(Ordering::Acquire),
             queued: Instant::now(),
             completed,
             _permit: permit,
+            _message_permit: message_permit,
         })
-        .map_err(|_| "relay outbound queue unavailable".into())
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => {
+                format!("relay outbound queue unavailable ({lane} count)")
+            }
+            mpsc::error::TrySendError::Closed(_) => "relay writer closed".into(),
+        })
     }
 
     /// Wait for a small key/bootstrap barrier to reach the socket before using it.
     pub async fn send_barrier(&self, text: String) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
-        self.enqueue(text, true, Some(tx))?;
+        self.enqueue(text, OutboundPriority::Control, Some(tx))?;
         tokio::time::timeout(DEADLINE, rx)
             .await
             .map_err(|_| "relay barrier timed out")?
@@ -148,13 +197,38 @@ impl TransportSender {
     /// A completed handler may wait for bounded queue space without blocking reads.
     /// Its generation is captured at request receipt, never at result delivery.
     pub async fn send_result(&self, text: String, generation: u64) -> Result<(), String> {
+        self.send_wait(text, generation, true).await
+    }
+
+    /// Wait for ordered event capacity without consuming the urgent RPC lane.
+    /// The caller must poll this independently of its incoming message handler.
+    pub async fn send_ordered(&self, text: String, generation: u64) -> Result<(), String> {
+        self.send_wait(text, generation, false).await
+    }
+
+    async fn send_wait(&self, text: String, generation: u64, urgent: bool) -> Result<(), String> {
         if text.len() > MAX_MESSAGE_BYTES {
             return Err("relay result exceeds transport limit".into());
         }
-        let (tx, budget) = if text.len() <= MAX_URGENT_MESSAGE_BYTES {
-            (&self.urgent, &self.urgent_bytes)
+        let (tx, budget, messages) = if urgent && text.len() <= MAX_URGENT_MESSAGE_BYTES {
+            (
+                &self.urgent,
+                &self.urgent_bytes,
+                Some(&self.urgent_messages),
+            )
         } else {
-            (&self.ordered, &self.ordered_bytes)
+            (&self.ordered, &self.ordered_bytes, None)
+        };
+        let message_permit = if let Some(messages) = messages {
+            Some(
+                messages
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| "relay result queue closed")?,
+            )
+        } else {
+            None
         };
         let permit = budget
             .clone()
@@ -170,6 +244,7 @@ impl TransportSender {
             queued: Instant::now(),
             completed: None,
             _permit: permit,
+            _message_permit: message_permit,
         })
         .await
         .map_err(|_| "relay writer closed".into())
@@ -227,7 +302,7 @@ where
     R: Stream<Item = Result<String, E>> + Unpin + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
-    let (urgent_tx, mut urgent_rx) = mpsc::channel::<Outbound>(128);
+    let (urgent_tx, mut urgent_rx) = mpsc::channel::<Outbound>(URGENT_MESSAGES);
     let (ordered_tx, mut ordered_rx) = mpsc::channel::<Outbound>(128);
     let (control_tx, mut control_rx) = mpsc::channel::<Frame>(CONTROL_QUEUE);
     let (ack_tx, mut ack_rx) = watch::channel((0u64, 0u32));
@@ -238,7 +313,10 @@ where
     let sender = TransportSender {
         urgent: urgent_tx,
         ordered: ordered_tx,
-        urgent_bytes: Arc::new(Semaphore::new(URGENT_BYTES)),
+        urgent_bytes: Arc::new(Semaphore::new(RPC_BYTES)),
+        urgent_messages: Arc::new(Semaphore::new(RPC_MESSAGES)),
+        control_bytes: Arc::new(Semaphore::new(CONTROL_BYTES)),
+        control_messages: Arc::new(Semaphore::new(CONTROL_MESSAGES)),
         ordered_bytes: Arc::new(Semaphore::new(QUEUE_BYTES)),
         generation: generation.clone(),
         generation_notice,
@@ -459,6 +537,185 @@ where
 mod tests {
     use super::*;
 
+    fn blocked_transport() -> (TransportSender, TransportGuard) {
+        let sink = Box::pin(futures_util::sink::unfold((), |(), _text: String| async {
+            std::future::pending::<Result<(), String>>().await
+        }));
+        let stream = futures_util::stream::pending::<Result<String, String>>();
+        let (sender, _incoming, guard) = spawn_transport(sink, stream, true);
+        (sender, guard)
+    }
+
+    #[tokio::test]
+    async fn waiting_compact_result_cannot_consume_control_byte_reservation() {
+        let (sender, _guard) = blocked_transport();
+        // Six replies are within the daemon's normal eight concurrent RPCs.
+        for _ in 0..5 {
+            sender.send_result("x".repeat(86 * 1024), 0).await.unwrap();
+        }
+        let mut sixth = Box::pin(sender.send_result("x".repeat(86 * 1024), 0));
+        assert!(futures_util::poll!(sixth.as_mut()).is_pending());
+        // Tokio's fair waiter reserves the leftover partial byte allowance.
+        assert_eq!(sender.urgent_bytes.available_permits(), 0);
+        sender.send_control(r#"{"type":"ping"}"#.into()).unwrap();
+        for index in 0..77 {
+            sender
+                .send_control(format!(
+                    r#"{{"type":"rpc-register","method":"method-{index}"}}"#
+                ))
+                .unwrap();
+        }
+        let mut barrier = Box::pin(sender.send_barrier("bootstrap".into()));
+        assert!(
+            futures_util::poll!(barrier.as_mut()).is_pending(),
+            "bootstrap must be admitted and wait for its write, not fail admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_rpc_count_preserves_bounded_control_slots() {
+        let (sender, _guard) = blocked_transport();
+        for _ in 0..RPC_MESSAGES {
+            sender.send("rpc-result".into(), true).unwrap();
+        }
+        assert!(sender.send("overflow".into(), true).is_err());
+        let mut pending = Box::pin(sender.send_result("waiting-result".into(), 0));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        for _ in 0..CONTROL_MESSAGES {
+            sender.send_control("heartbeat".into()).unwrap();
+        }
+        assert_eq!(sender.urgent.capacity(), 0);
+        assert_eq!(
+            sender.send_control("overflow".into()).unwrap_err(),
+            "relay outbound queue unavailable (control count)"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_bytes_remain_bounded_independently_of_rpc_bytes() {
+        let (sender, _guard) = blocked_transport();
+        sender.send_control("x".repeat(CONTROL_BYTES)).unwrap();
+        assert_eq!(
+            sender.send_control("overflow".into()).unwrap_err(),
+            "relay outbound byte budget exhausted (control)"
+        );
+        assert!(sender.send_control("x".repeat(CONTROL_BYTES + 1)).is_err());
+        sender.send("rpc-result".into(), true).unwrap();
+    }
+
+    async fn stalled_ordered_transport() -> (
+        TransportSender,
+        mpsc::Receiver<String>,
+        mpsc::Sender<Result<String, String>>,
+        mpsc::Receiver<Result<Inbound, String>>,
+        TransportGuard,
+    ) {
+        let (wire_tx, mut wire_rx) = mpsc::channel::<String>(64);
+        let (peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(64);
+        let sink = Box::pin(futures_util::sink::unfold(wire_tx, |tx, text| async move {
+            tx.send(text).await.map_err(|error| error.to_string())?;
+            Ok::<_, String>(tx)
+        }));
+        let stream = Box::pin(futures_util::stream::unfold(peer_rx, |mut rx| async {
+            rx.recv().await.map(|value| (value, rx))
+        }));
+        let (sender, incoming, guard) = spawn_transport(sink, stream, true);
+        wire_rx.recv().await.unwrap();
+        sender
+            .send("x".repeat(CHUNK_BYTES * (WINDOW_CHUNKS + 1)), false)
+            .unwrap();
+        for _ in 0..WINDOW_CHUNKS {
+            let chunk = wire_rx.recv().await.unwrap();
+            assert!(chunk.contains("transport-chunk"));
+        }
+        (sender, wire_rx, peer_tx, incoming, guard)
+    }
+
+    #[tokio::test]
+    async fn ordered_queue_backpressure_keeps_rpc_lane_live_and_cancels_stale_delivery() {
+        let (sender, mut wire, peer, mut incoming, _guard) = stalled_ordered_transport().await;
+        for index in 0..128 {
+            sender.send(format!("event-{index}"), false).unwrap();
+        }
+        assert_eq!(sender.ordered.capacity(), 0);
+        let mut pending = Box::pin(sender.send_ordered("old-key-pending-event".into(), 0));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+
+        peer.send(Ok("incoming-rpc".into())).await.unwrap();
+        let request = tokio::time::timeout(Duration::from_secs(1), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.text, "incoming-rpc");
+        sender
+            .send_result("urgent-rpc-result".into(), 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), wire.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "urgent-rpc-result"
+        );
+
+        sender.advance_generation();
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(wire.recv().await.unwrap().contains("transport-cancel"));
+        sender
+            .send_ordered("current-key-event".into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), wire.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "current-key-event"
+        );
+    }
+
+    #[tokio::test]
+    async fn ordered_byte_budget_wait_does_not_exhaust_urgent_capacity() {
+        let (sender, mut wire, _peer, _incoming, _guard) = stalled_ordered_transport().await;
+        sender.send("x".repeat(MAX_MESSAGE_BYTES), false).unwrap();
+        let remaining = sender.ordered_bytes.available_permits();
+        sender.send("x".repeat(remaining), false).unwrap();
+        assert_eq!(sender.ordered_bytes.available_permits(), 0);
+        let mut pending = Box::pin(sender.send_ordered("old-key-event".into(), 0));
+        assert!(futures_util::poll!(pending.as_mut()).is_pending());
+        sender.send("heartbeat".into(), true).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), wire.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "heartbeat"
+        );
+
+        sender.advance_generation();
+        tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(wire.recv().await.unwrap().contains("transport-cancel"));
+        sender
+            .send_ordered("current-key-event".into(), 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), wire.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "current-key-event"
+        );
+    }
+
     #[tokio::test]
     async fn stalled_bulk_does_not_block_incoming_requests_or_urgent_replies() {
         let (wire_tx, mut wire_rx) = mpsc::channel::<String>(4);
@@ -564,7 +821,9 @@ mod tests {
         let expected_chunks = text.len().div_ceil(CHUNK_BYTES);
         let started = Instant::now();
         let (done_tx, done_rx) = oneshot::channel();
-        sender.enqueue(text, false, Some(done_tx)).unwrap();
+        sender
+            .enqueue(text, OutboundPriority::Ordered, Some(done_tx))
+            .unwrap();
         let acknowledgements = peer_tx.clone();
         let peer = tokio::spawn(async move {
             let mut received = 0usize;
@@ -740,17 +999,15 @@ mod tests {
 
     #[tokio::test]
     async fn compact_replies_keep_urgent_admission_byte_bounded() {
-        // Block the initial Ready write so queued messages retain their permits.
-        let sink = Box::pin(futures_util::sink::unfold((), |(), _text: String| async {
-            std::future::pending::<Result<(), String>>().await
-        }));
-        let stream = futures_util::stream::pending::<Result<String, String>>();
-        let (sender, _incoming, _guard) = spawn_transport(sink, stream, true);
-        for _ in 0..URGENT_BYTES / MAX_URGENT_MESSAGE_BYTES {
+        let (sender, _guard) = blocked_transport();
+        for _ in 0..RPC_BYTES / MAX_URGENT_MESSAGE_BYTES {
             sender
                 .send("x".repeat(MAX_URGENT_MESSAGE_BYTES), true)
                 .unwrap();
         }
+        sender
+            .send("x".repeat(RPC_BYTES % MAX_URGENT_MESSAGE_BYTES), true)
+            .unwrap();
         assert!(sender.send("full".into(), true).is_err());
         assert!(
             tokio::time::timeout(
@@ -804,7 +1061,11 @@ mod tests {
         }
         let received = incoming.recv().await.unwrap().unwrap();
         assert_eq!(received.text, text);
-        eprintln!("1 MB legacy upload: {:?}, worst ack {:?}", started.elapsed(), worst);
+        eprintln!(
+            "1 MB legacy upload: {:?}, worst ack {:?}",
+            started.elapsed(),
+            worst
+        );
         assert!(worst < Duration::from_millis(200));
     }
 

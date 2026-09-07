@@ -581,26 +581,33 @@ async fn send_message_with_timeout(
             .send_barrier(serde_json::to_string(message).map_err(|e| e.to_string())?)
             .await;
     }
-    let urgent = matches!(
+    let payload = serde_json::to_string(message).map_err(|e| e.to_string())?;
+    let control = matches!(
         message,
         RelayServerMessage::Pong
-            | RelayServerMessage::ActionRequested { .. }
             | RelayServerMessage::Update {
                 update: falcondeck_core::RelayUpdate {
                     body: falcondeck_core::RelayUpdateBody::SessionBootstrap { .. },
                     ..
                 }
             }
-            | RelayServerMessage::RpcRequest { .. }
-            | RelayServerMessage::RpcResult { .. }
             | RelayServerMessage::RpcRegistered { .. }
             | RelayServerMessage::RpcUnregistered { .. }
-            | RelayServerMessage::Error { .. }
     );
-    sender.send(
-        serde_json::to_string(message).map_err(|e| e.to_string())?,
-        urgent,
-    )
+    if control {
+        sender.send_control(payload)
+    } else {
+        sender.send(
+            payload,
+            matches!(
+                message,
+                RelayServerMessage::ActionRequested { .. }
+                    | RelayServerMessage::RpcRequest { .. }
+                    | RelayServerMessage::RpcResult { .. }
+                    | RelayServerMessage::Error { .. }
+            ),
+        )
+    }
 }
 
 async fn send_raw_error(mut socket: WebSocket, message: String) -> Result<(), axum::Error> {
