@@ -317,7 +317,60 @@ describe("handoffThread", () => {
     );
   });
 
-  it("reads a bounded tail and labels it partial when a budget is set", async () => {
+  it("pages back from the tail until the byte budget is met", async () => {
+    const api = makeApi();
+    const bulk = "x".repeat(60_000);
+    const page = (ids: string[], oldest: string, hasOlder: boolean) => ({
+      workspace: makeWorkspace(),
+      thread: makeThread({ id: "thread-1" }),
+      items: ids.map(
+        (id) =>
+          ({
+            kind: "user_message",
+            id,
+            text: `${id} ${bulk}`,
+            attachments: [],
+            turn_id: null,
+            previous_turn_id: null,
+            created_at: "2026-01-01T00:00:00Z",
+          }) as ThreadDetail["items"][number],
+      ),
+      has_older: hasOlder,
+      oldest_item_id: oldest,
+      newest_item_id: ids[ids.length - 1],
+      is_partial: true,
+    });
+    const pages = [
+      page(["c-1", "c-2"], "c-1", true),
+      page(["b-1", "b-2"], "b-1", true),
+      page(["a-1", "a-2"], "a-1", true),
+      page(["z-1"], "z-1", true),
+    ];
+    let call = 0;
+    api.threadDetail.mockImplementation(async () => pages[call++] ?? pages[0]);
+
+    await handoffThread(api, { ...baseArgs, transcriptPageItems: 2 });
+
+    // 2 items x 60KB per page: the budget is met after four pages, and the
+    // walk stops rather than draining the whole thread.
+    expect(api.threadDetail).toHaveBeenCalledTimes(4);
+    expect(api.threadDetail).toHaveBeenNthCalledWith(1, "workspace-1", "thread-1", {
+      mode: "tail",
+      limit: 2,
+    });
+    expect(api.threadDetail).toHaveBeenNthCalledWith(2, "workspace-1", "thread-1", {
+      mode: "before",
+      before_item_id: "c-1",
+      limit: 2,
+    });
+    const seeded = api.sendTurn.mock.calls[0][0];
+    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    // Oldest page read first, newest last, and the gap is disclosed.
+    expect(prompt.indexOf("z-1")).toBeLessThan(prompt.indexOf("c-1"));
+    expect(prompt).toContain("begins mid-conversation");
+  });
+
+  it("stops paging when the source has no older history", async () => {
     const api = makeApi();
     api.threadDetail.mockImplementation(async (_workspaceId, threadId) => ({
       workspace: makeWorkspace(),
@@ -325,33 +378,29 @@ describe("handoffThread", () => {
       items: [
         {
           kind: "user_message",
-          id: "user-9",
-          text: "Where did we land on the retry?",
+          id: "only-1",
+          text: "Short thread",
           attachments: [],
           turn_id: null,
           previous_turn_id: null,
           created_at: "2026-01-01T00:00:00Z",
         } as ThreadDetail["items"][number],
       ],
-      has_older: true,
-      oldest_item_id: "user-9",
-      newest_item_id: "user-9",
-      is_partial: true,
+      has_older: false,
+      oldest_item_id: "only-1",
+      newest_item_id: "only-1",
+      is_partial: false,
     }));
 
-    await handoffThread(api, { ...baseArgs, transcriptLimit: 150 });
+    await handoffThread(api, { ...baseArgs, transcriptPageItems: 40 });
 
-    expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {
-      mode: "tail",
-      limit: 150,
-    });
+    expect(api.threadDetail).toHaveBeenCalledTimes(1);
     const seeded = api.sendTurn.mock.calls[0][0];
     const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
-    expect(prompt).toContain("begins mid-conversation");
-    expect(prompt).toContain("Where did we land on the retry?");
+    expect(prompt).not.toContain("begins mid-conversation");
   });
 
-  it("reads the whole thread when no budget is set", async () => {
+  it("reads the whole thread in one call when no page size is set", async () => {
     const api = makeApi();
     await handoffThread(api, baseArgs);
     expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {

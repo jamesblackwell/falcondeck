@@ -17,6 +17,7 @@ import type {
 } from "./daemon-client";
 import type {
   AgentProvider,
+  ConversationItem,
   ThreadDetail,
   ThreadDetailRequest,
   ThreadHandle,
@@ -53,12 +54,13 @@ export type HandoffThreadArgs = {
   sandboxMode: string | null;
   approvalPolicy: string;
   /**
-   * Newest-first item budget for the source transcript. Omit on a local
-   * transport to hand over the whole thread. Clients on the relay set it:
-   * a long thread is megabytes, and pulling all of it over a slow uplink
-   * outlives the relay's request deadline, so the handoff never starts.
+   * Items per page when reading the source transcript. Omit on a local
+   * transport to hand over the whole thread in one read. Clients on the
+   * relay set it: a long thread is megabytes, and pulling all of it over a
+   * slow uplink outlives the relay's request deadline, so the handoff never
+   * starts. Pages are read newest-first until {@link HANDOFF_TRANSCRIPT_BUDGET_BYTES}.
    */
-  transcriptLimit?: number | null;
+  transcriptPageItems?: number | null;
 };
 
 /**
@@ -160,6 +162,67 @@ function turnLooksStarted(detail: ThreadDetail | null): boolean {
 }
 
 /**
+ * How much source transcript a budgeted read pulls before it stops. Sized so
+ * the whole read stays well inside the relay's request deadline on a slow
+ * mobile uplink, while still filling most of the prompt's own character cap.
+ */
+export const HANDOFF_TRANSCRIPT_BUDGET_BYTES = 400_000;
+/** Bounds the read when a thread's items are unusually small. */
+const HANDOFF_TRANSCRIPT_MAX_PAGES = 8;
+
+/**
+ * The newest slice of a thread that fits the byte budget. A single `full`
+ * read is used when no page size is given (a local transport, where the
+ * whole thread costs nothing); otherwise pages walk backwards from the tail
+ * so no individual request is large enough to outlive the relay deadline.
+ */
+async function readHandoffTranscript(
+  api: HandoffThreadApi,
+  workspaceId: string,
+  threadId: string,
+  options: { pageItems?: number | null },
+): Promise<{ items: ConversationItem[]; partial: boolean }> {
+  const pageItems = options.pageItems;
+  if (pageItems == null) {
+    const detail = await api.threadDetail(workspaceId, threadId, {
+      mode: "full",
+    });
+    return { items: detail.items, partial: false };
+  }
+
+  const tail = await api.threadDetail(workspaceId, threadId, {
+    mode: "tail",
+    limit: pageItems,
+  });
+  let items = tail.items;
+  let oldestItemId = tail.oldest_item_id;
+  let hasOlder = tail.has_older;
+  let bytes = JSON.stringify(items).length;
+
+  for (
+    let page = 1;
+    hasOlder &&
+    oldestItemId != null &&
+    bytes < HANDOFF_TRANSCRIPT_BUDGET_BYTES &&
+    page < HANDOFF_TRANSCRIPT_MAX_PAGES;
+    page += 1
+  ) {
+    const older = await api.threadDetail(workspaceId, threadId, {
+      mode: "before",
+      before_item_id: oldestItemId,
+      limit: pageItems,
+    });
+    if (older.items.length === 0) break;
+    items = [...older.items, ...items];
+    bytes += JSON.stringify(older.items).length;
+    oldestItemId = older.oldest_item_id;
+    hasOlder = older.has_older;
+  }
+
+  return { items, partial: hasOlder };
+}
+
+/**
  * Cross-provider "continue with another agent": a new thread on `provider`,
  * seeded with the source transcript as its first turn. The source is never
  * modified. `onDestinationReady` fires after the destination exists (and is
@@ -181,20 +244,16 @@ export async function handoffThread(
 
   // Read the source before creating anything, so failed source hydration
   // cannot leave a destination thread behind.
-  const sourceDetail = await api.threadDetail(
-    workspace.id,
-    thread.id,
-    args.transcriptLimit != null
-      ? { mode: "tail", limit: args.transcriptLimit }
-      : { mode: "full" },
-  );
+  const source = await readHandoffTranscript(api, workspace.id, thread.id, {
+    pageItems: args.transcriptPageItems,
+  });
   const prompt = buildHandoffPrompt({
-    items: sourceDetail.items,
+    items: source.items,
     sourceTitle: thread.title,
     workspacePath: workspace.path,
     // A budgeted read starts mid-conversation. Say so rather than letting
     // the destination read a truncated history as the whole story.
-    partial: sourceDetail.has_older,
+    partial: source.partial,
   });
 
   let handle = await api.startThread({

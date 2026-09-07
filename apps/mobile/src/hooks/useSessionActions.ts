@@ -52,12 +52,13 @@ const RECENT_THREAD_PREFETCH_INITIAL_DELAY_MS = 1_000;
 let activeForegroundDetailLoads = 0;
 const FOREGROUND_DETAIL_LOAD_POLL_MS = 200;
 /**
- * Newest items the phone reads to seed a cross-harness handoff. The relay
- * drops a request after 30s and a phone uplink runs near 70 KB/s, so pulling
- * a multi-megabyte thread never finishes; this keeps the read inside that
- * budget and the destination is told the transcript starts mid-conversation.
+ * Items per page when the phone reads a thread to seed a cross-harness
+ * handoff. The relay drops a request after 30s and a phone uplink can run
+ * under 25 KB/s, so a whole multi-megabyte thread never arrives; small pages
+ * keep every request far inside that deadline and the destination is told
+ * the transcript starts mid-conversation.
  */
-const HANDOFF_TRANSCRIPT_ITEMS = 150;
+const HANDOFF_TRANSCRIPT_PAGE_ITEMS = 40;
 
 const waitForForegroundDetailLoads = async () => {
   while (activeForegroundDetailLoads > 0) {
@@ -851,7 +852,7 @@ export function useSessionActions() {
           thread,
           provider,
           ...destination,
-          transcriptLimit: HANDOFF_TRANSCRIPT_ITEMS,
+          transcriptPageItems: HANDOFF_TRANSCRIPT_PAGE_ITEMS,
         },
         {
           onDestinationReady: (handle) => {
