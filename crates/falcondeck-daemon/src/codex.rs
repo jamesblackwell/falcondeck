@@ -58,7 +58,7 @@ mod thread_list;
 use session_file::{
     hydrate_thread_items_from_session_file, supplement_thread_items_with_session_tool_calls,
 };
-use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
+use thread_list::{SubagentNotifications, parse_collaboration_modes, parse_models, parse_threads};
 
 pub struct CodexBootstrap {
     pub session: PendingCodexSession,
@@ -760,9 +760,6 @@ impl CodexSession {
                                 "cli",
                                 "vscode",
                                 "appServer",
-                                "subAgentReview",
-                                "subAgentCompact",
-                                "subAgentThreadSpawn",
                                 "unknown"
                             ]
                         }),
@@ -1138,6 +1135,7 @@ impl CodexSession {
             let _ = event_tx.send(StdoutEvent::Disconnected(None));
         });
 
+        let mut subagent_notifications = SubagentNotifications::default();
         while let Some(event) = event_rx.recv().await {
             let line = match event {
                 StdoutEvent::Disconnected(error) => {
@@ -1211,6 +1209,8 @@ impl CodexSession {
                             {
                                 warn!("failed to ingest server request {method}: {error}");
                             }
+                        } else if subagent_notifications.should_ignore(method, &params) {
+                            continue;
                         } else if let Err(error) = self
                             .state
                             .ingest_notification(&self.workspace_id, method, params)

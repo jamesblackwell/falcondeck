@@ -422,11 +422,32 @@ pub(super) async fn connect_workspace_internal(
         }
     }));
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
+    let subagent_thread_ids = if let Some(session) = codex_session.as_ref()
+        && persisted_workspace_ref.is_some_and(|workspace| !workspace.thread_states.is_empty())
+    {
+        match session.subagent_thread_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!("could not identify saved Codex subagents: {error}");
+                HashSet::new()
+            }
+        }
+    } else {
+        HashSet::new()
+    };
     let persisted_thread_states = persisted_workspace_ref
         .map(|workspace| {
             workspace
                 .thread_states
                 .iter()
+                .filter(|state| {
+                    !is_saved_codex_subagent(
+                        state.provider.as_ref(),
+                        &state.thread_id,
+                        state.native_session_id.as_deref(),
+                        &subagent_thread_ids,
+                    )
+                })
                 .map(|state| (state.thread_id.clone(), state.clone()))
                 .collect::<HashMap<_, _>>()
         })
@@ -605,6 +626,14 @@ pub(super) async fn connect_workspace_internal(
             .unwrap_or_default();
         let mut threads = hydrated_threads;
         carry_over_live_threads(&mut threads, previous_threads);
+        threads.retain(|_, thread| {
+            !is_saved_codex_subagent(
+                Some(&thread.summary.provider),
+                &thread.summary.id,
+                thread.summary.native_session_id.as_deref(),
+                &subagent_thread_ids,
+            )
+        });
         // The session only starts supervising its own exit once it is about
         // to become the workspace's authoritative handle. Until this point
         // its RAII lease cleans it up if workspace restore is cancelled.
@@ -673,6 +702,16 @@ pub(super) async fn connect_workspace_internal(
     }
 
     Ok(summary)
+}
+
+fn is_saved_codex_subagent(
+    provider: Option<&AgentProvider>,
+    thread_id: &str,
+    native_session_id: Option<&str>,
+    subagent_ids: &HashSet<String>,
+) -> bool {
+    provider.is_none_or(|provider| *provider == AgentProvider::CODEX)
+        && subagent_ids.contains(native_session_id.unwrap_or(thread_id))
 }
 
 /// Keeps threads that a workspace reconnect must not throw away.
@@ -6190,6 +6229,30 @@ mod tests {
         assert!(missing.is_err());
         let empty = edit_queued_turn(&app, "workspace-1", "thread-1", "queued-1", "   ").await;
         assert!(empty.is_err());
+    }
+
+    #[test]
+    fn saved_codex_subagents_are_removed_by_native_session_identity() {
+        let ids = HashSet::from(["child".to_string()]);
+        assert!(is_saved_codex_subagent(None, "child", None, &ids));
+        assert!(is_saved_codex_subagent(
+            Some(&AgentProvider::CODEX),
+            "local-child",
+            Some("child"),
+            &ids
+        ));
+        assert!(!is_saved_codex_subagent(
+            Some(&AgentProvider::CLAUDE),
+            "child",
+            None,
+            &ids
+        ));
+        assert!(!is_saved_codex_subagent(
+            Some(&AgentProvider::CODEX),
+            "root",
+            None,
+            &ids
+        ));
     }
 
     #[test]

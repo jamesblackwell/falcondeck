@@ -113,6 +113,73 @@ fn parse_reasoning_efforts(value: &Value) -> Vec<ReasoningEffortSummary> {
         .collect()
 }
 
+// User-created forks also have forkedFromId, so only source/parent metadata
+// identifies child agents. Older app-servers may omit parentThreadId.
+fn is_subagent_thread(thread: &Value) -> bool {
+    thread
+        .get("parentThreadId")
+        .and_then(Value::as_str)
+        .is_some()
+        || thread
+            .get("source")
+            .and_then(|source| source.get("subAgent"))
+            .is_some()
+}
+
+impl CodexSession {
+    /// Identify saved sidebar entries created by older daemons. Only metadata
+    /// is listed; native sessions and transcripts are never deleted.
+    pub(crate) async fn subagent_thread_ids(&self) -> Result<HashSet<String>, DaemonError> {
+        let mut ids = HashSet::new();
+        let mut cursor = None::<String>;
+        loop {
+            let page = self
+                .send_control_request(
+                    "thread/list",
+                    json!({
+                        "limit": 100,
+                        "cwd": self.workspace_path(),
+                        "sourceKinds": ["subAgent"],
+                        "cursor": cursor,
+                    }),
+                )
+                .await?;
+            ids.extend(
+                extract_thread_entries(&page)
+                    .into_iter()
+                    .filter(|thread| is_subagent_thread(thread))
+                    .filter_map(extract_thread_id),
+            );
+            let next = extract_string(&page, &["nextCursor"]);
+            if next.is_none() || next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(ids)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SubagentNotifications {
+    thread_ids: HashSet<String>,
+}
+
+impl SubagentNotifications {
+    pub(super) fn should_ignore(&mut self, method: &str, params: &Value) -> bool {
+        let Some(thread_id) = extract_thread_id(params) else {
+            return false;
+        };
+        if method == "thread/started" && is_subagent_thread(params.get("thread").unwrap_or(params))
+        {
+            self.thread_ids.insert(thread_id.clone());
+        }
+        // Keep IDs for this app-server's lifetime: status/turn/item events
+        // omit source metadata and can otherwise recreate sidebar entries.
+        self.thread_ids.contains(&thread_id)
+    }
+}
+
 pub(super) fn parse_threads(
     workspace_id: &str,
     workspace_path: &str,
@@ -123,6 +190,7 @@ pub(super) fn parse_threads(
 
     entries
         .into_iter()
+        .filter(|entry| !is_subagent_thread(entry))
         .filter(|entry| {
             extract_string(entry, &["cwd"])
                 .map(|cwd| cwd == workspace_path)
@@ -226,4 +294,81 @@ fn extract_thread_entries(value: &Value) -> Vec<&Value> {
     }
 
     walk(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_list_excludes_codex_subagents_but_keeps_user_forks() {
+        let threads = parse_threads(
+            "workspace",
+            "/repo",
+            &json!({"data": [
+                {"id": "root", "source": "appServer"},
+                {"id": "child", "source": {"subAgent": {"thread_spawn": {
+                    "parent_thread_id": "root", "depth": 1
+                }}}},
+                {"id": "review", "source": {"subAgent": "review"}},
+                {"id": "compact", "source": {"subAgent": "compact"}},
+                {"id": "other", "source": {"subAgent": {"other": "worker"}}},
+                {"id": "parent-marked", "source": "unknown", "parentThreadId": "root"},
+                {"id": "fork", "source": "cli", "forkedFromId": "root", "parentThreadId": null},
+                {"id": "legacy"}
+            ]}),
+        );
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.summary.id.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "fork", "legacy"]
+        );
+    }
+
+    #[test]
+    fn subagent_notifications_filter_the_entire_child_lifecycle() {
+        let mut filter = SubagentNotifications::default();
+        for child in [
+            json!({"id": "child", "source": {"subAgent": {"thread_spawn": {
+                "parent_thread_id": "root", "depth": 1
+            }}}}),
+            json!({"id": "parent-marked", "parentThreadId": "root"}),
+        ] {
+            assert!(filter.should_ignore("thread/started", &json!({"thread": child})));
+            for method in [
+                "thread/status/changed",
+                "turn/started",
+                "item/started",
+                "item/agentMessage/delta",
+                "turn/completed",
+                "thread/closed",
+                "thread/status/changed",
+            ] {
+                assert!(
+                    filter.should_ignore(method, &json!({"threadId": child["id"]})),
+                    "{method}"
+                );
+                assert!(
+                    !filter.should_ignore(method, &json!({"threadId": "root"})),
+                    "{method}"
+                );
+            }
+        }
+        // Collaboration activity belongs to the parent transcript and stays visible.
+        assert!(!filter.should_ignore(
+            "item/started",
+            &json!({
+                "threadId": "root", "item": {"type": "subAgentActivity", "threadId": "child"}
+            })
+        ));
+        assert!(!filter.should_ignore(
+            "thread/started",
+            &json!({"thread": {
+                "id": "fork", "forkedFromId": "root", "source": "appServer", "parentThreadId": null
+            }})
+        ));
+        assert!(!filter.should_ignore("account/updated", &json!({})));
+    }
 }
