@@ -534,7 +534,9 @@ export function conversationItemsToMarkdown(
         : null,
   };
   const partial = options.partial
-    ? "> Earlier authoritative history is not currently loaded and is not included in this export."
+    ? mode === "handoff"
+      ? "> This transcript begins mid-conversation: earlier history was not read and is not included below."
+      : "> Earlier authoritative history is not currently loaded and is not included in this export."
     : null;
   const preamble = [`# ${title}`, partial].filter(Boolean).join("\n\n");
   const fileSummary =

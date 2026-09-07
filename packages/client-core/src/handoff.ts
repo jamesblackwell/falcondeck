@@ -74,10 +74,13 @@ export function buildHandoffPrompt({
   items,
   sourceTitle,
   workspacePath,
+  partial = false,
 }: {
   items: readonly ConversationItem[];
   sourceTitle: string;
   workspacePath?: string | null;
+  /** The transcript starts mid-conversation because older items were not read. */
+  partial?: boolean;
 }): string {
   // The destination has no knowledge of the tool that produced the handoff,
   // and naming the source product or provider sends agents hunting for a
@@ -88,6 +91,7 @@ export function buildHandoffPrompt({
       title: sourceTitle.trim() || "Previous session",
       mode: "handoff",
       workspacePath,
+      partial,
     }),
   );
 

@@ -51,6 +51,13 @@ const RECENT_THREAD_PREFETCH_INITIAL_DELAY_MS = 1_000;
 // warm-up never delays the thread the user just opened.
 let activeForegroundDetailLoads = 0;
 const FOREGROUND_DETAIL_LOAD_POLL_MS = 200;
+/**
+ * Newest items the phone reads to seed a cross-harness handoff. The relay
+ * drops a request after 30s and a phone uplink runs near 70 KB/s, so pulling
+ * a multi-megabyte thread never finishes; this keeps the read inside that
+ * budget and the destination is told the transcript starts mid-conversation.
+ */
+const HANDOFF_TRANSCRIPT_ITEMS = 150;
 
 const waitForForegroundDetailLoads = async () => {
   while (activeForegroundDetailLoads > 0) {
@@ -844,6 +851,7 @@ export function useSessionActions() {
           thread,
           provider,
           ...destination,
+          transcriptLimit: HANDOFF_TRANSCRIPT_ITEMS,
         },
         {
           onDestinationReady: (handle) => {

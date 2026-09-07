@@ -317,6 +317,51 @@ describe("handoffThread", () => {
     );
   });
 
+  it("reads a bounded tail and labels it partial when a budget is set", async () => {
+    const api = makeApi();
+    api.threadDetail.mockImplementation(async (_workspaceId, threadId) => ({
+      workspace: makeWorkspace(),
+      thread: makeThread({ id: threadId }),
+      items: [
+        {
+          kind: "user_message",
+          id: "user-9",
+          text: "Where did we land on the retry?",
+          attachments: [],
+          turn_id: null,
+          previous_turn_id: null,
+          created_at: "2026-01-01T00:00:00Z",
+        } as ThreadDetail["items"][number],
+      ],
+      has_older: true,
+      oldest_item_id: "user-9",
+      newest_item_id: "user-9",
+      is_partial: true,
+    }));
+
+    await handoffThread(api, { ...baseArgs, transcriptLimit: 150 });
+
+    expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {
+      mode: "tail",
+      limit: 150,
+    });
+    const seeded = api.sendTurn.mock.calls[0][0];
+    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    expect(prompt).toContain("begins mid-conversation");
+    expect(prompt).toContain("Where did we land on the retry?");
+  });
+
+  it("reads the whole thread when no budget is set", async () => {
+    const api = makeApi();
+    await handoffThread(api, baseArgs);
+    expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {
+      mode: "full",
+    });
+    const seeded = api.sendTurn.mock.calls[0][0];
+    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    expect(prompt).not.toContain("begins mid-conversation");
+  });
+
   it("refuses a same-provider handoff and does not create a thread", async () => {
     const api = makeApi();
     await expect(

@@ -52,6 +52,13 @@ export type HandoffThreadArgs = {
   permissionMode: string | null;
   sandboxMode: string | null;
   approvalPolicy: string;
+  /**
+   * Newest-first item budget for the source transcript. Omit on a local
+   * transport to hand over the whole thread. Clients on the relay set it:
+   * a long thread is megabytes, and pulling all of it over a slow uplink
+   * outlives the relay's request deadline, so the handoff never starts.
+   */
+  transcriptLimit?: number | null;
 };
 
 /**
@@ -172,15 +179,22 @@ export async function handoffThread(
   const blocked = handoffBlockedReason(thread);
   if (blocked) throw new Error(blocked);
 
-  // Read the complete source before creating anything, so failed source
-  // hydration cannot leave a destination thread behind.
-  const sourceDetail = await api.threadDetail(workspace.id, thread.id, {
-    mode: "full",
-  });
+  // Read the source before creating anything, so failed source hydration
+  // cannot leave a destination thread behind.
+  const sourceDetail = await api.threadDetail(
+    workspace.id,
+    thread.id,
+    args.transcriptLimit != null
+      ? { mode: "tail", limit: args.transcriptLimit }
+      : { mode: "full" },
+  );
   const prompt = buildHandoffPrompt({
     items: sourceDetail.items,
     sourceTitle: thread.title,
     workspacePath: workspace.path,
+    // A budgeted read starts mid-conversation. Say so rather than letting
+    // the destination read a truncated history as the whole story.
+    partial: sourceDetail.has_older,
   });
 
   let handle = await api.startThread({
