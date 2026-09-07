@@ -5,7 +5,6 @@ import { AppState } from 'react-native'
 import {
   receiveRelayTransport,
   captureRelayDisplayFrame,
-  decryptToUtf8,
   encryptedDaemonEventEnvelope,
   encryptedPayloadIsSoleSnapshotEvent,
   normalizeDaemonSnapshot,
@@ -98,7 +97,7 @@ const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
 const MAX_PENDING_SNAPSHOT_EVENTS = 2_000
 // Retry cadence for asking the daemon to republish the session bootstrap
 // while the connection is up but the session data key is missing.
-const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
+const BOOTSTRAP_REQUEST_RETRY_MS = 5_000
 // Overflow only: the race buffer dropped events, so the payload we already
 // paid for cannot be the recovery base. A flush still in progress parks
 // instead of using this delay.
@@ -129,6 +128,16 @@ export function shouldPingRelayOnLeavingForeground(
   socketReadyState: number | null,
 ) {
   return nextAppState !== 'active' && socketReadyState === WebSocket.OPEN
+}
+
+export function bootstrapRefusalMatchesClient(
+  body: unknown,
+  clientPublicKey: string | null,
+): boolean {
+  if (!body || typeof body !== 'object' || !clientPublicKey) return false
+  const refusal = body as { kind?: unknown; client_public_key?: unknown }
+  return refusal.kind === 'bootstrap-refused' &&
+    refusal.client_public_key === clientPublicKey
 }
 
 function sendRelayPing(socket: WebSocket | null) {
@@ -668,38 +677,30 @@ export function useRelayConnection() {
           }
 
           try {
-            let decrypted: unknown
-            try {
-              const text = await decryptToUtf8(
-                sessionCrypto.dataKey,
-                update.body.envelope,
-              )
-              if (
-                snapshotRequestInFlight.current &&
-                encryptedPayloadIsSoleSnapshotEvent(text)
-              ) {
-                if (flushGeneration !== relayFlushGeneration.current) return
-                advanceCursor(update.seq)
-                if (
-                  shouldYieldRelayDisplayFrame(
-                    flushStartedAt,
-                    Date.now(),
-                    batch.length - index - 1,
-                  )
-                ) {
-                  returnUnprocessedRelayUpdates(
-                    pendingRelayUpdates.current,
-                    batch.slice(index + 1),
-                  )
-                  break
-                }
-                continue
-              }
-              decrypted = JSON.parse(text)
-            } catch {
-              decrypted = await relay._decryptJson(update.body.envelope)
-            }
+            const text = await relay._decryptUtf8(update.body.envelope)
             if (flushGeneration !== relayFlushGeneration.current) return
+            if (sessionCrypto !== relay._getSessionCrypto()) continue
+            if (
+              snapshotRequestInFlight.current &&
+              encryptedPayloadIsSoleSnapshotEvent(text)
+            ) {
+              advanceCursor(update.seq)
+              if (
+                shouldYieldRelayDisplayFrame(
+                  flushStartedAt,
+                  Date.now(),
+                  batch.length - index - 1,
+                )
+              ) {
+                returnUnprocessedRelayUpdates(
+                  pendingRelayUpdates.current,
+                  batch.slice(index + 1),
+                )
+                break
+              }
+              continue
+            }
+            const decrypted: unknown = JSON.parse(text)
             advanceCursor(update.seq)
             const events = parseRemoteDaemonEvents(decrypted)
             for (const event of events) {
@@ -989,14 +990,19 @@ export function useRelayConnection() {
     // A restored trusted session may hold the client token and key pair but
     // no session data key; without it the encrypted channel is unusable. Ask
     // the daemon for a fresh bootstrap over the relay's plaintext ephemeral
-    // channel once per connect, retrying every 30s while the key is absent.
+    // channel once per connect, retrying every 5s while the key is absent.
     // The reply lands as a session-bootstrap update through the normal replay
     // path and _processBootstrap installs the key.
     const requestBootstrapWhileKeyless = () => {
       if (!isCurrent || !shouldReconnect) return
       const current = useRelayStore.getState()
-      if (current._getSessionCrypto()) return
-      // One span for the whole wait: 30s retries keep the same live timer
+      // Keep the timer alive after success: a later RPC can discover a stale
+      // key without closing this otherwise healthy socket.
+      if (current._getSessionCrypto()) {
+        bootstrapRetryTimer = setTimeout(requestBootstrapWhileKeyless, BOOTSTRAP_REQUEST_RETRY_MS)
+        return
+      }
+      // One span for the whole wait: retries keep the same live timer
       // instead of stacking a new row each round.
       if (!hasInFlightConnectionAction('bootstrap')) {
         beginConnectionAction(
@@ -1180,9 +1186,7 @@ export function useRelayConnection() {
           }, RELAY_BACKOFF_RESET_MS)
           relay._setConnectionStatus('connected')
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
-          if (!relay._getSessionCrypto()) {
-            requestBootstrapWhileKeyless()
-          }
+          requestBootstrapWhileKeyless()
         }
 
         socket.onmessage = (msg) => {
@@ -1283,19 +1287,18 @@ export function useRelayConnection() {
               // not recognize (e.g. after its trusted list was reset). Without
               // surfacing this, the pairing screen spins on "Securing
               // session…" forever with no hint that re-pairing is required.
-              const refusal = payload.body as { kind?: unknown; client_public_key?: unknown } | null
-              if (refusal?.kind === 'bootstrap-refused') {
-                const keyPair = useRelayStore.getState()._getKeyPair()
-                if (
-                  keyPair &&
-                  typeof refusal.client_public_key === 'string' &&
-                  refusal.client_public_key === publicKeyToBase64(keyPair) &&
-                  !useRelayStore.getState()._getSessionCrypto()
-                ) {
-                  relay._setError(
-                    'The desktop does not recognize this device. Start over and pair again.',
-                  )
-                }
+              const keyPair = useRelayStore.getState()._getKeyPair()
+              if (
+                bootstrapRefusalMatchesClient(
+                  payload.body,
+                  keyPair ? publicKeyToBase64(keyPair) : null,
+                )
+              ) {
+                // This is an unsigned diagnostic. It may explain a keyless
+                // connection, but cannot revoke usable keys or erase data.
+                if (!relay._getSessionCrypto()) relay._setError(
+                  'The desktop does not recognize this device. Start over and pair again.',
+                )
                 break
               }
               const envelope = encryptedDaemonEventEnvelope(payload.body)

@@ -456,23 +456,14 @@ impl AppState {
         // relay's plaintext ephemeral channel. Track the last publish per
         // client public key so a misbehaving peer cannot flood the durable
         // update log with bootstrap material.
-        const BOOTSTRAP_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(60);
-        // Keys are attacker-controlled (fresh key pairs are free), so the
-        // per-key map alone is not a rate limit: also enforce a global
-        // minimum interval between publishes and a hard per-connection
-        // budget, and prune the map so it cannot grow unbounded.
-        const BOOTSTRAP_GLOBAL_MIN_INTERVAL: Duration = Duration::from_secs(10);
-        // Generous: the global interval is the real flood control. A tight
-        // budget (this was 5) let a handful of stale devices starve the one
-        // phone that genuinely needed its key, with no recovery until the
-        // bridge happened to reconnect.
-        const BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION: u32 = 50;
+        // Only pinned, trusted bundles reach the publish branch. Coalesce
+        // bursts per device without a lifetime budget that eventually disables
+        // recovery on a long-lived desktop connection.
+        const BOOTSTRAP_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(2);
         // Refusals are cheap ephemerals but still rate-limited so an
         // attacker minting fresh bundles cannot use us as a broadcast pump.
         const BOOTSTRAP_REFUSAL_MIN_INTERVAL: Duration = Duration::from_secs(5);
         let mut bootstrap_request_publishes: HashMap<String, tokio::time::Instant> = HashMap::new();
-        let mut bootstrap_publishes_used: u32 = 0;
-        let mut last_bootstrap_publish: Option<tokio::time::Instant> = None;
         let mut last_bootstrap_refusal: Option<tokio::time::Instant> = None;
         let mut key_generation = 0u64;
         // Collapses the per-chunk stream storm before it reaches the phone.
@@ -687,8 +678,6 @@ impl AppState {
                                         let recently_served = bootstrap_request_publishes
                                             .get(&client_bundle.public_key)
                                             .is_some_and(|last| now.duration_since(*last) < BOOTSTRAP_REQUEST_MIN_INTERVAL);
-                                        let globally_throttled = last_bootstrap_publish
-                                            .is_some_and(|last| now.duration_since(last) < BOOTSTRAP_GLOBAL_MIN_INTERVAL);
                                         if !trusted {
                                             tracing::warn!("refusing bootstrap request from a client bundle that never completed pairing");
                                             // Tell the requesting device it is not
@@ -711,14 +700,10 @@ impl AppState {
                                                     },
                                                 ).await?;
                                             }
-                                        } else if bootstrap_publishes_used >= BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION {
-                                            tracing::warn!("ignoring bootstrap request: per-connection publish budget exhausted");
-                                        } else if recently_served || globally_throttled {
+                                        } else if recently_served {
                                             tracing::debug!("ignoring bootstrap request inside the publish rate window");
                                         } else {
                                             bootstrap_request_publishes.insert(client_bundle.public_key.clone(), now);
-                                            bootstrap_publishes_used += 1;
-                                            last_bootstrap_publish = Some(now);
                                             self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
                                             tracing::info!("republished session bootstrap for a keyless trusted client");
                                         }

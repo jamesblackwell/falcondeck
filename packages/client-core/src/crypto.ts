@@ -35,6 +35,13 @@ export function setAesGcmBackend(backend: AesGcmBackend | null): void {
   aesGcmBackend = backend
 }
 
+export class RelayDecryptionError extends Error {
+  constructor(cause: unknown) {
+    super('Could not authenticate the encrypted relay response', { cause })
+    this.name = 'RelayDecryptionError'
+  }
+}
+
 function getWebCrypto() {
   const webCrypto = globalThis.crypto
   if (!webCrypto) {
@@ -520,7 +527,12 @@ export async function decryptToUtf8(
   ensureContentBundle(bundle)
   const nonce = bundle.slice(1, 1 + AES_NONCE_BYTES)
   const ciphertext = bundle.slice(1 + AES_NONCE_BYTES)
-  const plaintext = await decryptAesGcm(dataKey, nonce, ciphertext)
+  let plaintext: Uint8Array
+  try {
+    plaintext = await decryptAesGcm(dataKey, nonce, ciphertext)
+  } catch (cause) {
+    throw new RelayDecryptionError(cause)
+  }
   return decoder.decode(plaintext)
 }
 

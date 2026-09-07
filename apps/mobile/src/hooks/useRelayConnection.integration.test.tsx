@@ -35,6 +35,7 @@ function installSyncRpc(call: ReturnType<typeof vi.fn>) {
 
 const originalFailPendingRpcs = useRelayStore.getState()._failPendingRpcs
 const originalDecryptJson = useRelayStore.getState()._decryptJson
+const originalDecryptUtf8 = useRelayStore.getState()._decryptUtf8
 const originalCallRpc = useRelayStore.getState()._callRpc
 const TEST_AUTHORITY_SECRET = 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8'
 
@@ -134,6 +135,7 @@ describe('useRelayConnection session rotation', () => {
     cleanup()
     useRelayStore.getState()._failPendingRpcs = originalFailPendingRpcs
     useRelayStore.getState()._decryptJson = originalDecryptJson
+    useRelayStore.getState()._decryptUtf8 = originalDecryptUtf8
     useRelayStore.getState()._callRpc = originalCallRpc
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
@@ -524,7 +526,7 @@ describe('useRelayConnection session rotation', () => {
       if (envelope.ciphertext === 'first') return await firstDecrypt as T
       return { kind: 'daemon-event', event: secondEvent } as T
     })
-    useRelayStore.getState()._decryptJson = decryptJson as unknown as typeof originalDecryptJson
+    useRelayStore.getState()._decryptUtf8 = async envelope => JSON.stringify(await decryptJson(envelope))
 
     const socket = TestWebSocket.instances[0]!
     const sendEncryptedUpdate = (seq: number, nonce: string) => {
@@ -646,7 +648,7 @@ describe('useRelayConnection session rotation', () => {
       now += 20
       return { kind: 'daemon-event', event: eventsByCiphertext[envelope.ciphertext] } as T
     })
-    useRelayStore.getState()._decryptJson = decryptJson as unknown as typeof originalDecryptJson
+    useRelayStore.getState()._decryptUtf8 = async envelope => JSON.stringify(await decryptJson(envelope))
 
     const socket = TestWebSocket.instances[0]!
     const encryptedUpdate = (seq: number, ciphertext: string) => ({
@@ -758,9 +760,7 @@ describe('useRelayConnection session rotation', () => {
     const pendingDecrypt = new Promise<unknown>((resolve) => {
       resolveDecrypt = resolve
     })
-    useRelayStore.getState()._decryptJson = vi
-      .fn()
-      .mockReturnValue(pendingDecrypt) as typeof originalDecryptJson
+    useRelayStore.getState()._decryptUtf8 = async () => JSON.stringify(await pendingDecrypt)
 
     renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))

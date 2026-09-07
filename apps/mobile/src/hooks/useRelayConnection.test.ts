@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { EventEnvelope } from '@falcondeck/client-core'
 import {
   bufferSnapshotRaceEvent,
+  bootstrapRefusalMatchesClient,
   canCheckpointReplayCursor,
   isInvalidSavedSessionError,
   selectPresenceFromRelayBatch,
@@ -11,6 +12,24 @@ import {
   shouldParkSnapshotApplication,
   shouldRefetchSnapshotApplication,
 } from './useRelayConnection'
+
+describe('bootstrap refusal matching', () => {
+  it('recognizes a refusal for the current client regardless of cached crypto state', () => {
+    expect(bootstrapRefusalMatchesClient({
+      kind: 'bootstrap-refused',
+      client_public_key: 'phone-key',
+    }, 'phone-key')).toBe(true)
+  })
+
+  it('ignores unrelated or malformed ephemeral messages', () => {
+    expect(bootstrapRefusalMatchesClient({
+      kind: 'bootstrap-refused',
+      client_public_key: 'other-key',
+    }, 'phone-key')).toBe(false)
+    expect(bootstrapRefusalMatchesClient({ kind: 'audio' }, 'phone-key')).toBe(false)
+    expect(bootstrapRefusalMatchesClient(null, 'phone-key')).toBe(false)
+  })
+})
 
 describe('foreground reconnect trigger', () => {
   it('reconnects when foregrounding with a dead socket', () => {

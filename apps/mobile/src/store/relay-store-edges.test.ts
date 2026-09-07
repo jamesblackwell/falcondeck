@@ -21,6 +21,7 @@ import {
   persistClientSecretKey,
   persistDataKey,
   persistClientToken,
+  loadDataKey,
 } from '@/storage/secure'
 
 const TEST_CHALLENGE = 'dGVzdC1jaGFsbGVuZ2U='
@@ -274,6 +275,31 @@ describe('relay-store edge cases', () => {
 
       // Nothing should have been written
       expect(getJson('relay.session')).toBeNull()
+    })
+  })
+
+  describe('_recoverSessionCrypto', () => {
+    it('stops using a stale key without deleting persisted pairing credentials', async () => {
+      const dataKey = crypto.getRandomValues(new Uint8Array(32))
+      const saved = bytesToBase64(dataKey)
+      await persistDataKey(saved)
+      const session = { dataKey, material: null }
+      useRelayStore.getState()._setSessionCrypto(session)
+      useRelayStore.setState({
+        connectionStatus: 'encrypted',
+        isEncrypted: true,
+        isSyncing: true,
+      })
+
+      useRelayStore.getState()._recoverSessionCrypto(session)
+      expect(await loadDataKey()).toBe(saved)
+
+      const state = useRelayStore.getState()
+      expect(state._getSessionCrypto()).toBeNull()
+      expect(state.connectionStatus).toBe('connected')
+      expect(state.isEncrypted).toBe(false)
+      expect(state.isSyncing).toBe(true)
+      expect(state.error).toBeNull()
     })
   })
 

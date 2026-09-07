@@ -25,6 +25,8 @@ import {
   bootstrapSessionCrypto,
   encryptJson,
   decryptJson,
+  decryptToUtf8,
+  RelayDecryptionError,
   bytesToBase64,
   base64ToBytes,
   verifyPairingPublicKeyBundle,
@@ -179,9 +181,11 @@ interface RelayActions {
   _setLastReceivedSeq: (seq: number) => void
   _getClientToken: () => string | null
   _setSessionCrypto: (crypto: SessionCryptoState | null) => void
+  _recoverSessionCrypto: (expected: SessionCryptoState) => void
   _persistSession: () => void
   _encryptJson: (value: unknown) => Promise<EncryptedEnvelope>
   _decryptJson: <T>(envelope: EncryptedEnvelope) => Promise<T>
+  _decryptUtf8: (envelope: EncryptedEnvelope) => Promise<string>
   _sendMessage: (message: RelayClientMessage) => void
   _callRpc: <T = unknown>(
     method: string,
@@ -215,6 +219,15 @@ let _rpcRequestCounter = 0
 let _persistedDataKeyB64: string | null = null
 
 function replaceSessionCrypto(crypto: SessionCryptoState | null) {
+  if (_sessionCrypto && crypto && _sessionCrypto !== crypto &&
+      _sessionCrypto.dataKey.length === crypto.dataKey.length &&
+      _sessionCrypto.dataKey.every((byte, index) => byte === crypto.dataKey[index])) {
+    // A repeated bootstrap is confirmation, not rotation. Keep in-flight RPCs
+    // and the native key handle valid instead of zeroing their shared key.
+    _sessionCrypto.material = crypto.material
+    if (_sessionCrypto.dataKey !== crypto.dataKey) destroySessionCrypto(crypto)
+    return
+  }
   if (_sessionCrypto !== crypto) destroySessionCrypto(_sessionCrypto)
   _sessionCrypto = crypto
   setSessionStorageEncryptionKey(crypto?.dataKey ?? null)
@@ -222,6 +235,8 @@ function replaceSessionCrypto(crypto: SessionCryptoState | null) {
 
 type PendingRpc = {
   method: string
+  crypto: SessionCryptoState | null
+  socket: WebSocket | null
   timeout: ReturnType<typeof setTimeout>
   resolve: (value: unknown) => void
   reject: (error: Error) => void
@@ -770,6 +785,27 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       isEncrypted: state.connectionStatus === 'encrypted' && !!crypto,
     }))
   },
+  _recoverSessionCrypto: (expected) => {
+    // A late response from an old connection must never erase a newer key.
+    if (_sessionCrypto !== expected) return
+    const message = 'Refreshing the secure connection to your desktop…'
+    replaceSessionCrypto(null)
+    _persistedDataKeyB64 = null
+    get()._failPendingRpcs(message)
+    // Preserve persisted credentials and offline data until a signed bootstrap
+    // replaces them. A failed payload is not evidence that pairing was revoked.
+    set((state) => ({
+      connectionStatus: hasLiveRelayConnection(state.connectionStatus)
+        ? 'connected'
+        : state.connectionStatus,
+      error: null,
+      isEncrypted: false,
+      isSyncing: true,
+      hasSyncedOnce: false,
+    }))
+    logConnection('warn', message)
+    get()._requestBootstrap()
+  },
   _getKeyPair: () => _clientKeyPair,
   _getLastReceivedSeq: () => _lastReceivedSeq,
   _setLastReceivedSeq: (seq) => { _lastReceivedSeq = Math.max(_lastReceivedSeq, seq) },
@@ -818,6 +854,10 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     if (!_sessionCrypto) throw new Error('Encrypted relay session is not ready')
     return decryptJson<T>(_sessionCrypto.dataKey, envelope)
   },
+  _decryptUtf8: async (envelope) => {
+    if (!_sessionCrypto) throw new Error('Encrypted relay session is not ready')
+    return decryptToUtf8(_sessionCrypto.dataKey, envelope)
+  },
 
   _sendMessage: (message) => {
     /* v8 ignore start — requires live WebSocket, tested via E2E */
@@ -862,6 +902,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
       _pendingRpc.set(requestId, {
         method,
+        crypto: requestCrypto,
+        socket: requestSocket,
         timeout,
         resolve: (value) => resolve(value as T),
         reject,
@@ -888,12 +930,14 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       return false
     }
 
-    _pendingRpc.delete(payload.request_id)
-    clearTimeout(pending.timeout)
-
+    const isCurrent = () => _socket === pending.socket && _sessionCrypto === pending.crypto &&
+      _pendingRpc.get(payload.request_id) === pending
     try {
+      if (!isCurrent()) throw new Error('Remote connection changed during the request')
       if (payload.ok) {
-        pending.resolve(payload.result ? await get()._decryptJson(payload.result) : null)
+        const value = payload.result ? await get()._decryptJson(payload.result) : null
+        if (!isCurrent()) throw new Error('Remote connection changed during the request')
+        pending.resolve(value)
         return true
       }
 
@@ -905,18 +949,27 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       }
 
       const decrypted = await get()._decryptJson<unknown>(payload.error)
+      if (!isCurrent()) throw new Error('Remote connection changed during the request')
       const message = encryptedRpcErrorMessage(decrypted)
       logConnection('warn', `${pending.method} failed: ${message}`)
       pending.reject(new Error(message))
       return true
     } catch (error) {
+      if (error instanceof RelayDecryptionError && isCurrent() && pending.crypto) {
+        get()._recoverSessionCrypto(pending.crypto)
+        return true
+      }
       pending.reject(error instanceof Error ? error : new Error(`Failed to process ${pending.method} response`))
       return true
+    } finally {
+      _pendingRpc.delete(payload.request_id)
+      clearTimeout(pending.timeout)
     }
   },
 
   _failPendingRpcs: (message) => {
     for (const [requestId, pending] of _pendingRpc.entries()) {
+      if (pending.socket) cancelRelayTransport(pending.socket, requestId)
       clearTimeout(pending.timeout)
       pending.reject(new Error(message))
       _pendingRpc.delete(requestId)

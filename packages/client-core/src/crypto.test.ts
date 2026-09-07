@@ -11,6 +11,7 @@ import {
   encryptJson,
   generateBoxKeyPair,
   normalizePairingCodeInput,
+  RelayDecryptionError,
   restoreBoxKeyPair,
   signPairingAuthorityClientBundle,
   signPairingAuthorityDaemonBundle,
@@ -22,6 +23,15 @@ afterEach(() => {
 })
 
 describe('AES session key reuse', () => {
+  it('distinguishes authentication failure from a malformed relay envelope', async () => {
+    const key = new Uint8Array(32).fill(23)
+    const encrypted = await encryptJson(key, { value: 'authenticated' })
+    await expect(decryptJson(new Uint8Array(32).fill(24), encrypted))
+      .rejects.toBeInstanceOf(RelayDecryptionError)
+    const malformed = decryptJson(key, { ...encrypted, ciphertext: '' })
+    await expect(malformed).rejects.not.toBeInstanceOf(RelayDecryptionError)
+  })
+
   it('imports one WebCrypto key for concurrent encrypt/decrypt bursts', async () => {
     const key = new Uint8Array(32).fill(23)
     const importKey = vi.spyOn(globalThis.crypto.subtle, 'importKey')
