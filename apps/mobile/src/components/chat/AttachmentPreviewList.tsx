@@ -173,7 +173,7 @@ const AttachmentCard = memo(function AttachmentCard({
           <X
             accessible={false}
             size={theme.iconSize.xs}
-            color={theme.colors.surface[0]}
+            color={theme.colors.fg.primary}
           />
         </Pressable>
       ) : null}
@@ -199,12 +199,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   image: {
     width: "100%",
-    aspectRatio: 1,
+    height: 48,
     backgroundColor: theme.colors.surface[3],
   },
   unavailable: {
     width: "100%",
-    aspectRatio: 1,
+    height: 48,
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing[1],

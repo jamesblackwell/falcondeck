@@ -619,32 +619,41 @@ export function InlineVoiceRecorder({
         </>
       ) : (
         <>
-          <VoiceWaveform levels={levels} muted={state === 'transcribing'} />
-          {state === 'transcribing' ? (
-            <Text
-              variant="caption"
-              color="secondary"
-              size="xs"
-              accessibilityLiveRegion="polite"
-              accessibilityLabel={
-                transcriptionAttempt > 1
-                  ? `Retrying transcription, attempt ${transcriptionAttempt}`
-                  : 'Transcribing'
-              }
-            >
-              {transcriptionProgressLabel(transcriptionAttempt)}
-            </Text>
-          ) : (
-            <Text
-              variant="caption"
-              color="secondary"
-              size="xs"
-              style={styles.duration}
-              accessibilityLabel={`Recording, ${durationLabel(displaySeconds)}`}
-            >
-              {durationLabel(displaySeconds)}
-            </Text>
-          )}
+          <View style={styles.status}>
+            <View style={styles.statusHeading}>
+              <Text
+                variant="caption"
+                color={state === 'recording' ? 'accent' : 'secondary'}
+                size="xs"
+                weight="medium"
+                accessibilityLiveRegion="polite"
+                accessibilityLabel={state === 'transcribing'
+                  ? transcriptionAttempt > 1
+                    ? `Retrying transcription, attempt ${transcriptionAttempt}`
+                    : 'Transcribing'
+                  : undefined}
+                style={styles.statusLabel}
+              >
+                {state === 'transcribing'
+                  ? transcriptionProgressLabel(transcriptionAttempt)
+                  : state === 'starting' ? 'Starting microphone…' : 'Recording'}
+              </Text>
+              {state === 'starting' ? null : (
+                <Text variant="caption" color="muted" size="xs" style={styles.duration}>
+                  {durationLabel(displaySeconds)}
+                </Text>
+              )}
+            </View>
+            {state === 'recording' ? (
+              <View style={styles.waveform}>
+                <VoiceWaveform levels={levels} />
+              </View>
+            ) : state === 'transcribing' ? (
+              <Text variant="caption" color="muted" size="xs">
+                Turning audio into text
+              </Text>
+            ) : null}
+          </View>
           {state === 'transcribing' ? (
             <View style={styles.busyButton}>
               <ActivityDiamond color={theme.colors.fg.muted} />
@@ -698,6 +707,23 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[2],
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[2],
+  },
+  waveform: {
+    flexDirection: 'row',
+    height: 32,
+  },
+  status: {
+    flex: 1,
+    minWidth: 0,
+    gap: theme.spacing[1],
+  },
+  statusHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
+  },
+  statusLabel: {
+    flex: 1,
   },
   neutralButton: {
     width: CONTROL_SIZE,

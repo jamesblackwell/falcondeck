@@ -130,12 +130,12 @@ interface ChatInputProps {
 }
 
 const MIN_INPUT_HEIGHT = 48
-const MAX_INPUT_HEIGHT = 280
+const MAX_INPUT_HEIGHT = 320
 // A tall draft (plus attachment previews and the footer) can grow the card
 // past the space left above the keyboard; once the message list has shrunk
 // to nothing the overflow — the send button — slides under the keyboard.
 // Cap growth to a fraction of the window so the composer always fits.
-const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.25
+const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.33
 const COMPOSER_COLLAPSE_MS = 180
 const COMPOSER_COLLAPSE_TIMING = {
   duration: COMPOSER_COLLAPSE_MS,
@@ -267,10 +267,13 @@ export const ChatInput = memo(function ChatInput({
     MIN_INPUT_HEIGHT,
     Math.min(
       MAX_INPUT_HEIGHT,
-      Math.round(windowHeight * MAX_INPUT_HEIGHT_WINDOW_FRACTION),
+      Math.round(windowHeight * MAX_INPUT_HEIGHT_WINDOW_FRACTION) -
+        (attachments.length > 0 ? 80 : 0),
     ),
   )
+  const [inputContentHeight, setInputContentHeight] = useState(0)
   const draftIsEmpty = value.length === 0
+  const inputOverflows = !draftIsEmpty && inputContentHeight > maxInputHeight + 1
   const { onInputLayout, prepareCollapse, slotStyle } =
     useEmptyComposerCollapse(draftIsEmpty)
   const [caretIndex, setCaretIndex] = useState(value.length)
@@ -650,7 +653,11 @@ export const ChatInput = memo(function ChatInput({
           />
         ) : null}
         <Animated.View
-          style={[styles.inputSlot, draftIsEmpty ? slotStyle : null]}
+          style={[
+            styles.inputSlot,
+            draftIsEmpty ? slotStyle : null,
+            voiceProvider ? styles.inputHidden : null,
+          ]}
         >
           <TextInput
             testID="message-composer"
@@ -665,6 +672,10 @@ export const ChatInput = memo(function ChatInput({
             value={value}
             onChangeText={handleChangeText}
             onLayout={onInputLayout}
+            onContentSizeChange={(event) => {
+              setInputContentHeight(event.nativeEvent.contentSize.height)
+            }}
+            accessibilityHint={inputOverflows ? 'Scroll to review your full message' : undefined}
             onSelectionChange={(event) => {
               const nextSelection = event.nativeEvent.selection
               selectionRangeRef.current = nextSelection
@@ -678,7 +689,14 @@ export const ChatInput = memo(function ChatInput({
             editable={!disabled}
           />
         </Animated.View>
-        {slashQuery ? (
+        {inputOverflows && !voiceProvider ? (
+          <View style={styles.scrollHint}>
+            <Text variant="caption" size="xs" color="muted">
+              Scroll to review message
+            </Text>
+          </View>
+        ) : null}
+        {slashQuery && !voiceProvider ? (
           <View style={styles.skillMenu}>
             {slashItems.length > 0 ? (
               slashItems.map((item, index) => {
@@ -1016,6 +1034,13 @@ const styles = StyleSheet.create((theme) => ({
   composer: {
     gap: theme.spacing[2],
     paddingTop: theme.spacing[3],
+  },
+  scrollHint: {
+    marginHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[1],
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: theme.colors.border.subtle,
+    alignItems: 'flex-end',
   },
   inputSlot: {
     justifyContent: 'flex-end',

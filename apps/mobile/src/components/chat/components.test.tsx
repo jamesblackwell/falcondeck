@@ -758,11 +758,28 @@ describe('ChatInput component', () => {
 
     expect(style.height).toBeUndefined()
     expect(style.minHeight).toBe(48)
-    // Window height in the RN mock is 874; the cap is a quarter of it so the
-    // composer (attachments + input + send row) always clears the keyboard.
-    expect(style.maxHeight).toBe(219)
+    // Window height in the RN mock is 874; allow roughly a third for text.
+    expect(style.maxHeight).toBe(288)
     expect(input.props.multiline).toBe(true)
     expect(input.props.scrollEnabled).toBeUndefined()
+  })
+
+  it('shows a scroll cue only while the draft exceeds its visible height', () => {
+    const r = renderComponent(
+      <ChatInput value={'Line\n'.repeat(20)} {...chatInputDefaults} />,
+    )
+    const measureContent = (height: number) => act(() => {
+      r.root.findByType('TextInput' as any).props.onContentSizeChange({
+        nativeEvent: { contentSize: { width: 320, height } },
+      })
+    })
+    measureContent(500)
+    expect(textOf(r)).toContain('Scroll to review message')
+    measureContent(100)
+    expect(textOf(r)).not.toContain('Scroll to review message')
+    measureContent(500)
+    act(() => r.update(<ChatInput value="" {...chatInputDefaults} />))
+    expect(textOf(r)).not.toContain('Scroll to review message')
   })
 
   it('pins an empty draft so clearing the composer cannot balloon the input', () => {
