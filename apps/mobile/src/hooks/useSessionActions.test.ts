@@ -1173,7 +1173,7 @@ describe("loadThreadDetail", () => {
         workspace_id: "workspace-1",
         thread_id: "thread-1",
         mode: "tail",
-        limit: 150,
+        limit: 50,
         inline_images: false,
         tool_output_bytes: 2048,
         strict_limit: true,

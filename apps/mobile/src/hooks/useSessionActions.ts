@@ -19,7 +19,6 @@ import {
   serviceTierForTurn,
   threadForSelection,
   THREAD_DETAIL_OLDER_PAGE_LIMIT,
-  THREAD_DETAIL_TAIL_LIMIT,
   workspaceModels,
   workspaceAgentCapabilities,
 } from "@falcondeck/client-core";
@@ -49,6 +48,12 @@ const RECENT_THREAD_PREFETCH_LIMIT = 5;
  * through `thread.item` only when it is actually looked at. A screenshot-heavy
  * Codex page measured 1.7 MB with everything inlined and ~140 KB with this.
  */
+/**
+ * First page size for the phone. The desktop constant (150) is more than a
+ * phone screen shows and, over the relay, page bytes are the wait; the
+ * remaining history stays one "Load older" tap away.
+ */
+export const MOBILE_THREAD_DETAIL_TAIL_LIMIT = 50;
 export const MOBILE_THREAD_DETAIL_OPTIONS = {
   inline_images: false,
   tool_output_bytes: 2048,
@@ -533,7 +538,7 @@ export function useSessionActions() {
                   workspace_id: workspaceId,
                   thread_id: threadId,
                   mode: "tail",
-                  limit: THREAD_DETAIL_TAIL_LIMIT,
+                  limit: MOBILE_THREAD_DETAIL_TAIL_LIMIT,
                   ...MOBILE_THREAD_DETAIL_OPTIONS,
                 },
             {
@@ -656,7 +661,7 @@ export function useSessionActions() {
               workspace_id: thread.workspace_id,
               thread_id: thread.id,
               mode: "tail",
-              limit: THREAD_DETAIL_TAIL_LIMIT,
+              limit: MOBILE_THREAD_DETAIL_TAIL_LIMIT,
               ...MOBILE_THREAD_DETAIL_OPTIONS,
             },
             { requestIdPrefix: "mobile-prefetch" },
