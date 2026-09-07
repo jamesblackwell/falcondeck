@@ -167,16 +167,21 @@ describe('backup-service', () => {
   it('executes import backup and restores client preferences', async () => {
     const importResponse = {
       workspaces_imported: 1,
-      workspaces_failed: [],
+      workspaces_skipped: 0,
       extensions_imported: 1,
       automations_imported: 0,
       connectors_imported: 0,
       providers_imported: 0,
     }
 
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(importResponse)))
-
-    const response = await executeImportBackup(sampleBackup, {}, 'http://127.0.0.1:4317')
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(importResponse))
+    vi.stubGlobal('fetch', fetchMock)
+    const mappings = { '/Users/test/workspace': '/Users/new/project' }
+    const response = await executeImportBackup(sampleBackup, mappings, 'http://127.0.0.1:4317')
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      backup: sampleBackup,
+      path_mappings: mappings,
+    })
     expect(response.workspaces_imported).toBe(1)
     expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toEqual({
       theme: 'dark',

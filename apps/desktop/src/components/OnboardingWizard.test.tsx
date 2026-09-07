@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import * as backupService from '../backup-service'
+
 import { invoke } from '@tauri-apps/api/core'
 import { createDaemonApiClient } from '@falcondeck/client-core'
 import { DEFAULT_APPEARANCE, updateAppearance } from '@falcondeck/ui'
@@ -183,6 +185,7 @@ describe('shouldShowFirstRunOnboarding', () => {
 describe('OnboardingWizard', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
     vi.clearAllMocks()
     act(() => updateAppearance(DEFAULT_APPEARANCE))
     window.localStorage.clear()
@@ -513,7 +516,7 @@ describe('OnboardingWizard', () => {
   })
 
   it('keeps keyboard focus inside the modal', () => {
-    renderWizard()
+    renderWizard({ baseUrl: 'http://127.0.0.1:4317' })
 
     const first = screen.getByRole('button', {
       name: 'Or restore from a previous backup',
@@ -569,6 +572,71 @@ describe('OnboardingWizard', () => {
     ).toBeNull()
   })
 
+  it('disables restore until the daemon URL is available', () => {
+    renderWizard()
+    expect(screen.getByRole('button', { name: /restore from a previous backup/i })).toBeDisabled()
+  })
+
+  it('locks install controls while the start request is pending and recovers on failure', async () => {
+    let rejectInstall!: (reason: Error) => void
+    const api = createDaemonApiClient('http://127.0.0.1:4317')
+    vi.spyOn(api, 'refreshHarnesses').mockResolvedValue(overview)
+    const upgrade = vi.spyOn(api, 'upgradeHarness').mockImplementation(() =>
+      new Promise((_, reject) => { rejectInstall = reject }),
+    )
+    const props = renderWizard({ api, initialStep: ONBOARDING_STEP_INDEX.tools })
+    const update = await screen.findByRole('button', { name: 'Update' })
+    fireEvent.click(update)
+    fireEvent.click(update)
+    expect(upgrade).toHaveBeenCalledTimes(1)
+    expect(update).toBeDisabled()
+    expect(screen.getByText('Starting…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeDisabled()
+    await act(async () => rejectInstall(new Error('offline')))
+    expect(update).toBeEnabled()
+    expect(props.onToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Could not start Codex update' }))
+  })
+
+  it('keeps setup open and reports actual counts when restore skips projects', async () => {
+    vi.spyOn(backupService, 'inspectBackupFile').mockResolvedValue({ backup: {} } as Awaited<ReturnType<typeof backupService.inspectBackupFile>>)
+    vi.spyOn(backupService, 'executeImportBackup').mockResolvedValue({
+      workspaces_imported: 1, workspaces_skipped: 2, extensions_imported: 3,
+      automations_imported: 0, connectors_imported: 0, providers_imported: 0,
+      preferences_restored: true,
+    })
+    const props = renderWizard({ baseUrl: 'http://127.0.0.1:4317' })
+    fireEvent.change(screen.getByTestId('onboarding-backup-file-input'), {
+      target: { files: [new File(['{}'], 'backup.json')] },
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Restored 1 project(s) and 3 extension(s). 2 project(s) could not be connected.')
+    expect(props.onComplete).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+  })
+
+  it('prevents leaving setup during a restore and unlocks after failure', async () => {
+    let rejectRestore!: (reason: Error) => void
+    vi.spyOn(backupService, 'inspectBackupFile').mockImplementation(() =>
+      new Promise((_, reject) => { rejectRestore = reject }),
+    )
+    const props = renderWizard({ baseUrl: 'http://127.0.0.1:4317' })
+    fireEvent.change(screen.getByTestId('onboarding-backup-file-input'), {
+      target: { files: [new File(['{}'], 'backup.json')] },
+    })
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Skip setup' })).toBeDisabled()
+    await act(async () => rejectRestore(new Error('Invalid backup')))
+    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+    expect(props.onComplete).not.toHaveBeenCalled()
+    expect(props.onToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Could not restore backup' }))
+  })
+
+  it('explains denied notifications without offering an ineffective permission request', async () => {
+    mockedInvoke.mockResolvedValue('denied')
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.finish })
+    expect(await screen.findByText(/re-enable FalconDeck in System Settings/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull()
+  })
+
   it('allows restoring from a backup archive in step 0', async () => {
     const summary = {
       version: 1,
@@ -583,7 +651,7 @@ describe('OnboardingWizard', () => {
     }
     const importResult = {
       workspaces_imported: 2,
-      workspaces_failed: [],
+      workspaces_skipped: 0,
       extensions_imported: 3,
       automations_imported: 1,
       connectors_imported: 0,

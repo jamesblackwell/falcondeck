@@ -155,7 +155,7 @@ export async function executeImportBackup(
   baseUrl: string,
 ): Promise<ImportBackupResponse> {
   const client = createDaemonApiClient(baseUrl)
-  const result = await client.importBackup({ backup, pathMappings })
+  const result = await client.importBackup({ backup, path_mappings: pathMappings })
   restoreClientBackupData(backup.client)
   return result
 }

@@ -147,6 +147,8 @@ export function OnboardingWizard({
   const [overview, setOverview] = useState<HarnessesOverview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isProbing, setIsProbing] = useState(false);
+  const [startingHarnessId, setStartingHarnessId] = useState<string | null>(null);
+  const installPendingRef = useRef(false);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [jobLog, setJobLog] = useState<string[]>([]);
   const [notificationPermission, setNotificationPermission] =
@@ -155,24 +157,30 @@ export function OnboardingWizard({
   const [computerUsePermissions, setComputerUsePermissions] =
     useState<ComputerUsePermissionStatus | null>(null);
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
+  const [restoreWarning, setRestoreWarning] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<number | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
 
   const handleBackupFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !baseUrl) return;
+    if (!file || !baseUrl || isRestoringBackup) return;
 
     setIsRestoringBackup(true);
+    setRestoreWarning(null);
     try {
-      const { backup, summary } = await inspectBackupFile(file, baseUrl);
-      await executeImportBackup(backup, {}, baseUrl);
-      onToast({
-        variant: "success",
-        title: "Backup restored",
-        description: `Restored ${summary.workspace_count} workspace(s) and ${summary.extension_count} extension(s).`,
-      });
-      onComplete(false);
+      const { backup } = await inspectBackupFile(file, baseUrl);
+      const result = await executeImportBackup(backup, {}, baseUrl);
+      const description = `Restored ${result.workspaces_imported} project(s) and ${result.extensions_imported} extension(s).`;
+      if (result.workspaces_skipped > 0) {
+        const warning = `${description} ${result.workspaces_skipped} project(s) could not be connected. Continue setup to choose a folder on this Mac.`;
+        setRestoreWarning(warning);
+        onToast({ variant: "warning", title: "Backup partially restored", description: warning });
+      } else {
+        onToast({ variant: "success", title: "Backup restored", description });
+        onComplete(false);
+      }
     } catch (err) {
       onToast({
         variant: "danger",
@@ -196,7 +204,8 @@ export function OnboardingWizard({
   }, [step]);
 
   useEffect(() => {
-    nextRef.current?.focus();
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+    nextRef.current?.focus({ preventScroll: true });
   }, [step]);
 
   const probeHarnesses = useCallback(async () => {
@@ -277,7 +286,9 @@ export function OnboardingWizard({
 
   const startInstall = useCallback(
     async (harness: HarnessSummary) => {
-      if (!api) return;
+      if (!api || installPendingRef.current || activeJob) return;
+      installPendingRef.current = true;
+      setStartingHarnessId(harness.id);
       try {
         const jobId = await api.upgradeHarness(harness.id);
         setJobLog([]);
@@ -291,12 +302,15 @@ export function OnboardingWizard({
       } catch (error) {
         onToast({
           variant: "danger",
-          title: `Could not start ${harness.label} install`,
+          title: `Could not start ${harness.label} ${harness.installed ? "update" : "install"}`,
           description: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        installPendingRef.current = false;
+        setStartingHarnessId(null);
       }
     },
-    [api, onToast],
+    [api, activeJob, onToast],
   );
 
   // Read the current macOS notification state when the finish step opens so a
@@ -361,7 +375,7 @@ export function OnboardingWizard({
   return (
     <div
       className={cn(
-        "fixed inset-0 z-40 flex items-center justify-center bg-[var(--fd-overlay)] px-6 backdrop-blur-sm",
+        "fixed inset-0 z-40 flex items-center justify-center bg-[var(--fd-overlay)] p-3 sm:p-6 backdrop-blur-sm",
         overlayClassName,
       )}
     >
@@ -379,37 +393,35 @@ export function OnboardingWizard({
         aria-modal="true"
         aria-labelledby="onboarding-title"
         onKeyDown={trapDialogFocus}
-        className="flex max-h-full w-full max-w-2xl flex-col overflow-y-auto rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]"
+        className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]"
         // A setup assistant is modal: Escape does not dismiss it. Skip is an
         // explicit button so the choice is deliberate.
       >
-        <div className="flex items-center justify-center gap-2 px-6 pt-8">
-          {STEPS.map((label, index) => (
-            <div key={label} className="flex items-center gap-2">
+        <div className="shrink-0 px-6 pt-6">
+          <p className="mb-3 text-center text-xs text-fg-muted" role="status">
+            Step {step + 1} of {STEPS.length} · {STEPS[step]}
+          </p>
+          <div className="flex items-center justify-center gap-2" aria-hidden="true">
+            {STEPS.map((label, index) => (
               <span
-                aria-current={index === step ? "step" : undefined}
+                key={label}
                 className={cn(
                   "h-1.5 w-1.5 rounded-full transition-colors",
                   index === step
                     ? "bg-accent"
                     : index < step
-                      ? "bg-accent/50"
+                      ? "bg-accent-muted"
                       : "bg-surface-3",
                 )}
               />
-              {index === step ? (
-                <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                  {label}
-                </span>
-              ) : null}
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
-        <div className="flex-1 px-6 py-8">
+        <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
           {step === STEP_INDEX.welcome ? (
             <div className="flex flex-col items-center gap-4 py-8 text-center">
-              <div className="rounded-full bg-accent/10 p-4 text-accent">
+              <div className="rounded-full bg-accent-muted p-4 text-accent">
                 <Terminal aria-hidden="true" className="h-8 w-8" />
               </div>
               <h2
@@ -420,20 +432,26 @@ export function OnboardingWizard({
               </h2>
               <p className="max-w-md text-[length:var(--fd-text-sm)] text-fg-muted">
                 FalconDeck orchestrates coding agents — Codex, Claude Code,
-                OpenCode, and friends — from this computer. This takes about a
-                minute: pick a look, optionally set up dictation and computer
-                use, check your tools, and connect a project.
+                OpenCode, and others — from this computer. Choose your
+                preferences, check your tools, and connect a project. Dictation,
+                computer use, and OpenRouter are optional. You can change
+                everything later in Settings.
               </p>
               <button
                 type="button"
                 onClick={() => backupFileInputRef.current?.click()}
-                disabled={isRestoringBackup}
-                className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary underline underline-offset-4 cursor-pointer"
+                disabled={isRestoringBackup || !baseUrl}
+                className="fd-focus mt-2 disabled:cursor-not-allowed disabled:opacity-50 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary underline underline-offset-4 cursor-pointer"
               >
                 {isRestoringBackup
                   ? "Restoring backup archive…"
                   : "Or restore from a previous backup"}
               </button>
+              {restoreWarning ? (
+                <p role="alert" className="max-w-md text-sm text-warning">
+                  {restoreWarning}
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -466,8 +484,8 @@ export function OnboardingWizard({
                   Fonts and size
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Interface, chat, and code. Fine-tune stays in Settings →
-                  Appearance.
+                  Choose comfortable fonts and text sizes. You can fine-tune
+                  them later in Settings → Appearance.
                 </p>
               </div>
               <div className="mx-auto w-full max-w-lg">
@@ -592,6 +610,7 @@ export function OnboardingWizard({
                   {overview.harnesses.map((harness) => {
                     const status = harnessStatus(harness);
                     const jobForThis = activeJob?.harnessId === harness.id;
+                    const startingThis = startingHarnessId === harness.id;
                     return (
                       <div
                         key={harness.id}
@@ -639,10 +658,10 @@ export function OnboardingWizard({
                                 {harness.account_status}
                               </p>
                             ) : null}
-                            {jobForThis ? (
+                            {jobForThis || startingThis ? (
                               <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
                                 <ActivityDiamond size="sm" tone="current" />{" "}
-                                {activeJob?.action === "update" ? "Updating…" : "Installing…"}
+                                {startingThis ? "Starting…" : activeJob?.action === "update" ? "Updating…" : "Installing…"}
                               </p>
                             ) : null}
                           </div>
@@ -651,7 +670,7 @@ export function OnboardingWizard({
                               size="sm"
                               variant={harness.installed ? "secondary" : "default"}
                               disabled={
-                                !api || isProbing || activeJob != null
+                                !api || isProbing || startingHarnessId != null || activeJob != null
                               }
                               onClick={() => void startInstall(harness)}
                             >
@@ -675,7 +694,7 @@ export function OnboardingWizard({
                     <Button
                       size="sm"
                       variant="ghost"
-                      disabled={isProbing || activeJob != null}
+                      disabled={!api || isProbing || startingHarnessId != null || activeJob != null}
                       onClick={() => void probeHarnesses()}
                     >
                       <RefreshCw className="h-4 w-4" />
@@ -764,7 +783,7 @@ export function OnboardingWizard({
                     Notifications are unavailable on this system; you can skip
                     this.
                   </p>
-                ) : (
+                ) : notificationPermission === "denied" ? null : (
                   <Button
                     variant="secondary"
                     disabled={isRequestingPermission}
@@ -787,12 +806,13 @@ export function OnboardingWizard({
           ) : null}
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t border-border-subtle px-6 py-4">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border-subtle px-4 py-4 sm:px-6">
           <div>
             {step > 0 ? (
               <Button
                 type="button"
                 variant="ghost"
+                disabled={isRestoringBackup}
                 onClick={() => setStep((current) => current - 1)}
               >
                 Back
@@ -800,13 +820,14 @@ export function OnboardingWizard({
             ) : null}
           </div>
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => onComplete(true)}>
+            <Button type="button" variant="ghost" disabled={isRestoringBackup} onClick={() => onComplete(true)}>
               Skip setup
             </Button>
             {isLastStep ? (
               <Button
                 ref={nextRef}
                 type="button"
+                disabled={isRestoringBackup}
                 onClick={() => onComplete(false)}
               >
                 Start using FalconDeck
@@ -815,6 +836,7 @@ export function OnboardingWizard({
               <Button
                 ref={nextRef}
                 type="button"
+                disabled={isRestoringBackup}
                 onClick={() => {
                   if (step === STEP_INDEX.computerUse && api) {
                     const enableIfGranted = (granted: boolean) => {
