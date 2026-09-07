@@ -92,6 +92,7 @@ import {
   ComposerSuggestionSheet,
   GoalSheet,
   JumpToBottomFab,
+  TranscriptRefreshPill,
   QueuedTurns,
   ThinkingIndicator,
   OperationalNoticeBanner,
@@ -509,6 +510,8 @@ export default function HomeScreen() {
   );
   const isSelectedThreadLoading =
     !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
+  const isRefreshingSelectedThread =
+    isSelectedThreadLoading && blocks.length > 0 && !isPreparingSelectedHandoff;
 
   // One soft pulse when the currently viewed agent turn finishes. Watching
   // the summary transition keeps this independent of token/tool events and
@@ -1198,14 +1201,11 @@ export default function HomeScreen() {
     let cancelled = false;
     let snapTimer: ReturnType<typeof setTimeout> | null = null;
     setIsLoadingOlder(false);
-    // Read the item count imperatively: subscribing to it would refire this
-    // effect (and a full thread.detail RPC) for every streamed item.
-    if (
-      (useSessionStore.getState().threadItems[selectedThreadId]?.length ??
-        0) === 0
-    ) {
-      setDetailLoadingThreadId(selectedThreadId);
-    }
+    // Tracked for every load, cached or not: an uncached thread gets the
+    // full-pane "Loading thread…", a cached one a refresh pill over the
+    // transcript, so a page that takes seconds never looks like the thread
+    // simply ends at the cached messages.
+    setDetailLoadingThreadId(selectedThreadId);
 
     void loadThreadDetail(selectedWorkspaceId, selectedThreadId).finally(() => {
       if (cancelled) return;
@@ -1469,6 +1469,7 @@ export default function HomeScreen() {
           />
         )}
         <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
+        <TranscriptRefreshPill visible={isRefreshingSelectedThread} />
       </View>
 
       <LiveActivityLane groups={liveActivityGroups} />
