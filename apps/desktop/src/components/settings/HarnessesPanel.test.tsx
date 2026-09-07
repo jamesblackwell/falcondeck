@@ -72,8 +72,8 @@ describe('HarnessesPanel', () => {
     render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={[]} onToast={vi.fn()} />)
 
     expect(await screen.findByText('Codex')).toBeInTheDocument()
-    expect(screen.getByText('Update available')).toBeInTheDocument()
-    expect(screen.getByText('v0.12.0 → 0.13.0')).toBeInTheDocument()
+    expect(screen.getByText('Out of date · Latest v0.13.0')).toBeInTheDocument()
+    expect(screen.getByText('Installed v0.12.0')).toBeInTheDocument()
     expect(screen.getByText('Logged in using ChatGPT')).toBeInTheDocument()
     // Detection-only harness shows no upgrade button.
     expect(screen.queryByRole('button', { name: 'Install' })).toBeNull()
@@ -283,6 +283,56 @@ describe('HarnessesPanel', () => {
       { timeout: 5000 },
     )
   }, 10000)
+
+  it('queues installed upgrades, skips current and missing harnesses, and continues after failure', async () => {
+    const first = overview.harnesses[0]
+    const inventory = {
+      host: 'local',
+      harnesses: [
+        first,
+        { ...first, id: 'cursor', label: 'Cursor', latest_version: null, update_available: null },
+        { ...first, id: 'current', label: 'Current', update_available: false },
+        { ...first, id: 'missing', label: 'Missing', installed: false },
+        { ...first, id: 'custom', label: 'Custom', upgrade_command: null },
+      ],
+    }
+    const started: string[] = []
+    let finishFirst: ((response: Response) => void) | undefined
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/upgrade')) {
+        const id = JSON.parse(init!.body as string).harness_id
+        started.push(id)
+        return jsonResponse({ job_id: id })
+      }
+      if (url.endsWith('/jobs/codex')) {
+        return new Promise<Response>((resolve) => { finishFirst = resolve })
+      }
+      if (url.endsWith('/jobs/cursor')) {
+        return jsonResponse({
+          job_id: 'cursor', harness_id: 'cursor', label: 'Cursor', host: 'local',
+          status: 'completed', log: [],
+        })
+      }
+      return jsonResponse(inventory)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onToast = vi.fn()
+    render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={hosts} onToast={onToast} />)
+
+    expect(await screen.findByText('Installed · Latest version unknown')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Upgrade all' }))
+    await waitFor(() => expect(finishFirst).toBeDefined())
+    expect(started).toEqual(['codex'])
+    expect(screen.getByLabelText('Host')).toBeDisabled()
+    finishFirst!(jsonResponse({
+      job_id: 'codex', harness_id: 'codex', label: 'Codex', host: 'local',
+      status: 'failed', error: 'Installer failed', log: [],
+    }))
+    await waitFor(() => expect(started).toEqual(['codex', 'cursor']))
+    await waitFor(() => expect(screen.getByLabelText('Host')).toBeEnabled())
+    expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Codex upgrade failed' }))
+    expect(onToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Cursor upgraded' }))
+  })
 
   it('shows an error surface when the daemon cannot be reached', async () => {
     vi.stubGlobal(

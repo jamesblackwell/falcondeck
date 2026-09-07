@@ -194,6 +194,15 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 ## Client notes
 
+- Settings offers **Upgrade all** for installed managed harnesses on the
+  selected host. It runs jobs sequentially, skips confirmed current versions,
+  includes unknown latest versions, and continues after an individual failure.
+  Host selection is locked while the queue runs. A lost daemon job stops the
+  queue because the prior install may still be running.
+- Status badges show **Out of date · Latest v…** alongside the installed
+  version; unchecked versions explicitly say **Latest version unknown**.
+  Raw installer output is available under **Upgrade details**.
+
 - When `extra_installs` is non-empty the panel prefixes the resolved path
   with **Using** and lists each unused copy as **Also found … — not used**.
   A warning badge **Another install** appears when an unused copy reports a

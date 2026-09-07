@@ -69,12 +69,12 @@ function harnessStatusLabel(harness: HarnessSummary): {
     return { label: 'Not installed', variant: 'default' }
   }
   if (harness.update_available === true) {
-    return { label: 'Update available', variant: 'warning' }
+    return { label: harness.latest_version ? `Out of date · Latest v${harness.latest_version}` : 'Out of date', variant: 'warning' }
   }
   if (harness.update_available === false) {
     return { label: 'Up to date', variant: 'success' }
   }
-  return { label: 'Installed', variant: 'success' }
+  return { label: 'Installed · Latest version unknown', variant: 'default' }
 }
 
 function kindLabel(kind: HarnessSummary['kind']): string {
@@ -97,6 +97,9 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   const [error, setError] = useState<{ hostKey: string; message: string } | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
+  const [queue, setQueue] = useState<HarnessSummary[]>([])
+  const [isStarting, setIsStarting] = useState(false)
+  const startingRef = useRef(false)
   const [jobLog, setJobLog] = useState<string[]>([])
   const pollRef = useRef<number | null>(null)
 
@@ -200,12 +203,18 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   // provisioning panel's job loop.
   useEffect(() => {
     if (!activeJob || !baseUrl) return
+    let cancelled = false
+    let polling = false
     const poll = async () => {
+      if (cancelled || polling) return
+      polling = true
       try {
         const response = await fetch(
           `${baseUrl}/api/harnesses/jobs/${encodeURIComponent(activeJob.jobId)}`,
         )
+        if (cancelled) return
         if (response.status === 404) {
+          setQueue([])
           // Jobs are in-memory on the daemon: a 404 means a restart (or
           // pruning) erased it. Polling forever would leave every upgrade
           // button disabled with no recovery, so treat it as terminal.
@@ -221,6 +230,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         if (!response.ok) throw new Error(falconDeckHttpError(response.status))
         const job = normalizeHarnessUpgradeJob(await response.json())
         if (!job) throw new Error('invalid job response')
+        if (cancelled) return
         setJobLog(job.log)
         if (job.status !== 'running') {
           setActiveJob(null)
@@ -251,18 +261,23 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
       } catch {
         // Transient poll failures keep the job running from the UI's point
         // of view; the next tick retries.
+      } finally {
+        polling = false
       }
     }
     void poll()
     pollRef.current = window.setInterval(() => void poll(), 1500)
     return () => {
+      cancelled = true
       if (pollRef.current != null) window.clearInterval(pollRef.current)
     }
   }, [activeJob, baseUrl, fetchOverview, hostKey, hostLabel, onToast])
 
   const startUpgrade = useCallback(
     async (harness: HarnessSummary) => {
-      if (!baseUrl) return
+      if (!baseUrl || startingRef.current) return
+      startingRef.current = true
+      setIsStarting(true)
       const endpoint = hostEndpoint(hostKey, sshHostsRef.current)
       try {
         const response = await fetch(`${baseUrl}/api/harnesses/upgrade`, {
@@ -298,12 +313,26 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           title: `Could not start ${harness.label} upgrade`,
           description: error instanceof Error ? error.message : String(error),
         })
+      } finally {
+        startingRef.current = false
+        setIsStarting(false)
       }
     },
     [baseUrl, hostKey, onToast],
   )
 
+  useEffect(() => {
+    if (activeJob || isStarting || isRefreshing || queue.length === 0) return
+    const [next, ...remaining] = queue
+    setQueue(remaining)
+    void startUpgrade(next)
+  }, [activeJob, isStarting, isRefreshing, queue, startUpgrade])
+
   const harnesses = overview?.harnesses ?? []
+  const upgradeable = harnesses.filter(
+    (harness) => harness.installed && harness.upgrade_command && harness.update_available !== false,
+  )
+  const isBusy = activeJob != null || isStarting || queue.length > 0
 
   return (
     <SettingsPage>
@@ -324,6 +353,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             <select
               aria-label="Host"
               className="rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-2 py-1.5 text-[length:var(--fd-text-sm)] text-fg-primary"
+              disabled={isBusy}
               value={hostKey}
               onChange={(event) => setHostKey(event.target.value)}
             >
@@ -337,7 +367,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             <Button
               size="sm"
               variant="secondary"
-              disabled={!baseUrl || isRefreshing}
+              disabled={!baseUrl || isRefreshing || isBusy}
               onClick={() => void fetchOverview(hostKey, true)}
             >
               {isRefreshing ? (
@@ -346,6 +376,14 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                 <RefreshCw className="h-4 w-4" />
               )}
               Check for updates
+            </Button>
+            <Button
+              size="sm"
+              disabled={!baseUrl || isRefreshing || isBusy || upgradeable.length === 0}
+              onClick={() => setQueue(upgradeable)}
+            >
+              <Download className="h-4 w-4" />
+              {isBusy ? 'Upgrading…' : 'Upgrade all'}
             </Button>
           </div>
         </CardHeader>
@@ -400,10 +438,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                         ) : null}
                         {harness.version ? (
                           <span className="font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
-                            v{harness.version}
-                            {harness.latest_version && harness.update_available
-                              ? ` → ${harness.latest_version}`
-                              : ''}
+                            Installed v{harness.version}
                           </span>
                         ) : null}
                       </div>
@@ -423,7 +458,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                       <Button
                         size="sm"
                         variant={harness.update_available === true ? 'default' : 'secondary'}
-                        disabled={!baseUrl || isRefreshing || activeJob != null}
+                        disabled={!baseUrl || isRefreshing || isBusy}
                         onClick={() => void startUpgrade(harness)}
                       >
                         {harness.installed && harness.update_available === true ? (
@@ -434,9 +469,12 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                     ) : null}
                   </div>
                   {jobForThisHarness && jobLog.length > 0 ? (
-                    <pre className="mt-2 max-h-40 overflow-y-auto rounded-[var(--fd-radius-md)] bg-surface-2 p-2 font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
+                    <details className="mt-2">
+                      <summary className="fd-focus cursor-pointer text-xs text-fg-muted">Upgrade details</summary>
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-[var(--fd-radius-md)] bg-surface-2 p-2 font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
                       {jobLog.join('\n')}
                     </pre>
+                    </details>
                   ) : null}
                 </div>
               )
@@ -457,6 +495,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         </CardHeader>
         <CardContent>
           <ul className="list-inside list-disc space-y-1 text-[length:var(--fd-text-sm)] text-fg-muted">
+<li>Upgrade all updates installed managed harnesses on this host, one at a time. Harnesses with an unknown latest version are included; up-to-date harnesses are skipped.</li>
             <li>Custom ACP agents are listed with status but never auto-upgraded.</li>
             <li>Detected CLIs without a managed path show install location and version only.</li>
             <li>
