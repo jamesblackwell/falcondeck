@@ -505,8 +505,8 @@ export function OnboardingWizard({
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
                   Turn on system-wide dictation and pick a shortcut. Voice
-                  rewrite is optional — it needs an OpenRouter key on the next
-                  step.
+                  rewrite is optional — you can add an OpenRouter key later in
+                  setup.
                 </p>
               </div>
               <DictationSetup

@@ -594,7 +594,7 @@ export function DictationSetup({
         title="Voice rewrite"
         description={
           compact
-            ? "Select text, hold a different shortcut, and speak how to edit it. Needs an OpenRouter key — optional on the next step."
+            ? "Select text, hold a different shortcut, and speak how to edit it. Needs an OpenRouter key — you can add one later in setup."
             : "Select text in any app, hold a different shortcut, and speak how to edit it. FalconDeck transcribes the instruction, rewrites the selection through OpenRouter, and pastes over it."
         }
       >
