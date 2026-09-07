@@ -370,6 +370,58 @@ describe("handoffThread", () => {
     expect(prompt).toContain("begins mid-conversation");
   });
 
+  it("pages backwards from supplied seed items without a tail read", async () => {
+    const api = makeApi();
+    const seed = [
+      {
+        kind: "user_message",
+        id: "seen-1",
+        text: "Already on the device",
+        attachments: [],
+        turn_id: null,
+        previous_turn_id: null,
+        created_at: "2026-01-01T00:00:00Z",
+      } as ThreadDetail["items"][number],
+    ];
+    api.threadDetail.mockImplementation(async () => ({
+      workspace: makeWorkspace(),
+      thread: makeThread({ id: "thread-1" }),
+      items: [
+        {
+          kind: "user_message",
+          id: "older-1",
+          text: "x".repeat(500_000),
+          attachments: [],
+          turn_id: null,
+          previous_turn_id: null,
+          created_at: "2026-01-01T00:00:00Z",
+        } as ThreadDetail["items"][number],
+      ],
+      has_older: true,
+      oldest_item_id: "older-1",
+      newest_item_id: "older-1",
+      is_partial: true,
+    }));
+
+    await handoffThread(api, {
+      ...baseArgs,
+      transcriptPageItems: 20,
+      seedItems: seed,
+    });
+
+    // No `tail`: it is the one read the daemon may widen past the limit.
+    expect(api.threadDetail).toHaveBeenCalledTimes(1);
+    expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {
+      mode: "before",
+      before_item_id: "seen-1",
+      limit: 20,
+    });
+    const seeded = api.sendTurn.mock.calls[0][0];
+    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    expect(prompt).toContain("Already on the device");
+    expect(prompt).toContain("begins mid-conversation");
+  });
+
   it("stops paging when the source has no older history", async () => {
     const api = makeApi();
     api.threadDetail.mockImplementation(async (_workspaceId, threadId) => ({

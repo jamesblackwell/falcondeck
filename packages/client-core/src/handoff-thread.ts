@@ -61,6 +61,13 @@ export type HandoffThreadArgs = {
    * starts. Pages are read newest-first until {@link HANDOFF_TRANSCRIPT_BUDGET_BYTES}.
    */
   transcriptPageItems?: number | null;
+  /**
+   * Newest items the caller already holds for this thread. Supplying them
+   * skips the opening `tail` read, which the daemon may widen well past the
+   * requested limit to reach the last user message — on a slow uplink that
+   * one response is the whole reason a handoff never starts.
+   */
+  seedItems?: readonly ConversationItem[] | null;
 };
 
 /**
@@ -168,7 +175,7 @@ function turnLooksStarted(detail: ThreadDetail | null): boolean {
  */
 export const HANDOFF_TRANSCRIPT_BUDGET_BYTES = 400_000;
 /** Bounds the read when a thread's items are unusually small. */
-const HANDOFF_TRANSCRIPT_MAX_PAGES = 8;
+const HANDOFF_TRANSCRIPT_MAX_PAGES = 12;
 
 /**
  * The newest slice of a thread that fits the byte budget. A single `full`
@@ -180,7 +187,10 @@ async function readHandoffTranscript(
   api: HandoffThreadApi,
   workspaceId: string,
   threadId: string,
-  options: { pageItems?: number | null },
+  options: {
+    pageItems?: number | null;
+    seedItems?: readonly ConversationItem[] | null;
+  },
 ): Promise<{ items: ConversationItem[]; partial: boolean }> {
   const pageItems = options.pageItems;
   if (pageItems == null) {
@@ -190,13 +200,24 @@ async function readHandoffTranscript(
     return { items: detail.items, partial: false };
   }
 
-  const tail = await api.threadDetail(workspaceId, threadId, {
-    mode: "tail",
-    limit: pageItems,
-  });
-  let items = tail.items;
-  let oldestItemId = tail.oldest_item_id;
-  let hasOlder = tail.has_older;
+  let items: ConversationItem[];
+  let oldestItemId: string | null;
+  let hasOlder: boolean;
+  const seed = options.seedItems ?? [];
+  if (seed.length > 0) {
+    // Already on the device: costs nothing and avoids the widened tail read.
+    items = [...seed];
+    oldestItemId = items[0].id;
+    hasOlder = true;
+  } else {
+    const tail = await api.threadDetail(workspaceId, threadId, {
+      mode: "tail",
+      limit: pageItems,
+    });
+    items = tail.items;
+    oldestItemId = tail.oldest_item_id ?? items[0]?.id ?? null;
+    hasOlder = tail.has_older;
+  }
   let bytes = JSON.stringify(items).length;
 
   for (
@@ -207,16 +228,17 @@ async function readHandoffTranscript(
     page < HANDOFF_TRANSCRIPT_MAX_PAGES;
     page += 1
   ) {
+    // `before` is bounded by the requested count; `tail` is not.
     const older = await api.threadDetail(workspaceId, threadId, {
       mode: "before",
       before_item_id: oldestItemId,
       limit: pageItems,
     });
+    hasOlder = older.has_older;
     if (older.items.length === 0) break;
     items = [...older.items, ...items];
     bytes += JSON.stringify(older.items).length;
-    oldestItemId = older.oldest_item_id;
-    hasOlder = older.has_older;
+    oldestItemId = older.oldest_item_id ?? older.items[0].id;
   }
 
   return { items, partial: hasOlder };
@@ -246,6 +268,7 @@ export async function handoffThread(
   // cannot leave a destination thread behind.
   const source = await readHandoffTranscript(api, workspace.id, thread.id, {
     pageItems: args.transcriptPageItems,
+    seedItems: args.seedItems,
   });
   const prompt = buildHandoffPrompt({
     items: source.items,
