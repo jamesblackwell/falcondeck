@@ -35,7 +35,7 @@ const failed = new Set<string>();
 const listeners = new Set<() => void>();
 
 function key(threadId: string, itemId: string) {
-  return `${threadId}${itemId}`;
+  return `${threadId}/${itemId}`;
 }
 
 function notify() {
