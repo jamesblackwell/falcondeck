@@ -613,6 +613,8 @@ export const Conversation = memo(function Conversation({
       return;
     }
 
+    // Saved followers returned above. Preserve this reader's detached state
+    // even when their saved position is only a few pixels from the bottom.
     writeScrollTop(el, clampScrollTop(savedPosition.scrollTop, el));
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickyToBottomRef.current = false;
