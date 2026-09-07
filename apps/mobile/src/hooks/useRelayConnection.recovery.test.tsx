@@ -75,6 +75,9 @@ async function connect(savedKey: Uint8Array | null) {
 async function advance(ms: number) {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 }
+async function waitFor(assertion: () => void) {
+  await act(async () => { await vi.waitFor(assertion) })
+}
 
 it.each(['snapshot-invalidated', 'history-truncated'] as const)(
   'repairs the open transcript after %s even though the socket and selection stay healthy',
@@ -84,12 +87,15 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     const presence = { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null }
     socket.receive({ type: 'ready', session_id: 'session', role: 'client', next_seq: 11 })
     socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
-    await advance(1)
+    await waitFor(() => expect(socket.indexRequests()).toHaveLength(1))
     const indexResult = async (token: string) => encryptJson(dataKey, { token, snapshot: base,
       agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {} })
     socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[0]!.request_id,
       ok: true, error: null, result: await indexResult('before-loss') })
-    await advance(20)
+    await waitFor(() => {
+      expect(useRelayStore.getState()).toMatchObject({ hasSyncedOnce: true, isSyncing: false })
+      expect(useSessionStore.getState().snapshot?.sync_index?.token).toBe('before-loss')
+    })
     act(() => {
       useSessionStore.getState().selectThread('workspace-1', 'thread-1')
       useSessionStore.getState().setThreadDetail(threadDetail({
@@ -100,7 +106,7 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     expect(useRelayStore.getState().hasSyncedOnce).toBe(true)
 
     // The daemon completed the reply, but its terminal update was lost.
-    // Both recovery markers currently refresh only the sidebar/index.
+    // Both recovery markers must repair the transcript as well as the index.
     if (loss === 'snapshot-invalidated') {
       socket.receive({ type: 'update', update: {
         id: 'gap', seq: 12, created_at: new Date().toISOString(), body: { t: 'snapshot-invalidated' },
@@ -108,22 +114,24 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     } else {
       socket.receive({ type: 'sync', updates: [], next_seq: 13, history_truncated: true, presence })
     }
-    await advance(20)
-    expect(socket.indexRequests()).toHaveLength(2)
+    await waitFor(() => expect(socket.indexRequests()).toHaveLength(2))
     socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[1]!.request_id,
       ok: true, error: null, result: await indexResult('after-loss') })
-    await advance(20)
-    expect(useRelayStore.getState()).toMatchObject({ isEncrypted: true, isSyncing: false })
+    // Advancing fake timers does not finish real asynchronous AES work.
+    // Wait for the applied response, not a presumed number of paint frames.
+    await waitFor(() => {
+      expect(useRelayStore.getState()).toMatchObject({ isEncrypted: true, isSyncing: false })
+      expect(useSessionStore.getState().snapshot?.sync_index?.token).toBe('after-loss')
+    })
     expect(useSessionStore.getState().selectedThreadId).toBe('thread-1')
-    const detailCalls = socket.sent.filter((message): message is Extract<RelayClientMessage, { type: 'rpc-call' }> =>
+    const detailCalls = () => socket.sent.filter((message): message is Extract<RelayClientMessage, { type: 'rpc-call' }> =>
       message.type === 'rpc-call' && message.method === 'thread.detail')
-    expect(detailCalls).toHaveLength(1)
-    socket.receive({ type: 'rpc-result', request_id: detailCalls[0]!.request_id, ok: true, error: null,
+    await waitFor(() => expect(detailCalls()).toHaveLength(1))
+    socket.receive({ type: 'rpc-result', request_id: detailCalls()[0]!.request_id, ok: true, error: null,
       result: await encryptJson(dataKey, threadDetail({ items: [assistantMessage('reply', 'The complete reply')] })) })
-    await advance(20)
-    expect(useSessionStore.getState().threadItems['thread-1']).toMatchObject([
+    await waitFor(() => expect(useSessionStore.getState().threadItems['thread-1']).toMatchObject([
       { id: 'reply', text: 'The complete reply', lifecycle: 'complete' },
-    ])
+    ]))
   },
 )
 
