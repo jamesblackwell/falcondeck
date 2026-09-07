@@ -1648,13 +1648,14 @@ describe("handoffToProvider", () => {
     }
 
     // Paged: a full read of a long thread outlives the relay deadline.
+    // No cached detail for this thread, so the read falls back to a tail page.
     expect(rpc).toHaveBeenCalledWith(
       "thread.detail",
       expect.objectContaining({
         workspace_id: "w1",
         thread_id: "t1",
         mode: "tail",
-        limit: 40,
+        limit: 20,
       }),
       { requestIdPrefix: "mobile-handoff-detail" },
     );
