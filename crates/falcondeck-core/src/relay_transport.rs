@@ -672,6 +672,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_chunk_at_a_time_uploader_is_acknowledged_promptly() {
+        // A peer still running the pre-window sender waits for every ack.
+        let (wire_tx, mut wire_rx) = mpsc::channel::<String>(64);
+        let (peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(64);
+        let sink = Box::pin(futures_util::sink::unfold(wire_tx, |tx, text| async move {
+            tx.send(text).await.map_err(|e| e.to_string())?;
+            Ok::<_, String>(tx)
+        }));
+        let stream = Box::pin(futures_util::stream::unfold(peer_rx, |mut rx| async {
+            rx.recv().await.map(|v| (v, rx))
+        }));
+        let (_sender, mut incoming, _guard) = spawn_transport(sink, stream, true);
+        wire_rx.recv().await.unwrap();
+        let text = "y".repeat(1024 * 1024);
+        let started = Instant::now();
+        let mut worst = Duration::ZERO;
+        for (index, chunk) in text.as_bytes().chunks(CHUNK_BYTES).enumerate() {
+            let sent = Instant::now();
+            peer_tx
+                .send(Ok(serde_json::to_string(&Frame::TransportChunk {
+                    id: 7,
+                    index: index as u32,
+                    total: text.len(),
+                    data: STANDARD.encode(chunk),
+                })
+                .unwrap()))
+                .await
+                .unwrap();
+            let ack = tokio::time::timeout(Duration::from_secs(2), wire_rx.recv())
+                .await
+                .expect("ack within 2s")
+                .unwrap();
+            assert!(ack.contains("transport-ack"), "{ack}");
+            worst = worst.max(sent.elapsed());
+        }
+        let received = incoming.recv().await.unwrap().unwrap();
+        assert_eq!(received.text, text);
+        eprintln!("1 MB legacy upload: {:?}, worst ack {:?}", started.elapsed(), worst);
+        assert!(worst < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
     async fn legacy_peer_receives_original_message_and_queue_is_byte_bounded() {
         let (wire_tx, mut wire_rx) = mpsc::channel::<String>(4);
         let (_peer_tx, peer_rx) = mpsc::channel::<Result<String, String>>(4);
