@@ -14,6 +14,37 @@ import {
 } from "./MarkdownRenderer";
 import { setMermaidAssetLoader } from "./mermaidEngine";
 
+function instanceText(node: {
+  children?: Array<string | { children?: unknown[] }>;
+}): string {
+  return (node.children ?? [])
+    .map((child) =>
+      typeof child === "string" ? child : instanceText(child as never),
+    )
+    .join("");
+}
+
+/**
+ * iOS only turns *direct* string children of a Text into native text runs: the
+ * UITextView bridge wraps those in text fragments and renders anything else as
+ * an empty attachment. Fragments are transparent to React, so a string inside
+ * one still shows up in this test tree while disappearing on device — which is
+ * how the paragraph breaks went missing ("threshold.Here is", "forward:1.").
+ */
+function stringsHiddenInFragments(node: unknown, insideFragment = false): string[] {
+  if (typeof node === "string" || typeof node === "number") {
+    return insideFragment ? [String(node)] : [];
+  }
+  if (Array.isArray(node)) {
+    return node.flatMap((child) =>
+      stringsHiddenInFragments(child, insideFragment),
+    );
+  }
+  if (!React.isValidElement(node)) return [];
+  const children = (node.props as { children?: unknown }).children;
+  return stringsHiddenInFragments(children, node.type === React.Fragment);
+}
+
 afterEach(() => {
   cleanup();
   setMermaidAssetLoader(null);
@@ -124,6 +155,163 @@ describe("MarkdownRenderer", () => {
     expect(textOf(renderer)).toContain("Selectable paragraph with rich text.");
     expect(textOf(renderer)).toContain("FalconDecknative");
     expect(textOf(renderer)).toContain("Selectable footnote");
+  });
+
+  it("keeps a paragraph and the numbered list below it in one selection tree", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={[
+          "Yes—the fixes are committed but aren't running yet. Deploy in this order:",
+          "",
+          "1. Relay — restart with the CPU scheduler change.",
+          "2. Mac app/daemon — rebuild and restart with the sync changes.",
+          "3. iPhone app — release the updated client.",
+          "4. Remote web — deploy to receive the transport improvements.",
+          "",
+          "The earlier Mac restart and TestFlight build predate these latest changes.",
+        ].join("\n")}
+      />,
+    );
+
+    const selectable = renderer.root
+      .findAllByType("Text" as any)
+      .filter((node) => node.props.selectable === true);
+
+    expect(selectable).toHaveLength(1);
+    expect(selectable[0]!.props.uiTextView).toBe(true);
+    expect(instanceText(selectable[0]!)).toContain(
+      "Deploy in this order:",
+    );
+    expect(instanceText(selectable[0]!)).toContain("1.");
+    expect(instanceText(selectable[0]!)).toContain("Mac app/daemon");
+    expect(instanceText(selectable[0]!)).toContain("Remote web");
+    expect(instanceText(selectable[0]!)).toContain(
+      "The earlier Mac restart",
+    );
+  });
+
+  it("keeps block separators renderable on iOS", () => {
+    // Canary: the detector has to flag a string that only a Fragment holds.
+    expect(
+      stringsHiddenInFragments(<React.Fragment>{"\n\n"}</React.Fragment>),
+    ).toEqual(["\n\n"]);
+
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        highlightCommands
+        text={[
+          "Not a proven success threshold.",
+          "",
+          "Here is the route forward:",
+          "",
+          "1. Finish a focused technical check.",
+          "2. Prepare 500 fresher recipients.",
+          "",
+          "Run /deploy once that lands.",
+        ].join("\n")}
+      />,
+    );
+
+    const texts = renderer.root.findAllByType("Text" as any);
+    expect(
+      texts.flatMap((node) => stringsHiddenInFragments(node.props.children)),
+    ).toEqual([]);
+
+    const selectable = texts.filter((node) => node.props.selectable === true);
+    expect(selectable).toHaveLength(1);
+    const rendered = instanceText(selectable[0]!);
+    expect(rendered).toContain("threshold.\n\nHere is the route forward:");
+    expect(rendered).toContain("route forward:\n\n1. Finish");
+    expect(rendered).toContain("Run /deploy once that lands.");
+  });
+
+  it("still splits selection around a fenced code widget", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={"Before the fence.\n\n```bash\nmake mobile-dev\n```\n\nAfter the fence."}
+      />,
+    );
+
+    const selectable = renderer.root
+      .findAllByType("Text" as any)
+      .filter((node) => node.props.selectable === true);
+    const before = selectable.find((node) =>
+      instanceText(node).includes("Before the fence."),
+    );
+    const after = selectable.find((node) =>
+      instanceText(node).includes("After the fence."),
+    );
+
+    expect(before).toBeTruthy();
+    expect(after).toBeTruthy();
+    expect(before).not.toBe(after);
+    expect(instanceText(before!)).not.toContain("After the fence.");
+    expect(instanceText(after!)).not.toContain("Before the fence.");
+  });
+
+  it("keeps nested list items in the same selection tree as the lead paragraph", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={[
+          "Ship in this order:",
+          "",
+          "- Native clients",
+          "  1. Mac app/daemon",
+          "  2. iPhone app",
+          "- Remote web",
+        ].join("\n")}
+      />,
+    );
+
+    const selectable = renderer.root
+      .findAllByType("Text" as any)
+      .filter((node) => node.props.selectable === true);
+    expect(selectable).toHaveLength(1);
+    expect(instanceText(selectable[0]!)).toContain("Ship in this order:");
+    expect(instanceText(selectable[0]!)).toContain("Native clients");
+    expect(instanceText(selectable[0]!)).toContain("Mac app/daemon");
+    expect(instanceText(selectable[0]!)).toContain("Remote web");
+  });
+
+  it("selects through a task list using text markers", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={"Do these:\n\n- [ ] First\n- [x] Second"}
+      />,
+    );
+
+    const selectable = renderer.root
+      .findAllByType("Text" as any)
+      .filter((node) => node.props.selectable === true);
+    expect(selectable).toHaveLength(1);
+    expect(instanceText(selectable[0]!)).toContain("Do these:");
+    expect(instanceText(selectable[0]!)).toContain("[ ]");
+    expect(instanceText(selectable[0]!)).toContain("[x]");
+    expect(instanceText(selectable[0]!)).toContain("First");
+    expect(instanceText(selectable[0]!)).toContain("Second");
+  });
+
+  it("still renders a list that contains a fenced code widget", () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={[
+          "Intro",
+          "",
+          "1. Read this",
+          "",
+          "   ```bash",
+          "   make mobile-dev",
+          "   ```",
+          "",
+          "2. Then that",
+        ].join("\n")}
+      />,
+    );
+
+    expect(textOf(renderer)).toContain("Intro");
+    expect(textOf(renderer)).toContain("Read this");
+    expect(textOf(renderer)).toContain("make mobile-dev");
+    expect(textOf(renderer)).toContain("Then that");
   });
 
   it("gives every cell in a table column the same explicit width", () => {
@@ -251,7 +439,6 @@ describe("MarkdownRenderer", () => {
       .findAllByType("Text" as any)
       .filter(
         (node) =>
-          node.props.selectable === true &&
           typeof node.props.children?.[0] === "string" &&
           node.props.children[0].startsWith("Level "),
       )

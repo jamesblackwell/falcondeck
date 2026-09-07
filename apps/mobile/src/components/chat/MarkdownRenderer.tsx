@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useDeferredValue,
   useEffect,
@@ -300,6 +299,29 @@ function headingLeadStyle(depth: number | undefined) {
   }
 }
 
+function listMarkerLabel(node: MarkdownNode, index: number): string {
+  if (node.checked != null) return node.checked ? "[x]" : "[ ]";
+  return node.ordered ? `${(node.start ?? 1) + index}.` : "•";
+}
+
+// Inside a flattened prose Text the marker is a text fragment rather than its
+// own column, so it must not carry the column layout's width or alignment: iOS
+// applies a fragment's textAlign to the whole paragraph that fragment starts,
+// which right-aligns every wrapped line of the item beside it.
+function InlineListMarker({
+  node,
+  index,
+}: {
+  node: MarkdownNode;
+  index: number;
+}) {
+  return (
+    <Text color="muted" style={styles.listMarkerInline}>
+      {listMarkerLabel(node, index)}
+    </Text>
+  );
+}
+
 function ListMarker({ node, index }: { node: MarkdownNode; index: number }) {
   const { theme } = useUnistyles();
 
@@ -327,9 +349,32 @@ function ListMarker({ node, index }: { node: MarkdownNode; index: number }) {
       color="muted"
       style={[styles.listMarker, node.ordered ? styles.listMarkerOrdered : undefined]}
     >
-      {node.ordered ? `${(node.start ?? 1) + index}.` : "•"}
+      {listMarkerLabel(node, index)}
     </Text>
   );
+}
+
+function isProseListItem(node: MarkdownNode): boolean {
+  return (node.children ?? []).every(isProseFlow);
+}
+
+function isProseList(node: MarkdownNode): boolean {
+  const items = node.children ?? [];
+  return items.length > 0 && items.every(isProseListItem);
+}
+
+function isProseFlow(node: MarkdownNode): boolean {
+  switch (node.type) {
+    case "paragraph":
+    case "heading":
+      return true;
+    case "html":
+      return Boolean(node.value);
+    case "list":
+      return isProseList(node);
+    default:
+      return false;
+  }
 }
 
 function renderMarkdownInlineNodes(
@@ -355,18 +400,17 @@ function renderMarkdownInlineNodes(
 function renderSlashCommandText(value: string, key: string): ReactNode {
   const segments = splitSlashCommandSegments(value);
   if (!segments.some((segment) => segment.kind === "command")) return value;
-  return (
-    <Fragment key={key}>
-      {segments.map((segment, index) =>
-        segment.kind === "command" ? (
-          <Text key={`${key}-command-${index}`} color="accent" weight="medium">
-            {segment.value}
-          </Text>
-        ) : (
-          segment.value
-        ),
-      )}
-    </Fragment>
+  // An array rather than a Fragment: the plain segments are bare strings, and
+  // only strings that reach the enclosing Text as direct children survive the
+  // iOS UITextView bridge. See renderProseGroup.
+  return segments.map((segment, index) =>
+    segment.kind === "command" ? (
+      <Text key={`${key}-command-${index}`} color="accent" weight="medium">
+        {segment.value}
+      </Text>
+    ) : (
+      segment.value
+    ),
   );
 }
 
@@ -647,6 +691,216 @@ function renderMarkdownTable(
   );
 }
 
+const LIST_NEST_INDENT = "  ";
+
+function renderFlowInlines(
+  node: MarkdownNode,
+  definitions: MarkdownDefinitions,
+  key: string,
+  highlightCommands: boolean,
+): ReactNode {
+  if (node.type === "html") return node.value ?? "";
+  const inlines = renderMarkdownInlineNodes(
+    node.children,
+    definitions,
+    key,
+    highlightCommands,
+  );
+  if (node.type === "heading") {
+    return (
+      <Text
+        key={key}
+        weight="semibold"
+        style={[styles.paragraph, headingStyle(node.depth)]}
+      >
+        {inlines}
+      </Text>
+    );
+  }
+  return inlines;
+}
+
+function renderListItemAsText(
+  item: MarkdownNode,
+  list: MarkdownNode,
+  index: number,
+  definitions: MarkdownDefinitions,
+  key: string,
+  highlightCommands: boolean,
+  depth: number,
+  breakBefore: boolean,
+): ReactNode {
+  const indent = LIST_NEST_INDENT.repeat(depth);
+  const children = item.children ?? [];
+  const marker = (
+    <InlineListMarker
+      node={{ ...item, ordered: list.ordered, start: list.start }}
+      index={index}
+    />
+  );
+  const first = children[0];
+  const leadIsFlow =
+    first != null &&
+    (first.type === "paragraph" ||
+      first.type === "heading" ||
+      first.type === "html");
+  const remaining = leadIsFlow ? children.slice(1) : children;
+
+  return (
+    <Text key={key}>
+      {breakBefore ? "\n" : ""}
+      {indent}
+      {marker}
+      {leadIsFlow ? " " : null}
+      {leadIsFlow
+        ? renderFlowInlines(first, definitions, `${key}-lead`, highlightCommands)
+        : null}
+      {remaining.map((child, childIndex) => {
+        if (child.type === "list") {
+          return renderListAsText(
+            child,
+            definitions,
+            `${key}-list-${childIndex}`,
+            highlightCommands,
+            depth + 1,
+            true,
+          );
+        }
+        if (
+          child.type === "paragraph" ||
+          child.type === "heading" ||
+          child.type === "html"
+        ) {
+          return (
+            <Text key={`${key}-more-${childIndex}`}>
+              {"\n"}
+              {indent}
+              {LIST_NEST_INDENT}
+              {renderFlowInlines(
+                child,
+                definitions,
+                `${key}-more-${childIndex}`,
+                highlightCommands,
+              )}
+            </Text>
+          );
+        }
+        return null;
+      })}
+    </Text>
+  );
+}
+
+function renderListAsText(
+  node: MarkdownNode,
+  definitions: MarkdownDefinitions,
+  key: string,
+  highlightCommands: boolean,
+  depth = 0,
+  breakBeforeFirst = false,
+): ReactNode {
+  return (
+    <Text key={key}>
+      {(node.children ?? []).map((child, index) =>
+        renderListItemAsText(
+          child,
+          node,
+          index,
+          definitions,
+          `${key}-item-${index}`,
+          highlightCommands,
+          depth,
+          breakBeforeFirst || index > 0,
+        ),
+      )}
+    </Text>
+  );
+}
+
+function renderProseNode(
+  node: MarkdownNode,
+  definitions: MarkdownDefinitions,
+  key: string,
+  highlightCommands: boolean,
+  isFirstInDocument: boolean,
+  isFirstInGroup: boolean,
+): ReactNode {
+  switch (node.type) {
+    case "heading":
+      return (
+        <Text
+          key={key}
+          weight="semibold"
+          style={[
+            styles.paragraph,
+            headingStyle(node.depth),
+            isFirstInDocument && isFirstInGroup
+              ? undefined
+              : headingLeadStyle(node.depth),
+          ]}
+        >
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
+        </Text>
+      );
+    case "html":
+      return (
+        <Text key={key} color="secondary" style={styles.paragraph}>
+          {node.value}
+        </Text>
+      );
+    case "list":
+      return renderListAsText(node, definitions, key, highlightCommands);
+    default:
+      return (
+        <Text key={key} color="primary" style={styles.paragraph}>
+          {renderMarkdownInlineNodes(
+            node.children,
+            definitions,
+            key,
+            highlightCommands,
+          )}
+        </Text>
+      );
+  }
+}
+
+// iOS UITextView selection cannot cross native view boundaries. Consecutive
+// paragraphs, headings, and lists therefore flatten into one Text tree so a
+// drag-handle can run from an intro sentence into the numbered items below it.
+function renderProseGroup(
+  nodes: MarkdownNode[],
+  definitions: MarkdownDefinitions,
+  key: string,
+  highlightCommands: boolean,
+  isFirstInDocument: boolean,
+): ReactNode {
+  return (
+    <Text key={key} selectable color="primary" style={styles.paragraph}>
+      {nodes.flatMap((node, index) => {
+        const rendered = renderProseNode(
+          node,
+          definitions,
+          `${key}-node-${index}`,
+          highlightCommands,
+          isFirstInDocument,
+          index === 0,
+        );
+        // The blank line has to be a direct string child of this Text. iOS only
+        // turns direct children into text fragments; a string wrapped in a
+        // Fragment becomes an empty attachment instead, and the blocks render
+        // run together ("threshold.Here is", "forward:1."). Arrays are fine —
+        // React.Children flattens them — Fragments are not.
+        return index > 0 ? ["\n\n", rendered] : [rendered];
+      })}
+    </Text>
+  );
+}
+
 export function renderMarkdownBlocks(
   nodes: MarkdownNode[] | undefined,
   definitions: MarkdownDefinitions,
@@ -672,21 +926,56 @@ export function renderMarkdownBlocks(
     );
   }
 
-  return blocks.map((node, index) =>
-    renderMarkdownBlock(
-      node,
-      definitions,
-      `${keyPrefix}-block-${index}`,
-      {
-        isFirst: index === firstRenderedIndex,
-        isLast: index === lastRenderedIndex,
-        previousType:
-          blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
-      },
-      highlightCommands,
-      mermaidPending,
-    ),
-  );
+  const output: ReactNode[] = [];
+  let index = 0;
+  while (index < blocks.length) {
+    const node = blocks[index]!;
+    if (node.type === "definition") {
+      index += 1;
+      continue;
+    }
+    if (isProseFlow(node)) {
+      const group: MarkdownNode[] = [];
+      const startIndex = index;
+      while (index < blocks.length) {
+        const candidate = blocks[index]!;
+        if (candidate.type === "definition") {
+          index += 1;
+          continue;
+        }
+        if (!isProseFlow(candidate)) break;
+        group.push(candidate);
+        index += 1;
+      }
+      output.push(
+        renderProseGroup(
+          group,
+          definitions,
+          `${keyPrefix}-prose-${startIndex}`,
+          highlightCommands,
+          startIndex === firstRenderedIndex,
+        ),
+      );
+      continue;
+    }
+    output.push(
+      renderMarkdownBlock(
+        node,
+        definitions,
+        `${keyPrefix}-block-${index}`,
+        {
+          isFirst: index === firstRenderedIndex,
+          isLast: index === lastRenderedIndex,
+          previousType:
+            blocks[previousRenderedIndexes.get(index) ?? -1]?.type ?? null,
+        },
+        highlightCommands,
+        mermaidPending,
+      ),
+    );
+    index += 1;
+  }
+  return output;
 }
 
 function renderMarkdownBlock(
@@ -1084,6 +1373,9 @@ const styles = StyleSheet.create((theme) => ({
   listMarker: {
     lineHeight: theme.fontSize.base * theme.lineHeight.prose,
     minWidth: 24,
+  },
+  listMarkerInline: {
+    lineHeight: theme.fontSize.base * theme.lineHeight.prose,
   },
   listMarkerOrdered: {
     // Right-aligned so 9. and 10. share a baseline edge and the item text
