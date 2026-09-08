@@ -1,7 +1,6 @@
 import {
   Fragment,
   memo,
-  useDeferredValue,
   useMemo,
   useRef,
   type ComponentProps,
@@ -13,6 +12,7 @@ import { unified } from "unified";
 import { GitCommitHorizontal, Split, Terminal, Upload } from "lucide-react";
 
 import {
+  useStreamingText,
   agentDirectiveLabel,
   fenceLanguageFromClassName,
   isMermaidLanguage,
@@ -965,7 +965,7 @@ export function renderMessageContent(
 }
 
 /**
- * Keeps token-by-token Markdown parsing out of React's urgent input lane. The
+ * Bounds token-by-token Markdown parsing to a regular cadence. The
  * content remains complete and ordered, but a burst may coalesce into fewer
  * parses while typing, scrolling, and selection stay responsive.
  */
@@ -985,8 +985,7 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   /** Tint slash-command mentions; only user-authored messages opt in. */
   highlightCommands?: boolean;
 }) {
-  const deferredText = useDeferredValue(text);
-  const visibleText = defer ? deferredText : text;
+  const visibleText = useStreamingText(text, streaming && defer);
   return useMemo(() => {
     const content = streaming ? (
       <StreamingMessageContent

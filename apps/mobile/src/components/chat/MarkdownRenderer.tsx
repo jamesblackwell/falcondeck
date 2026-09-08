@@ -1,10 +1,6 @@
 import {
   memo,
-  useDeferredValue,
-  useEffect,
   useMemo,
-  useRef,
-  useState,
   type ReactNode,
 } from "react";
 import { ScrollView, View } from "react-native";
@@ -15,6 +11,7 @@ import remarkParse from "remark-parse";
 import { unified } from "unified";
 
 import {
+  useStreamingText,
   agentDirectiveLabel,
   isMermaidLanguage,
   safeExternalUrl,
@@ -1132,12 +1129,6 @@ function renderMarkdownBlock(
   }
 }
 
-/**
- * Minimum wall-clock gap between full remark parses of the accumulated
- * message while stream deltas keep arriving.
- */
-const PARSE_THROTTLE_MS = 120;
-
 export const MarkdownRenderer = memo(
   function MarkdownRenderer({
     text,
@@ -1145,53 +1136,7 @@ export const MarkdownRenderer = memo(
     interpretDirectives = true,
     highlightCommands = false,
   }: MarkdownRendererProps) {
-    const deferredStreamingText = useDeferredValue(text);
-    // Defer parsing only while tokens are arriving. After the turn settles,
-    // the deferred tree would paint stale and then grow the row — a height
-    // correction the transcript list reads as a yank toward the tail.
-    const renderedText = streaming ? deferredStreamingText : text;
-
-    // Full-text remark parsing (definitions pass plus per-segment passes) on
-    // every delta costs more than the deltas themselves once messages grow,
-    // and the memo comparator intentionally fails on each one. Coalesce
-    // re-parses to at most one per PARSE_THROTTLE_MS while chunks arrive
-    // rapidly: the first change outside the window flushes immediately, rapid
-    // successors share one trailing parse, and that trailing parse ALWAYS
-    // fires with the latest settled text — the finished message is never left
-    // stale-parsed. The streaming tail still repaints promptly on each tick
-    // because the timer picks up whatever text has accumulated by the time it
-    // runs. The very first render parses synchronously via `useState` below.
-    const [parsedText, setParsedText] = useState(renderedText);
-    const latestTextRef = useRef(renderedText);
-    const lastParseAtRef = useRef(0);
-    const parseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    useEffect(() => {
-      latestTextRef.current = renderedText;
-      if (parseTimerRef.current !== null) {
-        // A trailing parse is already scheduled; it will pick up this newer
-        // text, so back-to-back deltas need no extra scheduling work.
-        return;
-      }
-      const elapsed = Date.now() - lastParseAtRef.current;
-      if (elapsed >= PARSE_THROTTLE_MS) {
-        lastParseAtRef.current = Date.now();
-        setParsedText(renderedText);
-        return;
-      }
-      parseTimerRef.current = setTimeout(() => {
-        parseTimerRef.current = null;
-        lastParseAtRef.current = Date.now();
-        setParsedText(latestTextRef.current);
-      }, PARSE_THROTTLE_MS - elapsed);
-    }, [renderedText]);
-
-    useEffect(
-      () => () => {
-        if (parseTimerRef.current !== null) clearTimeout(parseTimerRef.current);
-      },
-      [],
-    );
+    const parsedText = useStreamingText(text, streaming);
 
     const renderedBlocks = useMemo(() => {
       const segments = interpretDirectives
@@ -1200,7 +1145,11 @@ export const MarkdownRenderer = memo(
       // Definitions apply across directive boundaries. Parse the clean full
       // message once for the lookup, then render each Markdown segment in
       // order around the native annotations.
-      const cleanTree = parseMarkdown(stripAgentDirectiveLines(parsedText));
+      const singleMarkdownSegment =
+        segments.length === 1 && segments[0].kind === "markdown" ? segments[0] : null;
+      const cleanTree = parseMarkdown(
+        singleMarkdownSegment ? singleMarkdownSegment.text : stripAgentDirectiveLines(parsedText),
+      );
       const definitions = buildMarkdownDefinitions(cleanTree);
       const definitionFooter = markdownDefinitionFooter(cleanTree);
       const blocks: ReactNode[] = [];
@@ -1220,7 +1169,7 @@ export const MarkdownRenderer = memo(
         // render-time definition lookup. Append the message's ordinary
         // definitions to each segment so a directive between `[label][id]`
         // and `[id]: …` cannot turn the link back into literal text.
-        const tree = parseMarkdown(
+        const tree = singleMarkdownSegment ? cleanTree : parseMarkdown(
           definitionFooter
             ? `${segment.text}\n\n${definitionFooter}`
             : segment.text,

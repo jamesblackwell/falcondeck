@@ -50,3 +50,5 @@ export * from "./missions";
 export * from "./thread-commands";
 export * from "./extension-ui";
 export * from "./mermaid";
+
+export { useStreamingText } from "./streaming-text";
