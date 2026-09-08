@@ -96,7 +96,7 @@ describe('FileView', () => {
   })
 
   it('renders markdown by default and toggles to source', () => {
-    render(
+    const { container } = render(
       <FileView
         filePath="docs/notes.md"
         file={{
@@ -118,6 +118,7 @@ describe('FileView', () => {
     expect(screen.getByRole('heading', { name: 'Audit' })).toBeVisible()
     expect(screen.getByRole('button', { name: 'Preview' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.queryByText('# Audit')).toBeNull()
+    expect(container.querySelector('.fd-markdown')?.parentElement).toHaveClass('text-fg-primary')
 
     fireEvent.click(screen.getByRole('button', { name: 'Source' }))
 
