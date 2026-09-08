@@ -842,6 +842,27 @@ describe('ChatInput component', () => {
     ).toBe(48)
   })
 
+  it('explicitly releases the animated slot height when drafting resumes', () => {
+    const r = renderComponent(
+      <ChatInput value={'Long draft\n'.repeat(20)} {...chatInputDefaults} />,
+    )
+    act(() => {
+      r.root.findByType('TextInput' as any).props.onLayout({
+        nativeEvent: { layout: { x: 0, y: 0, width: 320, height: 288 } },
+      })
+      r.root.findByProps({ accessibilityLabel: 'Send message' }).props.onPress()
+    })
+    act(() => r.update(<ChatInput value="" {...chatInputDefaults} />))
+    act(() => r.update(<ChatInput value="It was the" {...chatInputDefaults} />))
+
+    // Omitting/detaching the animated style leaves its last native height
+    // applied. The still-attached worklet must explicitly unset both keys.
+    const input = r.root.findByType('TextInput' as any)
+    const slotStyle = flattenStyle(input.parent!.props.style)
+    expect(slotStyle).toHaveProperty('height', undefined)
+    expect(slotStyle).toHaveProperty('overflow', undefined)
+  })
+
   it('skips the collapse animation when the OS requests reduced motion', () => {
     const setReducedMotion = (
       Reanimated as unknown as {

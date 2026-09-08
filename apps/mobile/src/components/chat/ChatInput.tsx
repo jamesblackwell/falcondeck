@@ -199,12 +199,14 @@ function useEmptyComposerCollapse(isEmpty: boolean) {
   }, [collapseHeight, collapsing, isEmpty, lastHeight, reducedMotion])
 
   const slotStyle = useAnimatedStyle(() =>
-    collapsing.value
+    isEmpty && collapsing.value
       ? {
           height: collapseHeight.value,
           overflow: 'hidden' as const,
         }
-      : {},
+      // Reanimated retains native values when a style is removed or omits
+      // a property. Explicitly release the slot when drafting resumes.
+      : { height: undefined, overflow: undefined },
   )
 
   return { onInputLayout, prepareCollapse, slotStyle }
@@ -655,7 +657,7 @@ export const ChatInput = memo(function ChatInput({
         <Animated.View
           style={[
             styles.inputSlot,
-            draftIsEmpty ? slotStyle : null,
+            slotStyle,
             voiceProvider ? styles.inputHidden : null,
           ]}
         >
