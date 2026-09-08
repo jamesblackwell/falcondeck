@@ -919,10 +919,34 @@ async fn codex_collaboration_mode_payload(
     let Some(mode_id) = mode_id.map(str::trim).filter(|mode| !mode.is_empty()) else {
         return Ok(serde_json::Value::Null);
     };
-    let modes = app.collaboration_modes(workspace_id).await?;
+    let modes = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        // An automation's Codex thread need not use the workspace's default provider.
+        workspace
+            .summary
+            .agents
+            .iter()
+            .find(|agent| agent.provider == AgentProvider::CODEX)
+            .map(|agent| agent.collaboration_modes.clone())
+            .unwrap_or_else(|| workspace.summary.collaboration_modes.clone())
+    };
+    // Discovery is experimental and can fail during bootstrap or a runtime wake.
+    // Default is a built-in mode: keep sending it explicitly to leave Plan mode.
+    let default_mode = falcondeck_core::CollaborationModeSummary {
+        id: "default".to_string(),
+        label: "Default".to_string(),
+        mode: Some("default".to_string()),
+        model_id: None,
+        reasoning_effort: None,
+        is_native: true,
+    };
     let mode = modes
         .iter()
         .find(|candidate| candidate.id == mode_id)
+        .or_else(|| (mode_id == "default").then_some(&default_mode))
         .ok_or_else(|| {
             DaemonError::BadRequest(format!(
                 "Codex collaboration mode '{mode_id}' is not available"
@@ -1051,6 +1075,119 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    async fn collaboration_test_app(path: &Path, modes: serde_json::Value) -> AppState {
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            path.join("state.json"),
+        );
+        let summary = serde_json::from_value(json!({
+            "id": "workspace-1",
+            "path": path,
+            "status": "ready",
+            "default_provider": "claude",
+            "agents": [
+                { "provider": "claude", "account": falcondeck_core::AccountSummary::default(), "collaboration_modes": [] },
+                { "provider": "codex", "account": falcondeck_core::AccountSummary::default(), "collaboration_modes": modes }
+            ],
+            "connected_at": "2026-09-08T00:00:00Z",
+            "updated_at": "2026-09-08T00:00:00Z"
+        })).unwrap();
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            super::super::ManagedWorkspace {
+                summary,
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::new(),
+            },
+        );
+        app
+    }
+
+    #[tokio::test]
+    async fn codex_default_mode_survives_unavailable_discovery() {
+        let temp = tempdir().unwrap();
+        let app = collaboration_test_app(temp.path(), json!([])).await;
+        let payload = codex_collaboration_mode_payload(
+            &app,
+            "workspace-1",
+            Some("default"),
+            Some("thread-model"),
+            Some("high"),
+        )
+        .await
+        .unwrap();
+        // Send an explicit default mode so a resumed Plan thread exits Plan.
+        assert_eq!(
+            payload,
+            json!({
+                "mode": "default",
+                "settings": {
+                    "model": "thread-model",
+                    "reasoning_effort": "high",
+                    "developer_instructions": null
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_mode_uses_codex_catalog_when_workspace_defaults_to_claude() {
+        let temp = tempdir().unwrap();
+        let app = collaboration_test_app(
+            temp.path(),
+            json!([{
+                "id": "plan", "label": "Plan", "mode": "plan",
+                "model_id": "preset-model", "reasoning_effort": "medium", "is_native": true
+            }]),
+        )
+        .await;
+        let payload = codex_collaboration_mode_payload(
+            &app,
+            "workspace-1",
+            Some("plan"),
+            Some("thread-model"),
+            Some("high"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            payload,
+            json!({
+                "mode": "plan",
+                "settings": {
+                    "model": "preset-model",
+                    "reasoning_effort": "medium",
+                    "developer_instructions": null
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_missing_nondefault_mode_is_still_rejected() {
+        let temp = tempdir().unwrap();
+        let app = collaboration_test_app(temp.path(), json!([])).await;
+        let error = codex_collaboration_mode_payload(
+            &app,
+            "workspace-1",
+            Some("plan"),
+            Some("thread-model"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collaboration mode 'plan' is not available")
+        );
+    }
 
     #[test]
     fn unmapped_providers_fall_back_to_their_id_as_the_command_name() {
