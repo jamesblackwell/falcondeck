@@ -1,7 +1,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import { Pressable, View, type LayoutChangeEvent } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
-import { ChevronDown, ChevronUp } from "lucide-react-native";
+import { ChevronDown, ChevronUp, Clock3 } from "lucide-react-native";
 
 import {
   projectHarnessUserText,
@@ -96,6 +96,12 @@ export const UserMessageBlock = memo(function UserMessageBlock({
 
   return (
     <View style={styles.row}>
+      {item.automated || (projected.kind === "prompt" && projected.automated) ? (
+        <View style={styles.automationLabel}>
+          <Clock3 accessible={false} size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+          <Text variant="meta" color="muted">Sent by scheduled task</Text>
+        </View>
+      ) : null}
       <View style={styles.bubble}>
         <AttachmentPreviewList attachments={item.attachments} itemId={item.id} />
         <View style={collapsed ? styles.clampedText : null}>
@@ -163,6 +169,12 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],
     gap: theme.spacing[1],
+  },
+  automationLabel: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+    paddingBottom: theme.spacing[1],
   },
   bubble: {
     maxWidth: "80%",

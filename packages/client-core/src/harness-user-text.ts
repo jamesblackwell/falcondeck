@@ -47,7 +47,7 @@ function falcondeckResumeReceipt(inner: string): ProjectedUserText | null {
 }
 
 export type ProjectedUserText =
-  | { kind: "prompt"; text: string }
+  | { kind: "prompt"; text: string; automated?: true }
   | { kind: "service"; level: ServiceLevel; message: string }
   | { kind: "hidden" }
   | { kind: "incomplete" };
@@ -208,6 +208,15 @@ function stripFalcondeckSkillPreambles(text: string): SkillPreambleStrip {
  * show: the typed prompt, a quiet background-task receipt, or nothing.
  */
 export function projectHarnessUserText(text: string): ProjectedUserText {
+  const projected = projectHarnessUserTextContent(text);
+  if (projected.kind !== "prompt") return projected;
+  // This envelope is persisted by the scheduler in native agent history.
+  const prefix = "<falcondeck_automation>Sent by scheduled task</falcondeck_automation>";
+  if (!projected.text.startsWith(prefix)) return projected;
+  return { kind: "prompt", text: projected.text.slice(prefix.length).trim(), automated: true };
+}
+
+function projectHarnessUserTextContent(text: string): ProjectedUserText {
   let source = text.trim();
   if (!source) return { kind: "hidden" };
 
@@ -302,7 +311,7 @@ export function projectHarnessUserItems(
     }
     copied = true;
     if (projected.kind === "prompt") {
-      next.push({ ...item, text: projected.text });
+      next.push({ ...item, text: projected.text, ...(projected.automated ? { automated: true as const } : {}) });
       continue;
     }
     if (projected.kind === "service") {

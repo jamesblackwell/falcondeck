@@ -1100,7 +1100,7 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
             thread_id: handle.thread.id.clone(),
             inputs: vec![TurnInputItem::Text {
                 id: None,
-                text: task.prompt.clone(),
+                text: falcondeck_core::control::automation_user_text(&task.prompt),
             }],
             selected_skills: task.selected_skills.clone(),
             provider: Some(task.summary.provider),

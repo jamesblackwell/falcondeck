@@ -9,6 +9,16 @@
 //! state-change event. Behaviour (scheduling, persistence, validation) lives
 //! in the daemon; only shared protocol types live here.
 
+/// Native-history marker for scheduler-originated user messages. Clients
+/// display this as metadata; keep in sync with client-core/harness-user-text.ts.
+pub const AUTOMATION_MESSAGE_PREFIX: &str =
+    "<falcondeck_automation>Sent by scheduled task</falcondeck_automation>";
+
+/// Preserve automation provenance in the agent's own transcript.
+pub fn automation_user_text(instruction: &str) -> String {
+    format!("{AUTOMATION_MESSAGE_PREFIX}\n\n{instruction}")
+}
+
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};

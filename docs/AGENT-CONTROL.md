@@ -63,6 +63,14 @@ keeps only bounded run metadata.
   target from a daemon-verified native task, so an extension cannot invent a
   more privileged workspace or provider configuration.
 
+Scheduled sends (including Run now) carry a small `falcondeck_automation`
+envelope in native agent history. Desktop, remote web, and mobile render it as
+“Sent by scheduled task” above the user bubble and omit it from displayed and
+copied prompt text. This applies per message, including runs in existing tasks;
+manual follow-ups remain unlabelled. Runs predating the envelope are not
+retroactively labelled. The marker is display provenance, not an authority or
+permission signal.
+
 ## Agent context injection
 
 So agents know they are running inside FalconDeck and how to use the control

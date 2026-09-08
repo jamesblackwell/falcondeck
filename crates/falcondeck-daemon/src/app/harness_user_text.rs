@@ -345,7 +345,12 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
 /// Search/title text for a user-role payload, if it should be visible at all.
 pub(crate) fn visible_user_prompt(text: &str) -> Option<String> {
     match project_user_text(text) {
-        ProjectedUserText::Prompt(text) => Some(text),
+        ProjectedUserText::Prompt(text) => Some(
+            text.strip_prefix(falcondeck_core::control::AUTOMATION_MESSAGE_PREFIX)
+                .unwrap_or(&text)
+                .trim()
+                .to_string(),
+        ),
         ProjectedUserText::Service { message, .. } => Some(message),
         ProjectedUserText::Hidden | ProjectedUserText::Incomplete => None,
     }
@@ -379,6 +384,23 @@ pub(crate) fn conversation_item_from_projected_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_origin_survives_history_projection_but_not_title_text() {
+        let text = falcondeck_core::control::automation_user_text("Check the build");
+        assert_eq!(
+            project_user_text(&text),
+            ProjectedUserText::Prompt(text.clone())
+        );
+        assert_eq!(
+            visible_user_prompt(&text).as_deref(),
+            Some("Check the build")
+        );
+        let item = conversation_item_from_projected_user("run".into(), &text, Utc::now()).unwrap();
+        assert!(
+            matches!(item, ConversationItem::UserMessage { text: actual, .. } if actual == text)
+        );
+    }
 
     #[test]
     fn unwraps_grok_query_wrappers() {

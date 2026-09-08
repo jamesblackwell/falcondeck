@@ -281,3 +281,31 @@ describe("projectHarnessUserItems", () => {
     ]);
   });
 });
+
+const automationEnvelope = '<falcondeck_automation>Sent by scheduled task</falcondeck_automation>';
+
+describe('automation message provenance', () => {
+  it('projects native history envelopes and preserves provenance across repeated projection', () => {
+    const items: ConversationItem[] = [{
+      kind: 'user_message', id: 'scheduled', text: `${automationEnvelope}\n\nCheck the build`,
+      attachments: [], created_at: createdAt,
+    }, {
+      kind: 'user_message', id: 'manual', text: 'Check the build',
+      attachments: [], created_at: createdAt,
+    }];
+    const projected = projectHarnessUserItems(items);
+    expect(projected[0]).toMatchObject({ text: 'Check the build', automated: true });
+    expect(projected[1]).not.toHaveProperty('automated');
+    expect(projectHarnessUserItems(projected)).toEqual(projected);
+  });
+
+  it('recognizes the envelope inside harness context and skill preambles', () => {
+    for (const text of [
+      `Apply the FalconDeck skill named 'review' to this request.\n\n${automationEnvelope}\n\nCheck the build`,
+      `<user_query>${automationEnvelope}\n\nCheck the build</user_query>`,
+    ]) {
+      expect(projectHarnessUserText(text)).toEqual({ kind: 'prompt', text: 'Check the build', automated: true });
+    }
+    expect(projectHarnessUserText(`Explain this marker: ${automationEnvelope}`)).not.toHaveProperty('automated');
+  });
+});

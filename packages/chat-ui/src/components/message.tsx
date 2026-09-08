@@ -329,82 +329,90 @@ function UserMessage({
   }
 
   return (
-    <div className="group/message relative ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
-      <div
-        className={cn("relative", collapsed && "overflow-hidden")}
-        style={
-          collapsed
-            ? { maxHeight: COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX }
-            : undefined
-        }
-      >
-        <div
-          ref={textRef}
-          data-message-selectable-content
-          className="fd-type-body max-w-none break-words text-fg-primary"
-        >
-          <MessageMarkdown
-            text={text}
-            defer={false}
-            interpretDirectives={false}
-            highlightCommands
-          />
+    <div className="ml-auto w-fit min-w-0 max-w-2xl">
+      {item.automated || (projected.kind === "prompt" && projected.automated) ? (
+        <div className="fd-type-meta mb-2 flex items-center justify-end gap-1 text-fg-muted">
+          <Clock3 aria-hidden="true" className="h-3 w-3" />
+          Sent by scheduled task
         </div>
-        {collapsed ? (
+      ) : null}
+      <div className="group/message relative min-w-0 rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
+        <div
+          className={cn("relative", collapsed && "overflow-hidden")}
+          style={
+            collapsed
+              ? { maxHeight: COLLAPSED_USER_MESSAGE_MAX_HEIGHT_PX }
+              : undefined
+          }
+        >
+          <div
+            ref={textRef}
+            data-message-selectable-content
+            className="fd-type-body max-w-none break-words text-fg-primary"
+          >
+            <MessageMarkdown
+              text={text}
+              defer={false}
+              interpretDirectives={false}
+              highlightCommands
+            />
+          </div>
+          {collapsed ? (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              aria-label="Show the full message"
+              className="fd-focus absolute inset-x-0 bottom-0 flex h-14 items-end justify-center bg-gradient-to-t from-surface-3 to-transparent"
+            >
+              <span className="flex items-center gap-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors group-hover/message:text-fg-secondary">
+                Show more
+                <ChevronDown aria-hidden="true" className="h-3 w-3" />
+              </span>
+            </button>
+          ) : null}
+        </div>
+        {collapsible && overflowing && expanded ? (
           <button
             type="button"
-            onClick={() => setExpanded(true)}
-            aria-label="Show the full message"
-            className="fd-focus absolute inset-x-0 bottom-0 flex h-14 items-end justify-center bg-gradient-to-t from-surface-3 to-transparent"
+            onClick={() => setExpanded(false)}
+            aria-label="Collapse the message"
+            className="fd-focus mt-2 flex items-center gap-1 rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors hover:text-fg-secondary"
           >
-            <span className="flex items-center gap-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors group-hover/message:text-fg-secondary">
-              Show more
-              <ChevronDown aria-hidden="true" className="h-3 w-3" />
-            </span>
+            Show less
+            <ChevronUp aria-hidden="true" className="h-3 w-3" />
           </button>
         ) : null}
+        {item.attachments.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {item.attachments.map((attachment) => (
+              <UserAttachment
+                key={attachment.id}
+                attachment={attachment}
+                onPreview={handlePreview}
+              />
+            ))}
+          </div>
+        ) : null}
+        {hasText ? (
+          <div
+            className={cn(
+              "absolute -top-3 right-2 z-10 flex justify-end rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 shadow-sm",
+              hoverRevealActions("message"),
+              "[@media(pointer:coarse)]:static [@media(pointer:coarse)]:mt-1 [@media(pointer:coarse)]:min-h-6 [@media(pointer:coarse)]:border-0 [@media(pointer:coarse)]:shadow-none",
+            )}
+          >
+            <CopyButton text={text} label="Copy message" />
+          </div>
+        ) : null}
+        {previewAttachment ? (
+          <ImagePreviewDialog
+            key={`${previewAttachment.id}:${previewAttachment.url}`}
+            url={previewAttachment.url}
+            label={attachmentLabel(previewAttachment)}
+            onClose={handlePreviewClose}
+          />
+        ) : null}
       </div>
-      {collapsible && overflowing && expanded ? (
-        <button
-          type="button"
-          onClick={() => setExpanded(false)}
-          aria-label="Collapse the message"
-          className="fd-focus mt-2 flex items-center gap-1 rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary transition-colors hover:text-fg-secondary"
-        >
-          Show less
-          <ChevronUp aria-hidden="true" className="h-3 w-3" />
-        </button>
-      ) : null}
-      {item.attachments.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {item.attachments.map((attachment) => (
-            <UserAttachment
-              key={attachment.id}
-              attachment={attachment}
-              onPreview={handlePreview}
-            />
-          ))}
-        </div>
-      ) : null}
-      {hasText ? (
-        <div
-          className={cn(
-            "absolute -top-3 right-2 z-10 flex justify-end rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 shadow-sm",
-            hoverRevealActions("message"),
-            "[@media(pointer:coarse)]:static [@media(pointer:coarse)]:mt-1 [@media(pointer:coarse)]:min-h-6 [@media(pointer:coarse)]:border-0 [@media(pointer:coarse)]:shadow-none",
-          )}
-        >
-          <CopyButton text={text} label="Copy message" />
-        </div>
-      ) : null}
-      {previewAttachment ? (
-        <ImagePreviewDialog
-          key={`${previewAttachment.id}:${previewAttachment.url}`}
-          url={previewAttachment.url}
-          label={attachmentLabel(previewAttachment)}
-          onClose={handlePreviewClose}
-        />
-      ) : null}
     </div>
   );
 }

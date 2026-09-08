@@ -264,7 +264,7 @@ async fn execute_run(app: &AppState, run_id: &str) {
     let mut events = app.subscribe();
     let expects_turn_end = automation.target.provider == falcondeck_core::AgentProvider::CODEX;
     let dispatch_started_at = Utc::now();
-    let instruction = automation.task.instruction().to_string();
+    let instruction = falcondeck_core::control::automation_user_text(automation.task.instruction());
     let response = app
         .send_turn(falcondeck_core::SendTurnRequest {
             workspace_id: workspace.id.clone(),

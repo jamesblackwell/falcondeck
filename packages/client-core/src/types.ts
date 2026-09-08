@@ -984,6 +984,8 @@ export type ConversationItem =
        * the daemon. Cleared implicitly when the daemon's copy replaces it.
        */
       pending?: boolean;
+      /** Client projection of the scheduler envelope in native agent history. */
+      automated?: true;
     }
   | {
       kind: "assistant_message";
