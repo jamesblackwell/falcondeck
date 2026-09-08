@@ -32,6 +32,11 @@ SplashScreen.preventAutoHideAsync()
 configureForegroundNotificationHandler()
 void ensureAndroidNotificationChannel()
 
+function RelayConnection() {
+  useRelayConnection()
+  return null
+}
+
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false)
   // Auth state is known once isReady flips; the offline cache hydrates a
@@ -40,7 +45,6 @@ export default function RootLayout() {
   const sessionRestoredRef = useRef(false)
   const { rt } = useUnistyles()
   const router = useRouter()
-  useRelayConnection()
 
   const openNotificationDestination = useCallback(() => {
     router.navigate('/(app)')
@@ -143,6 +147,10 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <StatusBar style={rt.themeName === 'light' ? 'dark' : 'light'} />
         <Slot />
+        {/* sync.index must capture the restored selection. Connecting before
+            hydration can return an index that omits the last-open thread and
+            reconcile the restored conversation back to an empty composer. */}
+        {isHydrated ? <RelayConnection /> : null}
         <OtaUpdateBanner />
       </SafeAreaProvider>
     </GestureHandlerRootView>
