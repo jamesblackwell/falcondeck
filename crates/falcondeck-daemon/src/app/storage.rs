@@ -317,6 +317,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     }
 
     if let Some(computer_use) = value.get("computer_use") {
+        if let Some(existing_profile) = computer_use.get("existing_profile").and_then(Value::as_bool) {
+            preferences.computer_use.existing_profile = existing_profile;
+        }
         if let Some(enabled) = computer_use.get("enabled").and_then(Value::as_bool) {
             preferences.computer_use.enabled = enabled;
         }
@@ -1042,11 +1045,15 @@ mod tests {
         let preferences = merge_preferences_from_value(json!({
             "computer_use": {
                 "enabled": true,
+                "existing_profile": true,
                 "telemetry": true,
                 "overlay": false
             }
         }));
         assert!(preferences.computer_use.enabled);
+        assert!(preferences.computer_use.existing_profile);
+        assert!(!merge_preferences_from_value(json!({"computer_use": {"enabled": true}})).computer_use.existing_profile);
+        assert!(!merge_preferences_from_value(json!({"computer_use": {"existing_profile": "true"}})).computer_use.existing_profile);
         assert!(preferences.computer_use.telemetry);
         assert!(!preferences.computer_use.overlay);
         assert!(!FalconDeckPreferences::default().computer_use.enabled);

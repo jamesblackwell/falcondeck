@@ -62,6 +62,7 @@ struct HostInner {
     last_error: Option<String>,
     telemetry: bool,
     overlay: bool,
+    existing_profile: bool,
 }
 
 impl ComputerUseHost {
@@ -130,7 +131,9 @@ impl ComputerUseHost {
         let mut inner = self.inner.lock().await;
         let binary = self.binary.as_ref().ok_or("cua-driver binary missing")?;
         reap_dead_child(&mut inner);
-        let settings_match = inner.telemetry == prefs.telemetry && inner.overlay == prefs.overlay;
+        let settings_match = inner.telemetry == prefs.telemetry
+            && inner.overlay == prefs.overlay
+            && inner.existing_profile == prefs.existing_profile;
         if inner.child.is_some() && settings_match {
             if let Some(socket) = inner.socket_path.clone() {
                 if socket_is_live(&socket) {
@@ -179,6 +182,7 @@ impl ComputerUseHost {
         reap_dead_child(&mut inner);
         let health = inner.last_health.clone();
         ComputerUseStatus {
+            existing_profile: prefs.existing_profile,
             available,
             enabled: prefs.enabled,
             macos_ok: macos_ok(),
@@ -254,7 +258,7 @@ pub fn mcp_args(socket_path: &Path) -> Vec<String> {
     ]
 }
 
-pub fn serve_args(socket_path: &Path, overlay: bool) -> Vec<String> {
+pub fn serve_args(socket_path: &Path, overlay: bool, existing_profile: bool) -> Vec<String> {
     let mut args = vec![
         "serve".to_string(),
         "--embedded".to_string(),
@@ -269,6 +273,9 @@ pub fn serve_args(socket_path: &Path, overlay: bool) -> Vec<String> {
     ];
     if !overlay {
         args.push("--no-overlay".to_string());
+    }
+    if existing_profile {
+        args.extend(["--grant".to_string(), "existing-profile".to_string()]);
     }
     args
 }
@@ -403,7 +410,11 @@ async fn start_locked(
 
     let mut command = Command::new(binary);
     command
-        .args(serve_args(&socket_path, prefs.overlay))
+        .args(serve_args(
+            &socket_path,
+            prefs.overlay,
+            prefs.existing_profile,
+        ))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -439,6 +450,7 @@ async fn start_locked(
     inner.socket_path = Some(socket_path.clone());
     inner.telemetry = prefs.telemetry;
     inner.overlay = prefs.overlay;
+    inner.existing_profile = prefs.existing_profile;
 
     match wait_until_ready(binary, &socket_path).await {
         Ok(health) => {
@@ -929,10 +941,11 @@ unsafe extern "C" {
 
 impl AppState {
     pub async fn computer_use_status(&self) -> ComputerUseStatus {
-        let prefs = self.inner.preferences.lock().await.computer_use.clone();
+        let preferences = self.inner.preferences.lock().await;
+        let prefs = &preferences.computer_use;
         self.inner
             .computer_use
-            .snapshot(&prefs, self.inner.daemon.capabilities.computer_use)
+            .snapshot(prefs, self.inner.daemon.capabilities.computer_use)
             .await
     }
 
@@ -940,8 +953,10 @@ impl AppState {
         &self,
         update: ComputerUseSettingsUpdate,
     ) -> Result<ComputerUseStatus, DaemonError> {
+        // Keep launch policy reads and saves serialized through the process
+        // restart. A stale connector request must not resurrect a revoked grant.
+        let mut preferences = self.inner.preferences.lock().await;
         let (prefs, restart, updated) = {
-            let preferences = self.inner.preferences.lock().await;
             let previous = preferences.computer_use.clone();
             let mut next = preferences.clone();
             if let Some(enabled) = update.enabled {
@@ -953,17 +968,18 @@ impl AppState {
             if let Some(overlay) = update.overlay {
                 next.computer_use.overlay = overlay;
             }
+            if let Some(existing_profile) = update.existing_profile {
+                next.computer_use.existing_profile = existing_profile;
+            }
             let prefs = next.computer_use.clone();
             let restart = previous.telemetry != prefs.telemetry
                 || previous.overlay != prefs.overlay
+                || previous.existing_profile != prefs.existing_profile
                 || (previous.enabled && !prefs.enabled);
             (prefs, restart, next)
         };
         super::storage::persist_preferences(&self.inner.preferences_path, &updated).await?;
-        {
-            let mut preferences = self.inner.preferences.lock().await;
-            *preferences = updated;
-        }
+        *preferences = updated.clone();
         if restart {
             if prefs.enabled {
                 if let Err(error) = self.inner.computer_use.restart(&prefs).await {
@@ -978,29 +994,36 @@ impl AppState {
             .computer_use
             .snapshot(&prefs, self.inner.daemon.capabilities.computer_use)
             .await;
+        drop(preferences);
         self.emit(
             None,
             None,
             falcondeck_core::UnifiedEvent::PreferencesUpdated {
-                preferences: self.inner.preferences.lock().await.clone(),
+                preferences: updated,
             },
         );
         Ok(status)
     }
 
     pub async fn restart_computer_use(&self) -> Result<ComputerUseStatus, DaemonError> {
-        let prefs = self.inner.preferences.lock().await.computer_use.clone();
-        if let Err(error) = self.inner.computer_use.restart(&prefs).await {
+        let preferences = self.inner.preferences.lock().await;
+        let prefs = &preferences.computer_use;
+        if let Err(error) = self.inner.computer_use.restart(prefs).await {
             tracing::warn!(%error, "failed to restart the computer-use driver");
         }
-        Ok(self.computer_use_status().await)
+        Ok(self
+            .inner
+            .computer_use
+            .snapshot(prefs, self.inner.daemon.capabilities.computer_use)
+            .await)
     }
 
     pub async fn test_computer_use(&self) -> Result<ComputerUseTestResult, DaemonError> {
-        let prefs = self.inner.preferences.lock().await.computer_use.clone();
+        let preferences = self.inner.preferences.lock().await;
+        let prefs = &preferences.computer_use;
         self.inner
             .computer_use
-            .test(&prefs)
+            .test(prefs)
             .await
             .map_err(DaemonError::Process)
     }
@@ -1008,11 +1031,12 @@ impl AppState {
     pub(crate) async fn builtin_computer_use_spec(
         &self,
     ) -> Option<crate::connectors::BuiltinComputerUseSpec> {
-        let prefs = self.inner.preferences.lock().await.computer_use.clone();
+        let preferences = self.inner.preferences.lock().await;
+        let prefs = &preferences.computer_use;
         if !prefs.enabled || !self.inner.daemon.capabilities.computer_use {
             return None;
         }
-        match self.inner.computer_use.ensure_ready(&prefs).await {
+        match self.inner.computer_use.ensure_ready(prefs).await {
             Ok(Some(connector)) => Some(crate::connectors::BuiltinComputerUseSpec {
                 binary: connector.binary.display().to_string(),
                 socket_path: connector.socket_path.display().to_string(),
@@ -1029,6 +1053,175 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_profile_requires_explicit_launch_consent() {
+        let prefs: ComputerUsePreferences = serde_json::from_str("{}").unwrap();
+        assert!(!prefs.existing_profile);
+        let args = serve_args(Path::new("/tmp/cua.sock"), true, prefs.existing_profile);
+        assert!(!args.iter().any(|arg| arg == "--grant"));
+        let granted = serve_args(Path::new("/tmp/cua.sock"), true, true);
+        assert!(
+            granted
+                .windows(2)
+                .any(|args| args == ["--grant", "existing-profile"])
+        );
+        assert!(
+            granted
+                .windows(2)
+                .any(|args| args == ["--permission-mode", "standard"])
+        );
+        assert!(
+            !mcp_args(Path::new("/tmp/cua.sock"))
+                .iter()
+                .any(|arg| arg == "--grant")
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_profile_consent_persists_and_partial_updates_preserve_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        let status = app
+            .update_computer_use(ComputerUseSettingsUpdate {
+                existing_profile: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(status.existing_profile);
+        assert!(!status.running);
+        app.update_computer_use(ComputerUseSettingsUpdate {
+            overlay: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let saved = super::super::storage::load_preferences(&app.inner.preferences_path)
+            .await
+            .unwrap();
+        assert!(saved.computer_use.existing_profile);
+        assert!(!saved.computer_use.overlay);
+        let status = app
+            .update_computer_use(ComputerUseSettingsUpdate {
+                existing_profile: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!status.existing_profile);
+        assert!(
+            !super::super::storage::load_preferences(&app.inner.preferences_path)
+                .await
+                .unwrap()
+                .computer_use
+                .existing_profile
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revoking_existing_profile_stops_the_old_driver_and_removes_its_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            temp.path().join("state.json"),
+        );
+        {
+            let mut preferences = app.inner.preferences.lock().await;
+            preferences.computer_use.enabled = true;
+            preferences.computer_use.existing_profile = true;
+        }
+        let socket = temp.path().join("old.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        {
+            let mut inner = app.inner.computer_use.inner.lock().await;
+            inner.child = Some(
+                Command::new("/bin/sleep")
+                    .arg("30")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+            );
+            inner.socket_path = Some(socket.clone());
+            inner.existing_profile = true;
+        }
+        let status = app
+            .update_computer_use(ComputerUseSettingsUpdate {
+                existing_profile: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(!status.existing_profile);
+        assert!(!status.running);
+        assert!(!socket.exists());
+        assert!(app.inner.computer_use.inner.lock().await.child.is_none());
+    }
+
+    #[tokio::test]
+    async fn existing_profile_consent_is_not_applied_when_persistence_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("not-a-directory");
+        tokio::fs::write(&blocker, b"block").await.unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            Default::default(),
+            blocker.join("state.json"),
+        );
+        assert!(
+            app.update_computer_use(ComputerUseSettingsUpdate {
+                existing_profile: Some(true),
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        );
+        assert!(!app.preferences().await.computer_use.existing_profile);
+    }
+
+    #[tokio::test]
+    async fn backup_import_preserves_host_local_computer_use_consent() {
+        for existing_profile in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let app = AppState::new_with_state_path(
+                "test".into(),
+                Default::default(),
+                temp.path().join("state.json"),
+            );
+            app.update_computer_use(ComputerUseSettingsUpdate {
+                existing_profile: Some(existing_profile),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let mut daemon = falcondeck_core::DaemonBackupData::default();
+            daemon.preferences.computer_use.existing_profile = !existing_profile;
+            let response = app
+                .import_backup(falcondeck_core::ImportBackupRequest {
+                    backup: falcondeck_core::FalconDeckBackup {
+                        version: falcondeck_core::BACKUP_SCHEMA_VERSION,
+                        created_at: chrono::Utc::now(),
+                        app_version: None,
+                        daemon,
+                        client: None,
+                    },
+                    path_mappings: Default::default(),
+                })
+                .await
+                .unwrap();
+            assert!(response.preferences_restored);
+            assert_eq!(
+                app.preferences().await.computer_use.existing_profile,
+                existing_profile
+            );
+        }
+    }
 
     #[test]
     fn mcp_args_point_at_the_embedded_socket() {
@@ -1048,14 +1241,14 @@ mod tests {
 
     #[test]
     fn serve_args_disable_the_overlay_when_asked() {
-        let with_overlay = serve_args(Path::new("/tmp/cua.sock"), true);
+        let with_overlay = serve_args(Path::new("/tmp/cua.sock"), true, false);
         assert!(!with_overlay.iter().any(|arg| arg == "--no-overlay"));
         assert!(
             with_overlay
                 .iter()
                 .any(|arg| arg == "--parent-liveness-stdio")
         );
-        let without = serve_args(Path::new("/tmp/cua.sock"), false);
+        let without = serve_args(Path::new("/tmp/cua.sock"), false, false);
         assert!(without.iter().any(|arg| arg == "--no-overlay"));
         assert!(without.iter().any(|arg| arg == "--embedded"));
         assert!(without.iter().any(|arg| arg == "standard"));

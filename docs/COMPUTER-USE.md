@@ -309,15 +309,50 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
   restart; if `screen_recording` is true but the test screenshot is black,
   offer "Restart FalconDeck" (`restart_app` exists).
 
+### Existing-profile CDP access (implemented)
+
+Settings → Computer use → **Allow agents to use my signed-in browser profile**
+persists the host-local `computer_use.existing_profile` opt-in (default false).
+The existing settings HTTP/RPC contract accepts this optional boolean; old
+preferences and clients remain compatible. Desktop hides no grant behind the
+general computer-use switch and disables the new control for older daemons.
+Backup imports preserve the receiving host's computer-use settings rather
+than transferring another host's consent.
+
+FalconDeck owns launch policy and lifecycle: its supervised Cua 0.23.2 child
+receives `serve --permission-mode standard --grant existing-profile` only when
+consented. MCP proxies receive the private socket, never the grant. Cua owns
+the CDP implementation, process/endpoint attestation, and typed browser tools;
+no extension, Python daemon, profile copy, or second browser runtime is added.
+Agents read the bundled BROWSER.md, observe the PID/window, use
+`browser_prepare` with `existing_profile`, then bind and operate typed tools.
+Preparation can enable the browser's per-instance remote-debugging setting;
+unsupported browser versions or ambiguous setup controls fail closed.
+
+Changing the grant restarts the child and removes its old socket even when
+the replacement cannot start. Existing computer-use sessions disconnect;
+restart FalconDeck to reconnect warm harness processes to the new socket
+(a new task alone does not necessarily respawn Codex's app-server). Launches and
+settings saves are serialized so a stale launch cannot restore revoked access.
+This is persistent host-wide consent, not a per-task capability manifest.
+CDP exposes broad signed-in profile authority; only enable it for trusted
+tasks on a trusted host. Revocation stops FalconDeck's runtime access, but
+does not guarantee remote debugging is disabled in Chrome: normal Cua session
+cleanup can restore a setting it enabled, while a forced restart cannot.
+Disable it manually in Chrome's remote-debugging page if needed.
+
+Verification: default-off/legacy parsing, explicit launch argv, persistence,
+partial updates, old-child termination/socket removal, and settings UI tests.
+Live signed-in Chrome attachment still needs a packaged Mac smoke test with
+Accessibility and Screen Recording granted; unit tests do not prove browser
+UI compatibility or TCC attribution.
+
 ### Phase 2: trust and polish
 
 - "Controlling your Mac" indicator in the activity view while a
   `cua-driver` tool call is in flight, with a Stop that cancels the turn and
   runs `cua-driver revoke --all` on the socket. Optional global panic hotkey
   alongside the dictation shortcut.
-- "Allow agents to use my signed-in browser profile" setting →
-  `--grant existing-profile` on the next daemon start (requires restart;
-  explain in UI).
 - macOS 15+ periodic screen-capture re-consent dialog: detect via a failed
   test capture and show a one-line explanation rather than a generic error.
 - Per-connector output token limit if AX snapshots keep tripping the 25 k

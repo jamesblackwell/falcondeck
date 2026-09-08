@@ -409,12 +409,14 @@ export type FalconDeckPreferences = {
 };
 
 export type ComputerUsePreferences = {
+  existing_profile: boolean;
   enabled: boolean;
   telemetry: boolean;
   overlay: boolean;
 };
 
 export type ComputerUseSettingsUpdate = {
+  existing_profile?: boolean | null;
   enabled?: boolean | null;
   telemetry?: boolean | null;
   overlay?: boolean | null;
@@ -439,6 +441,8 @@ export type ComputerUseHealth = {
 };
 
 export type ComputerUseStatus = {
+  /** Older daemons omit this and do not support existing-profile consent. */
+  existing_profile?: boolean;
   available: boolean;
   enabled: boolean;
   macos_ok: boolean;

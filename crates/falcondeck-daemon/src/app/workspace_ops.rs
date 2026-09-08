@@ -3518,8 +3518,8 @@ pub(super) async fn close_workspace(
 }
 
 async fn drop_workspace_from_order(app: &AppState, workspace_id: &str) {
+    let mut preferences = app.inner.preferences.lock().await;
     let updated = {
-        let mut preferences = app.inner.preferences.lock().await;
         let before = preferences.workspace_order.len();
         preferences
             .workspace_order
@@ -3533,8 +3533,8 @@ async fn drop_workspace_from_order(app: &AppState, workspace_id: &str) {
 }
 
 async fn append_workspace_to_order(app: &AppState, workspace_id: &str) {
+    let mut preferences = app.inner.preferences.lock().await;
     let updated = {
-        let mut preferences = app.inner.preferences.lock().await;
         if preferences
             .workspace_order
             .iter()

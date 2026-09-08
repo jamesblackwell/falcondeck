@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { createDaemonApiClient } from "@falcondeck/client-core";
-import type { ComputerUseStatus } from "@falcondeck/client-core";
+import type { ComputerUseSettingsUpdate, ComputerUseStatus } from "@falcondeck/client-core";
 import {
   SettingsPage,
   SettingsPageHeader,
@@ -37,7 +37,7 @@ export function ComputerUsePanel({ baseUrl, onToast }: ComputerUsePanelProps) {
   }, [refresh]);
 
   const patch = async (
-    update: { enabled?: boolean; telemetry?: boolean; overlay?: boolean },
+    update: ComputerUseSettingsUpdate,
   ) => {
     if (!baseUrl) return;
     setSaving(true);
@@ -91,6 +91,22 @@ export function ComputerUsePanel({ baseUrl, onToast }: ComputerUsePanelProps) {
               disabled={saving || !baseUrl}
               onCheckedChange={(telemetry) => void patch({ telemetry })}
             />
+          </SettingsSection>
+          <SettingsSection title="Signed-in browser access">
+            <SwitchRow
+              title="Allow agents to use my signed-in browser profile"
+              description="Use existing Chrome or Edge sessions over CDP without an extension. This grants broad access to live pages, cookies, storage, and signed-in accounts on this Mac. Only enable it for trusted agents and tasks."
+              checked={status?.existing_profile ?? false}
+              disabled={saving || !baseUrl || status?.existing_profile === undefined}
+              onCheckedChange={(existing_profile) => void patch({ existing_profile })}
+            />
+            <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+              Computer use must also be on. Changing this setting restarts the
+              driver and disconnects active computer-use sessions. Restart
+              FalconDeck afterward to reconnect agent tools. Browser preparation may enable
+              remote debugging. Turning this off stops FalconDeck access but does
+              not switch off Chrome’s remote-debugging setting.
+            </p>
           </SettingsSection>
           <ComputerUseSetup
             baseUrl={baseUrl}

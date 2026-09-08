@@ -3297,17 +3297,15 @@ impl AppState {
         &self,
         request: UpdatePreferencesRequest,
     ) -> Result<FalconDeckPreferences, DaemonError> {
+        let mut preferences = self.inner.preferences.lock().await;
         let updated = {
-            let preferences = self.inner.preferences.lock().await;
             let mut next = preferences.clone();
             apply_preferences_patch(&mut next, request);
             next
         };
         persist_preferences(&self.inner.preferences_path, &updated).await?;
-        {
-            let mut preferences = self.inner.preferences.lock().await;
-            *preferences = updated.clone();
-        }
+        *preferences = updated.clone();
+        drop(preferences);
         self.emit(
             None,
             None,
@@ -3407,11 +3405,14 @@ impl AppState {
         let mut response = falcondeck_core::ImportBackupResponse::default();
 
         // 1. Preferences
-        let prefs = request.backup.daemon.preferences;
+        let mut preferences = self.inner.preferences.lock().await;
+        let mut prefs = request.backup.daemon.preferences;
+        // Host-local control consent must not be granted or revoked by a backup.
+        prefs.computer_use = preferences.computer_use.clone();
         if let Err(err) = persist_preferences(&self.inner.preferences_path, &prefs).await {
             tracing::warn!(%err, "failed to persist imported preferences");
         } else {
-            *self.inner.preferences.lock().await = prefs.clone();
+            *preferences = prefs.clone();
             response.preferences_restored = true;
             self.emit(
                 None,
@@ -3419,6 +3420,8 @@ impl AppState {
                 UnifiedEvent::PreferencesUpdated { preferences: prefs },
             );
         }
+
+        drop(preferences);
 
         // 2. Extensions
         let ext_count = self

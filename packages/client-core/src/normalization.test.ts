@@ -9,12 +9,24 @@ import {
   normalizeHarnessSummary,
   normalizeHarnessUpgradeJob,
   normalizeInteractiveRequest,
+  normalizePreferences,
   normalizeThreadDetail,
   normalizeToolCallDisplay,
   normalizeWorkspaceSummary,
 } from "./normalization";
 import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
+
+describe("existing-profile consent normalization", () => {
+  it("defaults missing and malformed grants to off", () => {
+    for (const existing_profile of [undefined, null, "true", 1, false]) {
+      expect(normalizePreferences({ computer_use: { existing_profile } }).computer_use?.existing_profile).toBe(false);
+    }
+  });
+  it("preserves explicit consent", () => {
+    expect(normalizePreferences({ computer_use: { existing_profile: true } }).computer_use?.existing_profile).toBe(true);
+  });
+});
 
 describe("workspace capability normalization", () => {
   it("does not expose compaction when an older daemon omitted capabilities", () => {

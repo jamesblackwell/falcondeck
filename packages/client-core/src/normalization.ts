@@ -340,6 +340,7 @@ const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
 const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
   FalconDeckPreferences["computer_use"]
 > = {
+  existing_profile: false,
   enabled: false,
   telemetry: false,
   overlay: true,
@@ -2280,6 +2281,7 @@ function normalizeComputerUsePreferences(
     NonNullable<FalconDeckPreferences["computer_use"]>
   >;
   return {
+    existing_profile: raw.existing_profile === true,
     enabled: raw.enabled ?? false,
     telemetry: raw.telemetry ?? false,
     overlay: raw.overlay ?? true,

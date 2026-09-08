@@ -174,7 +174,7 @@ pub fn append_instructions(
     }
     if let Some(path) = computer_use_skill {
         text.push_str(&format!(
-            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI.",
+            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, also read BROWSER.md: existing signed-in profiles use browser_prepare with an observed pid/window_id and existing_profile strategy, then browser_bind. This requires the user's separate Settings → Computer use → signed-in browser consent. If denied, ask the user to enable it; never change daemon settings or launch another CDP endpoint to bypass the grant. Do not install a browser extension for this path.",
             path.display()
         ));
     }

@@ -100,6 +100,9 @@ impl Default for FalconDeckPreferences {
 /// Host-local computer-use settings persisted with other preferences.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerUsePreferences {
+    /// Allow the daemon-owned driver to attach to signed-in Chromium profiles.
+    #[serde(default)]
+    pub existing_profile: bool,
     /// User opted in. Default off until onboarding or Settings enables it.
     #[serde(default)]
     pub enabled: bool,
@@ -114,6 +117,7 @@ pub struct ComputerUsePreferences {
 impl Default for ComputerUsePreferences {
     fn default() -> Self {
         Self {
+            existing_profile: false,
             enabled: false,
             telemetry: false,
             overlay: true,
@@ -124,6 +128,9 @@ impl Default for ComputerUsePreferences {
 /// Partial update for host-local computer-use settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ComputerUseSettingsUpdate {
+    /// Explicit host-local consent for signed-in Chromium profile access.
+    #[serde(default)]
+    pub existing_profile: Option<bool>,
     /// Optional opt-in switch.
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -177,6 +184,9 @@ pub struct ComputerUseHealth {
 /// Live computer-use status for Settings and onboarding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputerUseStatus {
+    /// Requested existing-profile launch grant; effective only while running.
+    #[serde(default)]
+    pub existing_profile: bool,
     /// Desktop embedding, macOS 14+, and a bundled driver binary.
     pub available: bool,
     /// User switched computer use on.
