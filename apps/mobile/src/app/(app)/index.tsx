@@ -74,11 +74,11 @@ import { useScrollToBottom } from "@/hooks/useScrollToBottom";
 import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
 import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
 import {
-  ActivityDiamond,
   Button,
   Text,
   EmptyState,
   ErrorBanner,
+  LoadingState,
   SyncBanner,
 } from "@/components/ui";
 import {
@@ -1203,7 +1203,7 @@ export default function HomeScreen() {
     let snapTimer: ReturnType<typeof setTimeout> | null = null;
     setIsLoadingOlder(false);
     // Tracked for every load, cached or not: an uncached thread gets the
-    // full-pane "Loading thread…", a cached one a refresh pill over the
+    // full-pane "Loading task…", a cached one a refresh pill over the
     // transcript, so a page that takes seconds never looks like the thread
     // simply ends at the cached messages.
     setDetailLoadingThreadId(selectedThreadId);
@@ -1359,12 +1359,7 @@ export default function HomeScreen() {
         {isSyncing ? (
           // The sync banner above already names this wait, so the pane only
           // shows motion — a second copy of the same sentence read as a bug.
-          <View style={styles.syncState}>
-            <ActivityDiamond
-              size={theme.iconSize.md}
-              color={theme.colors.accent.default}
-            />
-          </View>
+          <LoadingState fill />
         ) : !selectedThread && blocks.length === 0 && !showThinking ? (
           <View style={styles.newThreadState}>
             <Text variant="heading" color="primary">
@@ -1380,15 +1375,7 @@ export default function HomeScreen() {
           isSelectedThreadLoading &&
           !showThinking &&
           !isPreparingSelectedHandoff ? (
-          <View style={styles.syncState}>
-            <ActivityDiamond
-              size={theme.iconSize.md}
-              color={theme.colors.accent.default}
-            />
-            <Text variant="caption" color="muted">
-              Loading thread…
-            </Text>
-          </View>
+          <LoadingState fill label="Loading task…" />
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
@@ -1453,11 +1440,8 @@ export default function HomeScreen() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    label={
-                      isLoadingOlder
-                        ? "Loading older messages..."
-                        : "Load older messages"
-                    }
+                    label="Load older messages"
+                    accessibilityLabel="Load older messages"
                     onPress={handleLoadOlder}
                     loading={isLoadingOlder}
                   />

@@ -1,5 +1,4 @@
 import {
-  archivedThreadsOf,
   compareThreads,
   partitionSidebarThreads,
   summarizeThreadAttention,
@@ -10,10 +9,6 @@ import {
 
 export const VISIBLE_THREAD_LIMIT = 5
 export const SHOW_MORE_STEP = 10
-
-export const CHATS_ARCHIVED_KEY = 'chats'
-
-const EMPTY_ARCHIVED = new Set<string>()
 
 export type SidebarRow =
   | {
@@ -63,14 +58,6 @@ export type SidebarRow =
       isExpanded: boolean
       isCollapsed: boolean
     }
-  | {
-      key: string
-      type: 'archived-toggle'
-      workspaceId: string
-      count: number
-      isOpen: boolean
-      isCollapsed: boolean
-    }
 
 /**
  * Selecting a thread rebuilds the rows with identical content (thread objects
@@ -103,7 +90,6 @@ export function buildSidebarRows(
   sortMode: ThreadSortMode = 'last_updated',
   showChatsSection = false,
   chatsCollapsed = false,
-  expandedArchivedWorkspaces: ReadonlySet<string> = EMPTY_ARCHIVED,
   remoteCounts: Record<string, import('@falcondeck/client-core').WorkspaceIndexCount> = {},
   remoteCursors: Record<string, number | null> = {},
 ): SidebarRow[] {
@@ -142,38 +128,6 @@ export function buildSidebarRows(
         Number(right.thread.is_pinned_in_project) - Number(left.thread.is_pinned_in_project)
       return pinDelta || compare(left.thread, right.thread)
     })
-
-  const archivedChatEntries = chatGroups
-    .flatMap((group) =>
-      archivedThreadsOf(group).map((thread) => ({
-        workspaceId: group.workspace.id,
-        thread,
-      })),
-    )
-    .sort((left, right) => compare(left.thread, right.thread))
-  const archivedChatsOpen =
-    expandedArchivedWorkspaces.has(CHATS_ARCHIVED_KEY) ||
-    archivedChatEntries.some((entry) => entry.thread.id === selectedThreadId)
-  const archivedChatRows: SidebarRow[] =
-    archivedChatEntries.length === 0
-      ? []
-      : [
-          {
-            key: `archived-toggle:${CHATS_ARCHIVED_KEY}`,
-            type: 'archived-toggle',
-            workspaceId: CHATS_ARCHIVED_KEY,
-            count: archivedChatEntries.length,
-            isOpen: archivedChatsOpen,
-            isCollapsed: chatsCollapsed,
-          },
-          ...archivedChatEntries.map(({ workspaceId, thread }) => ({
-            key: `archived:${thread.id}`,
-            type: 'thread' as const,
-            workspaceId,
-            thread,
-            isCollapsed: chatsCollapsed || !archivedChatsOpen,
-          })),
-        ]
 
   for (const group of chatGroups) {
     const remaining = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
@@ -241,30 +195,6 @@ export function buildSidebarRows(
       })
     }
 
-    const archived = [...archivedThreadsOf(group)].sort(compare)
-    if (archived.length > 0) {
-      const archivedOpen =
-        expandedArchivedWorkspaces.has(group.workspace.id) ||
-        archived.some((thread) => thread.id === selectedThreadId)
-      rows.push({
-        key: `archived-toggle:${group.workspace.id}`,
-        type: 'archived-toggle',
-        workspaceId: group.workspace.id,
-        count: archived.length,
-        isOpen: archivedOpen,
-        isCollapsed: !isOpen,
-      })
-      for (const thread of archived) {
-        rows.push({
-          key: `archived:${thread.id}`,
-          type: 'thread',
-          workspaceId: group.workspace.id,
-          thread,
-          isCollapsed: !isOpen || !archivedOpen,
-        })
-      }
-    }
-
     return rows
   })
 
@@ -289,16 +219,15 @@ export function buildSidebarRows(
         ]
       : []),
     ...projectRows,
-    ...(showChatsSection || chatRows.length > 0 || archivedChatRows.length > 0
+    ...(showChatsSection || chatRows.length > 0
       ? [
           {
             key: 'section:chats',
             type: 'section' as const,
             title: 'Chats' as const,
-            ...(chatRows.length > 0 || archivedChatRows.length > 0 ? { isOpen: !chatsCollapsed } : {}),
+            ...(chatRows.length > 0 ? { isOpen: !chatsCollapsed } : {}),
           },
           ...chatRows,
-          ...archivedChatRows,
         ]
       : []),
   ]

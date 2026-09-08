@@ -295,6 +295,53 @@ describe("SidebarView component", () => {
     expect(textOf(r)).toContain("proj");
     expect(textOf(r)).toContain("Test thread");
   });
+  it("shows a pin mark on chats pinned in a project", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [
+          thread({
+            id: "t1",
+            workspace_id: "w1",
+            title: "Kept here",
+            is_pinned_in_project: true,
+          }),
+        ],
+      },
+    ];
+    const r = renderComponent(<SidebarView {...base} groups={groups} />);
+    expect(
+      r.root.findByProps({ accessibilityLabel: "Pinned in project" }),
+    ).toBeTruthy();
+  });
+  it("hides archived chats from the drawer", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [thread({ id: "t1", workspace_id: "w1", title: "Live work" })],
+        archivedThreads: [
+          thread({
+            id: "old",
+            workspace_id: "w1",
+            title: "Old work",
+            is_archived: true,
+          }),
+        ],
+      },
+    ];
+    const r = renderComponent(<SidebarView {...base} groups={groups} />);
+    const text = textOf(r);
+    expect(text).toContain("Live work");
+    expect(text).not.toContain("Old work");
+    expect(text).not.toContain("Archived");
+    expect(
+      r.root.findAll(
+        (node) =>
+          typeof node.props.accessibilityLabel === "string" &&
+          node.props.accessibilityLabel.startsWith("Archived"),
+      ),
+    ).toHaveLength(0);
+  });
   it("collapses the Chats section to hide individual chats", () => {
     const groups: ProjectGroup[] = [
       {

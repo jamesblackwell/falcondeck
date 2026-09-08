@@ -223,7 +223,7 @@ When adding a new shared pattern:
 ## Main views
 
 Every surface that replaces the conversation column is a **main view**: Activity,
-Extensions, Plugins, Scheduled, Settings, and every extension `panels`
+Extensions, Plugins, Automations, Settings, and every extension `panels`
 contribution (Notes, Missions, Kanban, Mini Zen, and later packages).
 
 These used to be several unrelated pages — marketing-sized `text-3xl` titles at
@@ -267,7 +267,7 @@ third max-width.
 - Search: `SearchField`, full measure of the column, not a compact chip in the
   heading
 - Section labels: `MainViewSection` (`fd-type-eyebrow`, not a second `h1`)
-- Used by: Activity, Extensions, Plugins, Scheduled, Missions, and declarative
+- Used by: Activity, Extensions, Plugins, Automations, Missions, and declarative
   extension panels (the host wraps those automatically)
 
 **Workspace** — spatial tools that need the whole frame.
@@ -318,6 +318,16 @@ Copy this inner directory shell in a trusted frontend:
 ## Interaction Patterns
 
 These are the established cross-platform behaviours. Match them instead of inventing a new affordance for the same job.
+
+### Loading indicators (mobile)
+
+Mobile uses one wait glyph, `ActivityDiamond`, in three placements. Do not add a spinner, skeleton block, or in-flow status row for the same job. Connection and OTA banners use the same diamond when they are busy.
+
+- **Empty pane** — `LoadingState`: a centered diamond and an optional muted caption (`Loading tasks…`). The pane stays still; nothing above it appears or disappears.
+- **Content already on screen** — `LoadingPill`: a floating chip over the list. It must not take layout height. Brief loads stay silent (the pill waits a beat before showing).
+- **Inline control** — diamond on the control (`Button` `loading`, Show more). Keep the control's label next to the diamond; do not replace a whole row with a status sentence.
+
+Connection and session waits stay on `SyncBanner`. That banner names a wait that lasts; it is not a stand-in for paging or a thread fetch. Use **task** in this copy, not thread.
 
 ### Context menus (per-item actions)
 

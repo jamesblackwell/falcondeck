@@ -453,7 +453,7 @@ describe('sidebarRowsEqual', () => {
     expect(sidebarRowsEqual(before, after)).toBe(false)
   })
 
-  it('tucks archived chats behind a disclosure under the project', () => {
+  it('omits archived chats from the project and chats lists', () => {
     const rows = buildSidebarRows(
       [
         {
@@ -468,6 +468,18 @@ describe('sidebarRowsEqual', () => {
             }),
           ],
         },
+        {
+          workspace: workspace({ id: 'chat-w', kind: 'casual' }),
+          threads: [thread({ id: 'chat-t', workspace_id: 'chat-w', title: 'Weekend plans' })],
+          archivedThreads: [
+            thread({
+              id: 'old-chat',
+              workspace_id: 'chat-w',
+              title: 'Stale chat',
+              is_archived: true,
+            }),
+          ],
+        },
       ],
       emptyCollapsed,
       defaultCounts,
@@ -478,13 +490,10 @@ describe('sidebarRowsEqual', () => {
       'section:projects',
       'workspace:w1',
       'thread:t1',
-      'archived-toggle:w1',
-      'archived:old',
+      'section:chats',
+      'chat:chat-w:chat-t',
     ])
-    const toggle = rows.find((row) => row.type === 'archived-toggle')
-    expect(toggle).toMatchObject({ count: 1, isOpen: false, isCollapsed: false })
-    const archived = rows.find((row) => row.key === 'archived:old')
-    expect(archived).toMatchObject({ type: 'thread', isCollapsed: true })
+    expect(rows.some((row) => row.key.includes('archived'))).toBe(false)
   })
 
   it('detects length changes', () => {

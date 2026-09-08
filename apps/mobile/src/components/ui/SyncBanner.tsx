@@ -5,7 +5,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { CloudOff } from 'lucide-react-native'
 
 import type { SessionSyncStatus } from '@/lib/session-status'
-import { Spinner } from './Spinner'
+import { ActivityDiamond } from './ActivityDiamond'
 import { Text } from './Text'
 
 interface SyncBannerProps {
@@ -75,7 +75,7 @@ function SyncBannerContent({ status }: SyncBannerProps) {
       {showsOfflineIcon ? (
         <CloudOff accessible={false} size={theme.iconSize.xs} color={tint} />
       ) : (
-        <Spinner size={theme.iconSize.xs} color={tint} />
+        <ActivityDiamond size={theme.iconSize.xs} color={tint} />
       )}
       <View style={styles.message}>
         <Text variant="caption" size="xs" weight="medium" color="primary">

@@ -23,6 +23,7 @@ interface ButtonProps extends Omit<PressableProps, 'style'> {
   icon?: React.ReactNode
   loading?: boolean
   children?: React.ReactNode
+  style?: PressableProps['style']
 }
 
 const AnimatedPressable = Animated.createAnimatedComponent(Pressable)
@@ -36,6 +37,7 @@ export const Button = memo(function Button({
   disabled,
   onPress,
   children,
+  style,
   ...props
 }: ButtonProps) {
   const { theme } = useUnistyles()
@@ -84,6 +86,7 @@ export const Button = memo(function Button({
         styles[`size_${size}`],
         (disabled || loading) ? styles.disabled : undefined,
         animatedStyle,
+        style,
       ]}
       accessibilityRole="button"
       accessibilityState={{ disabled: Boolean(disabled || loading), busy: Boolean(loading) }}
@@ -99,17 +102,15 @@ export const Button = memo(function Button({
           size={theme.iconSize.md}
           color={isInverted ? theme.colors.surface[0] : theme.colors.fg.primary}
         />
-      ) : (
-        <>
-          {icon}
-          {label ? (
-            <Text variant="label" style={isInverted ? styles.invertedText : undefined}>
-              {label}
-            </Text>
-          ) : null}
-          {children}
-        </>
-      )}
+      ) : icon ? (
+        icon
+      ) : null}
+      {label ? (
+        <Text variant="label" style={isInverted ? styles.invertedText : undefined}>
+          {label}
+        </Text>
+      ) : null}
+      {loading ? null : children}
     </AnimatedPressable>
   )
 })

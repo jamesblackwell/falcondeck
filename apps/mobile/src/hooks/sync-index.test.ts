@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { expandSyncIndex, type ExtensionSnapshot, type SyncThreadPage } from '@falcondeck/client-core'
 import { useRelayStore, useSessionStore } from '@/store'
 import { snapshot, thread } from '@/test/factories'
-import { loadSyncExtensions, loadSyncThreadPage, requestInitialSync } from './sync-index'
+import { isSyncThreadPageInFlight, loadSyncExtensions, loadSyncThreadPage, requestInitialSync } from './sync-index'
 
 const originalRpc = useRelayStore.getState()._callRpc
 beforeEach(() => {
@@ -40,6 +40,19 @@ it('falls back only for an unavailable method, never for a timeout', async () =>
   vi.mocked(rpc).mockRejectedValue(new Error('Timed out waiting for a response'))
   await expect(requestInitialSync({ _callRpc: rpc }, null, legacy)).rejects.toThrow('Timed out')
   expect(legacy).not.toHaveBeenCalled()
+})
+
+it('reports a page as in flight only for the current socket and index', async () => {
+  const initial = expandSyncIndex({ token: 'old', snapshot: snapshot({ threads: [] }), agent_catalogs: [], model_catalogs: [], workspace_agents: {}, workspace_models: {}, counts: {} })
+  useSessionStore.setState({ snapshot: initial })
+  const page = deferred<SyncThreadPage>()
+  useRelayStore.getState()._callRpc = vi.fn().mockReturnValue(page.promise) as typeof originalRpc
+  const loading = loadSyncThreadPage('workspace-1')
+  expect(isSyncThreadPageInFlight('workspace-1')).toBe(true)
+  useSessionStore.setState({ snapshot: { ...initial, sync_index: { ...initial.sync_index!, token: 'new' } } })
+  expect(isSyncThreadPageInFlight('workspace-1')).toBe(false)
+  page.resolve({ token: 'old', workspace_id: 'workspace-1', threads: [], next_cursor: null })
+  await loading
 })
 
 it('joins duplicate page loads and ignores a response from a replaced index', async () => {

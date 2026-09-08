@@ -13,7 +13,7 @@ import {
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { NativeSheet, ProviderIcon, Text } from '@/components/ui'
+import { LoadingState, NativeSheet, ProviderIcon, Text } from '@/components/ui'
 
 /** Leaves a row of context above the revealed selection. */
 const SELECTED_REVEAL_INSET = 64
@@ -244,11 +244,7 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
         {panel === 'model' ? (
           <>
             {modelsLoading && models.length === 0 ? (
-              <View style={styles.empty}>
-                <Text variant="caption" color="muted">
-                  Loading models…
-                </Text>
-              </View>
+              <LoadingState label="Loading models…" />
             ) : (
               <>
                 <SheetRow

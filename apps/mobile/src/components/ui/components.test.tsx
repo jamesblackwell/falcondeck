@@ -157,6 +157,9 @@ describe('Button', () => {
   })
   it('renders with icon', () => { expect(renderComponent(<Button icon={<span />} label="Click" />).toJSON()).toBeTruthy() })
   it('renders loading', () => { expect(renderComponent(<Button loading label="L" />).toJSON()).toBeTruthy() })
+  it('keeps the label while loading', () => {
+    expect(textOf(renderComponent(<Button loading label="Load older messages" />))).toContain('Load older messages')
+  })
   it('renders disabled', () => { expect(renderComponent(<Button disabled label="D" />).toJSON()).toBeTruthy() })
   it('renders children', () => { expect(renderComponent(<Button>Child</Button>).toJSON()).toBeTruthy() })
   it('renders danger loading', () => { expect(renderComponent(<Button variant="danger" loading />).toJSON()).toBeTruthy() })

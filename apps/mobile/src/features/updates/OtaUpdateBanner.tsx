@@ -5,7 +5,7 @@ import { RotateCcw } from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { Spinner, Text } from '@/components/ui'
+import { ActivityDiamond, Text } from '@/components/ui'
 
 /**
  * Makes an update downloaded after launch actionable without requiring a full
@@ -127,7 +127,7 @@ export const OtaUpdateBanner = memo(function OtaUpdateBanner() {
     >
       <View style={styles.content}>
         {isBusy ? (
-          <Spinner size={theme.iconSize.sm} color={tint} />
+          <ActivityDiamond size={theme.iconSize.sm} color={tint} />
         ) : (
           <RotateCcw accessible={false} size={theme.iconSize.sm} color={tint} />
         )}

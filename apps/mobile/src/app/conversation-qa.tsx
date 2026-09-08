@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import { Redirect, useLocalSearchParams } from "expo-router";
 import { FlashList } from "@shopify/flash-list";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet } from "react-native-unistyles";
 
 import {
   applyConversationEventsToItems,
@@ -27,7 +27,7 @@ import {
   OperationalNoticeBanner,
   UnsupportedBlock,
 } from "@/components/chat";
-import { ActivityDiamond, Button, Text } from "@/components/ui";
+import { Button, LoadingState, Text } from "@/components/ui";
 import { pasteImageInputFromClipboard } from "@/features/thread/imageInputs";
 
 const ignoreApprovalDecision = () => {};
@@ -1559,7 +1559,6 @@ function longBlocks(tailText: string): ConversationRenderBlock[] {
 }
 
 export default function ConversationQaScreen() {
-  const { theme } = useUnistyles();
   const {
     failResponses,
     composer,
@@ -1910,16 +1909,11 @@ export default function ConversationQaScreen() {
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           scenario === "history" && historyPhase === "recovering" ? (
-            <View
-              accessibilityRole="progressbar"
+            <LoadingState
+              label="Recovering conversation history…"
               accessibilityLabel="Recovering conversation history"
               style={styles.recoveryState}
-            >
-              <ActivityDiamond size={20} color={theme.colors.accent.default} />
-              <Text variant="caption" color="muted">
-                Recovering conversation history…
-              </Text>
-            </View>
+            />
           ) : null
         }
         ListHeaderComponent={
@@ -1928,11 +1922,8 @@ export default function ConversationQaScreen() {
               <Button
                 variant="ghost"
                 size="sm"
-                label={
-                  loadingOlder
-                    ? "Loading earlier messages..."
-                    : "Load earlier messages"
-                }
+                label="Load earlier messages"
+                accessibilityLabel="Load earlier messages"
                 loading={loadingOlder}
                 onPress={() => {
                   if (loadingOlder) return;
@@ -2094,10 +2085,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   recoveryState: {
     minHeight: 240,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    gap: theme.spacing[2],
   },
   qaComplete: {
     paddingHorizontal: theme.spacing[4],

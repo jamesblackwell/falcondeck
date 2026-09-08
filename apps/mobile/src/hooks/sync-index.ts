@@ -44,6 +44,15 @@ function once(key: string, scope: SyncRequestScope, run: () => Promise<void>) {
   return promise
 }
 
+export function isSyncThreadPageInFlight(workspaceId: string, sort: ThreadSortMode = 'last_updated') {
+  const index = useSessionStore.getState().snapshot?.sync_index
+  if (!index) return false
+  const existing = inFlight.get(`${index.token}:${workspaceId}:${sort}`)
+  if (!existing) return false
+  const scope = requestScope(index.token)
+  return existing.scope.socket === scope.socket && existing.scope.sessionId === scope.sessionId
+}
+
 export function loadSyncThreadPage(workspaceId: string, sort: ThreadSortMode = 'last_updated', limit = 10) {
   const index = useSessionStore.getState().snapshot?.sync_index
   if (!index) return Promise.resolve()

@@ -1,10 +1,10 @@
 import { memo } from 'react'
 import { Pressable, ScrollView, View, useWindowDimensions } from 'react-native'
-import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import { StyleSheet } from 'react-native-unistyles'
 
 import type { Automation, AutomationRun } from '@falcondeck/client-core'
 
-import { ActivityDiamond, Badge, NativeSheet, Text } from '@/components/ui'
+import { Badge, LoadingState, NativeSheet, Text } from '@/components/ui'
 
 const RUN_TONE: Record<AutomationRun['status'], 'default' | 'success' | 'warning' | 'danger'> = {
   queued: 'default',
@@ -31,7 +31,6 @@ export const AutomationHistorySheet = memo(function AutomationHistorySheet({
   onClose: () => void
 }) {
   const { height } = useWindowDimensions()
-  const { theme } = useUnistyles()
   return (
     <NativeSheet onClose={onClose} accessibilityLabel="Close run history">
       <View style={styles.header}>
@@ -43,10 +42,7 @@ export const AutomationHistorySheet = memo(function AutomationHistorySheet({
       </View>
       <ScrollView style={{ maxHeight: height * 0.62 }} contentContainerStyle={styles.content}>
         {loading && !runs ? (
-          <View style={styles.center}>
-            <ActivityDiamond color={theme.colors.accent.default} />
-            <Text variant="caption" color="muted">Loading runs…</Text>
-          </View>
+          <LoadingState label="Loading runs…" />
         ) : !runs || runs.length === 0 ? (
           <Text variant="supporting" color="muted" style={styles.empty}>
             This automation has not run yet.
@@ -78,7 +74,6 @@ export const AutomationHistorySheet = memo(function AutomationHistorySheet({
 const styles = StyleSheet.create((theme) => ({
   header: { paddingHorizontal: theme.spacing[5], paddingBottom: theme.spacing[3], gap: theme.spacing[1] },
   content: { paddingHorizontal: theme.spacing[4], paddingBottom: theme.spacing[5], gap: theme.spacing[2] },
-  center: { paddingVertical: theme.spacing[8], alignItems: 'center', gap: theme.spacing[2] },
   empty: { paddingVertical: theme.spacing[8], textAlign: 'center' },
   row: { padding: theme.spacing[3], gap: theme.spacing[2], borderRadius: theme.radius.lg, backgroundColor: theme.colors.surface[2], borderWidth: 1, borderColor: theme.colors.border.default },
   pressed: { backgroundColor: theme.colors.surface[3] },

@@ -1,5 +1,5 @@
 import { useSessionStore } from '@/store'
-import { loadSyncThreadPage } from '@/hooks/sync-index'
+import { isSyncThreadPageInFlight, loadSyncThreadPage } from '@/hooks/sync-index'
 import {
   memo,
   useCallback,
@@ -15,7 +15,6 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated from "react-native-reanimated";
 import { FlashList } from "@shopify/flash-list";
 import {
-  Archive,
   ArrowUpDown,
   ChevronDown,
   FolderClosed,
@@ -52,9 +51,9 @@ import {
   Text,
   Button,
   EmptyState,
+  LoadingPill,
   OptionSheet,
   SyncBanner,
-  Spinner,
 } from "@/components/ui";
 import {
   readStoredChatsCollapsed,
@@ -191,9 +190,6 @@ export const SidebarView = memo(function SidebarView({
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<
     Map<string, number>
   >(() => new Map());
-  const [expandedArchivedWorkspaces, setExpandedArchivedWorkspaces] = useState<
-    Set<string>
-  >(() => new Set());
   const [optionsTarget, setOptionsTarget] = useState<{
     workspaceId: string;
     thread: ThreadSummary;
@@ -275,19 +271,11 @@ export const SidebarView = memo(function SidebarView({
     [activeExtensionFilters],
   );
 
-  const [loadingPages, setLoadingPages] = useState<ReadonlySet<string>>(new Set());
+  const [overflowLoading, setOverflowLoading] = useState<ReadonlySet<string>>(new Set());
+  const [isPaging, setIsPaging] = useState(false);
+  const pagingRunRef = useRef(0);
   const loadPage = useCallback(async (workspaceId: string, sort: ThreadSortMode, limit?: number) => {
-    const key = `${useSessionStore.getState().snapshot?.sync_index?.token}:${workspaceId}:${sort}`;
-    setLoadingPages(current => new Set(current).add(key));
-    try {
-      await loadSyncThreadPage(workspaceId, sort, limit);
-    } finally {
-      setLoadingPages(current => {
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
-    }
+    await loadSyncThreadPage(workspaceId, sort, limit);
   }, []);
 
   // Fetch one bounded page per expanded scope. Filters need complete scope,
@@ -296,21 +284,30 @@ export const SidebarView = memo(function SidebarView({
     ? !chatsCollapsed : !collapsedWorkspaces.has(group.workspace.id))
     .map(group => group.workspace.id).join("\n");
   useEffect(() => {
-    if (!syncIndex?.token) return;
+    if (!syncIndex?.token) {
+      setIsPaging(false);
+      return;
+    }
     let cancelled = false;
+    const run = ++pagingRunRef.current;
     const token = syncIndex.token;
     void (async () => {
-      for (const workspaceId of pageScopes.split("\n").filter(Boolean)) {
-        while (!cancelled) {
-          const current = useSessionStore.getState().snapshot?.sync_index;
-          if (!current || current.token !== token) return;
-          const cursor = current.cursors[`${workspaceId}:${sortMode}`];
-          if (cursor === null || (cursor !== undefined && !activeExtensionFilterCount)) break;
-          await loadPage(workspaceId, sortMode, activeExtensionFilterCount ? 50 : VISIBLE_THREAD_LIMIT);
-          const next = useSessionStore.getState().snapshot?.sync_index;
-          if (next?.token !== token || next.cursors[`${workspaceId}:${sortMode}`] === cursor) break;
-          await new Promise(resolve => setTimeout(resolve, 0));
+      try {
+        for (const workspaceId of pageScopes.split("\n").filter(Boolean)) {
+          while (!cancelled) {
+            const current = useSessionStore.getState().snapshot?.sync_index;
+            if (!current || current.token !== token) return;
+            const cursor = current.cursors[`${workspaceId}:${sortMode}`];
+            if (cursor === null || (cursor !== undefined && !activeExtensionFilterCount)) break;
+            setIsPaging(true);
+            await loadPage(workspaceId, sortMode, activeExtensionFilterCount ? 50 : VISIBLE_THREAD_LIMIT);
+            const next = useSessionStore.getState().snapshot?.sync_index;
+            if (next?.token !== token || next.cursors[`${workspaceId}:${sortMode}`] === cursor) break;
+            await new Promise(resolve => setTimeout(resolve, 0));
+          }
         }
+      } finally {
+        if (!cancelled && pagingRunRef.current === run) setIsPaging(false);
       }
     })();
     return () => { cancelled = true; };
@@ -338,7 +335,6 @@ export const SidebarView = memo(function SidebarView({
         sortMode,
         Boolean(onNewChat),
         chatsCollapsed,
-        expandedArchivedWorkspaces,
         activeExtensionFilterCount ? undefined : remoteCounts,
         syncIndex?.cursors,
       ),
@@ -350,7 +346,6 @@ export const SidebarView = memo(function SidebarView({
       sortMode,
       onNewChat,
       chatsCollapsed,
-      expandedArchivedWorkspaces,
       remoteCounts,
       syncIndex?.cursors,
       activeExtensionFilterCount,
@@ -426,7 +421,26 @@ export const SidebarView = memo(function SidebarView({
 
   const handleOverflowPress = useCallback(
     (workspaceId: string, visibleCount: number, isExpanded: boolean) => {
-      if (!isExpanded) void loadPage(workspaceId, sortMode);
+      if (!isExpanded) {
+        const key = `${useSessionStore.getState().snapshot?.sync_index?.token}:${workspaceId}:${sortMode}`;
+        const joined = isSyncThreadPageInFlight(workspaceId, sortMode);
+        setOverflowLoading((current) => new Set(current).add(key));
+        void (async () => {
+          try {
+            await loadPage(workspaceId, sortMode, SHOW_MORE_STEP);
+            if (!joined) return;
+            const cursor = useSessionStore.getState().snapshot?.sync_index?.cursors[`${workspaceId}:${sortMode}`];
+            if (cursor === null || cursor === undefined) return;
+            await loadPage(workspaceId, sortMode, SHOW_MORE_STEP);
+          } finally {
+            setOverflowLoading((current) => {
+              const next = new Set(current);
+              next.delete(key);
+              return next;
+            });
+          }
+        })();
+      }
       setVisibleThreadCounts((prev) => {
         const next = new Map(prev);
         if (isExpanded) {
@@ -439,15 +453,6 @@ export const SidebarView = memo(function SidebarView({
     },
     [sortMode, loadPage],
   );
-
-  const handleArchivedToggle = useCallback((workspaceId: string) => {
-    setExpandedArchivedWorkspaces((prev) => {
-      const next = new Set(prev);
-      if (next.has(workspaceId)) next.delete(workspaceId);
-      else next.add(workspaceId);
-      return next;
-    });
-  }, []);
 
   const openThreadOptions = useCallback(
     (workspaceId: string, thread: ThreadSummary) => {
@@ -698,32 +703,9 @@ export const SidebarView = memo(function SidebarView({
         );
       }
 
-      if (item.type === "archived-toggle") {
-        return (
-          <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
-            <Pressable
-              style={styles.overflowRow}
-              onPress={() => handleArchivedToggle(item.workspaceId)}
-              accessibilityRole="button"
-              accessibilityLabel={`Archived, ${item.count}`}
-              accessibilityState={{ expanded: item.isOpen }}
-            >
-              <ChevronDown
-                size={12}
-                color={theme.colors.fg.muted}
-                style={item.isOpen ? undefined : styles.sectionChevronCollapsed}
-              />
-              <Archive size={12} color={theme.colors.fg.muted} />
-              <Text variant="caption" color="muted">
-                Archived {item.count}
-              </Text>
-            </Pressable>
-          </CollapsibleRow>
-        );
-      }
-
       if (item.type === "overflow") {
-        const isLoading = loadingPages.has(`${syncIndex?.token}:${item.workspaceId}:${sortMode}`);
+        const overflowLabel = item.isExpanded ? "Show less" : "Show more";
+        const isLoading = overflowLoading.has(`${syncIndex?.token}:${item.workspaceId}:${sortMode}`);
         return (
           <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
             <Pressable
@@ -736,10 +718,13 @@ export const SidebarView = memo(function SidebarView({
                 )
               }
               accessibilityRole="button"
+              accessibilityLabel={overflowLabel}
               disabled={isLoading}
               accessibilityState={{ expanded: item.isExpanded, busy: isLoading, disabled: isLoading }}
             >
-              {isLoading ? <Spinner size={theme.iconSize.xs} color={theme.colors.fg.muted} /> : (
+              {isLoading ? (
+                <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+              ) : (
                 <ChevronDown
                   size={12}
                   color={theme.colors.fg.muted}
@@ -747,7 +732,7 @@ export const SidebarView = memo(function SidebarView({
                 />
               )}
               <Text variant="caption" color="muted">
-                {isLoading ? "Loading tasks…" : item.isExpanded ? "Show less" : "Show more"}
+                {overflowLabel}
               </Text>
             </Pressable>
           </CollapsibleRow>
@@ -777,14 +762,16 @@ export const SidebarView = memo(function SidebarView({
       selectedThreadId,
       selectedWorkspaceId,
       theme.colors.cat,
+      theme.colors.danger.default,
       theme.colors.fg.muted,
+      theme.colors.unread,
+      theme.colors.warning.default,
       theme.iconSize.xs,
       toggleWorkspaceCollapse,
       toggleChatsCollapsed,
       handleOverflowPress,
-      loadingPages,
+      overflowLoading,
       syncIndex?.token,
-      handleArchivedToggle,
       threadTagsById,
       workspaceColors,
       activeExtensionFilterCount,
@@ -817,12 +804,6 @@ export const SidebarView = memo(function SidebarView({
       ) : null}
 
       <SyncBanner status={syncStatus} />
-      {!syncStatus.isBusy && loadingPages.size > 0 ? (
-        <View style={styles.loadingStatus} accessibilityRole="progressbar" accessibilityLabel="Loading tasks" accessibilityLiveRegion="polite">
-          <Spinner size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-          <Text variant="caption" color="muted">Loading tasks…</Text>
-        </View>
-      ) : null}
 
       <View style={styles.list}>
         {rows.length === 0 ? (
@@ -868,6 +849,11 @@ export const SidebarView = memo(function SidebarView({
             maintainVisibleContentPosition={{ disabled: true }}
           />
         )}
+        <LoadingPill
+          visible={!syncStatus.isBusy && isPaging}
+          label="Loading tasks…"
+          accessibilityLabel="Loading tasks"
+        />
       </View>
 
       {hasFloatingDock ? (
@@ -968,13 +954,6 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[1],
-  },
-  loadingStatus: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[2],
   },
   list: {
     flex: 1,

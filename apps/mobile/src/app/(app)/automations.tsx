@@ -19,7 +19,7 @@ import {
   AutomationRow,
   type AutomationEditorSubmit,
 } from '@/components/automations'
-import { ActivityDiamond, Button, EmptyState, ErrorBanner, OptionSheet, Text } from '@/components/ui'
+import { Button, EmptyState, ErrorBanner, LoadingState, OptionSheet, Text } from '@/components/ui'
 import { subscribeToControlStateChanges } from '@/features/automations/control-events'
 import { AutomationControlError, useAutomationStore, useRelayStore, useSessionStore } from '@/store'
 
@@ -270,10 +270,7 @@ export default function AutomationsScreen() {
       ) : null}
 
       {!hydrated || (isLoading && automations.length === 0) ? (
-        <View style={styles.center}>
-          <ActivityDiamond color={theme.colors.accent.default} />
-          <Text variant="supporting" color="muted">Loading automations…</Text>
-        </View>
+        <LoadingState fill label="Loading automations…" />
       ) : automations.length === 0 ? (
         <View style={styles.center}>
           <EmptyState
