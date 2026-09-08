@@ -13,6 +13,10 @@ export function triggerThreadSelectionHaptic() {
   runWhenActive(() => Haptics.selectionAsync())
 }
 
+export function triggerProjectToggleHaptic() {
+  runWhenActive(() => Haptics.selectionAsync())
+}
+
 export function triggerAgentCompletionHaptic() {
   runWhenActive(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light))
 }

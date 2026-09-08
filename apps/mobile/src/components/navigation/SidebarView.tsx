@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
+import { triggerProjectToggleHaptic } from "@/lib/haptics";
 
 import type {
   ActiveExtensionThreadFilter,
@@ -400,6 +401,7 @@ export const SidebarView = memo(function SidebarView({
   );
 
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
+    triggerProjectToggleHaptic();
     setCollapsedWorkspaces((prev) => {
       const next = new Set(prev);
       if (next.has(workspaceId)) {
