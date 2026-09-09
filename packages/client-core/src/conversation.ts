@@ -566,12 +566,15 @@ export function mergeThreadDetailPage(
     const retained = current.items.filter(
       (item) => !pageKeys.has(conversationItemKey(item)),
     );
-    // A prompt pinned above the current window predates the older page;
-    // keep it on top until the page that actually contains it arrives.
+    // Only a prompt outside the contiguous cursor window is pinned. Provider
+    // timestamps can be equal or reconstructed; they cannot establish whether
+    // an older page belongs before an ordinary user message.
     const pinned =
       retained[0]?.kind === "user_message" &&
-      page.items.length > 0 &&
-      retained[0].created_at < page.items[0].created_at
+      retained[0] === current.items[0] &&
+      current.oldest_item_id != null &&
+      current.items[1]?.id === current.oldest_item_id &&
+      page.items.length > 0
         ? retained.shift()
         : undefined;
     items = [...(pinned ? [pinned] : []), ...page.items, ...retained];

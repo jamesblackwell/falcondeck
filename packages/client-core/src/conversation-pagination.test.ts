@@ -54,6 +54,22 @@ function detail(
 }
 
 describe("mergeThreadDetailPage", () => {
+  it("prepends earlier turns above an ordinary user boundary regardless of timestamps", () => {
+    const current = detail(["user", "answer"], { hasOlder: true });
+    current.items[0] = {
+      kind: "user_message",
+      id: "user",
+      text: "latest prompt",
+      attachments: [],
+      created_at: "2026-08-09T11:00:00Z",
+    };
+    const merged = mergeThreadDetailPage(current, detail(["earlier-answer"]), "prepend");
+
+    expect(merged.items.map((item) => item.id)).toEqual([
+      "earlier-answer", "user", "answer",
+    ]);
+  });
+
   it("prepends an overlapping older page once and adopts its history boundary", () => {
     const current = detail(["b", "c", "d"], { hasOlder: true });
     const page = detail(["a", "b"], {
@@ -187,7 +203,7 @@ describe("mergeThreadDetailPage", () => {
       id: "user-1",
       text: "fix it",
       attachments: [],
-      created_at: "2026-08-09T11:00:00Z",
+      created_at: at,
     };
     const page: ThreadDetail = {
       ...detail(["tool-5", "tool-6", "tool-7"], { hasOlder: true }),
