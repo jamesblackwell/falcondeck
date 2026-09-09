@@ -88,7 +88,9 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     socket.receive({ type: 'ready', session_id: 'session', role: 'client', next_seq: 11 })
     socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
     await waitFor(() => expect(socket.indexRequests()).toHaveLength(1))
-    const indexResult = async (token: string) => encryptJson(dataKey, { token, snapshot: base,
+    const indexResult = async (token: string) => encryptJson(dataKey, { token,
+      // A compact response can omit the selected row when its byte budget is full.
+      snapshot: token === 'after-loss' ? { ...base, threads: [] } : base,
       agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {} })
     socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[0]!.request_id,
       ok: true, error: null, result: await indexResult('before-loss') })

@@ -19,6 +19,7 @@ import {
   normalizeDaemonSnapshot,
   normalizeConversationItem,
   reconcileSnapshotSelection,
+  retainSyncIndexThreads,
   removeConversationItem,
   threadForSelection,
   upsertConversationItem,
@@ -760,6 +761,9 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
       candidateSnapshot = normalizeDaemonSnapshot(event.event.snapshot);
     }
     if (candidateSnapshot) {
+      if (event.event.type === 'snapshot') {
+        candidateSnapshot = retainSyncIndexThreads(candidateSnapshot, nextSnapshot);
+      }
       // Prev is the filtered snapshot accumulated so far in this batch, so
       // per-event workspace spreads stay referentially stable while nothing
       // actually changed.

@@ -20,6 +20,8 @@ export type SyncIndexCoverage = {
   touched_views: Record<string, true>
   catalog_touched: boolean
   extensions_loaded: boolean
+  /** Previously visible rows awaiting confirmation from this index. */
+  carried_threads?: Record<string, true>
 }
 
 export function expandSyncIndex(index: SyncIndex): DaemonSnapshot {
@@ -37,6 +39,21 @@ export function expandSyncIndex(index: SyncIndex): DaemonSnapshot {
     })),
     sync_index: { token: index.token, counts: index.counts, cursors: {}, touched_threads: {}, touched_views: {}, catalog_touched: false, extensions_loaded: false },
   }
+}
+
+/** A compact index is partial: omission does not mean a loaded thread was deleted. */
+export function retainSyncIndexThreads(next: DaemonSnapshot, previous: DaemonSnapshot | null): DaemonSnapshot {
+  if (!next.sync_index || !previous) return next
+  const workspaces = new Set(next.workspaces.map(workspace => workspace.id))
+  const rows = new Map(next.threads.map(thread => [thread.id, thread]))
+  const carried: Record<string, true> = {}
+  for (const thread of previous.threads) {
+    if (rows.has(thread.id) || thread.is_archived || !workspaces.has(thread.workspace_id) ||
+        next.sync_index.counts[thread.workspace_id]?.total === 0) continue
+    rows.set(thread.id, thread)
+    carried[thread.id] = true
+  }
+  return { ...next, threads: [...rows.values()], sync_index: { ...next.sync_index, carried_threads: carried } }
 }
 
 export function syncViewKey(view: { extension_id: string; view_id: string; scope?: { kind: string; id: string } | null }) {
@@ -82,11 +99,21 @@ export function mergeSyncThreadPage(snapshot: DaemonSnapshot, page: SyncThreadPa
   const index = snapshot.sync_index
   if (!index || index.token !== page.token) return snapshot
   const rows = new Map(snapshot.threads.map(thread => [thread.id, thread]))
+  const carried = { ...index.carried_threads }
   for (const thread of page.threads) {
     if (thread.workspace_id !== page.workspace_id) throw new Error('Sync page scope mismatch')
-    if (!index.touched_threads[thread.id] && !rows.has(thread.id)) rows.set(thread.id, thread)
+    if (!index.touched_threads[thread.id] && (!rows.has(thread.id) || carried[thread.id])) rows.set(thread.id, thread)
+    delete carried[thread.id]
   }
-  return { ...snapshot, threads: [...rows.values()], sync_index: { ...index, cursors: { ...index.cursors, [`${page.workspace_id}:${sort}`]: page.next_cursor } } }
+  // Only a complete workspace traversal proves a carried row no longer exists.
+  if (page.next_cursor === null) {
+    for (const id of Object.keys(carried)) {
+      if (rows.get(id)?.workspace_id !== page.workspace_id) continue
+      if (!index.touched_threads[id]) rows.delete(id)
+      delete carried[id]
+    }
+  }
+  return { ...snapshot, threads: [...rows.values()], sync_index: { ...index, carried_threads: carried, cursors: { ...index.cursors, [`${page.workspace_id}:${sort}`]: page.next_cursor } } }
 }
 
 export function mergeSyncExtensions(snapshot: DaemonSnapshot, token: string, extensions: ExtensionSnapshot): DaemonSnapshot {
