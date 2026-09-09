@@ -50,6 +50,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 ## Working Guidelines
 
+- Packaged Mac deployment: use `make desktop-install` (build/install/restart) or `make desktop-restart` (restart only). These are synchronous one-shot commands with a health check. Never use `launchctl submit`, KeepAlive jobs, or recurring automation for a one-off restart: a leftover job previously restarted the daemon 77 times and invalidated mobile sync tokens. Do not use broad `pkill` on the desktop binary; MCP helpers share it.
 - Multiple agents often work directly on `main`. Keep commits terse and scoped, commit completed work promptly, and exclude unrelated changes.
 - Read `docs/` before changing protocol or architecture.
 - Read `docs/EXTENSIONS.md` before changing extension contracts, contribution

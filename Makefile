@@ -132,6 +132,7 @@ help:
 		'  make install          Install desktop, mobile, and web dependencies' \
 		'  make desktop-build    Alias for desktop-install (packaged local app)' \
 		'  make desktop-install  Build, install, and open the packaged desktop app' \
+		'  make desktop-restart  Restart the installed Mac app once and verify daemon health' \
 		'  make desktop-brand-assets Regenerate desktop icons/brand assets (skip if up to date; FORCE_BRAND=1 to force)' \
 		'  make build            Build desktop, remote web, and site bundles' \
 		'  make mobile-build     Build the iOS app via EAS (cloud, ad-hoc distribution)' \
@@ -387,6 +388,10 @@ desktop-dev-stop: desktop-prepare
 
 desktop-build: desktop-install
 
+.PHONY: desktop-restart
+desktop-restart:
+	cd "$(ROOT)" && node scripts/restart-desktop.mjs
+
 desktop-install: desktop-brand-assets
 	@set -e; \
 		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
@@ -441,15 +446,7 @@ desktop-install: desktop-brand-assets
 			fi; \
 			codesign --verify --deep --strict "$(DESKTOP_BUNDLE_APP)"; \
 		fi; \
-		echo "Installing FalconDeck.app to $(APPLICATIONS_APP)"; \
-		rm -rf "$(APPLICATIONS_APP)"; \
-		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
-		if command -v codesign >/dev/null 2>&1; then \
-			codesign --verify --deep --strict "$(APPLICATIONS_APP)"; \
-		fi; \
-		echo "Installed $(APPLICATIONS_APP)"; \
-		echo "Opening FalconDeck.app"; \
-		open "$(APPLICATIONS_APP)"
+		cd "$(ROOT)" && node scripts/restart-desktop.mjs --install-from "$(DESKTOP_BUNDLE_APP)"
 
 frontend-dev: desktop-prepare
 	cd "$(DESKTOP_DIR)" && npx vite --port $(UI_PORT) --strictPort
