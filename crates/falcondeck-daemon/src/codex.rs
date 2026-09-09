@@ -305,6 +305,11 @@ fn insert_optional_value(params: &mut Value, key: &str, value: Value) {
 /// they are protected by the disconnect drain in `read_stdout` instead.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_SQLITE_HOME_ENV: &str = "CODEX_SQLITE_HOME";
+// FalconDeck explicitly unsubscribes once a thread becomes idle. A one-second
+// grace lets an immediate follow-up resubscribe before unloading while still
+// releasing the cross-process writer lock far sooner than Codex's 60-second
+// default.
+const CODEX_THREAD_UNLOAD_DELAY_OVERRIDE: &str = "thread_unload_delay_secs=1";
 const MAX_WORKSPACE_ID_BYTES: usize = 128;
 
 fn codex_sqlite_home(state: &AppState, workspace_id: &str) -> Result<PathBuf, DaemonError> {
@@ -340,6 +345,7 @@ async fn configure_codex_sqlite_home(
             ))
         })?;
     command.env(CODEX_SQLITE_HOME_ENV, sqlite_home);
+    command.arg("-c").arg(CODEX_THREAD_UNLOAD_DELAY_OVERRIDE);
     Ok(())
 }
 
@@ -1058,6 +1064,17 @@ impl CodexSession {
         }
         install_paginated_turns(&mut response, newest_first);
         Ok(response)
+    }
+
+    /// Drop this app-server connection's ownership of an idle thread.
+    ///
+    /// Codex keeps a cross-process writer lock for every loaded thread. Since
+    /// FalconDeck can run a development daemon beside the installed app, an
+    /// idle subscription must not monopolize the native conversation.
+    pub async fn unsubscribe_thread(&self, thread_id: &str) -> Result<(), DaemonError> {
+        self.send_control_request("thread/unsubscribe", json!({ "threadId": thread_id }))
+            .await?;
+        Ok(())
     }
 
     pub async fn respond_to_request(
@@ -2327,6 +2344,18 @@ mod tests {
             .and_then(|(_, value)| value)
             .map(PathBuf::from);
         assert_eq!(configured.as_deref(), Some(expected.as_path()));
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                CODEX_THREAD_UNLOAD_DELAY_OVERRIDE.to_string()
+            ]
+        );
         assert!(expected.is_dir());
     }
 

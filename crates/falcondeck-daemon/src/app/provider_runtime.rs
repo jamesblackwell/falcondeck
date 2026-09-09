@@ -324,13 +324,6 @@ impl ProviderRuntime {
     ) -> Result<(), DaemonError> {
         match self {
             Self::Codex => {
-                let session = app
-                    .resume_codex_thread_if_needed(spec.workspace_id, spec.thread_id)
-                    .await?;
-                let cwd = spec
-                    .thread
-                    .working_directory(session.workspace_path())
-                    .to_string();
                 let collaboration_mode = codex_collaboration_mode_payload(
                     app,
                     spec.workspace_id,
@@ -339,9 +332,16 @@ impl ProviderRuntime {
                     spec.thread.agent.reasoning_effort.as_deref(),
                 )
                 .await?;
+                let session = app
+                    .resume_codex_thread_if_needed(spec.workspace_id, spec.thread_id)
+                    .await?;
+                let cwd = spec
+                    .thread
+                    .working_directory(session.workspace_path())
+                    .to_string();
                 let casual_chat_root = app.casual_chat_documents_root(spec.workspace_id).await;
 
-                session
+                let result = session
                     .send_request(
                         "turn/start",
                         turn_start_params(
@@ -359,7 +359,11 @@ impl ProviderRuntime {
                             spec.service_tier,
                         ),
                     )
-                    .await?;
+                    .await;
+                if result.is_err() {
+                    app.schedule_codex_thread_release_if_idle(spec.workspace_id, spec.thread_id);
+                }
+                result?;
                 Ok(())
             }
             Self::Claude => {
@@ -819,7 +823,7 @@ impl ProviderRuntime {
                 let session = app
                     .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
                     .await?;
-                session
+                let result = session
                     .send_request(
                         "thread/goal/set",
                         json!({
@@ -829,7 +833,12 @@ impl ProviderRuntime {
                             "tokenBudget": request.token_budget,
                         }),
                     )
-                    .await?;
+                    .await;
+                app.schedule_codex_thread_release_if_idle(
+                    &request.workspace_id,
+                    &request.thread_id,
+                );
+                result?;
                 Ok(())
             }
             Self::Claude => {
@@ -867,9 +876,11 @@ impl ProviderRuntime {
                 let session = app
                     .resume_codex_thread_if_needed(workspace_id, thread_id)
                     .await?;
-                session
+                let result = session
                     .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
-                    .await?;
+                    .await;
+                app.schedule_codex_thread_release_if_idle(workspace_id, thread_id);
+                result?;
                 Ok(())
             }
             Self::Claude => {

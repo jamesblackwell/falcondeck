@@ -2912,6 +2912,7 @@ async fn send_turn_with_startup_mode(
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
+        app.schedule_codex_thread_release_if_idle(&request.workspace_id, &request.thread_id);
         return Err(error);
     }
 

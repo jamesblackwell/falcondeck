@@ -64,6 +64,33 @@ pub(crate) enum TransientTurnPlan {
     Ignored,
 }
 
+fn codex_thread_state_is_idle_for_release(
+    provider: &AgentProvider,
+    status: &ThreadStatus,
+    has_queued_request: bool,
+    is_dispatching: bool,
+    transient_retry_in_flight: bool,
+) -> bool {
+    provider == &AgentProvider::CODEX
+        && !matches!(
+            status,
+            ThreadStatus::Running | ThreadStatus::WaitingForInput
+        )
+        && !has_queued_request
+        && !is_dispatching
+        && !transient_retry_in_flight
+}
+
+fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
+    codex_thread_state_is_idle_for_release(
+        &thread.summary.provider,
+        &thread.summary.status,
+        !thread.queued_requests.is_empty(),
+        thread.dispatching_request.is_some(),
+        thread.transient_retry_in_flight,
+    )
+}
+
 /// How long a running Claude turn may stay silent — no stream traffic at all,
 /// not even thinking heartbeats — before the thread gets a visible warning.
 /// Long tool runs (builds, test suites) are legitimately silent, so this warns
@@ -85,6 +112,21 @@ struct AiThreadTitleInput {
 }
 
 impl AppState {
+    async fn codex_runtime_operation_guard(
+        &self,
+        workspace_id: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let gate = {
+            let mut gates = self.inner.codex_runtime_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry(workspace_id.to_string())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        gate.lock_owned().await
+    }
+
     /// Closes transient content, tools, and response requests once an agent
     /// reports that its turn ended, even if an item-level terminal event was lost.
     pub(super) async fn settle_turn_items_with_error(
@@ -249,6 +291,10 @@ impl AppState {
         thread_id: &str,
     ) -> Result<CodexSessionLease, DaemonError> {
         let session = self.session_for(workspace_id).await?;
+        // Serializes a resume with idle-unsubscribe for this workspace. A
+        // sender marks the thread running before reaching here, so whichever
+        // side wins the gate leaves one coherent subscription state.
+        let _operation = self.codex_runtime_operation_guard(workspace_id).await;
         let (requires_resume, cwd, summary) = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
@@ -305,6 +351,76 @@ impl AppState {
         Ok(session)
     }
 
+    /// Release Codex's native per-thread writer lock once FalconDeck has no
+    /// live work for the thread. This is deliberately best-effort: failing to
+    /// unload an idle cache entry must not turn a completed response red.
+    pub(super) fn schedule_codex_thread_release_if_idle(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) {
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let _operation = app.codex_runtime_operation_guard(&workspace_id).await;
+            if app
+                .inner
+                .codex_goal_refreshes_in_flight
+                .lock()
+                .expect("codex goal refresh set poisoned")
+                .contains(&(workspace_id.clone(), thread_id.clone()))
+            {
+                return;
+            }
+            let session = {
+                let workspaces = app.inner.workspaces.lock().await;
+                let Some(workspace) = workspaces.get(&workspace_id) else {
+                    return;
+                };
+                let Some(thread) = workspace.threads.get(&thread_id) else {
+                    return;
+                };
+                if !codex_thread_is_idle_for_release(thread) {
+                    return;
+                }
+                workspace.codex_session.as_ref().map(Arc::clone)
+            };
+            let Some(session) = session else {
+                return;
+            };
+            let Some(lease) = session.lease().await else {
+                return;
+            };
+            // A new turn can start while the lease is being acquired. Check
+            // the durable state again immediately before unsubscribing.
+            let still_idle = {
+                let workspaces = app.inner.workspaces.lock().await;
+                workspaces
+                    .get(&workspace_id)
+                    .and_then(|workspace| workspace.threads.get(&thread_id))
+                    .is_some_and(codex_thread_is_idle_for_release)
+            };
+            if !still_idle {
+                return;
+            }
+            if let Err(error) = lease.unsubscribe_thread(&thread_id).await {
+                tracing::debug!(
+                    workspace_id = %workspace_id,
+                    thread_id = %thread_id,
+                    %error,
+                    "could not release idle Codex thread"
+                );
+                return;
+            }
+            let _ = app
+                .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                    thread.requires_resume = true;
+                })
+                .await;
+        });
+    }
+
     /// Kick off a background Codex goal refresh for a thread, deduplicated
     /// per (workspace, thread). `thread.detail` used to await this inline:
     /// `thread/goal/get` has no deadline of its own and the app-server often
@@ -337,6 +453,7 @@ impl AppState {
                 .lock()
                 .expect("codex goal refresh set poisoned")
                 .remove(&key);
+            app.schedule_codex_thread_release_if_idle(&key.0, &key.1);
         });
     }
 
@@ -3157,6 +3274,51 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[test]
+    fn only_idle_codex_threads_release_native_ownership() {
+        assert!(codex_thread_state_is_idle_for_release(
+            &AgentProvider::CODEX,
+            &ThreadStatus::Idle,
+            false,
+            false,
+            false,
+        ));
+        for (provider, status, queued, dispatching, retrying) in [
+            (
+                AgentProvider::CLAUDE,
+                ThreadStatus::Idle,
+                false,
+                false,
+                false,
+            ),
+            (
+                AgentProvider::CODEX,
+                ThreadStatus::Running,
+                false,
+                false,
+                false,
+            ),
+            (
+                AgentProvider::CODEX,
+                ThreadStatus::WaitingForInput,
+                false,
+                false,
+                false,
+            ),
+            (AgentProvider::CODEX, ThreadStatus::Idle, true, false, false),
+            (AgentProvider::CODEX, ThreadStatus::Idle, false, true, false),
+            (AgentProvider::CODEX, ThreadStatus::Idle, false, false, true),
+        ] {
+            assert!(!codex_thread_state_is_idle_for_release(
+                &provider,
+                &status,
+                queued,
+                dispatching,
+                retrying,
+            ));
+        }
+    }
 
     fn isolated_codex_thread() -> ManagedThread {
         ManagedThread::new(ThreadSummary {
