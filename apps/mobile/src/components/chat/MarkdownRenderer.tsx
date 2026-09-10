@@ -1,6 +1,9 @@
 import {
+  createContext,
   memo,
+  useContext,
   useMemo,
+  type ComponentProps,
   type ReactNode,
 } from "react";
 import { ScrollView, View } from "react-native";
@@ -34,6 +37,8 @@ interface MarkdownRendererProps {
   interpretDirectives?: boolean;
   /** Tint slash-command mentions; only user-authored messages opt in. */
   highlightCommands?: boolean;
+  /** UI leading instead of passage leading. User-message bubbles opt in. */
+  compact?: boolean;
 }
 
 type MarkdownNode = {
@@ -301,6 +306,18 @@ function listMarkerLabel(node: MarkdownNode, index: number): string {
   return node.ordered ? `${(node.start ?? 1) + index}.` : "•";
 }
 
+const CompactMarkdownContext = createContext(false);
+
+function Paragraph({
+  style,
+  ...props
+}: ComponentProps<typeof Text>) {
+  const compact = useContext(CompactMarkdownContext);
+  const paragraphStyle = compact ? styles.paragraphCompact : styles.paragraph;
+  const extra = Array.isArray(style) ? style : style ? [style] : [];
+  return <Text {...props} style={[paragraphStyle, ...extra]} />;
+}
+
 // Inside a flattened prose Text the marker is a text fragment rather than its
 // own column, so it must not carry the column layout's width or alignment: iOS
 // applies a fragment's textAlign to the whole paragraph that fragment starts,
@@ -312,8 +329,12 @@ function InlineListMarker({
   node: MarkdownNode;
   index: number;
 }) {
+  const compact = useContext(CompactMarkdownContext);
   return (
-    <Text color="muted" style={styles.listMarkerInline}>
+    <Text
+      color="muted"
+      style={compact ? styles.listMarkerInlineCompact : styles.listMarkerInline}
+    >
       {listMarkerLabel(node, index)}
     </Text>
   );
@@ -321,6 +342,7 @@ function InlineListMarker({
 
 function ListMarker({ node, index }: { node: MarkdownNode; index: number }) {
   const { theme } = useUnistyles();
+  const compact = useContext(CompactMarkdownContext);
 
   if (node.checked != null) {
     return (
@@ -344,7 +366,10 @@ function ListMarker({ node, index }: { node: MarkdownNode; index: number }) {
   return (
     <Text
       color="muted"
-      style={[styles.listMarker, node.ordered ? styles.listMarkerOrdered : undefined]}
+      style={[
+        compact ? styles.listMarkerCompact : styles.listMarker,
+        node.ordered ? styles.listMarkerOrdered : undefined,
+      ]}
     >
       {listMarkerLabel(node, index)}
     </Text>
@@ -705,13 +730,9 @@ function renderFlowInlines(
   );
   if (node.type === "heading") {
     return (
-      <Text
-        key={key}
-        weight="semibold"
-        style={[styles.paragraph, headingStyle(node.depth)]}
-      >
+      <Paragraph key={key} weight="semibold" style={headingStyle(node.depth)}>
         {inlines}
-      </Text>
+      </Paragraph>
     );
   }
   return inlines;
@@ -825,11 +846,10 @@ function renderProseNode(
   switch (node.type) {
     case "heading":
       return (
-        <Text
+        <Paragraph
           key={key}
           weight="semibold"
           style={[
-            styles.paragraph,
             headingStyle(node.depth),
             isFirstInDocument && isFirstInGroup
               ? undefined
@@ -842,26 +862,26 @@ function renderProseNode(
             key,
             highlightCommands,
           )}
-        </Text>
+        </Paragraph>
       );
     case "html":
       return (
-        <Text key={key} color="secondary" style={styles.paragraph}>
+        <Paragraph key={key} color="secondary">
           {node.value}
-        </Text>
+        </Paragraph>
       );
     case "list":
       return renderListAsText(node, definitions, key, highlightCommands);
     default:
       return (
-        <Text key={key} color="primary" style={styles.paragraph}>
+        <Paragraph key={key} color="primary">
           {renderMarkdownInlineNodes(
             node.children,
             definitions,
             key,
             highlightCommands,
           )}
-        </Text>
+        </Paragraph>
       );
   }
 }
@@ -877,7 +897,7 @@ function renderProseGroup(
   isFirstInDocument: boolean,
 ): ReactNode {
   return (
-    <Text key={key} selectable color="primary" style={styles.paragraph}>
+    <Paragraph key={key} selectable color="primary">
       {nodes.flatMap((node, index) => {
         const rendered = renderProseNode(
           node,
@@ -894,7 +914,7 @@ function renderProseGroup(
         // React.Children flattens them — Fragments are not.
         return index > 0 ? ["\n\n", rendered] : [rendered];
       })}
-    </Text>
+    </Paragraph>
   );
 }
 
@@ -1049,12 +1069,11 @@ function renderMarkdownBlock(
       );
     case "heading":
       return (
-        <Text
+        <Paragraph
           key={key}
           selectable
           weight="semibold"
           style={[
-            styles.paragraph,
             headingStyle(node.depth),
             position.isFirst ? undefined : headingLeadStyle(node.depth),
           ]}
@@ -1065,13 +1084,13 @@ function renderMarkdownBlock(
             key,
             highlightCommands,
           )}
-        </Text>
+        </Paragraph>
       );
     case "html":
       return node.value ? (
-        <Text key={key} selectable color="secondary" style={styles.paragraph}>
+        <Paragraph key={key} selectable color="secondary">
           {node.value}
-        </Text>
+        </Paragraph>
       ) : null;
     case "list":
       return node.children?.length ? (
@@ -1097,14 +1116,14 @@ function renderMarkdownBlock(
       ) : null;
     case "paragraph":
       return (
-        <Text key={key} selectable color="primary" style={styles.paragraph}>
+        <Paragraph key={key} selectable color="primary">
           {renderMarkdownInlineNodes(
             node.children,
             definitions,
             key,
             highlightCommands,
           )}
-        </Text>
+        </Paragraph>
       );
     case "table":
       return renderMarkdownTable(node, definitions, key);
@@ -1112,9 +1131,9 @@ function renderMarkdownBlock(
       return <View key={key} style={styles.rule} />;
     default:
       return node.value ? (
-        <Text key={key} selectable color="primary" style={styles.paragraph}>
+        <Paragraph key={key} selectable color="primary">
           {node.value}
-        </Text>
+        </Paragraph>
       ) : (
         <View key={key}>
           {renderMarkdownBlocks(
@@ -1135,6 +1154,7 @@ export const MarkdownRenderer = memo(
     streaming = false,
     interpretDirectives = true,
     highlightCommands = false,
+    compact = false,
   }: MarkdownRendererProps) {
     const parsedText = useStreamingText(text, streaming);
 
@@ -1187,18 +1207,28 @@ export const MarkdownRenderer = memo(
       return blocks;
     }, [highlightCommands, interpretDirectives, parsedText, streaming]);
 
-    return <View style={styles.container}>{renderedBlocks}</View>;
+    return (
+      <CompactMarkdownContext.Provider value={compact}>
+        <View style={compact ? styles.containerCompact : styles.container}>
+          {renderedBlocks}
+        </View>
+      </CompactMarkdownContext.Provider>
+    );
   },
   (prev, next) =>
     prev.text === next.text &&
     prev.streaming === next.streaming &&
     prev.interpretDirectives === next.interpretDirectives &&
-    prev.highlightCommands === next.highlightCommands,
+    prev.highlightCommands === next.highlightCommands &&
+    prev.compact === next.compact,
 );
 
 const styles = StyleSheet.create((theme) => ({
   container: {
     gap: theme.spacing[3],
+  },
+  containerCompact: {
+    gap: theme.spacing[2],
   },
   codeBlock: {
     // Combined with the container's 12px block gap, this creates the same
@@ -1229,6 +1259,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   paragraph: {
     lineHeight: theme.fontSize.base * theme.lineHeight.prose,
+  },
+  paragraphCompact: {
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
   },
   heading1: {
     fontSize: theme.fontSize["2xl"],
@@ -1323,8 +1356,15 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: theme.fontSize.base * theme.lineHeight.prose,
     minWidth: 24,
   },
+  listMarkerCompact: {
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
+    minWidth: 24,
+  },
   listMarkerInline: {
     lineHeight: theme.fontSize.base * theme.lineHeight.prose,
+  },
+  listMarkerInlineCompact: {
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
   },
   listMarkerOrdered: {
     // Right-aligned so 9. and 10. share a baseline edge and the item text

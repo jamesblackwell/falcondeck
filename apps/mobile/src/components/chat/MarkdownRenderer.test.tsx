@@ -475,6 +475,30 @@ describe("MarkdownRenderer", () => {
     ]);
   });
 
+  it("uses passage leading by default and UI leading when compact", () => {
+    function paragraphLineHeight(element: React.ReactElement) {
+      const renderer = renderComponent(element);
+      const selectable = renderer.root
+        .findAllByType("Text" as any)
+        .find((node) => node.props.selectable === true);
+      const style = Object.assign(
+        {},
+        ...(Array.isArray(selectable?.props.style)
+          ? selectable.props.style.flat().filter(Boolean)
+          : [selectable?.props.style].filter(Boolean)),
+      );
+      cleanup();
+      return style.lineHeight;
+    }
+
+    expect(paragraphLineHeight(<MarkdownRenderer text="A short prompt" />)).toBe(
+      16 * 1.78,
+    );
+    expect(
+      paragraphLineHeight(<MarkdownRenderer text="A short prompt" compact />),
+    ).toBe(16 * 1.5);
+  });
+
   it("renders directives as accessible native activity annotations in message order", async () => {
     const openUrl = vi.spyOn(Linking, "openURL").mockResolvedValue(undefined);
     const renderer = renderComponent(

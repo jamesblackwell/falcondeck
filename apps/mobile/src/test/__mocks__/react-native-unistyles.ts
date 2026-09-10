@@ -21,7 +21,7 @@ const stubTheme = {
   spacing: { 0: 0, px: 1, 0.5: 2, 1: 4, 1.5: 6, 2: 8, 3: 12, 4: 16, 5: 20, 6: 24, 8: 32, 10: 40, 12: 48, 16: 64 },
   radius: { sm: 6, md: 8, lg: 12, xl: 16, '2xl': 20, full: 999 },
   fontSize: { '2xs': 10, xs: 12, sm: 14, base: 16, md: 17, lg: 19, xl: 22, '2xl': 26, '3xl': 32 },
-  lineHeight: { tight: 1.25, normal: 1.5, relaxed: 1.65, code: 1.55 },
+  lineHeight: { tight: 1.25, normal: 1.5, relaxed: 1.65, prose: 1.78, code: 1.55 },
   // The real bundled families, so a test can assert that code and microlabels
   // resolve to the monospace face rather than to whatever the fixture invented.
   fontFamily: { sans: 'Geist', mono: 'Geist Mono' },

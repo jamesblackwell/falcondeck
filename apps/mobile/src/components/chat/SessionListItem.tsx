@@ -1,6 +1,7 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import { Pin } from 'lucide-react-native'
 
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
@@ -90,6 +91,16 @@ function SessionListItemInner({
           ))}
         </View>
       ) : null}
+      {thread.is_pinned || thread.is_pinned_in_project ? (
+        <Pin
+          size={theme.iconSize.xs}
+          color={theme.colors.fg.muted}
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel={thread.is_pinned ? 'Pinned' : 'Pinned in project'}
+          style={styles.pin}
+        />
+      ) : null}
       {presentation.showBadge ? (
         <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
       ) : (
@@ -129,6 +140,9 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
   },
   tags: { flexDirection: 'row', alignItems: 'center' },
+  pin: {
+    transform: [{ rotate: '45deg' }],
+  },
 }))
 
 const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>

@@ -89,6 +89,59 @@ describe('SessionListItem props contract', () => {
     })
   })
 
+  it('marks a project-pinned thread in the row', () => {
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: thread({
+        id: 'thread-1',
+        workspace_id: 'workspace-1',
+        title: 'Project pinned',
+        is_pinned_in_project: true,
+      }),
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+    }))
+
+    expect(
+      renderer.root.findByProps({ accessibilityLabel: 'Pinned in project' }),
+    ).toBeTruthy()
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Pinned' })).toHaveLength(0)
+  })
+
+  it('labels a globally pinned thread as pinned, even if it is also pinned in the project', () => {
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: thread({
+        id: 'thread-1',
+        workspace_id: 'workspace-1',
+        title: 'Globally pinned',
+        is_pinned: true,
+        is_pinned_in_project: true,
+      }),
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+    }))
+
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Pinned' })).toBeTruthy()
+    expect(
+      renderer.root.findAllByProps({ accessibilityLabel: 'Pinned in project' }),
+    ).toHaveLength(0)
+  })
+
+  it('hides the pin mark on an unpinned thread', () => {
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: thread({ id: 'thread-1', workspace_id: 'workspace-1', title: 'Loose' }),
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+    }))
+
+    expect(renderer.root.findAllByProps({ accessibilityLabel: 'Pinned' })).toHaveLength(0)
+    expect(
+      renderer.root.findAllByProps({ accessibilityLabel: 'Pinned in project' }),
+    ).toHaveLength(0)
+  })
+
   it('accepts a full thread summary so presentation stays aligned with shared clients', () => {
     const props = {
       thread: {

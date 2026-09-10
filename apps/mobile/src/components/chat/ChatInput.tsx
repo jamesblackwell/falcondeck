@@ -147,6 +147,8 @@ const COMPOSER_COLLAPSE_TIMING = {
  * height for a beat after the draft is cleared. Pin the collapsed size, and
  * ease down from the last measured draft height so a send cannot balloon.
  */
+/* Reanimated SharedValues are mutable native animation handles. */
+/* eslint-disable react-hooks/immutability */
 function useEmptyComposerCollapse(isEmpty: boolean) {
   const lastHeight = useSharedValue(MIN_INPUT_HEIGHT)
   const collapseHeight = useSharedValue(MIN_INPUT_HEIGHT)
@@ -157,8 +159,6 @@ function useEmptyComposerCollapse(isEmpty: boolean) {
   const onInputLayout = useCallback(
     (event: LayoutChangeEvent) => {
       if (isEmpty) return
-      // Reanimated SharedValues are mutable native animation handles.
-      // eslint-disable-next-line react-hooks/immutability
       lastHeight.value = event.nativeEvent.layout.height
     },
     [isEmpty, lastHeight],
@@ -211,6 +211,7 @@ function useEmptyComposerCollapse(isEmpty: boolean) {
 
   return { onInputLayout, prepareCollapse, slotStyle }
 }
+/* eslint-enable react-hooks/immutability */
 
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
 const CONTROL_SIZE = 40
@@ -295,7 +296,9 @@ export const ChatInput = memo(function ChatInput({
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [liveSkills, setLiveSkills] = useState<SkillSummary[] | null>(null)
   const loadSkillsRef = useRef(loadSkills)
-  loadSkillsRef.current = loadSkills
+  useEffect(() => {
+    loadSkillsRef.current = loadSkills
+  }, [loadSkills])
   const [voiceProvider, setVoiceProvider] = useState<SpeechProvider | null>(
     null,
   )

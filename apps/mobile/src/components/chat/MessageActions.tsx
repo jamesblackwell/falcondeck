@@ -12,14 +12,18 @@ function copyTarget(accessibilityLabel: string) {
   return target || 'content'
 }
 
+const COMPACT_ICON_BUTTON = 32
+
 export const MessageActions = memo(function MessageActions({
   text,
   accessibilityLabel = 'Copy response',
   readAloudKey,
+  compact = false,
 }: {
   text: string
   accessibilityLabel?: string
   readAloudKey?: string
+  compact?: boolean
 }) {
   const { theme } = useUnistyles()
   const target = copyTarget(accessibilityLabel)
@@ -68,6 +72,13 @@ export const MessageActions = memo(function MessageActions({
         ? 'Read Aloud failed. Retry'
         : 'Read aloud'
 
+  const compactButton = compact
+    ? {
+        style: styles.compactIcon,
+        hitSlop: (theme.minTouchTarget - COMPACT_ICON_BUTTON) / 2,
+      }
+    : null
+
   return (
     <View style={styles.row} accessible={false}>
       <Button
@@ -77,6 +88,7 @@ export const MessageActions = memo(function MessageActions({
         accessibilityLiveRegion="polite"
         icon={icon}
         onPress={() => { void copy() }}
+        {...compactButton}
       />
       {readAloudKey ? (
         <Button
@@ -87,6 +99,7 @@ export const MessageActions = memo(function MessageActions({
           accessibilityState={{ busy: speechState === 'loading' }}
           icon={readAloudIcon}
           onPress={() => readAloudPlayer.toggle(readAloudKey, text)}
+          {...compactButton}
         />
       ) : null}
     </View>
@@ -98,5 +111,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[0],
+  },
+  compactIcon: {
+    height: COMPACT_ICON_BUTTON,
+    width: COMPACT_ICON_BUTTON,
   },
 }))

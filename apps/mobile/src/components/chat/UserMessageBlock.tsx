@@ -114,6 +114,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
               text={text}
               interpretDirectives={false}
               highlightCommands
+              compact
             />
           </View>
           {collapsed ? (
@@ -158,6 +159,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
         text={text}
         accessibilityLabel="Copy message"
         readAloudKey={item.id}
+        compact
       />
     </View>
   );
@@ -181,9 +183,9 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.xl,
     borderCurve: "continuous",
-    gap: theme.spacing[3],
+    gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
   },
   measure: {
     flexShrink: 0,
