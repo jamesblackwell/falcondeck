@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { useSessionStore } from './session-store'
+import { setConversationUpdatesPaused, useSessionStore } from './session-store'
 import {
   workspace,
   thread,
@@ -19,6 +19,7 @@ import {
 } from '../test/factories'
 
 function resetStore() {
+  setConversationUpdatesPaused(false)
   useSessionStore.getState().reset()
 }
 
@@ -48,24 +49,30 @@ describe('session-store edge cases', () => {
       expect(state.snapshot!.threads.filter((t) => t.workspace_id === 'w2')).toHaveLength(1)
     })
 
-    it('items for different threads are isolated in separate buckets', () => {
+    it('retains transcript items only for the selected thread', () => {
       const snap = snapshot({
         threads: [
           thread({ id: 't1' }),
           thread({ id: 't2' }),
         ],
       })
-      const { applyDaemonEvent } = useSessionStore.getState()
+      const { applyDaemonEvent, selectThread } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snap))
 
       applyDaemonEvent(conversationItemAddedEvent(assistantMessage('a1', 'hello'), 't1'))
       applyDaemonEvent(conversationItemAddedEvent(assistantMessage('a2', 'world'), 't2'))
 
+      expect(useSessionStore.getState().threadItems['t1']).toHaveLength(1)
+      expect(useSessionStore.getState().threadItems['t2']).toBeUndefined()
+
+      selectThread('workspace-1', 't2')
+      applyDaemonEvent(conversationItemAddedEvent(assistantMessage('a3', 'selected'), 't2'))
+
       const items = useSessionStore.getState().threadItems
       expect(items['t1']).toHaveLength(1)
       expect(items['t2']).toHaveLength(1)
       expect(items['t1']![0].id).toBe('a1')
-      expect(items['t2']![0].id).toBe('a2')
+      expect(items['t2']![0].id).toBe('a3')
     })
   })
 
@@ -89,13 +96,12 @@ describe('session-store edge cases', () => {
       }).not.toThrow()
     })
 
-    it('conversation items for nonexistent thread creates bucket', () => {
+    it('ignores conversation items for a nonexistent thread', () => {
       useSessionStore.getState().applyDaemonEvent(
         conversationItemAddedEvent(assistantMessage('a1', 'hello'), 'ghost-thread'),
       )
 
-      const items = useSessionStore.getState().threadItems['ghost-thread']
-      expect(items).toHaveLength(1)
+      expect(useSessionStore.getState().threadItems['ghost-thread']).toBeUndefined()
     })
   })
 

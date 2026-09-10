@@ -182,8 +182,9 @@ function reuseIfIdentical<T>(built: T[], prev: T[] | undefined): T[] {
  * chunk, and nearly all of them hold no archived thread at all — the scan
  * below short-circuits on the first one it finds, and the result is reused so
  * repeat calls for the same array (snapshot apply, then the cache builder)
- * cost nothing. Archived chats stay in the snapshot for the sidebar restore
- * list; this helper is only for current-thread pointers and approvals.
+ * cost nothing. Archived chats may still sit in the snapshot after a local
+ * archive (undo needs them); this helper is only for current-thread
+ * pointers and approvals.
  */
 const liveThreadsCache = new WeakMap<object, DaemonSnapshot['threads']>();
 

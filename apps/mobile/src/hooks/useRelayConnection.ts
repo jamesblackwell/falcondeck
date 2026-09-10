@@ -468,9 +468,9 @@ export function useRelayConnection() {
           {
             // Sidebar only: full plans and full diffs (Codex hangs the patch
             // off every ThreadSummary) dominate the encrypted payload and are
-            // not rendered in the project list. Archived chats stay in so the
-            // per-project archived view can restore them.
-            include_archived_threads: true,
+            // not rendered in the project list. Mobile has no archived restore
+            // list, so skip those chats too.
+            include_archived_threads: false,
             include_thread_plans: false,
             include_thread_diffs: false,
             // The per-agent skill catalog is the same list repeated once per
