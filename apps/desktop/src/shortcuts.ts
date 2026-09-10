@@ -19,6 +19,7 @@ export type ShortcutCommandId =
   | 'toggleSidebar'
   | 'toggleChanges'
   | 'toggleTerminal'
+  | 'newTerminal'
   | 'increaseTextSize'
   | 'decreaseTextSize'
   | 'resetTextSize'
@@ -70,6 +71,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide projects and chats', category: 'View', context: 'global', defaults: ['Mod+B'] },
   { id: 'toggleChanges', label: 'Toggle changes panel', description: 'Show or hide the changes panel', category: 'View', context: 'global', defaults: ['Mod+Alt+B'] },
   { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'View', context: 'global', defaults: ['Mod+J'] },
+  { id: 'newTerminal', label: 'New terminal', description: 'Open a new terminal tab in the current project', category: 'View', context: 'global', defaults: ['Ctrl+Shift+`'] },
   { id: 'increaseTextSize', label: 'Increase text size', description: 'Increase the interface text scale', category: 'View', context: 'global', defaults: ['Mod+=', 'Mod+Shift+Plus'] },
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },

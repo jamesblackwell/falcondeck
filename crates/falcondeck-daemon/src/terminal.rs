@@ -458,6 +458,13 @@ impl TerminalManager {
         }
     }
 
+    /// Writes raw PTY input without a JSON/base64 wrapper.
+    pub fn write_input(&self, id: &str, data: &[u8]) {
+        if let Some(session) = self.get(id) {
+            session.write_input(data);
+        }
+    }
+
     /// Handles one decoded client frame (input, resize, or ping).
     pub fn handle_client_frame(&self, id: &str, frame: &TerminalClientFrame) {
         let Some(session) = self.get(id) else {

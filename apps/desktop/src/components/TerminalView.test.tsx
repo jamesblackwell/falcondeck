@@ -5,7 +5,14 @@ import { resolve } from 'node:path'
 
 import type { TerminalChunk, TerminalSessionInfo } from '@falcondeck/client-core'
 
-import { TerminalChunkApplier, encodeTerminalInput, writeStatusNotice } from '../terminal-utils'
+import {
+  TerminalChunkApplier,
+  decodeOutputWire,
+  encodeOutputWire,
+  encodeTerminalInput,
+  encodeTerminalInputBinary,
+  writeStatusNotice,
+} from '../terminal-utils'
 import { TerminalView } from './TerminalView'
 
 vi.mock('@xterm/xterm', () => ({
@@ -13,13 +20,20 @@ vi.mock('@xterm/xterm', () => ({
     cols = 80
     rows = 24
     options: Record<string, unknown> = {}
+    unicode = { activeVersion: '6' }
     onData = vi.fn()
+    onBinary = vi.fn()
     onTitleChange = vi.fn()
     onResize = vi.fn()
+    onSelectionChange = vi.fn()
+    attachCustomKeyEventHandler = vi.fn()
     loadAddon = vi.fn()
     open = vi.fn()
     write = vi.fn()
     reset = vi.fn()
+    refresh = vi.fn()
+    focus = vi.fn()
+    getSelection = vi.fn(() => '')
     dispose = vi.fn()
   },
 }))
@@ -33,6 +47,22 @@ vi.mock('@xterm/addon-webgl', () => ({
     onContextLoss = vi.fn()
     dispose = vi.fn()
   },
+}))
+vi.mock('@xterm/addon-search', () => ({
+  SearchAddon: class {
+    findNext = vi.fn(() => false)
+    findPrevious = vi.fn(() => false)
+    clearDecorations = vi.fn()
+  },
+}))
+vi.mock('@xterm/addon-web-links', () => ({
+  WebLinksAddon: class {},
+}))
+vi.mock('@xterm/addon-clipboard', () => ({
+  ClipboardAddon: class {},
+}))
+vi.mock('@xterm/addon-unicode11', () => ({
+  Unicode11Addon: class {},
 }))
 
 const fakeSession = {
@@ -92,6 +122,7 @@ describe('TerminalView socket lifecycle', () => {
       <TerminalView
         session={fakeSession}
         socketUrl="ws://127.0.0.1:4123/api/terminals/term-test/ws?since_seq=0"
+        active
         onExited={onExited}
         onTitleChange={vi.fn()}
         createSocket={(url) => new FakeSocket(url) as unknown as WebSocket}
@@ -143,6 +174,24 @@ function fakeTerminal() {
     },
   }
 }
+
+describe('terminal wire encoding', () => {
+  it('round-trips binary output frames', () => {
+    const bytes = new TextEncoder().encode('hello')
+    const encoded = encodeOutputWire(false, 42, bytes)
+    const decoded = decodeOutputWire(encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength))
+    expect(decoded?.replay).toBe(false)
+    expect(decoded?.seq).toBe(42)
+    expect(Array.from(decoded?.bytes ?? [])).toEqual(Array.from(bytes))
+    expect(decodeOutputWire(encodeOutputWire(true, 0, new Uint8Array()).buffer)?.replay).toBe(true)
+  })
+
+  it('prefixes input bytes with the input kind', () => {
+    const [chunk] = encodeTerminalInputBinary('ls\n')
+    expect(chunk[0]).toBe(0x10)
+    expect(new TextDecoder().decode(chunk.subarray(1))).toBe('ls\n')
+  })
+})
 
 describe('encodeTerminalInput', () => {
   it('passes keystrokes through as base64 of the UTF-8 bytes', () => {

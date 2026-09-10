@@ -13,6 +13,7 @@ export type DesktopShellProps = {
   main: React.ReactNode
   rail?: React.ReactNode
   bottom?: React.ReactNode
+  bottomVisible?: boolean
   sidebarVisible?: boolean
   railVisible?: boolean
   onSidebarCollapsedByDrag?: () => void
@@ -98,13 +99,15 @@ export function DesktopShell({
   main,
   rail,
   bottom,
+  bottomVisible = true,
   sidebarVisible = true,
   railVisible = true,
   onSidebarCollapsedByDrag,
   onRailCollapsedByDrag,
 }: DesktopShellProps) {
   const railOpen = Boolean(rail) && railVisible
-  const animating = useToggleAnimation([sidebarVisible, railOpen])
+  const bottomOpen = Boolean(bottom) && bottomVisible
+  const animating = useToggleAnimation([sidebarVisible, railOpen, bottomOpen])
   const [bottomHeight, setBottomHeight] = React.useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
 
   // The rail's contents poll git state, so they are torn down once the close
@@ -159,8 +162,15 @@ export function DesktopShell({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 flex-1 flex-col [&>*]:min-h-0">{shell}</div>
-      <BottomResizeHandle height={bottomHeight} onHeightChange={setBottomHeight} />
-      <div style={{ height: bottomHeight }} className="min-h-0 shrink-0 overflow-hidden">
+      {bottomOpen ? (
+        <BottomResizeHandle height={bottomHeight} onHeightChange={setBottomHeight} />
+      ) : null}
+      <div
+        style={{ height: bottomOpen ? bottomHeight : 0 }}
+        className="min-h-0 shrink-0 overflow-hidden"
+        inert={!bottomOpen}
+        aria-hidden={bottomOpen ? undefined : true}
+      >
         {bottom}
       </div>
     </div>

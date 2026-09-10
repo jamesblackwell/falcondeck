@@ -31,6 +31,34 @@ describe('DesktopShell panel collapse', () => {
     expect(container.querySelector('[data-bottom-panel-resize]')).toHaveClass('bg-surface-0')
   })
 
+  it('keeps a hidden bottom panel mounted at zero height', () => {
+    const { container, rerender } = render(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        bottom={<div>bottom content</div>}
+        bottomVisible={false}
+      />,
+    )
+
+    expect(screen.getByText('bottom content')).toBeInTheDocument()
+    expect(container.querySelector('[data-bottom-panel-resize]')).toBeNull()
+    expect(container.querySelector('[data-fd-shell]')?.parentElement).toHaveClass('h-full')
+    const holder = screen.getByText('bottom content').parentElement
+    expect(holder).toHaveStyle({ height: '0px' })
+
+    rerender(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        bottom={<div>bottom content</div>}
+        bottomVisible
+      />,
+    )
+    expect(container.querySelector('[data-bottom-panel-resize]')).not.toBeNull()
+    expect(screen.getByText('bottom content').parentElement).not.toHaveStyle({ height: '0px' })
+  })
+
   it('keeps the sidebar mounted while collapsed so the width can animate', () => {
     const { rerender } = renderShell({ sidebarVisible: true, railVisible: false })
     const sidebar = screen.getByText('sidebar content')

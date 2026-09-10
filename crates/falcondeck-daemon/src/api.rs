@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use base64::Engine as _;
 use futures_util::StreamExt;
 use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tower_http::cors::{Any, CorsLayer};
@@ -24,7 +25,7 @@ use falcondeck_core::{
     UpdateThreadRequest,
     terminal::{
         OpenTerminalRequest, TerminalClientFrame, TerminalListResponse, TerminalOpenedResponse,
-        TerminalServerFrame,
+        TerminalServerFrame, decode_input_wire, encode_output_wire,
     },
 };
 
@@ -776,7 +777,9 @@ async fn thread_item(
     Path((workspace_id, thread_id, item_id)): Path<(String, String, String)>,
 ) -> Result<Json<falcondeck_core::ConversationItem>, DaemonError> {
     Ok(Json(
-        state.thread_item(&workspace_id, &thread_id, &item_id).await?,
+        state
+            .thread_item(&workspace_id, &thread_id, &item_id)
+            .await?,
     ))
 }
 
@@ -1639,8 +1642,7 @@ async fn terminal_socket(
         tokio::select! {
             frame = receiver.recv() => {
                 let Some(frame) = frame else { break; };
-                let Ok(text) = serde_json::to_string(&frame) else { continue; };
-                if socket.send(Message::Text(text.into())).await.is_err() {
+                if send_terminal_frame(&mut socket, &frame).await.is_err() {
                     break;
                 }
             }
@@ -1650,15 +1652,20 @@ async fn terminal_socket(
                     Message::Text(text) => {
                         if let Ok(frame) = serde_json::from_str::<TerminalClientFrame>(&text) {
                             if matches!(frame, TerminalClientFrame::TerminalPing) {
-                                let Ok(text) = serde_json::to_string(&TerminalServerFrame::TerminalPong) else {
-                                    continue;
-                                };
-                                if socket.send(Message::Text(text.into())).await.is_err() {
+                                if send_terminal_frame(&mut socket, &TerminalServerFrame::TerminalPong)
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             } else {
                                 state.terminals().handle_client_frame(&terminal_id, &frame);
                             }
+                        }
+                    }
+                    Message::Binary(data) => {
+                        if let Some(bytes) = decode_input_wire(&data) {
+                            state.terminals().write_input(&terminal_id, bytes);
                         }
                     }
                     Message::Close(_) => break,
@@ -1668,6 +1675,33 @@ async fn terminal_socket(
         }
     }
     state.terminals().detach(&terminal_id, client_id);
+}
+
+async fn send_terminal_frame(
+    socket: &mut WebSocket,
+    frame: &TerminalServerFrame,
+) -> Result<(), axum::Error> {
+    match frame {
+        TerminalServerFrame::TerminalOutput { chunk }
+        | TerminalServerFrame::TerminalReplay { chunk } => {
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&chunk.data_base64)
+            else {
+                return Ok(());
+            };
+            let replay = matches!(frame, TerminalServerFrame::TerminalReplay { .. });
+            socket
+                .send(Message::Binary(
+                    encode_output_wire(replay, chunk.seq, &bytes).into(),
+                ))
+                .await
+        }
+        other => {
+            let Ok(text) = serde_json::to_string(other) else {
+                return Ok(());
+            };
+            socket.send(Message::Text(text.into())).await
+        }
+    }
 }
 
 /// Builds the control request context from internal headers. Local callers

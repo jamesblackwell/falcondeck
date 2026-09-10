@@ -1,11 +1,15 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { TerminalSessionInfo } from '@falcondeck/client-core'
 
 import { TerminalPanel } from './TerminalPanel'
-import { nextActiveTabId, terminalTabLabel, type TerminalTab } from '../terminal-tabs'
+import { adjacentTabId, nextActiveTabId, terminalTabLabel, type TerminalTab } from '../terminal-tabs'
+
+vi.mock('../terminal-xterm', () => ({
+  prefetchTerminalRuntime: () => Promise.resolve(),
+}))
 
 vi.mock('./TerminalView', () => ({
   TerminalView: ({ session }: { session: TerminalSessionInfo }) => (
@@ -72,7 +76,9 @@ describe('TerminalPanel', () => {
       sessions: [session('term-1'), session('term-2')],
     })
     await renderPanel()
-    expect(await screen.findByTestId('terminal-view')).toHaveAttribute('data-session', 'term-2')
+    const views = await screen.findAllByTestId('terminal-view')
+    expect(views).toHaveLength(2)
+    expect(views[1]).toHaveAttribute('data-session', 'term-2')
     expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(2)
     expect(apiMocks.openTerminal).not.toHaveBeenCalled()
   })
@@ -80,9 +86,32 @@ describe('TerminalPanel', () => {
   it('auto-creates a terminal when the workspace has none', async () => {
     await renderPanel()
     await waitFor(() => {
-      expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-1', { cols: 100, rows: 30 })
+      expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-1', { cols: 80, rows: 24 })
     })
     expect(await screen.findByTestId('terminal-view')).toHaveAttribute('data-session', 'term-new')
+  })
+
+  it('does not auto-create terminals while the retained panel is hidden', async () => {
+    const { rerender } = render(
+      <TerminalPanel
+        baseUrl="http://127.0.0.1:4123"
+        workspaceId="workspace-1"
+        visible={false}
+        onHide={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(apiMocks.listTerminals).toHaveBeenCalledOnce())
+    expect(apiMocks.openTerminal).not.toHaveBeenCalled()
+
+    rerender(
+      <TerminalPanel
+        baseUrl="http://127.0.0.1:4123"
+        workspaceId="workspace-1"
+        visible
+        onHide={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledOnce())
   })
 
   it('starts a new terminal from the + button', async () => {
@@ -95,7 +124,90 @@ describe('TerminalPanel', () => {
       expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(2)
     })
     expect(apiMocks.openTerminal).toHaveBeenCalled()
-    expect(screen.getByTestId('terminal-view')).toHaveAttribute('data-session', 'term-2')
+    const views = screen.getAllByTestId('terminal-view')
+    expect(views).toHaveLength(2)
+    expect(views.some((view) => view.getAttribute('data-session') === 'term-2')).toBe(true)
+  })
+
+  it('does not let session restore overwrite a terminal requested while the panel mounts', async () => {
+    let resolveList: ((value: { sessions: TerminalSessionInfo[] }) => void) | undefined
+    apiMocks.listTerminals.mockReturnValue(
+      new Promise((resolve) => {
+        resolveList = resolve
+      }),
+    )
+    apiMocks.openTerminal.mockResolvedValue({ session: session('term-shortcut') })
+
+    render(
+      <TerminalPanel
+        baseUrl="http://127.0.0.1:4123"
+        workspaceId="workspace-1"
+        createRequestKey={1}
+        onHide={vi.fn()}
+      />,
+    )
+
+    await waitFor(() => expect(apiMocks.listTerminals).toHaveBeenCalledOnce())
+    expect(apiMocks.openTerminal).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveList?.({ sessions: [session('term-existing')] })
+    })
+
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledOnce())
+    const views = await screen.findAllByTestId('terminal-view')
+    expect(views.map((view) => view.getAttribute('data-session'))).toEqual([
+      'term-existing',
+      'term-shortcut',
+    ])
+  })
+
+  it('does not attach an in-flight terminal creation to a newly selected project', async () => {
+    let resolveFirst: ((value: { session: TerminalSessionInfo }) => void) | undefined
+    apiMocks.openTerminal
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFirst = resolve
+        }),
+      )
+      .mockResolvedValueOnce({
+        session: session('term-workspace-2', { workspace_id: 'workspace-2' }),
+      })
+
+    const { rerender } = render(
+      <TerminalPanel
+        baseUrl="http://127.0.0.1:4123"
+        workspaceId="workspace-1"
+        onHide={vi.fn()}
+      />,
+    )
+    await waitFor(() =>
+      expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-1', {
+        cols: 80,
+        rows: 24,
+      }),
+    )
+
+    rerender(
+      <TerminalPanel
+        baseUrl="http://127.0.0.1:4123"
+        workspaceId="workspace-2"
+        onHide={vi.fn()}
+      />,
+    )
+    await waitFor(() =>
+      expect(apiMocks.listTerminals).toHaveBeenCalledWith('workspace-2'),
+    )
+    await act(async () => {
+      resolveFirst?.({ session: session('term-workspace-1') })
+    })
+
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledTimes(2))
+    expect(await screen.findByTestId('terminal-view')).toHaveAttribute(
+      'data-session',
+      'term-workspace-2',
+    )
+    expect(screen.getAllByTestId('terminal-view')).toHaveLength(1)
   })
 
   it('closes a terminal through its tab button', async () => {
@@ -103,7 +215,7 @@ describe('TerminalPanel', () => {
       sessions: [session('term-1'), session('term-2')],
     })
     await renderPanel()
-    await screen.findByTestId('terminal-view')
+    await screen.findAllByTestId('terminal-view')
     const closeButton = document.querySelectorAll('[data-terminal-tab-close]')[0]
     fireEvent.click(closeButton)
     await waitFor(() => {
@@ -151,5 +263,13 @@ describe('terminal tab helpers', () => {
     expect(nextActiveTabId(tabs, 'a')).toBe('b')
     expect(nextActiveTabId([tab('a')], 'a')).toBeNull()
     expect(nextActiveTabId([], 'missing')).toBeNull()
+  })
+
+  it('cycles to the neighbouring tab', () => {
+    const tabs = [tab('a'), tab('b'), tab('c')]
+    expect(adjacentTabId(tabs, 'b', 1)).toBe('c')
+    expect(adjacentTabId(tabs, 'c', 1)).toBe('a')
+    expect(adjacentTabId(tabs, 'a', -1)).toBe('c')
+    expect(adjacentTabId([], null, 1)).toBeNull()
   })
 })

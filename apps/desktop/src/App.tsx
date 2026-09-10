@@ -281,6 +281,13 @@ const TerminalPanel = lazy(() =>
     default: module.TerminalPanel,
   })),
 );
+
+function prefetchTerminalChrome() {
+  void import("./components/TerminalPanel");
+  void import("./terminal-xterm").then((module) =>
+    module.prefetchTerminalRuntime(),
+  );
+}
 export default function App() {
   return (
     <ToastProvider>
@@ -461,6 +468,19 @@ function AppInner() {
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  const [terminalCreateKey, setTerminalCreateKey] = useState(0);
+  const [terminalFindKey, setTerminalFindKey] = useState(0);
+
+  useEffect(() => {
+    if (isTerminalOpen) setTerminalMounted(true);
+  }, [isTerminalOpen]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => prefetchTerminalChrome(), 1);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const [isExtensionsOpen, setIsExtensionsOpen] = useState(false);
   const [isPluginsOpen, setIsPluginsOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
@@ -5435,10 +5455,18 @@ function AppInner() {
         case "newThread":
           if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
           break;
-        case "findInThread":
+        case "findInThread": {
+          const inTerminal =
+            event.target instanceof Element &&
+            Boolean(event.target.closest("[data-terminal-panel]"));
+          if (inTerminal) {
+            setTerminalFindKey((current) => current + 1);
+            break;
+          }
           if (!isSettingsOpen && selectedThreadId)
             setFindRequestKey((current) => current + 1);
           break;
+        }
         case "navigateBack":
           navigateSelectionHistory(-1);
           break;
@@ -5456,6 +5484,10 @@ function AppInner() {
           break;
         case "toggleTerminal":
           setIsTerminalOpen((current) => !current);
+          break;
+        case "newTerminal":
+          setIsTerminalOpen(true);
+          setTerminalCreateKey((current) => current + 1);
           break;
         case "toggleChanges":
           toggleRail();
@@ -5533,6 +5565,7 @@ function AppInner() {
     handleOpenUsage,
     handleStopCallback,
     isSettingsOpen,
+    isTerminalOpen,
     navigateSelectionHistory,
     selectAdjacentThread,
     selectedThread?.status,
@@ -6269,16 +6302,20 @@ function AppInner() {
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}
         bottom={
-          isTerminalOpen ? (
+          terminalMounted ? (
             <Suspense fallback={null}>
               <TerminalPanel
                 baseUrl={baseUrl}
                 workspaceId={selectedWorkspaceId}
+                visible={isTerminalOpen}
+                createRequestKey={terminalCreateKey}
+                findRequestKey={terminalFindKey}
                 onHide={() => setIsTerminalOpen(false)}
               />
             </Suspense>
           ) : undefined
         }
+        bottomVisible={isTerminalOpen}
       />
       {snapshot?.restore_phase === "loading_persisted_state" ? (
         <StartupRestoreOverlay />

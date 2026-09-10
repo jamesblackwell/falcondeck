@@ -1,21 +1,39 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { PanelBottomClose } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { ChevronDown, ChevronUp, PanelBottomClose, Plus, Search, X } from 'lucide-react'
 import { createDaemonApiClient } from '@falcondeck/client-core'
-import { Button, Tooltip } from '@falcondeck/ui'
-import { TerminalView } from './TerminalView'
-import { nextActiveTabId, terminalTabLabel, type TerminalTab } from '../terminal-tabs'
+import { Button, Tooltip, cn } from '@falcondeck/ui'
+import { TerminalView, type TerminalViewHandle } from './TerminalView'
+import {
+  adjacentTabId,
+  nextActiveTabId,
+  terminalTabLabel,
+  type TerminalTab,
+} from '../terminal-tabs'
+import {
+  FALLBACK_TERMINAL_COLS,
+  FALLBACK_TERMINAL_ROWS,
+  measureTerminalGrid,
+} from '../terminal-utils'
+import { prefetchTerminalRuntime } from '../terminal-xterm'
 import { shortcutHintTokens, useShortcutSettings } from '../shortcuts'
-
-const DEFAULT_TERMINAL_COLS = 100
-const DEFAULT_TERMINAL_ROWS = 30
 
 interface TerminalPanelProps {
   baseUrl: string
   workspaceId: string | null
   onHide: () => void
+  visible?: boolean
+  createRequestKey?: number
+  findRequestKey?: number
 }
 
-export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelProps) {
+export function TerminalPanel({
+  baseUrl,
+  workspaceId,
+  onHide,
+  visible = true,
+  createRequestKey = 0,
+  findRequestKey = 0,
+}: TerminalPanelProps) {
   const api = useMemo(() => createDaemonApiClient(baseUrl), [baseUrl])
   const shortcutSettings = useShortcutSettings()
   const [tabs, setTabs] = useState<TerminalTab[]>([])
@@ -23,13 +41,31 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
   const [loaded, setLoaded] = useState(false)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Guards the auto-create in StrictMode double-effects and against racing
-  // the tab list restore.
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findFound, setFindFound] = useState<boolean | null>(null)
   const autoCreateRef = useRef(false)
   const tabsRef = useRef<TerminalTab[]>([])
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
+  const findInputRef = useRef<HTMLInputElement | null>(null)
+  const viewRefs = useRef(new Map<string, TerminalViewHandle>())
+  const workspaceRef = useRef(workspaceId)
+  const createInFlightRef = useRef(false)
+  const lastCreateRequestKey = useRef(0)
+  const lastFindRequestKey = useRef(0)
+
+  useLayoutEffect(() => {
+    workspaceRef.current = workspaceId
+  }, [workspaceId])
+
   useEffect(() => {
     tabsRef.current = tabs
   }, [tabs])
+
+  useEffect(() => {
+    void prefetchTerminalRuntime()
+  }, [])
 
   useEffect(() => {
     if (!workspaceId) {
@@ -67,35 +103,58 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
   }, [api, workspaceId])
 
   const createTerminal = useCallback(async () => {
-    if (!workspaceId || creating) return
+    if (!workspaceId || createInFlightRef.current) return
+    const requestedWorkspaceId = workspaceId
+    createInFlightRef.current = true
     setCreating(true)
     setError(null)
+    const measured = hostRef.current
+      ? measureTerminalGrid(hostRef.current)
+      : { cols: FALLBACK_TERMINAL_COLS, rows: FALLBACK_TERMINAL_ROWS }
     try {
-      const { session } = await api.openTerminal(workspaceId, {
-        cols: DEFAULT_TERMINAL_COLS,
-        rows: DEFAULT_TERMINAL_ROWS,
-      })
+      const { session } = await api.openTerminal(requestedWorkspaceId, measured)
+      if (workspaceRef.current !== requestedWorkspaceId) return
       setTabs((current) => {
         if (current.some((tab) => tab.session.id === session.id)) return current
         return [...current, { session, status: 'running' as const, observedTitle: null }]
       })
       setActiveId(session.id)
     } catch {
-      setError('Could not start a terminal.')
+      if (workspaceRef.current === requestedWorkspaceId) {
+        setError('Could not start a terminal.')
+      }
     } finally {
+      createInFlightRef.current = false
       setCreating(false)
     }
-  }, [api, creating, workspaceId])
+  }, [api, workspaceId])
 
-  // A fresh panel with no live sessions starts one, so Cmd+J always lands in
-  // a usable shell. A failed tab-list load suppresses this: the daemon was
-  // just unreachable, so spawning needs an explicit user action.
   useEffect(() => {
-    if (!loaded || !workspaceId || error || autoCreateRef.current) return
+    if (!visible || !loaded || !workspaceId || error || autoCreateRef.current) return
     if (tabs.length > 0 || creating) return
     autoCreateRef.current = true
     void createTerminal()
-  }, [createTerminal, creating, error, loaded, tabs.length, workspaceId])
+  }, [createTerminal, creating, error, loaded, tabs.length, visible, workspaceId])
+
+  useEffect(() => {
+    if (createRequestKey <= lastCreateRequestKey.current) return
+    // Session restore owns the initial tab snapshot. Queue shortcut requests
+    // until it lands so an older list response cannot erase a newly opened tab.
+    if (!loaded) return
+    lastCreateRequestKey.current = createRequestKey
+    autoCreateRef.current = true
+    void createTerminal()
+  }, [createRequestKey, createTerminal, loaded])
+
+  useEffect(() => {
+    if (findRequestKey <= lastFindRequestKey.current) return
+    lastFindRequestKey.current = findRequestKey
+    setFindOpen(true)
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus()
+      findInputRef.current?.select()
+    })
+  }, [findRequestKey])
 
   const closeTerminal = useCallback(
     (terminalId: string) => {
@@ -103,18 +162,23 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
         current === terminalId ? nextActiveTabId(tabsRef.current, terminalId) : current,
       )
       setTabs((current) => current.filter((tab) => tab.session.id !== terminalId))
+      viewRefs.current.delete(terminalId)
       void api.closeTerminal(terminalId).catch(() => undefined)
     },
     [api],
   )
 
-  // Keep the active selection pointing at a tab that still exists.
   useEffect(() => {
     if (activeId && tabs.some((tab) => tab.session.id === activeId)) return
     setActiveId(tabs.at(-1)?.session.id ?? null)
   }, [activeId, tabs])
 
-  const activeTab = tabs.find((tab) => tab.session.id === activeId) ?? null
+  useEffect(() => {
+    if (!visible || !activeId) return
+    const view = viewRefs.current.get(activeId)
+    view?.reactivate()
+    view?.focus()
+  }, [visible, activeId])
 
   const handleExited = useCallback((terminalId: string) => {
     setTabs((current) =>
@@ -134,8 +198,50 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
     )
   }, [])
 
+  const cycleTab = useCallback((offset: -1 | 1) => {
+    const next = adjacentTabId(tabsRef.current, activeId, offset)
+    if (next) setActiveId(next)
+  }, [activeId])
+
+  const runFind = useCallback(
+    (backwards = false) => {
+      const view = activeId ? viewRefs.current.get(activeId) : undefined
+      if (!findQuery || !view) {
+        setFindFound(findQuery ? false : null)
+        return
+      }
+      const found = backwards ? view.findPrevious(findQuery) : view.findNext(findQuery)
+      setFindFound(found)
+    },
+    [activeId, findQuery],
+  )
+
+  const closeFind = useCallback(() => {
+    const view = activeId ? viewRefs.current.get(activeId) : undefined
+    setFindOpen(false)
+    setFindFound(null)
+    view?.clearSearch()
+    view?.focus()
+  }, [activeId])
+
+  useEffect(() => {
+    function handleKey(event: KeyboardEvent) {
+      if (!visible) return
+      const target = event.target
+      const inPanel = target instanceof Node && panelRef.current?.contains(target)
+      if (!inPanel) return
+      if (event.ctrlKey && event.key === 'Tab') {
+        event.preventDefault()
+        cycleTab(event.shiftKey ? -1 : 1)
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [cycleTab, visible])
+
   return (
     <section
+      ref={panelRef}
       aria-label="Terminal"
       data-terminal-panel=""
       className="flex h-full min-h-0 flex-col bg-surface-0"
@@ -159,6 +265,13 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
                   onClick={() => setActiveId(tab.session.id)}
                   className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-fg-tertiary hover:bg-surface-2 data-[active=true]:bg-surface-2 data-[active=true]:text-fg-primary"
                 >
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full',
+                      tab.status === 'exited' ? 'bg-fg-muted' : 'bg-accent',
+                    )}
+                  />
                   <span className="max-w-40 truncate">{terminalTabLabel(tab)}</span>
                   {tab.status === 'exited' ? (
                     <span className="text-[10px] text-fg-muted">exited</span>
@@ -171,22 +284,38 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
                   onClick={() => closeTerminal(tab.session.id)}
                   className="rounded p-0.5 text-fg-muted hover:bg-surface-2 hover:text-fg-primary"
                 >
-                  ×
+                  <X aria-hidden="true" className="h-3 w-3" />
                 </button>
               </div>
             )
           })}
         </div>
-        <button
-          type="button"
-          aria-label="New terminal"
-          data-terminal-new=""
-          onClick={() => void createTerminal()}
-          disabled={!workspaceId || creating}
-          className="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg-primary disabled:opacity-40"
-        >
-          +
-        </button>
+        <Tooltip label="Find in terminal">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Find in terminal"
+            onClick={() => {
+              setFindOpen(true)
+              requestAnimationFrame(() => findInputRef.current?.focus())
+            }}
+          >
+            <Search aria-hidden="true" className="h-4 w-4" />
+          </Button>
+        </Tooltip>
+        <Tooltip label="New terminal" shortcut={shortcutHintTokens('newTerminal', shortcutSettings)}>
+          <button
+            type="button"
+            aria-label="New terminal"
+            data-terminal-new=""
+            onClick={() => void createTerminal()}
+            disabled={!workspaceId || creating}
+            className="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg-primary disabled:opacity-40"
+          >
+            <Plus aria-hidden="true" className="h-4 w-4" />
+          </button>
+        </Tooltip>
         <Tooltip
           label="Hide terminal"
           shortcut={shortcutHintTokens('toggleTerminal', shortcutSettings)}
@@ -202,21 +331,99 @@ export function TerminalPanel({ baseUrl, workspaceId, onHide }: TerminalPanelPro
           </Button>
         </Tooltip>
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden">
+      {findOpen ? (
+        <div
+          role="search"
+          aria-label="Find in terminal"
+          className="flex items-center gap-1 border-b border-border-subtle bg-surface-2 px-2 py-1"
+          onKeyDown={(event) => {
+            event.stopPropagation()
+            if (event.key === 'Escape') {
+              event.preventDefault()
+              closeFind()
+            } else if (event.key === 'Enter') {
+              event.preventDefault()
+              runFind(event.shiftKey)
+            }
+          }}
+        >
+          <label className="fd-focus-within flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2">
+            <Search className="h-3.5 w-3.5 text-fg-muted" aria-hidden="true" />
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              onChange={(event) => {
+                setFindQuery(event.target.value)
+                setFindFound(null)
+              }}
+              placeholder="Find in terminal"
+              aria-label="Find text"
+              className="h-7 min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted"
+            />
+            {findFound === false ? (
+              <span className="text-[length:var(--fd-text-2xs)] text-danger">No match</span>
+            ) : null}
+          </label>
+          <button
+            type="button"
+            className="fd-focus rounded p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
+            aria-label="Previous match"
+            onClick={() => runFind(true)}
+          >
+            <ChevronUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            className="fd-focus rounded p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
+            aria-label="Next match"
+            onClick={() => runFind(false)}
+          >
+            <ChevronDown className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            className="fd-focus rounded p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-primary"
+            aria-label="Close find"
+            onClick={closeFind}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
+      <div ref={hostRef} className="relative min-h-0 flex-1 overflow-hidden">
         {!workspaceId ? (
           <div className="flex h-full items-center justify-center text-sm text-fg-muted">
             Select a project to open a terminal.
           </div>
         ) : error ? (
           <div className="flex h-full items-center justify-center text-sm text-danger">{error}</div>
-        ) : activeTab ? (
-          <TerminalView
-            key={activeTab.session.id}
-            session={activeTab.session}
-            socketUrl={api.terminalSocketUrl(activeTab.session.id)}
-            onExited={() => handleExited(activeTab.session.id)}
-            onTitleChange={(title) => handleTitleChange(activeTab.session.id, title)}
-          />
+        ) : tabs.length > 0 ? (
+          tabs.map((tab) => {
+            const isActive = tab.session.id === activeId
+            return (
+              <div
+                key={tab.session.id}
+                className={cn(
+                  'h-full w-full',
+                  isActive ? 'relative z-[1]' : 'invisible absolute inset-0 pointer-events-none',
+                )}
+                inert={!isActive}
+                aria-hidden={isActive ? undefined : true}
+              >
+                <TerminalView
+                  ref={(handle) => {
+                    if (handle) viewRefs.current.set(tab.session.id, handle)
+                    else viewRefs.current.delete(tab.session.id)
+                  }}
+                  session={tab.session}
+                  active={isActive && visible}
+                  socketUrl={api.terminalSocketUrl(tab.session.id)}
+                  onExited={() => handleExited(tab.session.id)}
+                  onTitleChange={(title) => handleTitleChange(tab.session.id, title)}
+                />
+              </div>
+            )
+          })
         ) : loaded ? (
           <div className="flex h-full items-center justify-center text-sm text-fg-muted">
             No terminals

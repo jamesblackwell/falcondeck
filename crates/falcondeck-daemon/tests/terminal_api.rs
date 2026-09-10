@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use falcondeck_core::terminal::{TerminalClientFrame, TerminalServerFrame};
+use falcondeck_core::terminal::{
+    TerminalChunk, TerminalClientFrame, TerminalServerFrame, decode_output_wire, encode_input_wire,
+};
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
@@ -56,6 +58,28 @@ async fn local_websockets_reject_missing_and_untrusted_origins() {
     .await;
 }
 
+fn parse_terminal_ws_message(message: Message) -> Option<TerminalServerFrame> {
+    match message {
+        Message::Text(text) => serde_json::from_str(&text).ok(),
+        Message::Binary(data) => {
+            let (replay, seq, bytes) = decode_output_wire(&data)?;
+            let chunk = TerminalChunk {
+                seq,
+                data_base64: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    bytes,
+                ),
+            };
+            Some(if replay {
+                TerminalServerFrame::TerminalReplay { chunk }
+            } else {
+                TerminalServerFrame::TerminalOutput { chunk }
+            })
+        }
+        _ => None,
+    }
+}
+
 async fn next_frame(
     socket: &mut (impl StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin),
 ) -> TerminalServerFrame {
@@ -69,10 +93,9 @@ async fn next_frame(
             .expect("timed out waiting for terminal websocket frame")
             .expect("terminal websocket closed")
             .expect("websocket error");
-        let Message::Text(text) = message else {
+        let Some(frame) = parse_terminal_ws_message(message) else {
             continue;
         };
-        let frame: TerminalServerFrame = serde_json::from_str(&text).expect("valid frame");
         match frame {
             TerminalServerFrame::TerminalPong | TerminalServerFrame::TerminalAttached { .. } => {
                 continue;
@@ -215,14 +238,10 @@ async fn terminal_http_and_websocket_round_trip() {
     wait_for_pong(&mut socket).await;
 
     let marker = "falcondeck-terminal-http-marker";
-    let input = TerminalClientFrame::TerminalInput {
-        data_base64: base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            format!("echo {marker}\n"),
-        ),
-    };
     socket
-        .send(Message::Text(serde_json::to_string(&input).unwrap().into()))
+        .send(Message::Binary(
+            encode_input_wire(format!("echo {marker}\n").as_bytes()).into(),
+        ))
         .await
         .unwrap();
 

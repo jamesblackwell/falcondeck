@@ -43,6 +43,9 @@ describe('keyboard shortcuts', () => {
     expect(commandForEvent('global', key('u', { metaKey: true }))).toBe('openActivity')
     expect(commandForEvent('global', key('u', { metaKey: true, shiftKey: true }))).toBe('openUsage')
     expect(commandForEvent('global', key('j', { metaKey: true }))).toBe('toggleTerminal')
+    expect(
+      commandForEvent('global', key('`', { ctrlKey: true, shiftKey: true })),
+    ).toBe('newTerminal')
     expect(commandForEvent('global', key('?', { metaKey: true, shiftKey: true }))).toBe('openKeyboardShortcuts')
     expect(commandForEvent('global', key('Enter', { metaKey: true }))).toBeNull()
   })
