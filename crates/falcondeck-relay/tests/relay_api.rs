@@ -823,53 +823,33 @@ async fn multi_megabyte_replay_does_not_queue_ahead_of_initial_sync_rpc() {
         panic!("expected initial index request");
     };
     let result = test_envelope(&"i".repeat(CHUNK_BYTES * 2));
-    let result_bytes = serde_json::to_vec(&RelayServerMessage::RpcResult {
-        request_id: "initial-index".into(),
-        ok: true,
-        result: Some(result.clone()),
-        error: None,
-        failure: None,
-    })
-    .unwrap()
-    .len();
     send_client_message(
         &mut daemon,
         &RelayClientMessage::RpcResult {
             request_id,
             ok: true,
-            result: Some(result),
+            result: Some(result.clone()),
             error: None,
         },
     )
     .await;
 
-    let mut received_chunks = 0usize;
-    timeout(TokioDuration::from_secs(2), async {
-        while received_chunks < result_bytes.div_ceil(CHUNK_BYTES) {
-            let frame = phone.next().await.unwrap().unwrap();
-            let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-            if value["type"] != "transport-chunk" {
-                continue;
-            }
-            assert_eq!(value["total"], result_bytes);
-            assert_eq!(value["index"], received_chunks);
-            received_chunks += 1;
-            phone
-                .send(Message::Text(
-                    serde_json::json!({
-                        "type": "transport-ack", "id": value["id"], "index": value["index"],
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .unwrap();
-        }
-    })
-    .await
-    .expect("index result must not wait behind replay");
+    let RelayServerMessage::RpcResult {
+        request_id,
+        ok,
+        result: received,
+        ..
+    } = timeout(TokioDuration::from_secs(2), recv_server_message(&mut phone))
+        .await
+        .expect("index result must not wait behind replay")
+    else {
+        panic!("expected index result");
+    };
+    assert_eq!(request_id, "initial-index");
+    assert!(ok);
+    assert_eq!(received, Some(result));
     eprintln!(
-        "3 MiB retained backlog: {received_chunks} index chunks delivered in {:?}",
+        "3 MiB retained backlog: urgent index result delivered in {:?}",
         started.elapsed()
     );
 
@@ -1006,7 +986,10 @@ async fn negotiated_bulk_transfer_does_not_block_rpc_forwarding() {
     })
     .await
     .unwrap();
-    assert!(chunks <= WINDOW_CHUNKS, "bulk exceeded its credit: {chunks} chunks");
+    assert!(
+        chunks <= WINDOW_CHUNKS,
+        "bulk exceeded its credit: {chunks} chunks"
+    );
     assert!(
         timeout(TokioDuration::from_millis(300), phone.next())
             .await

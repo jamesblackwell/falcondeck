@@ -484,7 +484,11 @@ async fn socket_loop(
     };
 
     let close_code = close_code.load(std::sync::atomic::Ordering::Relaxed);
-    let reason = if close_code != 0 { "peer_close" } else { close_reason };
+    let reason = if close_code != 0 {
+        "peer_close"
+    } else {
+        close_reason
+    };
     tracing::info!(session_id = %auth.session_id, %peer_id, role = ?auth.role, reason, close_code,
         duration_ms = opened_at.elapsed().as_millis() as u64,
         idle_ms = last_activity.elapsed().as_millis() as u64,

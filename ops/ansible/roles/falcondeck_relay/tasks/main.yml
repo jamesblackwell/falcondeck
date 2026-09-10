@@ -43,6 +43,7 @@
       - --exclude=node_modules
       - --exclude=dist
       - --exclude=.expo
+      - --exclude=var
       - --exclude=apps/mobile/ios
       - --exclude=apps/mobile/src/vendor/mermaid.min.txt
       - --exclude=ops/ansible/inventory/local

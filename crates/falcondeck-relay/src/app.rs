@@ -2555,7 +2555,9 @@ impl AppState {
         for (request_id, method, requester_peer_id, tx) in expired {
             warn!(
                 session_id,
-                request_id, requester_peer_id, method,
+                request_id,
+                requester_peer_id,
+                method,
                 deadline_ms = PENDING_RPC_TTL_SECONDS * 1000,
                 "relay rpc request timed out before the daemon replied"
             );
@@ -2628,14 +2630,30 @@ impl AppState {
 
         self.notify_expired_rpcs(session_id, expired);
         if let Some((request_id, requester_peer_id, tx, method, elapsed_ms)) = response {
-            let ciphertext_bytes = result.as_ref().or(error.as_ref()).map_or(0, |value| value.ciphertext.len());
+            let ciphertext_bytes = result
+                .as_ref()
+                .or(error.as_ref())
+                .map_or(0, |value| value.ciphertext.len());
             tracing::debug!(session_id, %request_id, %requester_peer_id, responder_peer_id = peer_id, method, elapsed_ms, ciphertext_bytes, ok, "relay rpc response prepared for requester queue");
             if elapsed_ms >= 2000 {
-                let suppressed = tx.slow_rpc_log.lock().unwrap_or_else(|e| e.into_inner())
+                let suppressed = tx
+                    .slow_rpc_log
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
                     .take(std::time::Instant::now());
                 if let Some(suppressed) = suppressed {
-                    tracing::info!(session_id, request_id, requester_peer_id, responder_peer_id = peer_id,
-                        method, elapsed_ms, ciphertext_bytes, ok, suppressed, "relay slow rpc response");
+                    tracing::info!(
+                        session_id,
+                        request_id,
+                        requester_peer_id,
+                        responder_peer_id = peer_id,
+                        method,
+                        elapsed_ms,
+                        ciphertext_bytes,
+                        ok,
+                        suppressed,
+                        "relay slow rpc response"
+                    );
                 }
             }
             self.queue_message(
