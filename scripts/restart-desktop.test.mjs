@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmdirSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmdirSync, unlinkSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mainPids, restartDesktop, withRestartLock } from './restart-desktop.mjs';
@@ -94,15 +96,48 @@ test('installs a verified staged bundle, retains backup, then opens once', async
   assert.ok(verification < f.calls.findIndex(([c]) => c.endsWith('/osascript')));
   assert.equal(f.calls.filter(([c]) => c.endsWith('/open')).length, 1);
 });
-test('overlapping restart is rejected and lock is released on failure', async () => {
+test('overlapping restart is rejected and lock is released on failure', { skip: process.platform !== 'darwin' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'falcondeck-restart-test-'));
   const lock = join(dir, 'lock');
   try {
     await assert.rejects(withRestartLock(lock, async () => {
-      await assert.rejects(withRestartLock(lock, () => assert.fail('overlap')), /Another restart/);
+      await assert.rejects(withRestartLock(lock, () => assert.fail('overlap')), /Another desktop restart/);
       throw new Error('startup failed');
     }), /startup failed/);
-    assert.equal(existsSync(lock), false);
     await withRestartLock(lock, async () => {});
-  } finally { rmdirSync(dir); }
+  } finally { unlinkSync(join(lock, 'owner')); rmdirSync(lock); rmdirSync(dir); }
+});
+
+test('an abandoned directory from the old installer does not block restart', { skip: process.platform !== 'darwin' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'falcondeck-restart-test-'));
+  const lock = join(dir, 'lock');
+  mkdirSync(lock);
+  try { await withRestartLock(lock, async () => {}); }
+  finally { unlinkSync(join(lock, 'owner')); rmdirSync(lock); rmdirSync(dir); }
+});
+
+test('SIGKILL releases ownership without finally cleanup', { skip: process.platform !== 'darwin', timeout: 10000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'falcondeck-restart-test-'));
+  const lock = join(dir, 'lock');
+  const module = new URL('./restart-desktop.mjs', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e',
+    `import { withRestartLock } from ${JSON.stringify(module)};
+     await withRestartLock(${JSON.stringify(lock)}, async () => {
+       process.stdout.write('locked'); await new Promise(() => setInterval(() => {}, 1000));
+     });`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit');
+  try {
+    await Promise.race([
+      once(child.stdout, 'data'),
+      exited.then(() => { throw new Error('Lock holder exited before acquiring lock'); }),
+    ]);
+    await assert.rejects(withRestartLock(lock, () => assert.fail('overlap')), /Another desktop restart/);
+    child.kill('SIGKILL');
+    await exited;
+    await withRestartLock(lock, async () => {});
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+    unlinkSync(join(lock, 'owner')); rmdirSync(lock); rmdirSync(dir);
+  }
 });

@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmdirSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, renameSync, rmdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -97,12 +97,23 @@ export async function restartDesktop({ installFrom, io = run, delay = sleep, hea
 }
 
 export async function withRestartLock(lock, action) {
-  mkdirSync(dirname(lock), { recursive: true });
-  try { mkdirSync(lock); } catch (error) {
-    if (error.code === 'EEXIST') throw new Error(`Another restart is active, or was interrupted. Inspect before removing ${lock}`);
-    throw error;
+  // Keep the directory and inode: existence is not ownership. The old empty
+  // directory lock can be reused after an interrupted deployment.
+  mkdirSync(lock, { recursive: true });
+  const fd = openSync(join(lock, 'owner'), 'a', 0o600);
+  try {
+    // BSD flock belongs to the shared open-file description. lockf acquires it
+    // through inherited fd 3; our fd keeps it alive until close or process death.
+    const result = spawnSync('/usr/bin/lockf', ['-s', '-t', '0', '3'], {
+      stdio: ['ignore', 'ignore', 'pipe', fd], encoding: 'utf8', timeout: 5000,
+    });
+    if (result.error) throw result.error;
+    if (result.status === 75) throw new Error('Another desktop restart is active; wait for it to finish.');
+    if (result.status !== 0) throw new Error(`Cannot acquire desktop restart lock: ${result.stderr || result.signal || result.status}`);
+    return await action();
+  } finally {
+    closeSync(fd);
   }
-  try { return await action(); } finally { rmdirSync(lock); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
