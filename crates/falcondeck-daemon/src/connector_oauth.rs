@@ -348,20 +348,35 @@ fn authorization_server_metadata_url(issuer: &str) -> Result<String, String> {
     ))
 }
 
+/// RFC 9728: insert `/.well-known/oauth-protected-resource` between host and
+/// path, then fall back to the origin-level well-known URI.
+fn protected_resource_metadata_urls(mcp_url: &str) -> Result<Vec<String>, String> {
+    let parsed = mcp_url
+        .parse::<reqwest::Url>()
+        .map_err(|error| format!("invalid MCP URL: {error}"))?;
+    let origin = origin_of(mcp_url)?;
+    let path = parsed.path().trim_end_matches('/');
+    let mut urls = Vec::with_capacity(2);
+    if !path.is_empty() {
+        urls.push(format!(
+            "{origin}/.well-known/oauth-protected-resource{path}"
+        ));
+    }
+    urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
+    Ok(urls)
+}
+
 async fn discover(mcp_url: &str) -> Result<AuthorizationServerMetadata, String> {
     let origin = origin_of(mcp_url)?;
-    let issuer = match fetch_json::<ProtectedResourceMetadata>(&format!(
-        "{origin}/.well-known/oauth-protected-resource"
-    ))
-    .await
-    {
-        Ok(meta) => meta
-            .authorization_servers
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| origin.clone()),
-        Err(_) => origin.clone(),
-    };
+    let mut issuer = origin.clone();
+    for url in protected_resource_metadata_urls(mcp_url)? {
+        if let Ok(meta) = fetch_json::<ProtectedResourceMetadata>(&url).await {
+            if let Some(server) = meta.authorization_servers.into_iter().next() {
+                issuer = server;
+            }
+            break;
+        }
+    }
     fetch_json::<AuthorizationServerMetadata>(&authorization_server_metadata_url(&issuer)?).await
 }
 
@@ -453,12 +468,176 @@ pub async fn start_authorization(catalog_id: &str, redirect_base: &str) -> Resul
     }))
 }
 
-fn html_page(title: &str, body: &str) -> String {
+const CALLBACK_HTML: &str = include_str!("connector_oauth_callback.html");
+const FALCON_MARK: &str = include_str!("../../../assets/brand/logomark-mark-dark.svg");
+
+const CHECK_ICON: &str = r#"<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8.5l3 3 6-6" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+const CLOSE_ICON: &str = r#"<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>"#;
+
+#[derive(Clone, Copy)]
+enum PageKind {
+    Success,
+    Error,
+}
+
+struct CallbackPage<'a> {
+    kind: PageKind,
+    title: &'a str,
+    body: &'a str,
+    connector_id: Option<&'a str>,
+    detail: Option<&'a str>,
+}
+
+fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn truncate_detail(value: &str) -> String {
+    const MAX: usize = 280;
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= MAX {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(MAX).collect();
+    format!("{cut}…")
+}
+
+fn letter_mark(name: &str) -> char {
+    name.chars()
+        .find(|ch| ch.is_alphabetic())
+        .map(|ch| ch.to_ascii_uppercase())
+        .unwrap_or('?')
+}
+
+fn connector_identity(id: &str) -> (&str, Option<&str>) {
+    connector_catalog::get(id)
+        .map(|server| (server.name, Some(server.domain)))
+        .unwrap_or((id, None))
+}
+
+fn oauth_provider_error(error: &str) -> String {
+    match error {
+        "access_denied" => "Sign-in was cancelled.".to_string(),
+        "temporarily_unavailable" => {
+            "The authorization server is temporarily unavailable.".to_string()
+        }
+        "server_error" => "The authorization server had an error.".to_string(),
+        other => format!("The authorization server returned {other}."),
+    }
+}
+
+fn pair_html(kind: PageKind, connector_id: Option<&str>) -> String {
+    let status_icon = match kind {
+        PageKind::Success => CHECK_ICON,
+        PageKind::Error => CLOSE_ICON,
+    };
+    let Some(connector_id) = connector_id else {
+        return format!(r#"<div class="badge" aria-hidden="true">{status_icon}</div>"#);
+    };
+    let (name, domain) = connector_identity(connector_id);
+    let letter = escape_html(&letter_mark(name).to_string());
+    let logo = domain
+        .filter(|value| connector_catalog::is_catalog_domain(value))
+        .map(|value| {
+            format!(
+                r#"<img src="/api/plugin-logos?domain={}" alt="" onerror="this.remove()">"#,
+                encode_query(value)
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
-         <body style=\"font-family:system-ui,sans-serif;padding:2rem;max-width:36rem\">\
-         <h1>{title}</h1><p>{body}</p></body></html>"
+        r#"<div class="pair" aria-hidden="true"><div class="tile">{logo}<span class="letter">{letter}</span></div><div class="status">{status_icon}</div><div class="tile falcon">{FALCON_MARK}</div></div>"#
     )
+}
+
+fn detail_html(detail: Option<&str>) -> String {
+    let Some(detail) = detail.map(str::trim).filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    format!(
+        "<details><summary>Details</summary><pre>{}</pre></details>",
+        escape_html(&truncate_detail(detail))
+    )
+}
+
+fn pending_connector_id(state: Option<&str>) -> Option<String> {
+    let state = state.filter(|value| !value.is_empty())?;
+    let pending_map = pending().lock().unwrap_or_else(|p| p.into_inner());
+    pending_map.get(state).map(|item| item.name.clone())
+}
+
+fn html_page(page: CallbackPage<'_>) -> String {
+    let document_title = format!("{} · FalconDeck", page.title);
+    let meta = match page.kind {
+        PageKind::Success => "You can close this window and return to FalconDeck.",
+        PageKind::Error => "You can close this window and try again from FalconDeck.",
+    };
+    let kind_class = match page.kind {
+        PageKind::Success => "ok",
+        PageKind::Error => "error",
+    };
+    let document_title = escape_html(&document_title);
+    let title = escape_html(page.title);
+    let body = escape_html(page.body);
+    let pair = pair_html(page.kind, page.connector_id);
+    let detail = detail_html(page.detail);
+    render_template(&[
+        ("__KIND__", kind_class),
+        ("__DOCUMENT_TITLE__", &document_title),
+        ("__TITLE__", &title),
+        ("__BODY__", &body),
+        ("__META__", meta),
+        ("__PAIR__", &pair),
+        ("__DETAIL__", &detail),
+    ])
+}
+
+fn render_template(replacements: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(CALLBACK_HTML.len() + 256);
+    let mut rest = CALLBACK_HTML;
+    while let Some((offset, token, value)) = replacements
+        .iter()
+        .filter_map(|(token, value)| rest.find(token).map(|offset| (offset, *token, *value)))
+        .min_by_key(|(offset, _, _)| *offset)
+    {
+        rendered.push_str(&rest[..offset]);
+        rendered.push_str(value);
+        rest = &rest[offset + token.len()..];
+    }
+    rendered.push_str(rest);
+    rendered
+}
+
+fn success_page(connector_id: &str) -> String {
+    let (name, _) = connector_identity(connector_id);
+    html_page(CallbackPage {
+        kind: PageKind::Success,
+        title: "Connected",
+        body: &format!("{name} is available to every agent on the next turn."),
+        connector_id: Some(connector_id),
+        detail: None,
+    })
+}
+
+fn error_page(body: &str, connector_id: Option<&str>, detail: Option<&str>) -> String {
+    html_page(CallbackPage {
+        kind: PageKind::Error,
+        title: "Could not connect",
+        body,
+        connector_id,
+        detail,
+    })
 }
 
 /// Completes a pending login from the browser redirect.
@@ -468,19 +647,23 @@ pub async fn complete_authorization(
     error: Option<&str>,
 ) -> (u16, String) {
     if let Some(error) = error.filter(|value| !value.is_empty()) {
+        let connector_id = pending_connector_id(state);
         return (
             400,
-            html_page(
-                "Could not connect",
-                &format!("The authorization server returned {error}."),
-            ),
+            error_page(&oauth_provider_error(error), connector_id.as_deref(), None),
         );
     }
     let Some(state) = state.filter(|value| !value.is_empty()) else {
-        return (400, html_page("Could not connect", "Missing OAuth state."));
+        return (
+            400,
+            error_page("This sign-in link is incomplete.", None, None),
+        );
     };
     let Some(code) = code.filter(|value| !value.is_empty()) else {
-        return (400, html_page("Could not connect", "Missing OAuth code."));
+        return (
+            400,
+            error_page("This sign-in link is incomplete.", None, None),
+        );
     };
     let pending_item = {
         let mut pending_map = pending().lock().unwrap_or_else(|p| p.into_inner());
@@ -489,16 +672,17 @@ pub async fn complete_authorization(
     let Some(pending_item) = pending_item else {
         return (
             400,
-            html_page(
-                "Could not connect",
-                "This sign-in link is invalid or has expired. Start again from FalconDeck.",
-            ),
+            error_page("This sign-in link is invalid or has expired.", None, None),
         );
     };
     if pending_item.created.elapsed() > PENDING_TTL {
         return (
             400,
-            html_page("Could not connect", "This sign-in link has expired."),
+            error_page(
+                "This sign-in link has expired.",
+                Some(pending_item.name.as_str()),
+                None,
+            ),
         );
     }
 
@@ -527,11 +711,13 @@ pub async fn complete_authorization(
     {
         Ok(response) => response,
         Err(error) => {
+            tracing::warn!(error = %error, connector = %pending_item.name, "connector oauth token exchange failed");
             return (
                 502,
-                html_page(
-                    "Could not connect",
-                    &format!("Token exchange failed: {error}"),
+                error_page(
+                    "FalconDeck could not finish connecting.",
+                    Some(pending_item.name.as_str()),
+                    Some(&error.to_string()),
                 ),
             );
         }
@@ -539,22 +725,30 @@ pub async fn complete_authorization(
     if !response.status().is_success() {
         let status = response.status().as_u16();
         let body = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            status,
+            connector = %pending_item.name,
+            "connector oauth token exchange rejected"
+        );
         return (
             502,
-            html_page(
-                "Could not connect",
-                &format!("Token exchange returned {status}: {body}"),
+            error_page(
+                "The authorization server rejected the token exchange.",
+                Some(pending_item.name.as_str()),
+                Some(&format!("HTTP {status}: {body}")),
             ),
         );
     }
     let token: TokenResponse = match response.json().await {
         Ok(token) => token,
         Err(error) => {
+            tracing::warn!(error = %error, connector = %pending_item.name, "connector oauth token response invalid");
             return (
                 502,
-                html_page(
-                    "Could not connect",
-                    &format!("Invalid token response: {error}"),
+                error_page(
+                    "The authorization server returned an invalid token.",
+                    Some(pending_item.name.as_str()),
+                    Some(&error.to_string()),
                 ),
             );
         }
@@ -570,7 +764,14 @@ pub async fn complete_authorization(
             client_id: pending_item.client_id,
         },
     ) {
-        return (500, html_page("Could not connect", &error));
+        return (
+            500,
+            error_page(
+                "FalconDeck could not save the connection.",
+                Some(pending_item.name.as_str()),
+                Some(&error),
+            ),
+        );
     }
     if let Err(error) = crate::connectors::upsert_global_http_connector(
         &pending_item.name,
@@ -578,18 +779,16 @@ pub async fn complete_authorization(
         Some("oauth"),
         std::collections::BTreeMap::new(),
     ) {
-        return (500, html_page("Could not connect", &error));
-    }
-    (
-        200,
-        html_page(
-            "Connected to FalconDeck",
-            &format!(
-                "{} is connected. You can close this window and return to FalconDeck.",
-                pending_item.name
+        return (
+            500,
+            error_page(
+                "FalconDeck could not save the connection.",
+                Some(pending_item.name.as_str()),
+                Some(&error),
             ),
-        ),
-    )
+        );
+    }
+    (200, success_page(&pending_item.name))
 }
 
 #[cfg(test)]
@@ -630,6 +829,29 @@ mod tests {
         assert_eq!(
             authorization_server_metadata_url("https://example.com").unwrap(),
             "https://example.com/.well-known/oauth-authorization-server"
+        );
+    }
+
+    #[test]
+    fn protected_resource_metadata_urls_use_rfc_9728_path_insertion() {
+        assert_eq!(
+            protected_resource_metadata_urls("https://api.mobbin.com/mcp").unwrap(),
+            vec![
+                "https://api.mobbin.com/.well-known/oauth-protected-resource/mcp".to_string(),
+                "https://api.mobbin.com/.well-known/oauth-protected-resource".to_string(),
+            ]
+        );
+        assert_eq!(
+            protected_resource_metadata_urls("https://mcp.vercel.com").unwrap(),
+            vec!["https://mcp.vercel.com/.well-known/oauth-protected-resource".to_string()]
+        );
+        assert_eq!(
+            protected_resource_metadata_urls("https://api.githubcopilot.com/mcp/").unwrap(),
+            vec![
+                "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp"
+                    .to_string(),
+                "https://api.githubcopilot.com/.well-known/oauth-protected-resource".to_string(),
+            ]
         );
     }
 
@@ -717,5 +939,58 @@ mod tests {
         assert!(request.contains("client_id=client-id"));
         assert!(request.contains("resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp"));
         server.abort();
+    }
+
+    #[test]
+    fn success_page_uses_catalog_display_name() {
+        let html = success_page("mobbin");
+        assert!(html.contains("Connected · FalconDeck"));
+        assert!(html.contains("<h1>Connected</h1>"));
+        assert!(html.contains("Mobbin is available to every agent on the next turn."));
+        assert!(!html.contains("mobbin is available"));
+        assert!(html.contains("class=\"ok\""));
+        assert!(html.contains("/api/plugin-logos?domain=mobbin.com"));
+        assert!(html.contains("You can close this window and return to FalconDeck."));
+        assert!(html.contains("name=\"viewport\""));
+        assert!(html.contains("color-scheme"));
+    }
+
+    #[test]
+    fn error_page_escapes_user_controlled_copy() {
+        let html = error_page(
+            "Could not connect <script>alert(1)</script>",
+            None,
+            Some("<img src=x onerror=alert(1)>"),
+        );
+        assert!(html.contains("class=\"error\""));
+        assert!(html.contains("Could not connect &lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("You can close this window and try again from FalconDeck."));
+    }
+
+    #[test]
+    fn callback_copy_cannot_trigger_a_second_template_substitution() {
+        let html = error_page("Provider returned __META__", None, Some("__PAIR__"));
+        assert!(html.contains("Provider returned __META__"));
+        assert!(html.contains("<pre>__PAIR__</pre>"));
+    }
+
+    #[test]
+    fn access_denied_is_humanized() {
+        assert_eq!(
+            oauth_provider_error("access_denied"),
+            "Sign-in was cancelled."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incomplete_callback_renders_error_page() {
+        let (status, html) = complete_authorization(None, None, None).await;
+        assert_eq!(status, 400);
+        assert!(html.contains("Could not connect"));
+        assert!(html.contains("This sign-in link is incomplete."));
+        assert!(html.contains("class=\"error\""));
+        assert!(!html.contains("<details>"));
     }
 }
