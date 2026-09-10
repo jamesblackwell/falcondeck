@@ -1644,6 +1644,24 @@ mod tests {
     }
 
     #[test]
+    fn url_only_mobbin_never_falls_back_to_codex_oauth() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        let connectors = write(
+            dir.path(),
+            r#"{"mcpServers":{"mobbin":{"url":"https://api.mobbin.com/mcp"}}}"#,
+        );
+
+        let servers = load_mcp_servers_from(&connectors, &dir.path().join("missing.json"), "codex");
+
+        assert!(
+            servers.is_empty(),
+            "FalconDeck must withhold unauthenticated Mobbin instead of making Codex request its own login"
+        );
+    }
+
+    #[test]
     fn catalog_oauth_inference_preserves_custom_connectors() {
         let _lock = crate::connector_oauth::lock_store_for_test();
         let dir = tempfile::tempdir().unwrap();

@@ -268,6 +268,18 @@ pub const CATALOG: &[CatalogServer] = &[
         scopes: None,
     },
     CatalogServer {
+        id: "mobbin",
+        name: "Mobbin",
+        description: "Search UI screens and flows from real apps.",
+        category: "Creativity",
+        url: "https://api.mobbin.com/mcp",
+        auth: CatalogAuth::Oauth,
+        domain: "mobbin.com",
+        featured: false,
+        resource: Some("https://api.mobbin.com/mcp"),
+        scopes: Some("openid"),
+    },
+    CatalogServer {
         id: "fal-ai",
         name: "fal",
         description: "Generate images, video, and audio with fal models.",
@@ -424,6 +436,19 @@ mod tests {
     fn logo_domains_are_limited_to_the_curated_catalog() {
         assert!(is_catalog_domain("github.com"));
         assert!(is_catalog_domain("GitHub.COM."));
+        assert!(is_catalog_domain("mobbin.com"));
         assert!(!is_catalog_domain("attacker.example"));
+    }
+
+    #[test]
+    fn mobbin_is_a_catalog_oauth_server() {
+        let server = get("mobbin").expect("mobbin catalog entry");
+        assert_eq!(server.name, "Mobbin");
+        assert_eq!(server.url, "https://api.mobbin.com/mcp");
+        assert_eq!(server.auth, CatalogAuth::Oauth);
+        assert_eq!(server.domain, "mobbin.com");
+        assert_eq!(server.category, "Creativity");
+        assert_eq!(server.resource, Some("https://api.mobbin.com/mcp"));
+        assert_eq!(server.scopes, Some("openid"));
     }
 }
