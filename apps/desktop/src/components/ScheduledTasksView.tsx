@@ -10,15 +10,10 @@ import {
 import {
   CalendarClock,
   ChevronDown,
-  CircleAlert,
-  Clock3,
   Laptop,
   MessageCircle,
-  MoreHorizontal,
   Network,
-  Pause,
   Pencil,
-  Play,
   Plus,
   Server,
   Trash2,
@@ -38,9 +33,14 @@ import type {
   UpdateScheduledTaskPayload,
   WorkspaceSummary,
 } from "@falcondeck/client-core";
-import { approvalPolicyForProvider } from "@falcondeck/client-core";
+import {
+  approvalPolicyForProvider,
+  formatDueAt,
+  formatScheduleCadence,
+} from "@falcondeck/client-core";
 import {
   Button,
+  EmptyState,
   MainView,
   MainViewBody,
   MainViewLead,
@@ -65,6 +65,11 @@ import {
   automationDraftArguments,
   automationDraftFrom,
 } from "./automation-draft";
+import {
+  AutomationListRow,
+  AutomationRowMenuContent,
+  type AutomationRowTone,
+} from "./automation-list-row";
 
 type Toast = (toast: {
   variant: "default" | "success" | "danger";
@@ -170,48 +175,74 @@ function hostApi(
     : localApi;
 }
 
-function humanSchedule(entry: TaskEntry) {
-  const automation = entry.automation;
-  if (automation) {
-    if (automation.resolved_schedule) return automation.resolved_schedule;
-    if (automation.trigger.kind === "cron") {
-      return `Cron ${automation.trigger.expression} (${automation.trigger.timezone})`;
-    }
-    if (automation.trigger.kind === "interval") {
-      return `Every ${Math.round(automation.trigger.every_seconds / 60)} minutes`;
-    }
-    return `Once · ${new Date(automation.trigger.run_at).toLocaleString()}`;
-  }
-  const task = entry.task;
-  if (task.schedule.kind === "once") {
-    return `Once · ${new Date(task.schedule.run_at).toLocaleString(undefined, { timeZone: task.schedule.timezone })} (${task.schedule.timezone})`;
-  }
-  const rule = Object.fromEntries(
-    task.schedule.rrule
-      .replace(/^RRULE:/i, "")
-      .split(";")
-      .flatMap((part) => {
-        const pair = part.split("=");
-        return pair.length === 2 ? [[pair[0] ?? "", pair[1] ?? ""]] : [];
-      }),
-  );
-  const time = `${String(Number(rule.BYHOUR ?? 9)).padStart(2, "0")}:${String(Number(rule.BYMINUTE ?? 0)).padStart(2, "0")}`;
-  if (rule.FREQ === "WEEKLY")
-    return `Weekly · ${rule.BYDAY ?? "MO"} at ${time} (${task.schedule.timezone})`;
-  if (rule.FREQ === "HOURLY")
-    return `Every ${rule.INTERVAL ?? 1} hour(s) (${task.schedule.timezone})`;
-  if (rule.FREQ === "MINUTELY")
-    return `Every ${rule.INTERVAL ?? 5} minutes (${task.schedule.timezone})`;
-  return `Daily at ${time} (${task.schedule.timezone})`;
+function viewerTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
 }
 
-function nextRunLabel(entry: TaskEntry) {
-  if (entry.automation?.state === "failed") return "Failed";
-  const task = entry.task;
-  if (task.status === "paused") return "Paused";
-  if (task.status === "completed") return "Completed";
-  if (!task.next_run_at) return "Not scheduled";
-  return `Next ${new Date(task.next_run_at).toLocaleString(undefined, { timeZone: task.schedule.timezone })}`;
+function cadenceFor(entry: TaskEntry, timeZone = viewerTimeZone()) {
+  return formatScheduleCadence({
+    trigger: entry.automation?.trigger,
+    resolvedSchedule: entry.automation?.resolved_schedule,
+    legacySchedule: entry.automation ? null : entry.task.schedule,
+    viewerTimeZone: timeZone,
+  });
+}
+
+function scheduleTimezone(entry: TaskEntry) {
+  const trigger = entry.automation?.trigger;
+  if (trigger?.kind === "cron") return trigger.timezone;
+  if (entry.automation) return null;
+  return entry.task.schedule.timezone;
+}
+
+function cronExpression(entry: TaskEntry) {
+  const trigger = entry.automation?.trigger;
+  return trigger?.kind === "cron" ? trigger.expression : null;
+}
+
+function projectLabel(entry: TaskEntry) {
+  const workspace = entry.workspaces.find(
+    (item) => item.id === entry.task.workspace_id,
+  );
+  const path = workspace?.path ?? entry.automation?.target.workspace_path;
+  return path?.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
+}
+
+function rowTone(entry: TaskEntry): AutomationRowTone {
+  const last = entry.task.last_run?.status;
+  if (last === "running") return "running";
+  if (last === "queued") return "queued";
+  if (last === "awaiting_input") return "waiting";
+  if (last === "failed" || entry.automation?.state === "failed") return "failed";
+  if (entry.task.status === "paused") return "paused";
+  if (entry.task.status === "completed") return "completed";
+  return "active";
+}
+
+function whenFor(
+  entry: TaskEntry,
+  nowMs: number,
+): { label: string; title?: string; overdue?: boolean } {
+  const last = entry.task.last_run?.status;
+  if (last === "running") return { label: "Running" };
+  if (last === "queued") return { label: "Queued" };
+  if (last === "awaiting_input") return { label: "Waiting" };
+  if (entry.task.status === "paused") return { label: "Paused" };
+  if (entry.task.status === "completed") return { label: "Completed" };
+  const due = formatDueAt(entry.task.next_run_at, nowMs);
+  if (!due) return { label: "Not scheduled" };
+  return { label: due.label, title: due.title, overdue: due.overdue };
+}
+
+function attentionFor(entry: TaskEntry) {
+  const last = entry.task.last_run?.status;
+  if (last === "awaiting_input") {
+    return { text: "Needs input", tone: "warning" as const };
+  }
+  if (last === "failed") {
+    return { text: "Last run failed", tone: "danger" as const };
+  }
+  return null;
 }
 
 function automationStatus(automation: Automation): ScheduledTaskSummary["status"] {
@@ -515,15 +546,13 @@ function TaskEditor({
       await manager.connection(hostId ?? "")?.refresh();
       onToast({
         variant: "success",
-        title: editing ? "Scheduled task updated" : "Automation created",
+        title: editing ? "Automation updated" : "Automation created",
       });
       onSaved();
     } catch (error) {
       onToast({
         variant: "danger",
-        title: editing
-          ? "Could not save scheduled task"
-          : "Could not save automation",
+        title: "Could not save automation",
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -552,7 +581,7 @@ function TaskEditor({
             id="scheduled-task-editor-title"
             className="text-xl font-semibold text-fg-primary"
           >
-            {editing ? "Edit scheduled task" : "New automation"}
+            {editing ? "Edit automation" : "New automation"}
           </h2>
           <Button
             variant="ghost"
@@ -570,7 +599,7 @@ function TaskEditor({
               className="fd-focus w-full border-0 bg-transparent px-0 py-1 text-[length:var(--fd-text-xl)] font-semibold text-fg-primary placeholder:text-fg-muted"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder={editing ? "Scheduled task title" : "Automation name"}
+              placeholder="Automation name"
             />
           </label>
           <label className="block">
@@ -1000,7 +1029,7 @@ function TaskEditor({
                 (frequency === "once" && !runAt)
               }
             >
-              {saving ? "Saving…" : "Save task"}
+              {saving ? "Saving…" : "Save automation"}
             </Button>
           </div>
         </div>
@@ -1061,8 +1090,19 @@ export function ScheduledTasksView({
   >({});
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [menuKey, setMenuKey] = useState<string | null>(null);
+  const [cursorMenu, setCursorMenu] = useState<{
+    key: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now);
   const detailRequest = useRef(0);
   const editorRequest = useRef(0);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const closeDetail = () => {
     detailRequest.current += 1;
@@ -1107,7 +1147,7 @@ export function ScheduledTasksView({
       } catch (error) {
         onToast({
           variant: "danger",
-          title: "Could not load scheduled automations",
+          title: "Could not load automations",
           description: error instanceof Error ? error.message : String(error),
         });
       }
@@ -1214,7 +1254,7 @@ export function ScheduledTasksView({
       (item) => item.id === entry.task.workspace_id,
     );
     const haystack =
-      `${entry.task.title} ${entry.task.prompt_preview} ${entry.task.provider} ${entry.hostName} ${workspace?.path ?? ""}`.toLowerCase();
+      `${entry.task.title} ${entry.task.prompt_preview} ${entry.task.provider} ${entry.hostName} ${workspace?.path ?? ""} ${cadenceFor(entry)}`.toLowerCase();
     return (
       (filter === "all" || entry.task.status === filter) &&
       (hostFilter === "all" || (entry.hostId ?? "local") === hostFilter) &&
@@ -1336,7 +1376,7 @@ export function ScheduledTasksView({
     } catch (error) {
       onToast({
         variant: "danger",
-        title: "Scheduled task action failed",
+        title: "Could not update automation",
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -1372,7 +1412,7 @@ export function ScheduledTasksView({
       if (editorRequest.current !== request) return;
       onToast({
         variant: "danger",
-        title: "Could not load scheduled task",
+        title: "Could not load automation",
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -1427,15 +1467,19 @@ export function ScheduledTasksView({
         if (detailRequest.current !== request) return;
         onToast({
           variant: "danger",
-          title: "Could not load scheduled task details",
+          title: "Could not load automation",
           description: error instanceof Error ? error.message : String(error),
         });
       });
   };
 
+  const cursorEntry = cursorMenu
+    ? visible.find((entry) => taskEntryKey(entry) === cursorMenu.key)
+    : null;
+
   return (
     <MainView
-      icon={<Clock3 aria-hidden="true" className="h-4 w-4" />}
+      icon={<CalendarClock aria-hidden="true" className="h-4 w-4" />}
       title="Automations"
       actions={
         <div className="flex">
@@ -1522,7 +1566,7 @@ export function ScheduledTasksView({
           {hosts.length ? (
             <Select value={hostFilter} onValueChange={setHostFilter}>
               <SelectTrigger
-                aria-label="Filter scheduled tasks by host"
+                aria-label="Filter automations by host"
                 className="ml-auto h-9 min-w-44 max-w-64 bg-surface-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
               >
                 <span className="flex min-w-0 items-center gap-2">
@@ -1593,16 +1637,15 @@ export function ScheduledTasksView({
         ) : null}
         {!localSnapshot ? (
           <p className="mt-10 text-center text-sm text-fg-muted">
-            Loading scheduled tasks…
+            Loading automations…
           </p>
         ) : null}
-        <div className="mt-6 divide-y divide-border-subtle rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
+        <div className="mt-6 divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
           {visible.map((entry, index) => {
-            const workspace = entry.workspaces.find(
-              (item) => item.id === entry.task.workspace_id,
-            );
-            const key = `${entry.hostId ?? "local"}:${entry.task.id}`;
+            const key = taskEntryKey(entry);
             const owner = entry.automation?.owner;
+            const when = whenFor(entry, nowMs);
+            const attention = attentionFor(entry);
             const open = () => {
               if (owner && onOpenExtensionOwner) {
                 onOpenExtensionOwner(
@@ -1621,170 +1664,103 @@ export function ScheduledTasksView({
                     Used by Missions
                   </div>
                 ) : null}
-                <article
-                  className="group relative flex items-start gap-3 px-4 py-3.5 transition-colors duration-[var(--fd-duration-fast)] first:rounded-t-[var(--fd-radius-xl)] last:rounded-b-[var(--fd-radius-xl)] hover:bg-interactive-hover focus-within:bg-interactive-hover"
-                >
-                <button
-                  className="fd-focus mt-1 rounded-full"
-                  aria-label={`Open ${entry.task.title}`}
-                  onClick={open}
-                >
-                  {entry.task.last_run?.status === "failed" ? (
-                    <CircleAlert className="h-4 w-4 text-danger" />
-                  ) : entry.task.last_run?.status === "awaiting_input" ? (
-                    <CircleAlert className="h-4 w-4 text-warning" />
-                  ) : entry.task.status === "active" ? (
-                    <Clock3 className="h-4 w-4 text-info" />
-                  ) : (
-                    <span className="block h-4 w-4 rounded-full border border-fg-muted" />
-                  )}
-                </button>
-                <button
-                  className="fd-focus min-w-0 flex-1 rounded text-left"
-                  onClick={open}
-                >
-                  <h2 className="truncate font-medium">{entry.task.title}</h2>
-                  <p className="mt-1 truncate text-sm text-fg-muted">
-                    {humanSchedule(entry)} · {nextRunLabel(entry)} ·{" "}
-                    {workspace?.path.split("/").filter(Boolean).at(-1) ??
-                      "Unknown project"}{" "}
-                    · {entry.task.provider} · {entry.hostName}
-                    {entry.task.last_run?.status === "failed"
-                      ? " · Last run failed"
-                      : entry.task.last_run?.status === "awaiting_input"
-                        ? " · Waiting for input"
-                        : ""}
-                    {owner ? " · Mission-owned" : ""}
-                  </p>
-                </button>
-                <div className="flex opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
-                  {owner ? (
-                    <Button variant="ghost" size="sm" onClick={open}>
-                      Open Mission
-                    </Button>
-                  ) : (
-                    <>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`Run ${entry.task.title} now`}
-                        disabled={!entry.online || busyKey === key}
-                        onClick={() => void mutate(entry, "run")}
-                      >
-                        <Play className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-label={`${entry.task.status === "paused" ? "Resume" : "Pause"} ${entry.task.title}`}
-                        disabled={
-                          !entry.online ||
-                          busyKey === key ||
-                          entry.task.status === "completed"
-                        }
-                        onClick={() => void mutate(entry, "toggle")}
-                      >
-                        {entry.task.status === "paused" ? (
-                          <Play className="h-4 w-4" />
-                        ) : (
-                          <Pause className="h-4 w-4" />
-                        )}
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        aria-haspopup="menu"
-                        aria-expanded={menuKey === key}
-                        aria-label={`More actions for ${entry.task.title}`}
-                        onClick={() =>
-                          setMenuKey((current) =>
-                            current === key ? null : key,
-                          )
-                        }
-                      >
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                    </>
-                  )}
-                </div>
-                {menuKey === key ? (
-                  <div
-                    role="menu"
-                    aria-label={`Actions for ${entry.task.title}`}
-                    onKeyDown={(event) =>
-                      handleMenuKeyDown(event, () => setMenuKey(null))
-                    }
-                    className="absolute right-0 top-12 z-20 min-w-40 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
-                  >
-                    <button
-                      role="menuitem"
-                      className="fd-focus block w-full rounded px-3 py-2 text-left text-sm hover:bg-surface-3"
-                      disabled={!entry.online}
-                      onClick={() => {
-                        setMenuKey(null);
-                        void mutate(entry, "run");
-                      }}
-                    >
-                      Run now
-                    </button>
-                    <button
-                      role="menuitem"
-                      className="fd-focus block w-full rounded px-3 py-2 text-left text-sm hover:bg-surface-3"
-                      disabled={!entry.online}
-                      onClick={() => {
-                        setMenuKey(null);
-                        void edit(entry);
-                      }}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      role="menuitem"
-                      className="fd-focus block w-full rounded px-3 py-2 text-left text-sm hover:bg-surface-3"
-                      disabled={
-                        !entry.online || entry.task.status === "completed"
-                      }
-                      onClick={() => {
-                        setMenuKey(null);
-                        void mutate(entry, "toggle");
-                      }}
-                    >
-                      {entry.task.status === "paused" ? "Resume" : "Pause"}
-                    </button>
-                    <button
-                      role="menuitem"
-                      className="fd-focus block w-full rounded px-3 py-2 text-left text-sm text-danger hover:bg-surface-3"
-                      disabled={!entry.online}
-                      onClick={() => {
-                        setMenuKey(null);
-                        void mutate(entry, "delete");
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ) : null}
-                </article>
+                <AutomationListRow
+                  title={entry.task.title}
+                  cadence={cadenceFor(entry)}
+                  projectLabel={projectLabel(entry)}
+                  hostLabel={
+                    hosts.length > 0 && hostFilter === "all"
+                      ? entry.hostName
+                      : null
+                  }
+                  hostOffline={!entry.online}
+                  whenLabel={when.label}
+                  whenTitle={when.title}
+                  whenOverdue={when.overdue}
+                  attention={attention?.text}
+                  attentionTone={attention?.tone}
+                  tone={rowTone(entry)}
+                  missionOwned={Boolean(owner)}
+                  elevated={Boolean(entry.automation?.elevated)}
+                  selected={
+                    selected != null && taskEntryKey(selected) === key
+                  }
+                  busy={busyKey === key}
+                  online={entry.online && entry.supported}
+                  canToggle={entry.task.status !== "completed"}
+                  paused={entry.task.status === "paused"}
+                  menuOpen={menuKey === key}
+                  onOpen={open}
+                  onRun={() => void mutate(entry, "run")}
+                  onToggle={() => void mutate(entry, "toggle")}
+                  onEdit={() => void edit(entry)}
+                  onDelete={() => void mutate(entry, "delete")}
+                  onMenuOpenChange={(openMenu) => {
+                    setCursorMenu(null);
+                    setMenuKey(openMenu ? key : null);
+                  }}
+                  onContextMenu={(event) => {
+                    if (owner) return;
+                    setMenuKey(null);
+                    setCursorMenu({
+                      key,
+                      x: event.clientX,
+                      y: event.clientY,
+                    });
+                  }}
+                />
               </Fragment>
             );
           })}
           {localSnapshot && visible.length === 0 ? (
-            <div className="py-20 text-center">
-              <CalendarClock className="mx-auto h-8 w-8 text-fg-muted" />
-              <h2 className="mt-3 font-medium">
-                {entries.length
-                  ? "No matching tasks"
-                  : "No scheduled tasks yet"}
-              </h2>
-              <p className="mt-1 text-sm text-fg-muted">
-                {entries.length
+            <EmptyState
+              className="py-20"
+              icon={<CalendarClock className="h-8 w-8" />}
+              title={
+                entries.length
+                  ? "No matching automations"
+                  : "No automations yet"
+              }
+              description={
+                entries.length
                   ? "Try another search or filter."
-                  : "Create one to run agent work automatically."}
-              </p>
-            </div>
+                  : "Create one to run agent work on a schedule."
+              }
+            />
           ) : null}
         </div>
       </MainViewBody>
+      {cursorMenu && cursorEntry ? (
+        <Popover.Root
+          modal={false}
+          open
+          onOpenChange={(open) => {
+            if (!open) setCursorMenu(null);
+          }}
+        >
+          <Popover.Anchor asChild>
+            <span
+              className="pointer-events-none fixed h-0 w-0"
+              style={{ left: cursorMenu.x, top: cursorMenu.y }}
+            />
+          </Popover.Anchor>
+          <Popover.Portal>
+            <Popover.Content align="start" sideOffset={4} className="z-50 p-0">
+              <AutomationRowMenuContent
+                title={cursorEntry.task.title}
+                paused={cursorEntry.task.status === "paused"}
+                online={cursorEntry.online && cursorEntry.supported}
+                canToggle={cursorEntry.task.status !== "completed"}
+                onClose={() => setCursorMenu(null)}
+                onRun={() => void mutate(cursorEntry, "run")}
+                onEdit={() => void edit(cursorEntry)}
+                onToggle={() => void mutate(cursorEntry, "toggle")}
+                onDelete={() => void mutate(cursorEntry, "delete")}
+              />
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+      ) : null}
       {selected ? (
         <aside
           role="dialog"
@@ -1815,7 +1791,7 @@ export function ScheduledTasksView({
               onClick={() => {
                 closeDetail();
               }}
-              aria-label="Close task details"
+              aria-label="Close automation details"
             >
               <X className="h-4 w-4" />
             </Button>
@@ -1823,11 +1799,27 @@ export function ScheduledTasksView({
           <dl className="mt-6 space-y-4 text-sm">
             <div>
               <dt className="text-fg-muted">Schedule</dt>
-              <dd className="mt-1">{humanSchedule(selected)}</dd>
+              <dd className="mt-1">{cadenceFor(selected)}</dd>
+              {scheduleTimezone(selected) ? (
+                <dd className="mt-1 fd-type-meta text-fg-muted">
+                  {scheduleTimezone(selected)}
+                </dd>
+              ) : null}
+              {cronExpression(selected) ? (
+                <dd className="mt-1 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {cronExpression(selected)}
+                </dd>
+              ) : null}
             </div>
             <div>
               <dt className="text-fg-muted">Next run</dt>
-              <dd className="mt-1">{nextRunLabel(selected)}</dd>
+              <dd className="mt-1">{whenFor(selected, nowMs).label}</dd>
+              {selected.task.next_run_at ? (
+                <dd className="mt-1 fd-type-meta text-fg-muted">
+                  {formatDueAt(selected.task.next_run_at, nowMs)?.title ??
+                    selected.task.next_run_at}
+                </dd>
+              ) : null}
             </div>
             <div>
               <dt className="text-fg-muted">Provider</dt>
@@ -2071,7 +2063,7 @@ export function ScheduledTasksView({
           ) : null}
           {!selected.supported ? (
             <p className="mt-4 rounded bg-surface-2 p-3 text-sm text-warning">
-              This daemon does not support scheduled tasks yet. Upgrade
+              This daemon does not support automations yet. Upgrade
               FalconDeck on this host to manage it.
             </p>
           ) : !selected.online ? (
@@ -2159,7 +2151,7 @@ export function ScheduledTasksView({
                 if (!response.ok) {
                   onToast({
                     variant: "danger",
-                    title: "Could not save scheduled task",
+                    title: "Could not save automation",
                     description: controlErrorMessage(response),
                   });
                   return;
@@ -2171,7 +2163,7 @@ export function ScheduledTasksView({
                 );
                 onToast({
                   variant: "success",
-                  title: "Scheduled task updated",
+                  title: "Automation updated",
                 });
               }}
             />

@@ -1,8 +1,9 @@
-import type {
-  AgentControlSettings,
-  Automation,
-  AutomationConcurrencyPolicy,
-  AutomationMisfirePolicy,
+import {
+  formatAutomationCadence,
+  type AgentControlSettings,
+  type Automation,
+  type AutomationConcurrencyPolicy,
+  type AutomationMisfirePolicy,
 } from '@falcondeck/client-core'
 
 export type AutomationScheduleKind = 'cron' | 'interval' | 'once'
@@ -197,14 +198,5 @@ export function automationDraftIsElevated(draft: AutomationDraft) {
 }
 
 export function automationScheduleSummary(automation: Automation) {
-  if (automation.resolved_schedule) return automation.resolved_schedule
-  const trigger = automation.trigger
-  if (trigger.kind === 'cron') return `cron “${trigger.expression}” (${trigger.timezone})`
-  if (trigger.kind === 'interval') {
-    const minutes = trigger.every_seconds / 60
-    return minutes >= 60 && minutes % 60 === 0
-      ? `every ${minutes / 60} ${minutes === 60 ? 'hour' : 'hours'}`
-      : `every ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
-  }
-  return `once at ${new Date(trigger.run_at).toLocaleString()}`
+  return formatAutomationCadence(automation)
 }

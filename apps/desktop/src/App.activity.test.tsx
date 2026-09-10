@@ -299,7 +299,7 @@ describe("Activity takeover wiring", () => {
   it("opens a new thread with the scheduled-task setup prompt", async () => {
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+    fireEvent.click(screen.getByRole("button", { name: "Automations" }));
     expect(
       await screen.findByRole("heading", { name: "Automations" }),
     ).toBeInTheDocument();
@@ -339,7 +339,7 @@ describe("Activity takeover wiring", () => {
     );
     render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+    fireEvent.click(screen.getByRole("button", { name: "Automations" }));
     await screen.findByRole("heading", { name: "Automations" });
     fireEvent.click(screen.getByRole("button", { name: "New automation" }));
 

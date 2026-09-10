@@ -21,6 +21,7 @@ import {
 } from '@/components/automations'
 import { Button, EmptyState, ErrorBanner, LoadingState, OptionSheet, Text } from '@/components/ui'
 import { subscribeToControlStateChanges } from '@/features/automations/control-events'
+import { useRelativeTimeTick } from '@/hooks/useRelativeTimeTick'
 import { AutomationControlError, useAutomationStore, useRelayStore, useSessionStore } from '@/store'
 
 type EditorTarget =
@@ -64,6 +65,7 @@ export default function AutomationsScreen() {
   const [busyId, setBusyId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const daemonReady = isDaemonRpcReady(machinePresence)
+  const nowTick = useRelativeTimeTick()
 
   useFocusEffect(useCallback(() => {
     if (!sessionId) return
@@ -221,10 +223,11 @@ export default function AutomationsScreen() {
     <AutomationRow
       automation={item}
       busy={busyId === item.id}
+      nowTick={nowTick}
       onEdit={daemonReady ? openEditor : setActionTarget}
       onOpenActions={setActionTarget}
     />
-  ), [busyId, daemonReady, openEditor])
+  ), [busyId, daemonReady, nowTick, openEditor])
 
   const cachedStatus = lastSyncedAt
     ? `${daemonReady ? 'Synced' : 'Cached'} ${new Date(lastSyncedAt).toLocaleString()}`

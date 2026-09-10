@@ -95,7 +95,7 @@ async fn create_returns_automation_with_next_run_and_resolved_schedule() {
     assert!(next > Utc::now());
     assert_eq!(
         data["resolved_schedule"].as_str().unwrap(),
-        "cron \"0 8 * * 1-5\" (Europe/London)"
+        "Weekdays at 08:00 (Europe/London)"
     );
     let stored = service
         .automation(data["id"].as_str().unwrap())

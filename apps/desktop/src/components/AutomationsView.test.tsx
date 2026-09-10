@@ -124,8 +124,8 @@ describe("AutomationsView list", () => {
     await renderView();
     expect(screen.getByText("enabled")).toBeTruthy();
     expect(screen.getByText("codex")).toBeTruthy();
-    expect(screen.getByText(/cron "0 8 \* \* 1-5" \(Europe\/London\)/)).toBeTruthy();
-    expect(screen.getByText(/Next run/)).toBeTruthy();
+    expect(screen.getByText(/Weekdays at 08:00/)).toBeTruthy();
+    expect(screen.getByText(/Overdue|in \d+|tomorrow|Not scheduled/)).toBeTruthy();
     // The instruction never renders in the list.
     expect(screen.queryByText("Review my inbox.")).toBeNull();
   });

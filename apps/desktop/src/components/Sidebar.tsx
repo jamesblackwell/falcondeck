@@ -2,7 +2,7 @@ import { memo } from "react";
 import {
   Activity,
   Blocks,
-  Clock3,
+  CalendarClock,
   PanelsTopLeft,
   Puzzle,
 } from "lucide-react";
@@ -189,28 +189,30 @@ export const DesktopSidebar = memo(function DesktopSidebar({
               </Tooltip>
             ) : null}
             {onOpenScheduled ? (
-              <button
-                type="button"
-                onClick={onOpenScheduled}
-                className={cn(
-                  "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                  scheduledOpen
-                    ? "bg-surface-3 text-fg-primary"
-                    : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                )}
-                aria-current={scheduledOpen ? "page" : undefined}
-                aria-label="Scheduled"
-              >
-                <Clock3 aria-hidden="true" className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1">Scheduled</span>
-                {scheduledAttention ? (
-                  <span
-                    aria-hidden="true"
-                    title="Scheduled tasks need attention"
-                    className="h-1.5 w-1.5 rounded-full bg-danger"
-                  />
-                ) : null}
-              </button>
+              <Tooltip label="Automations">
+                <button
+                  type="button"
+                  onClick={onOpenScheduled}
+                  className={cn(
+                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                    scheduledOpen
+                      ? "bg-surface-3 text-fg-primary"
+                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+                  )}
+                  aria-current={scheduledOpen ? "page" : undefined}
+                  aria-label="Automations"
+                >
+                  <CalendarClock aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1">Automations</span>
+                  {scheduledAttention ? (
+                    <span
+                      aria-hidden="true"
+                      title="An automation needs attention"
+                      className="h-1.5 w-1.5 rounded-full bg-danger"
+                    />
+                  ) : null}
+                </button>
+              </Tooltip>
             ) : null}
             {onOpenExtensionPanel ? (
               <ExtensionPanelNavigation

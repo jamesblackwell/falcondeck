@@ -4123,7 +4123,7 @@ function RemoteApp() {
         (task) => task.workspace_id === workspaceId && task.status === "active",
       )
     ) {
-      return "Scheduled tasks for this project will not run until you add it back.";
+      return "Automations for this project will not run until you add it back.";
     }
     return null;
   }

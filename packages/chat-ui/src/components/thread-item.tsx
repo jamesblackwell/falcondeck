@@ -219,8 +219,8 @@ export const ThreadItem = memo(
           {thread.origin?.kind === 'scheduled_task' ? (
             <span
               role="img"
-              aria-label={`Scheduled task: ${thread.origin.title}`}
-              title={`Scheduled · ${thread.origin.title}`}
+              aria-label={`Automation: ${thread.origin.title}`}
+              title={`Automation · ${thread.origin.title}`}
               className="flex shrink-0 items-center text-fg-muted"
             >
               <CalendarClock aria-hidden="true" className="h-3 w-3" />

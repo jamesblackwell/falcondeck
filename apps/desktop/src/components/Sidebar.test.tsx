@@ -139,7 +139,7 @@ function renderSidebar(
 }
 
 describe("DesktopSidebar", () => {
-  it("renders Activity above Scheduled with a failure-toned numeric badge", () => {
+  it("renders Activity above Automations with a failure-toned numeric badge", () => {
     const onOpenActivity = vi.fn();
     renderSidebar({
       onOpenActivity,
@@ -150,7 +150,7 @@ describe("DesktopSidebar", () => {
     });
 
     const activity = screen.getByRole("button", { name: "Activity" });
-    const scheduled = screen.getByRole("button", { name: "Scheduled" });
+    const scheduled = screen.getByRole("button", { name: "Automations" });
     expect(activity.getAttribute("aria-current")).toBe("page");
     expect(activity).toHaveTextContent("3");
     expect(activity.querySelector(".text-danger")).not.toBeNull();
@@ -174,7 +174,7 @@ describe("DesktopSidebar", () => {
 
     const activity = screen.getByRole("button", { name: "Activity" });
     const extensions = screen.getByRole("button", { name: "Extensions" });
-    const scheduled = screen.getByRole("button", { name: "Scheduled" });
+    const scheduled = screen.getByRole("button", { name: "Automations" });
     expect(activity.compareDocumentPosition(extensions)).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
     );
@@ -407,11 +407,11 @@ describe("DesktopSidebar", () => {
     expect(onNewThread).toHaveBeenCalledWith("workspace-1");
   });
 
-  it("renders Scheduled as first-class navigation above Projects", () => {
+  it("renders Automations as first-class navigation above Projects", () => {
     const onOpenScheduled = vi.fn();
     renderSidebar({ onOpenScheduled, scheduledOpen: true });
 
-    const scheduled = screen.getByRole("button", { name: "Scheduled" });
+    const scheduled = screen.getByRole("button", { name: "Automations" });
     const projects = screen.getByRole("region", { name: "Projects" });
     expect(scheduled.getAttribute("aria-current")).toBe("page");
     expect(scheduled.compareDocumentPosition(projects)).toBe(
@@ -422,10 +422,10 @@ describe("DesktopSidebar", () => {
     expect(onOpenScheduled).toHaveBeenCalledOnce();
   });
 
-  it("shows scheduled-task attention without changing the navigation name", () => {
+  it("shows automation attention without changing the navigation name", () => {
     renderSidebar({ onOpenScheduled: vi.fn(), scheduledAttention: true });
-    expect(screen.getByRole("button", { name: "Scheduled" })).toContainElement(
-      screen.getByTitle("Scheduled tasks need attention"),
+    expect(screen.getByRole("button", { name: "Automations" })).toContainElement(
+      screen.getByTitle("An automation needs attention"),
     );
   });
 

@@ -594,27 +594,318 @@ pub fn overlap_disposition(
     }
 }
 
+const DAY_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_PLURAL: [&str; 7] = [
+    "Sundays",
+    "Mondays",
+    "Tuesdays",
+    "Wednesdays",
+    "Thursdays",
+    "Fridays",
+    "Saturdays",
+];
+const MONTH_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+fn join_english(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        rest => format!(
+            "{} and {}",
+            rest[..rest.len() - 1].join(", "),
+            rest[rest.len() - 1]
+        ),
+    }
+}
+
+fn ordinal(value: u32) -> String {
+    let suffix = match (value % 100, value % 10) {
+        (11 | 12 | 13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
+    };
+    format!("{value}{suffix}")
+}
+
+fn even_step(values: &BTreeSet<u32>) -> Option<(u32, u32)> {
+    let list: Vec<u32> = values.iter().copied().collect();
+    let first = *list.first()?;
+    let second = *list.get(1)?;
+    let step = second.checked_sub(first)?;
+    if step == 0 {
+        return None;
+    }
+    if list.windows(2).all(|pair| pair[1] - pair[0] == step) {
+        Some((first, step))
+    } else {
+        None
+    }
+}
+
+fn complete_step(values: &BTreeSet<u32>, min: u32, max: u32) -> Option<(u32, u32)> {
+    let (start, step) = even_step(values)?;
+    let last = *values.last()?;
+    (start == min && last.checked_add(step)? > max).then_some((start, step))
+}
+
+fn is_complete(values: &BTreeSet<u32>, min: u32, max: u32) -> bool {
+    values.len() as u32 == max.saturating_sub(min) + 1
+}
+
+fn format_clock(hour: u32, minute: u32) -> String {
+    format!("{hour:02}:{minute:02}")
+}
+
+fn interval_summary(every_seconds: u64) -> String {
+    if every_seconds % 86_400 == 0 {
+        let days = every_seconds / 86_400;
+        if days == 1 {
+            "Every day".to_string()
+        } else {
+            format!("Every {days} days")
+        }
+    } else if every_seconds % 3_600 == 0 {
+        let hours = every_seconds / 3_600;
+        if hours == 1 {
+            "Every hour".to_string()
+        } else {
+            format!("Every {hours} hours")
+        }
+    } else if every_seconds % 60 == 0 {
+        let minutes = every_seconds / 60;
+        if minutes == 1 {
+            "Every minute".to_string()
+        } else {
+            format!("Every {minutes} minutes")
+        }
+    } else {
+        format!("Every {every_seconds} seconds")
+    }
+}
+
+impl CronSpec {
+    fn describe_time(&self) -> Option<String> {
+        let minutes_all = is_complete(&self.minutes, 0, 59);
+        let hours_all = is_complete(&self.hours, 0, 23);
+        if minutes_all && hours_all {
+            return Some("Every minute".to_string());
+        }
+        if let Some((start, step)) = complete_step(&self.minutes, 0, 59) {
+            if hours_all && start == 0 && self.minutes.len() > 1 {
+                return Some(if step == 1 {
+                    "Every minute".to_string()
+                } else {
+                    format!("Every {step} minutes")
+                });
+            }
+        }
+        if hours_all && self.minutes.len() == 1 {
+            let minute = *self.minutes.iter().next()?;
+            return Some(if minute == 0 {
+                "Every hour".to_string()
+            } else {
+                format!("Every hour at :{minute:02}")
+            });
+        }
+        if let Some((start, step)) = complete_step(&self.hours, 0, 23) {
+            if start == 0
+                && self.minutes.len() == 1
+                && self.minutes.contains(&0)
+                && self.hours.len() > 1
+            {
+                return Some(if step == 1 {
+                    "Every hour".to_string()
+                } else {
+                    format!("Every {step} hours")
+                });
+            }
+        }
+        if self.minutes.len() == 1 && (1..=4).contains(&self.hours.len()) {
+            let minute = *self.minutes.iter().next()?;
+            let times: Vec<String> = self
+                .hours
+                .iter()
+                .map(|hour| format_clock(*hour, minute))
+                .collect();
+            return Some(format!("at {}", join_english(&times)));
+        }
+        if self.hours.len() == 1 && (2..=4).contains(&self.minutes.len()) {
+            let hour = *self.hours.iter().next()?;
+            let times: Vec<String> = self
+                .minutes
+                .iter()
+                .map(|minute| format_clock(hour, *minute))
+                .collect();
+            return Some(format!("at {}", join_english(&times)));
+        }
+        if let Some((_, step)) = complete_step(&self.minutes, 0, 59) {
+            let cadence = if step == 1 {
+                "Every minute".to_string()
+            } else {
+                format!("Every {step} minutes")
+            };
+            if hours_all {
+                return Some(cadence);
+            }
+            if let Some((_, hour_step)) = even_step(&self.hours) {
+                if hour_step == 1 && self.hours.len() > 1 {
+                    let start = *self.hours.iter().next()?;
+                    let end = *self.hours.iter().next_back()?;
+                    return Some(format!(
+                        "{cadence} from {} to {}",
+                        format_clock(start, 0),
+                        format_clock(end, 0)
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    fn describe_days(&self) -> Option<String> {
+        let months_all = is_complete(&self.months, 0, 11);
+        let month_phrase = if months_all {
+            None
+        } else if self.months.len() == 1 {
+            Some(MONTH_FULL[*self.months.iter().next()? as usize].to_string())
+        } else if self.months.len() <= 3 {
+            Some(join_english(
+                &self
+                    .months
+                    .iter()
+                    .map(|month| MONTH_FULL[*month as usize].to_string())
+                    .collect::<Vec<_>>(),
+            ))
+        } else {
+            return None;
+        };
+        let in_month = month_phrase
+            .as_deref()
+            .map(|month| format!(" in {month}"))
+            .unwrap_or_default();
+
+        if !self.dom_restricted && !self.dow_restricted {
+            return Some(if month_phrase.is_some() {
+                format!("Every day{in_month}")
+            } else {
+                "Every day".to_string()
+            });
+        }
+
+        if !self.dom_restricted && self.dow_restricted {
+            let days: Vec<u32> = self.days_of_week.iter().copied().collect();
+            let label = if days == [1, 2, 3, 4, 5] {
+                format!("Weekdays{in_month}")
+            } else if days == [0, 6] {
+                format!("Weekends{in_month}")
+            } else if days.len() == 1 {
+                format!("{}{in_month}", DAY_PLURAL[days[0] as usize])
+            } else if days.len() <= 4 {
+                format!(
+                    "{}{in_month}",
+                    join_english(
+                        &days
+                            .iter()
+                            .map(|day| DAY_SHORT[*day as usize].to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                )
+            } else {
+                return None;
+            };
+            return Some(label);
+        }
+
+        if self.dom_restricted && !self.dow_restricted {
+            let days: Vec<u32> = self.days_of_month.iter().copied().collect();
+            if days.len() == 1 {
+                let day = ordinal(days[0]);
+                return Some(if let Some(month) = month_phrase {
+                    format!("{day} of {month}")
+                } else {
+                    format!("Monthly on the {day}")
+                });
+            }
+            if days.len() <= 3 {
+                let listed = join_english(&days.iter().copied().map(ordinal).collect::<Vec<_>>());
+                return Some(if let Some(month) = month_phrase {
+                    format!("{listed} of {month}")
+                } else {
+                    format!("Monthly on the {listed}")
+                });
+            }
+        }
+        None
+    }
+
+    fn describe(&self) -> Option<String> {
+        let time = self.describe_time()?;
+        let days = self.describe_days()?;
+        if time.starts_with("Every ") && (days == "Every day" || days.starts_with("Every day")) {
+            return Some(if days == "Every day" {
+                time
+            } else {
+                format!("{time}, {days}")
+            });
+        }
+        if let Some(clock) = time.strip_prefix("at ") {
+            return Some(if days == "Every day" {
+                format!("Every day at {clock}")
+            } else {
+                format!("{days} at {clock}")
+            });
+        }
+        if days == "Every day" {
+            return Some(time);
+        }
+        let lowered = days
+            .chars()
+            .next()
+            .map(|first| {
+                format!(
+                    "{}{}",
+                    first.to_lowercase(),
+                    days.chars().skip(1).collect::<String>()
+                )
+            })
+            .unwrap_or(days);
+        Some(format!("{time}, {lowered}"))
+    }
+}
+
 /// A short human-readable schedule summary for list rows and responses.
 pub fn schedule_summary(trigger: &AutomationTrigger) -> String {
     match trigger {
         AutomationTrigger::Once { run_at } => {
-            format!("once at {}", run_at.to_rfc3339())
+            format!("Once on {}", run_at.format("%d %b %Y at %H:%M UTC"))
         }
         AutomationTrigger::Cron {
             expression,
             timezone,
-        } => format!("cron \"{expression}\" ({timezone})"),
-        AutomationTrigger::Interval { every_seconds, .. } => {
-            if *every_seconds % 86400 == 0 {
-                format!("every {} days", every_seconds / 86400)
-            } else if *every_seconds % 3600 == 0 {
-                format!("every {} hours", every_seconds / 3600)
-            } else if *every_seconds % 60 == 0 {
-                format!("every {} minutes", every_seconds / 60)
-            } else {
-                format!("every {every_seconds} seconds")
-            }
-        }
+        } => match CronSpec::parse(expression)
+            .ok()
+            .and_then(|spec| spec.describe())
+        {
+            Some(cadence) => format!("{cadence} ({timezone})"),
+            None => format!("Custom schedule ({timezone})"),
+        },
+        AutomationTrigger::Interval { every_seconds, .. } => interval_summary(*every_seconds),
     }
 }
 
@@ -637,6 +928,57 @@ mod tests {
             .unwrap()
             .at
             .to_rfc3339()
+    }
+
+    #[test]
+    fn describes_common_cron_expressions() {
+        assert_eq!(
+            cron("0 12 * * *").describe().as_deref(),
+            Some("Every day at 12:00")
+        );
+        assert_eq!(
+            cron("0 8 * * 1-5").describe().as_deref(),
+            Some("Weekdays at 08:00")
+        );
+        assert_eq!(
+            cron("20 2 * * 1,4").describe().as_deref(),
+            Some("Mon and Thu at 02:20")
+        );
+        assert_eq!(
+            cron("30 3,12 * * *").describe().as_deref(),
+            Some("Every day at 03:30 and 12:30")
+        );
+        assert_eq!(
+            cron("10 1 * * 1").describe().as_deref(),
+            Some("Mondays at 01:10")
+        );
+        assert_eq!(
+            cron("35 6 1 * *").describe().as_deref(),
+            Some("Monthly on the 1st at 06:35")
+        );
+        assert_eq!(
+            cron("*/15 * * * *").describe().as_deref(),
+            Some("Every 15 minutes")
+        );
+        assert_eq!(cron("10,20 9-17 * * *").describe(), None);
+        assert_eq!(
+            cron("0 0,2 * * *").describe().as_deref(),
+            Some("Every day at 00:00 and 02:00")
+        );
+        assert_eq!(
+            schedule_summary(&AutomationTrigger::Cron {
+                expression: "0 8 * * 1-5".to_string(),
+                timezone: "Europe/London".to_string(),
+            }),
+            "Weekdays at 08:00 (Europe/London)"
+        );
+        assert_eq!(
+            schedule_summary(&AutomationTrigger::Interval {
+                every_seconds: 60,
+                anchor_at: utc("2026-09-07T00:00:00Z"),
+            }),
+            "Every minute"
+        );
     }
 
     #[test]

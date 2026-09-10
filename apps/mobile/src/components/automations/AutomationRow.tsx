@@ -3,30 +3,41 @@ import { Pressable, View } from 'react-native'
 import { MoreHorizontal } from 'lucide-react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import type { Automation } from '@falcondeck/client-core'
+import { formatDueAt, type Automation } from '@falcondeck/client-core'
 
 import { Badge, Text } from '@/components/ui'
 import { automationScheduleSummary } from '@/features/automations/model'
 
-const STATE_TONE: Record<Automation['state'], 'default' | 'success' | 'warning' | 'danger'> = {
-  enabled: 'success',
-  paused: 'warning',
-  completed: 'default',
-  failed: 'danger',
-}
-
 export const AutomationRow = memo(function AutomationRow({
   automation,
   busy,
+  nowTick = 0,
   onEdit,
   onOpenActions,
 }: {
   automation: Automation
   busy: boolean
+  /** Minute clock used to refresh relative due labels in this memoized row. */
+  nowTick?: number
   onEdit: (automation: Automation) => void
   onOpenActions: (automation: Automation) => void
 }) {
   const { theme } = useUnistyles()
+  const due = formatDueAt(
+    automation.next_run_at,
+    nowTick > 0 ? nowTick * 60_000 : Date.now(),
+  )
+  const project =
+    automation.target.workspace_path.split(/[\\/]/).filter(Boolean).at(-1) ?? null
+  const lastFailed = automation.latest_outcome?.status === 'failed'
+  const whenLabel =
+    automation.state === 'paused'
+      ? 'Paused'
+      : automation.state === 'completed'
+        ? 'Completed'
+        : automation.state === 'failed'
+          ? 'Failed'
+          : due?.label ?? 'Not scheduled'
   return (
     <View style={[styles.row, busy ? styles.busy : null]}>
       <Pressable
@@ -39,36 +50,41 @@ export const AutomationRow = memo(function AutomationRow({
         accessibilityHint="Opens the editor. Long press for actions."
       >
         <View style={styles.topLine}>
-          <Text variant="label" color="primary" numberOfLines={1} style={styles.name}>
+          <Text
+            variant="label"
+            color={automation.state === 'paused' ? 'secondary' : 'primary'}
+            numberOfLines={1}
+            style={styles.name}
+          >
             {automation.name}
           </Text>
-          <Badge variant={STATE_TONE[automation.state]}>{automation.state}</Badge>
+          <Text
+            variant="meta"
+            color={due?.overdue || automation.state === 'failed' ? 'danger' : 'muted'}
+          >
+            {whenLabel}
+          </Text>
         </View>
-        <Text variant="mono" size="xs" color="muted" numberOfLines={1}>
-          {automationScheduleSummary(automation)}
-        </Text>
-        <Text variant="caption" color="muted" numberOfLines={1}>
-          {automation.target.provider} · {automation.target.workspace_path}
-        </Text>
         <Text variant="meta" color="muted" numberOfLines={1}>
-          {automation.next_run_at
-            ? `Next ${new Date(automation.next_run_at).toLocaleString()}`
-            : 'No scheduled run'}
-          {automation.latest_outcome
-            ? ` · Last ${automation.latest_outcome.status.replaceAll('_', ' ')}`
-            : ' · Never run'}
+          {automationScheduleSummary(automation)}
+          {project ? ` · ${project}` : ''}
         </Text>
-        {automation.elevated ? <Badge variant="danger">elevated</Badge> : null}
+        {lastFailed ? (
+          <Text variant="meta" color="danger" numberOfLines={1}>
+            Last run failed
+          </Text>
+        ) : null}
+        {automation.elevated ? <Badge variant="danger">Elevated</Badge> : null}
       </Pressable>
       <Pressable
-          style={styles.more}
-          onPress={() => onOpenActions(automation)}
-          disabled={busy}
-          accessibilityRole="button"
-          accessibilityLabel={`Actions for ${automation.name}`}
-          hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}
-        >
-          <MoreHorizontal size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+        style={styles.more}
+        onPress={() => onOpenActions(automation)}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel={`Actions for ${automation.name}`}
+        hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}
+      >
+        <MoreHorizontal size={theme.iconSize.sm} color={theme.colors.fg.muted} />
       </Pressable>
     </View>
   )

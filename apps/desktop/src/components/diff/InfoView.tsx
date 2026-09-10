@@ -63,7 +63,7 @@ const SECTION_HEADING_CLASS =
 function originLabel(thread: ThreadSummary | null): string | null {
   if (!thread) return null;
   if (thread.origin?.kind === "scheduled_task") {
-    return `Scheduled task · ${thread.origin.title}`;
+    return `Automation · ${thread.origin.title}`;
   }
   if (thread.origin?.kind === "automation") {
     return `Automation · ${thread.origin.name}`;

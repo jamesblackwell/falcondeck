@@ -197,7 +197,7 @@ describe("ScheduledTasksView", () => {
     ]);
 
     const hostFilter = screen.getByRole("combobox", {
-      name: "Filter scheduled tasks by host",
+      name: "Filter automations by host",
     });
     expect(hostFilter).toHaveTextContent("All hosts");
 
@@ -222,6 +222,25 @@ describe("ScheduledTasksView", () => {
     expect(
       await screen.findByText("Alert if ComfyUI is running at midday"),
     ).toBeInTheDocument();
+  });
+
+  it("shows a human cadence instead of a cron dump", async () => {
+    setup({
+      controlGet: vi.fn().mockResolvedValue({
+        resource: "automations",
+        data: [conversationalAutomation],
+      }),
+    });
+
+    expect(await screen.findByText(/Every day at 12:00/)).toBeInTheDocument();
+    expect(screen.getByText(/Every day at 09:00/)).toBeInTheDocument();
+    expect(screen.getByText(/Mondays at 09:00/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open Paused audit" }),
+    ).toHaveTextContent("Paused");
+    expect(screen.queryByText(/cron\s+"/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("This Mac")).not.toBeInTheDocument();
+    expect(screen.queryByText(/07\/09\/2026/)).not.toBeInTheDocument();
   });
 
   it("separates extension-owned Automations and opens their owning Mission", async () => {
@@ -249,7 +268,7 @@ describe("ScheduledTasksView", () => {
 
     expect(await screen.findByText("Used by Missions")).toBeInTheDocument();
     expect(screen.getByText("Launch review")).toBeInTheDocument();
-    expect(screen.getByText(/Mission-owned/)).toBeInTheDocument();
+    expect(screen.getByText("Mission")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Launch review" }));
     expect(onOpenExtensionOwner).toHaveBeenCalledWith(
       "falcondeck.missions",
@@ -428,7 +447,7 @@ describe("ScheduledTasksView", () => {
       screen.getByPlaceholderText("Describe what the agent should do"),
       { target: { value: "Check the canonical scheduler." } },
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save task" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save automation" }));
 
     await waitFor(() =>
       expect(controlExecute).toHaveBeenCalledWith(

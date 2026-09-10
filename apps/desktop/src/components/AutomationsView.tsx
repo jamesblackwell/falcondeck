@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   controlProviderChoices,
+  formatAutomationCadence,
+  formatDueAt,
   type AgentControlSettings,
   type Automation,
   type AutomationRun,
@@ -328,25 +330,17 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                     </Button>
                   </span>
                 </div>
-                <p className="mt-1 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
-                  {automation.resolved_schedule ??
-                    (automation.trigger.kind === "cron"
-                      ? `cron "${automation.trigger.expression}" (${automation.trigger.timezone})`
-                      : automation.trigger.kind === "interval"
-                        ? `every ${Math.round(automation.trigger.every_seconds / 60)} minutes`
-                        : `once at ${automation.trigger.run_at}`)}
-                  {" · "}
-                  {automation.target.workspace_path}
+                <p className="mt-1 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {formatAutomationCadence(automation)}
+                  {automation.target.workspace_path
+                    ? ` · ${automation.target.workspace_path.split(/[\\/]/).filter(Boolean).at(-1)}`
+                    : ""}
                 </p>
                 <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                  {automation.next_run_at
-                    ? `Next run ${new Date(automation.next_run_at).toLocaleString()}`
-                    : "No scheduled run"}
-                  {automation.latest_outcome
-                    ? ` · Last: ${automation.latest_outcome.status} (${new Date(
-                        automation.latest_outcome.finished_at,
-                      ).toLocaleString()})`
-                    : " · Never run"}
+                  {formatDueAt(automation.next_run_at)?.label ?? "No next run"}
+                  {automation.latest_outcome?.status === "failed"
+                    ? " · Last run failed"
+                    : ""}
                 </p>
               </div>
             ))}

@@ -4,6 +4,7 @@ export * from "./grouping";
 export * from "./activity";
 export * from "./conversation";
 export * from "./relative-time";
+export * from "./automation-schedule";
 export * from "./daemon-client";
 export * from "./crypto";
 export * from "./snapshot";
