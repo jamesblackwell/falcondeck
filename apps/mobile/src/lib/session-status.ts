@@ -39,7 +39,7 @@ export interface SessionSyncStatus {
 export interface SessionSyncInput {
   connectionStatus: string
   isEncrypted: boolean
-  /** A snapshot RPC is in flight. */
+  /** A snapshot RPC is in flight, including non-blocking background refreshes. */
   isSyncing: boolean
   /** The paired desktop is reachable through the relay. */
   daemonConnected: boolean
@@ -63,7 +63,6 @@ export function resolveSessionSyncStatus(
   const {
     connectionStatus,
     isEncrypted,
-    isSyncing,
     daemonConnected,
     hasSyncedOnce,
   } = input
@@ -133,7 +132,10 @@ export function resolveSessionSyncStatus(
     )
   }
 
-  if (isSyncing || !hasSyncedOnce) {
+  // Once an authoritative snapshot has landed, later index refreshes run in
+  // the background. The existing session remains usable, so they must not
+  // raise the blocking banner or disable the composer.
+  if (!hasSyncedOnce) {
     return busy('syncing', CONNECTION_COPY.syncing)
   }
 

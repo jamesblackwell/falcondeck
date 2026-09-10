@@ -84,10 +84,11 @@ describe('resolveSessionSyncStatus', () => {
     expect(offline.detail).toContain('Keep FalconDeck open')
   })
 
-  it('reports syncing again on a later refetch', () => {
-    expect(resolveSessionSyncStatus({ ...ready, isSyncing: true }).stage).toBe(
-      'syncing',
-    )
+  it('keeps a later project refresh in the background', () => {
+    const status = resolveSessionSyncStatus({ ...ready, isSyncing: true })
+    expect(status.stage).toBe('ready')
+    expect(status.isBusy).toBe(false)
+    expect(sessionSendBlockReason(status)).toBeNull()
   })
 
   it('distinguishes a live desktop whose snapshot RPC registration is missing', () => {

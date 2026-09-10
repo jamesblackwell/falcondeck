@@ -116,6 +116,7 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     } else {
       socket.receive({ type: 'sync', updates: [], next_seq: 13, history_truncated: true, presence })
     }
+    if (loss === 'snapshot-invalidated') await advance(10_000)
     await waitFor(() => expect(socket.indexRequests()).toHaveLength(2))
     socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[1]!.request_id,
       ok: true, error: null, result: await indexResult('after-loss') })
@@ -136,6 +137,42 @@ it.each(['snapshot-invalidated', 'history-truncated'] as const)(
     ]))
   },
 )
+
+it('coalesces a burst of live snapshot invalidations into one background index refresh', async () => {
+  const { socket, dataKey } = await connect(new Uint8Array(32).fill(42))
+  const base = normalizeDaemonSnapshot(snapshot())
+  const presence = { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null }
+  const indexResult = (token: string) => encryptJson(dataKey, { token, snapshot: base,
+    agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {} })
+  socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
+  await waitFor(() => expect(socket.indexRequests()).toHaveLength(1))
+  socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[0]!.request_id,
+    ok: true, error: null, result: await indexResult('initial') })
+  await waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
+
+  for (let seq = 12; seq < 32; seq += 1) {
+    socket.receive({ type: 'update', update: {
+      id: `invalidate-${seq}`, seq, created_at: new Date().toISOString(),
+      body: { t: 'snapshot-invalidated' },
+    } })
+  }
+  await advance(20)
+  const lastSuccessAt = useRelayStore.getState().syncDiagnostics.lastSuccessAt!
+  const remaining = Math.max(1, lastSuccessAt + 10_000 - Date.now())
+  await advance(remaining - 1)
+  expect(socket.indexRequests()).toHaveLength(1)
+  expect(useRelayStore.getState().isSyncing).toBe(false)
+  expect(useRelayStore.getState()._getLastReceivedSeq()).toBeLessThan(31)
+
+  await advance(1)
+  await waitFor(() => expect(socket.indexRequests()).toHaveLength(2))
+  expect(useRelayStore.getState().isSyncing).toBe(true)
+  socket.receive({ type: 'rpc-result', request_id: socket.indexRequests()[1]!.request_id,
+    ok: true, error: null, result: await indexResult('after-burst') })
+  await waitFor(() => expect(useRelayStore.getState().isSyncing).toBe(false))
+  expect(useSessionStore.getState().snapshot?.sync_index?.token).toBe('after-burst')
+  expect(useRelayStore.getState()._getLastReceivedSeq()).toBe(31)
+})
 
 it('does not let presence traffic turn one failed index request into an immediate retry storm', async () => {
   const { socket } = await connect(new Uint8Array(32).fill(42))
@@ -198,8 +235,7 @@ it('recovers from a malformed transport frame even when native close never emits
   const { socket } = await connect(new Uint8Array(32).fill(42))
   socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false,
     presence: { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null } })
-  await advance(1)
-  expect(socket.indexRequests()).toHaveLength(1)
+  await waitFor(() => expect(socket.indexRequests()).toHaveLength(1))
   // A bad/incomplete transfer must terminate its pending requests now. The
   // native close event is not a prerequisite for our retry or recovery.
   act(() => socket.onmessage?.({ data: '{"type":"transport-chunk","id":7,"index":4,"total":8,"data":"bad"}' }))

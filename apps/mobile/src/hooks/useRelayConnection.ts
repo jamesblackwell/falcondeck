@@ -104,6 +104,24 @@ const BOOTSTRAP_REQUEST_RETRY_MS = 5_000
 // paid for cannot be the recovery base. A flush still in progress parks
 // instead of using this delay.
 const SNAPSHOT_REFETCH_DELAY_MS = 1_000
+// Full daemon snapshots become thin invalidation markers on the compact mobile
+// transport. Metadata-heavy operations (restores, multi-agent task creation,
+// bulk archive changes) can emit many markers in a few seconds. The current
+// project index remains usable while those arrive, so fold the burst into one
+// trailing refresh and cap routine refreshes at one per interval.
+const SNAPSHOT_INVALIDATION_DEBOUNCE_MS = 1_000
+const SNAPSHOT_INVALIDATION_MIN_INTERVAL_MS = 10_000
+
+export function snapshotInvalidationDelayMs(
+  lastSuccessAt: number | null,
+  now: number,
+) {
+  if (lastSuccessAt === null) return SNAPSHOT_INVALIDATION_DEBOUNCE_MS
+  return Math.max(
+    SNAPSHOT_INVALIDATION_DEBOUNCE_MS,
+    lastSuccessAt + SNAPSHOT_INVALIDATION_MIN_INTERVAL_MS - now,
+  )
+}
 /**
  * iOS still suspends the app after a short background window; if that killed
  * the socket, waiting for the dead socket to error plus the backoff delay
@@ -266,6 +284,7 @@ export function useRelayConnection() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const snapshotInvalidationTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
@@ -355,6 +374,9 @@ export function useRelayConnection() {
   }, [syncIndexToken, hasSyncedOnce, isEncrypted])
 
   const applyAuthoritativeSnapshot = useCallback((nextSnapshot: DaemonSnapshot) => {
+    // A marker that arrived after this request began still needs its scheduled
+    // trailing refresh. Do not acknowledge that marker with an older snapshot.
+    const invalidationRefreshPending = snapshotInvalidationTimer.current !== null
     const racedEvents = pendingSnapshotEvents.current
     const events: EventEnvelope[] = [
       {
@@ -376,7 +398,7 @@ export function useRelayConnection() {
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
-    pendingIndexInvalidation.current = false
+    pendingIndexInvalidation.current = invalidationRefreshPending
     parkedAuthoritativeSnapshot.current = null
     snapshotRequestInFlight.current = false
 
@@ -393,6 +415,7 @@ export function useRelayConnection() {
         snapshotRaceOverflowed: false,
         parkedUpdateCount: pendingEncrypted.current.length,
       }) &&
+      !invalidationRefreshPending &&
       (pendingSnapshotCursor.current !== null || pendingTruncationNextSeq.current !== null)
     ) {
       checkpointPendingSnapshotCursor(true)
@@ -412,6 +435,10 @@ export function useRelayConnection() {
     const relay = useRelayStore.getState()
     if (!relay._getSessionCrypto() || snapshotRequestInFlight.current ||
         snapshotRetryTimer.current !== null || snapshotRefetchTimer.current !== null) return
+    if (snapshotInvalidationTimer.current !== null) {
+      clearTimeout(snapshotInvalidationTimer.current)
+      snapshotInvalidationTimer.current = null
+    }
     const presence = relay.machinePresence
     if (!presence?.daemon_connected || presence.daemon_rpc_ready === false) {
       snapshotWaitingForDaemon.current = true
@@ -527,6 +554,30 @@ export function useRelayConnection() {
     }
   }, [applyAuthoritativeSnapshot])
 
+  const scheduleSnapshotInvalidationRefresh = useCallback(() => {
+    if (snapshotInvalidationTimer.current !== null) return
+
+    const run = () => {
+      snapshotInvalidationTimer.current = null
+      const relay = useRelayStore.getState()
+      const delay = snapshotInvalidationDelayMs(
+        relay.syncDiagnostics.lastSuccessAt,
+        Date.now(),
+      )
+      if (snapshotRequestInFlight.current || delay > SNAPSHOT_INVALIDATION_DEBOUNCE_MS) {
+        snapshotInvalidationTimer.current = setTimeout(run, delay)
+        return
+      }
+      void requestSnapshot()
+    }
+
+    const relay = useRelayStore.getState()
+    snapshotInvalidationTimer.current = setTimeout(
+      run,
+      snapshotInvalidationDelayMs(relay.syncDiagnostics.lastSuccessAt, Date.now()),
+    )
+  }, [requestSnapshot])
+
   const processRpcResult = useCallback(async (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => {
     const relay = useRelayStore.getState()
     if (await relay._handleRpcResult(payload)) {
@@ -603,14 +654,25 @@ export function useRelayConnection() {
           if (update.body.t === 'snapshot-invalidated') {
             transcriptRecovery.invalidate()
             pendingIndexInvalidation.current = true
-            // Replay predates the RPC started from this sync's presence marker.
-            // A live invalidation raced with its capture needs one replacement.
-            if (snapshotRequestInFlight.current && update.seq >= (syncedPresenceFloor.current ?? 0)) {
-              snapshotRaceOverflowed.current = true
-            }
             pendingSnapshotCursor.current = Math.max(pendingSnapshotCursor.current ?? 0, update.seq)
-            if (relay._getSessionCrypto()) void requestSnapshot()
-            else snapshotAfterCrypto.current = true
+            if (!relay._getSessionCrypto()) {
+              snapshotAfterCrypto.current = true
+            } else if (snapshotRequestInFlight.current) {
+              if (!relay.hasSyncedOnce) {
+                // The first authoritative response raced with a newer full
+                // snapshot, so it is not a safe launch base yet.
+                snapshotRaceOverflowed.current = true
+              } else {
+                scheduleSnapshotInvalidationRefresh()
+              }
+            } else if (needsAuthoritativeSnapshot() || snapshotWaitingForDaemon.current) {
+              // First load and explicit recovery have no usable authoritative
+              // base, so they remain immediate. Routine live invalidations use
+              // the bounded background refresh below.
+              void requestSnapshot()
+            } else {
+              scheduleSnapshotInvalidationRefresh()
+            }
             continue
           }
 
@@ -893,7 +955,7 @@ export function useRelayConnection() {
         }
       }
     }
-  }, [applyAuthoritativeSnapshot, checkpointPendingSnapshotCursor, requestSnapshot, transcriptRecovery])
+  }, [applyAuthoritativeSnapshot, checkpointPendingSnapshotCursor, requestSnapshot, scheduleSnapshotInvalidationRefresh, transcriptRecovery])
 
   const scheduleRelayFlush = useCallback(() => {
     if (relayFlushFrame.current !== null || relayFlushTimeout.current !== null) {
@@ -977,6 +1039,10 @@ export function useRelayConnection() {
     if (snapshotRefetchTimer.current) {
       clearTimeout(snapshotRefetchTimer.current)
       snapshotRefetchTimer.current = null
+    }
+    if (snapshotInvalidationTimer.current) {
+      clearTimeout(snapshotInvalidationTimer.current)
+      snapshotInvalidationTimer.current = null
     }
     // A fresh connection run starts with fresh sync timers; stale attempt
     // counts and errors from the previous run otherwise defeat the sync
@@ -1100,6 +1166,10 @@ export function useRelayConnection() {
       if (snapshotRefetchTimer.current) {
         clearTimeout(snapshotRefetchTimer.current)
         snapshotRefetchTimer.current = null
+      }
+      if (snapshotInvalidationTimer.current) {
+        clearTimeout(snapshotInvalidationTimer.current)
+        snapshotInvalidationTimer.current = null
       }
       relay._setSyncRetry(null, null)
       if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
@@ -1471,6 +1541,10 @@ export function useRelayConnection() {
       if (snapshotRefetchTimer.current) {
         clearTimeout(snapshotRefetchTimer.current)
         snapshotRefetchTimer.current = null
+      }
+      if (snapshotInvalidationTimer.current) {
+        clearTimeout(snapshotInvalidationTimer.current)
+        snapshotInvalidationTimer.current = null
       }
       relay._setSyncRetry(null, null)
       if (reconnectTimer.current) {

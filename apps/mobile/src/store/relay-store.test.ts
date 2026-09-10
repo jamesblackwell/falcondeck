@@ -172,6 +172,18 @@ describe('relay-store', () => {
       expect(entries.at(-1)).toMatchObject({ message: 'Projects synced.' })
     })
 
+    it('labels a later index update as a background refresh', () => {
+      useConnectionLogStore.setState({ entries: [], visible: false })
+      useRelayStore.setState({ hasSyncedOnce: true })
+
+      useRelayStore.getState()._startSyncAttempt()
+
+      expect(useConnectionLogStore.getState().entries.at(-1)).toMatchObject({
+        message: 'Refreshing project list (attempt 1)',
+        action: 'snapshot',
+      })
+    })
+
     it('times the relay handshake in the connection log', () => {
       useConnectionLogStore.setState({
         entries: [],

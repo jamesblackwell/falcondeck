@@ -6,12 +6,22 @@ import {
   canCheckpointReplayCursor,
   isInvalidSavedSessionError,
   selectPresenceFromRelayBatch,
+  snapshotInvalidationDelayMs,
   shouldPingRelayOnLeavingForeground,
   shouldReconnectOnAppForeground,
   shouldIgnoreReplaySnapshotEvent,
   shouldParkSnapshotApplication,
   shouldRefetchSnapshotApplication,
 } from './useRelayConnection'
+
+describe('snapshot invalidation refresh cadence', () => {
+  it('coalesces a live burst while keeping the first authoritative load prompt', () => {
+    expect(snapshotInvalidationDelayMs(null, 50_000)).toBe(1_000)
+    expect(snapshotInvalidationDelayMs(45_000, 50_000)).toBe(5_000)
+    expect(snapshotInvalidationDelayMs(40_000, 50_000)).toBe(1_000)
+    expect(snapshotInvalidationDelayMs(30_000, 50_000)).toBe(1_000)
+  })
+})
 
 describe('bootstrap refusal matching', () => {
   it('recognizes a refusal for the current client regardless of cached crypto state', () => {

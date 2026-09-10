@@ -140,7 +140,7 @@ export interface RelayState {
   error: string | null
   isConnected: boolean
   isEncrypted: boolean
-  /** A snapshot RPC is in flight — the project/thread list is still catching up. */
+  /** A snapshot RPC is in flight, including non-blocking background refreshes. */
   isSyncing: boolean
   /** A snapshot has landed at least once since launch (or unpair). */
   hasSyncedOnce: boolean
@@ -706,11 +706,12 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   // nothing authoritative has loaded.
   _setSyncing: (isSyncing) => set({ isSyncing }),
   _startSyncAttempt: () => {
-    const attempt = get().syncDiagnostics.attempt + 1
+    const current = get()
+    const attempt = current.syncDiagnostics.attempt + 1
     beginConnectionAction(
       'snapshot',
       'info',
-      `Fetching project list (attempt ${attempt})`,
+      `${current.hasSyncedOnce ? 'Refreshing' : 'Fetching'} project list (attempt ${attempt})`,
     )
     set((state) => {
       const now = Date.now()
