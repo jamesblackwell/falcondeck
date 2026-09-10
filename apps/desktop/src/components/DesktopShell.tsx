@@ -159,8 +159,10 @@ export function DesktopShell({
 
   if (!bottom) return shell
 
+  // `h-screen`, not `h-full`: a percentage column sizes to conversation
+  // content, so the terminal grows the document and closing it leaves a gap.
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div data-desktop-shell="" className="flex h-screen min-h-0 flex-col overflow-hidden">
       <div className="flex min-h-0 flex-1 flex-col [&>*]:min-h-0">{shell}</div>
       {bottomOpen ? (
         <BottomResizeHandle height={bottomHeight} onHeightChange={setBottomHeight} />

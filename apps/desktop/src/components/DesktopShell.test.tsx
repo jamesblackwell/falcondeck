@@ -24,6 +24,10 @@ describe('DesktopShell panel collapse', () => {
       />,
     )
 
+    const column = container.querySelector('[data-desktop-shell]')
+    expect(column).toHaveClass('h-screen')
+    expect(column).toHaveClass('overflow-hidden')
+    expect(column).not.toHaveClass('h-full')
     const shell = container.querySelector('[data-fd-shell]')?.parentElement
     expect(shell).toHaveClass('h-full')
     expect(shell).not.toHaveClass('h-screen')
@@ -43,6 +47,7 @@ describe('DesktopShell panel collapse', () => {
 
     expect(screen.getByText('bottom content')).toBeInTheDocument()
     expect(container.querySelector('[data-bottom-panel-resize]')).toBeNull()
+    expect(container.querySelector('[data-desktop-shell]')).toHaveClass('h-screen')
     expect(container.querySelector('[data-fd-shell]')?.parentElement).toHaveClass('h-full')
     const holder = screen.getByText('bottom content').parentElement
     expect(holder).toHaveStyle({ height: '0px' })
@@ -57,6 +62,7 @@ describe('DesktopShell panel collapse', () => {
     )
     expect(container.querySelector('[data-bottom-panel-resize]')).not.toBeNull()
     expect(screen.getByText('bottom content').parentElement).not.toHaveStyle({ height: '0px' })
+    expect(container.querySelector('[data-desktop-shell]')).toHaveClass('h-screen')
   })
 
   it('keeps the sidebar mounted while collapsed so the width can animate', () => {
