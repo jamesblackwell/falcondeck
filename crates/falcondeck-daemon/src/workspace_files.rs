@@ -298,12 +298,16 @@ mod tests {
     #[tokio::test]
     async fn list_files_should_match_the_query_case_insensitively() {
         let root = tempdir().unwrap();
-        fs::create_dir_all(root.path().join("docs/qa")).await.unwrap();
+        fs::create_dir_all(root.path().join("docs/qa"))
+            .await
+            .unwrap();
         fs::create_dir_all(root.path().join("src")).await.unwrap();
         fs::write(root.path().join("docs/qa/2026-09-mobile-web-audit.md"), "")
             .await
             .unwrap();
-        fs::write(root.path().join("src/main.rs"), "").await.unwrap();
+        fs::write(root.path().join("src/main.rs"), "")
+            .await
+            .unwrap();
 
         let response = list_files(root.path().to_str().unwrap(), Some("MOBILE-WEB"))
             .await
@@ -324,7 +328,9 @@ mod tests {
         if !initialised {
             return;
         }
-        fs::create_dir_all(root.path().join("docs/qa")).await.unwrap();
+        fs::create_dir_all(root.path().join("docs/qa"))
+            .await
+            .unwrap();
         fs::write(root.path().join("docs/qa/2026-09-mobile-web-audit.md"), "")
             .await
             .unwrap();
