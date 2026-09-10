@@ -4613,7 +4613,7 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
-    let (needs_codex_resume, should_refresh_codex_goal) = {
+    let (needs_codex_history, should_refresh_codex_goal) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(&request.workspace_id)
@@ -4623,26 +4623,25 @@ pub(super) async fn thread_detail(
             .get(&request.thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         let is_codex = thread.summary.provider == AgentProvider::CODEX;
-        // A restored Codex thread has an empty transcript until resumed, and
-        // the resume response is where the items come from — so an empty
-        // Codex thread must pay that round trip before the window is built.
+        // Read history without resuming: browsing must not acquire the writer
+        // lock and prevent another Codex client from sending to this thread.
         // A thread that already holds items must not: its goal enrichment
         // runs in the background instead of gating the response.
         (
             is_codex && thread.requires_resume && thread.items.is_empty(),
-            is_codex && (thread.requires_resume || thread.summary.goal.is_none()),
+            is_codex && !thread.requires_resume && thread.summary.goal.is_none(),
         )
     };
-    if needs_codex_resume
+    if needs_codex_history
         && let Err(error) = app
-            .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
+            .read_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
             .await
     {
         tracing::debug!(
             workspace_id = %request.workspace_id,
             thread_id = %request.thread_id,
             %error,
-            "could not resume Codex thread before detail"
+            "could not read Codex thread before detail"
         );
     }
     if should_refresh_codex_goal {

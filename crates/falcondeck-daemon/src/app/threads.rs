@@ -290,6 +290,25 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<CodexSessionLease, DaemonError> {
+        self.load_codex_thread_if_needed(workspace_id, thread_id, true)
+            .await
+    }
+
+    pub(super) async fn read_codex_thread_if_needed(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<CodexSessionLease, DaemonError> {
+        self.load_codex_thread_if_needed(workspace_id, thread_id, false)
+            .await
+    }
+
+    async fn load_codex_thread_if_needed(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        resume: bool,
+    ) -> Result<CodexSessionLease, DaemonError> {
         let session = self.session_for(workspace_id).await?;
         // Serializes a resume with idle-unsubscribe for this workspace. A
         // sender marks the thread running before reaching here, so whichever
@@ -311,7 +330,11 @@ impl AppState {
             (thread.requires_resume, cwd, thread.summary.clone())
         };
         if requires_resume {
-            let response = session.resume_thread(thread_id, &cwd).await?;
+            let response = if resume {
+                session.resume_thread(thread_id, &cwd).await?
+            } else {
+                session.read_thread_history(thread_id).await?
+            };
             let hydration_cwd = cwd.clone();
             let hydrated = tokio::task::spawn_blocking(move || {
                 crate::codex::hydrate_thread_response(summary, &response, &hydration_cwd)
@@ -326,7 +349,7 @@ impl AppState {
             let hydrated = if let Some(workspace) = workspaces.get_mut(workspace_id)
                 && let Some(thread) = workspace.threads.get_mut(thread_id)
             {
-                apply_resumed_codex_thread_hydration(thread, hydrated);
+                apply_codex_thread_hydration(thread, hydrated, resume);
                 true
             } else {
                 false
@@ -462,9 +485,22 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<(), DaemonError> {
-        let session = self
-            .resume_codex_thread_if_needed(workspace_id, thread_id)
-            .await?;
+        // Goal enrichment is a read: never resume an idle thread just to obtain
+        // its goal, as that can block another app's next turn on the same thread.
+        let session = self.session_for(workspace_id).await?;
+        let _operation = self.codex_runtime_operation_guard(workspace_id).await;
+        {
+            let workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.threads.get(thread_id))
+            else {
+                return Ok(());
+            };
+            if thread.requires_resume {
+                return Ok(());
+            }
+        }
         // Bounded control request: a wedged app-server must not hold the
         // dedup slot hostage forever.
         let result = session
@@ -2833,9 +2869,10 @@ impl ManagedThread {
     }
 }
 
-fn apply_resumed_codex_thread_hydration(
+fn apply_codex_thread_hydration(
     thread: &mut ManagedThread,
     hydrated: crate::codex::HydratedThread,
+    resumed: bool,
 ) {
     if thread.summary.native_session_id.is_none() {
         thread.summary.native_session_id = hydrated.summary.native_session_id;
@@ -2864,7 +2901,8 @@ fn apply_resumed_codex_thread_hydration(
         );
     }
     thread.replace_items(merged_items);
-    thread.requires_resume = false;
+    // Read-only hydration must not make the next send skip writer acquisition.
+    thread.requires_resume = !resumed;
 }
 
 fn merge_resumed_codex_items(
@@ -3426,6 +3464,22 @@ mod tests {
     }
 
     #[test]
+    fn read_only_codex_history_preserves_resume_requirement() {
+        let mut thread = isolated_codex_thread();
+        thread.requires_resume = true;
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &json!({"thread": {"id": "thread-isolated", "turns": []}}),
+            "/tmp/project",
+        );
+        apply_codex_thread_hydration(&mut thread, hydrated, false);
+        assert!(
+            thread.requires_resume,
+            "the next send must still acquire native ownership"
+        );
+    }
+
+    #[test]
     fn resumed_isolated_codex_thread_rehydrates_its_conversation() {
         let mut thread = isolated_codex_thread();
         thread.requires_resume = true;
@@ -3467,7 +3521,7 @@ mod tests {
         thread.summary.title = "Renamed while hydrating".to_string();
         thread.summary.attention.last_read_seq = 42;
         thread.summary.is_pinned = true;
-        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+        apply_codex_thread_hydration(&mut thread, hydrated, true);
 
         assert!(!thread.requires_resume);
         assert_eq!(thread.summary.title, "Renamed while hydrating");
@@ -3516,7 +3570,7 @@ mod tests {
             "/tmp/project-copy",
         );
 
-        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+        apply_codex_thread_hydration(&mut thread, hydrated, true);
 
         assert_eq!(thread.summary.status, ThreadStatus::Error);
         assert_eq!(
@@ -3562,7 +3616,7 @@ mod tests {
         }
         thread.replace_items(current);
 
-        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+        apply_codex_thread_hydration(&mut thread, hydrated, true);
 
         assert_eq!(thread.items.len(), 2);
         assert!(matches!(

@@ -1018,13 +1018,44 @@ impl CodexSession {
             .state
             .agent_context_instructions_with_extensions(&AgentProvider::CODEX)
             .await;
-        let mut response = self
+        let response = self
             .send_control_request(
                 "thread/resume",
                 thread_resume_params(thread_id, cwd, instructions.as_deref()),
             )
             .await?;
 
+        self.collect_thread_turn_pages(thread_id, response).await
+    }
+
+    /// Read persisted history without acquiring Codex's cross-process writer.
+    pub async fn read_thread_history(&self, thread_id: &str) -> Result<Value, DaemonError> {
+        let mut response = self
+            .send_control_request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": false}),
+            )
+            .await?;
+        let page = self
+            .send_control_request(
+                "thread/turns/list",
+                json!({
+                    "threadId": thread_id,
+                    "limit": CODEX_TURN_PAGE_SIZE,
+                    "sortDirection": "desc",
+                    "itemsView": "full"
+                }),
+            )
+            .await?;
+        response["initialTurnsPage"] = page;
+        self.collect_thread_turn_pages(thread_id, response).await
+    }
+
+    async fn collect_thread_turn_pages(
+        &self,
+        thread_id: &str,
+        mut response: Value,
+    ) -> Result<Value, DaemonError> {
         // Legacy histories still arrive in `thread.turns`. Paginated Codex
         // Desktop histories instead return a descending first page beside the
         // thread record and require `thread/turns/list` for the rest.
@@ -2218,6 +2249,18 @@ mod tests {
 
     #[cfg(unix)]
     fn sleeping_test_session() -> (tempfile::TempDir, Arc<CodexSession>) {
+        let (directory, session, _) = piped_test_session("sleep 30 & wait");
+        (directory, session)
+    }
+
+    #[cfg(unix)]
+    fn piped_test_session(
+        script: &str,
+    ) -> (
+        tempfile::TempDir,
+        Arc<CodexSession>,
+        tokio::process::ChildStdout,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let state = AppState::new_with_state_path(
             "test".to_string(),
@@ -2226,15 +2269,16 @@ mod tests {
         );
         let mut command = Command::new("/bin/sh");
         command
-            .args(["-c", "sleep 30 & wait"])
+            .args(["-c", script])
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .process_group(0);
         let mut child = command.spawn().unwrap();
         let process_group_id = child.id().unwrap();
         let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
         let session = Arc::new(CodexSession {
             workspace_id: "workspace-1".to_string(),
             workspace_path: directory.path().to_string_lossy().to_string(),
@@ -2251,7 +2295,53 @@ mod tests {
             process_group_id: Some(process_group_id),
             state,
         });
-        (directory, session)
+        (directory, session, stdout)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_only_history_pages_without_resuming_or_subscribing() {
+        let (_directory, session, stdout) = piped_test_session("cat");
+        let responder = Arc::clone(&session);
+        let server = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            for (method, response) in [
+                ("thread/read", json!({"thread": {"id": "t", "turns": []}})),
+                (
+                    "thread/turns/list",
+                    json!({"data": [{"id": "new"}], "nextCursor": "older"}),
+                ),
+                (
+                    "thread/turns/list",
+                    json!({"data": [{"id": "old"}], "nextCursor": null}),
+                ),
+            ] {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                if method == "thread/read" {
+                    assert_eq!(request["params"]["includeTurns"], false);
+                }
+                let id = request["id"].as_u64().unwrap();
+                responder
+                    .pending
+                    .lock()
+                    .await
+                    .remove(&id)
+                    .unwrap()
+                    .send(Ok(response))
+                    .unwrap();
+            }
+        });
+        let response = timeout(Duration::from_secs(3), session.read_thread_history("t"))
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            response["thread"]["turns"],
+            json!([{"id": "old"}, {"id": "new"}])
+        );
     }
 
     #[cfg(unix)]

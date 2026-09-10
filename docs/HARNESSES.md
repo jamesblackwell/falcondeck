@@ -70,6 +70,16 @@ the binding test there fails to compile if the two drift apart.
 Per AGENTS.md, protocol changes start in `falcondeck-core` and
 `client-core`; the daemon and all clients read the same shapes.
 
+## Codex thread ownership
+
+Opening a transcript uses `thread/read` and `thread/turns/list`, not
+`thread/resume`: resume acquires a cross-process writer lock and can block
+Codex Desktop from sending to the same idle conversation. Read-only hydration
+must retain `requires_resume` for the next actual send. Background goal
+enrichment only queries threads already loaded by this daemon; it must not
+resume an idle thread to inspect it. Completed turns still unsubscribe to
+release native ownership.
+
 ## Subscription usage
 
 `GET /api/provider-usage` (and relay RPC `providers.usage`) returns live
