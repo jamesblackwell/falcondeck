@@ -35,6 +35,19 @@ fn emit_scoped_diagnostic(
     // A dead MCP server never blocks the turn, so it stays out of the
     // transcript and out of the error tier no matter which scope reported it.
     if let Some(server) = mcp_startup_failure_server(&message) {
+        // A provider-plugin server resolved to a versioned path can fail every
+        // thread start after the provider prunes its plugin cache. Retiring the
+        // warm Codex runtime when it is quiet lets the next thread start
+        // reconnect with freshly resolved paths. Daemon-managed connectors
+        // spawn identically on every reconnect, so a refresh cannot help them.
+        if !matches!(
+            server,
+            crate::connectors::BUILTIN_CONNECTOR_NAME
+                | crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME
+                | crate::connectors::BUILTIN_COMPUTER_USE_CONNECTOR_NAME
+        ) {
+            app.schedule_codex_plugin_refresh(workspace_id);
+        }
         return app.upsert_operational_condition(
             workspace_id.to_string(),
             format!("mcp_startup:{server}"),

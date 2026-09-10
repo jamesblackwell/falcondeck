@@ -446,6 +446,9 @@ struct InnerState {
     service_notices: StdMutex<Vec<ServiceNotice>>,
     /// Current workspace degradation keyed by `(workspace_id, semantic_key)`.
     operational_conditions: StdMutex<HashMap<(String, String), OperationalCondition>>,
+    /// Last provider-plugin refresh attempt per workspace, so repeated MCP
+    /// startup reports cannot spawn retirement tasks in a tight loop.
+    plugin_refresh_attempts: StdMutex<HashMap<String, std::time::Instant>>,
     /// Latest high-frequency token usage keyed by thread id.
     thread_token_usage: StdMutex<HashMap<String, ThreadTokenUsage>>,
     /// User-message excerpts per provider session, for content search.
@@ -1060,6 +1063,7 @@ impl AppState {
                 interactive_requests: Mutex::new(HashMap::new()),
                 service_notices: StdMutex::new(Vec::new()),
                 operational_conditions: StdMutex::new(HashMap::new()),
+                plugin_refresh_attempts: StdMutex::new(HashMap::new()),
                 thread_token_usage: StdMutex::new(HashMap::new()),
                 thread_search: StdMutex::new(thread_search::ThreadSearchIndex::default()),
                 thread_search_scanned_at: StdMutex::new(None),
@@ -4185,6 +4189,28 @@ impl AppState {
                 condition_id: condition.id,
             },
         );
+    }
+
+    /// Clears every per-server MCP startup condition for a workspace. Used
+    /// when a warm runtime is retired for a plugin refresh: a server that is
+    /// genuinely broken is re-reported by the replacement app-server on the
+    /// next thread start.
+    pub(crate) fn clear_mcp_startup_conditions(&self, workspace_id: &str) {
+        let keys: Vec<String> = {
+            let conditions = self
+                .inner
+                .operational_conditions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            conditions
+                .keys()
+                .filter_map(|(id, key)| (id == workspace_id).then(|| key.clone()))
+                .filter(|key| key.starts_with("mcp_startup:"))
+                .collect()
+        };
+        for key in keys {
+            self.clear_operational_condition(workspace_id, &key);
+        }
     }
 
     fn emit(&self, workspace_id: Option<String>, thread_id: Option<String>, event: UnifiedEvent) {

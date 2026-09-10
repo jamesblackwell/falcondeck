@@ -394,6 +394,107 @@ async fn keeps_mcp_startup_failures_out_of_every_transcript() {
 }
 
 #[tokio::test]
+async fn plugin_mcp_startup_failures_schedule_cooled_plugin_refreshes() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    let message = "cua_repl failed to start: MCP client for `cua_repl` failed to start: MCP \
+                   startup failed: handshaking with MCP server failed: connection closed: \
+                   initialize response";
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "warning",
+        json!({ "threadId": "thread-1", "message": message }),
+    )
+    .await
+    .unwrap();
+    let first = *app
+        .inner
+        .plugin_refresh_attempts
+        .lock()
+        .unwrap()
+        .get("workspace-1")
+        .expect("first report schedules a plugin refresh");
+
+    // A re-report inside the cooldown leaves the scheduled attempt alone.
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "warning",
+        json!({ "threadId": "thread-2", "message": message }),
+    )
+    .await
+    .unwrap();
+    let second = *app
+        .inner
+        .plugin_refresh_attempts
+        .lock()
+        .unwrap()
+        .get("workspace-1")
+        .expect("attempt entry survives");
+    assert_eq!(first, second, "cooldown must collapse repeat reports");
+
+    // Daemon-managed connectors respawn identically, so a refresh cannot help.
+    ingest_notification(
+        &app,
+        "workspace-2",
+        "warning",
+        json!({ "message": "cua-driver failed to start: MCP startup failed" }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !app.inner
+            .plugin_refresh_attempts
+            .lock()
+            .unwrap()
+            .contains_key("workspace-2")
+    );
+}
+
+#[tokio::test]
+async fn clearing_mcp_startup_conditions_spares_other_conditions() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    for key in [
+        "mcp_startup:cua_repl",
+        "mcp_startup:linear",
+        "codex_connection",
+    ] {
+        app.upsert_operational_condition(
+            "workspace-1".to_string(),
+            key,
+            falcondeck_core::ServiceLevel::Warning,
+            "message".to_string(),
+            None,
+        )
+        .expect("upsert condition");
+    }
+    app.upsert_operational_condition(
+        "workspace-2".to_string(),
+        "mcp_startup:cua_repl",
+        falcondeck_core::ServiceLevel::Warning,
+        "message".to_string(),
+        None,
+    )
+    .expect("upsert condition");
+
+    app.clear_mcp_startup_conditions("workspace-1");
+
+    let snapshot = app.snapshot().await;
+    let keys = snapshot
+        .operational_conditions
+        .iter()
+        .map(|condition| (condition.workspace_id.as_str(), condition.key.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            ("workspace-1", "codex_connection"),
+            ("workspace-2", "mcp_startup:cua_repl"),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn removes_operational_condition_after_recovery() {
     let app = AppState::new("test".to_string(), HashMap::new());
     app.upsert_operational_condition(
@@ -8138,26 +8239,31 @@ async fn codex_sub_agent_activity_items_render_as_tool_calls() {
     }
 
     let workspaces = app.inner.workspaces.lock().await;
-    let items = workspaces["workspace-1"].threads["thread-1"].items.as_slice();
+    let items = workspaces["workspace-1"].threads["thread-1"]
+        .items
+        .as_slice();
     assert!(
         !items
             .iter()
             .any(|item| matches!(item, ConversationItem::Unsupported { .. })),
         "sub-agent activity must not fall through to unsupported: {items:?}"
     );
-    assert!(matches!(
-        items,
-        [ConversationItem::ToolCall { title, detail, .. }]
-            if title == "Sub-agent started"
-                && matches!(
-                    detail.as_deref(),
-                    Some(falcondeck_core::ToolCallDetail::SubagentActivity {
-                        activity,
-                        agent_thread_id,
-                        agent_path,
-                    }) if activity == "started"
-                        && agent_thread_id == "01a076f3-ac7f-7f10-9b8f-0ebe12fc4908"
-                        && agent_path == "/root/mobile_audit"
-                )
-    ), "{items:?}");
+    assert!(
+        matches!(
+            items,
+            [ConversationItem::ToolCall { title, detail, .. }]
+                if title == "Sub-agent started"
+                    && matches!(
+                        detail.as_deref(),
+                        Some(falcondeck_core::ToolCallDetail::SubagentActivity {
+                            activity,
+                            agent_thread_id,
+                            agent_path,
+                        }) if activity == "started"
+                            && agent_thread_id == "01a076f3-ac7f-7f10-9b8f-0ebe12fc4908"
+                            && agent_path == "/root/mobile_audit"
+                    )
+        ),
+        "{items:?}"
+    );
 }

@@ -18,6 +18,16 @@ use super::{AppState, ManagedThread};
 const CODEX_WARM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 const BUSY_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_CONCURRENT_OPTIONAL_STARTS: usize = 2;
+/// Codex resolves plugin MCP servers to versioned paths when the app-server
+/// starts. The provider prunes that cache when it updates, so a warm runtime
+/// can keep launching a deleted script on every new thread. Give a just-started
+/// turn a moment to surface before deciding the runtime is quiet enough to
+/// refresh.
+const PLUGIN_REFRESH_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+/// One refresh attempt per workspace per cooldown; the provider re-reports an
+/// MCP startup failure on every thread start, which would otherwise spawn a
+/// retirement task per report.
+const PLUGIN_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub(super) struct RuntimeLifecycle {
     optional_start_slots: Semaphore,
@@ -101,7 +111,22 @@ impl AppState {
         });
     }
 
+    /// Retires the session when its warm idle grace has elapsed and no work is
+    /// live. See [`Self::retire_codex_session_if_quiet`].
     async fn retire_codex_session_if_idle(&self, session: &Arc<CodexSession>) -> IdleRetirement {
+        self.retire_codex_session_if_quiet(session, true).await
+    }
+
+    /// Detaches the workspace's Codex app-server once no thread work is live.
+    /// With `require_idle` the runtime must also have been quiet for the warm
+    /// grace period; plugin refreshes drop that requirement because the runtime
+    /// is already failing new threads and a fresh spawn resolves current
+    /// provider-side plugin paths.
+    async fn retire_codex_session_if_quiet(
+        &self,
+        session: &Arc<CodexSession>,
+        require_idle: bool,
+    ) -> IdleRetirement {
         // Existing operations hold shared leases. Exclusive acquisition means
         // every request that already resolved this session has completed, and
         // new callers will either observe the retained session or wake a new
@@ -127,7 +152,10 @@ impl AppState {
                 .threads
                 .values()
                 .any(codex_thread_keeps_runtime_live);
-            if !should_retire(session.idle_for(), has_live_work) {
+            if has_live_work {
+                return IdleRetirement::Busy;
+            }
+            if require_idle && !should_retire(session.idle_for(), has_live_work) {
                 return IdleRetirement::Busy;
             }
             workspace.codex_session.take()
@@ -139,10 +167,62 @@ impl AppState {
         tracing::info!(
             workspace_id = %session.workspace_id(),
             idle_seconds = session.idle_for().as_secs(),
-            "stopping warm Codex runtime after its idle grace period"
+            forced = !require_idle,
+            "stopping warm Codex runtime so the next use reconnects fresh"
         );
         let _ = session.shutdown().await;
         IdleRetirement::Retired
+    }
+
+    /// Retires a warm Codex runtime whose plugin MCP servers keep failing to
+    /// start. The provider (Codex) resolves plugin servers such as
+    /// `cua_repl` to versioned paths under its plugin cache when the
+    /// app-server starts; when the provider updates and prunes that cache, the
+    /// warm runtime keeps launching a deleted script and every new thread
+    /// reports an MCP startup failure. Retiring the quiet runtime makes the
+    /// next thread start reconnect with freshly resolved paths. A busy runtime
+    /// is left alone; the next failure report retries after the cooldown.
+    pub(crate) fn schedule_codex_plugin_refresh(&self, workspace_id: &str) {
+        let now = std::time::Instant::now();
+        {
+            let mut attempts = self
+                .inner
+                .plugin_refresh_attempts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if attempts
+                .get(workspace_id)
+                .is_some_and(|last| now.duration_since(*last) < PLUGIN_REFRESH_COOLDOWN)
+            {
+                return;
+            }
+            attempts.insert(workspace_id.to_string(), now);
+        }
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(PLUGIN_REFRESH_SETTLE).await;
+            let session = {
+                let workspaces = app.inner.workspaces.lock().await;
+                let Some(workspace) = workspaces.get(&workspace_id) else {
+                    return;
+                };
+                match workspace.codex_session.as_ref() {
+                    Some(session) if !session.is_closed() => Arc::clone(session),
+                    _ => return,
+                }
+            };
+            match app.retire_codex_session_if_quiet(&session, false).await {
+                IdleRetirement::Retired => {
+                    // A healed refresh must not leave the startup warnings on
+                    // screen; a still-broken server re-reports them.
+                    app.clear_mcp_startup_conditions(&workspace_id);
+                }
+                // Busy: a live turn keeps the runtime; the next failure report
+                // retries. Stale: the session was already replaced or closed.
+                IdleRetirement::Busy | IdleRetirement::Stale => {}
+            }
+        });
     }
 }
 
