@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as AudioApi from 'react-native-audio-api'
+import * as Speech from 'expo-speech'
+import { DEMO_SESSION_ID, demoConversationItems } from '@/features/demo/demoData'
 
 import { useRelayStore } from '@/store/relay-store'
 
@@ -21,6 +23,60 @@ describe('NativeReadAloudPlayer', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockSourceNodes.length = 0
+    useRelayStore.setState({ sessionId: null })
+  })
+
+  it('reads the long demo response offline with background audio and pause controls', async () => {
+    useRelayStore.setState({ sessionId: DEMO_SESSION_ID })
+    const rpc = vi.spyOn(useRelayStore.getState(), '_callRpc')
+    const message = demoConversationItems.find((item) => item.id === 'msg-5')!
+    expect(message.kind).toBe('assistant_message')
+    if (message.kind !== 'assistant_message') throw new Error('Missing demo summary')
+    expect(message.text.split(/\s+/).length).toBeGreaterThan(150)
+    const player = new NativeReadAloudPlayer()
+    player.toggle('demo-summary', message.text)
+    await vi.waitFor(() => expect(Speech.speak).toHaveBeenCalled())
+    expect(rpc).not.toHaveBeenCalled()
+    const calls = vi.mocked(Speech.speak).mock.calls
+    expect(calls.map(([text]) => text).join(' ')).toContain('Before deploying')
+    const options = calls[0][1]!
+    expect(options.useApplicationAudioSession).toBe(true)
+    expect(AudioApi.AudioManager.setAudioSessionOptions).toHaveBeenCalledWith({
+      iosCategory: 'playback', iosMode: 'spokenAudio',
+    })
+    options.onStart?.()
+    expect(player.getSnapshot('demo-summary')).toBe('playing')
+    await player.togglePause()
+    expect(Speech.pause).toHaveBeenCalledOnce()
+    expect(player.getSnapshot('demo-summary')).toBe('paused')
+    await player.togglePause()
+    expect(Speech.resume).toHaveBeenCalledOnce()
+    calls.at(-1)![1]!.onDone?.()
+    expect(player.getSnapshot('demo-summary')).toBe('idle')
+  })
+
+  it('cancels demo speech preparation and ignores callbacks from a replaced message', async () => {
+    useRelayStore.setState({ sessionId: DEMO_SESSION_ID })
+    const player = new NativeReadAloudPlayer()
+    player.toggle('first', 'First message')
+    player.stop()
+    await Promise.resolve()
+    expect(Speech.speak).not.toHaveBeenCalled()
+    player.toggle('second', 'Second message')
+    await vi.waitFor(() => expect(Speech.speak).toHaveBeenCalledOnce())
+    const old = vi.mocked(Speech.speak).mock.calls[0][1]!
+    player.toggle('third', 'A new message typed in the demo')
+    await vi.waitFor(() => expect(Speech.speak).toHaveBeenCalledTimes(2))
+    old.onStart?.()
+    old.onError?.(new Error('late error'))
+    old.onDone?.()
+    expect(player.getSnapshot('third')).toBe('loading')
+    const current = vi.mocked(Speech.speak).mock.calls[1][1]!
+    current.onStart?.()
+    expect(player.getSnapshot('third')).toBe('playing')
+    player.stop()
+    expect(Speech.stop).toHaveBeenCalled()
+    expect(player.getSnapshot('third')).toBe('idle')
   })
 
   it('prefetches chunks and plays them in sequence', async () => {

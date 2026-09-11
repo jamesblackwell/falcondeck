@@ -175,7 +175,13 @@ export const demoConversationItems: ConversationItem[] = [
   { kind: 'assistant_message', id: 'msg-3', text: "I've set up JWT authentication with the following:\n\n- **`src/middleware/auth.ts`** — JWT verification middleware that extracts and validates tokens from the Authorization header\n- **`src/routes/auth.ts`** — Login and register endpoints with bcrypt password hashing, JWT access tokens (15min), and refresh tokens stored in the database\n- **`src/server.ts`** — Updated to mount the auth routes and apply the middleware to protected endpoints\n\nThe refresh token rotation is handled automatically — each refresh invalidates the old token and issues a new pair.", created_at: ago(4) },
   { kind: 'user_message', id: 'msg-4', text: 'Can you run the tests to make sure everything works?', attachments: [], created_at: ago(3) },
   { kind: 'tool_call', id: 'tc-7', title: 'bash: npm test', tool_kind: 'bash', status: 'completed', output: 'PASS src/routes/auth.test.ts\n  ✓ registers a new user (45ms)\n  ✓ rejects duplicate email (12ms)\n  ✓ logs in with valid credentials (38ms)\n  ✓ rejects invalid password (8ms)\n  ✓ refreshes access token (22ms)\n\nTest Suites: 1 passed, 1 total\nTests:       5 passed, 5 total', exit_code: 0, display: sideEffect('command_output'), created_at: ago(2), completed_at: ago(2) },
-  { kind: 'assistant_message', id: 'msg-5', text: 'All 5 tests pass. Authentication is working correctly with JWT tokens, bcrypt password hashing, and refresh token rotation.', created_at: ago(1) },
+  { kind: 'assistant_message', id: 'msg-5', text: `All 5 tests pass. Authentication is working correctly with JWT tokens, bcrypt password hashing, and refresh token rotation.
+
+The tests cover registration, duplicate email addresses, successful login, incorrect passwords, and refreshing an access token. The login response includes a short-lived access token, while the refresh token stays associated with the user's session in the database. When a refresh succeeds, the previous token is replaced so it cannot be used again.
+
+Before deploying, I recommend checking the complete sign-in flow on staging with a separate test account. Sign in, open a protected page, let the access token expire, and confirm that the session refreshes without interrupting the user. Then sign out and verify that the old session can no longer access protected routes.
+
+There are a few useful follow-up tests we can add next: expired tokens, malformed authorization headers, and two refresh requests arriving at the same time. Those cases would give us better coverage of the failure paths. The current changes are ready for you to review file by file before deciding whether to merge them.`, created_at: ago(1) },
 ]
 
 const demoMigrationItems: ConversationItem[] = [

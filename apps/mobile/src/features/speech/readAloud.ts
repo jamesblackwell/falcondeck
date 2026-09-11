@@ -4,6 +4,7 @@ import {
   type AudioBuffer,
   type AudioBufferSourceNode,
 } from 'react-native-audio-api'
+import * as Speech from 'expo-speech'
 
 import {
   base64ToBytes,
@@ -14,6 +15,7 @@ import {
 
 import { mediaAudioPlayer } from '@/lib/media-audio-player'
 import { useRelayStore } from '@/store/relay-store'
+import { DEMO_SESSION_ID } from '@/features/demo/demoData'
 
 import { speechLiveActivity } from './speechLiveActivity'
 
@@ -22,6 +24,7 @@ export type ReadAloudState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 type Listener = () => void
 type Playback = {
   key: string
+  deviceSpeech: boolean
   node: AudioBufferSourceNode | null
   paused: boolean
   activityStarted: boolean
@@ -49,6 +52,7 @@ async function synthesize(text: string): Promise<SpeechSynthesisResponse> {
 export class NativeReadAloudPlayer {
   private context: AudioContext | null = null
   private active: Playback | null = null
+  private pendingSpeechStop: Promise<void> = Promise.resolve()
   private readonly states = new Map<string, ReadAloudState>()
   private readonly listeners = new Map<string, Set<Listener>>()
 
@@ -76,15 +80,20 @@ export class NativeReadAloudPlayer {
     mediaAudioPlayer.stop()
     const playback: Playback = {
       key,
+      deviceSpeech: useRelayStore.getState().sessionId === DEMO_SESSION_ID,
       node: null,
       paused: false,
       activityStarted: false,
       unsubscribeActivityActions: null,
     }
     this.active = playback
+    this.setState(key, 'loading')
+    if (playback.deviceSpeech) {
+      void this.playDeviceSpeech(playback, chunks)
+      return
+    }
     this.activatePlaybackSession()
     void this.audioContext().resume().catch(() => undefined)
-    this.setState(key, 'loading')
     void this.playChunks(playback, chunks)
   }
 
@@ -92,6 +101,9 @@ export class NativeReadAloudPlayer {
     const active = this.active
     if (!active || (key && active.key !== key)) return
     this.active = null
+    if (active.deviceSpeech) {
+      this.pendingSpeechStop = Speech.stop().catch(() => undefined)
+    }
     this.finishLiveActivity(active)
     this.deactivatePlaybackSession()
     try {
@@ -104,16 +116,16 @@ export class NativeReadAloudPlayer {
 
   async togglePause(): Promise<void> {
     const playback = this.active
-    if (!playback?.node || !playback.activityStarted) return
+    if (!playback || !playback.activityStarted || (!playback.deviceSpeech && !playback.node)) return
     try {
       if (playback.paused) {
-        await this.audioContext().resume()
+        await (playback.deviceSpeech ? Speech.resume() : this.audioContext().resume())
         if (this.active !== playback) return
         playback.paused = false
         speechLiveActivity.setMode('playing')
         this.setState(playback.key, 'playing')
       } else {
-        await this.audioContext().suspend()
+        await (playback.deviceSpeech ? Speech.pause() : this.audioContext().suspend())
         if (this.active !== playback) return
         playback.paused = true
         speechLiveActivity.setMode('paused')
@@ -121,6 +133,40 @@ export class NativeReadAloudPlayer {
       }
     } catch {
       // An interruption can race a Lock Screen pause or resume action.
+    }
+  }
+
+  /** Demo has no daemon: queue on-device utterances so playback also works offline. */
+  private async playDeviceSpeech(playback: Playback, chunks: string[]): Promise<void> {
+    const finish = (state: 'idle' | 'error') => {
+      if (this.active !== playback) return
+      this.stop(playback.key)
+      this.setState(playback.key, state)
+    }
+    try {
+      await this.pendingSpeechStop
+      if (this.active !== playback) return
+      this.activatePlaybackSession()
+      // Share our playback/spokenAudio session instead of a system-managed
+      // ambient session, which would suspend speech when the app backgrounds.
+      for (const [index, text] of chunks.entries()) {
+        Speech.speak(text, {
+          language: 'en-US',
+          useApplicationAudioSession: true,
+          onStart: () => {
+            if (this.active !== playback) return
+            this.startLiveActivity(playback)
+            this.setState(playback.key, playback.paused ? 'paused' : 'playing')
+          },
+          onDone: () => {
+            if (index === chunks.length - 1) finish('idle')
+          },
+          onStopped: () => finish('idle'),
+          onError: () => finish('error'),
+        })
+      }
+    } catch {
+      finish('error')
     }
   }
 
@@ -173,17 +219,20 @@ export class NativeReadAloudPlayer {
         if (playback.node === node) playback.node = null
         resolve()
       }
-      if (!playback.activityStarted) {
-        playback.activityStarted = true
-        speechLiveActivity.startPlaying()
-        playback.unsubscribeActivityActions = speechLiveActivity.subscribeAction((action) => {
-          if (this.active !== playback) return
-          if (action === 'toggle-playback') void this.togglePause()
-          if (action === 'stop-playback') this.stop(playback.key)
-        })
-      }
+      this.startLiveActivity(playback)
       this.setState(playback.key, 'playing')
       node.start()
+    })
+  }
+
+  private startLiveActivity(playback: Playback): void {
+    if (playback.activityStarted) return
+    playback.activityStarted = true
+    speechLiveActivity.startPlaying()
+    playback.unsubscribeActivityActions = speechLiveActivity.subscribeAction((action) => {
+      if (this.active !== playback) return
+      if (action === 'toggle-playback') void this.togglePause()
+      if (action === 'stop-playback') this.stop(playback.key)
     })
   }
 
