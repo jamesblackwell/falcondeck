@@ -810,11 +810,13 @@ export const SidebarView = memo(function SidebarView({
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {onClose ? (
-        <View style={styles.header}>
-          <Text variant="label" color="primary" weight="semibold">
-            Threads
-          </Text>
+      {/* The title stays even when there is nothing to close: it keeps the
+          panel's top edge on the same line as the conversation header. */}
+      <View style={styles.header}>
+        <Text variant="label" color="primary" weight="semibold">
+          Threads
+        </Text>
+        {onClose ? (
           <Pressable
             style={({ pressed }) => [
               styles.closeButton,
@@ -827,8 +829,8 @@ export const SidebarView = memo(function SidebarView({
           >
             <X size={theme.iconSize.md} color={theme.colors.fg.secondary} />
           </Pressable>
-        </View>
-      ) : null}
+        ) : null}
+      </View>
 
       <SyncBanner status={syncStatus} />
 

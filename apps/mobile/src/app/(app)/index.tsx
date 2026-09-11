@@ -119,6 +119,7 @@ import {
 } from "@/lib/haptics";
 import { CONNECTION_COPY } from "@/lib/connection-copy";
 import { sessionSendBlockReason } from "@/lib/session-status";
+import { READING_MAX_WIDTH, useTabletLayout } from "@/hooks/useTabletLayout";
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
 const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = [];
@@ -127,10 +128,13 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { theme } = useUnistyles();
   const navigation = useNavigation();
+  const { hasPermanentSidebar, readingGutter } = useTabletLayout();
   // The full-width drawer covers the transcript but leaves it mounted.
   // Pause live item subscriptions so a streaming turn does not re-parse
   // Markdown under the sidebar; the store still applies events.
-  const pauseLiveTranscript = useDrawerStatus() === "open";
+  // A sidebar that stays on screen covers nothing, so nothing pauses.
+  const isDrawerOpen = useDrawerStatus() === "open";
+  const pauseLiveTranscript = isDrawerOpen && !hasPermanentSidebar;
 
   const presentation: ConversationPresentation = useConversationPresentation({
     pause: pauseLiveTranscript,
@@ -1255,6 +1259,16 @@ export default function HomeScreen() {
     thread: selectedThread,
   });
 
+  // Gutters go on the scroll content rather than the list itself so the whole
+  // pane still takes scroll and drag gestures on a wide screen.
+  const listContentStyle = useMemo(
+    () => ({
+      paddingBottom: theme.spacing[4],
+      paddingHorizontal: readingGutter,
+    }),
+    [readingGutter, theme.spacing],
+  );
+
   return (
     <KeyboardAvoidingView
       style={[styles.container, { paddingTop: insets.top }]}
@@ -1264,17 +1278,24 @@ export default function HomeScreen() {
       <View style={styles.header}>
         <Pressable
           style={styles.headerLeft}
-          onPress={handleOpenDrawer}
+          // With the sidebar already on screen there is nothing to open, and a
+          // back chevron pointing at a visible panel reads as a dead control.
+          onPress={hasPermanentSidebar ? undefined : handleOpenDrawer}
+          disabled={hasPermanentSidebar}
           hitSlop={theme.spacing[2]}
-          accessibilityRole="button"
+          accessibilityRole={hasPermanentSidebar ? "header" : "button"}
           accessibilityLabel={
             workspace?.kind === "casual"
               ? `Casual chat${selectedThread ? `: ${selectedThread.title || "New thread"}` : ""}`
               : `Project: ${getWorkspaceTitle(workspace?.path)}${selectedThread ? `. Thread: ${selectedThread.title || "New thread"}` : ""}`
           }
-          accessibilityHint="Opens the project and thread list"
+          accessibilityHint={
+            hasPermanentSidebar ? undefined : "Opens the project and thread list"
+          }
         >
-          <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
+          {hasPermanentSidebar ? null : (
+            <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
+          )}
           <View style={styles.headerLabels}>
             <Text
               variant="label"
@@ -1433,7 +1454,7 @@ export default function HomeScreen() {
             onTouchCancel={onTouchEnd}
             onResponderRelease={onTouchEnd}
             scrollEventThrottle={16}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={listContentStyle}
             ListHeaderComponent={
               selectedThreadHistory.hasOlder ? (
                 <View style={styles.loadOlderContainer}>
@@ -1460,119 +1481,121 @@ export default function HomeScreen() {
         <TranscriptRefreshPill visible={isRefreshingSelectedThread} />
       </View>
 
-      <LiveActivityLane groups={liveActivityGroups} />
+      <View style={styles.composerColumn}>
+        <LiveActivityLane groups={liveActivityGroups} />
 
-      {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
-        <InterruptedTurnNotice
-          onContinue={handleContinueInterruptedTurn}
-          onDismiss={handleDismissInterruptedTurn}
-          isContinuing={isSubmitting}
+        {selectedThread && wasTurnInterruptedByShutdown(selectedThread) ? (
+          <InterruptedTurnNotice
+            onContinue={handleContinueInterruptedTurn}
+            onDismiss={handleDismissInterruptedTurn}
+            isContinuing={isSubmitting}
+          />
+        ) : null}
+
+        <GoalBanner
+          goal={selectedThread?.goal ?? null}
+          onPress={() => setIsGoalSheetOpen(true)}
         />
-      ) : null}
 
-      <GoalBanner
-        goal={selectedThread?.goal ?? null}
-        onPress={() => setIsGoalSheetOpen(true)}
-      />
-
-      <ComposerSuggestionPill
-        offer={composerSuggestionOffer}
-        onSubmit={handleSubmitComposerSuggestion}
-        onShowAlternatives={() => setIsSuggestionSheetOpen(true)}
-        onDismiss={handleDismissComposerSuggestions}
-      />
-
-      <QueuedTurns
-        queuedTurns={queuedTurns}
-        canSteer={capabilities.supports_steering}
-        onRemove={handleRemoveQueuedTurn}
-        onSteer={handleSteerQueuedTurn}
-        onEdit={handleEditQueuedTurn}
-        getAttachmentPreview={handleQueuedTurnAttachmentPreview}
-      />
-
-      {/* The keyboard already covers the home indicator, so keeping the inset
-          while it is up would float the composer above the keyboard. */}
-      <View style={{ paddingBottom: isKeyboardVisible ? 0 : insets.bottom }}>
-        <ChatInput
-          textInputRef={composerInputRef}
-          value={draft}
-          onChangeText={setDraft}
-          onSubmit={() => {
-            // Sending from just above the tail means the reader wants to see
-            // their message land; only a reader far enough up for the jump
-            // button keeps their place.
-            scrollToBottomIfNear();
-            void submitTurn();
-          }}
-          onStop={() => {
-            if (isStopping) return;
-            setIsStopping(true);
-            void interruptTurn().finally(() => setIsStopping(false));
-          }}
-          onPickImages={handlePickImages}
-          onPasteImage={handlePasteImage}
-          onTakePhoto={handleTakePhoto}
-          onRemoveAttachment={removeAttachment}
-          disabled={!workspace}
-          sendDisabled={
-            isSubmitting ||
-            !isEncrypted ||
-            Boolean(attachmentSendBlockReason) ||
-            isPreparingSelectedHandoff
-          }
-          statusNotice={
-            handoffPending && !isPreparingSelectedHandoff
-              ? "Preparing handoff… copying this conversation to the new thread"
-              : undefined
-          }
-          sendDisabledReason={
-            // Submitting is transient and self-evident; only surface a reason
-            // when the block is something the user has to act on.
-            isSubmitting
-              ? undefined
-              : isPreparingSelectedHandoff
-                ? "Wait for the handoff turn to start"
-                : !isEncrypted
-                  ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
-                  : (attachmentSendBlockReason ?? undefined)
-          }
-          attachments={attachments}
-          skills={workspace?.skills ?? []}
-          loadSkills={loadWorkspaceSkills}
-          // An empty catalog after sync is an empty state, not an active load.
-          modelsLoading={isSyncing && effectiveModels.length === 0}
-          models={effectiveModels}
-          selectedModel={selectedModel}
-          selectedEffort={selectedEffort}
-          effortOptions={effortOptions}
-          selectedProvider={activeProvider}
-          providers={providerOptions}
-          showProviderSelector={!selectedThread}
-          onSelectModel={handleModelChange}
-          onSelectEffort={handleEffortChange}
-          selectedServiceTier={selectedServiceTier}
-          onSelectServiceTier={handleServiceTierChange}
-          onSelectProvider={handleProviderChange}
-          handoffProviders={handoffProviderOptions}
-          onHandoffProviderSelect={
-            selectedThread ? handoffToProvider : undefined
-          }
-          handoffDisabledReason={handoffDisabledReason}
-          isRunning={isThreadRunning}
-          isStopping={isStopping}
-          capabilities={capabilities}
-          compactCommandAvailable={
-            Boolean(selectedThread) &&
-            capabilities.supports_compaction &&
-            !isThreadRunning
-          }
-          selectedPermissionMode={selectedPermissionMode}
-          selectedSandboxMode={selectedSandboxMode}
-          onSelectPermissionMode={handlePermissionModeChange}
-          onSelectSandboxMode={handleSandboxModeChange}
-          onGoalCommand={() => setIsGoalSheetOpen(true)}
+        <ComposerSuggestionPill
+          offer={composerSuggestionOffer}
+          onSubmit={handleSubmitComposerSuggestion}
+          onShowAlternatives={() => setIsSuggestionSheetOpen(true)}
+          onDismiss={handleDismissComposerSuggestions}
         />
+
+        <QueuedTurns
+          queuedTurns={queuedTurns}
+          canSteer={capabilities.supports_steering}
+          onRemove={handleRemoveQueuedTurn}
+          onSteer={handleSteerQueuedTurn}
+          onEdit={handleEditQueuedTurn}
+          getAttachmentPreview={handleQueuedTurnAttachmentPreview}
+        />
+
+        {/* The keyboard already covers the home indicator, so keeping the inset
+            while it is up would float the composer above the keyboard. */}
+        <View style={{ paddingBottom: isKeyboardVisible ? 0 : insets.bottom }}>
+          <ChatInput
+            textInputRef={composerInputRef}
+            value={draft}
+            onChangeText={setDraft}
+            onSubmit={() => {
+              // Sending from just above the tail means the reader wants to see
+              // their message land; only a reader far enough up for the jump
+              // button keeps their place.
+              scrollToBottomIfNear();
+              void submitTurn();
+            }}
+            onStop={() => {
+              if (isStopping) return;
+              setIsStopping(true);
+              void interruptTurn().finally(() => setIsStopping(false));
+            }}
+            onPickImages={handlePickImages}
+            onPasteImage={handlePasteImage}
+            onTakePhoto={handleTakePhoto}
+            onRemoveAttachment={removeAttachment}
+            disabled={!workspace}
+            sendDisabled={
+              isSubmitting ||
+              !isEncrypted ||
+              Boolean(attachmentSendBlockReason) ||
+              isPreparingSelectedHandoff
+            }
+            statusNotice={
+              handoffPending && !isPreparingSelectedHandoff
+                ? "Preparing handoff… copying this conversation to the new thread"
+                : undefined
+            }
+            sendDisabledReason={
+              // Submitting is transient and self-evident; only surface a reason
+              // when the block is something the user has to act on.
+              isSubmitting
+                ? undefined
+                : isPreparingSelectedHandoff
+                  ? "Wait for the handoff turn to start"
+                  : !isEncrypted
+                    ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
+                    : (attachmentSendBlockReason ?? undefined)
+            }
+            attachments={attachments}
+            skills={workspace?.skills ?? []}
+            loadSkills={loadWorkspaceSkills}
+            // An empty catalog after sync is an empty state, not an active load.
+            modelsLoading={isSyncing && effectiveModels.length === 0}
+            models={effectiveModels}
+            selectedModel={selectedModel}
+            selectedEffort={selectedEffort}
+            effortOptions={effortOptions}
+            selectedProvider={activeProvider}
+            providers={providerOptions}
+            showProviderSelector={!selectedThread}
+            onSelectModel={handleModelChange}
+            onSelectEffort={handleEffortChange}
+            selectedServiceTier={selectedServiceTier}
+            onSelectServiceTier={handleServiceTierChange}
+            onSelectProvider={handleProviderChange}
+            handoffProviders={handoffProviderOptions}
+            onHandoffProviderSelect={
+              selectedThread ? handoffToProvider : undefined
+            }
+            handoffDisabledReason={handoffDisabledReason}
+            isRunning={isThreadRunning}
+            isStopping={isStopping}
+            capabilities={capabilities}
+            compactCommandAvailable={
+              Boolean(selectedThread) &&
+              capabilities.supports_compaction &&
+              !isThreadRunning
+            }
+            selectedPermissionMode={selectedPermissionMode}
+            selectedSandboxMode={selectedSandboxMode}
+            onSelectPermissionMode={handlePermissionModeChange}
+            onSelectSandboxMode={handleSandboxModeChange}
+            onGoalCommand={() => setIsGoalSheetOpen(true)}
+          />
+        </View>
       </View>
 
       {isSuggestionSheetOpen && composerSuggestionOffer ? (
@@ -1653,8 +1676,11 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     minHeight: 2,
   },
-  listContent: {
-    paddingBottom: theme.spacing[4],
+  // Keeps the composer on the same reading column as the transcript above it.
+  composerColumn: {
+    width: "100%",
+    maxWidth: READING_MAX_WIDTH,
+    alignSelf: "center",
   },
   listBottomSpacer: {
     height: theme.spacing[6],
