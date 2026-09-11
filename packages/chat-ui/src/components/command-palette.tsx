@@ -184,6 +184,7 @@ type FrozenThreadOrder = {
 type PaletteIcon =
   | { kind: 'status'; tone: PaletteThreadStatus['tone'] }
   | { kind: 'glyph'; Glyph: LucideIcon }
+  | { kind: 'image'; src: string }
   | { kind: 'swatch'; preview: PalettePreview }
 
 /**
@@ -213,6 +214,15 @@ function highlightSnippet(
 
 function renderPaletteIcon(icon: PaletteIcon): React.ReactNode {
   if (icon.kind === 'glyph') return <icon.Glyph className="h-3.5 w-3.5" />
+  if (icon.kind === 'image') {
+    return (
+      <img
+        src={icon.src}
+        alt=""
+        className="h-3.5 w-3.5 rounded-[3px] object-contain"
+      />
+    )
+  }
   if (icon.kind === 'swatch') return <PaletteSwatch preview={icon.preview} size={14} />
   switch (icon.tone) {
     case 'accent':
@@ -489,6 +499,7 @@ export type CommandPaletteProps = {
   /** Opens the palette already scoped to one project's threads. */
   initialProjectId?: string | null
   requestMode?: 'open' | 'toggle' | 'close'
+  workspaceIconSrc?: (workspaceId: string) => string | null
 }
 
 /**
@@ -514,6 +525,7 @@ export const CommandPalette = memo(function CommandPalette({
   initialScope = 'all',
   initialProjectId = null,
   requestMode = 'open',
+  workspaceIconSrc,
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -598,7 +610,12 @@ export const CommandPalette = memo(function CommandPalette({
           label,
           sublabel: group.workspace.path,
           projectId: group.workspace.id,
-          icon: { kind: 'glyph' as const, Glyph: FolderClosed },
+          icon: (() => {
+            const src = workspaceIconSrc?.(group.workspace.id)
+            return src
+              ? { kind: 'image' as const, src }
+              : { kind: 'glyph' as const, Glyph: FolderClosed }
+          })(),
           search: normalizeSearchFields({
             primary: label,
             secondary: group.workspace.path,
@@ -898,7 +915,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, libraryWorkspaces, mode, onNewThread, onOpenActivity, onOpenBackup, onOpenKeyboardShortcuts, onOpenLibraryWorkspace, onOpenPlugins, onOpenSettings, onOpenUsage, onSelectThread, open, shortcutHints, workspaceIconSrc])
 
   // A project that has since disappeared (removed, or a stale request) must
   // not silently hide every result, so the chip only survives while it resolves.
@@ -911,6 +928,9 @@ export const CommandPalette = memo(function CommandPalette({
   )
   const activeProjectLabel = activeProject
     ? getProjectLabel(activeProject.workspace.path)
+    : null
+  const activeProjectIconSrc = activeProject
+    ? workspaceIconSrc?.(activeProject.workspace.id) ?? null
     : null
 
   // Message-content matches come from the daemon's excerpt index, so they are
@@ -1268,7 +1288,15 @@ export const CommandPalette = memo(function CommandPalette({
           ) : null}
           {activeProjectLabel ? (
             <span className="flex max-w-[12rem] shrink-0 items-center gap-1 rounded-[var(--fd-radius-sm)] bg-surface-3 py-0.5 pl-1.5 pr-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
-              <FolderClosed aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
+              {activeProjectIconSrc ? (
+                <img
+                  src={activeProjectIconSrc}
+                  alt=""
+                  className="h-3 w-3 rounded-[2px] object-contain"
+                />
+              ) : (
+                <FolderClosed aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
+              )}
               <span className="truncate">{activeProjectLabel}</span>
               <button
                 type="button"

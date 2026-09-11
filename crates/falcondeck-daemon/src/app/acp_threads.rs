@@ -2169,9 +2169,7 @@ async fn run_acp_turn_startup(
     let builtin = app
         .builtin_connectors(provider, &cwd, Some(thread_id))
         .await;
-    let agent_context = app
-        .agent_context_instructions_with_extensions(provider)
-        .await;
+    let agent_context = app.agent_context_instructions(provider).await;
     let first_start = if resume_interrupted {
         let native_session = known_native_session.as_deref().ok_or_else(|| {
             DaemonError::BadRequest(

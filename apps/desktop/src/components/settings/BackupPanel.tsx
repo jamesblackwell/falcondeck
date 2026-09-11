@@ -168,7 +168,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
         <SettingList>
           <SettingRow
             title="Full FalconDeck Archive"
-            description="Includes workspace pins, appearance & conversation preferences, extension data (Notes, Missions), automations, and connectors."
+            description="Includes workspace pins, appearance & conversation preferences, extension data (Notes, tags), automations, and connectors."
             control={
               <Button
                 variant="secondary"

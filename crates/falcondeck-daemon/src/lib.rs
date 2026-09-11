@@ -24,7 +24,6 @@ pub mod extension_mcp;
 mod git;
 pub mod harness_conformance;
 pub mod logging;
-mod mission_context;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 mod ship;
@@ -35,6 +34,7 @@ pub mod stdio_helper;
 mod terminal;
 mod variant;
 mod workspace_files;
+mod workspace_icons;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

@@ -1,11 +1,12 @@
 import * as React from 'react'
 import { memo, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
-import { FolderClosed, FolderOpen, Globe, Search, SquarePen } from 'lucide-react'
+import { Globe, Search, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
-import { workspaceColorCssVar } from '@falcondeck/client-core'
 import { ActivityDiamond, cn } from '@falcondeck/ui'
+
+import { WorkspaceIcon } from './workspace-icon'
 
 // Present when the workspace lives on an enrolled remote server rather than
 // this machine; rendered as a host subtitle with a connection dot.
@@ -25,6 +26,8 @@ export type WorkspaceGroupProps = {
   onOpenContextMenu?: (position: { x: number; y: number }) => void
   /** Theme-backed categorical token, e.g. `cat-3`. */
   color?: string | null
+  /** Resolved favicon URL; omit to keep the folder glyph. */
+  iconSrc?: string | null
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement> &
     React.RefAttributes<HTMLDivElement>
   /** Controlled open state; omit to let the group own it. */
@@ -53,6 +56,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   onSearchThreads,
   onOpenContextMenu,
   color,
+  iconSrc,
   dragHandleProps,
   open,
   onOpenChange,
@@ -78,9 +82,6 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   const hostLabel = host
     ? `${host.name} · ${host.connected ? 'Connected' : 'Offline'}`
     : undefined
-  const folderColor = workspaceColorCssVar(color)
-  const FolderIcon = isOpen ? FolderOpen : FolderClosed
-
   return (
     <Collapsible.Root asChild open={isOpen} onOpenChange={handleOpenChange}>
       <section className="min-w-0 overflow-hidden">
@@ -118,14 +119,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               the collapse, matching the drag hit area on the row itself. */}
           <Collapsible.Trigger className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left">
             <span className="relative h-4 w-4 shrink-0">
-              <FolderIcon
-                aria-hidden="true"
-                className={cn(
-                  'h-4 w-4',
-                  folderColor ? null : 'text-fg-muted',
-                )}
-                style={folderColor ? { color: folderColor } : undefined}
-              />
+              <WorkspaceIcon src={iconSrc} open={isOpen} color={color} />
               {/* Remote workspaces get a small globe badge on the folder
                   instead of a separate icon or a second subtitle line. */}
               {host ? (

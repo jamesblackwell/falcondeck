@@ -43,7 +43,6 @@ import {
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
   mergeGuidedComposerDraft,
-  missionCommandAvailable,
   providerForThread,
   resolvePersistedMode,
   resolvePermissionMode,
@@ -92,6 +91,8 @@ import {
   type TurnInputItem,
   type UpdatePreferencesPayload,
   type WorkspaceColorId,
+  type WorkspaceIconPreference,
+  workspaceIconUrl,
 } from "@falcondeck/client-core";
 import {
   ComposerContextBar,
@@ -3832,6 +3833,53 @@ function AppInner() {
     [api, setSnapshot, toast, viewSnapshot?.preferences.workspace_colors],
   );
 
+  const handleWorkspaceIconChange = useCallback(
+    async (workspaceId: string, icon: WorkspaceIconPreference | null) => {
+      if (!api)
+        throw new Error(CONNECTION_COPY.stillConnecting);
+      const nextIcons = {
+        ...(viewSnapshot?.preferences.workspace_icons ?? {}),
+      };
+      if (icon) nextIcons[workspaceId] = icon;
+      else delete nextIcons[workspaceId];
+      try {
+        const preferences = await api.updatePreferences({
+          workspace_icons: nextIcons,
+        });
+        setSnapshot((current) =>
+          current ? { ...current, preferences } : current,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to save project icon";
+        toast({
+          variant: "danger",
+          title: "Failed to save project icon",
+          description: message,
+        });
+        throw error;
+      }
+    },
+    [api, setSnapshot, toast, viewSnapshot?.preferences.workspace_icons],
+  );
+
+  const workspaceIconSrc = useCallback(
+    (workspaceId: string) => {
+      const workspace = viewSnapshot?.workspaces.find(
+        (entry) => entry.id === workspaceId,
+      );
+      return workspaceIconUrl(
+        baseUrl,
+        workspaceId,
+        workspace?.icon,
+        viewSnapshot?.preferences.workspace_icons?.[workspaceId],
+      );
+    },
+    [baseUrl, viewSnapshot?.preferences.workspace_icons, viewSnapshot?.workspaces],
+  );
+
   const handleOpenSettings = useCallback(() => {
     setSettingsSection("general");
     setSettingsRequestKey((current) => current + 1);
@@ -5681,6 +5729,7 @@ function AppInner() {
             initialScope={paletteRequest.scope}
             initialProjectId={paletteRequest.projectId}
             requestMode={paletteRequest.mode}
+            workspaceIconSrc={workspaceIconSrc}
           />
         </Suspense>
       ) : null}
@@ -5714,6 +5763,9 @@ function AppInner() {
             onWorkspaceOrderChange={handleWorkspaceOrderChange}
             workspaceColors={viewSnapshot?.preferences.workspace_colors}
             onWorkspaceColorChange={handleWorkspaceColorChange}
+            workspaceIcons={viewSnapshot?.preferences.workspace_icons}
+            onWorkspaceIconChange={handleWorkspaceIconChange}
+            workspaceIconSrc={workspaceIconSrc}
             collapsedWorkspaceIds={collapsedWorkspaceIds}
             onWorkspaceCollapsedChange={handleWorkspaceCollapsedChange}
             chatsCollapsed={chatsCollapsed}
@@ -6139,9 +6191,6 @@ function AppInner() {
                   activeCapabilities.supports_compaction &&
                   selectedThread?.status !== "running" &&
                   selectedThread?.status !== "waiting_for_input",
-                missionCommandAvailable: missionCommandAvailable(
-                  viewSnapshot?.extensions,
-                ),
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
                 handoffProviders: handoffProviderOptions,
@@ -6190,6 +6239,7 @@ function AppInner() {
                     onAddLocalProject={handleAddProject}
                     onNewChat={handleNewChat}
                     onAddRemoteProject={handleAddRemoteProject}
+                    workspaceIconSrc={workspaceIconSrc}
                     isAddingProject={
                       isAddingProject || isImportingProjectSessions
                     }

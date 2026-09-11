@@ -193,7 +193,7 @@ export function AutomationListRow({
   attention,
   attentionTone,
   tone,
-  missionOwned = false,
+  extensionOwned = false,
   elevated = false,
   selected = false,
   busy = false,
@@ -220,7 +220,7 @@ export function AutomationListRow({
   attention?: string | null;
   attentionTone?: "danger" | "warning";
   tone: AutomationRowTone;
-  missionOwned?: boolean;
+  extensionOwned?: boolean;
   elevated?: boolean;
   selected?: boolean;
   busy?: boolean;
@@ -268,7 +268,7 @@ export function AutomationListRow({
           >
             {title}
           </span>
-          {missionOwned ? <Badge variant="default">Mission</Badge> : null}
+          {extensionOwned ? <Badge variant="default">Extension</Badge> : null}
           {elevated ? <Badge variant="danger">Elevated</Badge> : null}
           <span
             className={cn(
@@ -313,9 +313,9 @@ export function AutomationListRow({
         </span>
       </button>
       <div className="flex shrink-0 items-start">
-        {missionOwned ? (
+        {extensionOwned ? (
           <Button variant="ghost" size="sm" onClick={onOpen}>
-            Open Mission
+            Open extension
           </Button>
         ) : (
           <>

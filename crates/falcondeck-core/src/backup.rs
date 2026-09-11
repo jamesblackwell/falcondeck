@@ -135,7 +135,7 @@ pub struct ExtensionsBackupData {
     /// Granted permissions per extension ID.
     #[serde(default)]
     pub grants: HashMap<String, BTreeSet<String>>,
-    /// Extension key-value storage (Notes content, Missions, tags, etc.).
+    /// Extension key-value storage (Notes content, tags, etc.).
     #[serde(default)]
     pub storage: HashMap<String, BTreeMap<String, Value>>,
 }

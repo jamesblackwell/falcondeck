@@ -51,7 +51,7 @@ export function composerSkillCatalog(
   return workspace?.skills ?? []
 }
 
-export type NativeSlashCommandId = 'goal' | 'mission' | 'compact'
+export type NativeSlashCommandId = 'goal' | 'compact'
 
 export type NativeSlashCommand = {
   id: NativeSlashCommandId
@@ -69,12 +69,6 @@ export const NATIVE_SLASH_COMMANDS: readonly NativeSlashCommand[] = [
     description: 'Set a goal to keep pursuing',
   },
   {
-    id: 'mission',
-    alias: '/mission',
-    label: '/mission',
-    description: 'Draft a bounded mission for human review',
-  },
-  {
     id: 'compact',
     alias: '/compact',
     label: '/compact',
@@ -88,7 +82,6 @@ const NATIVE_SLASH_COMMAND_BY_ID = Object.fromEntries(
 
 export type NativeSlashAvailability = {
   goal?: boolean
-  mission?: boolean
   compact?: boolean
 }
 
@@ -248,7 +241,6 @@ function mapAliasHighlight(
 function nativeSlashIds(native: NativeSlashAvailability): NativeSlashCommandId[] {
   const ids: NativeSlashCommandId[] = []
   if (native.goal) ids.push('goal')
-  if (native.mission) ids.push('mission')
   if (native.compact) ids.push('compact')
   return ids
 }

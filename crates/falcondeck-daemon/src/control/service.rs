@@ -1639,6 +1639,45 @@ impl ControlService {
         rows
     }
 
+    /// Deletes Automations owned by an extension that is no longer installed.
+    pub async fn retire_owned_automations(
+        &self,
+        extension_id: &str,
+    ) -> Result<usize, ControlError> {
+        let extension_id = extension_id.to_string();
+        let has_owned = self
+            .state
+            .lock()
+            .await
+            .automations
+            .iter()
+            .any(|automation| {
+                automation
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.extension_id == extension_id)
+            });
+        if !has_owned {
+            return Ok(0);
+        }
+        let (count, _) = self
+            .mutate(move |state, _now| {
+                let before = state.automations.len();
+                state.automations.retain(|automation| {
+                    automation
+                        .owner
+                        .as_ref()
+                        .is_none_or(|owner| owner.extension_id != extension_id)
+                });
+                Ok((
+                    before - state.automations.len(),
+                    vec![ControlDomain::Automations],
+                ))
+            })
+            .await?;
+        Ok(count)
+    }
+
     /// Returns verified extension ownership for an Automation-created task.
     pub async fn automation_owner(&self, automation_id: &str) -> Option<AutomationOwner> {
         self.automation(automation_id)

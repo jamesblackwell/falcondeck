@@ -180,7 +180,7 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
 - Binary: `Contents/MacOS/cua-driver` via `externalBin`, re-signed with
   FalconDeck's identity at bundle time.
 - Permission mode: `standard`. No `unrestricted` anywhere in the product.
-  `bounded` manifests are a later option for Missions and scheduled tasks.
+  `bounded` manifests are a later option for scheduled tasks.
 - Connector name: `cua-driver` (Cua's canonical server name, so the skill's
   tool references and Cua docs match what agents see).
 - Start policy: lazy. The daemon starts on the first spawn boundary where
@@ -369,7 +369,7 @@ UI compatibility or TCC attribution.
   Only worth it if Cua's cadence outpaces desktop releases in practice.
 - Linux remote hosts: cua-driver-rs runs on X11 with no TCC story; would
   need a headless-safe supervisor and a Linux binary in the remote install.
-- `bounded` capability manifests for Missions and scheduled tasks
+- `bounded` capability manifests for scheduled tasks
   (deny-by-default tool and app allowlists, lifetimes).
 - Windows desktop when FalconDeck ships there (same daemon-proxy shape).
 

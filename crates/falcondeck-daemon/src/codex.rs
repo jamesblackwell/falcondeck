@@ -1016,7 +1016,7 @@ impl CodexSession {
     pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
         let instructions = self
             .state
-            .agent_context_instructions_with_extensions(&AgentProvider::CODEX)
+            .agent_context_instructions(&AgentProvider::CODEX)
             .await;
         let response = self
             .send_control_request(

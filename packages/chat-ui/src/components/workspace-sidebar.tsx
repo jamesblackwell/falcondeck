@@ -5,7 +5,6 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import {
   Archive,
   ChevronDown,
-  FolderClosed,
   FolderPlus,
   Plus,
   Search,
@@ -22,6 +21,7 @@ import {
   THREAD_TAGS_EXTENSION_ID,
   threadProviderLabel,
   threadPriorityRank,
+  domainFromUserInput,
 } from "@falcondeck/client-core";
 import type {
   ActiveExtensionThreadFilter,
@@ -34,6 +34,7 @@ import type {
   ThreadSummary,
   ThreadTag,
   WorkspaceColorId,
+  WorkspaceIconPreference,
   WorkspaceSummary,
 } from "@falcondeck/client-core";
 import {
@@ -61,11 +62,13 @@ import {
   RenameThreadDialog,
   ThreadContextMenu,
   WorkspaceContextMenu,
+  WorkspaceIconDialog,
   type ThreadContextMenuState,
   type WorkspaceContextMenuState,
 } from "./sidebar-menus";
 import { ThreadItem, type ThreadItemArchiveHandler } from "./thread-item";
 import { WorkspaceGroup, type WorkspaceHostBadge } from "./workspace-group";
+import { WorkspaceIcon } from "./workspace-icon";
 
 const VISIBLE_THREAD_LIMIT = 5;
 const SHOW_MORE_STEP = 10;
@@ -172,6 +175,13 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     color: WorkspaceColorId | null,
   ) => Promise<void> | void;
+  workspaceIcons?: Record<string, WorkspaceIconPreference>;
+  onWorkspaceIconChange?: (
+    workspaceId: string,
+    icon: WorkspaceIconPreference | null,
+  ) => Promise<void> | void;
+  /** Resolved favicon URL for a connected project, or null for the folder glyph. */
+  workspaceIconSrc?: (workspaceId: string) => string | null;
   /** How chats order within each project; also applies to the pinned list. */
   threadSort?: ThreadSortMode;
   /** Enables the sort menu on the Projects heading. */
@@ -789,6 +799,7 @@ const ProjectGroupList = memo(function ProjectGroupList({
   onSearchProjectThreads,
   onOpenWorkspaceContextMenu,
   workspaceColors,
+  workspaceIconSrc,
   workspaceHosts,
   collapsedWorkspaces,
   onWorkspaceOpenChange,
@@ -829,6 +840,7 @@ const ProjectGroupList = memo(function ProjectGroupList({
     position: { x: number; y: number },
   ) => void;
   workspaceColors?: Record<string, string>;
+  workspaceIconSrc?: (workspaceId: string) => string | null;
   workspaceHosts?: Record<string, WorkspaceHostBadge>;
   collapsedWorkspaces: ReadonlySet<string>;
   onWorkspaceOpenChange: (workspaceId: string, open: boolean) => void;
@@ -923,6 +935,7 @@ const ProjectGroupList = memo(function ProjectGroupList({
                 )
               }
               color={workspaceColors?.[workspaceId] ?? null}
+              iconSrc={workspaceIconSrc?.(workspaceId) ?? null}
               dragHandleProps={dragHandleProps}
               open={!collapsedWorkspaces.has(workspaceId)}
               onOpenChange={(open) => onWorkspaceOpenChange(workspaceId, open)}
@@ -992,6 +1005,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onOpenLibraryWorkspace,
   workspaceColors,
   onWorkspaceColorChange,
+  workspaceIcons,
+  onWorkspaceIconChange,
+  workspaceIconSrc,
   threadSort = "last_updated",
   onThreadSortChange,
   onWorkspaceOrderChange,
@@ -1090,6 +1106,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [isForkingThread, setIsForkingThread] = useState(false);
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null);
+  const [iconWebsiteTarget, setIconWebsiteTarget] = useState<{
+    workspaceId: string;
+    path: string;
+  } | null>(null);
+  const [iconWebsiteValue, setIconWebsiteValue] = useState("");
+  const [iconWebsiteError, setIconWebsiteError] = useState<string | null>(null);
+  const [isSavingWorkspaceIcon, setIsSavingWorkspaceIcon] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{
     workspaceId: string;
     path: string;
@@ -1977,10 +2000,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ? viewingArchivedChats
         : archivedViewWorkspaceIds.has(workspaceId);
       const canColor = !isChats && Boolean(onWorkspaceColorChange);
+      const canIcon = !isChats && Boolean(onWorkspaceIconChange);
       const canClose = !isChats && Boolean(onCloseWorkspace);
       const canRemove = !isChats && Boolean(onRemoveWorkspace);
       if (
         !canColor &&
+        !canIcon &&
         !canClose &&
         !canRemove &&
         archivedCount === 0 &&
@@ -2002,6 +2027,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onCloseWorkspace,
       onRemoveWorkspace,
       onWorkspaceColorChange,
+      onWorkspaceIconChange,
       projectDisplayGroups,
       viewingArchivedChats,
     ],
@@ -2054,6 +2080,63 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       void onWorkspaceColorChange(workspaceId, color);
     },
     [onWorkspaceColorChange, workspaceContextMenu],
+  );
+
+  const handleSetWorkspaceIcon = useCallback(
+    (icon: WorkspaceIconPreference | null) => {
+      if (!workspaceContextMenu || !onWorkspaceIconChange) return;
+      const { workspaceId } = workspaceContextMenu;
+      setWorkspaceContextMenu(null);
+      void onWorkspaceIconChange(workspaceId, icon);
+    },
+    [onWorkspaceIconChange, workspaceContextMenu],
+  );
+
+  const handleChooseWebsiteIcon = useCallback(() => {
+    if (!workspaceContextMenu) return;
+    const current =
+      workspaceIcons?.[workspaceContextMenu.workspaceId]?.domain ?? "";
+    setIconWebsiteTarget({
+      workspaceId: workspaceContextMenu.workspaceId,
+      path: workspaceContextMenu.path,
+    });
+    setIconWebsiteValue(current);
+    setIconWebsiteError(null);
+    setWorkspaceContextMenu(null);
+  }, [workspaceContextMenu, workspaceIcons]);
+
+  const closeIconWebsiteDialog = useCallback(() => {
+    if (isSavingWorkspaceIcon) return;
+    setIconWebsiteTarget(null);
+    setIconWebsiteError(null);
+  }, [isSavingWorkspaceIcon]);
+
+  const handleIconWebsiteSubmit = useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!iconWebsiteTarget || !onWorkspaceIconChange) return;
+      const domain = domainFromUserInput(iconWebsiteValue);
+      if (!domain) {
+        setIconWebsiteError("Enter a website like example.com");
+        return;
+      }
+      setIsSavingWorkspaceIcon(true);
+      setIconWebsiteError(null);
+      try {
+        await onWorkspaceIconChange(iconWebsiteTarget.workspaceId, {
+          mode: "domain",
+          domain,
+        });
+        setIconWebsiteTarget(null);
+      } catch (error) {
+        setIconWebsiteError(
+          error instanceof Error ? error.message : "Failed to save icon",
+        );
+      } finally {
+        setIsSavingWorkspaceIcon(false);
+      }
+    },
+    [iconWebsiteTarget, iconWebsiteValue, onWorkspaceIconChange],
   );
 
   const requestCloseWorkspace = useCallback(() => {
@@ -2598,6 +2681,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 onSearchProjectThreads={onSearchProjectThreads}
                 onOpenWorkspaceContextMenu={handleOpenWorkspaceContextMenu}
                 workspaceColors={workspaceColors}
+                workspaceIconSrc={workspaceIconSrc}
                 workspaceHosts={workspaceHosts}
                 collapsedWorkspaces={collapsedWorkspaces}
                 onWorkspaceOpenChange={handleWorkspaceOpenChange}
@@ -2834,6 +2918,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? (workspaceColors?.[workspaceContextMenu.workspaceId] ?? null)
             : null
         }
+        selectedIcon={
+          workspaceContextMenu &&
+          workspaceContextMenu.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? (workspaceIcons?.[workspaceContextMenu.workspaceId] ?? { mode: "auto" })
+            : undefined
+        }
         archivedCount={
           workspaceContextMenu == null
             ? 0
@@ -2862,6 +2952,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? handleSetWorkspaceColor
             : undefined
         }
+        onSetIcon={
+          onWorkspaceIconChange &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? handleSetWorkspaceIcon
+            : undefined
+        }
+        onChooseWebsite={
+          onWorkspaceIconChange &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? handleChooseWebsiteIcon
+            : undefined
+        }
         onViewArchived={handleViewArchivedFromContextMenu}
         onCloseFromSidebar={
           onCloseWorkspace &&
@@ -2875,6 +2977,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? openRemoveDialog
             : undefined
         }
+      />
+      <WorkspaceIconDialog
+        target={iconWebsiteTarget}
+        value={iconWebsiteValue}
+        error={iconWebsiteError}
+        pending={isSavingWorkspaceIcon}
+        onChange={setIconWebsiteValue}
+        onClose={closeIconWebsiteDialog}
+        onSubmit={handleIconWebsiteSubmit}
       />
       <CloseWorkspaceDialog
         target={closeTarget}
@@ -2901,7 +3012,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 top: workspaceDragPosition.y + 12,
               }}
             >
-              <FolderClosed className="h-4 w-4 shrink-0 text-fg-muted" />
+              <WorkspaceIcon
+                src={
+                  draggingWorkspaceId
+                    ? workspaceIconSrc?.(draggingWorkspaceId)
+                    : null
+                }
+                color={
+                  draggingWorkspaceId
+                    ? (workspaceColors?.[draggingWorkspaceId] ?? null)
+                    : null
+                }
+              />
               <span className="truncate">
                 {orderedGroups
                   .find((group) => group.workspace.id === draggingWorkspaceId)

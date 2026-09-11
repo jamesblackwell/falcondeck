@@ -422,6 +422,8 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<Arc<CachedEnvelope>>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
+    /// Resolved sidebar icon bytes keyed by workspace id.
+    workspace_icons: Mutex<HashMap<String, crate::workspace_icons::CachedWorkspaceIcon>>,
     /// Per-workspace/provider gates prevent background metadata hydration and
     /// a first user turn from spawning competing ACP processes.
     acp_runtime_gates: Mutex<AcpRuntimeGates>,
@@ -1053,6 +1055,7 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
+                workspace_icons: Mutex::new(HashMap::new()),
                 acp_runtime_gates: Mutex::new(HashMap::new()),
                 acp_hydration_gates: Mutex::new(HashMap::new()),
                 codex_runtime_gates: Mutex::new(HashMap::new()),
@@ -1532,6 +1535,17 @@ impl AppState {
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         self.inner.extensions.lock().await.restore().await?;
+        if let Err(error) = self
+            .control()
+            .retire_owned_automations(extensions::RETIRED_MISSIONS_ID)
+            .await
+        {
+            tracing::warn!(
+                code = %error.0.code,
+                "failed to retire Missions-owned automations: {}",
+                error.0.message
+            );
+        }
         self.sync_extension_event_workers().await;
         let preferences = load_preferences(&self.inner.preferences_path).await?;
         {
@@ -1924,6 +1938,7 @@ impl AppState {
             connected_at: now,
             updated_at: persisted_workspace.updated_at.unwrap_or(now),
             last_error: workspace_last_error,
+            icon: None,
         };
 
         if let Some(existing) = workspaces
@@ -3302,6 +3317,7 @@ impl AppState {
         request: UpdatePreferencesRequest,
     ) -> Result<FalconDeckPreferences, DaemonError> {
         let mut preferences = self.inner.preferences.lock().await;
+        let icons_changed = request.workspace_icons.is_some();
         let updated = {
             let mut next = preferences.clone();
             apply_preferences_patch(&mut next, request);
@@ -3317,7 +3333,108 @@ impl AppState {
                 preferences: updated.clone(),
             },
         );
+        if icons_changed {
+            self.refresh_workspace_icons().await;
+        }
         Ok(updated)
+    }
+
+    pub(crate) fn spawn_workspace_icon_refresh(&self, workspace_id: String, path: String) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            if app
+                .resolve_and_apply_workspace_icon(&workspace_id, &path)
+                .await
+            {
+                app.emit(
+                    Some(workspace_id),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: app.snapshot().await,
+                    },
+                );
+            }
+        });
+    }
+
+    pub(crate) async fn refresh_workspace_icons(&self) {
+        let targets = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .map(|workspace| (workspace.summary.id.clone(), workspace.summary.path.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut changed = false;
+        for (workspace_id, path) in targets {
+            if self
+                .resolve_and_apply_workspace_icon(&workspace_id, &path)
+                .await
+            {
+                changed = true;
+            }
+        }
+        if changed {
+            self.emit(
+                None,
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: self.snapshot().await,
+                },
+            );
+        }
+    }
+
+    async fn resolve_and_apply_workspace_icon(&self, workspace_id: &str, path: &str) -> bool {
+        let preference = {
+            let preferences = self.inner.preferences.lock().await;
+            preferences.workspace_icons.get(workspace_id).cloned()
+        };
+        let kind = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .map(|workspace| workspace.summary.kind.clone())
+        };
+        let resolved = if kind == Some(falcondeck_core::WorkspaceKind::Casual) {
+            crate::workspace_icons::CachedWorkspaceIcon::folder()
+        } else {
+            crate::workspace_icons::resolve(Path::new(path), preference.as_ref()).await
+        };
+        let mut icons = self.inner.workspace_icons.lock().await;
+        let previous = icons.get(workspace_id).map(|cached| cached.meta.clone());
+        let changed = previous.as_ref() != Some(&resolved.meta);
+        icons.insert(workspace_id.to_string(), resolved.clone());
+        drop(icons);
+        let mut workspaces = self.inner.workspaces.lock().await;
+        if let Some(workspace) = workspaces.get_mut(workspace_id) {
+            workspace.summary.icon = Some(resolved.meta);
+        }
+        changed
+    }
+
+    pub async fn workspace_icon(
+        &self,
+        workspace_id: &str,
+    ) -> Result<crate::workspace_icons::CachedWorkspaceIcon, DaemonError> {
+        {
+            let cached = self.inner.workspace_icons.lock().await;
+            if let Some(icon) = cached.get(workspace_id) {
+                return Ok(icon.clone());
+            }
+        }
+        let path = self.workspace_path(workspace_id).await.ok_or_else(|| {
+            DaemonError::NotFound(format!("workspace {workspace_id} is not connected"))
+        })?;
+        self.resolve_and_apply_workspace_icon(workspace_id, &path)
+            .await;
+        self.inner
+            .workspace_icons
+            .lock()
+            .await
+            .get(workspace_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::NotFound("workspace icon is unavailable".to_string()))
     }
 
     pub async fn export_backup(&self) -> Result<falcondeck_core::FalconDeckBackup, DaemonError> {

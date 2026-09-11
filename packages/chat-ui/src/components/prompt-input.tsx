@@ -136,8 +136,6 @@ export type PromptInputProps = {
   capabilities?: AgentCapabilitySummary;
   /** Shows the native /compact command for an existing compactable thread. */
   compactCommandAvailable?: boolean;
-  /** Shows FalconDeck's native /mission prompt expansion when Missions is ready. */
-  missionCommandAvailable?: boolean;
   providerLocked?: boolean;
   showProviderSelector?: boolean;
   /** Cross-provider destinations shown behind the model menu's handoff step. */
@@ -294,7 +292,6 @@ export const PromptInput = memo(function PromptInput({
   isRunning = false,
   isStopping = false,
   compact = false,
-  missionCommandAvailable = false,
   goal,
   quotedSelections = EMPTY_QUOTED_SELECTIONS,
   onRemoveQuotedSelection,
@@ -379,7 +376,6 @@ export const PromptInput = memo(function PromptInput({
         query: slashQuery?.query ?? "",
         native: {
           goal: Boolean(goal),
-          mission: missionCommandAvailable,
           compact: compactCommandAvailable,
         },
       }),
@@ -387,7 +383,6 @@ export const PromptInput = memo(function PromptInput({
       compactCommandAvailable,
       goal,
       liveSkills,
-      missionCommandAvailable,
       selectedProvider,
       skills,
       slashQuery?.query,
@@ -755,10 +750,6 @@ export const PromptInput = memo(function PromptInput({
     [onValueChange, slashQuery, updateSlashQuery, value],
   );
 
-  const insertMissionPrompt = useCallback(() => {
-    insertSkillAlias("Start a FalconDeck Mission for this task:");
-  }, [insertSkillAlias]);
-
   const openGoalCommand = useCallback(() => {
     const query = slashQuery;
     if (!query || !goal) return;
@@ -780,15 +771,12 @@ export const PromptInput = memo(function PromptInput({
         case "goal":
           openGoalCommand();
           return;
-        case "mission":
-          insertMissionPrompt();
-          return;
         case "compact":
           insertSkillAlias(item.command.alias);
           return;
       }
     },
-    [insertMissionPrompt, insertSkillAlias, openGoalCommand],
+    [insertSkillAlias, openGoalCommand],
   );
 
   return (

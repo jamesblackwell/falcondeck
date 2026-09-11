@@ -69,6 +69,11 @@ pub struct FalconDeckPreferences {
     /// Sidebar folder colors keyed by workspace id (`cat-1` through `cat-12`).
     #[serde(default)]
     pub workspace_colors: BTreeMap<String, String>,
+    /// Sidebar project icon overrides keyed by workspace id.
+    ///
+    /// Missing keys mean auto-discover (local favicon, then a domain hint).
+    #[serde(default)]
+    pub workspace_icons: BTreeMap<String, WorkspaceIconPreference>,
     /// Conversation and thread display preferences.
     #[serde(default)]
     pub conversation: ConversationPreferences,
@@ -89,6 +94,7 @@ impl Default for FalconDeckPreferences {
             version: default_preferences_version(),
             workspace_order: Vec::new(),
             workspace_colors: BTreeMap::new(),
+            workspace_icons: BTreeMap::new(),
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
@@ -273,6 +279,137 @@ pub fn normalize_workspace_colors(
     colors
 }
 
+/// How a project row should pick its sidebar icon.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceIconMode {
+    /// Discover a local favicon or domain hint; fall back to the folder glyph.
+    Auto,
+    /// Always use the folder glyph.
+    Folder,
+    /// Fetch the favicon for [`WorkspaceIconPreference::domain`].
+    Domain,
+}
+
+/// User override for one project's sidebar icon.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceIconPreference {
+    /// Discovery mode. Missing keys in the preference map mean [`WorkspaceIconMode::Auto`].
+    pub mode: WorkspaceIconMode,
+    /// Required when [`WorkspaceIconMode::Domain`]; ignored otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+/// Where a resolved project image came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceIconSource {
+    /// A well-known favicon file inside the project.
+    File,
+    /// A domain fetched through the Plugins logo pipeline.
+    Domain,
+}
+
+/// Whether the sidebar should show a folder glyph or a fetched image.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceResolvedIconKind {
+    /// Lucide folder glyph (optionally tinted by workspace color).
+    Folder,
+    /// Image bytes served from `/api/workspace-icons/{id}` or `workspace.icon`.
+    Image,
+}
+
+/// Resolved sidebar icon for a connected workspace. Image bytes are not inlined.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceResolvedIcon {
+    /// Folder glyph vs fetched image.
+    pub kind: WorkspaceResolvedIconKind,
+    /// Cache key for the image bytes; present when [`kind`](Self::kind) is image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+    /// How the image was found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<WorkspaceIconSource>,
+    /// Domain used when [`source`](Self::source) is domain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl WorkspaceResolvedIcon {
+    /// Folder glyph with no image to fetch.
+    pub fn folder() -> Self {
+        Self {
+            kind: WorkspaceResolvedIconKind::Folder,
+            etag: None,
+            source: None,
+            domain: None,
+        }
+    }
+}
+
+/// Hostnames only: labels, dots, hyphens. Rejects paths and `..`.
+pub fn sanitize_logo_domain(raw: &str) -> Result<String, String> {
+    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || domain.len() > 253 {
+        return Err("invalid logo domain".to_string());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
+        return Err("invalid logo domain".to_string());
+    }
+    if !domain
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+    {
+        return Err("invalid logo domain".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("invalid logo domain".to_string());
+    }
+    Ok(domain)
+}
+
+/// Drops blank workspace ids and unusable icon preferences.
+pub fn normalize_workspace_icons(
+    raw: impl IntoIterator<Item = (String, WorkspaceIconPreference)>,
+) -> BTreeMap<String, WorkspaceIconPreference> {
+    let mut icons = BTreeMap::new();
+    for (workspace_id, preference) in raw {
+        let workspace_id = workspace_id.trim();
+        if workspace_id.is_empty() || icons.contains_key(workspace_id) {
+            continue;
+        }
+        let Some(normalized) = normalize_workspace_icon_preference(preference) else {
+            continue;
+        };
+        icons.insert(workspace_id.to_string(), normalized);
+    }
+    icons
+}
+
+fn normalize_workspace_icon_preference(
+    preference: WorkspaceIconPreference,
+) -> Option<WorkspaceIconPreference> {
+    match preference.mode {
+        WorkspaceIconMode::Auto => Some(WorkspaceIconPreference {
+            mode: WorkspaceIconMode::Auto,
+            domain: None,
+        }),
+        WorkspaceIconMode::Folder => Some(WorkspaceIconPreference {
+            mode: WorkspaceIconMode::Folder,
+            domain: None,
+        }),
+        WorkspaceIconMode::Domain => {
+            let domain = sanitize_logo_domain(preference.domain.as_deref().unwrap_or("")).ok()?;
+            Some(WorkspaceIconPreference {
+                mode: WorkspaceIconMode::Domain,
+                domain: Some(domain),
+            })
+        }
+    }
+}
+
 /// Models used for FalconDeck's own background work — currently thread
 /// titles — rather than for user turns. These runs are short, tool-free
 /// and frequent, so they default to the cheapest model each provider offers and
@@ -454,6 +591,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional replacement map of workspace id → categorical color token.
     #[serde(default)]
     pub workspace_colors: Option<BTreeMap<String, String>>,
+    /// Optional replacement map of workspace id → project icon preference.
+    #[serde(default)]
+    pub workspace_icons: Option<BTreeMap<String, WorkspaceIconPreference>>,
     /// Optional conversation preference updates.
     #[serde(default)]
     pub conversation: Option<ConversationPreferencesPatch>,
@@ -3203,6 +3343,9 @@ pub struct WorkspaceSummary {
     pub updated_at: DateTime<Utc>,
     /// Most recent workspace-level error, if any.
     pub last_error: Option<String>,
+    /// Resolved sidebar icon. Older daemons omit this; clients treat missing as folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<WorkspaceResolvedIcon>,
 }
 
 /// Live skill catalog for one workspace, rescanned from disk on demand.
@@ -5984,5 +6127,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sanitize_logo_domain_rejects_paths_and_odd_hosts() {
+        assert_eq!(sanitize_logo_domain("GitHub.COM.").unwrap(), "github.com");
+        assert!(sanitize_logo_domain("../etc/passwd").is_err());
+        assert!(sanitize_logo_domain("notion.so/logo").is_err());
+        assert!(sanitize_logo_domain("localhost").is_err());
+        assert!(sanitize_logo_domain("").is_err());
+    }
+
+    #[test]
+    fn normalize_workspace_icons_keeps_the_first_valid_preference() {
+        let icons = normalize_workspace_icons([
+            (
+                " workspace-a ".to_string(),
+                WorkspaceIconPreference {
+                    mode: WorkspaceIconMode::Domain,
+                    domain: Some("Lucidpic.com.".to_string()),
+                },
+            ),
+            (
+                "workspace-a".to_string(),
+                WorkspaceIconPreference {
+                    mode: WorkspaceIconMode::Folder,
+                    domain: None,
+                },
+            ),
+            (
+                "workspace-b".to_string(),
+                WorkspaceIconPreference {
+                    mode: WorkspaceIconMode::Domain,
+                    domain: Some("not a host".to_string()),
+                },
+            ),
+            (
+                "".to_string(),
+                WorkspaceIconPreference {
+                    mode: WorkspaceIconMode::Auto,
+                    domain: None,
+                },
+            ),
+            (
+                "workspace-c".to_string(),
+                WorkspaceIconPreference {
+                    mode: WorkspaceIconMode::Auto,
+                    domain: Some("ignored.example".to_string()),
+                },
+            ),
+        ]);
+        assert_eq!(
+            icons.get("workspace-a"),
+            Some(&WorkspaceIconPreference {
+                mode: WorkspaceIconMode::Domain,
+                domain: Some("lucidpic.com".to_string()),
+            })
+        );
+        assert!(!icons.contains_key("workspace-b"));
+        assert_eq!(
+            icons.get("workspace-c"),
+            Some(&WorkspaceIconPreference {
+                mode: WorkspaceIconMode::Auto,
+                domain: None,
+            })
+        );
     }
 }

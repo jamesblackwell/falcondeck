@@ -400,6 +400,11 @@ export type FalconDeckPreferences = {
    * tokens (`cat-1`…`cat-12`) so they retint with the active theme.
    */
   workspace_colors?: Record<string, string>;
+  /**
+   * Sidebar project icon overrides keyed by workspace id. Missing keys mean
+   * auto-discover (local favicon, then a domain hint). Older daemons omit this.
+   */
+  workspace_icons?: Record<string, WorkspaceIconPreference>;
   conversation: ConversationPreferences;
   notifications: NotificationPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
@@ -487,6 +492,7 @@ export type UpdateUtilityModelPreferences = {
 export type UpdatePreferencesPayload = {
   workspace_order?: string[] | null;
   workspace_colors?: Record<string, string> | null;
+  workspace_icons?: Record<string, WorkspaceIconPreference> | null;
   conversation?: UpdateConversationPreferences | null;
   notifications?: UpdateNotificationPreferences | null;
   utility_models?: UpdateUtilityModelPreferences | null;
@@ -661,6 +667,22 @@ export type ToolCallDetail =
       duration_ms: number | null;
     };
 
+export type WorkspaceIconMode = "auto" | "folder" | "domain";
+
+export type WorkspaceIconPreference = {
+  mode: WorkspaceIconMode;
+  domain?: string | null;
+};
+
+export type WorkspaceIconSource = "file" | "domain";
+
+export type WorkspaceResolvedIcon = {
+  kind: "folder" | "image";
+  etag?: string | null;
+  source?: WorkspaceIconSource | null;
+  domain?: string | null;
+};
+
 export type LibraryWorkspace = {
   id: string;
   path: string;
@@ -684,6 +706,8 @@ export type WorkspaceSummary = {
   connected_at: string;
   updated_at: string;
   last_error: string | null;
+  /** Resolved sidebar icon. Older daemons omit this; missing means folder. */
+  icon?: WorkspaceResolvedIcon | null;
 };
 
 export type ThreadPlanStep = {
@@ -738,12 +762,6 @@ export type ThreadSummary = {
   origin?:
     | { kind: "scheduled_task"; task_id: string; title: string }
     | { kind: "automation"; automation_id: string; name: string }
-    | {
-        kind: "mission_worker";
-        run_id: string;
-        worker_id: string;
-        title: string;
-      }
     | null;
   status: ThreadStatus;
   updated_at: string;

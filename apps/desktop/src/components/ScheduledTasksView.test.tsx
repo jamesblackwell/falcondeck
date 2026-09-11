@@ -243,14 +243,14 @@ describe("ScheduledTasksView", () => {
     expect(screen.queryByText(/07\/09\/2026/)).not.toBeInTheDocument();
   });
 
-  it("separates extension-owned Automations and opens their owning Mission", async () => {
+  it("separates extension-owned Automations and opens their owning extension", async () => {
     const ownedAutomation = {
       ...conversationalAutomation,
-      id: "automation-mission-review",
+      id: "automation-owner-review",
       name: "Launch review",
       owner: {
-        extension_id: "falcondeck.missions",
-        resource_id: "mission-1",
+        extension_id: "example.owner",
+        resource_id: "resource-1",
       },
     } as unknown as Automation;
     const onOpenExtensionOwner = vi.fn();
@@ -266,13 +266,13 @@ describe("ScheduledTasksView", () => {
       onOpenExtensionOwner,
     );
 
-    expect(await screen.findByText("Used by Missions")).toBeInTheDocument();
+    expect(await screen.findByText("Used by extensions")).toBeInTheDocument();
     expect(screen.getByText("Launch review")).toBeInTheDocument();
-    expect(screen.getByText("Mission")).toBeInTheDocument();
+    expect(screen.getByText("Extension")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Open Launch review" }));
     expect(onOpenExtensionOwner).toHaveBeenCalledWith(
-      "falcondeck.missions",
-      "mission-1",
+      "example.owner",
+      "resource-1",
       null,
     );
     expect(

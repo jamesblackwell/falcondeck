@@ -14,8 +14,8 @@ import {
 } from "./extension-agent-tool-results";
 
 const extension: ExtensionSummary = {
-  id: "example.missions",
-  name: "Example Missions",
+  id: "example.drafts",
+  name: "Example Drafts",
   version: "1.0.0",
   source: "bundled",
   bundled: true,
@@ -28,9 +28,9 @@ const extension: ExtensionSummary = {
     sidebarFilters: [],
     agentTools: [
       {
-        id: "draft-mission",
-        title: "Draft mission",
-        description: "Draft a mission",
+        id: "draft-item",
+        title: "Draft item",
+        description: "Draft an item",
       },
     ],
   },
@@ -43,11 +43,11 @@ const app: ExtensionAppRegistration = {
   panels: [],
   agentToolResults: [
     {
-      toolId: "draft-mission",
-      detail: { title: "Mission draft" },
+      toolId: "draft-item",
+      detail: { title: "Item draft" },
       component: ({ result, invokeAction, presentation, openDetails }) => (
         <section>
-          <h2>Review this Mission</h2>
+          <h2>Review this draft</h2>
           <span>{presentation}</span>
           <span>{JSON.stringify(result)}</span>
           {openDetails ? (
@@ -59,7 +59,7 @@ const app: ExtensionAppRegistration = {
             type="button"
             onClick={() => void invokeAction("start-draft", { draftId: "d1" })}
           >
-            Start mission
+            Start draft
           </button>
         </section>
       ),
@@ -70,7 +70,7 @@ const app: ExtensionAppRegistration = {
 const item: Extract<ConversationItem, { kind: "tool_call" }> = {
   kind: "tool_call",
   id: "tool-1",
-  title: "Draft mission",
+  title: "Draft item",
   tool_kind: "mcp",
   status: "completed",
   output: null,
@@ -87,7 +87,7 @@ const item: Extract<ConversationItem, { kind: "tool_call" }> = {
   detail: {
     kind: "mcp",
     server: "falcondeck-extensions",
-    tool: "example_missions__draft_mission",
+    tool: "example_drafts__draft_item",
     arguments: { objective: "Ship it" },
     result: {
       structuredContent: {
@@ -97,7 +97,7 @@ const item: Extract<ConversationItem, { kind: "tool_call" }> = {
       _meta: {
         "falcondeck/extensionTool": {
           extensionId: extension.id,
-          toolId: "draft-mission",
+          toolId: "draft-item",
         },
       },
     },
@@ -125,17 +125,17 @@ describe("ExtensionAgentToolResultCards", () => {
       </ExtensionAgentToolUiProvider>,
     );
 
-    expect(screen.getByText("Review this Mission")).toBeVisible();
+    expect(screen.getByText("Review this draft")).toBeVisible();
     expect(screen.getByText("inline")).toBeVisible();
     expect(screen.getByText(/\"draftId\":\"d1\"/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Open details" }));
     expect(openDetails).toHaveBeenCalledWith({
       extensionId: extension.id,
-      toolId: "draft-mission",
+      toolId: "draft-item",
       arguments: { objective: "Ship it" },
       result: { ok: true, result: { draftId: "d1" } },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Start mission" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start draft" }));
     await waitFor(() =>
       expect(invokeAction).toHaveBeenCalledWith(
         extension.id,
@@ -158,7 +158,7 @@ describe("ExtensionAgentToolResultCards", () => {
         <ExtensionAgentToolDetailPanel
           selection={{
             extensionId: extension.id,
-            toolId: "draft-mission",
+            toolId: "draft-item",
             arguments: { objective: "Ship it" },
             result: { ok: true, result: { draftId: "d1" } },
           }}
@@ -167,7 +167,7 @@ describe("ExtensionAgentToolResultCards", () => {
       </ExtensionAgentToolUiProvider>,
     );
 
-    expect(screen.getByText("Mission draft")).toBeVisible();
+    expect(screen.getByText("Item draft")).toBeVisible();
     expect(screen.getByText("detail")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Close details" }));
     expect(onClose).toHaveBeenCalledOnce();
@@ -185,6 +185,6 @@ describe("ExtensionAgentToolResultCards", () => {
       </ExtensionAgentToolUiProvider>,
     );
 
-    expect(screen.queryByText("Review this Mission")).not.toBeInTheDocument();
+    expect(screen.queryByText("Review this draft")).not.toBeInTheDocument();
   });
 });

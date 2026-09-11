@@ -386,14 +386,14 @@ mod tests {
             false,
             Some(json!({
                 "falcondeck/extensionTool": {
-                    "extensionId": "falcondeck.missions",
-                    "toolId": "draft-mission"
+                    "extensionId": "example.drafts",
+                    "toolId": "draft-item"
                 }
             })),
         );
         assert_eq!(
             response["result"]["_meta"]["falcondeck/extensionTool"]["toolId"],
-            json!("draft-mission")
+            json!("draft-item")
         );
         assert_eq!(
             response["result"]["structuredContent"]["result"]["draftId"],

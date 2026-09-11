@@ -51,7 +51,6 @@ import {
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
   mergeGuidedComposerDraft,
-  missionCommandAvailable,
   mergeThreadDetailPage,
   normalizeDaemonSnapshot,
   normalizeRelayUrl,
@@ -151,6 +150,7 @@ import {
   type ThreadTag,
   type UpdatePreferencesPayload,
   type WorkspaceColorId,
+  type WorkspaceIconPreference,
   optimisticallySetThreadStage,
   encryptedDaemonEventEnvelope,
 } from "@falcondeck/client-core";
@@ -4897,6 +4897,95 @@ function RemoteApp() {
     ],
   );
 
+  const handleWorkspaceIconChange = useCallback(
+    async (workspaceId: string, icon: WorkspaceIconPreference | null) => {
+      const nextIcons = {
+        ...(snapshot?.preferences.workspace_icons ?? {}),
+      };
+      if (icon) nextIcons[workspaceId] = icon;
+      else delete nextIcons[workspaceId];
+      try {
+        const preferences = normalizePreferences(
+          await submitQueuedAction("preferences.update", {
+            workspace_icons: nextIcons,
+          }),
+        );
+        setSnapshot((current) =>
+          current ? { ...current, preferences } : current,
+        );
+      } catch (error) {
+        reportError(error, "Failed to save project icon");
+        throw error;
+      }
+    },
+    [
+      reportError,
+      setSnapshot,
+      snapshot?.preferences.workspace_icons,
+      submitQueuedAction,
+    ],
+  );
+
+  const [remoteIconSrcs, setRemoteIconSrcs] = useState<Record<string, string>>(
+    {},
+  );
+  const remoteIconCache = useRef(new Map<string, string>());
+  useEffect(() => {
+    const workspaces = snapshot?.workspaces ?? [];
+    let cancelled = false;
+    for (const workspace of workspaces) {
+      if (workspace.icon?.kind !== "image") continue;
+      const cacheKey = `${workspace.id}:${workspace.icon.etag ?? ""}`;
+      const cached = remoteIconCache.current.get(cacheKey);
+      if (cached) {
+        setRemoteIconSrcs((current) =>
+          current[workspace.id] === cached
+            ? current
+            : { ...current, [workspace.id]: cached },
+        );
+        continue;
+      }
+      void submitQueuedAction("workspace.icon", {
+        workspace_id: workspace.id,
+      })
+        .then((payload) => {
+          const body = payload as {
+            kind?: string;
+            content_type?: string;
+            data?: string;
+          };
+          if (
+            cancelled ||
+            body.kind !== "image" ||
+            !body.data ||
+            !body.content_type
+          ) {
+            return;
+          }
+          const url = `data:${body.content_type};base64,${body.data}`;
+          remoteIconCache.current.set(cacheKey, url);
+          setRemoteIconSrcs((current) => ({
+            ...current,
+            [workspace.id]: url,
+          }));
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot?.workspaces, submitQueuedAction]);
+
+  const workspaceIconSrc = useCallback(
+    (workspaceId: string) => {
+      if (snapshot?.preferences.workspace_icons?.[workspaceId]?.mode === "folder") {
+        return null;
+      }
+      return remoteIconSrcs[workspaceId] ?? null;
+    },
+    [remoteIconSrcs, snapshot?.preferences.workspace_icons],
+  );
+
   useEffect(() => {
     if (!showProjects) return;
 
@@ -5127,6 +5216,9 @@ function RemoteApp() {
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
                 workspaceColors={snapshot?.preferences.workspace_colors}
                 onWorkspaceColorChange={handleWorkspaceColorChange}
+                workspaceIcons={snapshot?.preferences.workspace_icons}
+                onWorkspaceIconChange={handleWorkspaceIconChange}
+                workspaceIconSrc={workspaceIconSrc}
                 topNavigation={extensionPanelNavigation}
                 title="Projects"
                 errors={error ? [error] : []}
@@ -5163,6 +5255,7 @@ function RemoteApp() {
             onOpenSettings={() => setShowPreferences(true)}
             openRequestKey={paletteRequestKey}
             requestMode="toggle"
+            workspaceIconSrc={workspaceIconSrc}
           />
         </Suspense>
       ) : null}
@@ -5192,6 +5285,9 @@ function RemoteApp() {
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
           workspaceColors={snapshot?.preferences.workspace_colors}
           onWorkspaceColorChange={handleWorkspaceColorChange}
+          workspaceIcons={snapshot?.preferences.workspace_icons}
+          onWorkspaceIconChange={handleWorkspaceIconChange}
+          workspaceIconSrc={workspaceIconSrc}
           topNavigation={extensionPanelNavigation}
           title="Projects"
           errors={error ? [error] : []}
@@ -5378,9 +5474,6 @@ function RemoteApp() {
                     selectedThread?.status !== "running" &&
                     selectedThread?.status !== "waiting_for_input"
                   }
-                  missionCommandAvailable={missionCommandAvailable(
-                    snapshot?.extensions,
-                  )}
                   providerLocked={Boolean(selectedThread)}
                   showProviderSelector={!selectedThread}
                   handoffProviders={handoffProviderOptions}

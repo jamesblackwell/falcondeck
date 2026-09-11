@@ -112,7 +112,6 @@ function SlashMenuQa() {
           selectedEffort={null}
           onEffortChange={() => undefined}
           compactCommandAvailable
-          missionCommandAvailable
           goal={{
             goal: null,
             provider: "codex",

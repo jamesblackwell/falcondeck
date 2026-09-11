@@ -14,7 +14,8 @@ use std::sync::Mutex;
 
 use falcondeck_core::{
     AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
-    UpdatePreferencesRequest, crypto::verify_pairing_public_key_bundle, normalize_workspace_colors,
+    UpdatePreferencesRequest, WorkspaceIconPreference, crypto::verify_pairing_public_key_bundle,
+    normalize_workspace_colors, normalize_workspace_icons,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -196,6 +197,17 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
             ));
     }
 
+    if let Some(workspace_icons) = value.get("workspace_icons").and_then(Value::as_object) {
+        preferences.workspace_icons = normalize_workspace_icons(workspace_icons.iter().filter_map(
+            |(workspace_id, preference)| {
+                Some((
+                    workspace_id.clone(),
+                    serde_json::from_value::<WorkspaceIconPreference>(preference.clone()).ok()?,
+                ))
+            },
+        ));
+    }
+
     if let Some(conversation) = value.get("conversation") {
         if let Some(mode) = extract_string(conversation, &["tool_details_mode"]) {
             preferences.conversation.tool_details_mode = parse_tool_details_mode(&mode);
@@ -317,7 +329,10 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     }
 
     if let Some(computer_use) = value.get("computer_use") {
-        if let Some(existing_profile) = computer_use.get("existing_profile").and_then(Value::as_bool) {
+        if let Some(existing_profile) = computer_use
+            .get("existing_profile")
+            .and_then(Value::as_bool)
+        {
             preferences.computer_use.existing_profile = existing_profile;
         }
         if let Some(enabled) = computer_use.get("enabled").and_then(Value::as_bool) {
@@ -353,6 +368,10 @@ pub(super) fn apply_preferences_patch(
 
     if let Some(workspace_colors) = request.workspace_colors {
         preferences.workspace_colors = normalize_workspace_colors(workspace_colors);
+    }
+
+    if let Some(workspace_icons) = request.workspace_icons {
+        preferences.workspace_icons = normalize_workspace_icons(workspace_icons);
     }
 
     if let Some(conversation) = request.conversation {
@@ -969,6 +988,10 @@ mod tests {
                 "workspace-a": "red",
                 " ": "cat-1"
             },
+            "workspace_icons": {
+                "workspace-b": { "mode": "domain", "domain": "Lucidpic.com." },
+                "workspace-a": { "mode": "domain", "domain": "not a host" }
+            },
             "conversation": {
                 "tool_details_mode": "compact",
                 "group_read_only_tools": false,
@@ -999,6 +1022,14 @@ mod tests {
             Some("cat-3")
         );
         assert!(!preferences.workspace_colors.contains_key("workspace-a"));
+        assert_eq!(
+            preferences
+                .workspace_icons
+                .get("workspace-b")
+                .and_then(|icon| icon.domain.as_deref()),
+            Some("lucidpic.com")
+        );
+        assert!(!preferences.workspace_icons.contains_key("workspace-a"));
         assert_eq!(
             preferences.conversation.tool_details_mode,
             ToolDetailsMode::Compact
@@ -1052,8 +1083,16 @@ mod tests {
         }));
         assert!(preferences.computer_use.enabled);
         assert!(preferences.computer_use.existing_profile);
-        assert!(!merge_preferences_from_value(json!({"computer_use": {"enabled": true}})).computer_use.existing_profile);
-        assert!(!merge_preferences_from_value(json!({"computer_use": {"existing_profile": "true"}})).computer_use.existing_profile);
+        assert!(
+            !merge_preferences_from_value(json!({"computer_use": {"enabled": true}}))
+                .computer_use
+                .existing_profile
+        );
+        assert!(
+            !merge_preferences_from_value(json!({"computer_use": {"existing_profile": "true"}}))
+                .computer_use
+                .existing_profile
+        );
         assert!(preferences.computer_use.telemetry);
         assert!(!preferences.computer_use.overlay);
         assert!(!FalconDeckPreferences::default().computer_use.enabled);

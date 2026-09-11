@@ -216,9 +216,6 @@ Initial policy:
   `agent-tools:register` grant is applied once, on first discovery; afterwards
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
-- `falcondeck.missions`: bundled and disabled by default. Missions requests
-  `threads:read`, `agent-tools:register`, and `automations:manage-owned`; all
-  remain denied until the user grants them.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
@@ -662,8 +659,6 @@ An Automation may carry an opaque `{ extensionId, resourceId }`
 owner. The callback receives only Automations owned by itself and may manage
 only those resources; ordinary Automation revisions, validation, elevated
 authority settings, history, idempotency, and dispatch remain authoritative.
-`falcondeck.missions` is the reference consumer described in
-`docs/MISSIONS.md`.
 
 An extension creates an owned Automation from a daemon-verified existing task.
 FalconDeck copies that task's workspace, provider, model, permission, sandbox,
@@ -684,8 +679,7 @@ extension/tool identity metadata to successful MCP results. Desktop and remote
 web then render the newest matching result at transcript level, even when the
 provider's ordinary work session is folded. The component receives only that
 extension's synchronized views and the existing permission-checked action
-route. Missions uses the slot to confirm that the Mission and its first agent
-check-in started. Mobile, older clients, disabled
+route. Mobile, older clients, disabled
 extensions, undeclared tools, and frontend failures retain the ordinary MCP
 result as a visible fallback.
 
@@ -693,17 +687,7 @@ A trusted result renderer may also declare a titled detail surface. The
 transcript remains compact; the host opens the same renderer in its own side
 panel or drawer and marks the presentation as `detail`, so the extension can
 show the complete artifact without owning window layout or navigation. This is
-generic extension infrastructure rather than a Missions-only host feature.
-
-When Missions is enabled with its task-summary and agent-tool grants,
-FalconDeck adds a short provider-neutral Mission trigger to the injected agent
-context and stages the `falcondeck-missions` workflow skill. An explicit
-request to start, create, or run a Mission must call `create-mission` before
-ordinary task work begins; it
-must not silently degrade into a harness goal. Desktop and remote web also
-surface a native `/mission` composer command. Completing it expands to clear
-FalconDeck Mission intent, while the row stays hidden when the extension or a
-required grant is unavailable.
+generic extension infrastructure rather than a host feature tied to one package.
 
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
 official extensions stay within baseline capabilities unless the catalog grants
@@ -951,11 +935,9 @@ identifier-only attention count and generic thread label. It uses no private
 imports and remains bundled, disabled by default.
 
 Progress (2026-09-01): `panelActions`, agent tools, and generic
-`automations:manage-owned` are implemented. Missions uses ordinary extension
-storage for a durable brief, status, update log, and linked tasks, with optional
-periodic reviews backed by the existing Automation scheduler. Review tasks
-receive daemon-verified Mission provenance. There is no Mission-specific agent
-loop, run journal, worker pool, or scheduler. See `docs/MISSIONS.md`.
+`automations:manage-owned` are implemented. Owned Automations reuse the existing
+scheduler, validation, and run history. There is no extension-specific agent
+loop, run journal, worker pool, or scheduler.
 
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;

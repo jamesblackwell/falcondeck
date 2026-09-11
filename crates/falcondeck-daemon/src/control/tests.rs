@@ -113,16 +113,16 @@ async fn owned_automations_are_projected_only_to_the_owner_and_reject_public_mut
         .set_automation_owner_for_test(
             &automation_id,
             AutomationOwner {
-                extension_id: "falcondeck.missions".to_string(),
-                resource_id: "mission-1".to_string(),
+                extension_id: "example.owner".to_string(),
+                resource_id: "resource-1".to_string(),
             },
         )
         .await;
 
-    let owned = service.owned_automations("falcondeck.missions").await;
+    let owned = service.owned_automations("example.owner").await;
     assert_eq!(owned.len(), 1);
     assert_eq!(owned[0].id, automation_id);
-    assert_eq!(owned[0].resource_id, "mission-1");
+    assert_eq!(owned[0].resource_id, "resource-1");
     assert!(
         service
             .owned_automations("another.extension")
@@ -155,22 +155,22 @@ async fn owned_run_now_is_owner_scoped_and_idempotent() {
         .set_automation_owner_for_test(
             &automation_id,
             AutomationOwner {
-                extension_id: "falcondeck.missions".to_string(),
-                resource_id: "mission-1".to_string(),
+                extension_id: "example.owner".to_string(),
+                resource_id: "resource-1".to_string(),
             },
         )
         .await;
 
     let effect = || ExtensionAutomationEffect::RunNow {
         automation_id: automation_id.clone(),
-        idempotency_key: "mission-review-now-1".to_string(),
+        idempotency_key: "review-now-1".to_string(),
     };
     service
-        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .apply_extension_automation_effect("example.owner", effect(), None)
         .await
         .unwrap();
     service
-        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .apply_extension_automation_effect("example.owner", effect(), None)
         .await
         .unwrap();
 
@@ -202,8 +202,8 @@ async fn owned_create_can_queue_its_first_run_atomically() {
         .set_automation_owner_for_test(
             &automation_id,
             AutomationOwner {
-                extension_id: "falcondeck.missions".to_string(),
-                resource_id: "mission-1".to_string(),
+                extension_id: "example.owner".to_string(),
+                resource_id: "resource-1".to_string(),
             },
         )
         .await;
@@ -211,27 +211,27 @@ async fn owned_create_can_queue_its_first_run_atomically() {
     let effect = || {
         serde_json::from_value::<ExtensionAutomationEffect>(json!({
             "type": "create_from_thread",
-            "resourceId": "mission-1",
+            "resourceId": "resource-1",
             "sourceWorkspaceId": "workspace-1",
             "sourceThreadId": "thread-1",
-            "idempotencyKey": "mission-start-mission-1",
+            "idempotencyKey": "start-resource-1",
             "name": "Weekday inbox review",
             "trigger": {
                 "kind": "interval",
                 "every_seconds": 86400,
                 "anchor_at": "2026-08-16T00:00:00Z",
             },
-            "task": { "kind": "prompt", "instruction": "Review the Mission" },
+            "task": { "kind": "prompt", "instruction": "Review the inbox" },
             "runImmediately": true,
         }))
         .unwrap()
     };
     service
-        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .apply_extension_automation_effect("example.owner", effect(), None)
         .await
         .unwrap();
     service
-        .apply_extension_automation_effect("falcondeck.missions", effect(), None)
+        .apply_extension_automation_effect("example.owner", effect(), None)
         .await
         .unwrap();
 
@@ -246,6 +246,50 @@ async fn owned_create_can_queue_its_first_run_atomically() {
         .await
         .unwrap();
     assert_eq!(runs.data.as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn retire_owned_automations_deletes_only_that_extension() {
+    let (_dir, service) = service().await;
+    let owned = create_valid_automation(&service).await;
+    let owned_id = owned["id"].as_str().unwrap().to_string();
+    let other = create_valid_automation(&service).await;
+    let other_id = other["id"].as_str().unwrap().to_string();
+    service
+        .set_automation_owner_for_test(
+            &owned_id,
+            AutomationOwner {
+                extension_id: "example.owner".to_string(),
+                resource_id: "resource-1".to_string(),
+            },
+        )
+        .await;
+    service
+        .set_automation_owner_for_test(
+            &other_id,
+            AutomationOwner {
+                extension_id: "another.extension".to_string(),
+                resource_id: "resource-2".to_string(),
+            },
+        )
+        .await;
+
+    assert_eq!(
+        service
+            .retire_owned_automations("example.owner")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(service.automation(&owned_id).await.is_none());
+    assert!(service.automation(&other_id).await.is_some());
+    assert_eq!(
+        service
+            .retire_owned_automations("example.owner")
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]

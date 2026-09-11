@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use falcondeck_core::sanitize_logo_domain;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -75,23 +76,7 @@ fn image_path(dir: &Path, domain: &str) -> PathBuf {
 
 /// Hostnames only: labels, dots, hyphens. Rejects paths and `..`.
 pub fn sanitize_domain(raw: &str) -> Result<String, String> {
-    let domain = raw.trim().trim_end_matches('.').to_ascii_lowercase();
-    if domain.is_empty() || domain.len() > 253 {
-        return Err("invalid logo domain".to_string());
-    }
-    if domain.starts_with('.') || domain.ends_with('.') || domain.contains("..") {
-        return Err("invalid logo domain".to_string());
-    }
-    if !domain
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-    {
-        return Err("invalid logo domain".to_string());
-    }
-    if !domain.contains('.') {
-        return Err("invalid logo domain".to_string());
-    }
-    Ok(domain)
+    sanitize_logo_domain(raw)
 }
 
 /// Domain-stable 0..14d offset so first monthly rechecks are spread out.

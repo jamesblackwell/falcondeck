@@ -28,6 +28,32 @@ describe("existing-profile consent normalization", () => {
   });
 });
 
+describe("workspace icon normalization", () => {
+  it("fills an empty icon map and resolved icon for older daemons", () => {
+    expect(normalizePreferences({}).workspace_icons).toEqual({});
+    expect(
+      normalizePreferences({
+        workspace_icons: {
+          " workspace-a ": { mode: "domain", domain: "Example.COM." },
+        },
+      }).workspace_icons,
+    ).toEqual({
+      "workspace-a": { mode: "domain", domain: "example.com" },
+    });
+    expect(normalizeWorkspaceSummary({}).icon).toBeNull();
+    expect(
+      normalizeWorkspaceSummary({
+        icon: { kind: "image", etag: "abc", source: "file" },
+      }).icon,
+    ).toEqual({
+      kind: "image",
+      etag: "abc",
+      source: "file",
+      domain: null,
+    });
+  });
+});
+
 describe("workspace capability normalization", () => {
   it("does not expose compaction when an older daemon omitted capabilities", () => {
     const workspace = normalizeWorkspaceSummary({
@@ -688,25 +714,23 @@ describe("malformed conversation output normalization", () => {
     );
   });
 
-  it("preserves Mission worker provenance on ordinary thread summaries", () => {
+  it("preserves Automation provenance on ordinary thread summaries", () => {
     const detail = normalizeThreadDetail({
       workspace: {},
       thread: {
         origin: {
-          kind: "mission_worker",
-          run_id: "run-1",
-          worker_id: "worker-1",
-          title: "Ship parser fix",
+          kind: "automation",
+          automation_id: "automation-1",
+          name: "Weekday inbox review",
         },
       },
       items: [],
     });
 
     expect(detail.thread.origin).toEqual({
-      kind: "mission_worker",
-      run_id: "run-1",
-      worker_id: "worker-1",
-      title: "Ship parser fix",
+      kind: "automation",
+      automation_id: "automation-1",
+      name: "Weekday inbox review",
     });
   });
 

@@ -1661,7 +1661,7 @@ export function ScheduledTasksView({
               <Fragment key={key}>
                 {index === firstOwnedIndex ? (
                   <div className="fd-type-eyebrow bg-surface-1 px-4 py-2.5 text-fg-muted">
-                    Used by Missions
+                    Used by extensions
                   </div>
                 ) : null}
                 <AutomationListRow
@@ -1680,7 +1680,7 @@ export function ScheduledTasksView({
                   attention={attention?.text}
                   attentionTone={attention?.tone}
                   tone={rowTone(entry)}
-                  missionOwned={Boolean(owner)}
+                  extensionOwned={Boolean(owner)}
                   elevated={Boolean(entry.automation?.elevated)}
                   selected={
                     selected != null && taskEntryKey(selected) === key

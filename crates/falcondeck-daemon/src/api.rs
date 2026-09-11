@@ -277,6 +277,10 @@ pub fn router(state: AppState) -> Router {
             get(connector_oauth_callback),
         )
         .route("/api/plugin-logos", get(read_plugin_logo))
+        .route(
+            "/api/workspace-icons/{workspace_id}",
+            get(read_workspace_icon),
+        )
         .route("/api/skills", get(read_skill_library))
         .route("/api/skills/registry", get(search_skill_registry))
         .route("/api/skills/install", post(install_library_skill))
@@ -1290,6 +1294,48 @@ struct OauthCallbackQuery {
 #[derive(serde::Deserialize)]
 struct PluginLogoQuery {
     domain: String,
+}
+
+async fn read_workspace_icon(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    match state.workspace_icon(&workspace_id).await {
+        Ok(icon) => match (icon.bytes, icon.content_type, icon.meta.etag) {
+            (Some(bytes), Some(content_type), Some(etag)) => {
+                let quoted = format!("\"{etag}\"");
+                if headers
+                    .get(header::IF_NONE_MATCH)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.split(',').any(|tag| tag.trim() == quoted))
+                {
+                    return StatusCode::NOT_MODIFIED.into_response();
+                }
+                let content_type = HeaderValue::from_str(&content_type)
+                    .unwrap_or_else(|_| HeaderValue::from_static("image/png"));
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, content_type),
+                        (
+                            header::ETAG,
+                            HeaderValue::from_str(&quoted)
+                                .unwrap_or_else(|_| HeaderValue::from_static("\"icon\"")),
+                        ),
+                        (
+                            header::CACHE_CONTROL,
+                            HeaderValue::from_static("private, max-age=86400"),
+                        ),
+                    ],
+                    bytes,
+                )
+                    .into_response()
+            }
+            _ => StatusCode::NOT_FOUND.into_response(),
+        },
+        Err(error) => error.into_response(),
+    }
 }
 
 async fn read_plugin_logo(Query(query): Query<PluginLogoQuery>) -> Response {

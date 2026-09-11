@@ -246,6 +246,7 @@ fn remote_rpc_is_read_only(method: &str) -> bool {
             | "speech.models"
             | "workspace.files"
             | "workspace.file.read"
+            | "workspace.icon"
             | "workspace.skills"
             | "git.status"
             | "git.diff"
@@ -319,6 +320,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "workspace.files",
     "workspace.file.read",
     "workspace.file.write",
+    "workspace.icon",
     "git.status",
     "git.diff",
     "git.commit",
@@ -1760,6 +1762,27 @@ impl AppState {
                         .await
                         .and_then(|file| serde_json::to_value(file).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
+                }
+                "workspace.icon" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let icon = self
+                        .workspace_icon(&workspace_id)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let mut value = serde_json::json!({
+                        "kind": icon.meta.kind,
+                        "etag": icon.meta.etag,
+                        "source": icon.meta.source,
+                        "domain": icon.meta.domain,
+                    });
+                    if let (Some(bytes), Some(content_type)) = (icon.bytes, icon.content_type) {
+                        value["content_type"] = serde_json::Value::String(content_type);
+                        value["data"] = serde_json::Value::String(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            bytes,
+                        ));
+                    }
+                    Ok(value)
                 }
                 "workspace.file.write" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;

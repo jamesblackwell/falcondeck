@@ -92,14 +92,14 @@ function SessionListItemInner({
         </View>
       ) : null}
       {thread.is_pinned || thread.is_pinned_in_project ? (
-        <Pin
-          size={theme.iconSize.xs}
-          color={theme.colors.fg.muted}
+        <View
           accessible
           accessibilityRole="image"
           accessibilityLabel={thread.is_pinned ? 'Pinned' : 'Pinned in project'}
           style={styles.pin}
-        />
+        >
+          <Pin size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+        </View>
       ) : null}
       {presentation.showBadge ? (
         <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
@@ -141,6 +141,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   tags: { flexDirection: 'row', alignItems: 'center' },
   pin: {
+    // lucide-react-native copies style onto each path, so rotate the wrapper.
     transform: [{ rotate: '45deg' }],
   },
 }))

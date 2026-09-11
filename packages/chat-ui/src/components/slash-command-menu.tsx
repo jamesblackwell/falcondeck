@@ -1,4 +1,4 @@
-import { BookOpen, Orbit, Target, type LucideIcon } from "lucide-react";
+import { BookOpen, Target, type LucideIcon } from "lucide-react";
 import {
   Fragment,
   useEffect,
@@ -12,14 +12,12 @@ import type { RankedSlashItem, SlashMatchSpan } from "@falcondeck/client-core";
 import { slashSkillSourceLabel } from "@falcondeck/client-core";
 import { Kbd, MenuHeader, cn } from "@falcondeck/ui";
 
-const NATIVE_ICON: Record<"goal" | "mission" | "compact", LucideIcon> = {
+const NATIVE_ICON: Record<"goal" | "compact", LucideIcon> = {
   goal: Target,
-  mission: Orbit,
   compact: BookOpen,
 };
 
-const NATIVE_BADGE: Partial<Record<"goal" | "mission" | "compact", string>> = {
-  mission: "FalconDeck",
+const NATIVE_BADGE: Partial<Record<"goal" | "compact", string>> = {
   compact: "Harness",
 };
 

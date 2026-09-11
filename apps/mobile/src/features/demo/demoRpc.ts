@@ -205,6 +205,9 @@ export async function handleDemoRpc<T>(
     case 'workspace.skills':
       return { skills: [] } as T
 
+    case 'workspace.icon':
+      return { kind: 'folder' } as T
+
     case 'control.get':
       return { resource: String(params.resource ?? ''), data: [] } as T
 

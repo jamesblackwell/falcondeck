@@ -30,6 +30,7 @@ import { ActivityDiamond, Select, SelectContent, SelectItem, SelectTrigger, Tool
 
 import { OptionFilterField } from './option-filter-field'
 import type { WorkspaceHostBadge } from './workspace-group'
+import { WorkspaceIcon } from './workspace-icon'
 
 export type ComposerRemoteHostOption = {
   id: string
@@ -73,6 +74,7 @@ export type ComposerContextBarProps = {
   onAddRemoteProject?: (hostId: string, path: string) => void | Promise<void>
   /** True while a local or remote project connect is in flight. */
   isAddingProject?: boolean
+  workspaceIconSrc?: (workspaceId: string) => string | null
 }
 
 const CHIP_CLASS =
@@ -110,6 +112,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   onNewChat,
   onAddRemoteProject,
   isAddingProject = false,
+  workspaceIconSrc,
 }: ComposerContextBarProps) {
   const selectedHost = selectedWorkspace
     ? workspaceHosts[selectedWorkspace.id] ?? null
@@ -138,6 +141,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         onAddRemoteProject={onAddRemoteProject}
         isAddingProject={isAddingProject}
         disabled={disabled}
+        workspaceIconSrc={workspaceIconSrc}
       />
 
       {/* Location chip: Local vs the remote host name (ChatGPT-style). */}
@@ -229,6 +233,7 @@ function ProjectMenu({
   onAddRemoteProject,
   isAddingProject,
   disabled,
+  workspaceIconSrc,
 }: {
   workspaces: WorkspaceSummary[]
   selectedWorkspace: WorkspaceSummary | null
@@ -244,6 +249,7 @@ function ProjectMenu({
   onAddRemoteProject?: (hostId: string, path: string) => void | Promise<void>
   isAddingProject: boolean
   disabled: boolean
+  workspaceIconSrc?: (workspaceId: string) => string | null
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -402,6 +408,9 @@ function ProjectMenu({
   }
 
   const selectedRemoteHost = remoteHosts.find((host) => host.id === remoteHostId) ?? null
+  const selectedIconSrc = selectedWorkspace
+    ? workspaceIconSrc?.(selectedWorkspace.id)
+    : null
   const ProjectIcon = selectedWorkspace?.kind === 'casual' ? X : selectedHost ? Globe : FolderClosed
   const menuDisabled =
     disabled ||
@@ -419,7 +428,11 @@ function ProjectMenu({
             disabled={menuDisabled}
             className={CHIP_CLASS}
           >
-            <ProjectIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            {selectedWorkspace?.kind !== 'casual' && selectedIconSrc ? (
+              <WorkspaceIcon src={selectedIconSrc} className="h-3.5 w-3.5" />
+            ) : (
+              <ProjectIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            )}
             <span className="truncate">{projectLabel}</span>
           </button>
         </Popover.Trigger>
@@ -453,6 +466,7 @@ function ProjectMenu({
                   const host = workspaceHosts[workspace.id]
                   const selected = workspace.id === selectedWorkspace?.id
                   const Icon = host ? Globe : FolderClosed
+                  const iconSrc = workspaceIconSrc?.(workspace.id)
                   const accessibleName = host ? `${label} ${host.name}` : label
                   return (
                     <button
@@ -472,14 +486,18 @@ function ProjectMenu({
                         selected && 'bg-interactive-selected',
                       )}
                     >
-                      <Icon
-                        aria-hidden="true"
-                        className={cn(
-                          'h-3.5 w-3.5 shrink-0',
-                          host || selected ? 'text-accent' : 'text-fg-muted',
-                          host && !host.connected && 'opacity-60',
-                        )}
-                      />
+                      {iconSrc ? (
+                        <WorkspaceIcon src={iconSrc} className="h-3.5 w-3.5" />
+                      ) : (
+                        <Icon
+                          aria-hidden="true"
+                          className={cn(
+                            'h-3.5 w-3.5 shrink-0',
+                            host || selected ? 'text-accent' : 'text-fg-muted',
+                            host && !host.connected && 'opacity-60',
+                          )}
+                        />
+                      )}
                       <span className="min-w-0 flex-1">
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className="truncate font-medium">{label}</span>

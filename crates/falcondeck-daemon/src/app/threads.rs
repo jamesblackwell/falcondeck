@@ -3420,6 +3420,7 @@ mod tests {
             connected_at: Utc::now(),
             updated_at: Utc::now(),
             last_error: None,
+            icon: None,
         };
         app.inner.workspaces.lock().await.insert(
             "workspace-1".to_string(),

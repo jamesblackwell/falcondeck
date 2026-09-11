@@ -8,7 +8,9 @@ import {
   ChevronRight,
   CircleDashed,
   Copy,
+  FolderClosed,
   GitFork,
+  Globe,
   Pin,
   PinOff,
   Plus,
@@ -23,6 +25,7 @@ import type {
   ThreadSummary,
   ThreadTag,
   WorkspaceColorId,
+  WorkspaceIconPreference,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
 import {
@@ -64,6 +67,7 @@ const WORKSPACE_COLOR_GRID_HEIGHT_PX =
   WORKSPACE_COLOR_ROWS * WORKSPACE_COLOR_SWATCH_SIZE_PX +
   (WORKSPACE_COLOR_ROWS - 1) * WORKSPACE_COLOR_GAP_PX
 const WORKSPACE_COLOR_SECTION_HEIGHT_PX = 28 + WORKSPACE_COLOR_GRID_HEIGHT_PX
+const WORKSPACE_ICON_SECTION_HEIGHT_PX = 28 + THREAD_MENU_ROW_HEIGHT_PX * 3
 
 export type WorkspaceContextMenuState = {
   workspaceId: string
@@ -92,17 +96,21 @@ function ThreadMenuItem({
   icon,
   label,
   destructive = false,
+  checked,
   onClick,
 }: {
   icon: React.ReactNode
   label: string
   destructive?: boolean
+  checked?: boolean
   onClick: () => void
 }) {
+  const radio = checked !== undefined
   return (
     <button
       type="button"
-      role="menuitem"
+      role={radio ? 'menuitemradio' : 'menuitem'}
+      aria-checked={radio ? checked : undefined}
       onClick={onClick}
       className={cn(
         'fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
@@ -114,7 +122,10 @@ function ThreadMenuItem({
       <span aria-hidden="true" className="flex shrink-0 items-center">
         {icon}
       </span>
-      {label}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {checked ? (
+        <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+      ) : null}
     </button>
   )
 }
@@ -651,9 +662,12 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
 export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
   selectedColor = null,
+  selectedIcon,
   archivedCount = 0,
   archivedOpen = false,
   onSetColor,
+  onSetIcon,
+  onChooseWebsite,
   onViewArchived,
   onCloseFromSidebar,
   onRemove,
@@ -661,9 +675,12 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
 }: {
   target: WorkspaceContextMenuState | null
   selectedColor?: string | null
+  selectedIcon?: WorkspaceIconPreference
   archivedCount?: number
   archivedOpen?: boolean
   onSetColor?: (color: WorkspaceColorId | null) => void
+  onSetIcon?: (icon: WorkspaceIconPreference | null) => void
+  onChooseWebsite?: () => void
   onViewArchived?: () => void
   onCloseFromSidebar?: () => void
   onRemove?: () => void
@@ -674,17 +691,21 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   }
 
   const projectLabel = target.path.split('/').pop() || target.path
+  const showIcons = Boolean(onSetIcon)
   const showColors = Boolean(onSetColor)
   const showArchivedAction =
     Boolean(onViewArchived) && (archivedCount > 0 || archivedOpen)
   const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
   const showMembership = showClose || showRemove
-  if (!showColors && !showArchivedAction && !showMembership) {
+  if (!showIcons && !showColors && !showArchivedAction && !showMembership) {
     return null
   }
+  const showBelowIcons = showColors || showArchivedAction || showMembership
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
+    (showIcons ? WORKSPACE_ICON_SECTION_HEIGHT_PX : 0) +
+    (showIcons && showBelowIcons ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showColors ? WORKSPACE_COLOR_SECTION_HEIGHT_PX : 0) +
     (showColors && (showArchivedAction || showMembership)
       ? THREAD_MENU_SEPARATOR_HEIGHT_PX
@@ -721,6 +742,41 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
       className="fixed z-50 w-56 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
       style={{ left, top }}
     >
+      {showIcons ? (
+        <div className="px-0.5 pb-0.5 pt-1">
+          <p className="mb-1 px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+            Icon
+          </p>
+          <ThreadMenuItem
+            icon={<Sparkles className="h-3.5 w-3.5" />}
+            label="Auto"
+            checked={(selectedIcon?.mode ?? 'auto') === 'auto'}
+            onClick={() => onSetIcon?.(null)}
+          />
+          <ThreadMenuItem
+            icon={<FolderClosed className="h-3.5 w-3.5" />}
+            label="Folder"
+            checked={selectedIcon?.mode === 'folder'}
+            onClick={() => onSetIcon?.({ mode: 'folder' })}
+          />
+          <ThreadMenuItem
+            icon={<Globe className="h-3.5 w-3.5" />}
+            label={
+              selectedIcon?.mode === 'domain' && selectedIcon.domain
+                ? selectedIcon.domain
+                : 'Website…'
+            }
+            checked={selectedIcon?.mode === 'domain'}
+            onClick={() => onChooseWebsite?.()}
+          />
+        </div>
+      ) : null}
+      {showIcons && showBelowIcons ? (
+        <div
+          role="separator"
+          className="mx-2 my-1 border-t border-border-subtle"
+        />
+      ) : null}
       {showColors ? (
         <div className="px-1.5 pb-1 pt-1">
           <p className="mb-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
@@ -811,6 +867,85 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           onClick={onRemove}
         />
       ) : null}
+    </div>,
+    document.body,
+  )
+})
+
+export const WorkspaceIconDialog = memo(function WorkspaceIconDialog({
+  target,
+  value,
+  error,
+  pending,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  target: { workspaceId: string; path: string } | null
+  value: string
+  error: string | null
+  pending: boolean
+  onChange: (value: string) => void
+  onClose: () => void
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const projectLabel = target.path.split('/').pop() || target.path
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-workspace-icon-title"
+        onSubmit={onSubmit}
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <div className="space-y-1">
+          <h2
+            id="fd-workspace-icon-title"
+            className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+          >
+            Website icon
+          </h2>
+          <p className="truncate text-[length:var(--fd-text-sm)] text-fg-muted">
+            {projectLabel}
+          </p>
+        </div>
+        <p className="mt-3 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          Use the site’s favicon for this project.
+        </p>
+        <div className="mt-4 space-y-2">
+          <Input
+            aria-label="Website"
+            placeholder="example.com"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            autoFocus
+            disabled={pending}
+          />
+          {error ? (
+            <p className="text-[length:var(--fd-text-xs)] text-danger">{error}</p>
+          ) : null}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={!value.trim() || pending} aria-busy={pending}>
+            {pending ? 'Saving…' : 'Use website'}
+          </Button>
+        </div>
+      </form>
     </div>,
     document.body,
   )

@@ -2270,6 +2270,29 @@ describe("DesktopSidebar", () => {
     expect(onWorkspaceColorChange).toHaveBeenCalledWith("workspace-1", null);
   });
 
+  it("sets a project icon from the right-click menu", async () => {
+    const onWorkspaceIconChange = vi.fn().mockResolvedValue(undefined);
+    renderSidebar({
+      onWorkspaceIconChange,
+      workspaceIcons: { "workspace-1": { mode: "folder" } },
+    });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.getByRole("menuitemradio", { name: "Folder" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Auto" }));
+    expect(onWorkspaceIconChange).toHaveBeenCalledWith("workspace-1", null);
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "Website…" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Website icon" }),
+    ).toBeInTheDocument();
+  });
+
   it("focuses the context menu and moves through it with the arrow keys", async () => {
     renderSidebar();
 

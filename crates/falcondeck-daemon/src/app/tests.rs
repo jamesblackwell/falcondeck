@@ -88,6 +88,7 @@ async fn claude_harness_upgrade_refreshes_connected_workspace_models() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: Some(runtime),
@@ -2603,6 +2604,7 @@ async fn suggest_thread_title_rejects_an_empty_conversation() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -2683,6 +2685,7 @@ async fn builtin_rename_thread_tool_applies_the_agent_supplied_title() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -3133,6 +3136,7 @@ async fn workspace_bridge_rename_binds_the_calling_thread_among_concurrent_codex
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -3340,6 +3344,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -4841,6 +4846,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         live_workspace_id,
@@ -4956,6 +4962,7 @@ async fn close_workspace_keeps_persist_and_lists_it_in_the_library() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -5054,6 +5061,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id,
@@ -5149,6 +5157,7 @@ async fn shutdown_marks_waiting_threads_as_error_and_persists_them() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id,
@@ -5228,6 +5237,7 @@ async fn provider_disconnect_fails_only_that_providers_active_threads() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -5750,6 +5760,7 @@ async fn insert_claude_workspace_with_session(
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -6683,6 +6694,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -6828,6 +6840,7 @@ async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -6931,6 +6944,7 @@ async fn snapshot_with_request_strips_thread_plans_and_diffs_for_remote_clients(
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,
@@ -7079,6 +7093,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -7190,6 +7205,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -7376,6 +7392,7 @@ async fn busy_thread_app(
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -7813,6 +7830,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         connected_at: Utc::now(),
         updated_at: Utc::now(),
         last_error: None,
+        icon: None,
     };
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -8092,6 +8110,7 @@ async fn control_current_thread_target_pins_the_calling_thread() {
                 connected_at: Utc::now(),
                 updated_at: Utc::now(),
                 last_error: None,
+                icon: None,
             },
             codex_session: None,
             claude_runtime: None,

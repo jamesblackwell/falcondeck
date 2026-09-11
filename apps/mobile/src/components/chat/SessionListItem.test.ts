@@ -142,6 +142,28 @@ describe('SessionListItem props contract', () => {
     ).toHaveLength(0)
   })
 
+  it('rotates the pin on a wrapper, not the lucide icon', () => {
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: thread({
+        id: 'thread-1',
+        workspace_id: 'workspace-1',
+        title: 'Globally pinned',
+        is_pinned: true,
+      }),
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+    }))
+
+    const mark = renderer.root.findByProps({ accessibilityLabel: 'Pinned' })
+    expect(mark.props.style).toEqual({ transform: [{ rotate: '45deg' }] })
+
+    const icon = mark.findAll((node) => node.props.size === 14)
+    expect(icon).toHaveLength(1)
+    expect(icon[0]?.props.style).toBeUndefined()
+    expect(icon[0]?.props.color).toBe('#666')
+  })
+
   it('accepts a full thread summary so presentation stays aligned with shared clients', () => {
     const props = {
       thread: {

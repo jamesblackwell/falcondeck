@@ -1,5 +1,9 @@
 import { normalizeControlStateChanged } from "./control";
 import { normalizeWorkspaceColors } from "./workspace-colors";
+import {
+  normalizeWorkspaceIcons,
+  normalizeWorkspaceResolvedIcon,
+} from "./workspace-icons";
 import type {
   AccountSummary,
   AgentCapabilitySummary,
@@ -350,6 +354,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   workspace_order: [],
   workspace_colors: {},
+  workspace_icons: {},
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
   utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
@@ -643,11 +648,7 @@ export function normalizeThreadSummary(
         typeof thread.origin.title === "string") ||
       (thread.origin?.kind === "automation" &&
         typeof thread.origin.automation_id === "string" &&
-        typeof thread.origin.name === "string") ||
-      (thread.origin?.kind === "mission_worker" &&
-        typeof thread.origin.run_id === "string" &&
-        typeof thread.origin.worker_id === "string" &&
-        typeof thread.origin.title === "string")
+        typeof thread.origin.name === "string")
         ? thread.origin
         : null,
     status: thread.status ?? "idle",
@@ -755,6 +756,7 @@ export function normalizeWorkspaceSummary(
       workspace.connected_at ??
       new Date(0).toISOString(),
     last_error: workspace.last_error ?? null,
+    icon: normalizeWorkspaceResolvedIcon(workspace.icon),
   };
 }
 
@@ -2247,6 +2249,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         : 1,
     workspace_order: workspaceOrder,
     workspace_colors: normalizeWorkspaceColors(raw.workspace_colors),
+    workspace_icons: normalizeWorkspaceIcons(raw.workspace_icons),
     conversation: {
       tool_details_mode: toolDetailsMode,
       auto_expand: {

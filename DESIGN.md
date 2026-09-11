@@ -103,14 +103,12 @@ Use these nouns consistently in user-facing copy:
   term across harnesses.
 - **Thread** is the internal protocol and implementation term for a task. Do
   not expose it in ordinary product copy.
-- **Mission** is a bounded coordinated run with one coordinator task and zero
-  or more worker tasks.
 - **Automation** is a saved scheduled instruction. It may create tasks when it
   runs, but it is not itself a task.
 
 Name actions for the outcome the user intends, not the mechanism FalconDeck
-uses. For example, “New mission” and “New automation” may both open a new task
-with a guided draft.
+uses. For example, “New automation” opens a saved scheduled instruction, not a
+live task.
 
 ## Typography
 
@@ -224,7 +222,7 @@ When adding a new shared pattern:
 
 Every surface that replaces the conversation column is a **main view**: Activity,
 Extensions, Plugins, Automations, Settings, and every extension `panels`
-contribution (Notes, Missions, Kanban, Mini Zen, and later packages).
+contribution (Notes, Kanban, Mini Zen, and later packages).
 
 These used to be several unrelated pages — marketing-sized `text-3xl` titles at
 `max-w-3xl`, settings headers at `max-w-4xl`, catalog pages at `max-w-5xl`, and
@@ -267,7 +265,7 @@ third max-width.
 - Search: `SearchField`, full measure of the column, not a compact chip in the
   heading
 - Section labels: `MainViewSection` (`fd-type-eyebrow`, not a second `h1`)
-- Used by: Activity, Extensions, Plugins, Automations, Missions, and declarative
+- Used by: Activity, Extensions, Plugins, Automations, and declarative
   extension panels (the host wraps those automatically)
 
 **Workspace** — spatial tools that need the whole frame.

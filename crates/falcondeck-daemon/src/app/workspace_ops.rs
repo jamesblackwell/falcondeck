@@ -532,6 +532,7 @@ pub(super) async fn connect_workspace_internal(
             .and_then(|workspace| workspace.updated_at)
             .unwrap_or(now),
         last_error: None,
+        icon: None,
     };
 
     let hydrated_threads: HashMap<String, ManagedThread> = threads
@@ -684,6 +685,7 @@ pub(super) async fn connect_workspace_internal(
             snapshot: app.snapshot().await,
         },
     );
+    app.spawn_workspace_icon_refresh(workspace_id.clone(), summary.path.clone());
 
     app.persist_local_state().await?;
     // Keep optional provider runtimes lazy. Starting every configured ACP or
@@ -4764,6 +4766,7 @@ fn compact_workspace_summary(summary: &WorkspaceSummary) -> WorkspaceSummary {
         connected_at: summary.connected_at,
         updated_at: summary.updated_at,
         last_error: summary.last_error.clone(),
+        icon: summary.icon.clone(),
     }
 }
 
@@ -6078,6 +6081,7 @@ mod tests {
             connected_at: now,
             updated_at: now,
             last_error: None,
+            icon: None,
         };
         app.inner.workspaces.lock().await.insert(
             workspace_id.to_string(),
@@ -6804,7 +6808,10 @@ mod tests {
         assert_eq!(image.mime_type.as_deref(), Some("image/png"));
 
         let message = user_message("user-1", "see attached");
-        let ConversationItem::UserMessage { mut attachments, .. } = message else {
+        let ConversationItem::UserMessage {
+            mut attachments, ..
+        } = message
+        else {
             panic!("user message expected");
         };
         attachments.push(falcondeck_core::ImageInput {
@@ -7161,6 +7168,7 @@ mod tests {
                     connected_at: Utc::now(),
                     updated_at: Utc::now(),
                     last_error: None,
+                    icon: None,
                 },
                 codex_session: None,
                 claude_runtime: None,

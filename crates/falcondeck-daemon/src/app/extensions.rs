@@ -27,8 +27,8 @@ const MAX_SCOPE_KIND_CHARS: usize = 64;
 const MAX_SCOPE_ID_CHARS: usize = 512;
 const LEGACY_SCRATCH_PAD_ID: &str = "falcondeck.scratch-pad";
 const NOTES_ID: &str = "falcondeck.notes";
-const MISSIONS_ID: &str = "falcondeck.missions";
-const MISSIONS_CREATE_TOOL_ID: &str = "create-mission";
+pub(crate) const RETIRED_MISSIONS_ID: &str = "falcondeck.missions";
+const RETIRED_MISSIONS_SKILL: &str = "falcondeck-missions";
 const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
@@ -179,6 +179,7 @@ impl ExtensionRegistry {
             Err(error) => return Err(error.into()),
         };
         migrate_scratch_pad_to_notes(&mut self.persisted);
+        retire_missions_extension(&mut self.persisted);
         self.discover().await?;
         self.persist().await
     }
@@ -261,21 +262,15 @@ impl ExtensionRegistry {
                     self.root.join("official/mini-zen/server.ts"),
                     include_str!("../../../../extensions/official/mini-zen/server.ts"),
                 ),
-                (
-                    self.root
-                        .join("official/missions/falcondeck.extension.json"),
-                    include_str!(
-                        "../../../../extensions/official/missions/falcondeck.extension.json"
-                    ),
-                ),
-                (
-                    self.root.join("official/missions/server.ts"),
-                    include_str!("../../../../extensions/official/missions/server.ts"),
-                ),
             ]);
             // Scratch pad shipped as its own package directory; nothing reads
             // it once the catalog points at Notes, so clear it out.
             let _ = tokio::fs::remove_dir_all(self.root.join("official/scratch-pad")).await;
+            let _ = tokio::fs::remove_dir_all(self.root.join("official/missions")).await;
+            let _ = tokio::fs::remove_dir_all(
+                crate::agent_context::skills_root(&self.state_path).join(RETIRED_MISSIONS_SKILL),
+            )
+            .await;
         }
         for (path, contents) in assets {
             write_bundled_asset(&canonical_state_dir, &path, contents).await?;
@@ -504,18 +499,6 @@ impl ExtensionRegistry {
             .collect::<Vec<_>>();
         tools.sort_by(|left, right| left.name.cmp(&right.name));
         tools
-    }
-
-    /// Mission instructions should enter an agent's context only when the
-    /// extension can actually create and update its durable project. This prevents a stale
-    /// prompt from advertising a feature whose tool or required projections
-    /// the user has disabled.
-    pub(super) fn missions_agent_context_available(&self) -> bool {
-        self.has_grant(MISSIONS_ID, THREADS_READ_PERMISSION)
-            && self.has_grant(MISSIONS_ID, AGENT_TOOLS_PERMISSION)
-            && self.agent_tools().iter().any(|tool| {
-                tool.extension_id == MISSIONS_ID && tool.tool_id == MISSIONS_CREATE_TOOL_ID
-            })
     }
 
     /// Resolves one MCP tool name to its package, failing closed when the
@@ -934,34 +917,6 @@ impl ExtensionRegistry {
     }
 }
 
-impl super::AppState {
-    /// Adds extension-owned instructions to the ordinary FalconDeck agent
-    /// context. Provider spawn paths use this wrapper so Codex, Claude, and
-    /// ACP harnesses receive the same Mission trigger semantics.
-    pub(crate) async fn agent_context_instructions_with_extensions(
-        &self,
-        provider: &falcondeck_core::AgentProvider,
-    ) -> Option<String> {
-        let mut instructions = self.agent_context_instructions(provider).await?;
-        if !self
-            .inner
-            .extensions
-            .lock()
-            .await
-            .missions_agent_context_available()
-        {
-            return Some(instructions);
-        }
-
-        let skill = crate::mission_context::stage_skill(&self.inner.state_path);
-        if let Err(error) = &skill {
-            tracing::warn!(%error, "failed to stage FalconDeck Missions skill");
-        }
-        crate::mission_context::append_instructions(&mut instructions, skill.as_deref().ok());
-        Some(instructions)
-    }
-}
-
 async fn write_bundled_asset(
     canonical_state_dir: &Path,
     path: &Path,
@@ -1045,6 +1000,18 @@ fn migrate_scratch_pad_to_notes(state: &mut PersistedExtensionState) {
     state
         .views
         .retain(|_, view| view.extension_id != LEGACY_SCRATCH_PAD_ID);
+}
+
+/// Missions shipped as a bundled extension and was removed. Drop its
+/// persisted enablement, grants, storage, and views so a later restore does
+/// not keep a ghost package. Owned Automations are retired separately.
+fn retire_missions_extension(state: &mut PersistedExtensionState) {
+    state.enabled.remove(RETIRED_MISSIONS_ID);
+    state.grants.remove(RETIRED_MISSIONS_ID);
+    state.storage.remove(RETIRED_MISSIONS_ID);
+    state
+        .views
+        .retain(|_, view| view.extension_id != RETIRED_MISSIONS_ID);
 }
 
 fn extension_view_key(
@@ -2289,6 +2256,37 @@ mod tests {
         assert!(!state.storage.contains_key(LEGACY_SCRATCH_PAD_ID));
     }
 
+    #[test]
+    fn retired_missions_state_is_dropped() {
+        let mut state = PersistedExtensionState::default();
+        state.enabled.insert(RETIRED_MISSIONS_ID.to_string(), true);
+        state.grants.insert(
+            RETIRED_MISSIONS_ID.to_string(),
+            BTreeSet::from([AGENT_TOOLS_PERMISSION.to_string()]),
+        );
+        state.storage.insert(
+            RETIRED_MISSIONS_ID.to_string(),
+            BTreeMap::from([("missions".to_string(), serde_json::json!([]))]),
+        );
+        state.views.insert(
+            "stale".to_string(),
+            ExtensionView {
+                extension_id: RETIRED_MISSIONS_ID.to_string(),
+                view_id: "missions-panel".to_string(),
+                scope: None,
+                value: serde_json::json!({}),
+                updated_at: Utc::now(),
+            },
+        );
+
+        retire_missions_extension(&mut state);
+
+        assert!(!state.enabled.contains_key(RETIRED_MISSIONS_ID));
+        assert!(!state.grants.contains_key(RETIRED_MISSIONS_ID));
+        assert!(!state.storage.contains_key(RETIRED_MISSIONS_ID));
+        assert!(state.views.is_empty());
+    }
+
     const FOLLOW_UPS: &str = "falcondeck.follow-up-suggestions";
     const FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
 
@@ -2305,32 +2303,6 @@ mod tests {
         assert_eq!(tools.len(), 1, "only follow-ups publishes a tool today");
         assert_eq!(tools[0].name, FOLLOW_UPS_TOOL);
         assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_ok());
-    }
-
-    #[tokio::test]
-    async fn mission_agent_context_requires_the_complete_ready_toolset() {
-        let state_dir = tempfile::tempdir().expect("temporary state directory");
-        let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
-        registry.restore().await.expect("registry should restore");
-        assert!(!registry.missions_agent_context_available());
-
-        registry
-            .update_enabled(MISSIONS_ID, true)
-            .await
-            .expect("Missions should enable");
-        for permission in [THREADS_READ_PERMISSION, AGENT_TOOLS_PERMISSION] {
-            registry
-                .update_permission(MISSIONS_ID, permission, true)
-                .await
-                .expect("Missions permission should grant");
-        }
-        assert!(registry.missions_agent_context_available());
-
-        registry
-            .update_permission(MISSIONS_ID, THREADS_READ_PERMISSION, false)
-            .await
-            .expect("thread permission should revoke");
-        assert!(!registry.missions_agent_context_available());
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { Pressable, View } from "react-native";
+import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated from "react-native-reanimated";
@@ -76,7 +77,9 @@ import {
   type SidebarRow,
 } from "./sidebarRows";
 import { ThreadOptionsSheet } from "./ThreadOptionsSheet";
+import { WorkspaceOptionsSheet } from "./WorkspaceOptionsSheet";
 import { ExtensionFilterSheet } from "./ExtensionFilterSheet";
+import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcons";
 
 interface SidebarViewProps {
   groups: ProjectGroup[];
@@ -172,6 +175,11 @@ export const SidebarView = memo(function SidebarView({
   extensionSidebarFilters = [],
   workspaceColors,
 }: SidebarViewProps) {
+  const workspaceIconSrc = useWorkspaceIcons(groups);
+  const [workspaceOptions, setWorkspaceOptions] = useState<{
+    workspaceId: string;
+    workspaceName: string;
+  } | null>(null);
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   // Cached projects stay on screen while a reconnect snapshot is in flight.
@@ -620,10 +628,19 @@ export const SidebarView = memo(function SidebarView({
             <Pressable
               style={styles.workspaceLeft}
               onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
+              onLongPress={() => {
+                void Haptics.selectionAsync()
+                setWorkspaceOptions({
+                  workspaceId: item.workspaceId,
+                  workspaceName: item.workspaceName,
+                })
+              }}
               accessibilityRole="button"
               accessibilityLabel={item.workspaceName}
               accessibilityHint={
-                item.isOpen ? "Collapses this project" : "Expands this project"
+                item.isOpen
+                  ? "Collapses this project. Double tap and hold to change the icon"
+                  : "Expands this project. Double tap and hold to change the icon"
               }
               accessibilityState={{
                 expanded: item.isOpen,
@@ -632,7 +649,14 @@ export const SidebarView = memo(function SidebarView({
                   : {}),
               }}
             >
-              {item.isOpen ? (
+              {workspaceIconSrc(item.workspaceId) ? (
+                <Image
+                  source={{ uri: workspaceIconSrc(item.workspaceId)! }}
+                  style={styles.workspaceFavicon}
+                  contentFit="contain"
+                  accessibilityIgnoresInvertColors
+                />
+              ) : item.isOpen ? (
                 <FolderOpen
                   size={theme.iconSize.xs}
                   color={accent ?? theme.colors.fg.muted}
@@ -776,6 +800,7 @@ export const SidebarView = memo(function SidebarView({
       syncIndex?.token,
       threadTagsById,
       workspaceColors,
+      workspaceIconSrc,
       activeExtensionFilterCount,
       supportedExtensionFilters.length,
       sortMode,
@@ -929,6 +954,14 @@ export const SidebarView = memo(function SidebarView({
         />
       ) : null}
 
+      {workspaceOptions ? (
+        <WorkspaceOptionsSheet
+          workspaceId={workspaceOptions.workspaceId}
+          workspaceName={workspaceOptions.workspaceName}
+          onClose={() => setWorkspaceOptions(null)}
+        />
+      ) : null}
+
       {filtersOpen ? (
         <ExtensionFilterSheet
           definitions={supportedExtensionFilters}
@@ -1079,6 +1112,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   filterButtonPressed: {
     backgroundColor: theme.colors.surface[3],
+  },
+  workspaceFavicon: {
+    width: theme.iconSize.xs,
+    height: theme.iconSize.xs,
+    borderRadius: 3,
   },
   workspaceLeft: {
     flex: 1,
