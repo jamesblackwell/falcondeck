@@ -14,12 +14,17 @@ import { X } from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
+import { useTabletLayout } from '@/hooks/useTabletLayout'
+
 interface NativeSheetProps {
   children: ReactNode
   onClose: () => void
   accessibilityLabel?: string
   contentStyle?: StyleProp<ViewStyle>
 }
+
+/** Widest a sheet gets on a tablet before it stops growing and centres. */
+const TABLET_SHEET_MAX_WIDTH = 560
 
 const DISMISS_DRAG_DISTANCE = 80
 const DISMISS_FLING_VELOCITY = 0.8
@@ -42,6 +47,7 @@ export const NativeSheet = memo(function NativeSheet({
 }: NativeSheetProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
+  const { isTablet } = useTabletLayout()
 
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
@@ -80,7 +86,16 @@ export const NativeSheet = memo(function NativeSheet({
         <Animated.View
           style={[
             styles.content,
-            { paddingBottom: insets.bottom + theme.spacing[4] },
+            // A sheet pinned to the full width of an iPad puts its controls a
+            // hand-span apart; floating it keeps the same bottom-sheet shape
+            // at a size the thumb can still cover.
+            isTablet ? styles.contentTablet : null,
+            {
+              paddingBottom: isTablet
+                ? theme.spacing[4]
+                : insets.bottom + theme.spacing[4],
+            },
+            isTablet ? { marginBottom: insets.bottom + theme.spacing[4] } : null,
             { transform: [{ translateY: dragY }] },
           ]}
         >
@@ -119,6 +134,13 @@ const styles = StyleSheet.create((theme) => ({
     borderTopLeftRadius: theme.radius['2xl'],
     borderTopRightRadius: theme.radius['2xl'],
     borderCurve: 'continuous',
+  },
+  contentTablet: {
+    width: '100%',
+    maxWidth: TABLET_SHEET_MAX_WIDTH,
+    alignSelf: 'center',
+    borderBottomLeftRadius: theme.radius['2xl'],
+    borderBottomRightRadius: theme.radius['2xl'],
   },
   grabberZone: {
     alignItems: 'center',

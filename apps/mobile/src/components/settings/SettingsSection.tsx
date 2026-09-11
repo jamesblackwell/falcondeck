@@ -42,12 +42,20 @@ export const SettingsSection = memo(function SettingsSection({
   )
 })
 
+/** Widest a settings page gets before it stops growing and centres. */
+const SETTINGS_MAX_WIDTH = 700
+
 export const settingsPageStyles = StyleSheet.create((theme) => ({
   container: { flex: 1, backgroundColor: theme.colors.surface[0] },
   content: {
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[5],
     gap: theme.spacing[5],
+    // Settings rows are label-left/value-right pairs; stretched across an
+    // iPad they put the two halves too far apart to read as one row.
+    width: '100%',
+    maxWidth: SETTINGS_MAX_WIDTH,
+    alignSelf: 'center',
   },
   error: {
     paddingHorizontal: theme.spacing[4],

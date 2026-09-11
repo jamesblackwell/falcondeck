@@ -28,6 +28,7 @@ import {
 
 import { useRelayStore, useSessionStore, useThrottledSnapshot } from "@/store";
 import { SidebarView } from "./SidebarView";
+import { useTabletLayout } from "@/hooks/useTabletLayout";
 import { triggerThreadSelectionHaptic } from "@/lib/haptics";
 
 /**
@@ -42,7 +43,12 @@ export function SidebarDrawerContent({
 }: Pick<DrawerContentComponentProps, "navigation">) {
   const router = useRouter();
   const pathname = usePathname();
-  const isOpen = useDrawerStatus() === "open";
+  const { hasPermanentSidebar } = useTabletLayout();
+  // A permanent sidebar is always visible, so it must never take the freeze
+  // path below — frozen, it would keep showing whatever the thread list held
+  // at first render and never pick up a new or finished task.
+  const drawerStatus = useDrawerStatus();
+  const isOpen = hasPermanentSidebar || drawerStatus === "open";
   const settingsOpen =
     pathname === "/settings" ||
     pathname.startsWith("/settings/") ||
@@ -156,7 +162,9 @@ export function SidebarDrawerContent({
       onNewChat={handleNewChat}
       onOpenSettings={handleOpenSettings}
       settingsOpen={settingsOpen}
-      onClose={handleClose}
+      // A sidebar that never goes away has nothing to close, and an X on it
+      // reads as a way to dismiss the app's only navigation.
+      onClose={hasPermanentSidebar ? undefined : handleClose}
       threadTagsById={threadTags.byThreadId}
       threadTagOptions={threadTags.tags}
       extensionSnapshot={snapshot?.extensions}
