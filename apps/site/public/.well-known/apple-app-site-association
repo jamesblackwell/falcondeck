@@ -1,0 +1,14 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["YLQ57H32A4.com.falcondeck.mobile"],
+        "components": [
+          { "/": "/pair" },
+          { "/": "/pair/" },
+          { "/": "/", "?": { "code": "*" } }
+        ]
+      }
+    ]
+  }
+}

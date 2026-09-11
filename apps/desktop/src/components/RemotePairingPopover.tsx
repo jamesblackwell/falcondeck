@@ -1,7 +1,6 @@
 import {
   AlertTriangle,
   ChevronDown,
-  Copy,
   Lock,
   Monitor,
   RadioTower,
@@ -13,9 +12,8 @@ import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
 
 import type { RemoteStatusResponse, TrustedDevice } from '@falcondeck/client-core'
-import { ActivityDiamond, Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
+import { ActivityDiamond, Button, CopyButton, StatusIndicator } from '@falcondeck/ui'
 
-import { openExternalUrl } from '../api'
 import { formatCountdown, useMillisUntil } from '../pairing-expiry'
 import { formatRelative } from './settings/settings-utils'
 
@@ -24,59 +22,37 @@ import { formatRelative } from './settings/settings-utils'
 /* ------------------------------------------------------------------ */
 
 function PairingCard({
+  qrValue,
   link,
   code,
   remainingMs,
 }: {
+  qrValue: string
   link: string
   code: string
   remainingMs: number | null
 }) {
-  const { toast } = useToast()
-
-  async function handleOpenLink() {
-    try {
-      await openExternalUrl(link)
-    } catch (error) {
-      toast({
-        variant: 'danger',
-        title: 'Failed to open link',
-        description:
-          error instanceof Error
-            ? error.message
-            : 'FalconDeck could not hand this link off to your browser.',
-      })
-    }
-  }
-
   return (
     <div className="space-y-4">
       <p className="text-center text-[length:var(--fd-text-sm)] text-fg-secondary">
-        Scan this QR code with the FalconDeck mobile app, or copy a secure link to connect another
-        device.
+        Scan this QR code with your iPhone camera or the FalconDeck app. It opens the mobile app —
+        there is no web client.
       </p>
 
-      <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-5">
-        <QRCodeSVG value={link} size={160} bgColor="transparent" fgColor="var(--fd-fg-0)" />
+      <div
+        className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-5"
+        title="Scan to open FalconDeck"
+      >
+        <QRCodeSVG value={qrValue} size={160} bgColor="transparent" fgColor="var(--fd-fg-0)" />
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        <CopyButton
-          text={link}
-          variant="labeled"
-          label="Copy Link"
-          copiedLabel="Link Copied"
-          className="h-9 justify-center rounded-[var(--fd-radius-lg)] bg-accent px-3 text-surface-0 hover:bg-accent-strong hover:text-surface-0"
-        />
-        <button
-          type="button"
-          onClick={() => void handleOpenLink()}
-          className="fd-focus inline-flex h-9 items-center justify-center gap-2 rounded-[var(--fd-radius-lg)] bg-surface-3 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
-        >
-          <Copy className="h-3.5 w-3.5" />
-          Open link
-        </button>
-      </div>
+      <CopyButton
+        text={link}
+        variant="labeled"
+        label="Copy Link"
+        copiedLabel="Link Copied"
+        className="h-9 w-full justify-center rounded-[var(--fd-radius-lg)] bg-accent px-3 text-surface-0 hover:bg-accent-strong hover:text-surface-0"
+      />
 
       <div className="rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-3 py-3">
         <div className="flex items-start justify-between gap-3">
@@ -183,6 +159,7 @@ function statusLabel(status: RemoteStatusResponse['status'] | undefined) {
 export type RemotePairingPopoverProps = {
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
+  pairingQrValue: string | null
   onStartPairing: () => void
   isStartingRemote: boolean
   remoteControlsDisabled: boolean
@@ -194,6 +171,7 @@ export type RemotePairingPopoverProps = {
 export function RemotePairingPopover({
   remoteStatus,
   pairingLink,
+  pairingQrValue,
   onStartPairing,
   isStartingRemote,
   remoteControlsDisabled,
@@ -283,8 +261,9 @@ export function RemotePairingPopover({
               />
             ) : null}
 
-            {hasPendingPairing && !isPairingExpired ? (
+            {hasPendingPairing && pairingLink && !isPairingExpired ? (
               <PairingCard
+                qrValue={pairingQrValue ?? pairingLink}
                 link={pairingLink}
                 code={remoteStatus?.pairing?.pairing_code ?? ''}
                 remainingMs={remainingMs}

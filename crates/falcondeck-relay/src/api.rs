@@ -152,7 +152,7 @@ const RELAY_LANDING_PAGE: &str = r##"<!doctype html>
     <h1>FalconDeck Relay</h1>
     <div class="status"><span class="dot"></span>Operational</div>
     <p>This endpoint securely coordinates FalconDeck pairing, remote connections, and encrypted session updates.</p>
-    <a href="https://app.falcondeck.com">Open FalconDeck&nbsp;→</a>
+    <a href="https://falcondeck.com">Open FalconDeck&nbsp;→</a>
     <small>Service status: <a href="/health">/health</a></small>
   </main>
 </body>

@@ -29,6 +29,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     bundleIdentifier: 'com.falcondeck.mobile',
     supportsTablet: true,
+    associatedDomains: ['applinks:falcondeck.com', 'applinks:app.falcondeck.com'],
     // Keeps Read Aloud playback running when the device is locked or the app
     // is backgrounded, like a music player. Requires a native rebuild.
     infoPlist: {
@@ -45,6 +46,17 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   android: {
     package: 'com.falcondeck.mobile',
     allowBackup: false,
+    intentFilters: [
+      {
+        action: 'VIEW',
+        autoVerify: true,
+        category: ['BROWSABLE', 'DEFAULT'],
+        data: [
+          { scheme: 'https', host: 'falcondeck.com', pathPrefix: '/pair' },
+          { scheme: 'https', host: 'app.falcondeck.com', pathPrefix: '/pair' },
+        ],
+      },
+    ],
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#09090b',

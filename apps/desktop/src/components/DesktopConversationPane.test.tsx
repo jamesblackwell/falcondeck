@@ -15,6 +15,7 @@ describe("DesktopConversationPane", () => {
         selectedThreadId={null}
         remoteStatus={null}
         pairingLink={null}
+        pairingQrValue={null}
         isStartingRemote={false}
         remoteControlsDisabled={false}
         remoteControlsUnavailableReason={null}

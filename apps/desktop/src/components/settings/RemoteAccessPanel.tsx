@@ -11,7 +11,7 @@ import {
   SettingsSection,
 } from '@falcondeck/ui'
 
-import { ExternalLink, LaptopMinimal, Radio, RefreshCw, Smartphone, Trash2 } from 'lucide-react'
+import { LaptopMinimal, Radio, RefreshCw, Smartphone, Trash2 } from 'lucide-react'
 
 import type { SettingsViewProps } from '../SettingsView'
 import { useMillisUntil } from '../../pairing-expiry'
@@ -138,7 +138,7 @@ export function RemoteAccessPanel({
 
       <SettingsSection
         title="Pair a new device"
-        description="A pairing code is a temporary invite. Generating a new one adds another device to this session and does not sign out existing devices."
+        description="A pairing code is a temporary invite for the FalconDeck mobile app. Generating a new one adds another device to this session and does not sign out existing devices."
         contentClassName="space-y-4"
       >
         {remoteControlsDisabled && remoteControlsUnavailableReason ? (
@@ -209,7 +209,7 @@ export function RemoteAccessPanel({
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
-                  Remote link
+                  Pairing link
                 </p>
                 <p className="mt-2 truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
                   {pairingLink ?? 'No active link'}
@@ -217,21 +217,11 @@ export function RemoteAccessPanel({
               </div>
               {pairingLink ? <CopyButton text={pairingLink} /> : null}
             </div>
-            {pairingLink ? (
-              <a
-                href={pairingLink}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-3 inline-flex items-center gap-1.5 text-[length:var(--fd-text-xs)] text-accent hover:text-accent-strong"
-              >
-                Open remote link
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            ) : (
-              <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
-                Generate a code to create a shareable remote link.
-              </p>
-            )}
+            <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
+              {pairingLink
+                ? 'Opens the FalconDeck mobile app. If the app is not installed, it asks you to get it.'
+                : 'Generate a code to create a shareable pairing link.'}
+            </p>
           </div>
         </div>
       </SettingsSection>
@@ -243,7 +233,7 @@ export function RemoteAccessPanel({
       >
         {devices.length === 0 ? (
           <div className="rounded-[var(--fd-radius-xl)] border border-dashed border-border-default bg-surface-2 px-4 py-5 text-[length:var(--fd-text-sm)] text-fg-muted">
-            No trusted devices yet. Pair a phone, tablet, or browser to see it here.
+            No trusted devices yet. Pair a phone or tablet to see it here.
           </div>
         ) : (
           devices.map((device) => (

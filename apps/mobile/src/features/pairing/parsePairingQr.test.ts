@@ -2,11 +2,27 @@ import { describe, expect, it } from 'vitest'
 
 import { DEFAULT_REMOTE_RELAY_URL } from '@falcondeck/client-core'
 
-import { parsePairingQr } from './parsePairingQr'
+import { pairingPayloadFromSearchParams, parsePairingQr } from './parsePairingQr'
 
 describe('parsePairingQr', () => {
   it('parses the desktop pairing link format', () => {
     expect(parsePairingQr('https://app.falcondeck.com/?code=abcd-1234.AbCd_-90')).toEqual({
+      relayUrl: DEFAULT_REMOTE_RELAY_URL,
+      pairingCode: 'ABCD-1234.AbCd_-90',
+      requiresRelayConfirmation: false,
+    })
+  })
+
+  it('parses the mobile app pairing URL', () => {
+    expect(parsePairingQr('falcondeck://pair?code=abcd-1234.AbCd_-90')).toEqual({
+      relayUrl: DEFAULT_REMOTE_RELAY_URL,
+      pairingCode: 'ABCD-1234.AbCd_-90',
+      requiresRelayConfirmation: false,
+    })
+  })
+
+  it('parses the public pairing landing page', () => {
+    expect(parsePairingQr('https://falcondeck.com/pair?code=abcd-1234.AbCd_-90')).toEqual({
       relayUrl: DEFAULT_REMOTE_RELAY_URL,
       pairingCode: 'ABCD-1234.AbCd_-90',
       requiresRelayConfirmation: false,
@@ -60,5 +76,18 @@ describe('parsePairingQr', () => {
       pairingCode: 'PAIR-9999',
       requiresRelayConfirmation: true,
     })
+  })
+
+  it('rebuilds a pairing payload from route search params', () => {
+    expect(pairingPayloadFromSearchParams({ code: 'PAIR-9999' })).toBe(
+      'falcondeck://pair?code=PAIR-9999',
+    )
+    expect(
+      pairingPayloadFromSearchParams({
+        code: 'PAIR-9999',
+        relay: 'https://relay.test',
+      }),
+    ).toBe('falcondeck://pair?code=PAIR-9999&relay=https%3A%2F%2Frelay.test')
+    expect(pairingPayloadFromSearchParams({})).toBeNull()
   })
 })

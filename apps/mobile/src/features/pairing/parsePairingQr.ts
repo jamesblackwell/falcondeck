@@ -1,5 +1,6 @@
 import {
   DEFAULT_REMOTE_RELAY_URL,
+  PAIRING_APP_SCHEME,
   normalizePairingCodeInput,
   tryNormalizeRelayUrl,
 } from '@falcondeck/client-core'
@@ -14,28 +15,52 @@ function normalizePairingCode(value: string) {
   return normalizePairingCodeInput(value.trim())
 }
 
+function firstParam(value: string | string[] | undefined) {
+  if (Array.isArray(value)) return value[0]
+  return value
+}
+
+/** Rebuild a pairing payload from expo-router search params. */
+export function pairingPayloadFromSearchParams(params: {
+  code?: string | string[]
+  relay?: string | string[]
+}): string | null {
+  const code = firstParam(params.code)?.trim()
+  if (!code) return null
+  const url = new URL(`${PAIRING_APP_SCHEME}://pair`)
+  url.searchParams.set('code', code)
+  const relay = firstParam(params.relay)?.trim()
+  if (relay) url.searchParams.set('relay', relay)
+  return url.toString()
+}
+
+function parseSearchParams(searchParams: URLSearchParams): ParsedPairingQr | null {
+  const code = normalizePairingCode(searchParams.get('code') ?? '')
+  if (!code) {
+    return null
+  }
+
+  const relayUrlParam = searchParams.get('relay')?.trim()
+  const relayUrl = relayUrlParam ? tryNormalizeRelayUrl(relayUrlParam) : DEFAULT_REMOTE_RELAY_URL
+  if (!relayUrl) {
+    return null
+  }
+
+  return {
+    relayUrl,
+    pairingCode: code,
+    requiresRelayConfirmation: relayUrl !== DEFAULT_REMOTE_RELAY_URL,
+  }
+}
+
 function parseFromUrl(value: string) {
   try {
-    const url = new URL(value)
-    const code = normalizePairingCode(url.searchParams.get('code') ?? '')
-
-    if (!code) {
-      return null
-    }
-
-    const relayUrlParam = url.searchParams.get('relay')?.trim()
-    const relayUrl = relayUrlParam ? tryNormalizeRelayUrl(relayUrlParam) : DEFAULT_REMOTE_RELAY_URL
-    if (!relayUrl) {
-      return null
-    }
-
-    return {
-      relayUrl,
-      pairingCode: code,
-      requiresRelayConfirmation: relayUrl !== DEFAULT_REMOTE_RELAY_URL,
-    } satisfies ParsedPairingQr
+    return parseSearchParams(new URL(value).searchParams)
   } catch {
-    return null
+    // Some URL implementations reject custom schemes. Parse the query only.
+    const queryIndex = value.indexOf('?')
+    if (queryIndex < 0) return null
+    return parseSearchParams(new URLSearchParams(value.slice(queryIndex + 1)))
   }
 }
 

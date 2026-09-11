@@ -1,11 +1,10 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { RemoteStatusResponse } from '@falcondeck/client-core'
 import { ToastProvider } from '@falcondeck/ui'
 
-import { openExternalUrl } from '../api'
 import { RemotePairingPopover } from './RemotePairingPopover'
 
 type MockButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -17,10 +16,6 @@ type MockCopyButtonProps = {
   className?: string
   label?: string
 }
-
-vi.mock('../api', () => ({
-  openExternalUrl: vi.fn(),
-}))
 
 vi.mock('@falcondeck/ui', async () => {
   const actual = await vi.importActual<typeof import('@falcondeck/ui')>('@falcondeck/ui')
@@ -39,9 +34,8 @@ vi.mock('@falcondeck/ui', async () => {
   }
 })
 
-const openExternalUrlMock = vi.mocked(openExternalUrl)
-
-const pairingLink = 'https://app.falcondeck.com?code=YMZEYPB2EZTA'
+const pairingLink = 'https://falcondeck.com/pair?code=YMZEYPB2EZTA'
+const pairingQrValue = 'falcondeck://pair?code=YMZEYPB2EZTA'
 
 /** Pinned so countdown assertions do not race the wall clock. */
 const NOW = Date.parse('2026-08-08T12:00:00Z')
@@ -68,6 +62,7 @@ function renderPopover(status: RemoteStatusResponse = remoteStatus(), onStartPai
       <RemotePairingPopover
         remoteStatus={status}
         pairingLink={pairingLink}
+        pairingQrValue={pairingQrValue}
         onStartPairing={onStartPairing}
         isStartingRemote={false}
         remoteControlsDisabled={false}
@@ -79,7 +74,6 @@ function renderPopover(status: RemoteStatusResponse = remoteStatus(), onStartPai
 
 describe('RemotePairingPopover', () => {
   beforeEach(() => {
-    openExternalUrlMock.mockReset()
     vi.spyOn(Date, 'now').mockReturnValue(NOW)
   })
 
@@ -87,28 +81,15 @@ describe('RemotePairingPopover', () => {
     vi.restoreAllMocks()
   })
 
-  it('opens the pairing link via the desktop bridge', async () => {
+  it('copies the HTTPS pairing link and does not offer a web client', async () => {
     renderPopover()
 
     fireEvent.click(screen.getByRole('button', { name: /waiting/i }))
-    expect(await screen.findByRole('button', { name: /copy link/i })).toBeInTheDocument()
-    fireEvent.click(await screen.findByRole('button', { name: /open link/i }))
-
-    await waitFor(() => {
-      expect(openExternalUrlMock).toHaveBeenCalledWith(pairingLink)
-    })
-  })
-
-  it('shows a toast when opening the pairing link fails', async () => {
-    openExternalUrlMock.mockRejectedValue(new Error('Browser launch failed'))
-
-    renderPopover()
-
-    fireEvent.click(screen.getByRole('button', { name: /waiting/i }))
-    fireEvent.click(await screen.findByRole('button', { name: /open link/i }))
-
-    expect(await screen.findByText('Failed to open link')).toBeInTheDocument()
-    expect(await screen.findByText('Browser launch failed')).toBeInTheDocument()
+    const copyLink = await screen.findByRole('button', { name: /copy link/i })
+    expect(copyLink).toHaveAttribute('data-copy-text', pairingLink)
+    expect(screen.getByTitle('Scan to open FalconDeck')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /open link/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/there is no web client/i)).toBeInTheDocument()
   })
 
   it('shows how long a live pairing code has left', async () => {
@@ -128,7 +109,6 @@ describe('RemotePairingPopover', () => {
     expect(await screen.findByText(/this pairing code expired/i)).toBeInTheDocument()
     // A spent code must not be presented as scannable.
     expect(screen.queryByRole('button', { name: /copy link/i })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /open link/i })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: /generate new code/i }))
     expect(onStartPairing).toHaveBeenCalledTimes(1)
@@ -169,6 +149,7 @@ describe('RemotePairingPopover', () => {
         <RemotePairingPopover
           remoteStatus={status}
           pairingLink={null}
+          pairingQrValue={null}
           onStartPairing={() => {}}
           isStartingRemote={false}
           remoteControlsDisabled={false}
@@ -190,6 +171,7 @@ describe('RemotePairingPopover', () => {
         <RemotePairingPopover
           remoteStatus={null}
           pairingLink={null}
+          pairingQrValue={null}
           onStartPairing={() => {}}
           isStartingRemote={false}
           remoteControlsDisabled

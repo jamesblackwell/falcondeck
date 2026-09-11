@@ -134,8 +134,10 @@ Where FalconDeck diverges from CodexMonitor:
 
 ## Hosting Split
 
-- `falcondeck.com` serves the public site
-- `app.falcondeck.com` serves the hosted remote web client
+- `falcondeck.com` serves the public site and `/pair` landing
+- `app.falcondeck.com` serves the same pairing landing (legacy QR host)
 - `connect.falcondeck.com` serves the relay
 
-QR pairing and remote links should target `app.falcondeck.com`, not the relay origin directly.
+QR codes encode `falcondeck://pair` so the iPhone camera opens the mobile app.
+Copied pairing links target `https://falcondeck.com/pair`, which opens the app
+or asks the user to install it. Do not point pairing at the relay origin.

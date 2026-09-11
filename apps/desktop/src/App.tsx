@@ -12,6 +12,9 @@ import {
 
 import {
   buildOptimisticUserItem,
+  buildPairingAppUrl,
+  buildPairingPageUrl,
+  DEFAULT_PAIRING_PAGE_ORIGIN,
   buildProjectGroups,
   approvalPolicyForProvider,
   composerProviderFor,
@@ -1399,25 +1402,23 @@ function AppInner() {
         : [],
     [selectedThreadId, selectedWorkspaceId, viewSnapshot?.interactive_requests],
   );
-  const remoteWebUrl =
-    import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ??
-    "https://app.falcondeck.com";
-  const defaultRelayUrl = "https://connect.falcondeck.com";
+  const pairingOrigin =
+    import.meta.env.VITE_FALCONDECK_PAIRING_ORIGIN ??
+    DEFAULT_PAIRING_PAGE_ORIGIN;
   const remoteControlsUnavailableReason =
     connectionError ?? CONNECTION_COPY.stillConnecting;
   const remoteControlsDisabled = !api;
-  const pairingLink =
+  const pairingParts =
     remoteStatus?.pairing && remoteStatus.relay_url
-      ? (() => {
-          const params = new URLSearchParams({
-            code: remoteStatus.pairing.pairing_code,
-          });
-          if (remoteStatus.relay_url !== defaultRelayUrl) {
-            params.set("relay", remoteStatus.relay_url);
-          }
-          return `${remoteWebUrl}?${params.toString()}`;
-        })()
+      ? {
+          pairingCode: remoteStatus.pairing.pairing_code,
+          relayUrl: remoteStatus.relay_url,
+        }
       : null;
+  const pairingLink = pairingParts
+    ? buildPairingPageUrl(pairingParts, pairingOrigin)
+    : null;
+  const pairingQrValue = pairingParts ? buildPairingAppUrl(pairingParts) : null;
 
   const rememberComposerSelection = useCallback(
     (provider: AgentProvider, patch: Partial<PersistedComposerSelection>) => {
@@ -6046,6 +6047,7 @@ function AppInner() {
               selectedThreadId={selectedThreadId}
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
+              pairingQrValue={pairingQrValue}
               isStartingRemote={isStartingRemote}
               remoteControlsDisabled={remoteControlsDisabled}
               remoteControlsUnavailableReason={remoteControlsUnavailableReason}

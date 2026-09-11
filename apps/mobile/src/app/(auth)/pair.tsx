@@ -9,12 +9,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Lock, ChevronDown, ChevronUp, QrCode } from 'lucide-react-native'
-import { useRouter } from 'expo-router'
+import { useLocalSearchParams, useRouter } from 'expo-router'
 import { CameraView, useCameraPermissions } from 'expo-camera'
 
 import { useRelayStore } from '@/store'
 import { CONNECTION_COPY } from '@/lib/connection-copy'
 import {
+  pairingPayloadFromSearchParams,
   parsePairingQr,
   type ParsedPairingQr,
 } from '@/features/pairing/parsePairingQr'
@@ -38,6 +39,9 @@ export default function PairScreen() {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
   const router = useRouter()
+  const incomingParams = useLocalSearchParams<{ code?: string | string[]; relay?: string | string[] }>()
+  const incomingCode = incomingParams.code
+  const incomingRelay = incomingParams.relay
 
   const relayUrl = useRelayStore((s) => s.relayUrl)
   const pairingCode = useRelayStore((s) => s.pairingCode)
@@ -53,6 +57,7 @@ export default function PairScreen() {
   const [pendingScannedPairing, setPendingScannedPairing] = useState<ParsedPairingQr | null>(null)
   const [permission, requestPermission] = useCameraPermissions()
   const hasHandledScanRef = useRef(false)
+  const appliedIncomingRef = useRef<string | null>(null)
 
   const isClaiming = connectionStatus === 'claiming'
   const isSecuringSession = !!sessionId && !isEncrypted
@@ -94,36 +99,52 @@ export default function PairScreen() {
     setShowScanner(true)
   }, [permission, requestPermission])
 
+  const consumePairingPayload = useCallback(
+    (data: string, invalidMessage: string) => {
+      if (isSecuringSession) return false
+      const parsed = parsePairingQr(data)
+      if (!parsed) {
+        _setError(invalidMessage)
+        return false
+      }
+      if (parsed.pairingCode === DEMO_PAIRING_CODE) {
+        enterDemoMode()
+        router.replace('/(app)')
+        return true
+      }
+      if (parsed.requiresRelayConfirmation) {
+        setPendingScannedPairing(parsed)
+        return true
+      }
+      // Set store values then claim — zustand updates are synchronous.
+      setRelayUrl(parsed.relayUrl)
+      setPairingCode(parsed.pairingCode)
+      void claimPairing()
+      return true
+    },
+    [_setError, claimPairing, isSecuringSession, router, setPairingCode, setRelayUrl],
+  )
+
   const handleBarCodeScanned = useCallback(
     ({ data }: { data: string }) => {
       if (hasHandledScanRef.current || isSecuringSession) {
         return
       }
       hasHandledScanRef.current = true
-      const parsed = parsePairingQr(data)
-      if (!parsed) {
-        _setError('Invalid QR code')
-        setShowScanner(false)
-        return
-      }
-      if (parsed.pairingCode === DEMO_PAIRING_CODE) {
-        enterDemoMode()
-        setShowScanner(false)
-        router.replace('/(app)')
-        return
-      }
       setShowScanner(false)
-      if (parsed.requiresRelayConfirmation) {
-        setPendingScannedPairing(parsed)
-        return
-      }
-      // Set store values then claim — zustand updates are synchronous.
-      setRelayUrl(parsed.relayUrl)
-      setPairingCode(parsed.pairingCode)
-      void claimPairing()
+      consumePairingPayload(data, 'Invalid QR code')
     },
-    [setRelayUrl, setPairingCode, claimPairing, _setError, isSecuringSession, router],
+    [consumePairingPayload, isSecuringSession],
   )
+
+  useEffect(() => {
+    const payload = pairingPayloadFromSearchParams({ code: incomingCode, relay: incomingRelay })
+    if (!payload || appliedIncomingRef.current === payload || isSecuringSession) {
+      return
+    }
+    appliedIncomingRef.current = payload
+    consumePairingPayload(payload, 'Invalid pairing link')
+  }, [consumePairingPayload, incomingCode, incomingRelay, isSecuringSession])
 
   useEffect(() => {
     if (sessionId && isEncrypted) {

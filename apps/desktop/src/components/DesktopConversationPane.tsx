@@ -49,6 +49,7 @@ type DesktopConversationPaneProps = {
   selectedThreadId: string | null;
   remoteStatus: RemoteStatusResponse | null;
   pairingLink: string | null;
+  pairingQrValue: string | null;
   isStartingRemote: boolean;
   remoteControlsDisabled: boolean;
   remoteControlsUnavailableReason: string | null;
@@ -119,6 +120,7 @@ export function DesktopConversationPane({
   selectedThreadId,
   remoteStatus,
   pairingLink,
+  pairingQrValue,
   isStartingRemote,
   remoteControlsDisabled,
   remoteControlsUnavailableReason,
@@ -197,6 +199,7 @@ export function DesktopConversationPane({
         <RemotePairingPopover
           remoteStatus={remoteStatus}
           pairingLink={pairingLink}
+          pairingQrValue={pairingQrValue}
           onStartPairing={onStartPairing}
           isStartingRemote={isStartingRemote}
           remoteControlsDisabled={remoteControlsDisabled}

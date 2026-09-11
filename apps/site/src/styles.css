@@ -119,6 +119,40 @@ svg {
   text-underline-offset: 3px;
 }
 
+.pair-page {
+  width: min(560px, calc(100% - (var(--site-gutter) * 2)));
+  margin: 0 auto;
+  padding: 88px 0 96px;
+}
+
+.pair-page h1 {
+  margin: 16px 0 12px;
+  font-size: clamp(36px, 8vw, 56px);
+  letter-spacing: -0.05em;
+  line-height: 0.98;
+}
+
+.pair-page__lede,
+.pair-page__fallback {
+  margin: 0;
+  color: var(--fd-fg-1);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.pair-page__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 28px 0 20px;
+}
+
+.pair-page__fallback a {
+  color: var(--fd-accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .site-rail {
   position: absolute;
   top: 0;

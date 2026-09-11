@@ -1,10 +1,12 @@
 import { useEffect, type ReactNode } from 'react'
 
-import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Zap } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Smartphone, Zap } from 'lucide-react'
 
 const REPO_URL = 'https://github.com/jamesblackwell/falcondeck'
 const RELEASES_URL = 'https://github.com/jamesblackwell/falcondeck/releases'
-const APP_URL = 'https://app.falcondeck.com'
+const PAIR_URL = '/pair'
+const PAIRING_APP_SCHEME = 'falcondeck'
+const IOS_APP_STORE_URL: string | null = null
 const SELF_HOSTING_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/SELF-HOSTING.md'
 const PRIVACY_URL = '/privacy'
 const TERMS_URL = '/terms'
@@ -31,11 +33,85 @@ function SiteFooter() {
       <div className="site-footer__links">
         <a href={REPO_URL}>GitHub</a>
         <a href={RELEASES_URL}>Releases</a>
-        <a href={APP_URL}>Remote client</a>
+        <a href={PAIR_URL}>iOS app</a>
         <a href={PRIVACY_URL}>Privacy</a>
         <a href={TERMS_URL}>Terms</a>
       </div>
     </footer>
+  )
+}
+
+function pairingAppUrlFromSearch(search: URLSearchParams) {
+  const code = search.get('code')?.trim()
+  const params = new URLSearchParams()
+  if (code) params.set('code', code)
+  const relay = search.get('relay')?.trim()
+  if (relay) params.set('relay', relay)
+  const query = params.toString()
+  return query ? `${PAIRING_APP_SCHEME}://pair?${query}` : `${PAIRING_APP_SCHEME}://pair`
+}
+
+function PairPage() {
+  const search = new URLSearchParams(window.location.search)
+  const hasPairingCode = Boolean(search.get('code')?.trim())
+  const appUrl = pairingAppUrlFromSearch(search)
+
+  useEffect(() => {
+    const previousTitle = document.title
+    document.title = 'Open FalconDeck'
+    const robots = document.createElement('meta')
+    robots.name = 'robots'
+    robots.content = 'noindex'
+    document.head.appendChild(robots)
+    return () => {
+      document.title = previousTitle
+      robots.remove()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!hasPairingCode) return
+    if (!/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) return
+    const timer = window.setTimeout(() => {
+      window.location.href = appUrl
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [appUrl, hasPairingCode])
+
+  return (
+    <div className="site-frame">
+      <div className="site-rail site-rail--left" aria-hidden="true" />
+      <div className="site-rail site-rail--right" aria-hidden="true" />
+      <SiteHeader />
+      <main className="pair-page">
+        <p className="eyebrow">FalconDeck</p>
+        <h1>Open the iOS app</h1>
+        <p className="pair-page__lede">
+          {hasPairingCode
+            ? 'This pairing link is for the FalconDeck mobile app. It does not open a web session.'
+            : 'Scan the QR code from FalconDeck on your Mac, or open a pairing link on this iPhone.'}
+        </p>
+        <div className="pair-page__actions">
+          <a className="btn btn--accent" href={appUrl}>
+            <Smartphone aria-hidden="true" />
+            Open FalconDeck
+          </a>
+        </div>
+        {IOS_APP_STORE_URL ? (
+          <p className="pair-page__fallback">
+            Don&apos;t have the app?{' '}
+            <a href={IOS_APP_STORE_URL}>Download FalconDeck on the App Store</a>.
+          </p>
+        ) : (
+          <p className="pair-page__fallback">
+            Don&apos;t have the app yet? FalconDeck is not on the App Store yet. If you already have a
+            TestFlight or developer build, tap Open FalconDeck. Otherwise install the app on this
+            iPhone, then scan the QR code again.
+          </p>
+        )}
+      </main>
+      <SiteFooter />
+    </div>
   )
 }
 
@@ -329,10 +405,13 @@ function PhoneMock() {
 
 export default function App() {
   const path = window.location.pathname.replace(/\/+$/, '') || '/'
+  const search = new URLSearchParams(window.location.search)
+  const isPairPage = path === PAIR_URL || (path === '/' && Boolean(search.get('code')?.trim()))
   const isLegalPage = path === PRIVACY_URL || path === TERMS_URL
-  useKeyShortcuts(!isLegalPage)
+  useKeyShortcuts(!isLegalPage && !isPairPage)
   if (path === PRIVACY_URL) return <LegalPage page="privacy" />
   if (path === TERMS_URL) return <LegalPage page="terms" />
+  if (isPairPage) return <PairPage />
 
   return (
     <div className="site-frame">
@@ -351,8 +430,8 @@ export default function App() {
           <a href={REPO_URL}>Docs</a>
         </nav>
         <div className="site-header__actions">
-          <a className="nav-link" href={APP_URL}>
-            Remote client
+          <a className="nav-link" href={PAIR_URL}>
+            iOS app
           </a>
           <a className="btn btn--accent btn--sm" href={RELEASES_URL}>
             Download
@@ -372,7 +451,7 @@ export default function App() {
           </h1>
           <p className="hero__lede">
             FalconDeck runs Codex, Claude Code, OpenCode, and any ACP harness against your own code — then hands you the
-            same live session on your phone or browser. One daemon owns the turn, so there is nothing to catch up.
+            same live session on your phone. One daemon owns the turn, so there is nothing to catch up.
           </p>
           <div className="hero__actions">
             <a className="btn btn--accent" href={RELEASES_URL}>
@@ -399,7 +478,7 @@ export default function App() {
             reconnects.
           </Feature>
           <Feature title="In sync">
-            One daemon owns the live turn, so desktop, browser, and phone follow the same thread with nothing to catch
+            One daemon owns the live turn, so desktop and phone follow the same thread with nothing to catch
             up.
           </Feature>
         </section>

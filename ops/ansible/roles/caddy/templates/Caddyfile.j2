@@ -4,7 +4,6 @@
   tls {{ falcondeck_tls_email }}
 
   header {
-    Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; media-src 'self' blob: https:; worker-src 'self' blob:; manifest-src 'self'; upgrade-insecure-requests"
     X-Frame-Options "DENY"
     X-Content-Type-Options "nosniff"
     Referrer-Policy "no-referrer"
@@ -13,13 +12,24 @@
     -Server
   }
 
-  root * /var/www/falcondeck-app
-  @app_assets path /assets/*
-  header @app_assets Cache-Control "public, max-age=31536000, immutable"
-  @app_html path / /index.html
-  header @app_html Cache-Control "no-store, must-revalidate"
-  try_files {path} /index.html
-  file_server
+  # Pairing QR codes used to target this host. Serve the public site so a
+  # camera scan opens the mobile app (or the get-the-app page), not a web client.
+  @aasa path /.well-known/apple-app-site-association /apple-app-site-association
+  handle @aasa {
+    root * /var/www/falcondeck-site
+    header Content-Type "application/json"
+    file_server
+  }
+
+  handle {
+    root * /var/www/falcondeck-site
+    @app_assets path /assets/*
+    header @app_assets Cache-Control "public, max-age=31536000, immutable"
+    @app_html path / /index.html /pair /pair/
+    header @app_html Cache-Control "no-store, must-revalidate"
+    try_files {path} /index.html
+    file_server
+  }
 }
 
 {{ falcondeck_relay_domain }} {
@@ -53,11 +63,20 @@
 
   tls {{ falcondeck_tls_email }}
 
-  root * /var/www/falcondeck-site
-  @site_assets path /assets/*
-  header @site_assets Cache-Control "public, max-age=31536000, immutable"
-  @site_html path / /index.html
-  header @site_html Cache-Control "no-store, must-revalidate"
-  try_files {path} /index.html
-  file_server
+  @aasa path /.well-known/apple-app-site-association /apple-app-site-association
+  handle @aasa {
+    root * /var/www/falcondeck-site
+    header Content-Type "application/json"
+    file_server
+  }
+
+  handle {
+    root * /var/www/falcondeck-site
+    @site_assets path /assets/*
+    header @site_assets Cache-Control "public, max-age=31536000, immutable"
+    @site_html path / /index.html /pair /pair/
+    header @site_html Cache-Control "no-store, must-revalidate"
+    try_files {path} /index.html
+    file_server
+  }
 }

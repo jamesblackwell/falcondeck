@@ -62,7 +62,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 - Prefer semantic shared UI wrappers over ad hoc utility-heavy markup.
 - Preserve hosting defaults:
 - `connect.falcondeck.com` - relay
-- `app.falcondeck.com` - hosted remote web app
+- `app.falcondeck.com` - pairing landing (same public site; opens the iOS app)
 - `falcondeck.com` - public site
 - You may use Ansible and SSH on the production relay/app host for deployment, debugging, and verification when needed.
 

@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const originalConsoleError = console.error
 
-const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.hoisted(() => {
+const { routerMock, useRelayStore, useSessionStore, useAppearanceStore, searchParams } = vi.hoisted(() => {
   ;(globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false
 
   const relayState = {
@@ -25,6 +25,9 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
     }),
     setPairingCode: vi.fn((pairingCode: string) => {
       relayState.pairingCode = pairingCode
+    }),
+    _setError: vi.fn((error: string | null) => {
+      relayState.error = error
     }),
     _callRpc: vi.fn().mockImplementation(
       (_method: string, params: { notifications?: { enabled?: boolean } }) =>
@@ -49,6 +52,8 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
     replace: vi.fn(),
     back: vi.fn(),
   }
+
+  const searchParams = { current: {} as Record<string, string> }
 
   // Plain-selector stand-in for the zustand appearance store — the hoisted
   // zustand copy binds to the wrong React instance under react-test-renderer.
@@ -87,6 +92,7 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
     useRelayStore: store,
     useSessionStore: sessionStore,
     useAppearanceStore: appearanceStore,
+    searchParams,
   }
 })
 
@@ -96,7 +102,7 @@ vi.mock('expo-router', () => {
   return {
     Redirect: ({ href }: { href: string }) => React.createElement('Redirect', { href }),
     useRouter: () => routerMock,
-    useLocalSearchParams: () => ({}),
+    useLocalSearchParams: () => searchParams.current,
     Stack,
     Slot: () => null,
     Drawer: ({ children }: any) => children,
@@ -147,6 +153,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup()
+  searchParams.current = {}
   routerMock.push.mockReset()
   routerMock.navigate.mockReset()
   routerMock.replace.mockReset()
@@ -181,6 +188,44 @@ describe('mobile app screens', () => {
     useRelayStore.setState({ sessionId: 'session-1' })
     const authenticated = renderComponent(<IndexScreen />)
     expect(authenticated.root.findByType('Redirect' as any).props.href).toBe('/(app)')
+  })
+
+  it('forwards a pairing grant on the root URL to the pair screen', () => {
+    searchParams.current = { code: 'PAIR-9999', relay: 'https://relay.test' }
+    useRelayStore.setState({ sessionId: 'session-1' })
+    const renderer = renderComponent(<IndexScreen />)
+    expect(renderer.root.findByType('Redirect' as any).props.href).toBe(
+      '/(auth)/pair?code=PAIR-9999&relay=https%3A%2F%2Frelay.test',
+    )
+  })
+
+  it('claims pairing from an incoming app or universal link', async () => {
+    const claimPairing = vi.fn().mockResolvedValue(undefined)
+    useRelayStore.getState().claimPairing = claimPairing
+    searchParams.current = { code: 'PAIR-9999' }
+
+    await act(async () => {
+      renderComponent(<PairScreen />)
+    })
+
+    expect(useRelayStore.getState().pairingCode).toBe('PAIR-9999')
+    expect(claimPairing).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires review when an incoming link points at a self-hosted relay', async () => {
+    const claimPairing = vi.fn().mockResolvedValue(undefined)
+    useRelayStore.getState().claimPairing = claimPairing
+    searchParams.current = { code: 'PAIR-9999', relay: 'https://relay.test' }
+
+    let renderer: ReturnType<typeof renderComponent>
+    await act(async () => {
+      renderer = renderComponent(<PairScreen />)
+    })
+
+    expect(textOf(renderer!)).toContain('Review self-hosted relay')
+    expect(textOf(renderer!)).toContain('relay.test')
+    expect(useRelayStore.getState().relayUrl).toBe('https://connect.falcondeck.com')
+    expect(claimPairing).not.toHaveBeenCalled()
   })
 
   it('renders the pairing screen and navigates after connection', () => {

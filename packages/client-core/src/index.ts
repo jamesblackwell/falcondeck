@@ -16,6 +16,7 @@ export * from "./sync-index";
 export * from "./transport-timeout";
 export * from "./remote-host-client";
 export * from "./relay-url";
+export * from "./pairing-link";
 export * from "./collaboration";
 export * from "./composer-persistence";
 export * from "./thread-attention";
