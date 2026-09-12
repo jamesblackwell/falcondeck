@@ -478,13 +478,19 @@ pub(super) fn bounded_turn_error(error: Option<&str>) -> Option<String> {
         .map(|error| error.chars().take(2_000).collect())
 }
 
-/// User-facing copy when Codex (or another harness) dumps a retryable
-/// backend outage as if it were an assistant reply.
+/// User-facing copy when a harness dumps a retryable backend outage as if
+/// it were an assistant reply. Provider-neutral: Codex prints
+/// `Error: RetriableError: [unavailable] Error`, Cursor prints
+/// `Error: NonRetriableError: Provider Error We're having trouble connecting
+/// to the model provider…` — both are the same upstream blip.
 pub(crate) const TRANSIENT_PROVIDER_ERROR_MESSAGE: &str =
-    "Codex was temporarily unavailable. Try again in a moment.";
+    "The model provider was temporarily unavailable. Try again in a moment.";
 
 const TRANSIENT_ERROR_MARKERS: &[&str] = &[
     "retriableerror",
+    "trouble connecting to the model provider",
+    "provider error",
+    "try again in a moment",
     "retryable error",
     "[unavailable]",
     "server overloaded",
@@ -562,8 +568,9 @@ pub(crate) fn assistant_is_transient_provider_error(item: &ConversationItem) -> 
     }
 }
 
-/// Turns a Codex error dump (`Error: RetriableError: [unavailable] Error`)
-/// into a failed assistant receipt instead of a completed answer.
+/// Turns a provider error dump (`Error: RetriableError: [unavailable] Error`,
+/// Cursor's `Error: NonRetriableError: Provider Error …`) into a failed
+/// assistant receipt instead of a completed answer.
 pub(crate) fn rewrite_transient_assistant_error(item: &mut ConversationItem) {
     if !assistant_is_transient_provider_error(item) {
         return;
@@ -580,7 +587,7 @@ pub(crate) fn rewrite_transient_assistant_error(item: &mut ConversationItem) {
     if !is_transient_provider_error_dump(text) {
         return;
     }
-    debug!(raw = %text, "rewriting a transient Codex provider error dump");
+    debug!(raw = %text, "rewriting a transient provider error dump");
     *error = Some(TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string());
     *text = String::new();
     *lifecycle = ContentLifecycle::Error;
@@ -5054,6 +5061,12 @@ mod transient_provider_error_tests {
         ));
         assert!(is_transient_provider_error("server overloaded"));
         assert!(!is_transient_provider_error("quota exceeded"));
+        assert!(is_transient_provider_error_dump(
+            "Error: NonRetriableError: Provider Error We're having trouble connecting to the model provider. This might be temporary - please try again in a moment."
+        ));
+        assert!(!is_transient_provider_error_dump(
+            "Error: NonRetriableError: Provider Error usage limit reached for this model."
+        ));
         assert!(!is_transient_provider_error_dump(
             "The image is unavailable because this model does not support image input. Try a different model or drop the attachment."
         ));

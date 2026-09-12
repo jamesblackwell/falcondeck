@@ -55,7 +55,7 @@ use crate::{
 /// backend outage. Codex already retried internally; these wait longer.
 const MAX_TRANSIENT_TURN_RETRIES: u8 = 3;
 const TRANSIENT_RETRY_DELAYS_MS: [u64; 3] = [2_000, 8_000, 20_000];
-const TRANSIENT_RETRY_RECEIPT: &str = "Codex was temporarily unavailable. Retrying…";
+const TRANSIENT_RETRY_RECEIPT: &str = "The model provider was temporarily unavailable. Retrying…";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TransientTurnPlan {
@@ -861,6 +861,24 @@ impl AppState {
         thread_id: &str,
         error: Option<&str>,
     ) -> TransientTurnPlan {
+        let provider = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.threads.get(thread_id))
+                .map(|thread| thread.summary.provider.clone())
+        };
+        let Some(provider) = provider else {
+            return TransientTurnPlan::Ignored;
+        };
+        // Codex and ACP agents (Cursor, OpenCode, …) both surface an upstream
+        // blip as a failed turn we can simply re-prompt. Claude runs its own
+        // retry loop inside the CLI.
+        let retryable_provider = provider == AgentProvider::CODEX
+            || self
+                .fresh_acp_provider_configs()
+                .iter()
+                .any(|config| config.id.eq_ignore_ascii_case(provider.as_str()));
         let scheduled = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let Some(workspace) = workspaces.get_mut(workspace_id) else {
@@ -869,7 +887,7 @@ impl AppState {
             let Some(thread) = workspace.threads.get_mut(thread_id) else {
                 return TransientTurnPlan::Ignored;
             };
-            if thread.summary.provider != AgentProvider::CODEX {
+            if !retryable_provider {
                 thread.transient_retry_in_flight = false;
                 return TransientTurnPlan::Ignored;
             }
@@ -934,7 +952,7 @@ impl AppState {
                     .saturating_sub(1)
                     .min(TRANSIENT_RETRY_DELAYS_MS.len() - 1)];
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                app.run_transient_turn_retry(&workspace_id, &thread_id, generation)
+                app.run_transient_turn_retry(workspace_id, thread_id, generation)
                     .await;
             });
         }
@@ -942,7 +960,28 @@ impl AppState {
         TransientTurnPlan::Retry
     }
 
-    async fn run_transient_turn_retry(&self, workspace_id: &str, thread_id: &str, generation: u64) {
+    /// Boxed rather than `async fn`: the retry re-enters `send_turn`, which
+    /// for ACP providers reaches the event loop that schedules retries.
+    /// Erasing the future type breaks that async type cycle.
+    fn run_transient_turn_retry(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+        generation: u64,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        let app = self.clone();
+        Box::pin(async move {
+            app.run_transient_turn_retry_inner(&workspace_id, &thread_id, generation)
+                .await;
+        })
+    }
+
+    async fn run_transient_turn_retry_inner(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        generation: u64,
+    ) {
         {
             let workspaces = self.inner.workspaces.lock().await;
             let Some(thread) = workspaces
@@ -981,7 +1020,7 @@ impl AppState {
             tracing::warn!(
                 %error,
                 thread = %thread_id,
-                "failed to start a transient Codex retry"
+                "failed to start a transient provider retry"
             );
             let failed_at = Utc::now();
             let _ = self

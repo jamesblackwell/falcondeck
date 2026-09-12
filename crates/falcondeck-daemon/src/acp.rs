@@ -29,7 +29,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, InteractiveQuestion,
     InteractiveQuestionOption, ModelSummary, PlanApprovalOutcome, PlanStep, ReasoningEffortSummary,
-    ThreadPlan,
+    ThreadPlan, ThreadStatus,
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
@@ -1414,6 +1414,11 @@ pub struct AcpRuntime {
     prompt_sessions: Mutex<HashSet<String>>,
     /// Prompt sessions that emitted turn content during the current segment.
     prompt_output_sessions: Mutex<HashSet<String>>,
+    /// Thread status the app layer decided for a finished prompt (a transient
+    /// provider dump rewritten into a failed receipt, with or without a retry
+    /// queued). The `TurnEnded` handler and the awaiting prompt task race;
+    /// whichever runs second reads this so the stop reason alone never wins.
+    turn_outcomes: Mutex<HashMap<String, (ThreadStatus, Option<String>)>>,
     /// Sessions whose `session/load` replay is in flight. Replay history is
     /// not a prompt but must still project as conversation items.
     replay_sessions: Mutex<HashSet<String>>,
@@ -2079,6 +2084,7 @@ impl AcpRuntime {
             steer_queues: Mutex::new(HashMap::new()),
             prompt_sessions: Mutex::new(HashSet::new()),
             prompt_output_sessions: Mutex::new(HashSet::new()),
+            turn_outcomes: Mutex::new(HashMap::new()),
             replay_sessions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
             events,
@@ -2923,6 +2929,28 @@ impl AcpRuntime {
             .insert(session_id.to_string());
         self.prompt_output_sessions.lock().await.remove(session_id);
         self.prompt_stderr_errors.lock().await.remove(session_id);
+        self.turn_outcomes.lock().await.remove(session_id);
+    }
+
+    /// Records the app layer's verdict for the prompt that just ended.
+    pub async fn note_turn_outcome(
+        &self,
+        session_id: &str,
+        status: ThreadStatus,
+        error: Option<String>,
+    ) {
+        self.turn_outcomes
+            .lock()
+            .await
+            .insert(session_id.to_string(), (status, error));
+    }
+
+    /// Takes the verdict recorded by [`Self::note_turn_outcome`], if any.
+    pub async fn take_turn_outcome(
+        &self,
+        session_id: &str,
+    ) -> Option<(ThreadStatus, Option<String>)> {
+        self.turn_outcomes.lock().await.remove(session_id)
     }
 
     async fn wait_for_prompt_stderr(&self, session_id: &str) {

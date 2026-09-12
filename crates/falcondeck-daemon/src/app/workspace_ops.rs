@@ -2799,7 +2799,7 @@ async fn send_turn_with_startup_mode(
         .unwrap_or_else(|| ConversationItem::Service {
             id: format!("service-{}", Uuid::new_v4().simple()),
             level: falcondeck_core::ServiceLevel::Info,
-            message: "Retrying after a temporary Codex outage".to_string(),
+            message: "Retrying after a temporary provider outage".to_string(),
             created_at: Utc::now(),
         })
     } else {

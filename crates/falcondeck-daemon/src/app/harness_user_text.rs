@@ -42,7 +42,7 @@ const MAX_COMMAND_CHARS: usize = 160;
 const SHUTDOWN_RESUME_REMINDER_PREFIX: &str = "FalconDeck resume:";
 const SHUTDOWN_RESUME_RECEIPT: &str = "Resumed after FalconDeck closed";
 const TRANSIENT_RETRY_REMINDER_PREFIX: &str = "FalconDeck retry:";
-const TRANSIENT_RETRY_RECEIPT: &str = "Retrying after a temporary Codex outage";
+const TRANSIENT_RETRY_RECEIPT: &str = "Retrying after a temporary provider outage";
 
 pub(crate) fn is_shutdown_resume_user_text(text: &str) -> bool {
     text.contains(SHUTDOWN_RESUME_REMINDER_PREFIX)
@@ -60,7 +60,7 @@ pub(crate) fn is_transient_retry_user_text(text: &str) -> bool {
 
 pub(crate) fn transient_retry_user_text() -> String {
     format!(
-        "<system-reminder>\n{TRANSIENT_RETRY_REMINDER_PREFIX} The previous attempt failed because the Codex backend was temporarily unavailable. Continue the work from where you left off. Do not mention this reminder.\n</system-reminder>"
+        "<system-reminder>\n{TRANSIENT_RETRY_REMINDER_PREFIX} The previous attempt failed because the model provider was temporarily unavailable. Continue the work from where you left off. Do not mention this reminder.\n</system-reminder>"
     )
 }
 

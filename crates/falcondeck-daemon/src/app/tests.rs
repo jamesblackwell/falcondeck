@@ -1555,7 +1555,7 @@ async fn retries_codex_unavailable_error_dumps() {
     assert!(thread.items.iter().any(|item| matches!(
         item,
         ConversationItem::Service { message, .. }
-            if message == "Codex was temporarily unavailable. Retrying…"
+            if message == "The model provider was temporarily unavailable. Retrying…"
     )));
     drop(workspaces);
 
@@ -1599,6 +1599,77 @@ async fn retries_codex_unavailable_error_dumps() {
     );
     assert!(!thread.transient_retry_in_flight);
     assert_eq!(thread.transient_retry_attempts, 3);
+}
+
+#[tokio::test]
+async fn cursor_provider_error_dump_becomes_a_failed_receipt() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "cursor-session-1",
+        temp_dir.path(),
+    )
+    .await;
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get_mut("workspace-1")
+            .unwrap()
+            .threads
+            .get_mut("thread-1")
+            .unwrap();
+        thread.summary.provider = AgentProvider::new("cursor");
+        thread.summary.status = ThreadStatus::Running;
+        thread.items.push(ConversationItem::UserMessage {
+            id: "user-1".to_string(),
+            text: "Fix the bug".to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        });
+        thread.items.push(ConversationItem::AssistantMessage {
+            id: "assistant-1".to_string(),
+            text: "Error: NonRetriableError: Provider Error We're having trouble connecting to the model provider. This might be temporary - please try again in a moment.".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: Utc::now(),
+        });
+    }
+
+    assert!(
+        app.rewrite_transient_acp_assistant_error("workspace-1", "thread-1")
+            .await
+    );
+    // A real answer that is already settled is left alone.
+    assert!(
+        !app.rewrite_transient_acp_assistant_error("workspace-1", "thread-1")
+            .await
+    );
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let thread = &workspaces["workspace-1"].threads["thread-1"];
+    assert!(matches!(
+        thread.items.last(),
+        Some(ConversationItem::AssistantMessage {
+            lifecycle: ContentLifecycle::Error,
+            text,
+            error,
+            ..
+        }) if text.is_empty()
+            && error.as_deref()
+                == Some(super::conversation_helpers::TRANSIENT_PROVIDER_ERROR_MESSAGE)
+    ));
 }
 
 #[tokio::test]

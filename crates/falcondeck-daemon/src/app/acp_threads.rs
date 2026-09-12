@@ -19,12 +19,16 @@ use crate::acp::{AcpDiffContent, AcpEvent, AcpRuntime, AcpToolMemory};
 use crate::error::DaemonError;
 
 use super::agent_helpers::ResolvedSelectedSkill;
-use super::conversation_helpers::{ToolSettlement, tool_display_metadata};
+use super::conversation_helpers::{
+    TRANSIENT_PROVIDER_ERROR_MESSAGE, ToolSettlement, is_transient_provider_error_dump,
+    rewrite_transient_assistant_error, tool_display_metadata,
+};
 use super::harness_user_text::{
     conversation_item_from_projected_user, falcondeck_skill_name_preamble,
     falcondeck_skill_path_preamble,
 };
 use super::provider_runtime::ProviderRuntime;
+use super::threads::TransientTurnPlan;
 use super::{AppState, PendingServerRequest};
 
 struct AcpToolItem<'a> {
@@ -53,6 +57,54 @@ impl AppState {
             .parent()
             .map(crate::acp::load_acp_provider_configs)
             .unwrap_or_default()
+    }
+
+    /// Rewrites the in-flight assistant message of an ACP turn when its whole
+    /// body is a provider outage dump (Cursor's `Error: NonRetriableError:
+    /// Provider Error …`). Returns whether a rewrite happened.
+    pub(super) async fn rewrite_transient_acp_assistant_error(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> bool {
+        let rewritten = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            else {
+                return false;
+            };
+            let item = thread.items.iter_mut().rev().find_map(|item| match item {
+                ConversationItem::UserMessage { .. } => Some(None),
+                ConversationItem::AssistantMessage {
+                    phase: Some(falcondeck_core::AssistantMessagePhase::Commentary),
+                    ..
+                } => None,
+                ConversationItem::AssistantMessage {
+                    lifecycle: ContentLifecycle::Pending | ContentLifecycle::Streaming,
+                    ..
+                } => Some(Some(item)),
+                _ => None,
+            });
+            let Some(Some(item)) = item else {
+                return false;
+            };
+            let ConversationItem::AssistantMessage { text, .. } = &*item else {
+                return false;
+            };
+            if !is_transient_provider_error_dump(text) {
+                return false;
+            }
+            rewrite_transient_assistant_error(item);
+            item.clone()
+        };
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ConversationItemUpdated { item: rewritten },
+        );
+        true
     }
 
     /// Hydrates one provider's model/config catalog in the background because
@@ -1397,9 +1449,23 @@ impl AppState {
                 had_output,
             } => {
                 if let Some(thread_id) = runtime.thread_for_session(&session_id).await {
+                    // Cursor reports an upstream outage as a normal
+                    // `end_turn` whose only assistant text is an error dump.
+                    // Rewrite it into a failed receipt so the thread does
+                    // not read as answered, and queue the same automatic
+                    // retry Codex gets.
+                    let transient_dump = stop_reason.as_deref() != Some("cancelled")
+                        && self
+                            .rewrite_transient_acp_assistant_error(workspace_id, &thread_id)
+                            .await;
+                    let mut error = error;
+                    if transient_dump {
+                        error = Some(TRANSIENT_PROVIDER_ERROR_MESSAGE.to_string());
+                    }
                     let settlement = match stop_reason.as_deref() {
                         None => ToolSettlement::Failed,
                         Some("cancelled") => ToolSettlement::Interrupted,
+                        Some(_) if transient_dump => ToolSettlement::Failed,
                         Some(_) => ToolSettlement::Completed,
                     };
                     self.settle_turn_items_with_error(
@@ -1410,6 +1476,39 @@ impl AppState {
                         error.as_deref(),
                     )
                     .await;
+                    if transient_dump {
+                        let plan = self
+                            .plan_transient_turn_retry(workspace_id, &thread_id, error.as_deref())
+                            .await;
+                        let (status, last_error) = match plan {
+                            TransientTurnPlan::Retry => (ThreadStatus::Running, None),
+                            TransientTurnPlan::GiveUp { message } => {
+                                (ThreadStatus::Error, Some(message))
+                            }
+                            TransientTurnPlan::Ignored => (ThreadStatus::Error, error.clone()),
+                        };
+                        runtime
+                            .note_turn_outcome(&session_id, status.clone(), last_error.clone())
+                            .await;
+                        // The prompt task may already have stamped Idle from
+                        // the bare stop reason; overwrite it here too.
+                        if let Ok(thread) = self
+                            .upsert_thread(workspace_id, &thread_id, |thread| {
+                                if thread.status != ThreadStatus::WaitingForInput {
+                                    thread.status = status.clone();
+                                    thread.last_error = last_error.clone();
+                                    thread.updated_at = Utc::now();
+                                }
+                            })
+                            .await
+                        {
+                            self.emit(
+                                Some(workspace_id.to_string()),
+                                Some(thread_id.clone()),
+                                UnifiedEvent::ThreadUpdated { thread },
+                            );
+                        }
+                    }
                     // A turn the agent cut short would otherwise be
                     // indistinguishable from a normal completion — the user
                     // just sees the agent "stop mid-answer".
@@ -2397,7 +2496,13 @@ async fn run_acp_turn_startup(
         let outcome = runtime.prompt(&session_id, content.blocks).await;
         let (status, error) = match &outcome {
             Ok(stop_reason) if stop_reason == "cancelled" => (ThreadStatus::Idle, None),
-            Ok(_) => (ThreadStatus::Idle, None),
+            // The TurnEnded handler may have flagged this prompt as a
+            // transient provider failure (and scheduled a retry); it wins
+            // over the bare stop reason.
+            Ok(_) => runtime
+                .take_turn_outcome(&session_id)
+                .await
+                .unwrap_or((ThreadStatus::Idle, None)),
             Err(error) => (ThreadStatus::Error, Some(error.to_string())),
         };
         let updated = app
