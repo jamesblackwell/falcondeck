@@ -878,89 +878,48 @@ const ProjectGroupList = memo(function ProjectGroupList({
           !isDragged &&
           dropIndex === remainingIndex;
         if (!isDragged) remainingIndex += 1;
-        const dragHandleProps = onWorkspaceOrderChange
-          ? {
-              ref: (node: HTMLDivElement | null) => {
-                if (node) workspaceRowRefs.current.set(workspaceId, node);
-                else workspaceRowRefs.current.delete(workspaceId);
-              },
-              onPointerDown: (event: React.PointerEvent<HTMLDivElement>) =>
-                onWorkspacePointerDown(workspaceId, event),
-              onPointerMove: onWorkspacePointerMove,
-              onPointerUp: onWorkspacePointerUp,
-              onPointerCancel: onWorkspacePointerUp,
-              onClickCapture: onWorkspaceClickCapture,
-              "data-workspace-drag-id": workspaceId,
-              "aria-grabbed": isDragged ? true : undefined,
-              className: cn(
-                "cursor-grab select-none",
-                isDragged && "cursor-grabbing opacity-50",
-              ),
-              style: { touchAction: "none" as const },
-            }
-          : undefined;
-
-        // Only the collapsed row renders these, but the summary is cheap and
-        // the group is memoised on scalars, so it costs nothing when open.
-        const attention = summarizeThreadAttention(group.threads);
 
         return (
           <React.Fragment key={workspaceId}>
             {showDropBefore ? <WorkspaceDropIndicator /> : null}
-            <WorkspaceGroup
-              workspace={group.workspace}
-              host={workspaceHosts?.[workspaceId] ?? null}
+            <ProjectGroupRow
+              group={group}
+              isDragged={isDragged}
+              draggable={Boolean(onWorkspaceOrderChange)}
+              workspaceRowRefs={workspaceRowRefs}
+              onWorkspacePointerDown={onWorkspacePointerDown}
+              onWorkspacePointerMove={onWorkspacePointerMove}
+              onWorkspacePointerUp={onWorkspacePointerUp}
+              onWorkspaceClickCapture={onWorkspaceClickCapture}
               isSelected={visualSelectedWorkspaceId === workspaceId}
-              onSelect={() =>
-                onSelectWorkspace(
-                  workspaceId,
-                  group.workspace.current_thread_id ??
-                    group.threads[0]?.id ??
-                    null,
-                )
-              }
-              onNewThread={
-                onNewThread ? () => onNewThread(workspaceId) : undefined
-              }
-              onSearchThreads={
-                onSearchProjectThreads
-                  ? () => onSearchProjectThreads(workspaceId)
-                  : undefined
-              }
-              onOpenContextMenu={(position) =>
-                onOpenWorkspaceContextMenu(
-                  workspaceId,
-                  group.workspace.path,
-                  position,
-                )
-              }
+              onSelectWorkspace={onSelectWorkspace}
+              onNewThread={onNewThread}
+              onSearchProjectThreads={onSearchProjectThreads}
+              onOpenWorkspaceContextMenu={onOpenWorkspaceContextMenu}
               color={workspaceColors?.[workspaceId] ?? null}
               iconSrc={workspaceIconSrc?.(workspaceId) ?? null}
-              dragHandleProps={dragHandleProps}
+              host={workspaceHosts?.[workspaceId] ?? null}
               open={!collapsedWorkspaces.has(workspaceId)}
-              onOpenChange={(open) => onWorkspaceOpenChange(workspaceId, open)}
-              runningCount={attention.running}
-              unreadCount={attention.unread}
-              unreadTone={attention.unreadTone}
-            >
-              <ThreadList
-                group={group}
-                sortMode={threadSort}
-                selectedThreadId={visualSelectedThreadId}
-                viewingArchived={viewingArchivedWorkspaceIds.has(workspaceId)}
-                onHideArchived={() => onHideArchived(workspaceId)}
-                onSelectThread={onSelectThread}
-                onArchiveThread={onArchiveThread}
-                onUnarchiveThread={onUnarchiveThread}
-                onArchiveConfirm={onArchiveConfirm}
-                onArchiveCancel={onArchiveCancel}
-                pendingArchive={pendingArchive}
-                onOpenThreadContextMenu={onOpenThreadContextMenu}
-                onRequestRenameThread={onRequestRenameThread}
-                nowTick={nowTick}
-                threadTagsById={threadTagsById}
-              />
-            </WorkspaceGroup>
+              onWorkspaceOpenChange={onWorkspaceOpenChange}
+              threadSort={threadSort}
+              visualSelectedThreadId={visualSelectedThreadId}
+              viewingArchived={viewingArchivedWorkspaceIds.has(workspaceId)}
+              onHideArchived={onHideArchived}
+              onSelectThread={onSelectThread}
+              onArchiveThread={onArchiveThread}
+              onUnarchiveThread={onUnarchiveThread}
+              onArchiveConfirm={onArchiveConfirm}
+              onArchiveCancel={onArchiveCancel}
+              pendingArchiveThreadId={
+                pendingArchive && pendingArchive.workspaceId === workspaceId
+                  ? pendingArchive.threadId
+                  : null
+              }
+              onOpenThreadContextMenu={onOpenThreadContextMenu}
+              onRequestRenameThread={onRequestRenameThread}
+              nowTick={nowTick}
+              threadTagsById={threadTagsById}
+            />
             {draggingWorkspaceId != null &&
             workspaceId === lastRemainingWorkspaceId &&
             dropIndex === remainingWorkspaceIds.length ? (
@@ -970,6 +929,207 @@ const ProjectGroupList = memo(function ProjectGroupList({
         );
       })}
     </div>
+  );
+});
+
+/**
+ * One project folder. Split out and memoised on scalars so collapsing a single
+ * folder re-renders that folder alone: the sibling thread lists must not
+ * re-render while the disclosure animation is asking for a layout every frame.
+ */
+const ProjectGroupRow = memo(function ProjectGroupRow({
+  group,
+  isDragged,
+  draggable,
+  workspaceRowRefs,
+  onWorkspacePointerDown,
+  onWorkspacePointerMove,
+  onWorkspacePointerUp,
+  onWorkspaceClickCapture,
+  isSelected,
+  onSelectWorkspace,
+  onNewThread,
+  onSearchProjectThreads,
+  onOpenWorkspaceContextMenu,
+  color,
+  iconSrc,
+  host,
+  open,
+  onWorkspaceOpenChange,
+  threadSort,
+  visualSelectedThreadId,
+  viewingArchived,
+  onHideArchived,
+  onSelectThread,
+  onArchiveThread,
+  onUnarchiveThread,
+  onArchiveConfirm,
+  onArchiveCancel,
+  pendingArchiveThreadId,
+  onOpenThreadContextMenu,
+  onRequestRenameThread,
+  nowTick,
+  threadTagsById,
+}: {
+  group: ProjectGroup;
+  isDragged: boolean;
+  draggable: boolean;
+  workspaceRowRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
+  onWorkspacePointerDown: (
+    workspaceId: string,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) => void;
+  onWorkspacePointerMove: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onWorkspacePointerUp: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onWorkspaceClickCapture: (event: React.MouseEvent<HTMLDivElement>) => void;
+  isSelected: boolean;
+  onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
+  onNewThread?: (workspaceId: string) => void;
+  onSearchProjectThreads?: (workspaceId: string) => void;
+  onOpenWorkspaceContextMenu: (
+    workspaceId: string,
+    path: string,
+    position: { x: number; y: number },
+  ) => void;
+  color: string | null;
+  iconSrc: string | null;
+  host: WorkspaceHostBadge | null;
+  open: boolean;
+  onWorkspaceOpenChange: (workspaceId: string, open: boolean) => void;
+  threadSort: ThreadSortMode;
+  visualSelectedThreadId: string | null;
+  viewingArchived: boolean;
+  onHideArchived: (workspaceId: string) => void;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onArchiveThread?: ThreadItemArchiveHandler;
+  onUnarchiveThread?: ThreadItemArchiveHandler;
+  onArchiveConfirm?: () => void;
+  onArchiveCancel?: () => void;
+  pendingArchiveThreadId: string | null;
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
+  onRequestRenameThread?: (args: {
+    workspaceId: string;
+    thread: ThreadSummary;
+  }) => void;
+  nowTick: number;
+  threadTagsById?: Record<string, ThreadTag[]>;
+}) {
+  const workspaceId = group.workspace.id;
+  const workspacePath = group.workspace.path;
+  const defaultThreadId =
+    group.workspace.current_thread_id ?? group.threads[0]?.id ?? null;
+
+  const dragHandleProps = useMemo(
+    () =>
+      draggable
+        ? {
+            ref: (node: HTMLDivElement | null) => {
+              if (node) workspaceRowRefs.current.set(workspaceId, node);
+              else workspaceRowRefs.current.delete(workspaceId);
+            },
+            onPointerDown: (event: React.PointerEvent<HTMLDivElement>) =>
+              onWorkspacePointerDown(workspaceId, event),
+            onPointerMove: onWorkspacePointerMove,
+            onPointerUp: onWorkspacePointerUp,
+            onPointerCancel: onWorkspacePointerUp,
+            onClickCapture: onWorkspaceClickCapture,
+            "data-workspace-drag-id": workspaceId,
+            "aria-grabbed": isDragged ? true : undefined,
+            className: cn(
+              "cursor-grab select-none",
+              isDragged && "cursor-grabbing opacity-50",
+            ),
+            style: { touchAction: "none" as const },
+          }
+        : undefined,
+    [
+      draggable,
+      isDragged,
+      onWorkspaceClickCapture,
+      onWorkspacePointerDown,
+      onWorkspacePointerMove,
+      onWorkspacePointerUp,
+      workspaceId,
+      workspaceRowRefs,
+    ],
+  );
+
+  const handleSelect = useCallback(
+    () => onSelectWorkspace(workspaceId, defaultThreadId),
+    [defaultThreadId, onSelectWorkspace, workspaceId],
+  );
+  const handleNewThread = useMemo(
+    () => (onNewThread ? () => onNewThread(workspaceId) : undefined),
+    [onNewThread, workspaceId],
+  );
+  const handleSearchThreads = useMemo(
+    () =>
+      onSearchProjectThreads
+        ? () => onSearchProjectThreads(workspaceId)
+        : undefined,
+    [onSearchProjectThreads, workspaceId],
+  );
+  const handleOpenContextMenu = useCallback(
+    (position: { x: number; y: number }) =>
+      onOpenWorkspaceContextMenu(workspaceId, workspacePath, position),
+    [onOpenWorkspaceContextMenu, workspaceId, workspacePath],
+  );
+  const handleOpenChange = useCallback(
+    (next: boolean) => onWorkspaceOpenChange(workspaceId, next),
+    [onWorkspaceOpenChange, workspaceId],
+  );
+  const handleHideArchived = useCallback(
+    () => onHideArchived(workspaceId),
+    [onHideArchived, workspaceId],
+  );
+  const pendingArchive = useMemo(
+    () =>
+      pendingArchiveThreadId
+        ? { workspaceId, threadId: pendingArchiveThreadId }
+        : null,
+    [pendingArchiveThreadId, workspaceId],
+  );
+
+  // Only the collapsed row renders these, but the summary is cheap and the
+  // row is memoised on scalars, so it costs nothing when open.
+  const attention = summarizeThreadAttention(group.threads);
+
+  return (
+    <WorkspaceGroup
+      workspace={group.workspace}
+      host={host}
+      isSelected={isSelected}
+      onSelect={handleSelect}
+      onNewThread={handleNewThread}
+      onSearchThreads={handleSearchThreads}
+      onOpenContextMenu={handleOpenContextMenu}
+      color={color}
+      iconSrc={iconSrc}
+      dragHandleProps={dragHandleProps}
+      open={open}
+      onOpenChange={handleOpenChange}
+      runningCount={attention.running}
+      unreadCount={attention.unread}
+      unreadTone={attention.unreadTone}
+    >
+      <ThreadList
+        group={group}
+        sortMode={threadSort}
+        selectedThreadId={visualSelectedThreadId}
+        viewingArchived={viewingArchived}
+        onHideArchived={handleHideArchived}
+        onSelectThread={onSelectThread}
+        onArchiveThread={onArchiveThread}
+        onUnarchiveThread={onUnarchiveThread}
+        onArchiveConfirm={onArchiveConfirm}
+        onArchiveCancel={onArchiveCancel}
+        pendingArchive={pendingArchive}
+        onOpenThreadContextMenu={onOpenThreadContextMenu}
+        onRequestRenameThread={onRequestRenameThread}
+        nowTick={nowTick}
+        threadTagsById={threadTagsById}
+      />
+    </WorkspaceGroup>
   );
 });
 
@@ -2664,7 +2824,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             </div>
           </div>
           <Collapsible.Root open={!projectsCollapsed}>
-            <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+            <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
               <ProjectGroupList
                 orderedGroups={orderedGroups}
                 draggingWorkspaceId={draggingWorkspaceId}
@@ -2775,7 +2935,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               ) : null}
             </div>
             <Collapsible.Root open={!chatsCollapsed}>
-              <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+              <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
                 {viewingArchivedChats ? (
                   <ArchivedThreadList
                     entries={archivedChatEntries}

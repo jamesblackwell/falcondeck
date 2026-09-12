@@ -21,14 +21,33 @@ export const WorkspaceIcon = memo(function WorkspaceIcon({
   }, [src])
 
   const folderColor = workspaceColorCssVar(color)
-  const FolderGlyph = open ? FolderOpen : FolderClosed
   if (!src || failed) {
+    // Both glyphs stay mounted and crossfade: swapping the element outright
+    // made the folder pop a frame before the rows started moving, which read
+    // as two separate events instead of one disclosure.
     return (
-      <FolderGlyph
+      <span
         aria-hidden="true"
-        className={cn('h-4 w-4', folderColor ? null : 'text-fg-muted', className)}
+        className={cn(
+          'relative inline-block h-4 w-4 shrink-0',
+          folderColor ? null : 'text-fg-muted',
+          className,
+        )}
         style={folderColor ? { color: folderColor } : undefined}
-      />
+      >
+        <FolderClosed
+          className={cn(
+            'absolute inset-0 h-full w-full transition-opacity duration-[var(--fd-duration-fast)]',
+            open ? 'opacity-0' : 'opacity-100',
+          )}
+        />
+        <FolderOpen
+          className={cn(
+            'absolute inset-0 h-full w-full transition-opacity duration-[var(--fd-duration-fast)]',
+            open ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+      </span>
     )
   }
 

@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { memo, useCallback, useState } from 'react'
+import { memo, startTransition, useCallback, useState } from 'react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 import { Globe, Search, SquarePen } from 'lucide-react'
 
@@ -74,7 +74,11 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
     (next: boolean) => {
       if (open === undefined) setUncontrolledOpen(next)
       onOpenChange?.(next)
-      if (next) onSelect()
+      // Selecting swaps the conversation pane, a far heavier commit than the
+      // row itself. Marking it non-urgent lets React paint the first frames of
+      // the expand animation instead of dropping them behind a transcript
+      // render, which is what made the folder feel like it stuck on click.
+      if (next) startTransition(() => onSelect())
     },
     [onOpenChange, onSelect, open],
   )
@@ -225,7 +229,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             </button>
           ) : null}
         </div>
-        <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
+        <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
           {/* Padding lives inside the animated element: Radix measures this
               wrapper's height, so putting it on Content would make the gap pop
               in before the rows finish expanding. */}

@@ -283,6 +283,11 @@
   --fd-duration-normal: 150ms;
   --fd-duration-slow: 250ms;
   --fd-duration-panel: 220ms;
+  /* Disclosure (project folders, section headers). Opening is the gesture the
+     eye follows, so it gets the longer, decelerating curve; closing is an
+     acknowledgement and should be out of the way before the pointer moves. */
+  --fd-duration-collapse-in: 190ms;
+  --fd-duration-collapse-out: 140ms;
   --fd-ease-default: cubic-bezier(0.4, 0, 0.2, 1);
   --fd-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
   /* Decelerating curve for the shell panels: leaves fast, settles softly. */
@@ -305,6 +310,8 @@
     --fd-duration-normal: 0.01ms;
     --fd-duration-slow: 0.01ms;
     --fd-duration-panel: 0.01ms;
+    --fd-duration-collapse-in: 0.01ms;
+    --fd-duration-collapse-out: 0.01ms;
   }
 }
 
@@ -1582,10 +1589,23 @@ body {
 }
 
 /* === Collapsible Animations === */
+/* Height is the only property that can drive a disclosure (the content has no
+   fixed size), so the cost is a layout per frame. `contain` on the wrapper
+   keeps that layout inside the folder instead of reflowing the whole sidebar,
+   and the opacity ramp is front-loaded so the rows read as solid for most of
+   the travel rather than fading the entire way. */
+.fd-collapsible-content {
+  overflow: hidden;
+  contain: layout paint;
+}
+
 @keyframes fd-expand {
   from {
     height: 0;
     opacity: 0;
+  }
+  45% {
+    opacity: 1;
   }
   to {
     height: var(--radix-collapsible-content-height);
@@ -1596,6 +1616,9 @@ body {
   from {
     height: var(--radix-collapsible-content-height);
     opacity: 1;
+  }
+  55% {
+    opacity: 0;
   }
   to {
     height: 0;
@@ -1762,12 +1785,14 @@ body {
 }
 
 @theme {
-  --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
-  --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);
+  --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-panel);
+  --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-panel);
   /* Navigation collapses run quicker than content collapses: the payload is
      small and the toggle is high-frequency, so 250ms reads as sluggish. */
-  --animate-expand-fast: fd-expand var(--fd-duration-normal) var(--fd-ease-default);
-  --animate-collapse-fast: fd-collapse var(--fd-duration-normal) var(--fd-ease-default);
+  --animate-expand-fast: fd-expand var(--fd-duration-collapse-in)
+    var(--fd-ease-panel);
+  --animate-collapse-fast: fd-collapse var(--fd-duration-collapse-out)
+    var(--fd-ease-panel);
   --animate-toast-in: fd-toast-in 250ms var(--fd-ease-default);
   --animate-toast-out: fd-toast-out 200ms var(--fd-ease-default) forwards;
   --animate-diamond-activity: fd-diamond-activity 2.4s linear infinite;
