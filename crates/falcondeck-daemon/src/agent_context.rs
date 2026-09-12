@@ -21,6 +21,9 @@ const CUA_SKILL_BROWSER: &str = include_str!("agent_context/cua-driver/BROWSER.m
 const CUA_SKILL_RECORDING: &str = include_str!("agent_context/cua-driver/RECORDING.md");
 const CUA_SKILL_README: &str = include_str!("agent_context/cua-driver/README.md");
 const CUA_SKILL_VERSION: &str = include_str!("agent_context/cua-driver/VERSION");
+/// FalconDeck-authored host notes staged alongside the vendored cua-driver skill.
+const CUA_SKILL_FALCONDECK: &str =
+    include_str!("agent_context/cua-driver-falcondeck/FALCONDECK.md");
 
 /// Directory (under the daemon state dir) holding staged bundled skills.
 pub const SKILLS_DIR_NAME: &str = "skills";
@@ -123,6 +126,7 @@ fn stage_computer_use_skill(state_path: &Path) -> io::Result<PathBuf> {
     stage_named_file(&skill_dir, "RECORDING.md", CUA_SKILL_RECORDING)?;
     stage_named_file(&skill_dir, "README.md", CUA_SKILL_README)?;
     stage_named_file(&skill_dir, "VERSION", CUA_SKILL_VERSION)?;
+    stage_named_file(&skill_dir, "FALCONDECK.md", CUA_SKILL_FALCONDECK)?;
     Ok(skill_dir.join("SKILL.md"))
 }
 
@@ -174,7 +178,7 @@ pub fn append_instructions(
     }
     if let Some(path) = computer_use_skill {
         text.push_str(&format!(
-            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, also read BROWSER.md: existing signed-in profiles use browser_prepare with an observed pid/window_id and existing_profile strategy, then browser_bind. This requires the user's separate Settings → Computer use → signed-in browser consent. If denied, ask the user to enable it; never change daemon settings or launch another CDP endpoint to bypass the grant. Do not install a browser extension for this path.",
+            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, also read BROWSER.md: existing signed-in profiles use browser_prepare with an observed pid/window_id and existing_profile strategy, then browser_bind. This requires the user's separate Settings → Computer use → signed-in browser consent. If denied, ask the user to enable it; never change daemon settings or launch another CDP endpoint to bypass the grant. Do not install a browser extension for this path. The sibling FALCONDECK.md covers host quirks, including why an isolated launch with no pid can pick a browser the user did not ask for.",
             path.display()
         ));
     }
@@ -246,6 +250,13 @@ mod tests {
             CUA_SKILL_BODY
         );
         assert!(cua_path.parent().expect("dir").join("MACOS.md").is_file());
+        assert!(
+            cua_path
+                .parent()
+                .expect("dir")
+                .join("FALCONDECK.md")
+                .is_file()
+        );
         stage_bundled_skills(&state_path, false).expect("disable cua");
         assert!(!cua_path.exists());
         std::fs::remove_dir_all(&dir).ok();
