@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppState,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   View,
   type TextInput,
@@ -68,7 +66,7 @@ import { useSessionActions } from "@/hooks/useSessionActions";
 import { useInterruptTurn } from "@/hooks/useInterruptTurn";
 import { useAutoMarkThreadRead } from "@/hooks/useAutoMarkThreadRead";
 import { useThreadActions } from "@/hooks/useThreadActions";
-import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
+import { useKeyboardInset } from "@/hooks/useKeyboardInset";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
 import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
@@ -289,7 +287,11 @@ export default function HomeScreen() {
     scrollToBottomIfFollowing,
     scrollToBottomIfNear,
   } = useScrollToBottom<ConversationRenderBlock>();
-  const isKeyboardVisible = useKeyboardVisible();
+  // Validated against the window, unlike KeyboardAvoidingView, so the bogus
+  // frame iOS reports while resuming with a focused composer cannot pad the
+  // screen by its full height and stack the composer under the header.
+  const keyboardInset = useKeyboardInset();
+  const isKeyboardVisible = keyboardInset > 0;
   const [appState, setAppState] = useState(AppState.currentState);
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<
     string | null
@@ -1270,10 +1272,11 @@ export default function HomeScreen() {
   );
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { paddingTop: insets.top }]}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={0}
+    <View
+      style={[
+        styles.container,
+        { paddingTop: insets.top, paddingBottom: keyboardInset },
+      ]}
     >
       <View style={styles.header}>
         <Pressable
@@ -1626,7 +1629,7 @@ export default function HomeScreen() {
       ) : null}
 
       {isConnectionDebugMounted ? <ConnectionDebugScreen /> : null}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
