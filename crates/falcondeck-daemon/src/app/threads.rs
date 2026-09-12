@@ -82,13 +82,14 @@ fn codex_thread_state_is_idle_for_release(
 }
 
 fn codex_thread_is_idle_for_release(thread: &ManagedThread) -> bool {
-    codex_thread_state_is_idle_for_release(
-        &thread.summary.provider,
-        &thread.summary.status,
-        !thread.queued_requests.is_empty(),
-        thread.dispatching_request.is_some(),
-        thread.transient_retry_in_flight,
-    )
+    !thread.has_unpersisted_codex_start()
+        && codex_thread_state_is_idle_for_release(
+            &thread.summary.provider,
+            &thread.summary.status,
+            !thread.queued_requests.is_empty(),
+            thread.dispatching_request.is_some(),
+            thread.transient_retry_in_flight,
+        )
 }
 
 /// How long a running Claude turn may stay silent — no stream traffic at all,
@@ -2799,6 +2800,14 @@ impl AppState {
 }
 
 impl ManagedThread {
+    pub(super) fn has_unpersisted_codex_start(&self) -> bool {
+        // Codex creates the rollout lazily on the first turn. Unsubscribing
+        // or retiring its runtime before then destroys the only live copy.
+        self.summary.provider == AgentProvider::CODEX
+            && !self.requires_resume
+            && self.summary.latest_turn_id.is_none()
+    }
+
     pub(super) fn new(summary: ThreadSummary) -> Self {
         let ai_title_generated = !is_placeholder_thread_title(&summary.title)
             && !is_provisional_thread_title(&summary.title);
@@ -3391,6 +3400,24 @@ mod tests {
                 base_branch: Some("main".to_string()),
             }),
         })
+    }
+
+    #[test]
+    fn fresh_codex_thread_stays_loaded_until_its_first_turn() {
+        let mut thread = isolated_codex_thread();
+        assert!(thread.has_unpersisted_codex_start());
+        assert!(!codex_thread_is_idle_for_release(&thread));
+        assert!(super::super::runtime_health::codex_thread_keeps_runtime_live(&thread));
+
+        thread.summary.latest_turn_id = Some("first-turn".to_string());
+        assert!(!thread.has_unpersisted_codex_start());
+        assert!(codex_thread_is_idle_for_release(&thread));
+        assert!(!super::super::runtime_health::codex_thread_keeps_runtime_live(&thread));
+
+        thread.summary.latest_turn_id = None;
+        thread.requires_resume = true;
+        assert!(!thread.has_unpersisted_codex_start());
+        assert!(codex_thread_is_idle_for_release(&thread));
     }
 
     #[tokio::test]

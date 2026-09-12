@@ -71,13 +71,14 @@ fn codex_work_keeps_runtime_live(
             || is_dispatching_request)
 }
 
-fn codex_thread_keeps_runtime_live(thread: &ManagedThread) -> bool {
-    codex_work_keeps_runtime_live(
-        &thread.summary.provider,
-        &thread.summary.status,
-        !thread.queued_requests.is_empty(),
-        thread.dispatching_request.is_some(),
-    )
+pub(super) fn codex_thread_keeps_runtime_live(thread: &ManagedThread) -> bool {
+    thread.has_unpersisted_codex_start()
+        || codex_work_keeps_runtime_live(
+            &thread.summary.provider,
+            &thread.summary.status,
+            !thread.queued_requests.is_empty(),
+            thread.dispatching_request.is_some(),
+        )
 }
 
 fn should_retire(idle_for: std::time::Duration, has_live_work: bool) -> bool {
