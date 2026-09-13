@@ -2,7 +2,7 @@ import { ChevronDown } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 
 import { planProgress, planStepPresentation, type ThreadPlan } from '@falcondeck/client-core'
-import { cn } from '@falcondeck/ui'
+import { cn, StatusTextSwap } from '@falcondeck/ui'
 
 import { PlanStepIcon, PlanStepList } from './plan-steps'
 
@@ -56,14 +56,14 @@ export function PlanBar({
           <span className="fd-type-microlabel text-fg-muted">
             Plan
           </span>
-          <span
+          <StatusTextSwap
+            text={summary}
+            live={Boolean(current)}
             className={cn(
-              'min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]',
+              'min-w-0 flex-1 text-[length:var(--fd-text-sm)]',
               current ? 'text-fg-primary' : 'text-fg-muted',
             )}
-          >
-            {summary}
-          </span>
+          />
           <span className="shrink-0 tabular-nums text-[length:var(--fd-text-xs)] text-fg-muted">
             {completed}/{total}
           </span>

@@ -81,7 +81,12 @@ import {
   type ToolTestSummary,
   type WorkSessionEntry,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, CopyButton, cn } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  CopyButton,
+  StatusTextSwap,
+  cn,
+} from "@falcondeck/ui";
 
 import { FileDiffLink, useOpenFileDiff } from "../lib/file-diff-context";
 import { extractFilePath, fileBaseName } from "../lib/tool-file-path";
@@ -2243,7 +2248,11 @@ function ReasoningMessage({
           className="h-3.5 w-3.5 shrink-0 text-danger"
         />
       ) : null}
-      <span className="min-w-0 truncate font-medium">{label}</span>
+      <StatusTextSwap
+        text={label}
+        live={activelyStreaming}
+        className="min-w-0 font-medium"
+      />
       {durationLabel ? (
         <span
           aria-hidden={hasBody || undefined}
@@ -3459,24 +3468,24 @@ export const WorkSessionCard = memo(
               "fd-focus group rounded-[var(--fd-radius-sm)] transition-colors hover:text-fg-secondary",
             )}
           >
-            {running ? (
-              <>
-                <ActivityDiamond />
-                <span className="shrink-0 font-medium">
-                  {thinkingTail ? "Thinking…" : "Working…"}
-                </span>
-                {currentLabel ? (
-                  <span className="fd-type-meta fd-type-mono min-w-0 truncate text-fg-muted">
-                    {currentLabel}
-                  </span>
-                ) : null}
-              </>
-            ) : (
-              <span className="font-medium">
-                Worked for{" "}
-                {formatWorkDuration(startedAt, completedAt ?? startedAt)}
-              </span>
-            )}
+            {running ? <ActivityDiamond /> : null}
+            <StatusTextSwap
+              text={
+                running
+                  ? thinkingTail
+                    ? "Thinking…"
+                    : "Working…"
+                  : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`
+              }
+              live={running}
+              className={cn("font-medium", running && "shrink-0")}
+            />
+            {running && currentLabel ? (
+              <StatusTextSwap
+                text={currentLabel}
+                className="fd-type-meta fd-type-mono min-w-0 text-fg-muted"
+              />
+            ) : null}
             <ChevronRight
               aria-hidden="true"
               className={cn(
@@ -3532,13 +3541,17 @@ export const LiveActivityLane = memo(function LiveActivityLane({
               className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1"
             >
               <div className="border-b border-border-subtle px-3 py-2">
-                <p className="truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
-                  {group.summary.title}
-                </p>
+                <StatusTextSwap
+                  text={group.summary.title}
+                  live
+                  className="w-full text-[length:var(--fd-text-xs)] font-medium text-fg-primary"
+                />
                 {group.summary.subtitle ? (
-                  <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-                    {group.summary.subtitle}
-                  </p>
+                  <StatusTextSwap
+                    text={group.summary.subtitle}
+                    live
+                    className="w-full text-[length:var(--fd-text-xs)] text-fg-muted"
+                  />
                 ) : null}
               </div>
               <div className="space-y-1 p-2">

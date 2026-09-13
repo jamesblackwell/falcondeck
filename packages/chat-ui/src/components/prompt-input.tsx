@@ -42,7 +42,13 @@ import {
   rankSlashSuggestions,
   resolveServiceTier,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, Button, Tooltip, cn } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  Button,
+  StatusTextSwap,
+  Tooltip,
+  cn,
+} from "@falcondeck/ui";
 
 import {
   ModelMenu,
@@ -939,9 +945,11 @@ export const PromptInput = memo(function PromptInput({
                     muted={voice.state === "transcribing"}
                   />
                   {voice.state === "transcribing" ? (
-                    <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                      Transcribing…
-                    </span>
+                    <StatusTextSwap
+                      text="Transcribing…"
+                      live
+                      className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary"
+                    />
                   ) : (
                     <span
                       aria-hidden="true"

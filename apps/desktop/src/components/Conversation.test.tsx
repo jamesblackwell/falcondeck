@@ -379,6 +379,19 @@ describe("Conversation empty state", () => {
     expect(screen.queryByText("Thinking…")).toBeNull();
   });
 
+  it("replaces sending with thinking in the same status slot", () => {
+    const { rerender } = render(
+      <Conversation items={[]} isSending isThinking />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Sending…");
+
+    rerender(<Conversation items={[]} isThinking />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    expect(screen.queryByText("Sending…")).not.toBeInTheDocument();
+  });
+
   it("yields to the approval notice when an empty-transcript turn is blocked", () => {
     render(<Conversation items={[]} isWaitingForInput />);
 

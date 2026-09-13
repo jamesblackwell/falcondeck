@@ -1656,6 +1656,7 @@ function ConversationQa() {
     new URLSearchParams(window.location.search).get("unavailableActions") ===
     "1";
   const [streaming, setStreaming] = useState(true);
+  const [sending, setSending] = useState(false);
   const [showNotice, setShowNotice] = useState(true);
   const [scenario, setScenario] = useState<QaScenario>(() => {
     const requested = new URLSearchParams(window.location.search).get(
@@ -1712,6 +1713,12 @@ function ConversationQa() {
         setQaPreparingAttachments((current) => Math.max(0, current - count)),
       );
   };
+
+  useEffect(() => {
+    if (!sending) return;
+    const timer = window.setTimeout(() => setSending(false), 700);
+    return () => window.clearTimeout(timer);
+  }, [sending]);
 
   useEffect(() => {
     if (!streaming || visibleAnswer.length >= answer.length) return;
@@ -1880,6 +1887,7 @@ function ConversationQa() {
           onClick={() => {
             setVisibleAnswer("");
             setStreaming(true);
+            setSending(true);
             if (scenario !== "long") setScenario("mixed");
           }}
         >
@@ -1965,6 +1973,8 @@ function ConversationQa() {
           onRetryResponse={
             actionsUnavailable ? undefined : simulateBranchAction
           }
+          isSending={sending}
+          sendingLabel={sending ? "Summarizing previous conversation…" : null}
           isThinking={
             ((scenario === "mixed" || scenario === "long") &&
               streaming &&

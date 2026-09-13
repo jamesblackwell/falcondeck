@@ -28,7 +28,7 @@ import {
   reuseRetrySourcesByAssistantId,
   type ResponseCompletionTrackerState,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, EmptyState, cn } from "@falcondeck/ui";
+import { ActivityDiamond, EmptyState, StatusTextSwap, cn } from "@falcondeck/ui";
 
 import {
   FileDiffProvider,
@@ -166,6 +166,15 @@ function WaitingForApprovalNotice() {
     >
       <ShieldQuestion className="h-4 w-4 animate-pulse text-warning" />
       Waiting for approval — respond below to continue
+    </div>
+  );
+}
+
+function LiveAgentStatus({ label }: { label: string }) {
+  return (
+    <div role="status" className={AGENT_STATUS_ROW_CLASS}>
+      <ActivityDiamond />
+      <StatusTextSwap text={label} live className="font-medium" />
     </div>
   );
 }
@@ -1006,15 +1015,11 @@ export const Conversation = memo(function Conversation({
                     {isWaitingForInput && liveActivityGroups.length === 0 ? (
                       <WaitingForApprovalNotice />
                     ) : isBusy && liveActivityGroups.length === 0 ? (
-                      <div
-                        role="status"
-                        className={AGENT_STATUS_ROW_CLASS}
-                      >
-                        <ActivityDiamond />
-                        <span className="font-medium">
-                          {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
-                        </span>
-                      </div>
+                      <LiveAgentStatus
+                        label={
+                          isSending ? (sendingLabel ?? "Sending…") : "Thinking…"
+                        }
+                      />
                     ) : null}
                   </div>
                 ) : null}
@@ -1098,15 +1103,11 @@ export const Conversation = memo(function Conversation({
                     liveActivityGroups.length === 0 &&
                     !hasRunningWorkSession &&
                     !streamingReasoningId)) ? (
-                  <div
-                    role="status"
-                    className={AGENT_STATUS_ROW_CLASS}
-                  >
-                    <ActivityDiamond />
-                    <span className="font-medium">
-                      {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
-                    </span>
-                  </div>
+                  <LiveAgentStatus
+                    label={
+                      isSending ? (sendingLabel ?? "Sending…") : "Thinking…"
+                    }
+                  />
                 ) : null}
 
                 {/* In-flight tool activity renders in the thread flow, where the

@@ -288,6 +288,8 @@
      acknowledgement and should be out of the way before the pointer moves. */
   --fd-duration-collapse-in: 190ms;
   --fd-duration-collapse-out: 140ms;
+  /* Status-line text swap (Sending → Thinking, tool title changes). */
+  --fd-status-swap-distance: 4px;
   --fd-ease-default: cubic-bezier(0.4, 0, 0.2, 1);
   --fd-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
   /* Decelerating curve for the shell panels: leaves fast, settles softly. */
@@ -1782,6 +1784,92 @@ body {
 }
 .fd-conversation-block--enter {
   animation: fd-message-in 300ms var(--fd-ease-panel) backwards;
+}
+
+/* === Status text swap ===
+   One live label at a time (the agent status row, a thought header, a plan
+   step). The old copy exits up and the new copy enters from below; only
+   transform and opacity move, so a 1,000-block transcript does not pick up
+   a filter. The outgoing string lives in `data-text` / ::before so it never
+   joins the accessibility tree or Testing Library text queries. First paint
+   of a slot has no enter animation. */
+.fd-status-text {
+  position: relative;
+  display: inline-grid;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  vertical-align: bottom;
+}
+.fd-status-text__in,
+.fd-status-text__out {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fd-status-text__out {
+  width: 100%;
+  pointer-events: none;
+  animation: fd-status-text-out var(--fd-duration-normal) var(--fd-ease-default)
+    forwards;
+}
+.fd-status-text__out::before {
+  content: attr(data-text);
+}
+.fd-status-text__in--enter {
+  animation: fd-status-text-in var(--fd-duration-normal) var(--fd-ease-default)
+    both;
+}
+@keyframes fd-status-text-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--fd-status-swap-distance) * -1));
+  }
+}
+@keyframes fd-status-text-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--fd-status-swap-distance));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Quiet held-state shimmer. The highlight is a translating overlay, not an
+   animated mask or background-position, so it composites. */
+.fd-status-text--live .fd-status-text__in {
+  position: relative;
+  isolation: isolate;
+}
+.fd-status-text--live .fd-status-text__in::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 45%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, currentColor 28%, transparent),
+    transparent
+  );
+  pointer-events: none;
+  animation: fd-status-shimmer 1.8s var(--fd-ease-default) infinite;
+}
+@keyframes fd-status-shimmer {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(280%);
+  }
 }
 
 @theme {
