@@ -223,24 +223,32 @@ export type PromptInputProps = {
   goal?: Omit<GoalPanelProps, "onDone">;
   quotedSelections?: readonly QuotedSelection[];
   onRemoveQuotedSelection?: (selectionId: string) => void;
+  /**
+   * Set while a native (non-DOM) file drag is over the window. Desktop
+   * webviews hand file drags to the shell instead of the document, so the
+   * host drives the drop affordance from the platform event.
+   */
+  externalFileDragActive?: boolean;
 };
 
 const PROMPT_INPUT_MIN_HEIGHT = 52;
 const PROMPT_INPUT_MAX_HEIGHT = 200;
 
-function partitionImageFiles(files: FileList | readonly File[]) {
+function partitionAttachmentFiles(files: FileList | readonly File[]) {
   const selected = Array.from(files);
   return {
-    images: selected.filter((file) => file.type.startsWith("image/")),
-    unsupported: selected.filter((file) => !file.type.startsWith("image/")),
+    images: selected.filter((file) => fileAttachmentKind(file) === "image"),
+    documents: selected.filter(
+      (file) => fileAttachmentKind(file) === "document",
+    ),
   };
 }
 
-function unsupportedAttachmentNotice(files: readonly File[]) {
+function rejectedImageNotice(files: readonly File[]) {
   if (files.length === 1) {
-    return `Only images can be attached right now. ${files[0]?.name || "That file"} was not attached.`;
+    return `This agent does not accept images. ${files[0]?.name || "That image"} was not attached.`;
   }
-  return `Only images can be attached right now. ${files.length} non-image files were not attached.`;
+  return `This agent does not accept images. ${files.length} images were not attached.`;
 }
 
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
@@ -314,6 +322,7 @@ export const PromptInput = memo(function PromptInput({
   goal,
   quotedSelections = EMPTY_QUOTED_SELECTIONS,
   onRemoveQuotedSelection,
+  externalFileDragActive = false,
 }: PromptInputProps) {
   const textareaId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -336,9 +345,7 @@ export const PromptInput = memo(function PromptInput({
   const loadSkillsRef = useRef(loadSkills);
   loadSkillsRef.current = loadSkills;
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
-  const [draggedFileKind, setDraggedFileKind] = useState<
-    "images" | "unsupported" | "unknown" | null
-  >(null);
+  const [domFileDragActive, setDomFileDragActive] = useState(false);
   const [attachmentInputNotice, setAttachmentInputNotice] = useState<
     string | null
   >(null);
@@ -347,6 +354,11 @@ export const PromptInput = memo(function PromptInput({
     attachments.length > 0 ||
     quotedSelections.length > 0;
   const isPreparingAttachments = preparingAttachmentCount > 0;
+  // Documents never enter a provider payload — the daemon stores them beside
+  // the thread and the agent opens them from disk — so they attach even when
+  // the agent has no vision support.
+  const canAttachFiles = Boolean(onPickImages) && !disabled;
+  const isFileDragActive = externalFileDragActive || domFileDragActive;
   const canAttachImages =
     Boolean(onPickImages) && capabilities.supports_images && !disabled;
   const canSubmit =
@@ -673,50 +685,37 @@ export const PromptInput = memo(function PromptInput({
     acceptPastedOrDroppedFiles(pastedFiles);
   }
 
-  function draggedFilesKind(dataTransfer: DataTransfer) {
-    const items = Array.from(dataTransfer.items ?? []).filter(
-      (item) => item.kind === "file",
-    );
-    if (items.length === 0) return "unknown" as const;
-    return items.some((item) => item.type.startsWith("image/"))
-      ? ("images" as const)
-      : ("unsupported" as const);
-  }
-
   function handleDragEnter(event: React.DragEvent<HTMLDivElement>) {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
     dragDepthRef.current += 1;
-    setDraggedFileKind(draggedFilesKind(event.dataTransfer));
+    setDomFileDragActive(true);
   }
 
   function handleDragOver(event: React.DragEvent<HTMLDivElement>) {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
-    const kind = draggedFilesKind(event.dataTransfer);
-    event.dataTransfer.dropEffect =
-      canAttachImages && kind !== "unsupported" ? "copy" : "none";
+    // Item types are frequently empty mid-drag (Finder hands over paths, not
+    // media types), so anything file-shaped reads as attachable here; the
+    // image/document split happens once the files are actually read.
+    event.dataTransfer.dropEffect = canAttachFiles ? "copy" : "none";
   }
 
   function handleDragLeave(event: React.DragEvent<HTMLDivElement>) {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
     dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) setDraggedFileKind(null);
+    if (dragDepthRef.current === 0) setDomFileDragActive(false);
   }
 
   function handleDrop(event: React.DragEvent<HTMLDivElement>) {
     if (!event.dataTransfer.types.includes("Files")) return;
     event.preventDefault();
     dragDepthRef.current = 0;
-    setDraggedFileKind(null);
+    setDomFileDragActive(false);
     if (event.dataTransfer.files.length === 0) return;
-    if (!canAttachImages) {
-      setAttachmentInputNotice(
-        capabilities.supports_images
-          ? "Image attachments are unavailable right now."
-          : "The selected agent does not support image attachments.",
-      );
+    if (!canAttachFiles) {
+      setAttachmentInputNotice("Attachments are unavailable right now.");
       return;
     }
     acceptPastedOrDroppedFiles(event.dataTransfer.files);
@@ -808,24 +807,20 @@ export const PromptInput = memo(function PromptInput({
         onDrop={handleDrop}
         className={cn(
           "relative rounded-[var(--fd-radius-xl)] border bg-surface-2 shadow-[0_-2px_10px_-6px_rgba(0,0,0,0.14)] transition-colors",
-          draggedFileKind === "images" && canAttachImages
+          isFileDragActive && canAttachFiles
             ? "border-accent bg-accent-dim"
             : "border-border-default",
         )}
       >
-        {draggedFileKind ? (
+        {isFileDragActive ? (
           <div
             role="status"
             aria-live="polite"
             className="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-[var(--fd-radius-lg)] border border-dashed border-accent bg-surface-1/95 px-4 text-center text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-md)]"
           >
-            {draggedFileKind === "unsupported"
-              ? "Only images can be attached right now"
-              : canAttachImages
-                ? "Drop images to attach"
-                : capabilities.supports_images
-                  ? "Image attachments are unavailable right now"
-                  : "The selected agent does not support image attachments"}
+            {canAttachFiles
+              ? "Drop files to attach"
+              : "Attachments are unavailable right now"}
           </div>
         ) : null}
         {/* Attachment previews */}

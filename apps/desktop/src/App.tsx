@@ -152,6 +152,7 @@ import {
   type DesktopEditor,
 } from "./api";
 import { CONNECTION_COPY } from "./connection-copy";
+import { useNativeFileDrop } from "./native-file-drop";
 import {
   ACTIVITY_WINDOW_EVENTS,
   ACTIVITY_WINDOW_LABEL,
@@ -3733,6 +3734,16 @@ function AppInner() {
     ],
   );
 
+  const handleNativeFileDropError = useCallback((message: string) => {
+    setActionError(message);
+  }, []);
+  // Native drags never reach the document in a Tauri webview, so the drop
+  // affordance and the files both come from the platform event.
+  const nativeFileDragActive = useNativeFileDrop({
+    onFiles: handlePickImages,
+    onError: handleNativeFileDropError,
+  });
+
   const handleRemoveAttachment = useCallback(
     (attachmentId: string) => {
       setAttachmentsForConversation(conversationKey, (current) =>
@@ -6172,6 +6183,7 @@ function AppInner() {
                 stopShortcut: shortcutHintTokens("stopTurn", shortcutSettings),
                 onStop: handleStopCallback,
                 onPickImages: handlePickImages,
+                externalFileDragActive: nativeFileDragActive,
                 onRemoveAttachment: handleRemoveAttachment,
                 attachments,
                 preparingAttachmentCount,

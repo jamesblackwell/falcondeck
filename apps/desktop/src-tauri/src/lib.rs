@@ -1,5 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
+    collections::HashMap,
     env, fs,
     hash::{Hash, Hasher},
     io::{Read, Write},
@@ -7,9 +8,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    sync::Mutex as SyncMutex,
+    time::{Duration, Instant},
 };
 
+use base64::Engine as _;
 use falcondeck_core::DEFAULT_DAEMON_PORT;
 use falcondeck_daemon::{resolve_agent_binary, spawn_embedded, DaemonConfig, EmbeddedDaemonHandle};
 use serde::Serialize;
@@ -26,10 +29,20 @@ mod sounds;
 const ACTIVITY_WINDOW_LABEL: &str = "activity";
 const HOST_SESSION_KEYRING_SERVICE: &str = "com.falcondeck.desktop.remote-host";
 const MAX_HOST_SESSION_SECRET_BYTES: usize = 128 * 1024;
+/// Matches the daemon's document attachment ceiling. Larger drops are rejected
+/// here so a 2 GB video never lands in the webview's memory.
+const MAX_DROPPED_ATTACHMENT_BYTES: u64 = 25_000_000;
+/// How long a dropped path stays readable by the frontend. The webview reads
+/// its drop immediately; anything later is not that drop.
+const DROPPED_PATH_TTL: Duration = Duration::from_secs(60);
 
 struct DesktopState {
     daemon: Mutex<Option<EmbeddedDaemonHandle>>,
     exit_prompt_open: AtomicBool,
+    /// Paths the user just dragged onto a window, with the moment they landed.
+    /// The attachment read command serves only these, so the frontend can
+    /// never turn a file read into an arbitrary filesystem read.
+    dropped_paths: SyncMutex<HashMap<PathBuf, Instant>>,
 }
 
 impl Default for DesktopState {
@@ -37,7 +50,31 @@ impl Default for DesktopState {
         Self {
             daemon: Mutex::new(None),
             exit_prompt_open: AtomicBool::new(false),
+            dropped_paths: SyncMutex::new(HashMap::new()),
         }
+    }
+}
+
+impl DesktopState {
+    fn remember_dropped_paths(&self, paths: &[PathBuf]) {
+        let Ok(mut dropped) = self.dropped_paths.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        dropped.retain(|_, at| now.duration_since(*at) < DROPPED_PATH_TTL);
+        for path in paths {
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.clone());
+            dropped.insert(resolved, now);
+        }
+    }
+
+    fn was_recently_dropped(&self, path: &Path) -> bool {
+        let Ok(dropped) = self.dropped_paths.lock() else {
+            return false;
+        };
+        dropped
+            .get(path)
+            .is_some_and(|at| Instant::now().duration_since(*at) < DROPPED_PATH_TTL)
     }
 }
 
@@ -1121,6 +1158,99 @@ async fn read_local_text_file(
     read_text_file_contents(&resolved)
 }
 
+/// A file the user dragged onto a FalconDeck window, read for the composer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DroppedAttachment {
+    path: String,
+    name: String,
+    mime_type: Option<String>,
+    /// Base64 of the file contents; the frontend rebuilds a `File` from it and
+    /// runs the same prepare/budget pipeline as a paste.
+    data_base64: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DroppedAttachmentsResponse {
+    attachments: Vec<DroppedAttachment>,
+    skipped: Vec<String>,
+}
+
+/// Read files the user just dropped on a window.
+///
+/// Only paths reported by a recent platform drag-drop event are served, so the
+/// webview cannot widen this into an arbitrary file read. Folders and oversize
+/// files are reported as skipped rather than failing the whole drop.
+#[tauri::command]
+async fn read_dropped_attachments(
+    paths: Vec<String>,
+    state: tauri::State<'_, DesktopState>,
+) -> Result<DroppedAttachmentsResponse, String> {
+    let readable = paths
+        .into_iter()
+        .map(|raw| {
+            let name = local_path_display_name(&raw);
+            match resolve_existing_local_path(&raw) {
+                Ok(path) if state.was_recently_dropped(&path) => Ok((name, path)),
+                _ => Err(format!("{name} could not be read.")),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // Reading and base64-encoding up to 25 MB per file is blocking work; it
+    // must not run on a runtime thread that also serves the window.
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut attachments = Vec::new();
+        let mut skipped = Vec::new();
+        for entry in readable {
+            let (name, path) = match entry {
+                Ok(entry) => entry,
+                Err(message) => {
+                    skipped.push(message);
+                    continue;
+                }
+            };
+            let Ok(metadata) = fs::metadata(&path) else {
+                skipped.push(format!("{name} could not be read."));
+                continue;
+            };
+            if metadata.is_dir() {
+                skipped.push(format!("{name} is a folder."));
+                continue;
+            }
+            if metadata.len() > MAX_DROPPED_ATTACHMENT_BYTES {
+                skipped.push(format!("{name} is larger than 25 MB."));
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                skipped.push(format!("{name} could not be read."));
+                continue;
+            };
+            attachments.push(DroppedAttachment {
+                name,
+                path: path.to_string_lossy().to_string(),
+                mime_type: None,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
+        }
+        Ok(DroppedAttachmentsResponse {
+            attachments,
+            skipped,
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn local_path_display_name(raw: &str) -> String {
+    Path::new(raw.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("that file")
+        .to_string()
+}
+
 #[tauri::command]
 async fn save_local_file_as(
     source: String,
@@ -1304,6 +1434,23 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(DesktopState::default())
+        .on_window_event(|window, event| {
+            // Tauri intercepts native drags before the document sees them, so
+            // the paths are recorded here and the webview reads them back by
+            // path after its own drag-drop event fires.
+            if let tauri::WindowEvent::DragDrop(event) = event {
+                match event {
+                    // Remember on enter as well as drop so the webview's drop
+                    // handler can read the files even if it races the window
+                    // event. Hovered paths expire with the same TTL.
+                    tauri::DragDropEvent::Enter { paths, .. }
+                    | tauri::DragDropEvent::Drop { paths, .. } => {
+                        window.state::<DesktopState>().remember_dropped_paths(paths);
+                    }
+                    _ => {}
+                }
+            }
+        })
         .on_page_load(|webview, payload| {
             eprintln!(
                 "FalconDeck webview '{}' page {:?}: {}",
@@ -1363,6 +1510,7 @@ pub fn run() {
             open_path_with_editor,
             local_path_kind,
             read_local_text_file,
+            read_dropped_attachments,
             save_local_file_as,
             open_activity_window,
             focus_main_window,
