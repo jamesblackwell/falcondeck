@@ -320,7 +320,14 @@ async fn handle_tool_call(
 }
 
 fn tool_result(id: Value, structured: Value, is_error: bool, metadata: Option<Value>) -> Value {
-    let text = serde_json::to_string(&structured).unwrap_or_else(|_| "{\"ok\":false}".to_string());
+    let text = structured
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|_| !is_error)
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            serde_json::to_string(&structured).unwrap_or_else(|_| "{\"ok\":false}".to_string())
+        });
     let mut result = json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": structured,
@@ -347,6 +354,14 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_tool_results_are_plain_text_on_the_bridge() {
+        let markdown = "# Thread test\n\n## User\n\nHello";
+        let result = tool_result(json!(1), json!({"ok":true,"result":markdown}), false, None);
+        assert_eq!(result["result"]["content"][0]["text"], markdown);
+        assert_eq!(result["result"]["structuredContent"]["result"], markdown);
+    }
 
     fn context(daemon_url: &str) -> BridgeContext {
         BridgeContext {

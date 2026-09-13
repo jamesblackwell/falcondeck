@@ -155,6 +155,7 @@ pub fn append_instructions(
         "You are running inside FalconDeck, a local-first control plane that orchestrates coding agents (Codex, Claude, ACP CLIs) from the FalconDeck desktop and mobile apps. Your threads, turns and tool approvals are managed by FalconDeck.\n\n\
          - Use the FalconDeck MCP tools available in this session. They are part of the product; do not wait for the user to name them.\n",
     );
+    text.push_str("- Use `falcondeck_list_threads` and `falcondeck_view_thread` on falcondeck-extensions to inspect sibling work as bounded markdown. Use `falcondeck_create_thread` for independent work in this workspace; context defaults to none, with optional briefing or transcript_tail. Creation does not wait; at most three concurrent children per parent. Approvals remain in FalconDeck UI.\n");
     if suggest_follow_ups {
         text.push_str(
             "- Near the end of a turn, if useful next steps remain, call `falcondeck_suggest_follow_ups` once with 1–5 short actions (imperative labels, at most 30 characters). It does not block the turn. Skip it only when nothing useful is left to offer.\n",

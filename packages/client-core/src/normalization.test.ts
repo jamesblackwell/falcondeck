@@ -714,6 +714,12 @@ describe("malformed conversation output normalization", () => {
     );
   });
 
+  it("preserves agent spawn provenance", () => {
+    const origin = { kind: "agent_spawn", parent_thread_id: "parent-1" };
+    const detail = normalizeThreadDetail({ workspace: {}, thread: { origin }, items: [] });
+    expect(detail.thread.origin).toEqual(origin);
+  });
+
   it("preserves Automation provenance on ordinary thread summaries", () => {
     const detail = normalizeThreadDetail({
       workspace: {},

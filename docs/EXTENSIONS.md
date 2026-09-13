@@ -1020,3 +1020,25 @@ Before changing the extension API, answer:
 
 If these questions lack concrete answers, the capability is not ready for the
 public extension SDK.
+
+## Daemon-owned session thread tools
+
+The `falcondeck-extensions` bridge also advertises `falcondeck_list_threads`,
+`falcondeck_view_thread`, and `falcondeck_create_thread` beside the daemon-owned
+rename builtin. These require a calling thread and inherit its workspace. They
+are not extension-host APIs, control operations, or `threads:read` grants;
+`threads:read` remains summary-only with no previews or transcript access.
+
+List reads daemon summaries plus existing search-index opening/recent excerpts
+without transcript hydration. View loads a bounded native-provider tail and
+formats handoff markdown in Rust, with `before` pagination, at most 100 items
+and 24000 characters. No ConversationItem JSON is returned.
+
+Create uses normal thread start and optional first-turn dispatch with existing
+UI approvals. Optional context is `none` (default), `briefing` (summary/index),
+or `transcript_tail` (40 items / 12000 characters). The daemon persists
+`agent_spawn` origin with `parent_thread_id`, not a conversation database.
+Admission is serialized and capped at three concurrent children per parent;
+running, waiting, queued, and unused idle children count until completed,
+or errored. Archiving an unused idle child releases its slot; archived running
+or waiting children continue to count. Calls return after dispatch, without waiting for a turn.

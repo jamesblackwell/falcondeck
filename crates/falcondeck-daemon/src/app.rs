@@ -102,6 +102,7 @@ mod speech;
 mod storage;
 mod sync_index;
 mod thread_search;
+mod thread_tools;
 mod threads;
 mod utility_model;
 mod workspace_ops;
@@ -459,6 +460,8 @@ struct InnerState {
     thread_search_scanned_at: StdMutex<Option<std::time::Instant>>,
     /// Serializes scans so concurrent searches trigger at most one walk.
     thread_search_scan: Mutex<()>,
+    /// Serializes child admission through first-turn dispatch.
+    agent_spawn_gate: Mutex<()>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
     realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
     /// Pending Claude PreToolUse hook replies keyed by (workspace_id, request_id);
@@ -1078,6 +1081,7 @@ impl AppState {
                 thread_search: StdMutex::new(thread_search::ThreadSearchIndex::default()),
                 thread_search_scanned_at: StdMutex::new(None),
                 thread_search_scan: Mutex::new(()),
+                agent_spawn_gate: Mutex::new(()),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
@@ -2850,10 +2854,11 @@ impl AppState {
 
     /// The agent tools the `falcondeck-extensions` MCP bridge may publish
     /// right now. Recomputed per request so a disable or revoke is reflected
-    /// the next time a harness lists tools. Includes the daemon-owned rename
-    /// tool so an agent can retitle this conversation without an extension.
+    /// the next time a harness lists tools. Includes daemon-owned session
+    /// tools for renaming, inspecting, and creating sibling threads.
     pub async fn extension_agent_tools(&self) -> falcondeck_core::ExtensionAgentToolList {
         let mut tools = vec![builtin_rename_thread_tool()];
+        tools.extend(thread_tools::catalog());
         tools.extend(self.inner.extensions.lock().await.agent_tools());
         tools.sort_by(|left, right| left.name.cmp(&right.name));
         falcondeck_core::ExtensionAgentToolList { tools }
@@ -2906,6 +2911,16 @@ impl AppState {
             .as_ref()
             .map(|context| context.workspace_path.as_str())
             .or(request.workspace_path.as_deref());
+        if thread_tools::is_builtin(&request.name) {
+            return self
+                .invoke_thread_tool(
+                    &request.name,
+                    &request.arguments,
+                    effective_thread_id,
+                    effective_workspace_path,
+                )
+                .await;
+        }
         if request.name == BUILTIN_RENAME_THREAD_TOOL {
             // Workspace-wide bridges already resolved their thread above, so
             // rename binds to the same in-flight call or unambiguous task.

@@ -4151,6 +4151,11 @@ pub struct ThreadSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ThreadOrigin {
+    /// An in-session agent created a sibling through the extensions bridge.
+    AgentSpawn {
+        /// Calling FalconDeck thread.
+        parent_thread_id: String,
+    },
     /// A daemon-owned scheduled task created the thread for one invocation.
     ScheduledTask {
         /// Owning task identifier.

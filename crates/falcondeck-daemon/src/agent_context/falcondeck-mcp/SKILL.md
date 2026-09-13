@@ -13,7 +13,8 @@ not optional flavour.
 - `falcondeck` — control plane: `falcondeck_search`, `falcondeck_get`,
   `falcondeck_execute`.
 - `falcondeck-extensions` — session tools, including
-  `falcondeck_suggest_follow_ups` and `falcondeck_rename_thread`.
+  `falcondeck_suggest_follow_ups`, `falcondeck_rename_thread`,
+  `falcondeck_list_threads`, `falcondeck_view_thread`, and `falcondeck_create_thread`.
 
 ## Next actions
 
@@ -43,3 +44,32 @@ Follow-ups the user asks for during a conversation ("check back in a few
 hours", "remind me here tomorrow") should run in this same thread: create the
 automation with `"thread": { "kind": "current" }`. Use a `managed` thread only
 for standing schedules that are not about this conversation.
+
+## Sibling threads
+
+Use `falcondeck_list_threads` to find work in this workspace. Results are bounded
+markdown summaries with last previews and cached opening/recent user excerpts,
+when available; listing does not load transcripts. `limit` defaults to 30 (max
+100), and `max_chars` defaults to 24000 (512–24000).
+
+Use `falcondeck_view_thread` with `thread_id` to read handoff markdown. `limit`
+defaults to 40 items (max 100); `max_chars` has the same bounds as list. The
+newest content wins when the character budget fills. Individual bodies may be
+truncated. Pass the returned `before` item id to read older content.
+
+Use `falcondeck_create_thread` for independent sibling work. The workspace is
+inherited. Optional arguments: `provider`, `isolation` (`project_folder`, the
+default, or `isolated`), `model`, and `prompt` (up to 24000 characters). Without
+`prompt`, the new thread stays idle. `context` defaults to `none`: no parent
+transcript is copied. Choose `briefing` for the parent's summary and cached user
+excerpts, or `transcript_tail` for up to 40 items / 12000 characters of handoff
+markdown. Explicit context is held for the first prompt if none is supplied.
+
+Creation returns after starting the thread and dispatching any first prompt;
+it does not wait for completion. Use list/view to check progress. The daemon
+stamps the parent as spawn origin and allows at most three concurrent children
+per parent. Running, waiting, queued, and unused idle children consume a slot;
+completed/error children release it; archiving releases an unused idle child,
+but an archived child that is still running or waiting continues to count. Tool approvals and questions
+stay in the existing FalconDeck UI. If first-prompt dispatch fails, the result
+still identifies the created thread; do not blindly create a duplicate.

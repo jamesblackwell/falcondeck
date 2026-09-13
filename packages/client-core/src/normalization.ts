@@ -644,6 +644,8 @@ export function normalizeThreadSummary(
           }
         : null,
     origin:
+      (thread.origin?.kind === "agent_spawn" &&
+        typeof thread.origin.parent_thread_id === "string") ||
       (thread.origin?.kind === "scheduled_task" &&
         typeof thread.origin.task_id === "string" &&
         typeof thread.origin.title === "string") ||

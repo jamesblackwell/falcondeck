@@ -760,6 +760,7 @@ export type ThreadSummary = {
   /** Source thread when this thread is a cross-provider continuation. */
   handoff_from?: ThreadHandoffSource | null;
   origin?:
+    | { kind: "agent_spawn"; parent_thread_id: string }
     | { kind: "scheduled_task"; task_id: string; title: string }
     | { kind: "automation"; automation_id: string; name: string }
     | null;

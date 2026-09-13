@@ -5115,7 +5115,7 @@ fn latest_user_message_index(items: &[ConversationItem]) -> Option<usize> {
         .rposition(|item| matches!(item, ConversationItem::UserMessage { .. }))
 }
 
-fn conversation_item_id(item: &ConversationItem) -> &str {
+pub(super) fn conversation_item_id(item: &ConversationItem) -> &str {
     match item {
         ConversationItem::UserMessage { id, .. }
         | ConversationItem::AssistantMessage { id, .. }
