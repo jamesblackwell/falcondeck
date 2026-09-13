@@ -17,6 +17,17 @@ const PREVIEW_TITLE_BACKFILL_LIMIT: usize = 5;
 
 const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
 const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 15_000_000;
+/// Documents are stored beside the thread and opened from disk by the agent,
+/// so they never inflate a provider payload and can be larger than images.
+const MAX_DOCUMENT_ATTACHMENT_BYTES: u64 = 25_000_000;
+const MAX_TOTAL_DOCUMENT_ATTACHMENT_BYTES: u64 = 25_000_000;
+
+/// Running per-turn attachment budget, tracked separately per kind.
+#[derive(Debug, Default)]
+struct AttachmentBudget {
+    image_bytes: u64,
+    document_bytes: u64,
+}
 
 pub(super) async fn connect_workspace(
     app: &AppState,
@@ -1405,14 +1416,13 @@ async fn normalize_turn_inputs(
     inputs: &[TurnInputItem],
 ) -> Result<Vec<TurnInputItem>, DaemonError> {
     let mut normalized = Vec::with_capacity(inputs.len());
-    let mut total_image_bytes = 0;
+    let mut budget = AttachmentBudget::default();
 
     for input in inputs {
         match input {
             TurnInputItem::Text { .. } => normalized.push(input.clone()),
             TurnInputItem::Image(image) => normalized.push(TurnInputItem::Image(
-                normalize_image_input(app, workspace_id, thread_id, image, &mut total_image_bytes)
-                    .await?,
+                normalize_image_input(app, workspace_id, thread_id, image, &mut budget).await?,
             )),
         }
     }
@@ -1425,9 +1435,10 @@ async fn normalize_image_input(
     workspace_id: &str,
     thread_id: &str,
     image: &ImageInput,
-    total_image_bytes: &mut u64,
+    budget: &mut AttachmentBudget,
 ) -> Result<ImageInput, DaemonError> {
     let image_url = image.url.trim();
+    let kind = attachment_kind(image);
 
     if let Some(local_path) = image
         .local_path
@@ -1440,7 +1451,7 @@ async fn normalize_image_input(
         // payload, and those must fall through to be materialized here.
         if tokio::fs::try_exists(local_path).await.unwrap_or(false) {
             if let Ok(metadata) = tokio::fs::metadata(local_path).await {
-                record_image_attachment_size(image, metadata.len(), total_image_bytes)?;
+                record_attachment_size(image, kind, metadata.len(), budget)?;
             }
             let mut normalized = image.clone();
             normalized.url = compact_image_reference_url(image, local_path);
@@ -1449,9 +1460,10 @@ async fn normalize_image_input(
     }
 
     if image_url.starts_with("data:") {
-        let parsed = parse_image_data_url_with_budget(&image.url, image, total_image_bytes)?;
+        let parsed = parse_image_data_url_with_budget(&image.url, image, kind, budget)?;
         let local_path =
-            persist_inline_image_attachment(app, workspace_id, thread_id, image, parsed).await?;
+            persist_inline_image_attachment(app, workspace_id, thread_id, image, kind, parsed)
+                .await?;
         let mut normalized = image.clone();
         normalized.url = local_path.clone();
         normalized.local_path = Some(local_path);
@@ -1460,7 +1472,7 @@ async fn normalize_image_input(
 
     if Path::new(image_url).is_absolute() {
         if let Ok(metadata) = tokio::fs::metadata(image_url).await {
-            record_image_attachment_size(image, metadata.len(), total_image_bytes)?;
+            record_attachment_size(image, kind, metadata.len(), budget)?;
         }
         let mut normalized = image.clone();
         normalized.local_path = Some(image_url.to_string());
@@ -1471,29 +1483,53 @@ async fn normalize_image_input(
     Ok(image.clone())
 }
 
-fn record_image_attachment_size(
+fn record_attachment_size(
     image: &ImageInput,
+    kind: AttachmentKind,
     bytes: u64,
-    total_image_bytes: &mut u64,
+    budget: &mut AttachmentBudget,
 ) -> Result<(), DaemonError> {
     let label = image
         .name
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .unwrap_or("Image");
-    if bytes > MAX_IMAGE_ATTACHMENT_BYTES {
-        return Err(DaemonError::BadRequest(format!(
-            "{label} is too large. Images must be 10 MB or smaller."
-        )));
+        .unwrap_or(match kind {
+            AttachmentKind::Image => "Image",
+            AttachmentKind::Document => "File",
+        });
+    match kind {
+        AttachmentKind::Image => {
+            if bytes > MAX_IMAGE_ATTACHMENT_BYTES {
+                return Err(DaemonError::BadRequest(format!(
+                    "{label} is too large. Images must be 10 MB or smaller."
+                )));
+            }
+            let next_total = budget.image_bytes.saturating_add(bytes);
+            if next_total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES {
+                return Err(DaemonError::BadRequest(
+                    "Those images are too large together. Attach no more than 15 MB at once."
+                        .to_string(),
+                ));
+            }
+            budget.image_bytes = next_total;
+        }
+        AttachmentKind::Document => {
+            if bytes > MAX_DOCUMENT_ATTACHMENT_BYTES {
+                return Err(DaemonError::BadRequest(format!(
+                    "{label} is too large. Files must be 25 MB or smaller."
+                )));
+            }
+            let next_total = budget.document_bytes.saturating_add(bytes);
+            if next_total > MAX_TOTAL_DOCUMENT_ATTACHMENT_BYTES {
+                return Err(DaemonError::BadRequest(
+                    "Those files are too large together. Attach no more than 25 MB at once."
+                        .to_string(),
+                ));
+            }
+            budget.document_bytes = next_total;
+        }
     }
-    let next_total = total_image_bytes.saturating_add(bytes);
-    if next_total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES {
-        return Err(DaemonError::BadRequest(
-            "Those images are too large together. Attach no more than 15 MB at once.".to_string(),
-        ));
-    }
-    *total_image_bytes = next_total;
     Ok(())
 }
 
@@ -1502,14 +1538,27 @@ async fn persist_inline_image_attachment(
     workspace_id: &str,
     thread_id: &str,
     image: &ImageInput,
+    kind: AttachmentKind,
     parsed: ParsedImageDataUrl,
 ) -> Result<String, DaemonError> {
+    let attachments_root = thread_attachments_root(app, workspace_id, thread_id);
+
+    // Documents keep their own file name — the agent is told to open the path,
+    // so "Q3-report.pdf" beats an opaque attachment id. The id becomes the
+    // containing folder, which keeps two same-named drops apart.
+    if kind == AttachmentKind::Document {
+        let directory = attachments_root.join(sanitized_attachment_file_stem(&image.id));
+        tokio::fs::create_dir_all(&directory).await?;
+        let file_path = directory.join(document_attachment_file_name(image, &parsed.media_type));
+        tokio::fs::write(&file_path, parsed.bytes).await?;
+        return Ok(file_path.to_string_lossy().to_string());
+    }
+
     let extension = image_file_extension(
         image.name.as_deref(),
         image.mime_type.as_deref(),
         &parsed.media_type,
     );
-    let attachments_root = thread_attachments_root(app, workspace_id, thread_id);
     tokio::fs::create_dir_all(&attachments_root).await?;
 
     let file_path = attachments_root.join(format!(
@@ -1522,7 +1571,42 @@ async fn persist_inline_image_attachment(
     Ok(file_path.to_string_lossy().to_string())
 }
 
-fn thread_attachments_root(app: &AppState, workspace_id: &str, thread_id: &str) -> PathBuf {
+/// A safe on-disk name for a document attachment: the client's file name with
+/// path separators and control characters removed, never empty, never a
+/// relative traversal.
+fn document_attachment_file_name(image: &ImageInput, media_type: &str) -> String {
+    let supplied = image
+        .name
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    let sanitized = supplied
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .map(|ch| if ch == ':' { '-' } else { ch })
+        .take(96)
+        .collect::<String>();
+    let trimmed = sanitized.trim().trim_matches('.').trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    let extension = media_type
+        .rsplit('/')
+        .next()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .unwrap_or("bin");
+    format!("attachment.{extension}")
+}
+
+pub(super) fn thread_attachments_root(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> PathBuf {
     app.inner
         .state_path
         .parent()
@@ -1599,14 +1683,14 @@ fn image_data_url_parts(url: &str) -> Result<(String, &str), DaemonError> {
 
     let mut parts = metadata.split(';');
     let media_type = parts.next().unwrap_or_default().trim().to_string();
-    if media_type.is_empty() || !media_type.starts_with("image/") {
+    if media_type.is_empty() || !media_type.contains('/') {
         return Err(DaemonError::BadRequest(
-            "image attachments must use an image/* data URL".to_string(),
+            "attachments must declare a media type in their data URL".to_string(),
         ));
     }
     if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
         return Err(DaemonError::BadRequest(
-            "image attachments must use base64 data URLs".to_string(),
+            "attachments must use base64 data URLs".to_string(),
         ));
     }
 
@@ -1626,7 +1710,8 @@ fn parse_image_data_url(url: &str) -> Result<ParsedImageDataUrl, DaemonError> {
 fn parse_image_data_url_with_budget(
     url: &str,
     image: &ImageInput,
-    total_image_bytes: &mut u64,
+    kind: AttachmentKind,
+    budget: &mut AttachmentBudget,
 ) -> Result<ParsedImageDataUrl, DaemonError> {
     let (_, encoded) = image_data_url_parts(url)?;
     let padding = if encoded.ends_with("==") {
@@ -1640,7 +1725,7 @@ fn parse_image_data_url_with_budget(
     let decoded_upper_bound = (encoded_len.saturating_add(3) / 4)
         .saturating_mul(3)
         .saturating_sub(padding);
-    record_image_attachment_size(image, decoded_upper_bound, total_image_bytes)?;
+    record_attachment_size(image, kind, decoded_upper_bound, budget)?;
     parse_image_data_url(url)
 }
 
@@ -3173,14 +3258,20 @@ pub(super) fn codex_approval_response(
 /// leaves the provider on its config default.
 pub(super) fn sandbox_policy_payload(
     mode: Option<&str>,
-    additional_writable_root: Option<&str>,
+    additional_writable_roots: &[String],
 ) -> Value {
     match mode.map(str::trim) {
         Some("read-only") => json!({ "type": "readOnly" }),
-        Some("workspace-write") => match additional_writable_root {
-            Some(root) => json!({ "type": "workspaceWrite", "writableRoots": [root] }),
-            None => json!({ "type": "workspaceWrite" }),
-        },
+        Some("workspace-write") => {
+            if additional_writable_roots.is_empty() {
+                json!({ "type": "workspaceWrite" })
+            } else {
+                json!({
+                    "type": "workspaceWrite",
+                    "writableRoots": additional_writable_roots,
+                })
+            }
+        }
         Some("danger-full-access") => json!({ "type": "dangerFullAccess" }),
         _ => Value::Null,
     }
@@ -6595,13 +6686,124 @@ mod tests {
     }
 
     #[test]
-    fn parses_image_data_urls_strictly() {
+    fn parses_attachment_data_urls_strictly() {
         let parsed =
             parse_image_data_url("data:image/webp;base64,aGVsbG8=").expect("valid data url");
         assert_eq!(parsed.media_type, "image/webp");
         assert_eq!(parsed.bytes, b"hello");
-        assert!(parse_image_data_url("data:text/plain;base64,aGVsbG8=").is_err());
+        // Documents ride the same envelope, so any declared media type parses.
+        let document =
+            parse_image_data_url("data:application/pdf;base64,aGVsbG8=").expect("valid data url");
+        assert_eq!(document.media_type, "application/pdf");
+        assert!(parse_image_data_url("data:;base64,aGVsbG8=").is_err());
         assert!(parse_image_data_url("data:image/png,hello").is_err());
+    }
+
+    #[tokio::test]
+    async fn stores_a_document_attachment_under_its_own_file_name() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "doc-1".to_string(),
+            name: Some("Q3 report.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            url: "data:application/pdf;base64,aGVsbG8=".to_string(),
+            local_path: None,
+        })];
+
+        let normalized = normalize_turn_inputs(&app, "workspace-1", "thread-1", &inputs)
+            .await
+            .unwrap();
+
+        let TurnInputItem::Image(attachment) = &normalized[0] else {
+            panic!("expected an attachment input");
+        };
+        let local_path = attachment
+            .local_path
+            .as_deref()
+            .expect("expected a materialized path");
+        assert!(local_path.ends_with("doc-1/Q3 report.pdf"));
+        assert_eq!(tokio::fs::read(local_path).await.unwrap(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn keeps_a_document_file_name_inside_the_attachment_directory() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
+        let image = ImageInput {
+            id: "doc-2".to_string(),
+            name: Some("../../escape.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            url: "data:application/pdf;base64,aGVsbG8=".to_string(),
+            local_path: None,
+        };
+        let parsed = parse_image_data_url(&image.url).unwrap();
+
+        let local_path = persist_inline_image_attachment(
+            &app,
+            "workspace-1",
+            "thread-1",
+            &image,
+            AttachmentKind::Document,
+            parsed,
+        )
+        .await
+        .unwrap();
+
+        assert!(Path::new(&local_path).starts_with(temp_dir.path().join("attachments")));
+        assert!(local_path.ends_with("doc-2/escape.pdf"));
+    }
+
+    #[test]
+    fn rejects_documents_over_the_file_ceiling() {
+        let image = ImageInput {
+            id: "large".to_string(),
+            name: Some("archive.zip".to_string()),
+            mime_type: Some("application/zip".to_string()),
+            url: String::new(),
+            local_path: None,
+        };
+        let mut budget = AttachmentBudget::default();
+
+        let error = record_attachment_size(
+            &image,
+            AttachmentKind::Document,
+            MAX_DOCUMENT_ATTACHMENT_BYTES + 1,
+            &mut budget,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("archive.zip is too large. Files must be 25 MB or smaller.")
+        );
+    }
+
+    #[test]
+    fn spends_image_and_document_budgets_separately() {
+        let mut budget = AttachmentBudget::default();
+        let document = ImageInput {
+            id: "doc".to_string(),
+            name: Some("report.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            url: String::new(),
+            local_path: None,
+        };
+        let image = ImageInput {
+            mime_type: Some("image/png".to_string()),
+            name: Some("shot.png".to_string()),
+            ..document.clone()
+        };
+
+        record_attachment_size(&document, AttachmentKind::Document, 20_000_000, &mut budget)
+            .unwrap();
+        record_attachment_size(&image, AttachmentKind::Image, 9_000_000, &mut budget).unwrap();
+
+        assert_eq!(budget.document_bytes, 20_000_000);
+        assert_eq!(budget.image_bytes, 9_000_000);
     }
 
     #[test]
@@ -6629,7 +6831,7 @@ mod tests {
             url: "data:image/png;base64,aGVsbG8=".to_string(),
             local_path: Some(diagram_path.clone()),
         };
-        let mut total_image_bytes = 0;
+        let mut budget = AttachmentBudget::default();
 
         let normalized = normalize_image_input(
             &AppState::new_with_state_path(
@@ -6640,7 +6842,7 @@ mod tests {
             "workspace-1",
             "thread-1",
             &image,
-            &mut total_image_bytes,
+            &mut budget,
         )
         .await
         .unwrap();
@@ -6671,6 +6873,7 @@ mod tests {
             "../../workspace",
             "../../thread",
             &image,
+            AttachmentKind::Image,
             parsed,
         )
         .await
@@ -6689,11 +6892,15 @@ mod tests {
             url: String::new(),
             local_path: None,
         };
-        let mut total = 0;
+        let mut budget = AttachmentBudget::default();
 
-        let error =
-            record_image_attachment_size(&image, MAX_IMAGE_ATTACHMENT_BYTES + 1, &mut total)
-                .unwrap_err();
+        let error = record_attachment_size(
+            &image,
+            AttachmentKind::Image,
+            MAX_IMAGE_ATTACHMENT_BYTES + 1,
+            &mut budget,
+        )
+        .unwrap_err();
 
         assert!(
             error
@@ -6747,9 +6954,13 @@ mod tests {
             url: String::new(),
             local_path: None,
         };
-        let mut total = MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - 1;
+        let mut budget = AttachmentBudget {
+            image_bytes: MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - 1,
+            document_bytes: 0,
+        };
 
-        let error = record_image_attachment_size(&image, 2, &mut total).unwrap_err();
+        let error =
+            record_attachment_size(&image, AttachmentKind::Image, 2, &mut budget).unwrap_err();
 
         assert!(
             error.to_string().contains(

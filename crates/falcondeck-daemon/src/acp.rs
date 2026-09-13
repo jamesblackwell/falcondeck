@@ -37,6 +37,7 @@ use crate::agent_binary::{
     desktop_login_shell_environment, preferred_command_path_with_environment, resolve_agent_binary,
     strip_terminal_advertising_env,
 };
+use crate::app::agent_helpers::attachment_reference_text;
 use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::error::DaemonError;
 
@@ -410,14 +411,7 @@ fn acp_interject_probe_supported(outcome: &Result<Value, DaemonError>) -> bool {
 /// block referencing the path, so the attachment never silently vanishes.
 /// The mime type comes from the file extension, not the client's claim.
 pub async fn acp_image_content_block(image: &ImageInput, encoded_budget: &mut usize) -> Value {
-    let fallback = || {
-        let reference = image
-            .local_path
-            .as_deref()
-            .or(image.name.as_deref())
-            .unwrap_or("attachment");
-        json!({ "type": "text", "text": format!("[attached image: {reference}]") })
-    };
+    let fallback = || json!({ "type": "text", "text": attachment_reference_text(image) });
     let Some(local_path) = image
         .local_path
         .as_deref()

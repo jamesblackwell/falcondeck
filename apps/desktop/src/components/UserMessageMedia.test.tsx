@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { MessageCard } from "@falcondeck/chat-ui";
+import { LocalPathProvider, MessageCard } from "@falcondeck/chat-ui";
 import type { ConversationItem, ImageInput } from "@falcondeck/client-core";
 
 function userMessage(attachment: ImageInput) {
@@ -23,7 +23,36 @@ const remoteImage = {
   local_path: null,
 } satisfies ImageInput;
 
+const documentAttachment = {
+  type: "image",
+  id: "brief",
+  name: "brief.pdf",
+  mime_type: "application/pdf",
+  url: "/tmp/attachments/brief/brief.pdf",
+  local_path: "/tmp/attachments/brief/brief.pdf",
+} satisfies ImageInput;
+
 describe("user message media", () => {
+  it("shows a document attachment as a file chip that opens its local path", () => {
+    const onLocalPath = vi.fn();
+    render(
+      <LocalPathProvider onLocalPath={onLocalPath}>
+        <MessageCard item={userMessage(documentAttachment)} />
+      </LocalPathProvider>,
+    );
+
+    expect(screen.getByText("PDF")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Preview brief.pdf" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open brief.pdf" }));
+    expect(onLocalPath).toHaveBeenCalledWith(
+      "open",
+      "/tmp/attachments/brief/brief.pdf",
+    );
+  });
+
   it("opens and closes an accessible full-size attachment preview", () => {
     render(<MessageCard item={userMessage(remoteImage)} />);
 

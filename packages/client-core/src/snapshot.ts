@@ -14,8 +14,14 @@ import {
   normalizeScheduledTaskRun,
   normalizeThreadSummary,
 } from "./normalization";
-import { trackSyncIndexEvent } from './sync-index';
+import { trackSyncIndexEvent } from "./sync-index";
 import { prepareImageFile } from "./image-prepare";
+import {
+  attachmentKind,
+  fileAttachmentKind,
+  mediaTypeForFileName,
+  type AttachmentKind,
+} from "./attachment-kind";
 
 export type SnapshotSelection = {
   workspaceId: string | null;
@@ -54,7 +60,12 @@ export function threadForSelection(
  * authoritatively; clients use them to fail before allocating relay payloads. */
 export const MAX_IMAGE_ATTACHMENT_BYTES = 10_000_000;
 export const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 15_000_000;
-const IMAGE_FILENAME_EXTENSION = /\.(?:avif|gif|heic|heif|jpe?g|png|webp)$/i;
+
+/** Documents are never inlined into a provider payload — the daemon stores
+ * them beside the thread and the agent opens them from disk — so they get a
+ * more generous ceiling than vision attachments. */
+export const MAX_DOCUMENT_ATTACHMENT_BYTES = 25_000_000;
+export const MAX_TOTAL_DOCUMENT_ATTACHMENT_BYTES = 25_000_000;
 
 function base64PayloadByteSize(value: string): number | null {
   const comma = value.indexOf(",");
@@ -72,37 +83,67 @@ export function imageInputByteSize(image: ImageInput): number | null {
     : null;
 }
 
-function validateImageByteEntries(
-  entries: readonly { name: string; bytes: number }[],
-) {
-  let total = 0;
+type AttachmentByteEntry = {
+  name: string;
+  bytes: number;
+  kind: AttachmentKind;
+};
+
+function validateImageByteEntries(entries: readonly AttachmentByteEntry[]) {
+  let imageTotal = 0;
+  let documentTotal = 0;
   for (const entry of entries) {
+    if (entry.kind === "document") {
+      if (entry.bytes > MAX_DOCUMENT_ATTACHMENT_BYTES) {
+        throw new Error(
+          `${entry.name} is too large. Files must be 25 MB or smaller.`,
+        );
+      }
+      documentTotal += entry.bytes;
+      continue;
+    }
     if (entry.bytes > MAX_IMAGE_ATTACHMENT_BYTES) {
       throw new Error(
         `${entry.name} is too large. Images must be 10 MB or smaller.`,
       );
     }
-    total += entry.bytes;
+    imageTotal += entry.bytes;
   }
-  if (total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES) {
+  if (imageTotal > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES) {
     throw new Error(
       "Those images are too large together. Attach no more than 15 MB at once.",
     );
   }
+  if (documentTotal > MAX_TOTAL_DOCUMENT_ATTACHMENT_BYTES) {
+    throw new Error(
+      "Those files are too large together. Attach no more than 25 MB at once.",
+    );
+  }
 }
 
-/** Validate already-materialized image inputs before queueing or relay encryption. */
+function attachmentByteEntries(
+  attachments: readonly ImageInput[],
+): AttachmentByteEntry[] {
+  return attachments.flatMap((attachment) => {
+    const bytes = imageInputByteSize(attachment);
+    if (bytes == null) return [];
+    const kind = attachmentKind(attachment);
+    return [
+      {
+        name:
+          attachment.name?.trim() || (kind === "document" ? "File" : "Image"),
+        bytes,
+        kind,
+      },
+    ];
+  });
+}
+
+/** Validate already-materialized attachments before queueing or relay encryption. */
 export function validateImageAttachmentBudget(
   images: readonly ImageInput[],
 ): void {
-  validateImageByteEntries(
-    images.flatMap((image) => {
-      const bytes = imageInputByteSize(image);
-      return bytes == null
-        ? []
-        : [{ name: image.name?.trim() || "Image", bytes }];
-    }),
-  );
+  validateImageByteEntries(attachmentByteEntries(images));
 }
 
 /** Highest-severity newest operational notice for one workspace. */
@@ -706,13 +747,15 @@ export function reconcileSnapshotSelection(
 }
 
 /**
- * Convert file inputs to ImageInput objects.
+ * Convert picked, pasted, or dropped files into attachment inputs.
  * Shared by both desktop and remote-web apps.
  *
- * Screenshot-sized and oversized files are downscaled and JPEG-encoded
+ * Screenshot-sized and oversized images are downscaled and JPEG-encoded
  * before the wire budget is applied, so a macOS webpage screenshot paste
  * does not fail the 10 MB cap and several of them can share the 15 MB
- * turn budget.
+ * turn budget. Documents (PDFs, spreadsheets, text) are passed through
+ * untouched — the daemon writes them beside the thread and the agent reads
+ * them from disk, so they never inflate a provider payload.
  */
 export async function filesToImageInputs(
   files: FileList | readonly File[] | null,
@@ -720,43 +763,34 @@ export async function filesToImageInputs(
 ): Promise<ImageInput[]> {
   if (!files) return [];
   const selected = Array.from(files);
-  const unsupported = selected.find((file) => {
-    const type = file.type?.trim().toLowerCase() ?? "";
-    return (
-      !type.startsWith("image/") &&
-      !(type === "" && IMAGE_FILENAME_EXTENSION.test(file.name))
-    );
-  });
-  if (unsupported) {
-    throw new Error(
-      `Only image attachments are supported. ${unsupported.name || "That file"} was not attached.`,
-    );
-  }
-  const existingEntries = existing.flatMap((image) => {
-    const bytes = imageInputByteSize(image);
-    return bytes == null
-      ? []
-      : [{ name: image.name?.trim() || "Image", bytes }];
-  });
-  let usedBytes = existingEntries.reduce((total, entry) => total + entry.bytes, 0);
-  const prepared: File[] = [];
+  const existingEntries = attachmentByteEntries(existing);
+  let usedImageBytes = existingEntries
+    .filter((entry) => entry.kind === "image")
+    .reduce((total, entry) => total + entry.bytes, 0);
+  const prepared: { file: File; kind: AttachmentKind }[] = [];
   for (const file of selected) {
-    const remaining = MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - usedBytes;
+    const kind = fileAttachmentKind(file);
+    if (kind === "document") {
+      prepared.push({ file, kind });
+      continue;
+    }
+    const remaining = MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - usedImageBytes;
     const next = await prepareImageFile(
       file,
       Math.min(MAX_IMAGE_ATTACHMENT_BYTES, remaining),
     );
-    prepared.push(next);
-    usedBytes += next.size;
+    prepared.push({ file: next, kind });
+    usedImageBytes += next.size;
   }
   validateImageByteEntries([
     ...existingEntries,
-    ...prepared.map((file) => ({
-      name: file.name || "Image",
-      bytes: file.size || 0,
+    ...prepared.map((entry) => ({
+      name: entry.file.name || (entry.kind === "document" ? "File" : "Image"),
+      bytes: entry.file.size || 0,
+      kind: entry.kind,
     })),
   ]);
-  return Promise.all(prepared.map(fileToImageInput));
+  return Promise.all(prepared.map((entry) => fileToImageInput(entry.file)));
 }
 
 function fileToImageInput(file: File): Promise<ImageInput> {
@@ -768,7 +802,7 @@ function fileToImageInput(file: File): Promise<ImageInput> {
         type: "image",
         id: crypto.randomUUID(),
         name: file.name,
-        mime_type: file.type,
+        mime_type: file.type || mediaTypeForFileName(file.name) || null,
         url: String(reader.result),
         local_path: null,
       });

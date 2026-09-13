@@ -9,6 +9,7 @@ export * from "./daemon-client";
 export * from "./crypto";
 export * from "./snapshot";
 export * from "./image-prepare";
+export * from "./attachment-kind";
 export * from "./remote-session";
 export * from "./remote-rpc";
 export * from "./relay-transport";

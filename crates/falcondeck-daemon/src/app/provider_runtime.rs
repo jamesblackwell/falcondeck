@@ -27,7 +27,7 @@ use super::{
         ResolvedSelectedSkill, agy_prompt_from_inputs, claude_prompt_from_inputs, codex_inputs,
     },
     opencode_threads::{requested_native_transport, start_opencode_turn, steer_opencode_turn},
-    workspace_ops::{sandbox_policy_payload, send_turn},
+    workspace_ops::{sandbox_policy_payload, send_turn, thread_attachments_root},
 };
 use crate::{
     codex::{extract_thread_id, extract_thread_title, thread_start_params, turn_start_params},
@@ -338,6 +338,15 @@ impl ProviderRuntime {
                     .working_directory(session.workspace_path())
                     .to_string();
                 let casual_chat_root = app.casual_chat_documents_root(spec.workspace_id).await;
+                let attachments_root =
+                    thread_attachments_root(app, spec.workspace_id, spec.thread_id)
+                        .to_string_lossy()
+                        .into_owned();
+                let mut extra_writable_roots = Vec::new();
+                if let Some(root) = casual_chat_root {
+                    extra_writable_roots.push(root);
+                }
+                extra_writable_roots.push(attachments_root);
 
                 let result = session
                     .send_request(
@@ -351,7 +360,7 @@ impl ProviderRuntime {
                             collaboration_mode,
                             sandbox_policy_payload(
                                 spec.thread.agent.sandbox_mode.as_deref(),
-                                casual_chat_root.as_deref(),
+                                &extra_writable_roots,
                             ),
                             Some(spec.approval_policy),
                             spec.service_tier,

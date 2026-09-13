@@ -122,7 +122,6 @@ Where FalconDeck diverges from CodexMonitor:
 
 - Worktree management UI (we don't force worktrees)
 - Claude-specific UX until the Codex path is solid
-- Generic binary file upload beyond image attachments
 - Over-customized theming beyond dark/light/dim/system
 
 ## Keyboard & Interaction

@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use falcondeck_core::{
     AgentProvider, ConversationCitation, ConversationCitationLocator, ImageInput,
     SelectedSkillReference, SkillSummary, ThreadIsolation, TurnInputItem,
@@ -183,7 +185,14 @@ pub(super) fn codex_inputs(
                 })
             }
             TurnInputItem::Image(image) => {
-                if let Some(local_path) = image
+                if attachment_kind(image) == AttachmentKind::Document {
+                    // Codex has no document input; the file lives beside the
+                    // thread, so the path is what makes it reachable.
+                    json!({
+                        "type": "text",
+                        "text": attachment_reference_text(image),
+                    })
+                } else if let Some(local_path) = image
                     .local_path
                     .as_deref()
                     .filter(|path| !path.trim().is_empty())
@@ -272,14 +281,94 @@ pub(super) fn claude_prompt_from_inputs(
         .join("\n\n")
 }
 
-pub(crate) fn claude_image_reference(image: &ImageInput) -> String {
+/// What an attachment is for, decided from its media type or file name.
+/// Images are embedded into the provider payload; everything else is handed
+/// over as a path the agent can open with its own file tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachmentKind {
+    Image,
+    Document,
+}
+
+pub(crate) fn attachment_kind(image: &ImageInput) -> AttachmentKind {
+    if let Some(mime) = image
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return if mime.to_ascii_lowercase().starts_with("image/") {
+            AttachmentKind::Image
+        } else {
+            AttachmentKind::Document
+        };
+    }
+    let url = image.url.trim();
+    if url.to_ascii_lowercase().starts_with("data:image/") {
+        return AttachmentKind::Image;
+    }
+    let name = image
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            image
+                .local_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    match name.and_then(|value| Path::new(value).extension()) {
+        Some(extension) => {
+            if is_image_file_extension(&extension.to_string_lossy().to_ascii_lowercase()) {
+                AttachmentKind::Image
+            } else {
+                AttachmentKind::Document
+            }
+        }
+        // Legacy clients sent images with no media type and no name.
+        None => AttachmentKind::Image,
+    }
+}
+
+pub(crate) fn is_image_file_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "avif"
+            | "bmp"
+            | "gif"
+            | "heic"
+            | "heif"
+            | "jpeg"
+            | "jpg"
+            | "png"
+            | "svg"
+            | "tif"
+            | "tiff"
+            | "webp"
+    )
+}
+
+/// Text stand-in for an attachment the provider cannot embed.
+///
+/// Documents always take this path: the daemon has already written the file
+/// beside the thread, so naming the path is what lets the agent open it.
+/// Images land here only when embedding failed (missing file, over budget),
+/// where a reference still beats the attachment vanishing.
+pub(crate) fn attachment_reference_text(image: &ImageInput) -> String {
+    let label = match attachment_kind(image) {
+        AttachmentKind::Image => "image attachment",
+        AttachmentKind::Document => "file attachment",
+    };
+
     if let Some(local_path) = image
         .local_path
         .as_deref()
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        return format!("[image attachment: {local_path}]");
+        return format!("[{label}: {local_path}]");
     }
 
     if let Some(name) = image
@@ -288,7 +377,7 @@ pub(crate) fn claude_image_reference(image: &ImageInput) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return format!("[image attachment: {name}]");
+        return format!("[{label}: {name}]");
     }
 
     if let Some(mime_type) = image
@@ -297,15 +386,15 @@ pub(crate) fn claude_image_reference(image: &ImageInput) -> String {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return format!("[image attachment: {mime_type}]");
+        return format!("[{label}: {mime_type}]");
     }
 
     let url = image.url.trim();
     if url.starts_with("http://") || url.starts_with("https://") {
-        return format!("[image attachment: {url}]");
+        return format!("[{label}: {url}]");
     }
 
-    "[image attachment]".to_string()
+    format!("[{label}]")
 }
 
 fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSkill]) -> String {
@@ -1827,5 +1916,64 @@ mod turn_skill_resolution_tests {
             &AgentProvider::CODEX,
         );
         assert_eq!(resolved.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod attachment_translation_tests {
+    use falcondeck_core::{ImageInput, TurnInputItem};
+
+    use super::{AttachmentKind, attachment_kind, codex_inputs};
+
+    #[test]
+    fn sends_a_document_attachment_to_codex_as_a_path_reference() {
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "doc-1".to_string(),
+            name: Some("brief.pdf".to_string()),
+            mime_type: Some("application/pdf".to_string()),
+            url: "/tmp/attachments/doc-1/brief.pdf".to_string(),
+            local_path: Some("/tmp/attachments/doc-1/brief.pdf".to_string()),
+        })];
+
+        let translated = codex_inputs(&inputs, &[]);
+
+        assert_eq!(translated[0]["type"], "text");
+        assert_eq!(
+            translated[0]["text"],
+            "[file attachment: /tmp/attachments/doc-1/brief.pdf]"
+        );
+    }
+
+    #[test]
+    fn still_sends_images_to_codex_as_local_images() {
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "img-1".to_string(),
+            name: Some("shot.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "/tmp/attachments/img-1.png".to_string(),
+            local_path: Some("/tmp/attachments/img-1.png".to_string()),
+        })];
+
+        let translated = codex_inputs(&inputs, &[]);
+
+        assert_eq!(translated[0]["type"], "localImage");
+        assert_eq!(translated[0]["path"], "/tmp/attachments/img-1.png");
+    }
+
+    #[test]
+    fn classifies_attachments_without_a_media_type_by_file_name() {
+        let named = |name: &str| ImageInput {
+            id: "a".to_string(),
+            name: Some(name.to_string()),
+            mime_type: None,
+            url: String::new(),
+            local_path: None,
+        };
+
+        assert_eq!(attachment_kind(&named("shot.PNG")), AttachmentKind::Image);
+        assert_eq!(
+            attachment_kind(&named("notes.pdf")),
+            AttachmentKind::Document
+        );
     }
 }

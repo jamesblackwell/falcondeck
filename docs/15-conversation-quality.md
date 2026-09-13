@@ -447,14 +447,23 @@ one compact derived filename on every client and never expose a data URL or
 signed query string as their label. Removal remains independently operable in
 the composer, user-authored text has the same accessible copy action on all
 clients, and provider-backed edit/resend remains available for image-only
-turns. FalconDeck currently sends image inputs only, so non-image file picks
-must be rejected with an explicit explanation rather than silently discarded.
-The current Codex app-server input union has text, image/local-image, skill, and
-mention variants but no generic file input; Claude's CLI similarly exposes
-filesystem access rather than a streamed file-attachment variant. Generic file
-support therefore needs an explicit bounded text/document translation or a new
-provider capability contract. Do not fake it by sending an inaccessible client
-path or by adding a FalconDeck conversation database.
+turns.
+
+Non-image files (PDFs, spreadsheets, plain text) attach as documents on the
+same wire envelope, discriminated by media type rather than a new input
+variant. The daemon writes their bytes into the thread's attachment directory
+under the original file name and hands agents the resulting path, because no
+provider input union carries a generic file: Codex has text, image/local-image,
+skill, and mention variants, and Claude's CLI exposes filesystem access instead
+of a file-attachment variant. Every harness therefore receives a document as a
+`[file attachment: <daemon-local path>]` text block it can open with its own
+file tools, and the path it names always exists on the agent's host. Never fake
+this by forwarding an inaccessible client path.
+
+Documents attach even when the agent has no vision support, since they never
+enter a provider payload. They carry their own budget (25 MB per file and per
+turn) apart from the image budget, and render as a named file chip that opens
+the stored file rather than as a broken thumbnail.
 
 ## Web research and citation contract
 

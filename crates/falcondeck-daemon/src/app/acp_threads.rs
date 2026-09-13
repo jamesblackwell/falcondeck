@@ -18,7 +18,9 @@ use tokio::sync::mpsc;
 use crate::acp::{AcpDiffContent, AcpEvent, AcpRuntime, AcpToolMemory};
 use crate::error::DaemonError;
 
-use super::agent_helpers::ResolvedSelectedSkill;
+use super::agent_helpers::{
+    AttachmentKind, ResolvedSelectedSkill, attachment_kind, attachment_reference_text,
+};
 use super::conversation_helpers::{
     TRANSIENT_PROVIDER_ERROR_MESSAGE, ToolSettlement, is_transient_provider_error_dump,
     rewrite_transient_assistant_error, tool_display_metadata,
@@ -2624,19 +2626,14 @@ async fn acp_turn_content(
         let TurnInputItem::Image(image) = input else {
             continue;
         };
-        if supports_images {
+        if supports_images && attachment_kind(image) == AttachmentKind::Image {
             // Falls back to a text reference on oversize/unreadable files, so
             // the attachment is never silently dropped.
             content.push(crate::acp::acp_image_content_block(image, &mut encoded_budget).await);
         } else {
-            let reference = image
-                .local_path
-                .as_deref()
-                .or(image.name.as_deref())
-                .unwrap_or("attachment");
             content.push(serde_json::json!({
                 "type": "text",
-                "text": format!("[attached image: {reference}]"),
+                "text": attachment_reference_text(image),
             }));
         }
     }

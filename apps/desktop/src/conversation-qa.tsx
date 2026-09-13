@@ -477,6 +477,15 @@ const mixedItems: ConversationItem[] = [
         mime_type: "image/png",
         url: "javascript:expired-attachment",
       },
+      {
+        type: "image",
+        id: "document-1",
+        name: "streaming-audit.pdf",
+        mime_type: "application/pdf",
+        url: "/tmp/falcondeck-attachments/document-1/streaming-audit.pdf",
+        local_path:
+          "/tmp/falcondeck-attachments/document-1/streaming-audit.pdf",
+      },
     ],
     turn_id: "turn-qa-1",
     previous_turn_id: null,
@@ -1269,6 +1278,28 @@ const markdownAdversarialItems: ConversationItem[] = [
 ];
 
 /** A representative offer: a long-ish primary label plus alternatives. */
+/** `?attachments=1` seeds the composer with one of each attachment chip: an
+ * image thumbnail and a document, which shows a name and type, not a preview. */
+const QA_COMPOSER_ATTACHMENTS: ImageInput[] = [
+  {
+    type: "image",
+    id: "composer-image",
+    name: "wireframe.svg",
+    mime_type: "image/svg+xml",
+    url: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMjAiIGhlaWdodD0iMTgwIiB2aWV3Qm94PSIwIDAgMzIwIDE4MCI+PHJlY3Qgd2lkdGg9IjMyMCIgaGVpZ2h0PSIxODAiIHJ4PSIyNCIgZmlsbD0iIzEyMTgyMSIvPjxjaXJjbGUgY3g9IjE2MCIgY3k9IjkwIiByPSI1NCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjMTBiOTgxIiBzdHJva2Utd2lkdGg9IjgiLz48L3N2Zz4=",
+    local_path: null,
+  },
+  {
+    type: "image",
+    id: "composer-document",
+    name: "streaming-audit.pdf",
+    mime_type: "application/pdf",
+    url: "/tmp/falcondeck-attachments/composer-document/streaming-audit.pdf",
+    local_path:
+      "/tmp/falcondeck-attachments/composer-document/streaming-audit.pdf",
+  },
+];
+
 const QA_SUGGESTION_OFFER: ComposerSuggestionOffer = {
   extensionId: "falcondeck.follow-up-suggestions",
   primary: {
@@ -1691,7 +1722,11 @@ function ConversationQa() {
   const [qaDraft, setQaDraft] = useState("");
   const [qaSuggestionsDismissed, setQaSuggestionsDismissed] = useState(false);
   const qaSuggestionOffer = qaSuggestionsDismissed ? null : QA_SUGGESTION_OFFER;
-  const [qaAttachments, setQaAttachments] = useState<ImageInput[]>([]);
+  const [qaAttachments, setQaAttachments] = useState<ImageInput[]>(() =>
+    new URLSearchParams(window.location.search).get("attachments") === "1"
+      ? QA_COMPOSER_ATTACHMENTS
+      : [],
+  );
   const [qaPreparingAttachments, setQaPreparingAttachments] = useState(0);
   const [qaAttachmentError, setQaAttachmentError] = useState<string | null>(
     null,

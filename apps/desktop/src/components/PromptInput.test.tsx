@@ -250,9 +250,9 @@ describe("PromptInput", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Preparing 2 images…");
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing 2 files…");
     const preparingButton = screen.getByRole("button", {
-      name: "Preparing images",
+      name: "Preparing files",
     });
     expect(preparingButton).toBeDisabled();
     expect(
@@ -287,16 +287,16 @@ describe("PromptInput", () => {
       />,
     );
 
-    expect(screen.getByRole("status")).toHaveTextContent("Preparing 1 image…");
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing 1 file…");
     expect(
       screen.getByRole("button", { name: "Stop generating" }),
     ).toBeEnabled();
     expect(
-      screen.queryByRole("button", { name: "Preparing images" }),
+      screen.queryByRole("button", { name: "Preparing files" }),
     ).not.toBeInTheDocument();
   });
 
-  it("accepts image drops with visible feedback and ignores non-file drags", () => {
+  it("accepts file drops with visible feedback and ignores non-file drags", () => {
     const onPickImages = vi.fn();
     const file = new File(["image"], "diagram.png", { type: "image/png" });
     const files = {
@@ -314,13 +314,13 @@ describe("PromptInput", () => {
     const textbox = screen.getByRole("textbox", { name: "Message composer" });
     fireEvent.dragEnter(textbox, { dataTransfer });
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Drop images to attach",
+      "Drop files to attach",
     );
     fireEvent.dragOver(textbox, { dataTransfer });
     expect(dataTransfer.dropEffect).toBe("copy");
     fireEvent.drop(textbox, { dataTransfer });
     expect(onPickImages).toHaveBeenCalledWith([file]);
-    expect(screen.queryByText("Drop images to attach")).not.toBeInTheDocument();
+    expect(screen.queryByText("Drop files to attach")).not.toBeInTheDocument();
 
     fireEvent.dragEnter(textbox, {
       dataTransfer: { types: ["text/plain"], files },
@@ -328,7 +328,7 @@ describe("PromptInput", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("attaches supported images from a mixed drop and names skipped files", () => {
+  it("attaches both images and documents from a mixed drop", () => {
     const onPickImages = vi.fn();
     const image = new File(["image"], "diagram.png", { type: "image/png" });
     const document = new File(["notes"], "brief.pdf", {
@@ -349,21 +349,15 @@ describe("PromptInput", () => {
     const textbox = screen.getByRole("textbox", { name: "Message composer" });
     fireEvent.dragEnter(textbox, { dataTransfer });
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Drop images to attach",
+      "Drop files to attach",
     );
     fireEvent.drop(textbox, { dataTransfer });
 
-    expect(onPickImages).toHaveBeenCalledWith([image]);
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Only images can be attached right now. brief.pdf was not attached.",
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Dismiss attachment message" }),
-    );
-    expect(screen.queryByText(/brief\.pdf was not attached/)).toBeNull();
+    expect(onPickImages).toHaveBeenCalledWith([image, document]);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
-  it("explains unsupported clipboard files instead of silently discarding them", () => {
+  it("attaches a pasted document alongside images", () => {
     const onPickImages = vi.fn();
     const document = new File(["notes"], "brief.pdf", {
       type: "application/pdf",
@@ -377,10 +371,8 @@ describe("PromptInput", () => {
       },
     });
 
-    expect(onPickImages).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Only images can be attached right now. brief.pdf was not attached.",
-    );
+    expect(onPickImages).toHaveBeenCalledWith([document]);
+    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("clears an attachment warning when the selected agent changes", () => {
@@ -399,7 +391,7 @@ describe("PromptInput", () => {
       },
     });
     expect(screen.getByRole("status")).toHaveTextContent(
-      "The selected agent does not support image attachments.",
+      "This agent does not accept images. clipboard.png was not attached.",
     );
 
     rerender(
@@ -411,7 +403,7 @@ describe("PromptInput", () => {
     );
     expect(
       screen.queryByText(
-        "The selected agent does not support image attachments.",
+        "This agent does not accept images. clipboard.png was not attached.",
       ),
     ).toBeNull();
   });
@@ -464,10 +456,10 @@ describe("PromptInput", () => {
     fireEvent.click(trigger);
 
     expect(
-      screen.getByRole("button", { name: "Attach image" }),
+      screen.getByRole("button", { name: "Attach file" }),
     ).not.toHaveFocus();
     expect(trigger).not.toHaveFocus();
-    expect(screen.getByText("Choose, paste, or drop")).toBeInTheDocument();
+    expect(screen.getByText("Images, PDFs, or documents")).toBeInTheDocument();
   });
 
   it("retains first-action focus when the add menu is opened from the keyboard", () => {
@@ -478,7 +470,7 @@ describe("PromptInput", () => {
     fireEvent.keyDown(trigger, { key: "Enter" });
     fireEvent.click(trigger);
 
-    expect(screen.getByRole("button", { name: "Attach image" })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Attach file" })).toHaveFocus();
   });
 
   it("explains and enforces image capability limits", () => {
@@ -500,8 +492,10 @@ describe("PromptInput", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Add to this message" }),
     );
-    expect(screen.getByRole("button", { name: "Attach image" })).toBeDisabled();
-    expect(screen.getByText("Not supported by this agent")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeEnabled();
+    expect(
+      screen.getByText("PDFs and documents — no images on this agent"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(
       "The selected agent does not support image attachments.",
     );
@@ -594,7 +588,7 @@ describe("PromptInput", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Add to this message" }),
     );
-    expect(screen.getByText("Attach image")).toBeInTheDocument();
+    expect(screen.getByText("Attach file")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Set a goal"));
     const objective = screen.getByPlaceholderText(
@@ -799,7 +793,7 @@ describe("PromptInput", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Add to this message" }),
     );
-    expect(screen.getByText("Attach image")).toBeInTheDocument();
+    expect(screen.getByText("Attach file")).toBeInTheDocument();
     expect(screen.queryByText("Set a goal")).not.toBeInTheDocument();
   });
 

@@ -20,7 +20,9 @@ use crate::{
 
 use super::{
     AppState, PendingServerRequest,
-    agent_helpers::{ResolvedSelectedSkill, replace_selected_skill_aliases},
+    agent_helpers::{
+        AttachmentKind, ResolvedSelectedSkill, attachment_kind, replace_selected_skill_aliases,
+    },
     conversation_helpers::{ToolSettlement, synthesize_tool_title, tool_display_metadata},
 };
 
@@ -1216,7 +1218,11 @@ fn opencode_prompt_from_inputs(
                     file["name"] = Value::String(name.to_string());
                 }
                 if let Some(mime_type) = image.mime_type.as_deref() {
-                    file["description"] = Value::String(format!("Image attachment ({mime_type})"));
+                    let label = match attachment_kind(image) {
+                        AttachmentKind::Image => "Image attachment",
+                        AttachmentKind::Document => "File attachment",
+                    };
+                    file["description"] = Value::String(format!("{label} ({mime_type})"));
                 }
                 Some(file)
             }

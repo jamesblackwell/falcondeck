@@ -19,7 +19,7 @@ use crate::agent_binary::{
     missing_binary_message, preferred_command_path, resolve_agent_binary,
     strip_terminal_advertising_env,
 };
-use crate::app::agent_helpers::claude_image_reference;
+use crate::app::agent_helpers::attachment_reference_text;
 use crate::error::DaemonError;
 use chrono::{DateTime, Utc};
 use falcondeck_core::{
@@ -684,7 +684,7 @@ pub fn build_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
     for image in images {
         content.push(json!({
             "type": "text",
-            "text": claude_image_reference(image)
+            "text": attachment_reference_text(image)
         }));
     }
     if content.is_empty() {

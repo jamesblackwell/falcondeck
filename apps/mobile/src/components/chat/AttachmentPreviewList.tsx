@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
 import { Image } from "expo-image";
-import { CircleX, X } from "lucide-react-native";
+import { CircleX, FileText, X } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
 import {
   imageInputLabel,
+  isDocumentAttachment,
   isSafeNativeImageUrl,
   type ImageInput,
 } from "@falcondeck/client-core";
@@ -93,9 +94,14 @@ const AttachmentCard = memo(function AttachmentCard({
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const label = imageInputLabel(attachment);
   const url = attachment.url.trim();
-  const renderable = isSafeNativeImageUrl(url) && failedUrl !== url;
+  // Documents live on the daemon host; there is nothing for this device to
+  // preview, so they show as a file card rather than a failed image.
+  const isDocument = isDocumentAttachment(attachment);
+  const renderable =
+    !isDocument && isSafeNativeImageUrl(url) && failedUrl !== url;
   // History pages ship attachment references; fetch the preview on demand.
-  const needsFetch = Boolean(itemId) && !renderable && imageNeedsFetch(attachment);
+  const needsFetch =
+    Boolean(itemId) && !isDocument && !renderable && imageNeedsFetch(attachment);
   const fullItem = useFullThreadItem(itemId ?? "", needsFetch);
   const fetching =
     needsFetch && (fullItem.status === "loading" || fullItem.status === "idle");
@@ -133,6 +139,18 @@ const AttachmentCard = memo(function AttachmentCard({
           <ActivityDiamond
             size={theme.iconSize.sm}
             color={theme.colors.accent.default}
+          />
+        </View>
+      ) : isDocument ? (
+        <View
+          style={styles.unavailable}
+          accessible
+          accessibilityLabel={`${label}, file attachment`}
+        >
+          <FileText
+            accessible={false}
+            size={theme.iconSize.sm}
+            color={theme.colors.fg.muted}
           />
         </View>
       ) : (

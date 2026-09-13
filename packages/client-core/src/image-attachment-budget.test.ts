@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   filesToImageInputs,
   imageInputByteSize,
+  MAX_DOCUMENT_ATTACHMENT_BYTES,
   MAX_IMAGE_ATTACHMENT_BYTES,
   validateImageAttachmentBudget,
 } from './snapshot'
@@ -17,6 +18,18 @@ function image(name: string, bytes: number): ImageInput {
     name,
     mime_type: 'image/png',
     url: `data:image/png;base64,${'A'.repeat(encodedLength)}`,
+    local_path: null,
+  }
+}
+
+function documentAttachment(name: string, bytes: number): ImageInput {
+  const encodedLength = Math.ceil(bytes / 3) * 4
+  return {
+    type: 'image',
+    id: name,
+    name,
+    mime_type: 'application/pdf',
+    url: `data:application/pdf;base64,${'A'.repeat(encodedLength)}`,
     local_path: null,
   }
 }
@@ -111,6 +124,74 @@ describe('image attachment budgets', () => {
       url: 'data:image/jpeg;base64,anBlZw==',
     })
     expect(close).toHaveBeenCalled()
+  })
+
+  it('keeps a document attachment out of the image prepare path', async () => {
+    vi.stubGlobal('FileReader', class {
+      error = null
+      result: string | null = null
+      onerror: (() => void) | null = null
+      onload: (() => void) | null = null
+
+      readAsDataURL(file: File) {
+        this.result = `data:${file.type};base64,cGRm`
+        this.onload?.()
+      }
+    })
+
+    const [attachment] = await filesToImageInputs([
+      new File(['pdf'], 'contract.pdf', { type: 'application/pdf' }),
+    ])
+
+    expect(attachment).toMatchObject({
+      name: 'contract.pdf',
+      mime_type: 'application/pdf',
+      url: 'data:application/pdf;base64,cGRm',
+    })
+  })
+
+  it('types a dropped file from its name when the platform omits a MIME type', async () => {
+    vi.stubGlobal('FileReader', class {
+      error = null
+      result: string | null = null
+      onerror: (() => void) | null = null
+      onload: (() => void) | null = null
+
+      readAsDataURL() {
+        this.result = 'data:application/pdf;base64,cGRm'
+        this.onload?.()
+      }
+    })
+
+    const [attachment] = await filesToImageInputs([
+      new File(['pdf'], 'contract.pdf'),
+    ])
+
+    expect(attachment.mime_type).toBe('application/pdf')
+  })
+
+  it('rejects a document over the file ceiling', async () => {
+    const files = [
+      {
+        name: 'archive.zip',
+        type: 'application/zip',
+        size: MAX_DOCUMENT_ATTACHMENT_BYTES + 1,
+      },
+    ] as unknown as FileList
+
+    await expect(filesToImageInputs(files)).rejects.toThrow(
+      'archive.zip is too large. Files must be 25 MB or smaller.',
+    )
+  })
+
+  it('budgets documents apart from images', () => {
+    expect(() =>
+      validateImageAttachmentBudget([
+        image('one.png', 7_000_000),
+        documentAttachment('report.pdf', 20_000_000),
+        image('two.png', 7_000_000),
+      ]),
+    ).not.toThrow()
   })
 
   it('rejects an oversized aggregate before relay encryption', () => {

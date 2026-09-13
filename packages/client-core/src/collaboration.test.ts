@@ -94,21 +94,38 @@ describe('thread provider labels', () => {
 })
 
 describe('image attachment capability gating', () => {
+  const image = {
+    mime_type: 'image/png',
+    name: 'shot.png',
+    url: 'data:image/png;base64,AA==',
+  }
+  const document = {
+    mime_type: 'application/pdf',
+    name: 'brief.pdf',
+    url: '',
+  }
+
   it('blocks unsupported image turns without treating an empty composer as an error', () => {
-    expect(imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, 1)).toBe(
+    expect(imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, [image])).toBe(
       'The selected agent does not support image attachments. Remove the image or choose an agent that supports images.',
     )
-    expect(imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, 2)).toContain(
-      'Remove the images',
-    )
-    expect(imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, 0)).toBeNull()
+    expect(
+      imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, [image, image]),
+    ).toContain('Remove the images')
+    expect(imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, [])).toBeNull()
+  })
+
+  it('still sends documents when the agent has no vision support', () => {
+    expect(
+      imageAttachmentSendBlockReason(NO_AGENT_CAPABILITIES, [document]),
+    ).toBeNull()
   })
 
   it('allows images only when the provider advertises support', () => {
     expect(
       imageAttachmentSendBlockReason(
         { ...NO_AGENT_CAPABILITIES, supports_images: true },
-        2,
+        [image, image],
       ),
     ).toBeNull()
   })

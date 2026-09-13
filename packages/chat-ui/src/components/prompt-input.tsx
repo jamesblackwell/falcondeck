@@ -1,8 +1,9 @@
 import * as Popover from "@radix-ui/react-popover";
 import {
   ChevronLeft,
-  ImagePlus,
+  FileText,
   Mic,
+  Paperclip,
   Plus,
   Quote,
   Send,
@@ -37,6 +38,7 @@ import type {
 import {
   activeSlashQuery,
   anyModelHasFastTier,
+  fileAttachmentKind,
   modelFastTier,
   NO_AGENT_CAPABILITIES,
   rankSlashSuggestions,
@@ -59,7 +61,9 @@ import {
 } from "./model-selector";
 import {
   attachmentLabel,
+  attachmentTypeLabel,
   canRenderAttachmentImage,
+  isDocumentAttachment,
 } from "./attachment-preview";
 import { GoalPanel, type GoalPanelProps } from "./goal-control";
 import { SlashCommandMenu } from "./slash-command-menu";
@@ -433,7 +437,7 @@ export const PromptInput = memo(function PromptInput({
   useEffect(() => {
     setAttachmentInputNotice(null);
     dragDepthRef.current = 0;
-    setDraggedFileKind(null);
+    setDomFileDragActive(false);
   }, [capabilities.supports_images, selectedProvider]);
 
   const syncTextareaHeight = useCallback(
@@ -557,11 +561,13 @@ export const PromptInput = memo(function PromptInput({
   }
 
   function acceptPastedOrDroppedFiles(files: FileList | readonly File[]) {
-    const { images, unsupported } = partitionImageFiles(files);
+    const { images, documents } = partitionAttachmentFiles(files);
+    const rejectedImages = canAttachImages ? [] : images;
     setAttachmentInputNotice(
-      unsupported.length > 0 ? unsupportedAttachmentNotice(unsupported) : null,
+      rejectedImages.length > 0 ? rejectedImageNotice(rejectedImages) : null,
     );
-    if (images.length > 0 && canAttachImages) onPickImages?.(images);
+    const accepted = [...(canAttachImages ? images : []), ...documents];
+    if (accepted.length > 0) onPickImages?.(accepted);
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -652,12 +658,8 @@ export const PromptInput = memo(function PromptInput({
     );
     if (fileItems.length === 0) return;
     event.preventDefault();
-    if (!canAttachImages) {
-      setAttachmentInputNotice(
-        capabilities.supports_images
-          ? "Image attachments are unavailable right now."
-          : "The selected agent does not support image attachments.",
-      );
+    if (!canAttachFiles) {
+      setAttachmentInputNotice("Attachments are unavailable right now.");
       return;
     }
     const clipboardFiles = Array.from(event.clipboardData.files);
@@ -831,7 +833,8 @@ export const PromptInput = memo(function PromptInput({
           <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
             {attachments.map((attachment) => (
               <div key={attachment.id} className="relative">
-                {canRenderAttachmentImage(attachment.url) ? (
+                {!isDocumentAttachment(attachment) &&
+                canRenderAttachmentImage(attachment.url) ? (
                   <img
                     src={attachment.url}
                     alt={attachment.name ?? "attachment"}
@@ -839,11 +842,20 @@ export const PromptInput = memo(function PromptInput({
                   />
                 ) : (
                   <div
-                    className="flex h-14 w-28 items-center rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
+                    className="flex h-14 w-36 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
                     title={attachmentLabel(attachment)}
                   >
-                    <span className="truncate">
-                      {attachmentLabel(attachment)}
+                    <FileText
+                      className="h-4 w-4 shrink-0 text-fg-muted"
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-fg-primary">
+                        {attachmentLabel(attachment)}
+                      </span>
+                      <span className="block truncate text-[length:var(--fd-text-2xs)] text-fg-muted">
+                        {attachmentTypeLabel(attachment)}
+                      </span>
                     </span>
                   </div>
                 )}
@@ -853,7 +865,7 @@ export const PromptInput = memo(function PromptInput({
                     onClick={() => onRemoveAttachment(attachment.id)}
                     disabled={disabled}
                     className="fd-focus absolute -top-1.5 -right-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-default bg-surface-3 text-fg-secondary shadow-sm transition-colors hover:bg-surface-4 hover:text-fg-primary disabled:pointer-events-none disabled:opacity-60"
-                    aria-label={`Remove ${attachment.name ?? "image attachment"}`}
+                    aria-label={`Remove ${attachment.name ?? "attachment"}`}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -869,7 +881,7 @@ export const PromptInput = memo(function PromptInput({
               >
                 <ActivityDiamond size="md" />
                 Preparing {preparingAttachmentCount}{" "}
-                {preparingAttachmentCount === 1 ? "image" : "images"}…
+                {preparingAttachmentCount === 1 ? "file" : "files"}…
               </div>
             ) : null}
           </div>
@@ -1130,9 +1142,8 @@ export const PromptInput = memo(function PromptInput({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
                 multiple
-                disabled={!canAttachImages}
+                disabled={!canAttachFiles}
                 className="hidden"
                 onChange={handleFileChange}
               />
@@ -1218,36 +1229,24 @@ export const PromptInput = memo(function PromptInput({
                             setPlusMenuOpen(false);
                             fileInputRef.current?.click();
                           }}
-                          disabled={!canAttachImages}
-                          aria-label="Attach image"
-                          title={
-                            capabilities.supports_images
-                              ? undefined
-                              : "The selected agent does not support image attachments"
-                          }
+                          disabled={!canAttachFiles}
+                          aria-label="Attach file"
                           className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-fg-secondary"
                         >
-                          <ImagePlus
+                          <Paperclip
                             className="h-4 w-4 shrink-0 text-fg-muted"
                             aria-hidden="true"
                           />
                           <span className="min-w-0 flex-1">
-                            <span className="block">Attach image</span>
-                            {capabilities.supports_images ? (
-                              <span
-                                aria-hidden="true"
-                                className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
-                              >
-                                Choose, paste, or drop
-                              </span>
-                            ) : (
-                              <span
-                                aria-hidden="true"
-                                className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
-                              >
-                                Not supported by this agent
-                              </span>
-                            )}
+                            <span className="block">Attach file</span>
+                            <span
+                              aria-hidden="true"
+                              className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
+                            >
+                              {capabilities.supports_images
+                                ? "Images, PDFs, or documents"
+                                : "PDFs and documents — no images on this agent"}
+                            </span>
                           </span>
                         </button>
                         {goal ? (
@@ -1392,7 +1391,7 @@ export const PromptInput = memo(function PromptInput({
                   </Tooltip>
                 ) : (
                   <Tooltip
-                    label={isPreparingAttachments ? "Preparing images" : "Send"}
+                    label={isPreparingAttachments ? "Preparing files" : "Send"}
                     shortcut={isPreparingAttachments ? undefined : sendShortcut}
                   >
                     <Button
@@ -1401,7 +1400,7 @@ export const PromptInput = memo(function PromptInput({
                       disabled={!canSubmit}
                       aria-label={
                         isPreparingAttachments
-                          ? "Preparing images"
+                          ? "Preparing files"
                           : "Send message"
                       }
                       aria-describedby={

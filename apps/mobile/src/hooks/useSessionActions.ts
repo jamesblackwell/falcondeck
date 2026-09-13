@@ -283,7 +283,7 @@ export function useSessionActions() {
     }
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(workspace, provider),
-      submittedAttachments.length,
+      submittedAttachments,
     );
     if (imageBlockReason) {
       relay._setError(imageBlockReason);

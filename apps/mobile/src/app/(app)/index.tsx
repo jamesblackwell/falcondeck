@@ -359,7 +359,7 @@ export default function HomeScreen() {
   );
   const attachmentSendBlockReason = imageAttachmentSendBlockReason(
     capabilities,
-    attachments.length,
+    attachments,
   );
   const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
   const composerSuggestionOffer = useMemo(() => {

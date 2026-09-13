@@ -1,7 +1,9 @@
+import { attachmentKind } from "./attachment-kind";
 import { defaultProviderLabel } from "./normalization";
 import type {
   AgentCapabilitySummary,
   AgentProvider,
+  ImageInput,
   ModelSummary,
   ServiceTierOption,
   ThreadSummary,
@@ -103,11 +105,15 @@ export function threadAgentCapabilities(
  */
 export function imageAttachmentSendBlockReason(
   capabilities: AgentCapabilitySummary,
-  attachmentCount: number,
+  attachments: readonly Pick<ImageInput, "mime_type" | "name" | "url">[],
 ): string | null {
-  if (attachmentCount <= 0 || capabilities.supports_images) return null;
+  if (capabilities.supports_images) return null;
+  const imageCount = attachments.filter(
+    (attachment) => attachmentKind(attachment) === "image",
+  ).length;
+  if (imageCount <= 0) return null;
   return `The selected agent does not support image attachments. Remove ${
-    attachmentCount === 1 ? "the image" : "the images"
+    imageCount === 1 ? "the image" : "the images"
   } or choose an agent that supports images.`;
 }
 

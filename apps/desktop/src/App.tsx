@@ -30,6 +30,7 @@ import {
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
   draftKeyFor,
+  fileAttachmentKind,
   filesToImageInputs,
   forkThread,
   generateUserItemId,
@@ -2845,7 +2846,7 @@ function AppInner() {
     const activeProvider = selectedThread?.provider ?? selectedProvider;
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(selectedWorkspace, activeProvider),
-      submittedAttachments.length,
+      submittedAttachments,
     );
     const blockReason =
       workspaceSendBlockReason(selectedWorkspace, activeProvider) ??
@@ -3681,23 +3682,29 @@ function AppInner() {
 
   const handlePickImages = useCallback(
     (files: FileList | readonly File[] | null) => {
-      const selectedCount = files?.length ?? 0;
-      if (selectedCount === 0) return;
+      if (!files || files.length === 0) return;
       const provider = selectedThread?.provider ?? selectedProvider;
-      if (
-        !workspaceAgentCapabilities(selectedWorkspace, provider).supports_images
-      ) {
+      // Documents are stored beside the thread and read from disk by the
+      // agent, so only the image half depends on vision support.
+      const accepted = workspaceAgentCapabilities(selectedWorkspace, provider)
+        .supports_images
+        ? Array.from(files)
+        : Array.from(files).filter(
+            (file) => fileAttachmentKind(file) === "document",
+          );
+      if (accepted.length < files.length) {
         setActionError(
           "The selected agent does not support image attachments.",
         );
-        return;
       }
+      const selectedCount = accepted.length;
+      if (selectedCount === 0) return;
       // Bind to the conversation the user picked in; file reading is async and
       // they may have navigated away by the time it resolves.
       const key = conversationKey;
       updateAttachmentPreparation(key, selectedCount);
       void filesToImageInputs(
-        files,
+        accepted,
         attachmentsByConversationRef.current[key] ?? NO_ATTACHMENTS,
       )
         .then((next) => {
@@ -3711,7 +3718,7 @@ function AppInner() {
           setActionError(
             error instanceof Error
               ? error.message
-              : "Could not attach that image",
+              : "Could not attach that file",
           );
         })
         .finally(() => updateAttachmentPreparation(key, -selectedCount));
@@ -5325,7 +5332,7 @@ function AppInner() {
   );
   const attachmentSendBlockReason = imageAttachmentSendBlockReason(
     activeCapabilities,
-    attachments.length,
+    attachments,
   );
   const isComposerDisabled = workspaceComposerDisabled(selectedWorkspace);
 

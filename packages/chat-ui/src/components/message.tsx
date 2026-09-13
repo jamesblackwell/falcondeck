@@ -89,6 +89,7 @@ import {
 } from "@falcondeck/ui";
 
 import { FileDiffLink, useOpenFileDiff } from "../lib/file-diff-context";
+import { useLocalPathHandler } from "../lib/local-path-context";
 import { extractFilePath, fileBaseName } from "../lib/tool-file-path";
 import { WebLinkAnchor } from "../lib/web-link-context";
 import { CodeBlock } from "./code-block";
@@ -98,9 +99,58 @@ import { MessageMarkdown } from "./message-markdown";
 import { PlanStepList } from "./plan-steps";
 import {
   attachmentLabel,
+  attachmentTypeLabel,
   canRenderAttachmentImage,
+  isDocumentAttachment,
 } from "./attachment-preview";
 import type { ReadAloudController } from "../lib/read-aloud";
+
+function UserDocumentAttachment({ attachment }: { attachment: ImageInput }) {
+  const context = useLocalPathHandler();
+  const label = attachmentLabel(attachment);
+  const type = attachmentTypeLabel(attachment);
+  const path = attachment.local_path?.trim() || "";
+  const chrome =
+    "flex h-20 w-40 items-start gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 p-2 text-left";
+  const body = (
+    <>
+      <FileText aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+      <span className="min-w-0 flex-1">
+        <span className="line-clamp-2 break-all text-[length:var(--fd-text-xs)] text-fg-primary">
+          {label}
+        </span>
+        <span className="block text-[length:var(--fd-text-2xs)] text-fg-muted">
+          {type}
+        </span>
+      </span>
+    </>
+  );
+
+  if (!context || !path) {
+    return (
+      <div className={chrome} title={label}>
+        {body}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      title={`Open ${path}`}
+      aria-label={`Open ${label}`}
+      onClick={() => void context.onLocalPath("open", path)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        context.openMenu(path, { x: event.clientX, y: event.clientY });
+      }}
+      className={cn(chrome, "fd-focus transition-colors hover:bg-surface-3")}
+    >
+      {body}
+    </button>
+  );
+}
 
 function UserAttachment({
   attachment,
@@ -113,6 +163,10 @@ function UserAttachment({
   const url = attachment.url.trim();
   const label = attachmentLabel(attachment);
   const renderable = canRenderAttachmentImage(url) && failedUrl !== url;
+
+  if (isDocumentAttachment(attachment)) {
+    return <UserDocumentAttachment attachment={attachment} />;
+  }
 
   return renderable ? (
     <button

@@ -49,16 +49,17 @@ import {
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
 
-describe('client-core image inputs', () => {
-  it('rejects unsupported files explicitly instead of silently discarding them', async () => {
-    const files = [{ name: 'notes.txt', type: 'text/plain' }] as unknown as FileList
-    let message = ''
-    try {
-      await filesToImageInputs(files)
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error)
-    }
-    expect(message).toBe('Only image attachments are supported. notes.txt was not attached.')
+describe('client-core attachment inputs', () => {
+  it('attaches a non-image file as a document instead of rejecting it', async () => {
+    const [attachment] = await filesToImageInputs([
+      new File(['notes'], 'notes.txt', { type: 'text/plain' }),
+    ])
+
+    expect(attachment).toMatchObject({
+      name: 'notes.txt',
+      mime_type: 'text/plain',
+    })
+    expect(attachment.url.startsWith('data:text/plain;base64,')).toBe(true)
   })
 })
 

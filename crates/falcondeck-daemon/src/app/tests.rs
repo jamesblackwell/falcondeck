@@ -1216,17 +1216,17 @@ fn parses_thread_goal_notifications() {
 fn maps_sandbox_modes_to_codex_policy_payloads() {
     use super::workspace_ops::sandbox_policy_payload;
     assert_eq!(
-        sandbox_policy_payload(Some("read-only"), None),
+        sandbox_policy_payload(Some("read-only"), &[]),
         json!({ "type": "readOnly" })
     );
     assert_eq!(
-        sandbox_policy_payload(Some("workspace-write"), None),
+        sandbox_policy_payload(Some("workspace-write"), &[]),
         json!({ "type": "workspaceWrite" })
     );
     assert_eq!(
         sandbox_policy_payload(
             Some("workspace-write"),
-            Some("/Users/test/Documents/FalconDeck")
+            &["/Users/test/Documents/FalconDeck".to_string()]
         ),
         json!({
             "type": "workspaceWrite",
@@ -1234,12 +1234,28 @@ fn maps_sandbox_modes_to_codex_policy_payloads() {
         })
     );
     assert_eq!(
-        sandbox_policy_payload(Some("danger-full-access"), None),
+        sandbox_policy_payload(
+            Some("workspace-write"),
+            &[
+                "/Users/test/Documents/FalconDeck".to_string(),
+                "/tmp/falcondeck/attachments/workspace/thread".to_string(),
+            ]
+        ),
+        json!({
+            "type": "workspaceWrite",
+            "writableRoots": [
+                "/Users/test/Documents/FalconDeck",
+                "/tmp/falcondeck/attachments/workspace/thread"
+            ]
+        })
+    );
+    assert_eq!(
+        sandbox_policy_payload(Some("danger-full-access"), &[]),
         json!({ "type": "dangerFullAccess" })
     );
-    assert_eq!(sandbox_policy_payload(None, None), serde_json::Value::Null);
+    assert_eq!(sandbox_policy_payload(None, &[]), serde_json::Value::Null);
     assert_eq!(
-        sandbox_policy_payload(Some("bogus"), None),
+        sandbox_policy_payload(Some("bogus"), &[]),
         serde_json::Value::Null
     );
 }

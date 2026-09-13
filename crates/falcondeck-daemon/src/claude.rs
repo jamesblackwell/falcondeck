@@ -27,7 +27,7 @@ use crate::agent_binary::preferred_command_path;
 use crate::agent_binary::{
     missing_binary_message, resolve_agent_binary, strip_terminal_advertising_env,
 };
-use crate::app::agent_helpers::claude_image_reference;
+use crate::app::agent_helpers::attachment_reference_text;
 use crate::app::agent_helpers::{
     append_claude_text_delta, claude_tool_result_image_items, extract_claude_assistant_message_id,
     extract_claude_text_chunk, extract_claude_thinking_chunk, extract_claude_tool_event,
@@ -1081,7 +1081,7 @@ async fn build_claude_stream_json_input_with_budget(
 }
 
 async fn claude_image_content_block(image: &ImageInput, encoded_budget: &mut usize) -> Value {
-    let fallback = || json!({ "type": "text", "text": claude_image_reference(image) });
+    let fallback = || json!({ "type": "text", "text": attachment_reference_text(image) });
     let Some(local_path) = image
         .local_path
         .as_deref()
