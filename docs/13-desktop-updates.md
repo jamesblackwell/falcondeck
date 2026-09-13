@@ -159,6 +159,21 @@ Development behavior is different:
 
 ## Troubleshooting
 
+### Mermaid diagrams render as black boxes in the packaged app
+
+The main webview CSP (`apps/desktop/src-tauri/tauri.conf.json`) allows
+`style-src 'unsafe-inline'`, but Tauri normally rewrites `style-src` at runtime
+by appending a `'sha256-…'` hash for the inline `<style>` in `index.html`. Once a
+hash is present, browsers ignore `'unsafe-inline'`, so any `<style>` element
+injected later (mermaid puts one inside each rendered SVG) is blocked: nodes
+fill black, labels lose `text-anchor: middle`, edges render as filled shapes.
+The vite fixtures do not reproduce it because they carry no CSP.
+
+`security.dangerousDisableAssetCspModification` is set to `["style-src"]` so the
+declared `'unsafe-inline'` stays effective. Keep that entry; it only opts out of
+the hash injection for styles, `script-src` nonces are still applied.
+
+
 ### The release workflow fails before build
 
 Check:
