@@ -121,15 +121,15 @@ GitHub Actions needs these secrets before the release workflow can publish insta
 
 ## Releasing
 
-GitHub Actions secrets and the Mac-only notarizing workflow are already in place. First public version is `0.1.0` (no bump needed). After the current working-tree work is on `main`:
+GitHub Actions secrets and the Mac-only notarizing workflow are in place. First public cut is [desktop-v0.1.0](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.0). Agent procedure: [.agents/skills/desktop-mac-release/SKILL.md](/Users/James/www/sites/falcondeck/.agents/skills/desktop-mac-release/SKILL.md).
 
-1. Rebase or merge `origin/main`, then push `main`.
-2. `git tag desktop-v0.1.0 && git push origin desktop-v0.1.0` (or run the `release-desktop` workflow manually). That creates a **draft** GitHub Release.
+1. Bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml) and run `npm run desktop:version:sync`.
+2. Push `main`, then `git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z` (or run the `release-desktop` workflow manually). That creates a **draft** GitHub Release.
 3. Wait for both macOS jobs (Apple Silicon and Intel). Confirm the draft has `.dmg` / `.app.tar.gz` assets and `latest.json`.
 4. Install from that DMG (not `make desktop-install`) and confirm Gatekeeper is silent, the daemon starts, and one real agent turn works.
-5. Publish the draft. Then update the README “until the first build is available” copy.
+5. Publish the draft. Point README (and the site if needed) at the release URL.
 
-Later cuts: bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml), run `npm run desktop:version:sync`, tag `desktop-vX.Y.Z`.
+Do not rewrite a tag that already has a published GitHub Release.
 
 ## Release checklist
 
@@ -186,6 +186,16 @@ Check:
 
 The imported certificate must be **Developer ID Application**, not Apple Distribution or iOS Distribution. Those iOS/App Store certs cannot sign a GitHub Releases DMG.
 
+Do not pass empty `APPLE_ID` / `APPLE_PASSWORD` into `tauri-action`. GitHub injects blank strings for unset secrets, and Tauri then tries Apple-ID notarization and gets HTTP 401.
+
+### The app compiles in CI then fails at link with `___isPlatformVersionAtLeast`
+
+ObjC `@available` checks need `libclang_rt.osx`. [apps/desktop/src-tauri/build.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/build.rs) must keep linking it for release builds (`rustc` uses `-nodefaultlibs`).
+
+### `tsc -b` fails in the desktop package script
+
+Packaged/CI builds use `npm run build:frontend` (Vite) via `beforeBuildCommand`. Do not switch that back to `npm run build` / `tsc -b` as a release gate.
+
 ### The desktop release builds but auto-update does not work
 
 Check:
@@ -224,6 +234,7 @@ That means `FALCONDECK_UPDATER_PUBLIC_KEY` was not injected during release prep.
 
 ## Related docs
 
+- [desktop-mac-release skill](/Users/James/www/sites/falcondeck/.agents/skills/desktop-mac-release/SKILL.md)
 - [10-repo-layout.md](/Users/James/www/sites/falcondeck/docs/10-repo-layout.md)
 - [11-deployment-ops.md](/Users/James/www/sites/falcondeck/docs/11-deployment-ops.md)
 - [06-architecture-decisions.md](/Users/James/www/sites/falcondeck/docs/06-architecture-decisions.md)
