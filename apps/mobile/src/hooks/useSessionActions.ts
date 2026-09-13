@@ -4,7 +4,6 @@ import {
   approvalPolicyForProvider,
   buildOptimisticUserItem,
   generateUserItemId,
-  HandoffIncompleteError,
   handoffDestinationSettings,
   handoffThread,
   type HandoffThreadApi,
@@ -159,9 +158,6 @@ export function useSessionActions() {
   const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
   const handoffPendingRef = useRef(false);
   const [handoffPending, setHandoffPending] = useState(false);
-  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
-    string | null
-  >(null);
 
   const startThread = useCallback(async () => {
     const relay = useRelayStore.getState();
@@ -871,13 +867,6 @@ export function useSessionActions() {
           }),
         );
       },
-      async sendTurn(payload) {
-        const result = await relay._callRpc<{
-          ok: boolean;
-          message?: string | null;
-        }>("turn.start", payload, { requestIdPrefix: "mobile-handoff-turn" });
-        return result ?? { ok: true };
-      },
       async threadDetail(workspaceId, threadId, request) {
         return normalizeThreadDetail(
           await relay._callRpc<ThreadDetail>(
@@ -900,52 +889,23 @@ export function useSessionActions() {
     );
 
     try {
-      await handoffThread(
-        api,
-        {
-          workspace,
-          thread,
-          provider,
-          ...destination,
-          transcriptPageItems: HANDOFF_TRANSCRIPT_PAGE_ITEMS,
-          // Whatever is already on screen for this thread is free context.
-          seedItems:
-            session.threadDetail?.thread.id === thread.id
-              ? session.threadDetail.items
-              : null,
-        },
-        {
-          onDestinationReady: (handle) => {
-            showHandoffDestination(handle);
-            setHandoffPendingThreadKey(
-              draftKeyFor(handle.workspace.id, handle.thread.id),
-            );
-          },
-        },
-      );
+      // The daemon holds the transcript for the user's first message on the
+      // destination, so the new thread opens empty with the composer live.
+      const handle = await handoffThread(api, {
+        workspace,
+        thread,
+        provider,
+        ...destination,
+        transcriptPageItems: HANDOFF_TRANSCRIPT_PAGE_ITEMS,
+        // Whatever is already on screen for this thread is free context.
+        seedItems:
+          session.threadDetail?.thread.id === thread.id
+            ? session.threadDetail.items
+            : null,
+      });
+      showHandoffDestination(handle);
       relay._setError(null);
     } catch (error) {
-      if (error instanceof HandoffIncompleteError) {
-        showHandoffDestination(error.handle);
-        if (error.detail) {
-          useSessionStore.getState().setThreadDetail(error.detail);
-        }
-        if (!error.turnStarted) {
-          useUIStore.getState().setComposerForConversation(
-            draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
-            error.prompt,
-            [],
-          );
-        }
-        if (!isRelayTransportError(error)) {
-          relay._setError(
-            error.turnStarted
-              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
-              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
-          );
-        }
-        return;
-      }
       if (!isRelayTransportError(error)) {
         const message =
           error instanceof Error ? error.message : "Failed to create handoff";
@@ -958,7 +918,6 @@ export function useSessionActions() {
     } finally {
       handoffPendingRef.current = false;
       setHandoffPending(false);
-      setHandoffPendingThreadKey(null);
     }
   }, []);
 
@@ -1013,6 +972,5 @@ export function useSessionActions() {
     retryResponse,
     handoffToProvider,
     handoffPending,
-    handoffPendingThreadKey,
   };
 }

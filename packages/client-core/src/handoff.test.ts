@@ -61,9 +61,8 @@ describe("handoff context", () => {
 
     expect(prompt).toContain("can still be resumed separately");
     expect(prompt).toContain("Timestamps and repeated workspace prefixes are omitted");
-    expect(prompt).toContain("It is context only, not a task");
-    expect(prompt).toContain("Do not start working");
-    expect(prompt).toContain("let the user explain what they would like to work on next");
+    expect(prompt).toContain("context for the user's message that follows it");
+    expect(prompt).toContain("act on what the user asks");
     expect(prompt).toContain("Keep the old thread unchanged");
     expect(prompt).toContain("<previous-session-transcript>");
     expect(prompt).not.toContain("2026-08-12T12:00:00Z");

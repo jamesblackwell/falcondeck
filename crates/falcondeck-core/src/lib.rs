@@ -2284,6 +2284,12 @@ pub struct StartThreadRequest {
     /// provenance for the newly created destination thread.
     #[serde(default)]
     pub handoff_from: Option<ThreadHandoffSource>,
+    /// Source transcript to hand the agent along with the user's first
+    /// message. Held by the daemon until that message is sent, so the
+    /// destination costs nothing until the user has picked a model and said
+    /// what they want. Never recorded as a user bubble.
+    #[serde(default)]
+    pub handoff_context: Option<String>,
 }
 
 /// Provenance for a thread created by handing work to another provider.
@@ -2293,6 +2299,11 @@ pub struct ThreadHandoffSource {
     pub thread_id: String,
     /// Provider that owns the source thread.
     pub provider: AgentProvider,
+    /// True while the daemon still holds the source transcript for this
+    /// thread's first turn. Clients show that the context will ride along
+    /// with the next message; false once a turn has carried it.
+    #[serde(default)]
+    pub context_pending: bool,
 }
 
 /// Request payload used to fork a provider-owned thread at a completed turn.

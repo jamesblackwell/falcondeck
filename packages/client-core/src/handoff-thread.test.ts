@@ -1,16 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  HandoffIncompleteError,
   handoffBlockedReason,
   handoffDestinationSettings,
   handoffThread,
+  pendingHandoffContextNotice,
+  threadHasPendingHandoffContext,
 } from "./handoff-thread";
 import { NO_AGENT_CAPABILITIES } from "./collaboration";
-import type {
-  SendTurnPayload,
-  StartThreadPayload,
-} from "./daemon-client";
+import type { StartThreadPayload } from "./daemon-client";
 import type {
   ThreadDetail,
   ThreadDetailRequest,
@@ -114,9 +112,6 @@ function makeApi() {
           title: payload.title ?? "Fix the login bug · Claude",
         }),
     ),
-    sendTurn: vi.fn(async (_payload: SendTurnPayload) => ({
-      ok: true as const,
-    })),
     threadDetail: vi.fn(
       async (
         _workspaceId: string,
@@ -249,7 +244,7 @@ describe("handoffDestinationSettings", () => {
 });
 
 describe("handoffThread", () => {
-  it("reads the source before creating the destination, then seeds the turn", async () => {
+  it("reads the source, then creates the destination with the transcript held for its first message", async () => {
     const api = makeApi();
     const order: string[] = [];
     api.threadDetail.mockImplementation(async () => {
@@ -279,8 +274,7 @@ describe("handoffThread", () => {
       return makeHandle();
     });
 
-    const onDestinationReady = vi.fn();
-    const handle = await handoffThread(api, baseArgs, { onDestinationReady });
+    const handle = await handoffThread(api, baseArgs);
 
     expect(order).toEqual(["detail", "start"]);
     expect(api.threadDetail).toHaveBeenCalledWith(
@@ -297,24 +291,17 @@ describe("handoffThread", () => {
         handoff_from: { thread_id: "thread-1", provider: "codex" },
       }),
     );
+    // No turn is sent: the daemon holds the transcript and the user picks a
+    // model and writes the first message themselves.
+    const started = api.startThread.mock.calls[0]![0];
+    expect(started.handoff_context).toContain("Where does auth happen?");
+    expect(started.handoff_context).toContain("can still be resumed separately");
     expect(api.updateThread).toHaveBeenCalledWith({
       workspace_id: "workspace-1",
       thread_id: "thread-handoff",
       title: "Fix the login bug · Claude",
     });
-    expect(onDestinationReady).toHaveBeenCalledWith(handle);
-    expect(api.sendTurn).toHaveBeenCalledTimes(1);
-    const send = api.sendTurn.mock.calls[0]![0];
-    expect(send.thread_id).toBe("thread-handoff");
-    expect(send.provider).toBe("claude");
-    expect(send.inputs).toHaveLength(1);
-    expect(send.inputs[0]).toMatchObject({ type: "text" });
-    expect(String((send.inputs[0] as { text: string }).text)).toContain(
-      "Where does auth happen?",
-    );
-    expect(String((send.inputs[0] as { text: string }).text)).toContain(
-      "can still be resumed separately",
-    );
+    expect(handle.thread.id).toBe("thread-handoff");
   });
 
   it("pages back from the tail until the byte budget is met", async () => {
@@ -363,8 +350,7 @@ describe("handoffThread", () => {
       before_item_id: "c-1",
       limit: 2,
     });
-    const seeded = api.sendTurn.mock.calls[0][0];
-    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    const prompt = api.startThread.mock.calls[0]![0].handoff_context ?? "";
     // Oldest page read first, newest last, and the gap is disclosed.
     expect(prompt.indexOf("z-1")).toBeLessThan(prompt.indexOf("c-1"));
     expect(prompt).toContain("begins mid-conversation");
@@ -416,8 +402,7 @@ describe("handoffThread", () => {
       before_item_id: "seen-1",
       limit: 20,
     });
-    const seeded = api.sendTurn.mock.calls[0][0];
-    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    const prompt = api.startThread.mock.calls[0]![0].handoff_context ?? "";
     expect(prompt).toContain("Already on the device");
     expect(prompt).toContain("begins mid-conversation");
   });
@@ -447,8 +432,7 @@ describe("handoffThread", () => {
     await handoffThread(api, { ...baseArgs, transcriptPageItems: 40 });
 
     expect(api.threadDetail).toHaveBeenCalledTimes(1);
-    const seeded = api.sendTurn.mock.calls[0][0];
-    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    const prompt = api.startThread.mock.calls[0]![0].handoff_context ?? "";
     expect(prompt).not.toContain("begins mid-conversation");
   });
 
@@ -458,8 +442,7 @@ describe("handoffThread", () => {
     expect(api.threadDetail).toHaveBeenCalledWith("workspace-1", "thread-1", {
       mode: "full",
     });
-    const seeded = api.sendTurn.mock.calls[0][0];
-    const prompt = seeded.inputs[0].type === "text" ? seeded.inputs[0].text : "";
+    const prompt = api.startThread.mock.calls[0]![0].handoff_context ?? "";
     expect(prompt).not.toContain("begins mid-conversation");
   });
 
@@ -501,66 +484,37 @@ describe("handoffThread", () => {
   it("still hands off when the destination rename fails", async () => {
     const api = makeApi();
     api.updateThread.mockRejectedValue(new Error("rename failed"));
-    const onDestinationReady = vi.fn();
-    const handle = await handoffThread(api, baseArgs, { onDestinationReady });
+    const handle = await handoffThread(api, baseArgs);
     expect(handle.thread.id).toBe("thread-handoff");
-    expect(onDestinationReady).toHaveBeenCalledTimes(1);
-    expect(api.sendTurn).toHaveBeenCalledTimes(1);
+    expect(api.startThread).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("reports a created destination when the seed turn fails to start", async () => {
-    const api = makeApi();
-    api.sendTurn.mockRejectedValue(new Error("turn.start failed"));
-    api.threadDetail.mockImplementation(
-      async (_workspaceId: string, threadId: string) => ({
-        workspace: makeWorkspace(),
-        thread: makeThread({
-          id: threadId,
-          status: threadId === "thread-handoff" ? "idle" : "idle",
+describe("pending handoff context", () => {
+  it("is only reported while the daemon still holds the transcript", () => {
+    expect(threadHasPendingHandoffContext(null)).toBe(false);
+    expect(threadHasPendingHandoffContext(makeThread())).toBe(false);
+    expect(
+      threadHasPendingHandoffContext(
+        makeThread({
+          handoff_from: { thread_id: "thread-1", provider: "codex" },
         }),
-        items:
-          threadId === "thread-handoff"
-            ? []
-            : [
-                {
-                  kind: "user_message" as const,
-                  id: "user-1",
-                  text: "Where does auth happen?",
-                  attachments: [],
-                  turn_id: null,
-                  previous_turn_id: null,
-                  created_at: "2026-08-20T00:00:00Z",
-                },
-              ],
-        has_older: false,
-        oldest_item_id: null,
-        newest_item_id: null,
-        is_partial: false,
-      }),
+      ),
+    ).toBe(false);
+    const pending = makeThread({
+      handoff_from: {
+        thread_id: "thread-1",
+        provider: "codex",
+        context_pending: true,
+      },
+    });
+    expect(threadHasPendingHandoffContext(pending)).toBe(true);
+    expect(pendingHandoffContextNotice(pending, "Fix the login bug")).toBe(
+      'The conversation from "Fix the login bug" is sent with your first message.',
     );
-
-    try {
-      await handoffThread(api, baseArgs);
-      throw new Error("expected HandoffIncompleteError");
-    } catch (error) {
-      expect(error).toBeInstanceOf(HandoffIncompleteError);
-      const incomplete = error as HandoffIncompleteError;
-      expect(incomplete.turnStarted).toBe(false);
-      expect(incomplete.handle.thread.id).toBe("thread-handoff");
-      expect(incomplete.prompt).toContain("Where does auth happen?");
-      expect(incomplete.detail?.items).toEqual([]);
-    }
-  });
-
-  it("treats a destination that already has items as a started turn", async () => {
-    const api = makeApi();
-    api.sendTurn.mockRejectedValue(new Error("lost confirmation"));
-    try {
-      await handoffThread(api, baseArgs);
-      throw new Error("expected HandoffIncompleteError");
-    } catch (error) {
-      expect(error).toBeInstanceOf(HandoffIncompleteError);
-      expect((error as HandoffIncompleteError).turnStarted).toBe(true);
-    }
+    expect(pendingHandoffContextNotice(pending, null)).toBe(
+      "The previous conversation is sent with your first message.",
+    );
+    expect(pendingHandoffContextNotice(makeThread(), "x")).toBeNull();
   });
 });

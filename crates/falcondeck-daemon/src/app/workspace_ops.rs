@@ -602,6 +602,7 @@ pub(super) async fn connect_workspace_internal(
                         .iter()
                         .map(|queued| queued.summary.clone())
                         .collect();
+                    managed.pending_handoff_context = state.handoff_context.clone();
                 }
                 managed
             })
@@ -1115,6 +1116,18 @@ async fn start_thread_internal(
     }
     let now = Utc::now();
     let is_handoff = request.handoff_from.is_some();
+    // The transcript only means something on a handoff; a stray value on a
+    // plain start is dropped rather than silently prepended to a first turn.
+    let handoff_context = request
+        .handoff_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|context| is_handoff && !context.is_empty())
+        .map(str::to_owned);
+    let handoff_from = request.handoff_from.map(|mut source| {
+        source.context_pending = handoff_context.is_some();
+        source
+    });
 
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
@@ -1127,7 +1140,7 @@ async fn start_thread_internal(
         provider: provider.clone(),
         native_session_id,
         provider_transport,
-        handoff_from: request.handoff_from,
+        handoff_from,
         origin: None,
         status: ThreadStatus::Idle,
         updated_at: now,
@@ -1159,12 +1172,18 @@ async fn start_thread_internal(
         workspace.summary.default_provider = provider;
     }
     workspace.summary.updated_at = now;
-    workspace
-        .threads
-        .insert(thread_id.clone(), ManagedThread::new(thread.clone()));
+    let mut managed = ManagedThread::new(thread.clone());
+    managed.pending_handoff_context = handoff_context;
+    let persist_now = managed.pending_handoff_context.is_some();
+    workspace.threads.insert(thread_id.clone(), managed);
     let workspace_summary = workspace.summary.clone();
     drop(workspaces);
 
+    if persist_now {
+        // The held transcript is the whole point of the destination. Write it
+        // now so a daemon restart before the first message keeps the handoff.
+        app.persist_local_state().await?;
+    }
     let thread = app
         .thread_summary(&request.workspace_id, &thread.id)
         .await?;
@@ -2633,7 +2652,7 @@ async fn send_turn_with_startup_mode(
     }
 
     let skill_catalog = refresh_workspace_skill_catalog(app, &request.workspace_id).await?;
-    let (thread, provider, selected_skills, previous_turn_id, approval_policy) = {
+    let (thread, provider, selected_skills, previous_turn_id, approval_policy, handoff_context) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(&request.workspace_id)
@@ -2766,13 +2785,27 @@ async fn send_turn_with_startup_mode(
         workspace.summary.default_provider = provider.clone();
         workspace.summary.updated_at = now;
         let previous_turn_id = managed.summary.latest_turn_id.clone();
+        // A handoff's transcript rides along with the user's first real
+        // message. Resume and retry envelopes are not that message; they
+        // leave the context waiting for one. It is cleared only after the
+        // provider accepts the turn, so a failed start keeps the handoff.
+        let handoff_context = if request.resume_interrupted || is_transient_retry {
+            None
+        } else {
+            managed.pending_handoff_context.clone()
+        };
         (
             managed.summary.clone(),
             provider,
             selected_skills,
             previous_turn_id,
             approval_policy,
+            handoff_context,
         )
+    };
+    let harness_inputs = match handoff_context.as_deref() {
+        Some(context) => super::harness_user_text::with_handoff_context(&inputs, context),
+        None => inputs.clone(),
     };
     let user_message = if request.resume_interrupted {
         super::harness_user_text::conversation_item_from_projected_user(
@@ -2860,7 +2893,7 @@ async fn send_turn_with_startup_mode(
                 workspace_id: &request.workspace_id,
                 thread_id: &request.thread_id,
                 thread: &thread,
-                inputs: &inputs,
+                inputs: &harness_inputs,
                 selected_skills: &selected_skills,
                 approval_policy: &approval_policy,
                 requested_model_id: request.model_id.as_deref(),
@@ -2916,6 +2949,36 @@ async fn send_turn_with_startup_mode(
         }
         app.schedule_codex_thread_release_if_idle(&request.workspace_id, &request.thread_id);
         return Err(error);
+    }
+
+    if handoff_context.is_some() {
+        let mut carried = false;
+        let _ = app
+            .with_managed_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+                carried = thread.pending_handoff_context.take().is_some();
+                if let Some(source) = thread.summary.handoff_from.as_mut() {
+                    source.context_pending = false;
+                }
+            })
+            .await;
+        if carried {
+            if let Err(error) = app.persist_local_state().await {
+                tracing::warn!(
+                    thread_id = %request.thread_id,
+                    "failed to persist handoff context consumption: {error}"
+                );
+            }
+            if let Ok(thread) = app
+                .thread_summary(&request.workspace_id, &request.thread_id)
+                .await
+            {
+                app.emit(
+                    Some(request.workspace_id.clone()),
+                    Some(request.thread_id.clone()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+        }
     }
 
     Ok(CommandResponse {
@@ -5634,6 +5697,7 @@ mod tests {
             native_session_id: session_id.map(ToOwned::to_owned),
             provider_transport: None,
             handoff_from: None,
+            handoff_context: None,
             origin: None,
             title: Some(format!("Persisted {thread_id}")),
             manual_title: false,
@@ -6036,6 +6100,79 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].summary.id, "claude-thread-x");
         assert_eq!(merged[0].items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handoff_context_stays_out_of_the_user_bubble_and_survives_a_failed_start() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        app.with_managed_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.summary.status = ThreadStatus::Idle;
+            thread.summary.handoff_from = Some(falcondeck_core::ThreadHandoffSource {
+                thread_id: "source-1".to_string(),
+                provider: AgentProvider::CODEX,
+                context_pending: true,
+            });
+            thread.pending_handoff_context = Some("# Previous session\nhello".to_string());
+        })
+        .await
+        .unwrap();
+
+        // The seeded workspace has no Claude runtime, so the provider start
+        // fails after the user bubble is recorded.
+        let result = send_turn(
+            &app,
+            SendTurnRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                inputs: vec![TurnInputItem::Text {
+                    id: None,
+                    text: "Now fix the login bug".to_string(),
+                }],
+                selected_skills: Vec::new(),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                approval_policy: None,
+                service_tier: None,
+                permission_mode: None,
+                sandbox_mode: None,
+                steer: false,
+                user_item_id: None,
+                resume_interrupted: false,
+            },
+        )
+        .await;
+        assert!(result.is_err(), "no runtime means the start must fail");
+
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = &workspaces["workspace-1"].threads["thread-1"];
+        let user_texts: Vec<&str> = thread
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::UserMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts, vec!["Now fix the login bug"]);
+        // A failed start keeps the handoff for the retry.
+        assert_eq!(
+            thread.pending_handoff_context.as_deref(),
+            Some("# Previous session\nhello")
+        );
+        assert!(
+            thread
+                .summary
+                .handoff_from
+                .as_ref()
+                .is_some_and(|source| source.context_pending)
+        );
     }
 
     async fn seed_workspace_with_thread(app: &AppState, workspace_id: &str, thread_id: &str) {

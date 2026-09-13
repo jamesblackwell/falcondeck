@@ -630,6 +630,11 @@ struct ManagedThread {
     /// the backoff window and the retry turn itself. Lets the retry envelope
     /// start instead of being queued behind the still-Running thread.
     transient_retry_in_flight: bool,
+    /// Source transcript a handoff left for this thread's first turn. Sent to
+    /// the agent ahead of the user's own message and never shown as a user
+    /// bubble; cleared once a turn has carried it. Persisted so a daemon
+    /// restart before that first message does not lose the handoff.
+    pending_handoff_context: Option<String>,
 }
 
 #[derive(Clone)]
@@ -891,6 +896,8 @@ struct PersistedThreadState {
     provider_transport: Option<String>,
     #[serde(default)]
     handoff_from: Option<falcondeck_core::ThreadHandoffSource>,
+    #[serde(default)]
+    handoff_context: Option<String>,
     #[serde(default)]
     origin: Option<falcondeck_core::ThreadOrigin>,
     #[serde(default)]
@@ -1867,6 +1874,7 @@ impl AppState {
             };
             let mut thread = ManagedThread::new(summary);
             thread.queued_requests = state.queued_requests.clone();
+            thread.pending_handoff_context = state.handoff_context.clone();
             thread.manual_title = state.manual_title;
             thread.ai_title_generated = state.ai_title_generated
                 || (!is_placeholder_thread_title(&thread.summary.title)
@@ -3974,6 +3982,7 @@ impl AppState {
                     native_session_id: thread.summary.native_session_id.clone(),
                     provider_transport: thread.summary.provider_transport.clone(),
                     handoff_from: thread.summary.handoff_from.clone(),
+                    handoff_context: thread.pending_handoff_context.clone(),
                     origin: thread.summary.origin.clone(),
                     title: Some(thread.summary.title.clone()),
                     manual_title: thread.manual_title,

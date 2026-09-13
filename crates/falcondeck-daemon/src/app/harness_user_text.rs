@@ -1,7 +1,7 @@
 //! Interprets harness-injected user-role text for the transcript.
 
 use chrono::{DateTime, Utc};
-use falcondeck_core::{ConversationItem, ServiceLevel};
+use falcondeck_core::{ConversationItem, ServiceLevel, TurnInputItem};
 
 const HARNESS_BLOCK_TAGS: [&str; 13] = [
     "environment_context",
@@ -82,6 +82,59 @@ fn falcondeck_retry_receipt(inner: &str) -> Option<ProjectedUserText> {
             level: ServiceLevel::Info,
             message: TRANSIENT_RETRY_RECEIPT.to_string(),
         })
+}
+
+/// Wraps the context a handoff carries into a thread's first turn. The
+/// client authored the framing (handoff vs. fork wording) and the transcript
+/// inside; this block only marks it. The agent must see it ahead of the
+/// user's message; the transcript must not, so `project_user_text` cuts the
+/// block back out when a harness echoes the prompt. Everything inside is
+/// quoted verbatim, so the strip keys on the outermost pair only.
+const HANDOFF_CONTEXT_OPEN: &str = "<falcondeck-handoff-context>";
+const HANDOFF_CONTEXT_CLOSE: &str = "</falcondeck-handoff-context>";
+
+fn handoff_context_preamble(context: &str) -> String {
+    format!("{HANDOFF_CONTEXT_OPEN}\n{context}\n{HANDOFF_CONTEXT_CLOSE}")
+}
+
+/// The inputs a handoff's first turn sends the agent: the held transcript
+/// ahead of the user's own text, in one text item so every harness sees a
+/// single prompt. An image-only message gets the context as its own item.
+pub(crate) fn with_handoff_context(inputs: &[TurnInputItem], context: &str) -> Vec<TurnInputItem> {
+    let preamble = handoff_context_preamble(context);
+    let mut out = Vec::with_capacity(inputs.len() + 1);
+    let mut merged = false;
+    for input in inputs {
+        match input {
+            TurnInputItem::Text { id, text } if !merged => {
+                merged = true;
+                out.push(TurnInputItem::Text {
+                    id: id.clone(),
+                    text: format!("{preamble}\n\n{text}"),
+                });
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    if !merged {
+        out.insert(
+            0,
+            TurnInputItem::Text {
+                id: None,
+                text: preamble,
+            },
+        );
+    }
+    out
+}
+
+/// Removes the handoff block a harness echoed back with the user's prompt.
+/// `None` when the text is not a handoff turn.
+fn strip_handoff_context(text: &str) -> Option<&str> {
+    let rest = text.trim_start();
+    let body = rest.strip_prefix(HANDOFF_CONTEXT_OPEN)?;
+    let close = body.rfind(HANDOFF_CONTEXT_CLOSE)?;
+    Some(body[close + HANDOFF_CONTEXT_CLOSE.len()..].trim())
 }
 
 pub(crate) fn falcondeck_skill_path_preamble(path: &str) -> String {
@@ -290,6 +343,17 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
         return ProjectedUserText::Hidden;
     }
 
+    // Before any tag scan: the quoted transcript can hold anything,
+    // including unbalanced markers of the other blocks handled below.
+    let source = match strip_handoff_context(source) {
+        Some("") => return ProjectedUserText::Hidden,
+        Some(rest) => rest,
+        None if source.starts_with(HANDOFF_CONTEXT_OPEN) => {
+            return ProjectedUserText::Incomplete;
+        }
+        None => source,
+    };
+
     let source = match strip_falcondeck_skill_preambles(source) {
         SkillPreambleStrip::Unchanged => source,
         SkillPreambleStrip::Incomplete => return ProjectedUserText::Incomplete,
@@ -384,6 +448,65 @@ pub(crate) fn conversation_item_from_projected_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_context_rides_in_the_first_text_input_and_projects_out() {
+        let inputs = vec![
+            TurnInputItem::Text {
+                id: Some("in-1".into()),
+                text: "Now fix the login bug".into(),
+            },
+            TurnInputItem::Text {
+                id: None,
+                text: "second".into(),
+            },
+        ];
+        let sent = with_handoff_context(&inputs, "# Previous session\n<system-reminder>unbalanced");
+        assert_eq!(sent.len(), 2);
+        let TurnInputItem::Text { id, text } = &sent[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(id.as_deref(), Some("in-1"));
+        assert!(text.starts_with(HANDOFF_CONTEXT_OPEN));
+        assert!(text.ends_with("Now fix the login bug"));
+        assert!(text.contains("# Previous session"));
+        // The harness echoes the whole prompt; only the user's text survives.
+        assert_eq!(
+            project_user_text(text),
+            ProjectedUserText::Prompt("Now fix the login bug".to_string())
+        );
+        assert_eq!(
+            visible_user_prompt(text).as_deref(),
+            Some("Now fix the login bug")
+        );
+    }
+
+    #[test]
+    fn handoff_context_gets_its_own_item_for_image_only_messages() {
+        let inputs = vec![TurnInputItem::Image(falcondeck_core::ImageInput {
+            id: "img-1".into(),
+            name: None,
+            mime_type: None,
+            url: "data:image/png;base64,AA==".into(),
+            local_path: None,
+        })];
+        let sent = with_handoff_context(&inputs, "ctx");
+        assert_eq!(sent.len(), 2);
+        assert!(matches!(&sent[0], TurnInputItem::Text { text, .. } if text.contains("ctx")));
+        assert!(matches!(&sent[1], TurnInputItem::Image(_)));
+    }
+
+    #[test]
+    fn partial_handoff_echo_waits_for_the_close_tag() {
+        assert_eq!(
+            project_user_text("<falcondeck-handoff-context>\nstill streaming"),
+            ProjectedUserText::Incomplete
+        );
+        assert_eq!(
+            project_user_text("<falcondeck-handoff-context>\nx\n</falcondeck-handoff-context>"),
+            ProjectedUserText::Hidden
+        );
+    }
 
     #[test]
     fn automation_origin_survives_history_projection_but_not_title_text() {

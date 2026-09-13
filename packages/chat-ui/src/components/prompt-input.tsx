@@ -193,6 +193,11 @@ export type PromptInputProps = {
   sendDisabled?: boolean;
   /** Visible explanation when content exists but the host cannot send it. */
   sendDisabledReason?: string;
+  /**
+   * Standing note above the footer, such as a handoff whose source
+   * conversation rides along with the next message. Not dismissable.
+   */
+  contextNotice?: string | null;
   /** True while the selected thread has an in-flight turn. */
   isRunning?: boolean;
   /** True while an interrupt request is in flight. */
@@ -289,6 +294,7 @@ export const PromptInput = memo(function PromptInput({
   disabled = false,
   sendDisabled = false,
   sendDisabledReason,
+  contextNotice,
   isRunning = false,
   isStopping = false,
   compact = false,
@@ -1080,6 +1086,16 @@ export const PromptInput = memo(function PromptInput({
             onSelect={activateSlashItem}
             listId={slashListId}
           />
+        ) : null}
+
+        {contextNotice ? (
+          <p
+            role="status"
+            aria-live="polite"
+            className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-fg-muted"
+          >
+            {contextNotice}
+          </p>
         ) : null}
 
         {sendDisabled && sendDisabledReason ? (

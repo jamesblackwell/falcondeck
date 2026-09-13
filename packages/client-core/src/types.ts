@@ -784,6 +784,11 @@ export type ThreadSummary = {
 export type ThreadHandoffSource = {
   thread_id: string;
   provider: AgentProvider;
+  /**
+   * True while the daemon still holds the source transcript for this
+   * thread's first message. Cleared once a turn has carried it.
+   */
+  context_pending?: boolean;
 };
 
 /** Where a new thread's turns run. Fixed when the thread is created. */

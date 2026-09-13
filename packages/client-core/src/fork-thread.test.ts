@@ -7,7 +7,6 @@ import {
 } from "./fork-thread";
 import type {
   ForkThreadPayload,
-  SendTurnPayload,
   StartThreadPayload,
 } from "./daemon-client";
 import type {
@@ -153,9 +152,6 @@ function makeApi() {
         }),
       }),
     ),
-    sendTurn: vi.fn(async (_payload: SendTurnPayload) => ({
-      ok: true as const,
-    })),
     threadDetail: vi.fn(async (
       _workspaceId: string,
       _threadId: string,
@@ -228,20 +224,16 @@ describe("forkThread", () => {
         handoff_from: { thread_id: thread.id, provider: "claude" },
       }),
     );
-    // The seed turn is a transcript dump, not a user message, so the thread
-    // must be titled before it — otherwise auto-title-derivation would name
-    // it after the transcript-dump prompt instead of the source thread.
+    // The transcript is left with the daemon for the user's first message
+    // rather than sent as a turn of its own.
+    const started = api.startThread.mock.calls[0]![0];
+    expect(started.handoff_context).toContain("Where does auth happen?");
+    expect(started.handoff_context).toContain("fresh, independent copy");
     expect(api.updateThread).toHaveBeenCalledWith({
       workspace_id: workspace.id,
       thread_id: "thread-handoff",
       title: "Fix the login bug (fork)",
     });
-    expect(api.sendTurn).toHaveBeenCalledTimes(1);
-    const sendTurnArgs = api.sendTurn.mock.calls[0]![0];
-    expect(sendTurnArgs.workspace_id).toBe(workspace.id);
-    expect(sendTurnArgs.thread_id).toBe("thread-handoff");
-    expect(sendTurnArgs.inputs).toHaveLength(1);
-    expect(sendTurnArgs.inputs[0]).toMatchObject({ type: "text" });
   });
 
   it("falls back to a same-provider handoff when the native provider has no completed turn yet", async () => {
@@ -274,22 +266,6 @@ describe("forkThread", () => {
     expect(api.startThread).not.toHaveBeenCalled();
   });
 
-  it("reports the new thread before its seed turn is sent", async () => {
-    const api = makeApi();
-    const workspace = makeWorkspace();
-    const thread = makeThread({ provider: "claude" });
-    const onDestinationReady = vi.fn(() => {
-      // The destination exists and is titled by the time the UI hears about
-      // it, so switching to it early cannot show an untitled thread.
-      expect(api.sendTurn).not.toHaveBeenCalled();
-    });
-
-    await forkThread(api, { workspace, thread }, { onDestinationReady });
-
-    expect(onDestinationReady).toHaveBeenCalledTimes(1);
-    expect(api.sendTurn).toHaveBeenCalledTimes(1);
-  });
-
   it("hands the thread to another harness when forked onto one", async () => {
     const api = makeApi();
     const workspace = makeWorkspace();
@@ -309,7 +285,9 @@ describe("forkThread", () => {
     expect(api.updateThread).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Fix the login bug · Claude" }),
     );
-    expect(api.sendTurn).toHaveBeenCalledTimes(1);
+    expect(api.startThread.mock.calls[0]![0].handoff_context).toContain(
+      "Where does auth happen?",
+    );
   });
 
   it("forks an isolated thread onto another harness but not its own", async () => {

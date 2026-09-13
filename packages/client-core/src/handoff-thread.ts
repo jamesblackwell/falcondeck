@@ -11,10 +11,7 @@ import {
   type PersistedComposerState,
 } from "./composer-persistence";
 import { buildHandoffPrompt } from "./handoff";
-import type {
-  SendTurnPayload,
-  StartThreadPayload,
-} from "./daemon-client";
+import type { StartThreadPayload } from "./daemon-client";
 import type {
   AgentProvider,
   ConversationItem,
@@ -33,9 +30,6 @@ import type {
 export interface HandoffThreadApi {
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>;
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>;
-  sendTurn(
-    payload: SendTurnPayload,
-  ): Promise<{ ok: boolean; message?: string | null }>;
   threadDetail(
     workspaceId: string,
     threadId: string,
@@ -69,39 +63,6 @@ export type HandoffThreadArgs = {
    */
   seedItems?: readonly ConversationItem[] | null;
 };
-
-/**
- * The destination thread exists, but FalconDeck lost confirmation that the
- * seed turn started. Callers should show the linked thread and, when
- * `turnStarted` is false, put `prompt` in the composer so the user can resend.
- */
-export class HandoffIncompleteError extends Error {
-  readonly handle: ThreadHandle;
-  readonly prompt: string;
-  readonly turnStarted: boolean;
-  readonly detail: ThreadDetail | null;
-
-  constructor(args: {
-    handle: ThreadHandle;
-    prompt: string;
-    turnStarted: boolean;
-    detail?: ThreadDetail | null;
-    message?: string;
-    cause?: unknown;
-  }) {
-    const message =
-      args.message ??
-      (args.cause instanceof Error
-        ? args.cause.message
-        : "Failed to start the handoff turn");
-    super(message);
-    this.name = "HandoffIncompleteError";
-    this.handle = args.handle;
-    this.prompt = args.prompt;
-    this.turnStarted = args.turnStarted;
-    this.detail = args.detail ?? null;
-  }
-}
 
 /**
  * Why a cross-provider handoff cannot start right now. `null` means the
@@ -157,15 +118,6 @@ export function handoffDestinationSettings(
     sandboxMode,
     approvalPolicy: approvalPolicyForProvider(provider, permissionMode),
   };
-}
-
-function turnLooksStarted(detail: ThreadDetail | null): boolean {
-  if (!detail) return false;
-  return (
-    detail.items.length > 0 ||
-    detail.thread.status === "running" ||
-    detail.thread.status === "waiting_for_input"
-  );
 }
 
 /**
@@ -245,17 +197,38 @@ async function readHandoffTranscript(
 }
 
 /**
- * Cross-provider "continue with another agent": a new thread on `provider`,
- * seeded with the source transcript as its first turn. The source is never
- * modified. `onDestinationReady` fires after the destination exists (and is
- * titled) so the UI can switch to it before the potentially slow seed turn.
+ * Whether the daemon still holds a handoff transcript for this thread's
+ * first message. Clients say so above the composer: the user picks a model
+ * and types as normal, and the context rides along with that send.
+ */
+export function threadHasPendingHandoffContext(
+  thread: Pick<ThreadSummary, "handoff_from"> | null | undefined,
+): boolean {
+  return Boolean(thread?.handoff_from?.context_pending);
+}
+
+/** Composer notice for a destination whose transcript is still waiting. */
+export function pendingHandoffContextNotice(
+  thread: Pick<ThreadSummary, "handoff_from"> | null | undefined,
+  sourceTitle?: string | null,
+): string | null {
+  if (!threadHasPendingHandoffContext(thread)) return null;
+  const source = sourceTitle?.trim();
+  return source
+    ? `The conversation from "${source}" is sent with your first message.`
+    : "The previous conversation is sent with your first message.";
+}
+
+/**
+ * Cross-provider "continue with another agent": a new thread on `provider`
+ * that carries the source transcript. The daemon holds that transcript and
+ * sends it ahead of the user's first message, so nothing is read by a model
+ * until the user has chosen one and said what they want. The source is
+ * never modified. Returns once the destination exists and is titled.
  */
 export async function handoffThread(
   api: HandoffThreadApi,
   args: HandoffThreadArgs,
-  options?: {
-    onDestinationReady?: (handle: ThreadHandle) => void;
-  },
 ): Promise<ThreadHandle> {
   const { workspace, thread, provider } = args;
   if (provider === thread.provider) {
@@ -270,7 +243,7 @@ export async function handoffThread(
     pageItems: args.transcriptPageItems,
     seedItems: args.seedItems,
   });
-  const prompt = buildHandoffPrompt({
+  const context = buildHandoffPrompt({
     items: source.items,
     sourceTitle: thread.title,
     workspacePath: workspace.path,
@@ -279,7 +252,7 @@ export async function handoffThread(
     partial: source.partial,
   });
 
-  let handle = await api.startThread({
+  const handle = await api.startThread({
     workspace_id: workspace.id,
     provider,
     model_id: args.modelId,
@@ -291,40 +264,16 @@ export async function handoffThread(
       thread_id: thread.id,
       provider: thread.provider,
     },
+    handoff_context: context,
   });
   try {
-    handle = await api.updateThread({
+    return await api.updateThread({
       workspace_id: handle.workspace.id,
       thread_id: handle.thread.id,
       title: `${thread.title} · ${args.destinationLabel}`,
     });
   } catch {
-    // The destination still exists under the auto-derived title. Keep going.
-  }
-  options?.onDestinationReady?.(handle);
-
-  try {
-    await api.sendTurn({
-      workspace_id: handle.workspace.id,
-      thread_id: handle.thread.id,
-      provider,
-      model_id: args.modelId,
-      permission_mode: args.permissionMode,
-      approval_policy: args.approvalPolicy,
-      sandbox_mode: args.sandboxMode,
-      inputs: [{ type: "text", text: prompt }],
-    });
+    // The destination still exists under the auto-derived title.
     return handle;
-  } catch (cause) {
-    const recovered = await api
-      .threadDetail(handle.workspace.id, handle.thread.id, { mode: "full" })
-      .catch(() => null);
-    throw new HandoffIncompleteError({
-      handle,
-      prompt,
-      turnStarted: turnLooksStarted(recovered),
-      detail: recovered,
-      cause,
-    });
   }
 }

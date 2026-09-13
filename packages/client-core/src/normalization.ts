@@ -640,6 +640,7 @@ export function normalizeThreadSummary(
         ? {
             thread_id: thread.handoff_from.thread_id,
             provider: normalizeProvider(thread.handoff_from.provider),
+            context_pending: thread.handoff_from.context_pending === true,
           }
         : null,
     origin:

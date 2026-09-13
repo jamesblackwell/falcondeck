@@ -1549,6 +1549,10 @@ impl AppState {
                             .or_else(|| params.get("handoff_from"))
                             .cloned()
                             .and_then(|value| serde_json::from_value(value).ok()),
+                        handoff_context: extract_string(
+                            &params,
+                            &["handoffContext", "handoff_context"],
+                        ),
                     };
                     self.start_thread(request)
                         .await
@@ -2204,6 +2208,10 @@ impl AppState {
                             .or_else(|| params.get("handoff_from"))
                             .cloned()
                             .and_then(|value| serde_json::from_value(value).ok()),
+                        handoff_context: extract_string(
+                            &params,
+                            &["handoffContext", "handoff_context"],
+                        ),
                     };
                     self.start_thread(request)
                         .await

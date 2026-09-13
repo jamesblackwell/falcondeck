@@ -609,6 +609,7 @@ async fn start_automation_thread(
                 .clone()
                 .unwrap_or(falcondeck_core::ThreadIsolation::ProjectFolder),
             handoff_from: None,
+            handoff_context: None,
         })
         .await;
     let handle = match started {

@@ -122,6 +122,21 @@ command-execution JSON that only repeats the title, and a repeated workspace `cd
 every shell tool. Failures, interruptions, non-zero exits, and the actual tool output stay.
 Download/Share export is unchanged and still includes timestamps.
 
+**Refinement (Sep 2026)**: the destination no longer reads the transcript as a seed turn of its
+own. Handing off used to create the linked thread and immediately send the whole transcript on
+whatever model the composer last remembered for that harness, so the user paid for a full read
+before choosing a model or saying anything, and switching model afterwards paid it again. Now the
+client passes the bounded transcript as `handoff_context` on `thread.start`; the daemon stores it
+on the thread (`PersistedThreadState.handoff_context`, so a restart keeps it) and flags
+`handoff_from.context_pending`. The destination opens empty with the normal composer, every
+client shows "the conversation from X is sent with your first message", and the user picks
+model, effort and modes as usual. On that first `turn.start` the daemon prepends the context to
+the harness inputs inside a `<falcondeck-handoff-context>` block, records only the user's own
+text as the user bubble, and clears the flag once the provider accepts the turn (a failed start
+keeps it). Harness echoes of the prompt strip the block back out (`harness_user_text.rs`).
+Same-harness "Fork thread" on providers without a native fork uses the same path. Because the
+consumption point is in the daemon, desktop, remote-web and mobile behave identically.
+
 ## Decision 9: Mobile / Relay Authentication
 
 **Decision**: QR code pairing, no account required

@@ -39,8 +39,8 @@ import {
   fetchWithTimeout,
   filesToImageInputs,
   forkThread,
-  HandoffIncompleteError,
   handoffBlockedReason,
+  pendingHandoffContextNotice,
   generateBoxKeyPair,
   generateUserItemId,
   imageAttachmentSendBlockReason,
@@ -501,9 +501,6 @@ function RemoteApp() {
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerState>(() => readPersistedComposerState());
   const [handoffPending, setHandoffPending] = useState(false);
-  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
-    string | null
-  >(null);
   const handoffPendingRef = useRef(false);
 
   // Each conversation keeps its own unsent input, keyed by workspace + thread
@@ -511,8 +508,6 @@ function RemoteApp() {
   // attachments across. Draft text is device-local persistent; attachments
   // follow their conversation for the session only.
   const conversationKey = draftKeyFor(selectedWorkspaceId, selectedThreadId);
-  const isPreparingSelectedHandoff =
-    handoffPendingThreadKey === conversationKey;
   const conversationKeyRef = useRef(conversationKey);
   const draft = drafts[conversationKey]?.text ?? "";
   const attachments =
@@ -4218,12 +4213,6 @@ function RemoteApp() {
         callRpc<ThreadHandle>("thread.update", payload).then(
           normalizeThreadHandle,
         ),
-      sendTurn: async (payload) => {
-        await submitQueuedAction("turn.start", payload, {
-          awaitCompletion: false,
-        });
-        return { ok: true };
-      },
       threadDetail: (workspaceId, threadId, request) =>
         callRpc<ThreadDetail>("thread.detail", {
           workspace_id: workspaceId,
@@ -4231,12 +4220,13 @@ function RemoteApp() {
           ...request,
         }).then(normalizeThreadDetail),
     }),
-    [callRpc, submitQueuedAction],
+    [callRpc],
   );
 
   /**
    * Switches the UI onto a thread that continues another one (a fork or a
-   * cross-harness handoff) as soon as it exists, before its seed turn is sent.
+   * cross-harness handoff) as soon as it exists. The destination opens empty:
+   * its transcript waits with the daemon for the user's first message.
    */
   const adoptLinkedThread = useCallback(
     (handle: ThreadHandle) => {
@@ -4270,7 +4260,6 @@ function RemoteApp() {
       );
       conversationKeyRef.current = destinationKey;
       threadDetailRef.current = emptyDetail;
-      setHandoffPendingThreadKey(destinationKey);
       setThreadDetail(emptyDetail);
       setSelectedWorkspaceId(handle.workspace.id);
       setSelectedThreadId(handle.thread.id);
@@ -4303,69 +4292,23 @@ function RemoteApp() {
         setHandoffPending(true);
       }
       try {
-        const handle = await forkThread(
-          forkApi,
-          {
-            workspace,
-            thread,
-            provider: target,
-            composer: persistedComposerSelections,
-          },
-          { onDestinationReady: adoptLinkedThread },
-        );
-        // A native fork returns in one call and never reports a destination,
-        // so the new thread is adopted here instead.
-        setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                workspaces: current.workspaces.map((entry) =>
-                  entry.id === handle.workspace.id ? handle.workspace : entry,
-                ),
-                threads: [
-                  handle.thread,
-                  ...current.threads.filter(
-                    (entry) => entry.id !== handle.thread.id,
-                  ),
-                ],
-              }
-            : current,
-        );
-        setSelectedWorkspaceId(handle.workspace.id);
-        setSelectedThreadId(handle.thread.id);
+        const handle = await forkThread(forkApi, {
+          workspace,
+          thread,
+          provider: target,
+          composer: persistedComposerSelections,
+        });
+        adoptLinkedThread(handle);
         setError(null);
         if (crossHarness) {
           toast({
             variant: "success",
             title: `Continuing with ${targetLabel}`,
             description:
-              "The source conversation was carried over verbatim. The original is unchanged.",
+              "Pick a model and send your first message. The conversation is carried over with it; the original is unchanged.",
           });
         }
       } catch (error: unknown) {
-        if (error instanceof HandoffIncompleteError) {
-          // The destination exists; only its seed turn is in doubt.
-          adoptLinkedThread(error.handle);
-          if (error.detail) {
-            threadDetailRef.current = error.detail;
-            setThreadDetail(error.detail);
-          }
-          if (!error.turnStarted) {
-            setDraftForConversation(
-              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
-              error.prompt,
-            );
-          }
-          setError(error.message);
-          toast({
-            variant: "warning",
-            title: `Linked ${targetLabel} thread created`,
-            description: error.turnStarted
-              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
-              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
-          });
-          return;
-        }
         reportError(
           error,
           crossHarness
@@ -4381,7 +4324,6 @@ function RemoteApp() {
           handoffPendingRef.current = false;
           setHandoffPending(false);
         }
-        setHandoffPendingThreadKey(null);
       }
     },
     [
@@ -4389,7 +4331,6 @@ function RemoteApp() {
       forkApi,
       persistedComposerSelections,
       reportError,
-      setDraftForConversation,
       snapshot,
       toast,
     ],
@@ -5367,12 +5308,7 @@ function RemoteApp() {
                   exportTitle={selectedThread?.title}
                   preferences={snapshot?.preferences ?? null}
                   emptyState={conversationEmptyState}
-                  isSending={isSubmitting || isPreparingSelectedHandoff}
-                  sendingLabel={
-                    isPreparingSelectedHandoff
-                      ? "Starting the linked thread…"
-                      : null
-                  }
+                  isSending={isSubmitting}
                   isThinking={selectedThread?.status === "running"}
                   isWaitingForInput={
                     selectedThread?.status === "waiting_for_input"
@@ -5507,16 +5443,19 @@ function RemoteApp() {
                   }
                   sendDisabled={
                     isSubmitting ||
-                    isPreparingSelectedHandoff ||
                     preparingAttachmentCount > 0 ||
                     Boolean(attachmentSendBlockReason)
                   }
-                  sendDisabledReason={
-                    attachmentSendBlockReason ??
-                    (isPreparingSelectedHandoff
-                      ? "Wait for the handoff turn to start"
-                      : undefined)
-                  }
+                  sendDisabledReason={attachmentSendBlockReason ?? undefined}
+                  contextNotice={pendingHandoffContextNotice(
+                    selectedThread,
+                    selectedThread?.handoff_from
+                      ? snapshot?.threads.find(
+                          (entry) =>
+                            entry.id === selectedThread.handoff_from?.thread_id,
+                        )?.title
+                      : null,
+                  )}
                   isRunning={
                     selectedThread?.status === "running" ||
                     selectedThread?.status === "waiting_for_input"

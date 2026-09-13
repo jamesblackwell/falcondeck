@@ -33,8 +33,8 @@ import {
   filesToImageInputs,
   forkThread,
   generateUserItemId,
-  HandoffIncompleteError,
   handoffBlockedReason,
+  pendingHandoffContextNotice,
   imageAttachmentSendBlockReason,
   insertTranscript,
   operationalConditionDismissalKey,
@@ -513,13 +513,6 @@ function AppInner() {
   const [isSending, setIsSending] = useState(false);
   const [handoffPendingProvider, setHandoffPendingProvider] =
     useState<AgentProvider | null>(null);
-  // Once the destination exists, keep the otherwise-empty transcript visibly
-  // busy while the handoff turn is sent. Keying this to the destination
-  // avoids showing the indicator if the user navigates back to another
-  // thread while the handoff is still running.
-  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
-    string | null
-  >(null);
   // The first message in a new conversation has no daemon thread id yet, so
   // keep its optimistic transcript item keyed to the temporary composer
   // conversation until thread.start returns.
@@ -2469,9 +2462,9 @@ function AppInner() {
 
   /**
    * Switches the UI onto a thread that continues another one (a fork or a
-   * cross-harness handoff) as soon as it exists, before its seed turn is sent.
-   * The destination is marked busy so its composer reads as sending until the
-   * turn lands.
+   * cross-harness handoff) as soon as it exists. The destination starts
+   * empty: its source transcript waits with the daemon for the user's first
+   * message, so nothing has been sent yet.
    */
   const adoptLinkedThread = useCallback(
     (handle: ThreadHandle) => {
@@ -2495,7 +2488,6 @@ function AppInner() {
           : current,
       );
       conversationKeyRef.current = destinationKey;
-      setHandoffPendingThreadKey(destinationKey);
       setSelectedWorkspaceId(handle.workspace.id);
       setSelectedThreadId(handle.thread.id);
       setThreadDetail({
@@ -4432,70 +4424,26 @@ function AppInner() {
       if (crossHarness && handoffPendingProvider) return;
       if (crossHarness) setHandoffPendingProvider(target);
       try {
-        const handle = await forkThread(
-          client,
-          {
-            workspace,
-            thread,
-            provider: target,
-            composer: persistedComposerSelections,
-          },
-          { onDestinationReady: adoptLinkedThread },
-        );
-        // A native fork returns in one call and never reports a destination,
-        // so the new thread is adopted here instead.
-        setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                workspaces: current.workspaces.map((entry) =>
-                  entry.id === handle.workspace.id ? handle.workspace : entry,
-                ),
-                threads: [
-                  handle.thread,
-                  ...current.threads.filter(
-                    (entry) => entry.id !== handle.thread.id,
-                  ),
-                ],
-              }
-            : current,
-        );
-        setSelectedWorkspaceId(handle.workspace.id);
-        setSelectedThreadId(handle.thread.id);
+        const handle = await forkThread(client, {
+          workspace,
+          thread,
+          provider: target,
+          composer: persistedComposerSelections,
+        });
+        adoptLinkedThread(handle);
         setActionError(null);
         if (crossHarness) {
           toast({
             variant: "success",
             title: `Continuing with ${targetLabel}`,
             description:
-              "The source conversation was carried over verbatim. The original is unchanged.",
+              "Pick a model and send your first message. The conversation is carried over with it; the original is unchanged.",
           });
         }
       } catch (error: unknown) {
         const failureTitle = crossHarness
           ? `Failed to continue with ${targetLabel}`
           : "Failed to fork thread";
-        if (error instanceof HandoffIncompleteError) {
-          // The destination exists; only its seed turn is in doubt. Show it,
-          // and hand the prompt back to the composer when it never started.
-          adoptLinkedThread(error.handle);
-          if (error.detail) setThreadDetail(error.detail);
-          if (!error.turnStarted) {
-            setDraftForConversation(
-              draftKeyFor(error.handle.workspace.id, error.handle.thread.id),
-              error.prompt,
-            );
-          }
-          setActionError(error.message);
-          toast({
-            variant: "warning",
-            title: `Linked ${targetLabel} thread created`,
-            description: error.turnStarted
-              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
-              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
-          });
-          return;
-        }
         const msg =
           error instanceof Error ? error.message : "Failed to fork thread";
         setActionError(msg);
@@ -4506,7 +4454,6 @@ function AppInner() {
         // Only the cross-harness path claimed the gate; a same-harness fork
         // clearing it would re-open the menu under an unrelated handoff.
         if (crossHarness) setHandoffPendingProvider(null);
-        setHandoffPendingThreadKey(null);
       }
     },
     [
@@ -4515,11 +4462,6 @@ function AppInner() {
       handoffPendingProvider,
       persistedComposerSelections,
       setActionError,
-      setDraftForConversation,
-      setSelectedThreadId,
-      setSelectedWorkspaceId,
-      setSnapshot,
-      setThreadDetail,
       toast,
       viewSnapshot,
     ],
@@ -5236,8 +5178,6 @@ function AppInner() {
       threadDetail.thread.id !== selectedThreadId ||
       (threadDetail.is_partial && threadDetail.items.length === 0)),
   );
-  const isPreparingSelectedHandoff =
-    handoffPendingThreadKey === conversationKey;
   const operationalConditions = useMemo(
     () =>
       workspaceOperationalConditions(
@@ -5320,6 +5260,11 @@ function AppInner() {
   const handoffDisabledReason = handoffBlockedReason(selectedThread, {
     pending: Boolean(handoffPendingProvider),
   });
+  const handoffSourceTitle = selectedThread?.handoff_from
+    ? (viewSnapshot?.threads.find(
+        (entry) => entry.id === selectedThread.handoff_from?.thread_id,
+      )?.title ?? null)
+    : null;
   const activeCapabilities = useMemo(
     () =>
       threadAgentCapabilities(
@@ -6056,13 +6001,9 @@ function AppInner() {
               conversationItems={conversationItems}
               preferences={effectivePreferences}
               conversationEmptyState={conversationEmptyState}
-              isSending={isSending || isPreparingSelectedHandoff}
+              isSending={isSending}
               sendingLabel={
-                isPreparingSelectedHandoff
-                  ? "Starting the linked thread…"
-                  : isPreparingIsolation
-                    ? "Setting up isolated copy…"
-                    : null
+                isPreparingIsolation ? "Setting up isolated copy…" : null
               }
               isThreadDetailPending={isThreadDetailPending}
               hasOlderMessages={Boolean(
@@ -6200,6 +6141,10 @@ function AppInner() {
                   ? handleHandoffProviderSelect
                   : undefined,
                 handoffDisabledReason,
+                contextNotice: pendingHandoffContextNotice(
+                  selectedThread,
+                  handoffSourceTitle,
+                ),
                 models,
                 selectedModelId: selectedModel,
                 onModelChange: handleModelChange,
@@ -6254,13 +6199,9 @@ function AppInner() {
                   Boolean(sendBlockReason) ||
                   Boolean(attachmentSendBlockReason) ||
                   isSending ||
-                  isPreparingSelectedHandoff ||
                   preparingAttachmentCount > 0,
                 sendDisabledReason: selectedWorkspace
-                  ? (attachmentSendBlockReason ??
-                    (isPreparingSelectedHandoff
-                      ? "Wait for the handoff turn to start"
-                      : (sendBlockReason ?? undefined)))
+                  ? (attachmentSendBlockReason ?? sendBlockReason ?? undefined)
                   : undefined,
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone

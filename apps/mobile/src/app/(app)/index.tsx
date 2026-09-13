@@ -18,8 +18,8 @@ import {
   conversationRenderBlockType,
   defaultProvider,
   deriveComposerSuggestions,
-  draftKeyFor,
   handoffBlockedReason,
+  pendingHandoffContextNotice,
   imageAttachmentSendBlockReason,
   latestVisibleAssistantMessageId,
   operationalConditionDismissalKey,
@@ -259,7 +259,6 @@ export default function HomeScreen() {
     loadWorkspaceSkills,
     handoffToProvider,
     handoffPending,
-    handoffPendingThreadKey,
   } = useSessionActions();
   const interruptTurn = useInterruptTurn();
   const {
@@ -337,12 +336,20 @@ export default function HomeScreen() {
         : [],
     [providerOptions, selectedThread],
   );
-  const isPreparingSelectedHandoff =
-    handoffPendingThreadKey ===
-    draftKeyFor(selectedWorkspaceId, selectedThreadId);
   const handoffDisabledReason = handoffBlockedReason(selectedThread, {
     pending: handoffPending,
   });
+  const handoffSourceThreadId = selectedThread?.handoff_from?.thread_id ?? null;
+  const handoffSourceTitle = useSessionStore((s) =>
+    handoffSourceThreadId
+      ? (s.snapshot?.threads.find((entry) => entry.id === handoffSourceThreadId)
+          ?.title ?? null)
+      : null,
+  );
+  const handoffContextNotice = pendingHandoffContextNotice(
+    selectedThread,
+    handoffSourceTitle,
+  );
 
   // Which mode pickers the composer shows, and whether a queued message can be
   // steered — both are per-provider, so they change with the active agent.
@@ -512,13 +519,13 @@ export default function HomeScreen() {
   const isThreadRunning = selectedThread?.status === "running";
   const showThinking = shouldShowThinkingIndicator(
     presentation,
-    isThreadRunning || isPreparingSelectedHandoff,
+    isThreadRunning,
     isSubmitting && selectedThread?.status !== "waiting_for_input",
   );
   const isSelectedThreadLoading =
     !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
   const isRefreshingSelectedThread =
-    isSelectedThreadLoading && blocks.length > 0 && !isPreparingSelectedHandoff;
+    isSelectedThreadLoading && blocks.length > 0;
 
   // One soft pulse when the currently viewed agent turn finishes. Watching
   // the summary transition keeps this independent of token/tool events and
@@ -1397,14 +1404,12 @@ export default function HomeScreen() {
           </View>
         ) : blocks.length === 0 &&
           isSelectedThreadLoading &&
-          !showThinking &&
-          !isPreparingSelectedHandoff ? (
+          !showThinking ? (
           <LoadingState fill label="Loading task…" />
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
           !showThinking &&
-          !isPreparingSelectedHandoff &&
           selectedThreadDetailError ? (
           <View style={styles.syncState}>
             <Text variant="label" color="secondary" weight="semibold">
@@ -1423,8 +1428,7 @@ export default function HomeScreen() {
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
           !isThreadRunning &&
-          !showThinking &&
-          !isPreparingSelectedHandoff ? (
+          !showThinking ? (
           <EmptyState
             title="No messages yet"
             description="Send a message to get started"
@@ -1474,7 +1478,7 @@ export default function HomeScreen() {
             }
             ListFooterComponent={
               <>
-                {showThinking ? <ThinkingIndicator submitting={isSubmitting && !isThreadRunning && !isPreparingSelectedHandoff} /> : null}
+                {showThinking ? <ThinkingIndicator submitting={isSubmitting && !isThreadRunning} /> : null}
                 <View style={styles.listBottomSpacer} />
               </>
             }
@@ -1543,24 +1547,21 @@ export default function HomeScreen() {
             sendDisabled={
               isSubmitting ||
               !isEncrypted ||
-              Boolean(attachmentSendBlockReason) ||
-              isPreparingSelectedHandoff
+              Boolean(attachmentSendBlockReason)
             }
             statusNotice={
-              handoffPending && !isPreparingSelectedHandoff
+              handoffPending
                 ? "Preparing handoff… copying this conversation to the new thread"
-                : undefined
+                : (handoffContextNotice ?? undefined)
             }
             sendDisabledReason={
               // Submitting is transient and self-evident; only surface a reason
               // when the block is something the user has to act on.
               isSubmitting
                 ? undefined
-                : isPreparingSelectedHandoff
-                  ? "Wait for the handoff turn to start"
-                  : !isEncrypted
-                    ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
-                    : (attachmentSendBlockReason ?? undefined)
+                : !isEncrypted
+                  ? (sessionSendBlockReason(syncStatus) ?? CONNECTION_COPY.reconnecting)
+                  : (attachmentSendBlockReason ?? undefined)
             }
             attachments={attachments}
             skills={workspace?.skills ?? []}

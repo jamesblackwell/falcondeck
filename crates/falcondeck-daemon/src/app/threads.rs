@@ -2874,6 +2874,7 @@ impl ManagedThread {
             transient_retry_attempts: 0,
             transient_retry_generation: 0,
             transient_retry_in_flight: false,
+            pending_handoff_context: None,
         }
     }
 

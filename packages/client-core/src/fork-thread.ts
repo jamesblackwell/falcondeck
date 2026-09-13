@@ -38,15 +38,6 @@ export type ForkThreadArgs = {
   composer?: PersistedComposerState | null;
 };
 
-export type ForkThreadOptions = {
-  /**
-   * Fires once the new thread exists and is titled, before its seed turn is
-   * sent, so the UI can switch to it instead of waiting on a slow first turn.
-   * Never fires for a native fork, which returns its thread in one call.
-   */
-  onDestinationReady?: (handle: ThreadHandle) => void;
-};
-
 /**
  * Whether the thread's provider can branch its history at a turn boundary
  * without replaying a transcript (see `AgentCapabilitySummary.supports_forking`,
@@ -109,11 +100,11 @@ export function forkBlockedReason(
  * - Native fork (Codex today): the provider's own `thread/fork` branches the
  *   session at its last completed turn — a real session copy.
  * - Same-provider handoff (every other provider): a new thread on the same
- *   provider, seeded with the retained transcript as its first turn via the
+ *   provider whose first message carries the retained transcript, via the
  *   same bounded-transcript mechanism cross-provider handoff already uses.
  * - Cross-harness fork (`provider` differs from the thread's): the
- *   cross-provider handoff, which seeds the destination agent with the
- *   transcript and this workspace's remembered pickers for that harness.
+ *   cross-provider handoff, which leaves the transcript with the daemon for
+ *   the user's first message on that harness.
  *
  * Callers never need to branch on provider; all three paths return the new
  * thread's `ThreadHandle`.
@@ -121,7 +112,6 @@ export function forkBlockedReason(
 export async function forkThread(
   api: ForkThreadApi,
   args: ForkThreadArgs,
-  options?: ForkThreadOptions,
 ): Promise<ThreadHandle> {
   const { workspace, thread } = args;
   const provider = args.provider ?? thread.provider;
@@ -129,16 +119,12 @@ export async function forkThread(
   if (blocked) throw new Error(blocked);
 
   if (provider !== thread.provider) {
-    return handoffThread(
-      api,
-      {
-        workspace,
-        thread,
-        provider,
-        ...handoffDestinationSettings(workspace, provider, args.composer),
-      },
-      options,
-    );
+    return handoffThread(api, {
+      workspace,
+      thread,
+      provider,
+      ...handoffDestinationSettings(workspace, provider, args.composer),
+    });
   }
 
   if (threadSupportsNativeFork(thread, workspace) && thread.latest_turn_id) {
@@ -156,11 +142,8 @@ export async function forkThread(
     throw new Error("Nothing to fork yet — send a message first.");
   }
 
-  const prompt = buildForkPrompt({
-    items: detail.items,
-    sourceTitle: thread.title,
-    workspacePath: workspace.path,
-  });
+  // The daemon holds the transcript and sends it ahead of the user's first
+  // message in the copy, so nothing is read by a model until then.
   const started = await api.startThread({
     workspace_id: workspace.id,
     provider: thread.provider,
@@ -171,28 +154,17 @@ export async function forkThread(
     sandbox_mode: thread.agent.sandbox_mode,
     isolation: "project_folder",
     handoff_from: { thread_id: thread.id, provider: thread.provider },
+    handoff_context: buildForkPrompt({
+      items: detail.items,
+      sourceTitle: thread.title,
+      workspacePath: workspace.path,
+    }),
   });
-  // The seed turn below is the transcript dump, not something a user typed;
-  // left alone, title auto-derivation would pick its opening line as the
-  // thread's name. Set a real title first, mirroring the cross-provider
-  // handoff flow's own `${title} · ${provider}` rename.
-  const handle = await api.updateThread({
+  // Mirrors the cross-provider handoff's own `${title} · ${provider}` rename
+  // so the copy never sits under a placeholder name.
+  return api.updateThread({
     workspace_id: started.workspace.id,
     thread_id: started.thread.id,
     title: `${thread.title} (fork)`,
   });
-  options?.onDestinationReady?.(handle);
-  await api.sendTurn({
-    workspace_id: handle.workspace.id,
-    thread_id: handle.thread.id,
-    inputs: [{ type: "text", text: prompt }],
-    provider: handle.thread.provider,
-    model_id: handle.thread.agent.model_id,
-    reasoning_effort: handle.thread.agent.reasoning_effort,
-    approval_policy: handle.thread.agent.approval_policy,
-    service_tier: handle.thread.agent.service_tier,
-    permission_mode: handle.thread.agent.permission_mode,
-    sandbox_mode: handle.thread.agent.sandbox_mode,
-  });
-  return handle;
 }

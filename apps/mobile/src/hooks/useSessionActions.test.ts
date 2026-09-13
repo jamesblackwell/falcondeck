@@ -15,7 +15,6 @@ import { useRelayStore } from "@/store/relay-store";
 import { useSessionStore } from "@/store/session-store";
 import { useUIStore } from "@/store/ui-store";
 import { useSessionActions } from "./useSessionActions";
-import { draftKeyFor } from "@falcondeck/client-core";
 
 import {
   assistantMessage,
@@ -1603,7 +1602,7 @@ describe("handoffToProvider", () => {
     return source;
   }
 
-  it("creates a linked destination, titles it, and seeds the source transcript", async () => {
+  it("creates a linked destination, titles it, and leaves the transcript with the daemon", async () => {
     seedHandoffWorkspace();
     const destination = thread({
       id: "handoff-1",
@@ -1626,9 +1625,6 @@ describe("handoffToProvider", () => {
           thread: { ...destination, title: params.title as string },
         };
       }
-      if (method === "turn.start") {
-        return { ok: true };
-      }
       return undefined;
     });
     const setError = vi.fn();
@@ -1642,7 +1638,7 @@ describe("handoffToProvider", () => {
       await act(async () => {
         await harness.getActions().handoffToProvider("claude");
       });
-      expect(harness.getActions().handoffPendingThreadKey).toBeNull();
+      expect(harness.getActions().handoffPending).toBe(false);
     } finally {
       harness.unmount();
     }
@@ -1670,6 +1666,10 @@ describe("handoffToProvider", () => {
       }),
       { requestIdPrefix: "mobile-handoff" },
     );
+    const startCall = rpc.mock.calls.find(([method]) => method === "thread.start");
+    const context = (startCall?.[1] as { handoff_context?: string }).handoff_context ?? "";
+    expect(context).toContain("Where does auth happen?");
+    expect(context).toContain("can still be resumed separately");
     expect(rpc).toHaveBeenCalledWith(
       "thread.update",
       expect.objectContaining({
@@ -1678,19 +1678,8 @@ describe("handoffToProvider", () => {
       }),
       { requestIdPrefix: "mobile-handoff" },
     );
-    const turnCall = rpc.mock.calls.find(([method]) => method === "turn.start");
-    expect(turnCall?.[1]).toEqual(
-      expect.objectContaining({
-        workspace_id: "w1",
-        thread_id: "handoff-1",
-        provider: "claude",
-      }),
-    );
-    const turnInputs = (
-      turnCall?.[1] as { inputs: { type: string; text: string }[] }
-    ).inputs;
-    expect(turnInputs[0]?.text).toContain("Where does auth happen?");
-    expect(turnInputs[0]?.text).toContain("can still be resumed separately");
+    // No seed turn: the user picks a model and sends the first message.
+    expect(rpc.mock.calls.some(([method]) => method === "turn.start")).toBe(false);
     expect(useSessionStore.getState().selectedThreadId).toBe("handoff-1");
     expect(setError).toHaveBeenCalledWith(null);
   });
@@ -1713,57 +1702,5 @@ describe("handoffToProvider", () => {
     }
 
     expect(rpc).not.toHaveBeenCalled();
-  });
-
-  it("leaves the prompt in the destination composer when the seed turn does not start", async () => {
-    seedHandoffWorkspace();
-    const destination = thread({
-      id: "handoff-1",
-      workspace_id: "w1",
-      provider: "claude",
-      title: "Fix the login bug · Claude",
-    });
-    const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
-      if (method === "thread.detail") {
-        if (params.thread_id === "handoff-1") {
-          return threadDetail({
-            thread: destination,
-            items: [],
-          });
-        }
-        return threadDetail({
-          items: [userMessage("u1", "Where does auth happen?")],
-        });
-      }
-      if (method === "thread.start" || method === "thread.update") {
-        return { workspace: workspace({ id: "w1" }), thread: destination };
-      }
-      if (method === "turn.start") {
-        throw new Error("turn.start failed");
-      }
-      return undefined;
-    });
-    const setError = vi.fn();
-    useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState["_callRpc"],
-      _setError: setError as RelayStoreState["_setError"],
-    } as Partial<RelayStoreState>);
-
-    const harness = mountSessionActions();
-    try {
-      await act(async () => {
-        await harness.getActions().handoffToProvider("claude");
-      });
-    } finally {
-      harness.unmount();
-    }
-
-    expect(useSessionStore.getState().selectedThreadId).toBe("handoff-1");
-    expect(useUIStore.getState().drafts[draftKeyFor("w1", "handoff-1")]?.text).toContain(
-      "Where does auth happen?",
-    );
-    expect(setError).toHaveBeenCalledWith(
-      "The handoff turn did not start. Its prompt is ready in the composer to resend.",
-    );
   });
 });

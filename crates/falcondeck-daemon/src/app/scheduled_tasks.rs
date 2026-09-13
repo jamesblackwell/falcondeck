@@ -1020,6 +1020,7 @@ async fn execute_run(app: AppState, task_id: String, run_id: String) {
             permission_mode: task.permission_mode.clone(),
             isolation: task.isolation,
             handoff_from: None,
+            handoff_context: None,
         })
         .await;
     let handle = match started {

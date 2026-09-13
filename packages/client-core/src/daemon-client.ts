@@ -141,6 +141,12 @@ export type StartThreadPayload = {
   isolation?: ThreadIsolation;
   /** Creates a linked destination while leaving the source thread unchanged. */
   handoff_from?: ThreadHandoffSource | null;
+  /**
+   * Source transcript the daemon sends ahead of the user's first message on
+   * the new thread. Only meaningful with `handoff_from`. Never shown as a
+   * user bubble, and no model reads it until that first message is sent.
+   */
+  handoff_context?: string | null;
 };
 
 export type ForkThreadPayload = {
