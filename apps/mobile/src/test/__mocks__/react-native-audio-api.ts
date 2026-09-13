@@ -46,4 +46,11 @@ export const mockAudioManager = {
 
 export const AudioManager = mockAudioManager
 
+export const PlaybackNotificationManager = {
+  show: vi.fn(async () => {}),
+  hide: vi.fn(async () => {}),
+  enableControl: vi.fn(async () => {}),
+  addEventListener: vi.fn(() => ({ remove: vi.fn() })),
+}
+
 export const decodePCMInBase64 = vi.fn(async () => ({ duration: 0.02 }))

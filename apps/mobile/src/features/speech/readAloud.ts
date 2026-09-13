@@ -18,6 +18,7 @@ import { useRelayStore } from '@/store/relay-store'
 import { DEMO_SESSION_ID } from '@/features/demo/demoData'
 
 import { speechLiveActivity } from './speechLiveActivity'
+import { ReadAloudNowPlaying } from './readAloudNowPlaying'
 
 export type ReadAloudState = 'idle' | 'loading' | 'playing' | 'paused' | 'error'
 
@@ -53,6 +54,8 @@ export class NativeReadAloudPlayer {
   private context: AudioContext | null = null
   private active: Playback | null = null
   private pendingSpeechStop: Promise<void> = Promise.resolve()
+  private readonly nowPlaying = new ReadAloudNowPlaying()
+  private pauseTransition = Promise.resolve()
   private readonly states = new Map<string, ReadAloudState>()
   private readonly listeners = new Map<string, Set<Listener>>()
 
@@ -115,10 +118,23 @@ export class NativeReadAloudPlayer {
   }
 
   async togglePause(): Promise<void> {
+    return this.setPaused(!this.active?.paused)
+  }
+
+  private setPaused(paused: boolean): Promise<void> {
     const playback = this.active
-    if (!playback || !playback.activityStarted || (!playback.deviceSpeech && !playback.node)) return
+    this.pauseTransition = this.pauseTransition.then(async () => {
+      if (!playback || this.active !== playback || playback.paused === paused) return
+      await this.applyPaused(paused)
+    })
+    return this.pauseTransition
+  }
+
+  private async applyPaused(paused: boolean): Promise<void> {
+    const playback = this.active
+    if (!playback || !playback.activityStarted) return
     try {
-      if (playback.paused) {
+      if (!paused) {
         await (playback.deviceSpeech ? Speech.resume() : this.audioContext().resume())
         if (this.active !== playback) return
         playback.paused = false
@@ -131,6 +147,7 @@ export class NativeReadAloudPlayer {
         speechLiveActivity.setMode('paused')
         this.setState(playback.key, 'paused')
       }
+      this.nowPlaying.setPaused(playback.paused)
     } catch {
       // An interruption can race a Lock Screen pause or resume action.
     }
@@ -220,7 +237,7 @@ export class NativeReadAloudPlayer {
         resolve()
       }
       this.startLiveActivity(playback)
-      this.setState(playback.key, 'playing')
+      this.setState(playback.key, playback.paused ? 'paused' : 'playing')
       node.start()
     })
   }
@@ -228,6 +245,10 @@ export class NativeReadAloudPlayer {
   private startLiveActivity(playback: Playback): void {
     if (playback.activityStarted) return
     playback.activityStarted = true
+    this.nowPlaying.start(
+      (paused) => { if (this.active === playback) void this.setPaused(paused) },
+      () => { if (this.active === playback) this.stop(playback.key) },
+    )
     speechLiveActivity.startPlaying()
     playback.unsubscribeActivityActions = speechLiveActivity.subscribeAction((action) => {
       if (this.active !== playback) return
@@ -252,6 +273,7 @@ export class NativeReadAloudPlayer {
     playback.unsubscribeActivityActions = null
     if (!playback.activityStarted) return
     playback.activityStarted = false
+    this.nowPlaying.stop()
     speechLiveActivity.end()
   }
 

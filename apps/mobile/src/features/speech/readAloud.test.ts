@@ -79,6 +79,32 @@ describe('NativeReadAloudPlayer', () => {
     expect(player.getSnapshot('third')).toBe('idle')
   })
 
+  it('handles idempotent system pause/play commands in demo mode and clears completed playback', async () => {
+    useRelayStore.setState({ sessionId: DEMO_SESSION_ID })
+    const player = new NativeReadAloudPlayer()
+    player.toggle('demo', 'Read this example aloud')
+    await vi.waitFor(() => expect(Speech.speak).toHaveBeenCalledOnce())
+    const speech = vi.mocked(Speech.speak).mock.calls[0][1]!
+    speech.onStart?.()
+    const calls = vi.mocked(AudioApi.PlaybackNotificationManager.addEventListener).mock.calls
+    const pause = calls.find(([name]) => name === 'playbackNotificationPause')![1]
+    const play = calls.find(([name]) => name === 'playbackNotificationPlay')![1]
+    pause({})
+    pause({})
+    await vi.waitFor(() => expect(player.getSnapshot('demo')).toBe('paused'))
+    expect(Speech.pause).toHaveBeenCalledOnce()
+    play({})
+    play({})
+    await vi.waitFor(() => expect(player.getSnapshot('demo')).toBe('playing'))
+    expect(Speech.resume).toHaveBeenCalledOnce()
+    speech.onDone?.()
+    await vi.waitFor(() => expect(AudioApi.PlaybackNotificationManager.hide).toHaveBeenCalled())
+    expect(player.getSnapshot('demo')).toBe('idle')
+    pause({})
+    await Promise.resolve()
+    expect(Speech.pause).toHaveBeenCalledOnce()
+  })
+
   it('prefetches chunks and plays them in sequence', async () => {
     const startPlaying = vi.spyOn(speechLiveActivity, 'startPlaying')
     const setActivityMode = vi.spyOn(speechLiveActivity, 'setMode')
