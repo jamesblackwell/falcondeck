@@ -63,6 +63,7 @@ import {
   validateImageAttachmentBudget,
   withComposerProvider,
   withComposerSelection,
+  workspaceAgent,
   workspaceAgentCapabilities,
   workspaceRelativeFilePath,
   threadAgentCapabilities,
@@ -236,6 +237,18 @@ const SCHEDULED_TASK_CREATION_PROMPT =
 type DesktopExtensionPanel = ExtensionPanelDefinition & {
   ownerHostId: string | null;
 };
+
+/** Upper bound on the model-picker spinner when a provider handshake never reports back. */
+const PROVIDER_HYDRATION_TIMEOUT_MS = 45_000;
+
+/**
+ * Codex and Claude publish their catalogs on their own connect paths; only
+ * ACP and native OpenCode providers fill the picker lazily on selection, so
+ * only those show a loading state.
+ */
+function providerHydratesLazily(provider: AgentProvider) {
+  return provider !== "codex" && provider !== "claude";
+}
 
 function lastAgentItemId(items: ConversationItem[]) {
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -2426,14 +2439,37 @@ function AppInner() {
   // Once per workspace+provider: the daemon reuses a live runtime, so a
   // repeat would only cost a no-op round trip.
   const hydratedProvidersRef = useRef(new Set<string>());
+  // Providers whose catalog fetch is in flight, keyed like the ref above. The
+  // daemon flips the agent's account status off "unknown" once the handshake
+  // publishes models, so the composer spins until then; a failed handshake
+  // leaves the status untouched, which the timeout covers.
+  const [hydratingProviderKeys, setHydratingProviderKeys] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   useEffect(() => {
     if (selectedThread || !selectedWorkspace || !selectedProvider) return;
     const key = `${selectedWorkspace.id}:${selectedProvider}`;
     if (hydratedProvidersRef.current.has(key)) return;
     hydratedProvidersRef.current.add(key);
-    apiFor(selectedWorkspace.id)
-      ?.hydrateProvider?.(selectedWorkspace.id, selectedProvider)
-      .catch(() => {});
+    const client = apiFor(selectedWorkspace.id);
+    if (!client?.hydrateProvider || !providerHydratesLazily(selectedProvider)) {
+      return;
+    }
+    const settle = () =>
+      setHydratingProviderKeys((previous) => {
+        if (!previous.has(key)) return previous;
+        const next = new Set(previous);
+        next.delete(key);
+        return next;
+      });
+    setHydratingProviderKeys((previous) => new Set(previous).add(key));
+    const timer = window.setTimeout(settle, PROVIDER_HYDRATION_TIMEOUT_MS);
+    // The request only schedules the fetch; the catalog lands later via a
+    // workspace event, so the timer stays armed after the call resolves.
+    client
+      .hydrateProvider(selectedWorkspace.id, selectedProvider)
+      .catch(settle);
+    return () => window.clearTimeout(timer);
   }, [apiFor, selectedProvider, selectedThread, selectedWorkspace]);
 
   const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
@@ -5244,6 +5280,15 @@ function AppInner() {
     () => workspaceModels(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
   );
+  const modelsLoading = useMemo(() => {
+    if (selectedThread || !selectedWorkspace) return false;
+    if (!hydratingProviderKeys.has(`${selectedWorkspace.id}:${activeProvider}`)) {
+      return false;
+    }
+    const status = workspaceAgent(selectedWorkspace, activeProvider)?.account
+      .status;
+    return status === undefined || status === "unknown";
+  }, [activeProvider, hydratingProviderKeys, selectedThread, selectedWorkspace]);
   const providerOptions = useMemo(
     () => workspaceProviderOptions(selectedWorkspace),
     [selectedWorkspace],
@@ -6146,6 +6191,7 @@ function AppInner() {
                   handoffSourceTitle,
                 ),
                 models,
+                modelsLoading,
                 selectedModelId: selectedModel,
                 onModelChange: handleModelChange,
                 reasoningOptions: currentReasoningOptions,

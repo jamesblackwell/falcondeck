@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronLeft,
+  Loader2,
   Star,
   Zap,
 } from "lucide-react";
@@ -183,6 +184,7 @@ export function ModelMenu({
   handoffProviders = EMPTY_PROVIDER_OPTIONS,
   onHandoffProviderSelect,
   handoffDisabledReason = null,
+  modelsLoading = false,
   disabled = false,
   open: controlledOpen,
   onOpenChange,
@@ -207,6 +209,12 @@ export function ModelMenu({
   onHandoffProviderSelect?: (provider: AgentProvider) => void;
   /** Keeps handoff discoverable while explaining why it cannot start yet. */
   handoffDisabledReason?: string | null;
+  /**
+   * The provider's catalog is still being fetched (lazy ACP/OpenCode
+   * hydration). Spins on the trigger and explains an empty or placeholder
+   * list instead of leaving the menu looking final.
+   */
+  modelsLoading?: boolean;
   disabled?: boolean;
 } & MenuOpenProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
@@ -426,10 +434,18 @@ export function ModelMenu({
             aria-label="Model"
             aria-haspopup="menu"
             aria-expanded={open}
-            disabled={disabled || (models.length === 0 && !canHandoff)}
+            disabled={
+              disabled ||
+              (models.length === 0 && !canHandoff && !modelsLoading)
+            }
             className="fd-focus group inline-flex h-7 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
           >
-            {isFastOn ? (
+            {modelsLoading ? (
+              <Loader2
+                aria-hidden="true"
+                className="h-3 w-3 shrink-0 animate-spin"
+              />
+            ) : isFastOn ? (
               <Zap
                 aria-hidden="true"
                 className="h-3 w-3 shrink-0 text-accent"
@@ -556,9 +572,22 @@ export function ModelMenu({
                     </div>
                   );
                 })}
-                {visibleModels.length === 0 ? (
+                {visibleModels.length === 0 && !modelsLoading ? (
                   <p className="px-2.5 py-3 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
                     No models match “{modelQuery.trim()}”
+                  </p>
+                ) : null}
+                {modelsLoading ? (
+                  <p
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-2 px-2.5 py-2 text-[length:var(--fd-text-sm)] text-fg-muted"
+                  >
+                    <Loader2
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 animate-spin"
+                    />
+                    <span>Loading models…</span>
                   </p>
                 ) : null}
               </div>

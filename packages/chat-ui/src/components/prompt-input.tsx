@@ -143,6 +143,8 @@ export type PromptInputProps = {
   onHandoffProviderSelect?: (provider: AgentProvider) => void;
   handoffDisabledReason?: string | null;
   models: ModelSummary[];
+  /** The provider's model catalog is still being fetched. */
+  modelsLoading?: boolean;
   selectedModelId: string | null;
   onModelChange: (value: string) => void;
   reasoningOptions: string[];
@@ -269,6 +271,7 @@ export const PromptInput = memo(function PromptInput({
   handoffProviders = EMPTY_HANDOFF_PROVIDER_OPTIONS,
   onHandoffProviderSelect,
   handoffDisabledReason = null,
+  modelsLoading = false,
   models,
   selectedModelId,
   onModelChange,
@@ -1329,6 +1332,7 @@ export const PromptInput = memo(function PromptInput({
                 handoffProviders={handoffProviders}
                 onHandoffProviderSelect={onHandoffProviderSelect}
                 handoffDisabledReason={handoffDisabledReason}
+                modelsLoading={modelsLoading}
                 disabled={disabled}
                 {...optionMenuProps("model")}
               />

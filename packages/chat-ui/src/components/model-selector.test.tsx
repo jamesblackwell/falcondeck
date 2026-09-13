@@ -185,6 +185,43 @@ describe("ModelMenu", () => {
   });
 });
 
+describe("ModelMenu loading", () => {
+  it("opens an empty menu and reports that models are still loading", async () => {
+    render(
+      <ModelMenu
+        models={[]}
+        selectedModel={null}
+        onModelChange={vi.fn()}
+        reasoningOptions={[]}
+        selectedEffort={null}
+        onEffortChange={vi.fn()}
+        modelsLoading
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Model" });
+    expect(trigger).not.toBeDisabled();
+    fireEvent.click(trigger);
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent("Loading models…");
+    });
+    expect(screen.queryByText(/No models match/)).toBeNull();
+  });
+
+  it("keeps the trigger disabled when nothing is loading and no models exist", () => {
+    render(
+      <ModelMenu
+        models={[]}
+        selectedModel={null}
+        onModelChange={vi.fn()}
+        reasoningOptions={[]}
+        selectedEffort={null}
+        onEffortChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Model" })).toBeDisabled();
+  });
+});
+
 describe("PermissionModeSelector", () => {
   it("carries a Permissions title with its shortcut keycaps", async () => {
     render(
