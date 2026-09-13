@@ -1,11 +1,4 @@
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Ban,
@@ -330,7 +323,8 @@ function UserMessage({
 
   return (
     <div className="ml-auto w-fit min-w-0 max-w-2xl">
-      {item.automated || (projected.kind === "prompt" && projected.automated) ? (
+      {item.automated ||
+      (projected.kind === "prompt" && projected.automated) ? (
         <div className="fd-type-meta mb-2 flex items-center justify-end gap-1 text-fg-muted">
           <Clock3 aria-hidden="true" className="h-3 w-3" />
           Sent by scheduled task
@@ -716,9 +710,7 @@ function AssistantMessage({
       )}
     >
       {isCommentary ? (
-        <p className="fd-type-microlabel mb-1 text-fg-muted">
-          Progress update
-        </p>
+        <p className="fd-type-microlabel mb-1 text-fg-muted">Progress update</p>
       ) : null}
       {lifecycle === "pending" && !item.text ? (
         <p
@@ -975,9 +967,7 @@ function WebSearchMessage({
           />
         )}
         <div className="min-w-0 flex-1">
-          <p className="fd-type-microlabel text-fg-muted">
-            {actionLabel}
-          </p>
+          <p className="fd-type-microlabel text-fg-muted">{actionLabel}</p>
           <p className="mt-0.5 break-words text-[length:var(--fd-text-sm)] text-fg-primary">
             {query}
           </p>
@@ -1106,7 +1096,10 @@ function ToolCallCompactRow({
     >
       <ToolStatusIcon item={item} className="h-3.5 w-3.5 shrink-0" />
       {notableStyle ? (
-        <notableStyle.Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+        <notableStyle.Icon
+          aria-hidden="true"
+          className="h-3.5 w-3.5 shrink-0"
+        />
       ) : null}
       <span
         className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]"
@@ -1243,7 +1236,9 @@ function ToolCallMessage({
     const wantsPath = touchesFile || activityKind === "read";
     return {
       label: described.label,
-      filePath: wantsPath ? (described.path ?? extractFilePath(item.title)) : null,
+      filePath: wantsPath
+        ? (described.path ?? extractFilePath(item.title))
+        : null,
       labelNamesFile: described.namesPath,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the title, detail
@@ -3450,9 +3445,7 @@ export const WorkSessionCard = memo(
     // about what it just did. Labelling that state with the finished tool's
     // name would claim work that already ended.
     const thinkingTail =
-      running &&
-      items[items.length - 1]?.kind === "reasoning" &&
-      !activeTool;
+      running && items[items.length - 1]?.kind === "reasoning" && !activeTool;
     const currentLabel = activeTool ? toolCallLabel(activeTool) : null;
 
     return (

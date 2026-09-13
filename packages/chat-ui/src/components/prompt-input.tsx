@@ -910,7 +910,11 @@ export const PromptInput = memo(function PromptInput({
                 <>
                   {voice.state === "recording" ? (
                     <>
-                      <span role="status" aria-live="polite" className="sr-only">
+                      <span
+                        role="status"
+                        aria-live="polite"
+                        className="sr-only"
+                      >
                         Recording voice input
                       </span>
                       <Tooltip label="Cancel">
@@ -1064,345 +1068,351 @@ export const PromptInput = memo(function PromptInput({
               rows={1}
             />
 
-        {attachmentInputNotice ? (
-          <div className="flex items-center gap-2 px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning">
-            <p role="status" aria-live="polite" className="min-w-0 flex-1">
-              {attachmentInputNotice}
-            </p>
-            <button
-              type="button"
-              onClick={() => setAttachmentInputNotice(null)}
-              aria-label="Dismiss attachment message"
-              className="fd-focus inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
-            >
-              <X aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        ) : null}
+            {attachmentInputNotice ? (
+              <div className="flex items-center gap-2 px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning">
+                <p role="status" aria-live="polite" className="min-w-0 flex-1">
+                  {attachmentInputNotice}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setAttachmentInputNotice(null)}
+                  aria-label="Dismiss attachment message"
+                  className="fd-focus inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+                >
+                  <X aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : null}
 
-        {slashQuery && !disabled && !voice ? (
-          <SlashCommandMenu
-            query={slashQuery.query}
-            items={slashItems}
-            activeIndex={clampedSlashIndex}
-            onActiveIndexChange={setActiveSkillIndex}
-            onSelect={activateSlashItem}
-            listId={slashListId}
-          />
-        ) : null}
-
-        {contextNotice ? (
-          <p
-            role="status"
-            aria-live="polite"
-            className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-fg-muted"
-          >
-            {contextNotice}
-          </p>
-        ) : null}
-
-        {sendDisabled && sendDisabledReason ? (
-          <p
-            id={`${textareaId}-send-status`}
-            role="status"
-            aria-live="polite"
-            className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning"
-          >
-            {sendDisabledReason}
-          </p>
-        ) : null}
-
-        {/* Footer: tools + send. Hidden (not unmounted) during dictation so
-            the card keeps this row's height under the overlay. */}
-        <div className="flex items-center gap-1.5 px-3 pb-3">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            disabled={!canAttachImages}
-            className="hidden"
-            onChange={handleFileChange}
-          />
-          <Popover.Root
-            open={plusMenuOpen}
-            onOpenChange={(next) => {
-              setPlusMenuOpen(next);
-              // Always reopen on the menu, never on whatever view was last used.
-              if (!next) setPlusMenuView("menu");
-            }}
-          >
-            <Popover.Trigger asChild>
-              <button
-                ref={plusButtonRef}
-                type="button"
-                aria-label="Add to this message"
-                onPointerDown={() => {
-                  plusMenuOpenedByKeyboardRef.current = false;
-                }}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Enter" ||
-                    event.key === " " ||
-                    event.key === "ArrowDown"
-                  ) {
-                    plusMenuOpenedByKeyboardRef.current = true;
-                  }
-                }}
-                className="fd-focus inline-flex h-8 w-8 items-center justify-center rounded-[var(--fd-radius-md)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
-              >
-                <Plus className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </Popover.Trigger>
-            <Popover.Portal>
-              <Popover.Content
-                align="start"
-                side="top"
-                sideOffset={8}
-                onOpenAutoFocus={(event) => {
-                  if (!plusMenuOpenedByKeyboardRef.current) {
-                    event.preventDefault();
-                    plusButtonRef.current?.blur();
-                  }
-                }}
-                onCloseAutoFocus={(event) => {
-                  if (!plusMenuOpenedByKeyboardRef.current) {
-                    event.preventDefault();
-                    plusButtonRef.current?.blur();
-                  }
-                  plusMenuOpenedByKeyboardRef.current = false;
-                }}
-                onPointerDown={() => {
-                  plusMenuOpenedByKeyboardRef.current = false;
-                }}
-                className={cn(
-                  "z-50 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]",
-                  plusMenuView === "goal" ? "w-80 p-4" : "w-56 p-1",
-                )}
-              >
-                {plusMenuView === "goal" && goal ? (
-                  <div className="space-y-3">
-                    <button
-                      type="button"
-                      onClick={() => setPlusMenuView("menu")}
-                      className="fd-focus -ml-1 inline-flex items-center gap-1 rounded-[var(--fd-radius-sm)] px-1 py-0.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-secondary"
-                    >
-                      <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />{" "}
-                      Back
-                    </button>
-                    <GoalPanel
-                      {...goal}
-                      onDone={() => setPlusMenuOpen(false)}
-                    />
-                  </div>
-                ) : (
-                  <div className="flex flex-col">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPlusMenuOpen(false);
-                        fileInputRef.current?.click();
-                      }}
-                      disabled={!canAttachImages}
-                      aria-label="Attach image"
-                      title={
-                        capabilities.supports_images
-                          ? undefined
-                          : "The selected agent does not support image attachments"
-                      }
-                      className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-fg-secondary"
-                    >
-                      <ImagePlus
-                        className="h-4 w-4 shrink-0 text-fg-muted"
-                        aria-hidden="true"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block">Attach image</span>
-                        {capabilities.supports_images ? (
-                          <span
-                            aria-hidden="true"
-                            className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
-                          >
-                            Choose, paste, or drop
-                          </span>
-                        ) : (
-                          <span
-                            aria-hidden="true"
-                            className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
-                          >
-                            Not supported by this agent
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                    {goal ? (
-                      <button
-                        type="button"
-                        onClick={() => setPlusMenuView("goal")}
-                        className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
-                      >
-                        <Target
-                          className="h-4 w-4 shrink-0 text-fg-muted"
-                          aria-hidden="true"
-                        />
-                        <span className="min-w-0 flex-1 truncate">
-                          {goal.goal ? goal.goal.objective : "Set a goal"}
-                        </span>
-                        {goal.goal ? (
-                          <span className="shrink-0 rounded-full bg-accent-dim px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-accent">
-                            On
-                          </span>
-                        ) : null}
-                      </button>
-                    ) : null}
-                  </div>
-                )}
-              </Popover.Content>
-            </Popover.Portal>
-          </Popover.Root>
-
-          {/* Capability → mode → model → effort → switches. Permission scope
-              leads because it is the toggle with consequences. */}
-          {!compact ? (
-            <>
-              {showProviderSelector ? (
-                <ProviderSelector
-                  value={selectedProvider}
-                  providers={providers}
-                  onValueChange={onProviderChange}
-                  disabled={disabled || providerLocked}
-                  {...optionMenuProps("provider")}
-                />
-              ) : null}
-              {collaborationModes.length > 0 ? (
-                <CollaborationModeSelector
-                  value={selectedCollaborationMode}
-                  modes={collaborationModes}
-                  onValueChange={onCollaborationModeChange ?? noopModeChange}
-                  disabled={disabled || !onCollaborationModeChange}
-                  onCloseAutoFocus={restoreComposerFocus}
-                  onOpenChange={(nextOpen) => {
-                    if (!nextOpen) restoreComposerFocusSoon();
-                  }}
-                />
-              ) : null}
-              {capabilities.permission_modes.length > 0 ? (
-                <PermissionModeSelector
-                  value={selectedPermissionMode}
-                  modes={capabilities.permission_modes}
-                  onValueChange={onPermissionModeChange ?? noopModeChange}
-                  disabled={disabled || !onPermissionModeChange}
-                  {...optionMenuProps("permissions")}
-                />
-              ) : null}
-              {capabilities.sandbox_modes.length > 0 ? (
-                <SandboxSelector
-                  value={selectedSandboxMode}
-                  modes={capabilities.sandbox_modes}
-                  onValueChange={onSandboxModeChange ?? noopModeChange}
-                  disabled={disabled || !onSandboxModeChange}
-                  {...optionMenuProps("sandbox")}
-                />
-              ) : null}
-              <ModelMenu
-                models={models}
-                selectedModel={selectedModel}
-                onModelChange={onModelChange}
-                reasoningOptions={reasoningOptions}
-                selectedEffort={selectedEffort}
-                onEffortChange={onEffortChange}
-                fastTier={modelFastTier(selectedModel)}
-                fastActive={
-                  resolveServiceTier(selectedServiceTier, selectedModel) !==
-                  null
-                }
-                onFastActiveChange={
-                  onServiceTierChange
-                    ? (active) =>
-                        onServiceTierChange(
-                          active
-                            ? (modelFastTier(selectedModel)?.id ?? null)
-                            : null,
-                        )
-                    : undefined
-                }
-                showFastRow={
-                  Boolean(onServiceTierChange) && anyModelHasFastTier(models)
-                }
-                handoffProviders={handoffProviders}
-                onHandoffProviderSelect={onHandoffProviderSelect}
-                handoffDisabledReason={handoffDisabledReason}
-                modelsLoading={modelsLoading}
-                disabled={disabled}
-                {...optionMenuProps("model")}
+            {slashQuery && !disabled && !voice ? (
+              <SlashCommandMenu
+                query={slashQuery.query}
+                items={slashItems}
+                activeIndex={clampedSlashIndex}
+                onActiveIndexChange={setActiveSkillIndex}
+                onSelect={activateSlashItem}
+                listId={slashListId}
               />
-            </>
-          ) : null}
+            ) : null}
 
-          <div className="ml-auto flex items-center gap-2">
-            {/* Dictation keeps its own slot rather than standing in for Send
+            {contextNotice ? (
+              <p
+                role="status"
+                aria-live="polite"
+                className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-fg-muted"
+              >
+                {contextNotice}
+              </p>
+            ) : null}
+
+            {sendDisabled && sendDisabledReason ? (
+              <p
+                id={`${textareaId}-send-status`}
+                role="status"
+                aria-live="polite"
+                className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning"
+              >
+                {sendDisabledReason}
+              </p>
+            ) : null}
+
+            {/* Footer: tools + send. Hidden (not unmounted) during dictation so
+            the card keeps this row's height under the overlay. */}
+            <div className="flex items-center gap-1.5 px-3 pb-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                disabled={!canAttachImages}
+                className="hidden"
+                onChange={handleFileChange}
+              />
+              <Popover.Root
+                open={plusMenuOpen}
+                onOpenChange={(next) => {
+                  setPlusMenuOpen(next);
+                  // Always reopen on the menu, never on whatever view was last used.
+                  if (!next) setPlusMenuView("menu");
+                }}
+              >
+                <Popover.Trigger asChild>
+                  <button
+                    ref={plusButtonRef}
+                    type="button"
+                    aria-label="Add to this message"
+                    onPointerDown={() => {
+                      plusMenuOpenedByKeyboardRef.current = false;
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key === "Enter" ||
+                        event.key === " " ||
+                        event.key === "ArrowDown"
+                      ) {
+                        plusMenuOpenedByKeyboardRef.current = true;
+                      }
+                    }}
+                    className="fd-focus inline-flex h-8 w-8 items-center justify-center rounded-[var(--fd-radius-md)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                  </button>
+                </Popover.Trigger>
+                <Popover.Portal>
+                  <Popover.Content
+                    align="start"
+                    side="top"
+                    sideOffset={8}
+                    onOpenAutoFocus={(event) => {
+                      if (!plusMenuOpenedByKeyboardRef.current) {
+                        event.preventDefault();
+                        plusButtonRef.current?.blur();
+                      }
+                    }}
+                    onCloseAutoFocus={(event) => {
+                      if (!plusMenuOpenedByKeyboardRef.current) {
+                        event.preventDefault();
+                        plusButtonRef.current?.blur();
+                      }
+                      plusMenuOpenedByKeyboardRef.current = false;
+                    }}
+                    onPointerDown={() => {
+                      plusMenuOpenedByKeyboardRef.current = false;
+                    }}
+                    className={cn(
+                      "z-50 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]",
+                      plusMenuView === "goal" ? "w-80 p-4" : "w-56 p-1",
+                    )}
+                  >
+                    {plusMenuView === "goal" && goal ? (
+                      <div className="space-y-3">
+                        <button
+                          type="button"
+                          onClick={() => setPlusMenuView("menu")}
+                          className="fd-focus -ml-1 inline-flex items-center gap-1 rounded-[var(--fd-radius-sm)] px-1 py-0.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-secondary"
+                        >
+                          <ChevronLeft
+                            className="h-3.5 w-3.5"
+                            aria-hidden="true"
+                          />{" "}
+                          Back
+                        </button>
+                        <GoalPanel
+                          {...goal}
+                          onDone={() => setPlusMenuOpen(false)}
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex flex-col">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPlusMenuOpen(false);
+                            fileInputRef.current?.click();
+                          }}
+                          disabled={!canAttachImages}
+                          aria-label="Attach image"
+                          title={
+                            capabilities.supports_images
+                              ? undefined
+                              : "The selected agent does not support image attachments"
+                          }
+                          className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-fg-secondary"
+                        >
+                          <ImagePlus
+                            className="h-4 w-4 shrink-0 text-fg-muted"
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block">Attach image</span>
+                            {capabilities.supports_images ? (
+                              <span
+                                aria-hidden="true"
+                                className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
+                              >
+                                Choose, paste, or drop
+                              </span>
+                            ) : (
+                              <span
+                                aria-hidden="true"
+                                className="block text-[length:var(--fd-text-2xs)] text-fg-muted"
+                              >
+                                Not supported by this agent
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                        {goal ? (
+                          <button
+                            type="button"
+                            onClick={() => setPlusMenuView("goal")}
+                            className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                          >
+                            <Target
+                              className="h-4 w-4 shrink-0 text-fg-muted"
+                              aria-hidden="true"
+                            />
+                            <span className="min-w-0 flex-1 truncate">
+                              {goal.goal ? goal.goal.objective : "Set a goal"}
+                            </span>
+                            {goal.goal ? (
+                              <span className="shrink-0 rounded-full bg-accent-dim px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-accent">
+                                On
+                              </span>
+                            ) : null}
+                          </button>
+                        ) : null}
+                      </div>
+                    )}
+                  </Popover.Content>
+                </Popover.Portal>
+              </Popover.Root>
+
+              {/* Capability → mode → model → effort → switches. Permission scope
+              leads because it is the toggle with consequences. */}
+              {!compact ? (
+                <>
+                  {showProviderSelector ? (
+                    <ProviderSelector
+                      value={selectedProvider}
+                      providers={providers}
+                      onValueChange={onProviderChange}
+                      disabled={disabled || providerLocked}
+                      {...optionMenuProps("provider")}
+                    />
+                  ) : null}
+                  {collaborationModes.length > 0 ? (
+                    <CollaborationModeSelector
+                      value={selectedCollaborationMode}
+                      modes={collaborationModes}
+                      onValueChange={
+                        onCollaborationModeChange ?? noopModeChange
+                      }
+                      disabled={disabled || !onCollaborationModeChange}
+                      onCloseAutoFocus={restoreComposerFocus}
+                      onOpenChange={(nextOpen) => {
+                        if (!nextOpen) restoreComposerFocusSoon();
+                      }}
+                    />
+                  ) : null}
+                  {capabilities.permission_modes.length > 0 ? (
+                    <PermissionModeSelector
+                      value={selectedPermissionMode}
+                      modes={capabilities.permission_modes}
+                      onValueChange={onPermissionModeChange ?? noopModeChange}
+                      disabled={disabled || !onPermissionModeChange}
+                      {...optionMenuProps("permissions")}
+                    />
+                  ) : null}
+                  {capabilities.sandbox_modes.length > 0 ? (
+                    <SandboxSelector
+                      value={selectedSandboxMode}
+                      modes={capabilities.sandbox_modes}
+                      onValueChange={onSandboxModeChange ?? noopModeChange}
+                      disabled={disabled || !onSandboxModeChange}
+                      {...optionMenuProps("sandbox")}
+                    />
+                  ) : null}
+                  <ModelMenu
+                    models={models}
+                    selectedModel={selectedModel}
+                    onModelChange={onModelChange}
+                    reasoningOptions={reasoningOptions}
+                    selectedEffort={selectedEffort}
+                    onEffortChange={onEffortChange}
+                    fastTier={modelFastTier(selectedModel)}
+                    fastActive={
+                      resolveServiceTier(selectedServiceTier, selectedModel) !==
+                      null
+                    }
+                    onFastActiveChange={
+                      onServiceTierChange
+                        ? (active) =>
+                            onServiceTierChange(
+                              active
+                                ? (modelFastTier(selectedModel)?.id ?? null)
+                                : null,
+                            )
+                        : undefined
+                    }
+                    showFastRow={
+                      Boolean(onServiceTierChange) &&
+                      anyModelHasFastTier(models)
+                    }
+                    handoffProviders={handoffProviders}
+                    onHandoffProviderSelect={onHandoffProviderSelect}
+                    handoffDisabledReason={handoffDisabledReason}
+                    modelsLoading={modelsLoading}
+                    disabled={disabled}
+                    {...optionMenuProps("model")}
+                  />
+                </>
+              ) : null}
+
+              <div className="ml-auto flex items-center gap-2">
+                {/* Dictation keeps its own slot rather than standing in for Send
                 on an empty composer: speaking into a half-written prompt is
                 as common as speaking a whole one. */}
-            {onVoiceInput ? (
-              <Tooltip label="Voice input">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={onVoiceInput}
-                  disabled={disabled}
-                  aria-label="Record voice input"
-                  className="h-9 w-9 rounded-full p-0"
-                >
-                  <Mic className="h-4 w-4" />
-                </Button>
-              </Tooltip>
-            ) : null}
-            {showStop ? (
-              <Tooltip
-                label={isStopping ? "Stopping…" : "Stop"}
-                shortcut={isStopping ? undefined : stopShortcut}
-              >
-                <Button
-                  type="button"
-                  onClick={onStop}
-                  disabled={disabled || isStopping}
-                  aria-label={isStopping ? "Stopping" : "Stop generating"}
-                  className="h-9 w-9 rounded-full p-0"
-                >
-                  <Square className="h-3.5 w-3.5 fill-current" />
-                </Button>
-              </Tooltip>
-            ) : (
-              <Tooltip
-                label={isPreparingAttachments ? "Preparing images" : "Send"}
-                shortcut={
-                  isPreparingAttachments ? undefined : sendShortcut
-                }
-              >
-                <Button
-                  type="button"
-                  onClick={onSubmit}
-                  disabled={!canSubmit}
-                  aria-label={
-                    isPreparingAttachments ? "Preparing images" : "Send message"
-                  }
-                  aria-describedby={
-                    sendDisabled && sendDisabledReason
-                      ? `${textareaId}-send-status`
-                      : undefined
-                  }
-                  className="h-9 w-9 rounded-full p-0"
-                >
-                  {isPreparingAttachments ? (
-                    <ActivityDiamond size="md" tone="current" />
-                  ) : (
-                    <Send className="h-4 w-4" />
-                  )}
-                </Button>
-              </Tooltip>
-            )}
-          </div>
-        </div>
+                {onVoiceInput ? (
+                  <Tooltip label="Voice input">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={onVoiceInput}
+                      disabled={disabled}
+                      aria-label="Record voice input"
+                      className="h-9 w-9 rounded-full p-0"
+                    >
+                      <Mic className="h-4 w-4" />
+                    </Button>
+                  </Tooltip>
+                ) : null}
+                {showStop ? (
+                  <Tooltip
+                    label={isStopping ? "Stopping…" : "Stop"}
+                    shortcut={isStopping ? undefined : stopShortcut}
+                  >
+                    <Button
+                      type="button"
+                      onClick={onStop}
+                      disabled={disabled || isStopping}
+                      aria-label={isStopping ? "Stopping" : "Stop generating"}
+                      className="h-9 w-9 rounded-full p-0"
+                    >
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                    </Button>
+                  </Tooltip>
+                ) : (
+                  <Tooltip
+                    label={isPreparingAttachments ? "Preparing images" : "Send"}
+                    shortcut={isPreparingAttachments ? undefined : sendShortcut}
+                  >
+                    <Button
+                      type="button"
+                      onClick={onSubmit}
+                      disabled={!canSubmit}
+                      aria-label={
+                        isPreparingAttachments
+                          ? "Preparing images"
+                          : "Send message"
+                      }
+                      aria-describedby={
+                        sendDisabled && sendDisabledReason
+                          ? `${textareaId}-send-status`
+                          : undefined
+                      }
+                      className="h-9 w-9 rounded-full p-0"
+                    >
+                      {isPreparingAttachments ? (
+                        <ActivityDiamond size="md" tone="current" />
+                      ) : (
+                        <Send className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </Tooltip>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>

@@ -156,7 +156,9 @@ describe("PromptInput", () => {
       screen.queryByRole("button", { name: "Record voice input" }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
-    fireEvent.click(screen.getByRole("button", { name: "Transcribe and send" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Transcribe and send" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Cancel voice input" }));
     expect(onStop).toHaveBeenCalledOnce();
     expect(onStopAndSend).toHaveBeenCalledOnce();
@@ -198,9 +200,7 @@ describe("PromptInput", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Record voice input" }));
     expect(onVoiceInput).toHaveBeenCalledOnce();
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
 
     rerender(
       <PromptInput
@@ -209,9 +209,7 @@ describe("PromptInput", () => {
         onVoiceInput={onVoiceInput}
       />,
     );
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeEnabled();
     // Dictation stays available so it can extend the draft in place.
     expect(
       screen.getByRole("button", { name: "Record voice input" }),
@@ -742,11 +740,7 @@ describe("PromptInput", () => {
       },
     ]);
     render(
-      <PromptInput
-        {...promptInputProps}
-        value="/"
-        loadSkills={loadSkills}
-      />,
+      <PromptInput {...promptInputProps} value="/" loadSkills={loadSkills} />,
     );
     const textarea = screen.getByPlaceholderText(
       "Ask anything",
@@ -1365,11 +1359,7 @@ describe("PromptInput", () => {
   it("shows a Send tooltip with the host shortcut as keycaps", async () => {
     render(
       <TooltipProvider delayDuration={0}>
-        <PromptInput
-          {...promptInputProps}
-          value="Hello"
-          sendShortcut={["↵"]}
-        />
+        <PromptInput {...promptInputProps} value="Hello" sendShortcut={["↵"]} />
       </TooltipProvider>,
     );
 
