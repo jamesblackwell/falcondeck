@@ -1888,7 +1888,7 @@ impl AppState {
             // `title_is_provider_preview` properly.
             threads.insert(state.thread_id.clone(), thread);
         }
-        let summary = WorkspaceSummary {
+        let mut summary = WorkspaceSummary {
             id: workspace_id.clone(),
             path: path_string.clone(),
             kind: workspace_kind_for_path(&path_string),
@@ -1950,20 +1950,27 @@ impl AppState {
             connected_at: now,
             updated_at: persisted_workspace.updated_at.unwrap_or(now),
             last_error: workspace_last_error,
-            icon: None,
+            icon: self.cached_workspace_icon_meta(&workspace_id).await,
         };
 
         if let Some(existing) = workspaces
             .values_mut()
             .find(|workspace| workspace.summary.path == path_string)
         {
+            if existing.summary.icon.is_some() {
+                summary.icon = existing.summary.icon.clone();
+            }
             existing.summary = summary.clone();
             existing.threads = threads;
-            return Ok(existing.summary.clone());
+            let id = existing.summary.id.clone();
+            let path = existing.summary.path.clone();
+            drop(workspaces);
+            self.spawn_workspace_icon_refresh(id, path);
+            return Ok(summary);
         }
 
         workspaces.insert(
-            workspace_id,
+            workspace_id.clone(),
             ManagedWorkspace {
                 summary: summary.clone(),
                 codex_session: None,
@@ -1974,6 +1981,8 @@ impl AppState {
                 threads,
             },
         );
+        drop(workspaces);
+        self.spawn_workspace_icon_refresh(workspace_id, path_string);
         Ok(summary)
     }
 
@@ -3408,16 +3417,32 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn cached_workspace_icon_meta(
+        &self,
+        workspace_id: &str,
+    ) -> Option<falcondeck_core::WorkspaceResolvedIcon> {
+        self.inner
+            .workspace_icons
+            .lock()
+            .await
+            .get(workspace_id)
+            .map(|cached| cached.meta.clone())
+    }
+
     async fn resolve_and_apply_workspace_icon(&self, workspace_id: &str, path: &str) -> bool {
         let preference = {
             let preferences = self.inner.preferences.lock().await;
             preferences.workspace_icons.get(workspace_id).cloned()
         };
-        let kind = {
+        let (kind, previous_summary) = {
             let workspaces = self.inner.workspaces.lock().await;
-            workspaces
-                .get(workspace_id)
-                .map(|workspace| workspace.summary.kind.clone())
+            match workspaces.get(workspace_id) {
+                Some(workspace) => (
+                    Some(workspace.summary.kind.clone()),
+                    workspace.summary.icon.clone(),
+                ),
+                None => (None, None),
+            }
         };
         let resolved = if kind == Some(falcondeck_core::WorkspaceKind::Casual) {
             crate::workspace_icons::CachedWorkspaceIcon::folder()
@@ -3425,15 +3450,13 @@ impl AppState {
             crate::workspace_icons::resolve(Path::new(path), preference.as_ref()).await
         };
         let mut icons = self.inner.workspace_icons.lock().await;
-        let previous = icons.get(workspace_id).map(|cached| cached.meta.clone());
-        let changed = previous.as_ref() != Some(&resolved.meta);
         icons.insert(workspace_id.to_string(), resolved.clone());
         drop(icons);
         let mut workspaces = self.inner.workspaces.lock().await;
         if let Some(workspace) = workspaces.get_mut(workspace_id) {
-            workspace.summary.icon = Some(resolved.meta);
+            workspace.summary.icon = Some(resolved.meta.clone());
         }
-        changed
+        previous_summary.as_ref() != Some(&resolved.meta)
     }
 
     pub async fn workspace_icon(
@@ -3449,8 +3472,18 @@ impl AppState {
         let path = self.workspace_path(workspace_id).await.ok_or_else(|| {
             DaemonError::NotFound(format!("workspace {workspace_id} is not connected"))
         })?;
-        self.resolve_and_apply_workspace_icon(workspace_id, &path)
+        let changed = self
+            .resolve_and_apply_workspace_icon(workspace_id, &path)
             .await;
+        if changed {
+            self.emit(
+                Some(workspace_id.to_string()),
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: self.snapshot().await,
+                },
+            );
+        }
         self.inner
             .workspace_icons
             .lock()

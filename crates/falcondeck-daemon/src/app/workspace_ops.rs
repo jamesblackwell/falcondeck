@@ -502,6 +502,7 @@ pub(super) async fn connect_workspace_internal(
     let default_provider = persisted_workspace_ref
         .and_then(|workspace| workspace.default_provider.clone())
         .unwrap_or(AgentProvider::CODEX);
+    let cached_icon = app.cached_workspace_icon_meta(&workspace_id).await;
     let summary = WorkspaceSummary {
         id: workspace_id.clone(),
         path: path_string.clone(),
@@ -532,7 +533,7 @@ pub(super) async fn connect_workspace_internal(
             .and_then(|workspace| workspace.updated_at)
             .unwrap_or(now),
         last_error: None,
-        icon: None,
+        icon: cached_icon,
     };
 
     let hydrated_threads: HashMap<String, ManagedThread> = threads

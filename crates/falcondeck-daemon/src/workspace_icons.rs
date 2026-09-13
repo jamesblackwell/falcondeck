@@ -14,28 +14,49 @@ use crate::connector_logos;
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_HINT_FILE_BYTES: u64 = 1_000_000;
 
-const LOCAL_ICON_CANDIDATES: &[&str] = &[
+const ICON_FILE_NAMES: &[&str] = &[
     "favicon.svg",
     "favicon.png",
+    "favicon-32x32.png",
     "apple-touch-icon.png",
     "apple-touch-icon-precomposed.png",
+    "icon.png",
+    "logo.svg",
+    "logo.png",
+    "logomark-mark-dark.svg",
+    "logomark-mark-light.svg",
+    "logomark-mark.svg",
+    "google-app-icon.png",
     "favicon.ico",
-    "public/favicon.svg",
-    "public/favicon.png",
-    "public/apple-touch-icon.png",
-    "public/favicon.ico",
-    "src/favicon.svg",
-    "src/favicon.png",
-    "src/favicon.ico",
-    "src/app/favicon.ico",
-    "src/app/favicon.png",
-    "src/app/icon.png",
-    "app/favicon.ico",
-    "app/icon.png",
-    "assets/favicon.svg",
-    "assets/favicon.png",
-    "assets/icon.png",
-    "assets/favicon.ico",
+];
+
+const ICON_DIRECTORIES: &[&str] = &[
+    "",
+    "public",
+    "public/images",
+    "assets",
+    "assets/brand",
+    "frontend/public",
+    "frontend/public/images",
+    "web/public",
+    "client/public",
+    "src",
+    "src/app",
+    "app",
+    "static",
+];
+
+const SKIP_APP_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "target",
+    "trees",
+    "vendor",
+    ".git",
+    ".next",
+    "coverage",
+    "storybook-static",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +120,13 @@ fn is_hosting_domain(domain: &str) -> bool {
         || domain.ends_with(".bitbucket.org")
 }
 
+fn is_unusable_site_domain(domain: &str) -> bool {
+    is_hosting_domain(domain)
+        || domain == "localhost"
+        || domain.ends_with(".localhost")
+        || domain.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
 pub fn domain_from_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -118,7 +146,7 @@ pub fn domain_from_url(raw: &str) -> Option<String> {
     };
     let host = rest.split(['/', ':', '?']).next()?.trim();
     let domain = sanitize_logo_domain(host).ok()?;
-    if is_hosting_domain(&domain) {
+    if is_unusable_site_domain(&domain) {
         return None;
     }
     Some(domain)
@@ -149,27 +177,169 @@ fn read_local_icon(path: &Path) -> Option<(Vec<u8>, String)> {
     Some((bytes, content_type))
 }
 
+fn icon_directories(root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = ICON_DIRECTORIES
+        .iter()
+        .map(|prefix| {
+            if prefix.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(prefix)
+            }
+        })
+        .collect();
+    let apps = root.join("apps");
+    if apps.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&apps) {
+            for entry in entries.flatten().take(24) {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if name.starts_with('.') || SKIP_APP_DIR_NAMES.contains(&name) {
+                    continue;
+                }
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                dirs.push(path.join("public"));
+                dirs.push(path.join("assets"));
+            }
+        }
+    }
+    dirs
+}
+
+fn usable_icon_file(path: &Path) -> Option<DiscoveredIcon> {
+    if !path.is_file() {
+        return None;
+    }
+    let content_type = content_type_for_path(path)?.to_string();
+    let metadata = path.metadata().ok()?;
+    if metadata.len() == 0 || metadata.len() > MAX_BYTES as u64 {
+        return None;
+    }
+    Some(DiscoveredIcon::File {
+        path: path.to_path_buf(),
+        content_type,
+    })
+}
+
 fn first_local_icon(root: &Path) -> Option<DiscoveredIcon> {
-    for relative in LOCAL_ICON_CANDIDATES {
-        let path = root.join(relative);
-        if !path.is_file() {
-            continue;
+    let dirs = icon_directories(root);
+    for name in ICON_FILE_NAMES {
+        for dir in &dirs {
+            if let Some(found) = usable_icon_file(&dir.join(name)) {
+                return Some(found);
+            }
         }
-        let Some(content_type) = content_type_for_path(&path) else {
-            continue;
-        };
-        let Ok(metadata) = path.metadata() else {
-            continue;
-        };
-        if metadata.len() == 0 || metadata.len() > MAX_BYTES as u64 {
-            continue;
-        }
-        return Some(DiscoveredIcon::File {
-            path,
-            content_type: content_type.to_string(),
-        });
     }
     None
+}
+
+fn domain_from_composer_json(root: &Path) -> Option<String> {
+    let raw = read_hint_file(&root.join("composer.json"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("homepage")
+        .and_then(serde_json::Value::as_str)
+        .and_then(domain_from_url)
+}
+
+fn domain_from_app_url_file(root: &Path) -> Option<String> {
+    for name in [".env.example", ".env"] {
+        let Some(raw) = read_hint_file(&root.join(name)) else {
+            continue;
+        };
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.starts_with('#') {
+                continue;
+            }
+            for key in ["APP_URL=", "NEXT_PUBLIC_SITE_URL=", "VITE_APP_URL="] {
+                if let Some(value) = line.strip_prefix(key) {
+                    let value = value.trim().trim_matches(['"', '\'']);
+                    if let Some(domain) = domain_from_url(value) {
+                        if domain != "localhost" && !domain.ends_with(".localhost") {
+                            return Some(domain);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn domain_from_readme(root: &Path) -> Option<String> {
+    let slug = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| {
+            name.trim()
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|ch| ch.is_ascii_alphanumeric())
+                .collect::<String>()
+        })
+        .filter(|slug| slug.len() >= 3)?;
+    for name in ["README.md", "README", "readme.md"] {
+        let Some(raw) = read_hint_file(&root.join(name)) else {
+            continue;
+        };
+        let text = if raw.len() > 32_000 {
+            &raw[..32_000]
+        } else {
+            &raw
+        };
+        for candidate in readme_urls(text) {
+            let Some(domain) = domain_from_url(candidate) else {
+                continue;
+            };
+            let host = domain.strip_prefix("www.").unwrap_or(&domain);
+            let label = host.split('.').next().unwrap_or(host);
+            if label == slug || host.starts_with(&format!("{slug}.")) {
+                return Some(domain);
+            }
+        }
+    }
+    None
+}
+
+fn next_url_start(text: &str) -> Option<usize> {
+    let http = text.find("http://");
+    let https = text.find("https://");
+    match (http, https) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(index), None) | (None, Some(index)) => Some(index),
+        _ => None,
+    }
+}
+
+fn readme_urls(text: &str) -> Vec<&str> {
+    let mut urls = Vec::new();
+    let mut index = 0;
+    while index + 8 < text.len() {
+        let Some(rel) = next_url_start(&text[index..]) else {
+            break;
+        };
+        let start = index + rel;
+        let mut end = start;
+        while end < text.len() {
+            let ch = text.as_bytes()[end];
+            if ch.is_ascii_whitespace() || matches!(ch, b')' | b']' | b'>' | b'"' | b'\'' | b'`') {
+                break;
+            }
+            end += 1;
+        }
+        let url = text[start..end].trim_end_matches(['.', ',', ';']);
+        if url.len() > 10 {
+            urls.push(url);
+        }
+        index = end.max(start + 1);
+    }
+    urls
 }
 
 fn domain_from_package_json(root: &Path) -> Option<String> {
@@ -241,7 +411,16 @@ pub fn discover_auto(workspace_path: &Path) -> DiscoveredIcon {
     if let Some(domain) = domain_from_package_json(workspace_path) {
         return DiscoveredIcon::Domain { domain };
     }
+    if let Some(domain) = domain_from_composer_json(workspace_path) {
+        return DiscoveredIcon::Domain { domain };
+    }
     if let Some(domain) = domain_from_cargo_toml(workspace_path) {
+        return DiscoveredIcon::Domain { domain };
+    }
+    if let Some(domain) = domain_from_app_url_file(workspace_path) {
+        return DiscoveredIcon::Domain { domain };
+    }
+    if let Some(domain) = domain_from_readme(workspace_path) {
         return DiscoveredIcon::Domain { domain };
     }
     DiscoveredIcon::Folder
@@ -373,6 +552,61 @@ mod tests {
             r#"{"repository":{"url":"git@github.com:acme/app.git"}}"#,
         );
         assert_eq!(discover_auto(dir.path()), DiscoveredIcon::Folder);
+    }
+
+    #[test]
+    fn discover_reads_nested_app_favicons() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("apps/desktop/public/favicon.svg"),
+            "<svg></svg>",
+        );
+        assert!(matches!(
+            discover_auto(dir.path()),
+            DiscoveredIcon::File { content_type, .. } if content_type == "image/svg+xml"
+        ));
+    }
+
+    #[test]
+    fn discover_reads_brand_logomark() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("assets/brand/logomark-mark-dark.svg"),
+            "<svg></svg>",
+        );
+        assert!(matches!(
+            discover_auto(dir.path()),
+            DiscoveredIcon::File { path, .. } if path.ends_with("logomark-mark-dark.svg")
+        ));
+    }
+
+    #[test]
+    fn discover_reads_frontend_public_favicon() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &dir.path().join("frontend/public/apple-touch-icon.png"),
+            "png",
+        );
+        assert!(matches!(
+            discover_auto(dir.path()),
+            DiscoveredIcon::File { content_type, .. } if content_type == "image/png"
+        ));
+    }
+
+    #[test]
+    fn discover_uses_readme_url_matching_the_folder_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("falcondeck");
+        write(
+            &root.join("README.md"),
+            "# FalconDeck\n\nInstall from https://github.com/acme/falcondeck then open https://falcondeck.com.\n",
+        );
+        assert_eq!(
+            discover_auto(&root),
+            DiscoveredIcon::Domain {
+                domain: "falcondeck.com".to_string()
+            }
+        );
     }
 
     #[test]
