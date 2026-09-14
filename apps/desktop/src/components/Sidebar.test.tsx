@@ -803,6 +803,111 @@ describe("DesktopSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
+  describe("project fold", () => {
+    const NOW = Date.parse("2026-09-14T12:00:00Z");
+    const hoursAgo = (hours: number) =>
+      new Date(NOW - hours * 60 * 60 * 1000).toISOString();
+    const project = (index: number, lastUsed: string): ProjectGroup => ({
+      workspace: workspace({
+        id: `ws-${index}`,
+        path: `/Users/james/project-${index}`,
+        current_thread_id: null,
+        connected_at: hoursAgo(24 * 30),
+      }),
+      threads: [
+        thread({
+          id: `ws-${index}-thread`,
+          workspace_id: `ws-${index}`,
+          title: `Work ${index}`,
+          updated_at: lastUsed,
+        }),
+      ],
+    });
+    const projectHeading = (index: number) =>
+      screen.queryByRole("button", { name: `project-${index}` });
+
+    it("folds stale projects beyond the first five behind Show more", () => {
+      vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
+      try {
+        const groups = [1, 2, 3, 4, 5, 6, 7, 8].map((index) =>
+          project(index, hoursAgo(24 * 10)),
+        );
+        render(
+          <DesktopSidebar
+            groups={groups}
+            selectedWorkspaceId="ws-1"
+            selectedThreadId={null}
+            onSelectWorkspace={() => {}}
+            onSelectThread={() => {}}
+          />,
+        );
+        for (const index of [1, 2, 3, 4, 5]) {
+          expect(projectHeading(index)).toBeInTheDocument();
+        }
+        expect(projectHeading(6)).not.toBeInTheDocument();
+        expect(projectHeading(8)).not.toBeInTheDocument();
+
+        const reveal = screen.getByRole("button", {
+          name: "Show 3 more projects",
+        });
+        fireEvent.click(reveal);
+        expect(projectHeading(6)).toBeInTheDocument();
+        expect(projectHeading(8)).toBeInTheDocument();
+
+        fireEvent.click(
+          screen.getByRole("button", { name: "Show fewer projects" }),
+        );
+        expect(projectHeading(8)).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps recently used and selected projects above the fold", () => {
+      vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
+      try {
+        const groups = [
+          ...[1, 2, 3, 4, 5, 6].map((index) => project(index, hoursAgo(24 * 10))),
+          project(7, hoursAgo(3)),
+          project(8, hoursAgo(24 * 10)),
+        ];
+        render(
+          <DesktopSidebar
+            groups={groups}
+            selectedWorkspaceId="ws-8"
+            selectedThreadId={null}
+            onSelectWorkspace={() => {}}
+            onSelectThread={() => {}}
+          />,
+        );
+        expect(projectHeading(7)).toBeInTheDocument();
+        expect(projectHeading(8)).toBeInTheDocument();
+        expect(projectHeading(6)).not.toBeInTheDocument();
+        expect(
+          screen.getByRole("button", { name: "Show 1 more project" }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("shows no fold when every project fits", () => {
+      const groups = [1, 2, 3].map((index) => project(index, hoursAgo(24 * 10)));
+      render(
+        <DesktopSidebar
+          groups={groups}
+          selectedWorkspaceId="ws-1"
+          selectedThreadId={null}
+          onSelectWorkspace={() => {}}
+          onSelectThread={() => {}}
+        />,
+      );
+      expect(
+        screen.queryByRole("button", { name: /more project/ }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("offers Show less beside Show more while a project is partly expanded", () => {
     const threads = Array.from({ length: 30 }, (_, index) =>
       thread({

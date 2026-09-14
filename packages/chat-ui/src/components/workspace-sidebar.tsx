@@ -16,6 +16,7 @@ import {
   compareThreads,
   forkProviderOptions,
   filterProjectGroupsByExtensions,
+  partitionSidebarProjects,
   partitionSidebarThreads,
   summarizeThreadAttention,
   THREAD_TAGS_EXTENSION_ID,
@@ -1214,6 +1215,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   ] = useState<Set<string>>(() => new Set());
   const [uncontrolledProjectsCollapsed, setUncontrolledProjectsCollapsed] =
     useState(false);
+  // Session-only, like the per-project chat pager: the fold rests closed on
+  // every launch so a long project list starts compact.
+  const [projectsRevealed, setProjectsRevealed] = useState(false);
   const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
     useState(false);
   const [viewingArchivedChats, setViewingArchivedChats] = useState(false);
@@ -1533,6 +1537,26 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [orderedGroups],
   );
 
+  // Projects beyond the resting window fold behind "Show more" unless they
+  // were used recently or hold the selection. `nowTick` keeps the window
+  // sliding while the sidebar stays mounted.
+  const { visible: restingGroups, hidden: foldedGroups } = useMemo(
+    () =>
+      partitionSidebarProjects(orderedGroups, {
+        now: nowTick * RELATIVE_TIME_TICK_MS,
+        selectedWorkspaceId: visualSelectedWorkspaceId,
+      }),
+    [nowTick, orderedGroups, visualSelectedWorkspaceId],
+  );
+  const displayedGroups =
+    projectsRevealed || foldedGroups.length === 0
+      ? orderedGroups
+      : restingGroups;
+  const displayedWorkspaceOrder = useMemo(
+    () => displayedGroups.map((group) => group.workspace.id),
+    [displayedGroups],
+  );
+
   const collapsedWorkspaces = useMemo(
     () =>
       onWorkspaceCollapsedChange
@@ -1599,9 +1623,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [onWorkspaceCollapsedChange],
   );
 
+  // Drop targets are computed over the rows on screen; folded projects have
+  // no row to measure against. `finishWorkspaceDrag` maps the on-screen slot
+  // back into the full order.
   const updateWorkspaceDropIndex = useCallback(
     (clientY: number, workspaceId: string) => {
-      const remainingWorkspaceIds = workspaceOrder.filter(
+      const remainingWorkspaceIds = displayedWorkspaceOrder.filter(
         (id) => id !== workspaceId,
       );
       let nextIndex = remainingWorkspaceIds.length;
@@ -1619,7 +1646,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         : workspaceDragRef.current;
       setDropIndex(nextIndex);
     },
-    [workspaceOrder],
+    [displayedWorkspaceOrder],
   );
 
   const handleWorkspacePointerDown = useCallback(
@@ -1697,9 +1724,23 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       const remainingWorkspaceIds = workspaceOrder.filter(
         (id) => id !== drag.workspaceId,
       );
+      const remainingDisplayedIds = displayedWorkspaceOrder.filter(
+        (id) => id !== drag.workspaceId,
+      );
+      // Dropping before an on-screen row lands before that row in the full
+      // order. Dropping past the last on-screen row lands right after it, so
+      // the moved project stays in view rather than sinking under the fold.
+      const anchorId = remainingDisplayedIds[drag.dropIndex];
+      const lastDisplayedId = remainingDisplayedIds.at(-1);
+      const insertAt =
+        anchorId != null
+          ? remainingWorkspaceIds.indexOf(anchorId)
+          : lastDisplayedId != null
+            ? remainingWorkspaceIds.indexOf(lastDisplayedId) + 1
+            : remainingWorkspaceIds.length;
       const nextOrder = [...remainingWorkspaceIds];
       nextOrder.splice(
-        Math.min(drag.dropIndex, nextOrder.length),
+        Math.min(Math.max(insertAt, 0), nextOrder.length),
         0,
         drag.workspaceId,
       );
@@ -1710,7 +1751,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         setOptimisticWorkspaceOrder(null);
       });
     },
-    [onWorkspaceOrderChange, workspaceOrder],
+    [displayedWorkspaceOrder, onWorkspaceOrderChange, workspaceOrder],
   );
 
   const handleWorkspaceClickCapture = useCallback(
@@ -2826,7 +2867,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           <Collapsible.Root open={!projectsCollapsed}>
             <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
               <ProjectGroupList
-                orderedGroups={orderedGroups}
+                orderedGroups={displayedGroups}
                 draggingWorkspaceId={draggingWorkspaceId}
                 dropIndex={dropIndex}
                 onWorkspaceOrderChange={onWorkspaceOrderChange}
@@ -2860,6 +2901,37 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 nowTick={nowTick}
                 threadTagsById={threadTagsById}
               />
+              {foldedGroups.length > 0 ? (
+                <div className="mt-1.5 flex items-center">
+                  {projectsRevealed ? (
+                    <button
+                      type="button"
+                      onClick={() => setProjectsRevealed(false)}
+                      className={THREAD_PAGER_BUTTON_CLASS}
+                      aria-label="Show fewer projects"
+                    >
+                      Show less
+                      <ChevronDown
+                        aria-hidden="true"
+                        className="h-3 w-3 rotate-180"
+                      />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setProjectsRevealed(true)}
+                      className={THREAD_PAGER_BUTTON_CLASS}
+                      aria-label={`Show ${foldedGroups.length} more ${
+                        foldedGroups.length === 1 ? "project" : "projects"
+                      }`}
+                    >
+                      <ChevronDown aria-hidden="true" className="h-3 w-3" />
+                      Show more
+                      <span className="tabular-nums">{foldedGroups.length}</span>
+                    </button>
+                  )}
+                </div>
+              ) : null}
             </Collapsible.Content>
           </Collapsible.Root>
           {orderedGroups.length === 0 && chatGroups.length === 0 ? (

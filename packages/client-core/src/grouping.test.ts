@@ -4,8 +4,10 @@ import type { ThreadSummary, WorkspaceSummary } from './types'
 import {
   buildProjectGroups,
   compareThreads,
+  partitionSidebarProjects,
   partitionSidebarThreads,
   sortProjectGroupThreads,
+  type ProjectGroup,
 } from './grouping'
 
 function workspace(id: string, path: string) {
@@ -340,5 +342,82 @@ describe('partitionSidebarThreads', () => {
     const archived = summary({ id: 'archived', is_archived: true, is_pinned: true })
     expect(partitionSidebarThreads([archived]).archived).toEqual([archived])
     expect(partitionSidebarThreads([archived]).globallyPinned).toEqual([])
+  })
+})
+
+describe('partitionSidebarProjects', () => {
+  const NOW = Date.parse('2026-09-14T12:00:00Z')
+  const hoursAgo = (hours: number) => new Date(NOW - hours * 60 * 60 * 1000).toISOString()
+  const project = (index: number, lastUsed: string | null): ProjectGroup => ({
+    workspace: {
+      id: `ws-${index}`,
+      path: `/p/${index}`,
+      connected_at: hoursAgo(24 * 30),
+      updated_at: hoursAgo(24 * 30),
+    } as WorkspaceSummary,
+    threads: lastUsed
+      ? [summary({ id: `t-${index}`, workspace_id: `ws-${index}`, updated_at: lastUsed })]
+      : [],
+  })
+  const ids = (groups: ProjectGroup[]) => groups.map((group) => group.workspace.id)
+
+  it('shows every project when there are five or fewer', () => {
+    const groups = [1, 2, 3, 4, 5].map((index) => project(index, null))
+    const { visible, hidden } = partitionSidebarProjects(groups, { now: NOW })
+    expect(ids(visible)).toEqual(['ws-1', 'ws-2', 'ws-3', 'ws-4', 'ws-5'])
+    expect(hidden).toEqual([])
+  })
+
+  it('keeps the first five and folds stale projects beyond them', () => {
+    const groups = [1, 2, 3, 4, 5, 6, 7].map((index) => project(index, hoursAgo(24 * 10)))
+    const { visible, hidden } = partitionSidebarProjects(groups, { now: NOW })
+    expect(ids(visible)).toEqual(['ws-1', 'ws-2', 'ws-3', 'ws-4', 'ws-5'])
+    expect(ids(hidden)).toEqual(['ws-6', 'ws-7'])
+  })
+
+  it('surfaces projects used in the last 36 hours in their original order', () => {
+    const groups = [
+      ...[1, 2, 3, 4, 5].map((index) => project(index, null)),
+      project(6, hoursAgo(40)),
+      project(7, hoursAgo(2)),
+      project(8, hoursAgo(35)),
+    ]
+    const { visible, hidden } = partitionSidebarProjects(groups, { now: NOW })
+    expect(ids(visible)).toEqual(['ws-1', 'ws-2', 'ws-3', 'ws-4', 'ws-5', 'ws-7', 'ws-8'])
+    expect(ids(hidden)).toEqual(['ws-6'])
+  })
+
+  it('caps recent projects at ten, preferring the most recently used', () => {
+    const groups = [
+      ...[1, 2, 3, 4, 5].map((index) => project(index, null)),
+      // Eight recent projects compete for five slots; ws-13 is the newest,
+      // ws-6 the oldest of the bunch.
+      ...[6, 7, 8, 9, 10, 11, 12, 13].map((index) => project(index, hoursAgo(20 - index))),
+    ]
+    const { visible, hidden } = partitionSidebarProjects(groups, { now: NOW })
+    expect(visible).toHaveLength(10)
+    expect(ids(visible).slice(5)).toEqual(['ws-9', 'ws-10', 'ws-11', 'ws-12', 'ws-13'])
+    expect(ids(hidden)).toEqual(['ws-6', 'ws-7', 'ws-8'])
+  })
+
+  it('always keeps the selected project visible', () => {
+    const groups = [1, 2, 3, 4, 5, 6, 7].map((index) => project(index, null))
+    const { visible, hidden } = partitionSidebarProjects(groups, {
+      now: NOW,
+      selectedWorkspaceId: 'ws-7',
+    })
+    expect(ids(visible)).toEqual(['ws-1', 'ws-2', 'ws-3', 'ws-4', 'ws-5', 'ws-7'])
+    expect(ids(hidden)).toEqual(['ws-6'])
+  })
+
+  it('treats a freshly connected project with no chats as in use', () => {
+    const fresh: ProjectGroup = {
+      workspace: { id: 'ws-new', path: '/p/new', connected_at: hoursAgo(1) } as WorkspaceSummary,
+      threads: [],
+    }
+    const groups = [...[1, 2, 3, 4, 5, 6].map((index) => project(index, null)), fresh]
+    const { visible } = partitionSidebarProjects(groups, { now: NOW })
+    expect(ids(visible)).toContain('ws-new')
+    expect(ids(visible)).not.toContain('ws-6')
   })
 })

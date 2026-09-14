@@ -266,3 +266,64 @@ export function projectLabel(path: string) {
   const parts = path.split('/').filter(Boolean)
   return parts[parts.length - 1] ?? path
 }
+
+/** Projects always shown before recency is consulted. */
+export const SIDEBAR_PROJECT_BASE_LIMIT = 5
+/** Ceiling on projects shown without "Show more", recent ones included. */
+export const SIDEBAR_PROJECT_ACTIVE_LIMIT = 10
+/** A project counts as in use when anything in it moved inside this window. */
+export const SIDEBAR_PROJECT_RECENT_WINDOW_MS = 36 * 60 * 60 * 1000
+
+/**
+ * Latest activity in a project as epoch ms: its newest chat, or the moment it
+ * was connected when it has no chats yet. Unparseable stamps count as never.
+ */
+export function projectLastUsedAt(group: ProjectGroup): number {
+  let latest = Date.parse(group.workspace.connected_at ?? '')
+  if (Number.isNaN(latest)) latest = -Infinity
+  for (const thread of group.threads) {
+    const stamp = Date.parse(thread.updated_at)
+    if (!Number.isNaN(stamp) && stamp > latest) latest = stamp
+  }
+  return latest
+}
+
+/**
+ * Splits the ordered project list into the rows the sidebar shows at rest and
+ * the rows folded behind "Show more". The first five always show. Beyond
+ * those, projects used inside the recent window fill up to ten slots, most
+ * recently used first, so a busy week does not push live work under the
+ * fold. Whatever is selected stays visible regardless. Relative order is
+ * preserved on both sides so revealing the fold never reshuffles rows.
+ */
+export function partitionSidebarProjects(
+  groups: readonly ProjectGroup[],
+  options: { now: number; selectedWorkspaceId?: string | null },
+): { visible: ProjectGroup[]; hidden: ProjectGroup[] } {
+  const { now, selectedWorkspaceId = null } = options
+  if (groups.length <= SIDEBAR_PROJECT_BASE_LIMIT) {
+    return { visible: [...groups], hidden: [] }
+  }
+  const shown = new Set<string>()
+  for (const group of groups.slice(0, SIDEBAR_PROJECT_BASE_LIMIT)) {
+    shown.add(group.workspace.id)
+  }
+  const recentBeyondBase = groups
+    .slice(SIDEBAR_PROJECT_BASE_LIMIT)
+    .map((group) => ({ group, usedAt: projectLastUsedAt(group) }))
+    .filter(({ usedAt }) => now - usedAt <= SIDEBAR_PROJECT_RECENT_WINDOW_MS)
+    .sort((left, right) => right.usedAt - left.usedAt)
+  for (const { group } of recentBeyondBase) {
+    if (shown.size >= SIDEBAR_PROJECT_ACTIVE_LIMIT) break
+    shown.add(group.workspace.id)
+  }
+  if (selectedWorkspaceId != null) shown.add(selectedWorkspaceId)
+
+  const visible: ProjectGroup[] = []
+  const hidden: ProjectGroup[] = []
+  for (const group of groups) {
+    if (shown.has(group.workspace.id)) visible.push(group)
+    else hidden.push(group)
+  }
+  return { visible, hidden }
+}

@@ -4,7 +4,9 @@
    layout and hover behavior can be screenshot without launching the app.
    `?theme=light|dark` picks the mode; `?width=200` narrows the sidebar;
    `?collapsed=workspace-1,workspace-2` folds projects shut to check the
-   inline running/unread rollup on their rows. */
+   inline running/unread rollup on their rows. `?projects=12` pads the list
+   with stale filler projects (plus one used an hour ago) to exercise the
+   project fold and its Show more row. */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -25,6 +27,7 @@ if (theme === "light" || theme === "dark") {
   updateAppearance({ theme });
 }
 const width = Number(params.get("width")) || 280;
+const extraProjectCount = Math.max(0, Number(params.get("projects")) || 0);
 const collapsedWorkspaceIds = (params.get("collapsed") ?? "")
   .split(",")
   .map((id) => id.trim())
@@ -209,6 +212,44 @@ const groups: ProjectGroup[] = [
     ],
   },
 ];
+
+// Filler projects: all idle for weeks except one touched an hour ago, which
+// should stay above the fold on recency alone.
+const fillerNames = [
+  "quizgecko",
+  "relay",
+  "miner-ops",
+  "blackwell-page",
+  "notes-sync",
+  "invoice-bot",
+  "photo-tidy",
+  "acp-probe",
+  "garden-log",
+  "recipes",
+  "ledger",
+  "sandbox",
+];
+for (let index = 0; index < extraProjectCount; index += 1) {
+  const id = `filler-${index + 1}`;
+  const name = fillerNames[index % fillerNames.length];
+  const recent = index === 3;
+  groups.push({
+    workspace: workspace({
+      id,
+      path: `/Users/james/www/sites/${name}${index >= fillerNames.length ? `-${index}` : ""}`,
+      current_thread_id: null,
+      connected_at: minutesAgo(60 * 24 * 40),
+    }),
+    threads: [
+      thread({
+        id: `${id}-thread`,
+        workspace_id: id,
+        title: recent ? "Touched this morning" : `Old work in ${name}`,
+        updated_at: recent ? minutesAgo(60) : minutesAgo(60 * 24 * (7 + index)),
+      }),
+    ],
+  });
+}
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
