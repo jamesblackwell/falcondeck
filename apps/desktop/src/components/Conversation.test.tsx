@@ -766,6 +766,57 @@ describe("Conversation empty state", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps following when the viewport grows and the browser clamps scrollTop to the tail", () => {
+    // The composer empties on send, the transcript viewport grows, and the
+    // browser clamps scrollTop down to the new maximum. That scroll event
+    // arrives before ResizeObserver can re-pin; it must not read as the
+    // reader scrolling up.
+    const observers = captureResizeObservers();
+    try {
+      render(
+        <Conversation
+          threadKey="thread-1"
+          items={[
+            {
+              kind: "assistant_message",
+              id: "a-1",
+              text: "Reply",
+              created_at: "2026-08-08T12:00:00Z",
+            },
+          ]}
+          isThinking
+        />,
+      );
+      const transcript = screen.getByRole("log", { name: "Conversation" });
+      let scrollHeight = 1_000;
+      let clientHeight = 500;
+      Object.defineProperty(transcript, "scrollHeight", {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(transcript, "clientHeight", {
+        configurable: true,
+        get: () => clientHeight,
+      });
+      transcript.scrollTop = 500;
+      fireEvent.scroll(transcript);
+
+      // Viewport grew by 80px; scrollTop is clamped to the new tail.
+      clientHeight = 580;
+      transcript.scrollTop = 420;
+      fireEvent.scroll(transcript);
+
+      scrollHeight = 1_200;
+      observers.flush();
+      expect(transcript.scrollTop).toBe(620);
+      expect(
+        screen.queryByRole("button", { name: "Jump to latest message" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      observers.restore();
+    }
+  });
+
   it("offers the jump button to a parked reader once the tail outgrows the threshold", () => {
     const observers = captureResizeObservers();
     const makeItem = (id: string) => ({

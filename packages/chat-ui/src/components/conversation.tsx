@@ -57,6 +57,9 @@ import {
 const AUTO_SCROLL_THRESHOLD = 40;
 const JUMP_THRESHOLD = 200;
 const SMOOTH_SCROLL_DURATION_MS = 320;
+/// Gap kept above the latest user message when it is lifted to the top of
+/// the viewport. Matches the transcript's own top padding.
+const TAIL_TURN_TOP_GAP = 16;
 const MAX_THREAD_UI_STATE = 48;
 // Keep the newest context fully laid out for streaming and bottom anchoring.
 // Older blocks use browser-native layout/paint deferral once a transcript is
@@ -104,6 +107,9 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   return (
     <div
       data-conversation-block-id={block.id}
+      data-conversation-block-kind={
+        block.kind === "item" ? block.item.kind : block.kind
+      }
       className={cn(
         "fd-conversation-block min-w-0",
         deferred && "fd-conversation-block--deferred",
@@ -147,6 +153,21 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
     </div>
   );
 });
+
+/// Layout distance from `ancestor`'s top edge to `element`'s, ignoring
+/// transforms and scroll position.
+function offsetTopWithin(element: HTMLElement, ancestor: HTMLElement) {
+  const toRoot = (start: HTMLElement) => {
+    let top = 0;
+    let node: HTMLElement | null = start;
+    while (node) {
+      top += node.offsetTop;
+      node = node.offsetParent as HTMLElement | null;
+    }
+    return top;
+  };
+  return toRoot(element) - toRoot(ancestor);
+}
 
 function clampScrollTop(scrollTop: number, element: HTMLDivElement) {
   return Math.min(
@@ -259,6 +280,7 @@ export const Conversation = memo(function Conversation({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const tailSpacerRef = useRef<HTMLDivElement>(null);
   const pinToBottomFrameRef = useRef<number | null>(null);
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>());
   const activeThreadKeyRef = useRef<string | null>(threadKey);
@@ -503,6 +525,41 @@ export const Conversation = memo(function Conversation({
     [threadKey],
   );
 
+  /// Sizes the spacer under the transcript so the latest turn — the last user
+  /// message and everything after it — can sit at the top of the viewport,
+  /// the way ChatGPT lifts a just-sent message. While the reply is shorter
+  /// than the viewport it streams into this reserved space and the view does
+  /// not move: the spacer shrinks by exactly what the reply grows, so the
+  /// scroll bottom stays put. Once the turn outgrows the viewport the spacer
+  /// is gone and ordinary tail-following takes over. Sized synchronously
+  /// (never via state) so callers can pin against the new scrollHeight in
+  /// the same layout pass.
+  const syncTailSpacer = useCallback(() => {
+    const scroll = scrollRef.current;
+    const content = contentRef.current;
+    const spacer = tailSpacerRef.current;
+    if (!scroll || !content || !spacer) return;
+
+    const userBlocks = content.querySelectorAll<HTMLElement>(
+      '[data-conversation-block-kind="user_message"]',
+    );
+    const lastUser = userBlocks.item(userBlocks.length - 1);
+    let height = 0;
+    if (lastUser) {
+      // Layout offsets, not bounding rects: an entering block is mid-way
+      // through a translateY animation, and a rect measured then would size
+      // the spacer against a position the block is about to leave.
+      const turnHeight =
+        content.offsetHeight - offsetTopWithin(lastUser, content);
+      height = Math.max(
+        0,
+        Math.floor(scroll.clientHeight - turnHeight - TAIL_TURN_TOP_GAP),
+      );
+    }
+    const next = height > 0 ? `${height}px` : "";
+    if (spacer.style.height !== next) spacer.style.height = next;
+  }, []);
+
   /// Every scroll position this component sets goes through here so the
   /// echoing scroll event can be told apart from reader input.
   const writeScrollTop = useCallback((el: HTMLDivElement, value: number) => {
@@ -522,11 +579,17 @@ export const Conversation = memo(function Conversation({
     if (!el) return;
 
     cancelSmoothScroll();
+    syncTailSpacer();
     writeScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight));
     stickyToBottomRef.current = true;
     setShowJump(false);
     persistScrollPosition();
-  }, [cancelSmoothScroll, persistScrollPosition, writeScrollTop]);
+  }, [
+    cancelSmoothScroll,
+    persistScrollPosition,
+    syncTailSpacer,
+    writeScrollTop,
+  ]);
 
   /// Glides to the bottom instead of teleporting — for the send snap and the
   /// jump button, where the reader is watching. The target is re-read every
@@ -538,6 +601,7 @@ export const Conversation = memo(function Conversation({
     const el = scrollRef.current;
     if (!el) return;
 
+    syncTailSpacer();
     const target = () => Math.max(0, el.scrollHeight - el.clientHeight);
     const from = el.scrollTop;
     const prefersReducedMotion =
@@ -568,6 +632,7 @@ export const Conversation = memo(function Conversation({
     cancelSmoothScroll,
     persistScrollPosition,
     scrollToBottom,
+    syncTailSpacer,
     writeScrollTop,
   ]);
 
@@ -577,6 +642,7 @@ export const Conversation = memo(function Conversation({
   const pinToBottomNow = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    syncTailSpacer();
     writeScrollTop(el, Math.max(0, el.scrollHeight - el.clientHeight));
     stickyToBottomRef.current = true;
     readerDistanceRef.current = 0;
@@ -587,7 +653,7 @@ export const Conversation = memo(function Conversation({
         stickToBottom: true,
       });
     }
-  }, [threadKey, writeScrollTop]);
+  }, [syncTailSpacer, threadKey, writeScrollTop]);
 
   /// Deferred pin, for thread switches only: restored content (images, code
   /// blocks, fonts) settles its height over the next couple of frames, so the
@@ -656,8 +722,13 @@ export const Conversation = memo(function Conversation({
       Math.abs(el.scrollTop - programmaticScrollTopRef.current) < 1;
     if (!isProgrammaticEcho) {
       const delta = el.scrollTop - lastScrollTopRef.current;
-      // Near the bottom is not permission to undo an upward scroll.
-      if (delta < -1 || !isNearBottom) {
+      // Near the bottom is not permission to undo an upward scroll. But a
+      // negative delta that lands exactly on the tail is the browser clamping
+      // scrollTop after the viewport grew (the composer emptied on send): the
+      // scroll event runs before ResizeObserver can re-pin, and nobody can
+      // scroll *up* onto the tail, so it is not reader input either.
+      const isClampToTail = delta < -1 && distanceFromBottom <= 1;
+      if ((delta < -1 && !isClampToTail) || !isNearBottom) {
         stickyToBottomRef.current = false;
       } else if (delta > 1 && isNearBottom) {
         stickyToBottomRef.current = true;
@@ -883,6 +954,9 @@ export const Conversation = memo(function Conversation({
     // shrinks clientHeight without changing content size, which would
     // otherwise leave a follower looking at a gap above the tail.
     const observer = new ResizeObserver(() => {
+      // The spacer sits beside the transcript, not inside it, so sizing it
+      // here does not feed back into this observer.
+      syncTailSpacer();
       if (smoothScrollFrameRef.current !== null) {
         persistScrollPosition();
         return;
@@ -903,7 +977,13 @@ export const Conversation = memo(function Conversation({
     return () => {
       observer.disconnect();
     };
-  }, [isLoading, persistScrollPosition, pinToBottomNow, threadKey]);
+  }, [
+    isLoading,
+    persistScrollPosition,
+    pinToBottomNow,
+    syncTailSpacer,
+    threadKey,
+  ]);
 
   // Any real scroll input takes the position back from a running glide.
   useEffect(() => {
@@ -1114,6 +1194,11 @@ export const Conversation = memo(function Conversation({
                   completed groups it becomes will also live. */}
                 <LiveActivityLane groups={liveActivityGroups} />
               </div>
+              <div
+                ref={tailSpacerRef}
+                aria-hidden="true"
+                data-conversation-tail-spacer
+              />
             </div>
 
             {selectedExcerpt ? (
