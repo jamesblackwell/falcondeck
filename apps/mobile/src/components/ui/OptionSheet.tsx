@@ -140,13 +140,13 @@ export const OptionSheet = memo(function OptionSheet({
               {item.swatch ? <PaletteSwatch colors={item.swatch} /> : null}
               <View style={styles.itemBody}>
                 <Text
-                  size="sm"
+                  size="base"
                   color={item.disabled ? 'faint' : item.destructive ? 'danger' : 'primary'}
                 >
                   {item.label}
                 </Text>
                 {secondary ? (
-                  <Text variant="caption" size="xs" color={item.disabled ? 'faint' : 'muted'}>
+                  <Text variant="supporting" color={item.disabled ? 'faint' : 'muted'}>
                     {secondary}
                   </Text>
                 ) : null}

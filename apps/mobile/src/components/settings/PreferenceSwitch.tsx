@@ -23,9 +23,9 @@ export const PreferenceSwitch = memo(function PreferenceSwitch({
     // a subtle cue, and these rows go dead as a group when push is turned off.
     <View style={[styles.row, disabled ? styles.disabled : undefined]}>
       <View style={styles.copy}>
-        <Text variant="label" color="primary">{label}</Text>
+        <Text variant="label" size="base" color="primary">{label}</Text>
         {description ? (
-          <Text variant="caption" color="muted" style={styles.description}>{description}</Text>
+          <Text variant="supporting" color="muted" style={styles.description}>{description}</Text>
         ) : null}
       </View>
       <Switch

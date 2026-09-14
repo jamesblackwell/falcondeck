@@ -72,7 +72,7 @@ function SessionListItemInner({
       {/* Regular, not label: Geist only ships Regular/Bold, so weight 500
           rounds to Bold and these rows look heavier than desktop. */}
       <Text
-        variant="supporting"
+        variant="body"
         color={isSelected ? 'primary' : 'secondary'}
         weight="normal"
         numberOfLines={1}
@@ -104,7 +104,7 @@ function SessionListItemInner({
       {presentation.showBadge ? (
         <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
       ) : (
-        <Text variant="caption" color="muted" size="2xs">
+        <Text variant="meta" color="muted">
           {updatedAtLabel}
         </Text>
       )}
@@ -116,6 +116,7 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
+    minHeight: theme.minTouchTarget,
     paddingLeft: theme.spacing[2],
     paddingRight: theme.spacing[3],
     paddingVertical: theme.spacing[2],

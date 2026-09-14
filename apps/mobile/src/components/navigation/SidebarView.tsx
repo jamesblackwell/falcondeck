@@ -668,7 +668,7 @@ export const SidebarView = memo(function SidebarView({
                 />
               )}
               <Text
-                variant="supporting"
+                variant="body"
                 color="secondary"
                 weight="normal"
                 numberOfLines={1}
@@ -686,7 +686,7 @@ export const SidebarView = memo(function SidebarView({
                         size={10}
                         color={theme.colors.accent.default}
                       />
-                      <Text variant="caption" color="muted" size="2xs">
+                      <Text variant="meta" color="muted">
                         {item.runningCount}
                       </Text>
                     </View>
@@ -706,7 +706,7 @@ export const SidebarView = memo(function SidebarView({
                           },
                         ]}
                       />
-                      <Text variant="caption" color="muted" size="2xs">
+                      <Text variant="meta" color="muted">
                         {item.unreadCount}
                       </Text>
                     </View>
@@ -757,7 +757,7 @@ export const SidebarView = memo(function SidebarView({
                   style={item.isExpanded ? styles.chevronFlipped : undefined}
                 />
               )}
-              <Text variant="caption" color="muted">
+              <Text variant="supporting" color="muted">
                 {overflowLabel}
               </Text>
             </Pressable>

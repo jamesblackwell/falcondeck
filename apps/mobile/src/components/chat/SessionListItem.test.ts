@@ -68,7 +68,7 @@ describe('SessionListItem props contract', () => {
     expect(onOpenThreadOptions).toHaveBeenCalledWith('workspace-1', item)
   })
 
-  it('uses the quiet supporting treatment for thread titles', () => {
+  it('uses body-sized thread titles with a quiet regular weight', () => {
     const renderer = renderComponent(React.createElement(SessionListItem, {
       thread: thread({ id: 'thread-1', workspace_id: 'workspace-1', title: 'Quiet title' }),
       workspaceId: 'workspace-1',
@@ -83,9 +83,9 @@ describe('SessionListItem props contract', () => {
     expect(style).toMatchObject({
       color: '#ccc',
       fontFamily: 'Geist',
-      fontSize: 14,
+      fontSize: 16,
       fontWeight: '400',
-      lineHeight: 21,
+      lineHeight: 24,
     })
   })
 

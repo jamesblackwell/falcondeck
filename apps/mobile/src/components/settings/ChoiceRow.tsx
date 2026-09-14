@@ -33,9 +33,9 @@ export const ChoiceRow = memo(function ChoiceRow({
       accessibilityLabel={label}
     >
       <View style={styles.copy}>
-        <Text variant="label" color={selected ? 'accent' : 'primary'}>{label}</Text>
+        <Text variant="label" size="base" color={selected ? 'accent' : 'primary'}>{label}</Text>
         {description ? (
-          <Text variant="caption" color="muted" style={styles.description}>{description}</Text>
+          <Text variant="supporting" color="muted" style={styles.description}>{description}</Text>
         ) : null}
       </View>
       {selected ? <Check size={theme.iconSize.sm} color={theme.colors.accent.default} /> : null}

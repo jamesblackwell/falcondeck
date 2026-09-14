@@ -42,11 +42,11 @@ export const SettingsRow = memo(function SettingsRow({
     <>
       {icon ? <View style={styles.icon}>{icon}</View> : null}
       <View style={styles.copy}>
-        <Text variant="label" color={destructive ? 'danger' : 'primary'}>
+        <Text variant="label" size="base" color={destructive ? 'danger' : 'primary'}>
           {label}
         </Text>
         {detail ? (
-          <Text variant="caption" color="muted" style={styles.detail}>
+          <Text variant="supporting" color="muted" style={styles.detail}>
             {detail}
           </Text>
         ) : null}

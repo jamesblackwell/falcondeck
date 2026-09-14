@@ -36,7 +36,7 @@ export const SettingsSection = memo(function SettingsSection({
         ))}
       </Card>
       {footer ? (
-        <Text variant="caption" color="muted" style={styles.footer}>{footer}</Text>
+        <Text variant="supporting" color="muted" style={styles.footer}>{footer}</Text>
       ) : null}
     </View>
   )
@@ -73,5 +73,5 @@ const styles = StyleSheet.create((theme) => ({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.colors.border.default,
   },
-  footer: { paddingHorizontal: theme.spacing[2], lineHeight: theme.fontSize.xs * theme.lineHeight.relaxed },
+  footer: { paddingHorizontal: theme.spacing[2], lineHeight: theme.fontSize.sm * theme.lineHeight.relaxed },
 }))
