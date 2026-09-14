@@ -132,9 +132,20 @@ export function buildSidebarRows(
   for (const group of chatGroups) {
     const remaining = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
       : Math.max(remoteCursors[`${group.workspace.id}:${sortMode}`] === undefined ? 0 : 1, (remoteCounts[group.workspace.id]?.total ?? 0) - group.threads.length)
-    if (remaining > 0) chatRows.push({ key: `overflow:${group.workspace.id}`, type: 'overflow',
-      workspaceId: group.workspace.id, hiddenCount: remaining, visibleCount: group.threads.length,
-      isExpanded: false, isCollapsed: chatsCollapsed })
+    if (remaining > 0) {
+      // Chats is one flat section. Page the next unfinished workspace through
+      // one stable control, advancing to the next scope when this one is done.
+      chatRows.push({
+        key: 'overflow:chats',
+        type: 'overflow',
+        workspaceId: group.workspace.id,
+        hiddenCount: remaining,
+        visibleCount: group.threads.length,
+        isExpanded: false,
+        isCollapsed: chatsCollapsed,
+      })
+      break
+    }
   }
 
   const projectRows = projectGroups.flatMap((group) => {

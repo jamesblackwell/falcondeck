@@ -79,6 +79,34 @@ describe('buildSidebarRows', () => {
     ])
   })
 
+  it('uses one Chats pager and advances to the next unfinished workspace', () => {
+    const groups = ['chat-a', 'chat-b', 'chat-c', 'chat-d'].map(id => ({
+      workspace: workspace({ id, kind: 'casual' }),
+      threads: [],
+    }))
+    const counts = Object.fromEntries(groups.map(({ workspace }) => [
+      workspace.id, { total: 10, running: 0, unread: 0, awaiting: 0 },
+    ]))
+    const cursors: Record<string, number | null> = {}
+    const build = (collapsed = false) => buildSidebarRows(
+      groups, emptyCollapsed, defaultCounts, null, 'last_updated', true,
+      collapsed, counts, cursors,
+    )
+
+    for (const { workspace } of groups) {
+      expect(build().filter(row => row.type === 'overflow')).toEqual([
+        expect.objectContaining({
+          key: 'overflow:chats', workspaceId: workspace.id, isCollapsed: false,
+        }),
+      ])
+      expect(build(true).filter(row => row.type === 'overflow')).toEqual([
+        expect.objectContaining({ isCollapsed: true }),
+      ])
+      cursors[`${workspace.id}:last_updated`] = null
+    }
+    expect(build().filter(row => row.type === 'overflow')).toEqual([])
+  })
+
   it('keeps chat rows for a collapsed chats section but marks them collapsed', () => {
     const rows = buildSidebarRows(
       [

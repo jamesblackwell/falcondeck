@@ -128,3 +128,41 @@ it('follows the first-page fetch with a larger page when show more joins it', as
     renderer.root.findByProps({ accessibilityLabel: 'Show more' }).props.accessibilityState?.busy,
   ).not.toBe(true)
 })
+
+it('renders one Chats control and pages each unfinished chat workspace', async () => {
+  const ids = ['chat-a', 'chat-b', 'chat-c', 'chat-d']
+  useSessionStore.setState({ snapshot: snapshot({
+    sync_index: {
+      ...pagingIndex,
+      counts: Object.fromEntries(ids.map(id => [
+        id, { total: 10, running: 0, unread: 0, awaiting: 0 },
+      ])),
+      cursors: Object.fromEntries(ids.map(id => [`${id}:last_updated`, 5])),
+    },
+  }) })
+  loadPage.mockImplementation(async (workspaceId: string) => {
+    const current = useSessionStore.getState().snapshot!
+    useSessionStore.setState({ snapshot: {
+      ...current,
+      sync_index: {
+        ...current.sync_index!,
+        cursors: { ...current.sync_index!.cursors, [`${workspaceId}:last_updated`]: null },
+      },
+    } })
+  })
+  const renderer = renderComponent(<SidebarView
+    groups={ids.map(id => ({ workspace: workspace({ id, kind: 'casual' }), threads: [] }))}
+    selectedThreadId={null} onSelectThread={vi.fn()} onNewThread={vi.fn()}
+  />)
+
+  expect(loadPage).not.toHaveBeenCalled()
+  for (const id of ids) {
+    expect(textOf(renderer).match(/Show more/g)).toHaveLength(1)
+    await act(async () => {
+      renderer.root.findByProps({ accessibilityLabel: 'Show more' }).props.onPress()
+    })
+    expect(loadPage).toHaveBeenLastCalledWith(id, 'last_updated', 10)
+  }
+  expect(loadPage).toHaveBeenCalledTimes(4)
+  expect(textOf(renderer)).not.toContain('Show more')
+})
