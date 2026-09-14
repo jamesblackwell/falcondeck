@@ -48,6 +48,7 @@ function resetAll() {
     attachmentsByConversation: {},
     draft: "",
     attachments: [],
+    selectedIsolation: "project_folder",
     selectedProvider: null,
     selectedModel: null,
     selectedEffort: "medium",
@@ -140,6 +141,26 @@ function imageAgent(provider: string, supportsImages: boolean) {
     },
   };
 }
+
+describe("task isolation", () => {
+  beforeEach(resetAll);
+
+  it.each(["project_folder", "isolated"] as const)("starts in %s", async (isolation) => {
+    const project = workspace({ id: "w1" });
+    useSessionStore.setState({ snapshot: snapshot({ workspaces: [project] }), selectedWorkspaceId: "w1" });
+    useUIStore.getState().setSelectedIsolation(isolation);
+    const rpc = vi.fn().mockResolvedValue({ workspace: project, thread: thread({ id: "new-task", workspace_id: "w1" }) });
+    useRelayStore.setState({ _callRpc: rpc as RelayStoreState["_callRpc"] });
+    const harness = mountSessionActions();
+    try {
+      await act(async () => { await harness.getActions().startThread(); });
+      expect(rpc).toHaveBeenCalledWith("thread.start", expect.objectContaining({ workspace_id: "w1", isolation }), expect.anything());
+      expect(useSessionStore.getState().selectedThreadId).toBe("new-task");
+    } finally {
+      harness.unmount();
+    }
+  });
+});
 
 describe("submitTurn guards", () => {
   beforeEach(resetAll);

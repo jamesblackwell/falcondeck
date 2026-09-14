@@ -143,6 +143,16 @@ describe('ui-store', () => {
     expect(useUIStore.getState().selectedEffort).toBe('medium')
   })
 
+  it('resets isolation when moving to another conversation', () => {
+    const ui = useUIStore.getState()
+    ui.setConversation('w1', null)
+    ui.setSelectedIsolation('isolated')
+    ui.setConversation('w1', null)
+    expect(useUIStore.getState().selectedIsolation).toBe('isolated')
+    ui.setConversation('w2', null)
+    expect(useUIStore.getState().selectedIsolation).toBe('project_folder')
+  })
+
   it('sets selected provider', () => {
     useUIStore.getState().setSelectedProvider('claude')
     expect(useUIStore.getState().selectedProvider).toBe('claude')

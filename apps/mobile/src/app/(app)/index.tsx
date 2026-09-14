@@ -220,6 +220,7 @@ export default function HomeScreen() {
     selectedEffort,
     selectedModel,
     selectedPermissionMode,
+    selectedIsolation,
     selectedProvider,
     selectedSandboxMode,
     selectedServiceTier,
@@ -232,6 +233,7 @@ export default function HomeScreen() {
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
       selectedPermissionMode: s.selectedPermissionMode,
+      selectedIsolation: s.selectedIsolation,
       selectedProvider: s.selectedProvider,
       selectedSandboxMode: s.selectedSandboxMode,
       selectedServiceTier: s.selectedServiceTier,
@@ -244,6 +246,7 @@ export default function HomeScreen() {
     setSelectedModel,
     setSelectedEffort,
     setSelectedPermissionMode,
+    setSelectedIsolation,
     setSelectedProvider,
     setSelectedSandboxMode,
     setSelectedServiceTier,
@@ -1574,6 +1577,8 @@ export default function HomeScreen() {
             effortOptions={effortOptions}
             selectedProvider={activeProvider}
             providers={providerOptions}
+            selectedIsolation={selectedIsolation}
+            onSelectIsolation={setSelectedIsolation}
             showProviderSelector={!selectedThread}
             onSelectModel={handleModelChange}
             onSelectEffort={handleEffortChange}

@@ -9,6 +9,7 @@ import {
   upsertComposerDraft,
   withComposerProvider,
   withComposerSelection,
+  type ThreadIsolation,
   type AgentProvider,
   type ComposerDrafts,
   type ConversationItem,
@@ -117,6 +118,7 @@ interface UIState {
   draft: string;
   /** The current conversation's attachments — a mirror of the keyed map. */
   attachments: ImageInput[];
+  selectedIsolation: ThreadIsolation;
   selectedProvider: AgentProvider | null;
   selectedModel: string | null;
   selectedEffort: string | null;
@@ -155,6 +157,7 @@ interface UIActions {
     failedDraft: string,
     failedAttachments: ImageInput[],
   ) => void;
+  setSelectedIsolation: (isolation: ThreadIsolation) => void;
   setSelectedProvider: (provider: AgentProvider | null) => void;
   setSelectedModel: (modelId: string | null) => void;
   setSelectedEffort: (effort: string | null) => void;
@@ -194,6 +197,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   attachmentsByConversation: {},
   draft: initialDrafts[initialConversationKey]?.text ?? '',
   attachments: [],
+  selectedIsolation: 'project_folder',
   selectedProvider: null,
   selectedModel: null,
   selectedEffort: 'medium',
@@ -213,6 +217,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
     if (conversationKey === get().conversationKey) return;
     set((state) => ({
       conversationKey,
+      selectedIsolation: 'project_folder',
       draft: state.drafts[conversationKey]?.text ?? '',
       attachments: state.attachmentsByConversation[conversationKey] ?? [],
       isSubmitting: Boolean(state.pendingSubmissions[conversationKey]),
@@ -282,6 +287,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
         ...(state.conversationKey === conversationKey ? { draft, attachments } : {}),
       };
     }),
+  setSelectedIsolation: (selectedIsolation) => set({ selectedIsolation }),
   setSelectedProvider: (provider) => set({ selectedProvider: provider }),
   setSelectedModel: (modelId) => set({ selectedModel: modelId }),
   setSelectedEffort: (effort) => set({ selectedEffort: effort }),

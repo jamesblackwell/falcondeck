@@ -10,6 +10,7 @@ import {
   NO_AGENT_CAPABILITIES,
   resolveServiceTier,
   type AgentCapabilitySummary,
+  type ThreadIsolation,
   type AgentProvider,
   type ModelSummary,
   type ProviderOption,
@@ -42,6 +43,8 @@ interface InputToolbarProps {
   selectedProvider: AgentProvider
   /** Providers the active workspace offers; defaults to the built-in pair. */
   providers?: ProviderOption[]
+  selectedIsolation?: ThreadIsolation
+  onSelectIsolation?: (isolation: ThreadIsolation) => void
   showProviderSelector: boolean
   disabled?: boolean
   onSelectModel: (modelId: string | null) => void
@@ -90,6 +93,8 @@ export const InputToolbar = memo(function InputToolbar({
   effortOptions,
   selectedProvider,
   providers = DEFAULT_PROVIDERS,
+  selectedIsolation = 'project_folder',
+  onSelectIsolation,
   showProviderSelector,
   disabled = false,
   onSelectModel,
@@ -245,6 +250,30 @@ export const InputToolbar = memo(function InputToolbar({
             accessibilityLabel="Sandbox mode"
             disabled={disabled}
             onPress={openSandboxSheet}
+          />
+        ) : null}
+
+        {showProviderSelector && onSelectIsolation ? (
+          <Chip
+            label={selectedIsolation === 'isolated' ? 'Isolated copy' : 'Project folder'}
+            accessibilityLabel="Task location"
+            disabled={disabled}
+            onPress={() => {
+              if (disabled) return
+              triggerComposerSelectionHaptic()
+              setSheet({
+                title: 'Start task in',
+                items: [
+                  { value: 'project_folder', label: 'Project folder', description: 'Work directly in the project folder.' },
+                  { value: 'isolated', label: 'Isolated copy', description: 'Work in a separate copy on a new branch. Requires a Git repository.' },
+                ],
+                selected: selectedIsolation,
+                onSelect: (value) => {
+                  onSelectIsolation(value === 'isolated' ? 'isolated' : 'project_folder')
+                  setSheet(null)
+                },
+              })
+            }}
           />
         ) : null}
 

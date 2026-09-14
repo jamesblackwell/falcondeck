@@ -183,6 +183,7 @@ export function useSessionActions() {
           ),
           permission_mode: ui.selectedPermissionMode,
           sandbox_mode: ui.selectedSandboxMode,
+          isolation: ui.selectedIsolation,
         },
         { requestIdPrefix: "mobile-thread" },
       ),

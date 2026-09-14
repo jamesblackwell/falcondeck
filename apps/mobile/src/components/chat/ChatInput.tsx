@@ -35,6 +35,7 @@ import {
   slashSkillSourceLabel,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
+  type ThreadIsolation,
   type AgentProvider,
   type ImageInput,
   type ModelSummary,
@@ -99,6 +100,8 @@ interface ChatInputProps {
   effortOptions: string[]
   selectedProvider: AgentProvider
   providers?: ProviderOption[]
+  selectedIsolation?: ThreadIsolation
+  onSelectIsolation?: (isolation: ThreadIsolation) => void
   showProviderSelector: boolean
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
@@ -243,6 +246,8 @@ export const ChatInput = memo(function ChatInput({
   effortOptions,
   selectedProvider,
   providers,
+  selectedIsolation = 'project_folder',
+  onSelectIsolation,
   showProviderSelector,
   onSelectModel,
   onSelectEffort,
@@ -880,6 +885,8 @@ export const ChatInput = memo(function ChatInput({
               effortOptions={effortOptions}
               selectedProvider={selectedProvider}
               providers={providerOptions}
+              selectedIsolation={selectedIsolation}
+              onSelectIsolation={onSelectIsolation}
               showProviderSelector={showProviderSelector}
               disabled={disabled}
               onSelectModel={onSelectModel}

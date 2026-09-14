@@ -432,6 +432,27 @@ describe("chat behavior components", () => {
     expect(onSelectProvider).toHaveBeenCalledWith("claude");
   });
 
+  it("offers isolation only for new tasks and submits the selection", () => {
+    const onSelectIsolation = vi.fn();
+    const props = {
+      models: [], selectedModel: null, selectedEffort: null, effortOptions: [],
+      selectedProvider: "codex" as const, onSelectModel: vi.fn(),
+      onSelectEffort: vi.fn(), onSelectProvider: vi.fn(), onSelectIsolation,
+    };
+    const renderer = renderComponent(<InputToolbar {...props} showProviderSelector />);
+    act(() => {
+      renderer.root.findByProps({ accessibilityLabel: "Task location: Project folder" }).props.onPress();
+    });
+    expect(textOf(renderer)).toContain("Requires a Git repository.");
+    act(() => {
+      renderer.root.findByProps({ accessibilityLabel: "Isolated copy" }).props.onPress();
+    });
+    expect(onSelectIsolation).toHaveBeenCalledWith("isolated");
+    act(() => { renderer.update(<InputToolbar {...props} showProviderSelector={false} />); });
+    expect(textOf(renderer)).not.toContain("Project folder");
+    expect(textOf(renderer)).not.toContain("Isolated copy");
+  });
+
   it("disables toolbar controls when the composer is disabled", () => {
     const renderer = renderComponent(
       <InputToolbar
