@@ -2422,22 +2422,35 @@ function AppInner() {
     ],
   );
 
-  // Optional providers start lazily in the daemon; a new-thread composer
-  // aimed at one is the signal to warm its runtime so the model picker fills
-  // in without needing a first prompt. Covers both an explicit harness
-  // switch and a composer that restores with the provider already selected.
+  // Optional providers start lazily in the daemon; a composer aimed at one
+  // is the signal to warm its runtime so the model picker fills in without
+  // needing a first prompt. A new-thread composer always warms (explicit
+  // harness switch or a restored selection). An existing thread warms only
+  // while its provider's catalog is empty: ACP catalogs are not persisted,
+  // so a handoff destination or an idle thread opened after a daemon
+  // restart would otherwise offer no models until its first turn.
   // Once per workspace+provider: the daemon reuses a live runtime, so a
   // repeat would only cost a no-op round trip.
   const hydratedProvidersRef = useRef(new Set<string>());
+  const composerProvider = selectedThread?.provider ?? selectedProvider;
+  const composerCatalogEmpty =
+    workspaceModels(selectedWorkspace, composerProvider).length === 0;
   useEffect(() => {
-    if (selectedThread || !selectedWorkspace || !selectedProvider) return;
-    const key = `${selectedWorkspace.id}:${selectedProvider}`;
+    if (!selectedWorkspace || !composerProvider) return;
+    if (selectedThread && !composerCatalogEmpty) return;
+    const key = `${selectedWorkspace.id}:${composerProvider}`;
     if (hydratedProvidersRef.current.has(key)) return;
     hydratedProvidersRef.current.add(key);
     apiFor(selectedWorkspace.id)
-      ?.hydrateProvider?.(selectedWorkspace.id, selectedProvider)
+      ?.hydrateProvider?.(selectedWorkspace.id, composerProvider)
       .catch(() => {});
-  }, [apiFor, selectedProvider, selectedThread, selectedWorkspace]);
+  }, [
+    apiFor,
+    composerCatalogEmpty,
+    composerProvider,
+    selectedThread,
+    selectedWorkspace,
+  ]);
 
   const liveSkillsRef = useRef<LiveSkillCatalog | null>(null);
   const snapshotSkillsRef = useRef(selectedWorkspace?.skills ?? []);
@@ -5266,7 +5279,6 @@ function AppInner() {
   // The daemon owns the flag: it sets it when a composer selection starts a
   // lazy catalog fetch and clears it on publish, failure, or deadline.
   const modelsLoading =
-    !selectedThread &&
     workspaceAgent(selectedWorkspace, activeProvider)?.models_loading === true;
   const providerOptions = useMemo(
     () => workspaceProviderOptions(selectedWorkspace),

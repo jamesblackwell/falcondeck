@@ -718,26 +718,34 @@ export default function HomeScreen() {
     }
   }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort]);
 
-  // Optional providers start lazily in the daemon; picking one on a new-thread
-  // composer is the signal to warm its runtime so the model list fills in.
+  // Optional providers start lazily in the daemon; a composer aimed at one
+  // is the signal to warm its runtime so the model list fills in. A
+  // new-thread composer always warms; an existing thread warms only while
+  // its provider's live catalog is empty (ACP catalogs are not persisted,
+  // so a handoff destination or a thread opened after a daemon restart
+  // would otherwise offer no models until its first turn).
   const hydratedProvidersRef = useRef(new Set<string>());
+  const composerProvider = selectedThread?.provider ?? selectedProvider;
+  const liveCatalogEmpty = models.length === 0;
   useEffect(() => {
-    if (selectedThread || !workspace || !selectedProvider) return;
+    if (!workspace || !composerProvider) return;
+    if (selectedThread && !liveCatalogEmpty) return;
     if (!isEncrypted || !daemonRpcReady) return;
-    const key = `${workspace.id}:${selectedProvider}`;
+    const key = `${workspace.id}:${composerProvider}`;
     if (hydratedProvidersRef.current.has(key)) return;
     hydratedProvidersRef.current.add(key);
     void useRelayStore
       .getState()
       ._callRpc("provider.hydrate", {
         workspace_id: workspace.id,
-        provider: selectedProvider,
+        provider: composerProvider,
       })
       .catch(() => {});
   }, [
+    composerProvider,
     daemonRpcReady,
     isEncrypted,
-    selectedProvider,
+    liveCatalogEmpty,
     selectedThread,
     workspace,
   ]);
