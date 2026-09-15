@@ -482,6 +482,7 @@ pub(super) async fn connect_workspace_internal(
         .or_else(|| threads.first().map(|thread| thread.summary.id.clone()));
     let mut agents = vec![
         WorkspaceAgentSummary {
+            models_loading: false,
             provider: AgentProvider::CODEX,
             label: "Codex".to_string(),
             account: codex_account.clone(),
@@ -491,6 +492,7 @@ pub(super) async fn connect_workspace_internal(
             capabilities: AgentCapabilitySummary::codex(),
         },
         WorkspaceAgentSummary {
+            models_loading: false,
             provider: AgentProvider::CLAUDE,
             label: "Claude".to_string(),
             account: claude_account.clone(),
@@ -500,6 +502,7 @@ pub(super) async fn connect_workspace_internal(
             capabilities: claude_capabilities,
         },
         WorkspaceAgentSummary {
+            models_loading: false,
             provider: AgentProvider::AGY,
             label: "Antigravity".to_string(),
             account: agy_account.clone(),

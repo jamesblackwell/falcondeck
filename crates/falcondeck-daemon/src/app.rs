@@ -758,6 +758,7 @@ impl AppState {
                     models.push(crate::app::opencode_threads::native_default_model());
                 }
                 WorkspaceAgentSummary {
+                    models_loading: false,
                     provider: AgentProvider::new(config.id.clone()),
                     label: config.label.clone(),
                     account: falcondeck_core::AccountSummary {
@@ -1896,6 +1897,7 @@ impl AppState {
             agents: {
                 let mut agents = vec![
                     WorkspaceAgentSummary {
+                        models_loading: false,
                         provider: AgentProvider::CODEX,
                         label: "Codex".to_string(),
                         account: falcondeck_core::AccountSummary {
@@ -1908,6 +1910,7 @@ impl AppState {
                         capabilities: AgentCapabilitySummary::codex(),
                     },
                     WorkspaceAgentSummary {
+                        models_loading: false,
                         provider: AgentProvider::CLAUDE,
                         label: "Claude".to_string(),
                         account: falcondeck_core::AccountSummary {
@@ -1920,6 +1923,7 @@ impl AppState {
                         capabilities: AgentCapabilitySummary::claude(),
                     },
                     WorkspaceAgentSummary {
+                        models_loading: false,
                         provider: AgentProvider::AGY,
                         label: "Antigravity".to_string(),
                         account: falcondeck_core::AccountSummary {
@@ -4649,6 +4653,7 @@ impl IntoWorkspaceAgentUpdate for CodexProviderMetadata {
         skills: Vec<SkillSummary>,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
+            models_loading: false,
             label: provider_label(&provider),
             provider,
             account: self.account,
@@ -4667,6 +4672,7 @@ impl IntoWorkspaceAgentUpdate for ClaudeProviderMetadata {
         skills: Vec<SkillSummary>,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
+            models_loading: false,
             label: provider_label(&provider),
             provider,
             account: self.account,
@@ -4685,6 +4691,7 @@ impl IntoWorkspaceAgentUpdate for AgyProviderMetadata {
         skills: Vec<SkillSummary>,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
+            models_loading: false,
             label: provider_label(&provider),
             provider,
             account: self.account,

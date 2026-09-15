@@ -4,6 +4,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use falcondeck_core::{
@@ -49,6 +50,11 @@ fn acp_metadata_updated_at(
 ) -> chrono::DateTime<Utc> {
     if replay || !changed { current } else { now }
 }
+
+/// Upper bound on one composer-triggered catalog fetch. ACP setup and
+/// discovery requests are individually bounded, but a start can still wedge
+/// on shared daemon locks; past this the composer stops waiting.
+const PROVIDER_HYDRATION_DEADLINE: Duration = Duration::from_secs(90);
 
 impl AppState {
     /// Re-reads `providers.json` so provider edits apply without a daemon
@@ -135,40 +141,187 @@ impl AppState {
         }
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
-        tokio::spawn(async move {
-            if provider.as_str().eq_ignore_ascii_case("grok") {
-                app.seed_grok_placeholder_catalog(&workspace_id).await;
-            }
-            if provider.as_str().eq_ignore_ascii_case("opencode")
-                && let Some(config) = app.opencode_config()
-                && super::opencode_threads::requested_native_transport(&config)
-            {
-                // Spawning the native server publishes its catalog as a side
-                // effect; nothing else to do on success.
-                match app.opencode_runtime_for(&workspace_id).await {
-                    Ok(_) => return,
-                    Err(error) => {
-                        tracing::info!(
-                            %error,
-                            "native OpenCode metadata hydration failed"
-                        );
-                        app.set_opencode_native_available(&workspace_id, false)
-                            .await;
-                        if matches!(config.transport, crate::acp::ProviderTransport::Native) {
-                            return;
-                        }
-                        // Auto mode falls through to the ACP handshake below.
-                    }
-                }
-            }
-            if let Err(error) = app.acp_runtime_for(&workspace_id, &provider).await {
+        // The flag is the composer's only signal that a catalog is coming, so
+        // every exit below (success, error, deadline, panic) must clear it.
+        let work = tokio::spawn({
+            let app = app.clone();
+            let workspace_id = workspace_id.clone();
+            let provider = provider.clone();
+            async move {
+                app.set_agent_models_loading(&workspace_id, &provider, true)
+                    .await;
+                let started = std::time::Instant::now();
                 tracing::info!(
                     provider = %provider,
-                    %error,
-                    "ACP provider metadata hydration skipped"
+                    workspace_id = %workspace_id,
+                    "provider metadata hydration started"
                 );
+                let outcome = tokio::time::timeout(
+                    PROVIDER_HYDRATION_DEADLINE,
+                    app.hydrate_provider_metadata(&workspace_id, &provider),
+                )
+                .await;
+                let failure = match outcome {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(_) => Some(format!(
+                        "no response after {}s",
+                        PROVIDER_HYDRATION_DEADLINE.as_secs()
+                    )),
+                };
+                match &failure {
+                    None => tracing::info!(
+                        provider = %provider,
+                        workspace_id = %workspace_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "provider metadata hydration finished"
+                    ),
+                    Some(error) => tracing::warn!(
+                        provider = %provider,
+                        workspace_id = %workspace_id,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        %error,
+                        "provider metadata hydration failed"
+                    ),
+                }
+                app.finish_agent_models_loading(&workspace_id, &provider, failure.as_deref())
+                    .await;
             }
         });
+        tokio::spawn(async move {
+            if let Err(error) = work.await
+                && error.is_panic()
+            {
+                tracing::error!(
+                    provider = %provider,
+                    workspace_id = %workspace_id,
+                    "provider metadata hydration panicked"
+                );
+                app.finish_agent_models_loading(
+                    &workspace_id,
+                    &provider,
+                    Some("hydration task panicked"),
+                )
+                .await;
+            }
+        });
+    }
+
+    /// One provider's catalog fetch: native OpenCode when configured, else
+    /// the ACP handshake. Publishing the catalog is a side effect of a
+    /// successful start.
+    async fn hydrate_provider_metadata(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+    ) -> Result<(), DaemonError> {
+        if provider.as_str().eq_ignore_ascii_case("grok") {
+            self.seed_grok_placeholder_catalog(workspace_id).await;
+        }
+        if provider.as_str().eq_ignore_ascii_case("opencode")
+            && let Some(config) = self.opencode_config()
+            && super::opencode_threads::requested_native_transport(&config)
+        {
+            match self.opencode_runtime_for(workspace_id).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    tracing::info!(%error, "native OpenCode metadata hydration failed");
+                    self.set_opencode_native_available(workspace_id, false)
+                        .await;
+                    if matches!(config.transport, crate::acp::ProviderTransport::Native) {
+                        return Err(error);
+                    }
+                    // Auto mode falls through to the ACP handshake below.
+                }
+            }
+        }
+        self.acp_runtime_for(workspace_id, provider).await?;
+        Ok(())
+    }
+
+    /// Flips the composer-facing loading flag on one workspace agent entry.
+    /// Returns without emitting when the entry is absent or already in that
+    /// state, so repeat selections stay silent.
+    pub(super) async fn set_agent_models_loading(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        loading: bool,
+    ) {
+        let workspace = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(agent) = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case(provider.as_str()))
+            else {
+                return;
+            };
+            if agent.models_loading == loading {
+                return;
+            }
+            agent.models_loading = loading;
+            workspace.summary.clone()
+        };
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::WorkspaceUpdated { workspace },
+        );
+    }
+
+    /// Clears the loading flag once hydration settles. A failure on a
+    /// provider that never connected replaces its "not started" label so the
+    /// picker explains the empty catalog instead of spinning again later.
+    async fn finish_agent_models_loading(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        failure: Option<&str>,
+    ) {
+        let workspace = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            let Some(agent) = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case(provider.as_str()))
+            else {
+                return;
+            };
+            let mut changed = false;
+            if agent.models_loading {
+                agent.models_loading = false;
+                changed = true;
+            }
+            if let Some(failure) = failure
+                && agent.account.status != falcondeck_core::AccountStatus::Ready
+            {
+                let label = if agent.label.is_empty() {
+                    provider.as_str().to_string()
+                } else {
+                    agent.label.clone()
+                };
+                agent.account.label = format!("{label} failed to start: {failure}");
+                changed = true;
+            }
+            if !changed {
+                return;
+            }
+            workspace.summary.clone()
+        };
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::WorkspaceUpdated { workspace },
+        );
     }
 
     /// Fills an empty Grok catalog before ACP connect so the composer is
@@ -704,6 +857,7 @@ impl AppState {
                             .summary
                             .agents
                             .push(falcondeck_core::WorkspaceAgentSummary {
+                                models_loading: false,
                                 provider: provider.clone(),
                                 label: runtime.config.label.clone(),
                                 account: falcondeck_core::AccountSummary {
@@ -730,6 +884,7 @@ impl AppState {
                     status: falcondeck_core::AccountStatus::Ready,
                     label: format!("{} connected", runtime.config.label),
                 };
+                agent.models_loading = false;
                 agent.capabilities = capabilities;
                 if !models.is_empty() {
                     agent.models = merged_models(provider, &agent.models, models);

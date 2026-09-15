@@ -28,6 +28,19 @@ describe("existing-profile consent normalization", () => {
   });
 });
 
+describe("workspace agent catalog loading flag", () => {
+  it("keeps models_loading only while the daemon reports it", () => {
+    const loading = normalizeWorkspaceSummary({
+      agents: [{ provider: "grok", models_loading: true }],
+    });
+    expect(loading.agents[0]?.models_loading).toBe(true);
+    const settled = normalizeWorkspaceSummary({
+      agents: [{ provider: "grok" }],
+    });
+    expect("models_loading" in settled.agents[0]!).toBe(false);
+  });
+});
+
 describe("workspace icon normalization", () => {
   it("fills an empty icon map and resolved icon for older daemons", () => {
     expect(normalizePreferences({}).workspace_icons).toEqual({});

@@ -71,6 +71,7 @@ async fn claude_harness_upgrade_refreshes_connected_workspace_models() {
                 kind: falcondeck_core::WorkspaceKind::Project,
                 status: WorkspaceStatus::Ready,
                 agents: vec![falcondeck_core::WorkspaceAgentSummary {
+                    models_loading: false,
                     provider: AgentProvider::CLAUDE,
                     label: "Claude".to_string(),
                     account: falcondeck_core::AccountSummary::default(),
@@ -7469,6 +7470,7 @@ async fn busy_thread_app(
         path: workspace_path.to_string_lossy().to_string(),
         status: WorkspaceStatus::Busy,
         agents: vec![falcondeck_core::WorkspaceAgentSummary {
+            models_loading: false,
             provider: provider.clone(),
             label: provider.to_string(),
             account: falcondeck_core::AccountSummary::default(),

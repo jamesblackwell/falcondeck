@@ -3532,6 +3532,11 @@ pub struct WorkspaceAgentSummary {
     /// Capability flags reported by the provider.
     #[serde(default)]
     pub capabilities: AgentCapabilitySummary,
+    /// True while the daemon fetches this provider's catalog for a composer
+    /// selection. Cleared when the catalog publishes, the start fails, or the
+    /// hydration deadline passes, so pickers can show a bounded spinner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub models_loading: bool,
 }
 
 /// How FalconDeck knows about a coding harness (agent CLI).

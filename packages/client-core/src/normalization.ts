@@ -618,6 +618,7 @@ function normalizeWorkspaceAgent(
     collaboration_modes: agent.collaboration_modes ?? [],
     skills: (agent.skills ?? []).map((skill) => normalizeSkill(skill)),
     capabilities: capabilitiesForAgent(provider, agent.capabilities),
+    ...(agent.models_loading === true ? { models_loading: true } : {}),
   };
 }
 

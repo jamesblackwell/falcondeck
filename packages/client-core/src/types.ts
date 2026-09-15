@@ -226,6 +226,8 @@ export type WorkspaceAgentSummary = {
   collaboration_modes: CollaborationModeSummary[];
   skills?: SkillSummary[];
   capabilities?: AgentCapabilitySummary;
+  /** Daemon is fetching this provider's catalog for a composer selection. */
+  models_loading?: boolean;
 };
 
 /** How FalconDeck knows about a coding harness (agent CLI). */

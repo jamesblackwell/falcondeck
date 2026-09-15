@@ -206,6 +206,7 @@ impl AppState {
             agent.capabilities = native_capabilities();
             agent.models = models;
             agent.collaboration_modes = collaboration_modes;
+            agent.models_loading = false;
             workspace.summary.clone()
         };
         self.emit(
