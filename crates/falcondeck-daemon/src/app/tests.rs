@@ -395,6 +395,28 @@ async fn keeps_mcp_startup_failures_out_of_every_transcript() {
     );
 }
 
+#[test]
+fn mcp_startup_messages_drop_nested_wrappers_and_repeats() {
+    let message = "AbletonMCP failed to start: MCP client for `AbletonMCP` failed to start: \
+                   MCP startup failed: handshaking with MCP server failed: connection \
+                   closed: initialize response: connection closed: initialize response";
+    assert_eq!(
+        super::notifications::condense_mcp_startup_message("AbletonMCP", message),
+        "AbletonMCP failed to start: connection closed: initialize response"
+    );
+    assert_eq!(
+        super::notifications::condense_mcp_startup_message("clarity", "MCP startup failed"),
+        "clarity failed to start: startup failed"
+    );
+    assert_eq!(
+        super::notifications::condense_mcp_startup_message(
+            "sentry",
+            "The sentry MCP server is not logged in."
+        ),
+        "sentry failed to start: The sentry MCP server is not logged in."
+    );
+}
+
 #[tokio::test]
 async fn plugin_mcp_startup_failures_schedule_cooled_plugin_refreshes() {
     let app = AppState::new("test".to_string(), HashMap::new());

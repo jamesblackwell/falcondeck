@@ -13,6 +13,8 @@ const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
 const COLLAPSED_WORKSPACES_STORAGE_KEY =
   'falcondeck.desktop.collapsed-workspaces.v1'
 const CHATS_COLLAPSED_STORAGE_KEY = 'falcondeck.desktop.chats-collapsed.v1'
+const DISMISSED_CONDITIONS_STORAGE_KEY = 'falcondeck.desktop.dismissed-conditions.v1'
+const DISMISSED_CONDITIONS_CAP = 200
 const PROJECTS_COLLAPSED_STORAGE_KEY =
   'falcondeck.desktop.projects-collapsed.v1'
 
@@ -320,5 +322,32 @@ export function splitPreferencesUpdate(payload: UpdatePreferencesPayload): {
   return {
     daemonPayload: hasDaemonFields ? daemonPayload : null,
     thinkingDisplay,
+  }
+}
+
+/** Content keys of operational conditions the user dismissed by hand. */
+export function readStoredDismissedConditions(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_CONDITIONS_STORAGE_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed)
+      ? parsed.filter((entry): entry is string => typeof entry === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function writeStoredDismissedConditions(keys: readonly string[]) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(
+      DISMISSED_CONDITIONS_STORAGE_KEY,
+      JSON.stringify(keys.slice(-DISMISSED_CONDITIONS_CAP)),
+    )
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory value
+    // stays authoritative for this session.
   }
 }

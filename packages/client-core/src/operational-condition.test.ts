@@ -4,6 +4,7 @@ import { normalizeDaemonSnapshot } from "./normalization";
 import {
   applySnapshotEvent,
   groupOperationalConditions,
+  operationalConditionContentKey,
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
 } from "./snapshot";
@@ -60,6 +61,30 @@ describe("operational conditions", () => {
     expect(
       workspaceOperationalConditions([updated], [], "workspace-1", dismissed),
     ).toEqual([updated]);
+  });
+
+  it("keeps a re-reported condition hidden after its wording was dismissed", () => {
+    const original = condition(
+      "condition-1",
+      "mcp_startup:AbletonMCP",
+      "warning",
+      "2026-08-13T10:00:00Z",
+    );
+    const dismissed = new Set([operationalConditionContentKey(original)]);
+    const reported = {
+      ...original,
+      id: "condition-2",
+      created_at: "2026-08-13T11:00:00Z",
+      updated_at: "2026-08-13T11:00:00Z",
+    };
+    expect(
+      workspaceOperationalConditions([reported], [], "workspace-1", dismissed),
+    ).toEqual([]);
+
+    const reworded = { ...reported, message: `${reported.message} (new)` };
+    expect(
+      workspaceOperationalConditions([reworded], [], "workspace-1", dismissed),
+    ).toEqual([reworded]);
   });
 
   it("replaces and clears conditions by workspace and semantic key", () => {

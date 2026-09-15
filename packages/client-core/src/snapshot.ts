@@ -177,6 +177,18 @@ export function operationalConditionDismissalKey(
   return `${condition.id}:${condition.updated_at}`;
 }
 
+/**
+ * Identity that survives the daemon re-reporting the same problem under a
+ * fresh condition id (a connector that fails identically on every session).
+ * Explicit dismissals persist on this key so one click silences the repeat
+ * until the wording changes.
+ */
+export function operationalConditionContentKey(
+  condition: Pick<OperationalCondition, "workspace_id" | "key" | "message">,
+): string {
+  return `content:${condition.workspace_id}|${condition.key}|${condition.message}`;
+}
+
 /** Active conditions for one workspace, highest severity and newest first. */
 export function workspaceOperationalConditions(
   conditions: readonly OperationalCondition[] | null | undefined,
@@ -208,6 +220,7 @@ export function workspaceOperationalConditions(
     .filter(
       (condition) =>
         !dismissedVersions.has(operationalConditionDismissalKey(condition)) &&
+        !dismissedVersions.has(operationalConditionContentKey(condition)) &&
         !dismissedVersions.has(condition.id),
     )
     .sort((left, right) => {

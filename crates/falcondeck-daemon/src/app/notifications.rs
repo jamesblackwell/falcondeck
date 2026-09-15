@@ -23,6 +23,35 @@ fn mcp_startup_failure_server(message: &str) -> Option<&str> {
         .or_else(|| message.contains(" mcp ").then_some(name))
 }
 
+/// Trims a provider's nested MCP startup error down to the part that says
+/// what went wrong. Codex wraps the cause in three layers of "failed to
+/// start" and repeats the innermost segment, so the raw text reads like a
+/// stack trace instead of a status line.
+pub(super) fn condense_mcp_startup_message(name: &str, message: &str) -> String {
+    let detail = message
+        .split_once(" failed to start:")
+        .map_or(message, |(_, rest)| rest)
+        .trim();
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in detail.split(": ").map(str::trim) {
+        if segment.is_empty()
+            || segment == "MCP startup failed"
+            || segment == "handshaking with MCP server failed"
+            || segment.starts_with("MCP client for ")
+            || segments.contains(&segment)
+        {
+            continue;
+        }
+        segments.push(segment);
+    }
+    let detail = if segments.is_empty() {
+        "startup failed".to_string()
+    } else {
+        segments.join(": ")
+    };
+    format!("{name} failed to start: {detail}")
+}
+
 fn emit_scoped_diagnostic(
     app: &AppState,
     workspace_id: &str,
@@ -40,14 +69,20 @@ fn emit_scoped_diagnostic(
         // warm Codex runtime when it is quiet lets the next thread start
         // reconnect with freshly resolved paths. Daemon-managed connectors
         // spawn identically on every reconnect, so a refresh cannot help them.
-        if !matches!(
+        // The same holds for servers the user configured in connectors.json:
+        // retiring the runtime just makes the next thread start fail the same
+        // way and re-report, which turns one broken server into a banner on
+        // every new conversation.
+        let daemon_managed = matches!(
             server,
             crate::connectors::BUILTIN_CONNECTOR_NAME
                 | crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME
                 | crate::connectors::BUILTIN_COMPUTER_USE_CONNECTOR_NAME
-        ) {
+        ) || crate::connectors::global_server_names().contains(server);
+        if !daemon_managed {
             app.schedule_codex_plugin_refresh(workspace_id);
         }
+        let message = condense_mcp_startup_message(server, &message);
         return app.upsert_operational_condition(
             workspace_id.to_string(),
             format!("mcp_startup:{server}"),
@@ -1835,12 +1870,10 @@ pub(super) async fn ingest_notification(
                 let error = extract_string(&params, &["error"])
                     .unwrap_or_else(|| "Startup failed".to_string());
                 let reason = extract_string(&params, &["failureReason", "failure_reason"]);
+                let message = condense_mcp_startup_message(&name, &error);
                 let message = match reason {
-                    Some(reason) => format!(
-                        "{name} failed to start: {error} ({})",
-                        humanize_camel_case(&reason)
-                    ),
-                    None => format!("{name} failed to start: {error}"),
+                    Some(reason) => format!("{message} ({})", humanize_camel_case(&reason)),
+                    None => message,
                 };
                 app.upsert_operational_condition(
                     workspace_id.to_string(),

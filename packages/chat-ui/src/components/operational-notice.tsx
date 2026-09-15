@@ -23,7 +23,8 @@ export function OperationalNotice({
   onDismiss,
 }: {
   conditions: readonly OperationalCondition[];
-  onDismiss: (condition: OperationalCondition) => void;
+  /** `explicit` is true when the user clicked, false when the notice timed out. */
+  onDismiss: (condition: OperationalCondition, explicit?: boolean) => void;
 }) {
   const groups = groupOperationalConditions(conditions);
   const lead = groups[0];
@@ -38,7 +39,7 @@ export function OperationalNotice({
   useEffect(() => {
     if (!transient || !versionKey) return;
     const timer = setTimeout(() => {
-      for (const condition of conditions) onDismiss(condition);
+      for (const condition of conditions) onDismiss(condition, false);
     }, AUTO_DISMISS_MS);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -122,7 +123,7 @@ export function OperationalNotice({
       <button
         type="button"
         onClick={() => {
-          for (const condition of lead.conditions) onDismiss(condition);
+          for (const condition of lead.conditions) onDismiss(condition, true);
         }}
         aria-label="Dismiss issue"
         className="-m-1 inline-flex size-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted hover:bg-surface-3 hover:text-fg-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
@@ -146,7 +147,7 @@ function ConditionList({
   className,
 }: {
   conditions: readonly OperationalCondition[];
-  onDismiss: (condition: OperationalCondition) => void;
+  onDismiss: (condition: OperationalCondition, explicit?: boolean) => void;
   className?: string;
 }) {
   return (
@@ -166,7 +167,7 @@ function ConditionList({
             </span>
             <button
               type="button"
-              onClick={() => onDismiss(condition)}
+              onClick={() => onDismiss(condition, true)}
               className="fd-focus shrink-0 text-fg-muted hover:text-fg-primary"
               aria-label={`Dismiss issue: ${presentation.message}`}
             >

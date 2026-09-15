@@ -38,6 +38,7 @@ import {
   pendingHandoffContextNotice,
   imageAttachmentSendBlockReason,
   insertTranscript,
+  operationalConditionContentKey,
   operationalConditionDismissalKey,
   parseCompactThreadCommand,
   workspaceOperationalConditions,
@@ -175,6 +176,8 @@ import {
   clearStoredOnboarding,
   preferencesWithThinkingDisplay,
   readStoredChatsCollapsed,
+  readStoredDismissedConditions,
+  writeStoredDismissedConditions,
   readStoredCollapsedWorkspaces,
   readStoredOnboarding,
   readStoredThinkingDisplay,
@@ -665,7 +668,7 @@ function AppInner() {
   );
   const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
     Set<string>
-  >(() => new Set());
+  >(() => new Set(readStoredDismissedConditions()));
   const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(
     readStoredThinkingDisplay,
   );
@@ -5226,14 +5229,29 @@ function AppInner() {
     ],
   );
   const dismissOperationalCondition = useCallback(
-    (condition: OperationalCondition) => {
+    (condition: OperationalCondition, explicit = false) => {
       const dismissalKey = operationalConditionDismissalKey(condition);
+      // A click means "I know, stop telling me": remember the wording so the
+      // daemon re-reporting the same failure on the next session stays quiet.
+      // Timed-out notices only hide this version, so a recurrence still shows.
+      const contentKey = explicit
+        ? operationalConditionContentKey(condition)
+        : null;
       setDismissedConditionVersions((current) => {
-        if (current.has(dismissalKey)) return current;
+        if (current.has(dismissalKey) && (!contentKey || current.has(contentKey))) {
+          return current;
+        }
         const next = new Set(current);
         next.add(dismissalKey);
+        if (contentKey) next.add(contentKey);
         return next;
       });
+      if (contentKey) {
+        writeStoredDismissedConditions([
+          ...readStoredDismissedConditions().filter((key) => key !== contentKey),
+          contentKey,
+        ]);
+      }
     },
     [],
   );

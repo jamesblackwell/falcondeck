@@ -100,6 +100,7 @@ describe("operational conversation status", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dismiss issue" }));
     expect(onDismiss).toHaveBeenCalledWith(
       expect.objectContaining({ id: "notice-1" }),
+      true,
     );
   });
 
@@ -160,6 +161,7 @@ describe("operational conversation status", () => {
       });
       expect(onDismiss).toHaveBeenCalledWith(
         expect.objectContaining({ id: "condition-transient" }),
+        false,
       );
     } finally {
       vi.useRealTimers();

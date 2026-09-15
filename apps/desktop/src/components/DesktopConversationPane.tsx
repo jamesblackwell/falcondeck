@@ -64,7 +64,10 @@ type DesktopConversationPaneProps = {
   onLoadOlderMessages?: () => void;
   interactiveRequests: InteractiveRequest[];
   operationalConditions: readonly OperationalCondition[];
-  onDismissOperationalCondition: (condition: OperationalCondition) => void;
+  onDismissOperationalCondition: (
+    condition: OperationalCondition,
+    explicit?: boolean,
+  ) => void;
   findRequestKey?: number;
   onStartPairing: () => void;
   onRevokeDevice?: (device: TrustedDevice) => void;
