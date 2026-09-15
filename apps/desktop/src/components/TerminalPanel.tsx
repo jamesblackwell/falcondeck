@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, PanelBottomClose, Plus, Search, X } from 'lucide-react'
 import { createDaemonApiClient } from '@falcondeck/client-core'
-import { Button, Tooltip, cn } from '@falcondeck/ui'
+import { Button, Kbd, Tooltip, cn } from '@falcondeck/ui'
 import { TerminalView, type TerminalViewHandle } from './TerminalView'
 import {
   adjacentTabId,
   nextActiveTabId,
+  tabIndexForKeyEvent,
   terminalTabLabel,
   type TerminalTab,
 } from '../terminal-tabs'
@@ -15,7 +16,7 @@ import {
   measureTerminalGrid,
 } from '../terminal-utils'
 import { prefetchTerminalRuntime } from '../terminal-xterm'
-import { shortcutHintTokens, useShortcutSettings } from '../shortcuts'
+import { commandForEvent, shortcutHintTokens, useShortcutSettings } from '../shortcuts'
 
 interface TerminalPanelProps {
   baseUrl: string
@@ -44,7 +45,9 @@ export function TerminalPanel({
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findFound, setFindFound] = useState<boolean | null>(null)
-  const autoCreateRef = useRef(false)
+  // Whether this workspace has had its first shell spawned (or requested);
+  // state rather than a ref because the placeholder renders from it.
+  const [autoCreated, setAutoCreated] = useState(false)
   const tabsRef = useRef<TerminalTab[]>([])
   const hostRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLElement | null>(null)
@@ -73,7 +76,7 @@ export function TerminalPanel({
       return
     }
     let cancelled = false
-    autoCreateRef.current = false
+    setAutoCreated(false)
     setTabs([])
     setActiveId(null)
     setLoaded(false)
@@ -130,11 +133,11 @@ export function TerminalPanel({
   }, [api, workspaceId])
 
   useEffect(() => {
-    if (!visible || !loaded || !workspaceId || error || autoCreateRef.current) return
+    if (!visible || !loaded || !workspaceId || error || autoCreated) return
     if (tabs.length > 0 || creating) return
-    autoCreateRef.current = true
+    setAutoCreated(true)
     void createTerminal()
-  }, [createTerminal, creating, error, loaded, tabs.length, visible, workspaceId])
+  }, [autoCreated, createTerminal, creating, error, loaded, tabs.length, visible, workspaceId])
 
   useEffect(() => {
     if (createRequestKey <= lastCreateRequestKey.current) return
@@ -142,7 +145,7 @@ export function TerminalPanel({
     // until it lands so an older list response cannot erase a newly opened tab.
     if (!loaded) return
     lastCreateRequestKey.current = createRequestKey
-    autoCreateRef.current = true
+    setAutoCreated(true)
     void createTerminal()
   }, [createRequestKey, createTerminal, loaded])
 
@@ -158,14 +161,22 @@ export function TerminalPanel({
 
   const closeTerminal = useCallback(
     (terminalId: string) => {
+      const remaining = tabsRef.current.filter((tab) => tab.session.id !== terminalId)
       setActiveId((current) =>
         current === terminalId ? nextActiveTabId(tabsRef.current, terminalId) : current,
       )
-      setTabs((current) => current.filter((tab) => tab.session.id !== terminalId))
+      setTabs(remaining)
+      tabsRef.current = remaining
       viewRefs.current.delete(terminalId)
       void api.closeTerminal(terminalId).catch(() => undefined)
+      if (remaining.length === 0) {
+        // Closing the last tab folds the panel away, and the next ⌘J starts
+        // a fresh shell instead of landing on an empty strip.
+        setAutoCreated(false)
+        onHide()
+      }
     },
-    [api],
+    [api, onHide],
   )
 
   useEffect(() => {
@@ -226,18 +237,42 @@ export function TerminalPanel({
 
   useEffect(() => {
     function handleKey(event: KeyboardEvent) {
-      if (!visible) return
+      if (!visible || event.repeat) return
       const target = event.target
       const inPanel = target instanceof Node && panelRef.current?.contains(target)
       if (!inPanel) return
-      if (event.ctrlKey && event.key === 'Tab') {
+      const jumpIndex = tabIndexForKeyEvent(event, tabsRef.current.length)
+      if (jumpIndex !== null) {
         event.preventDefault()
-        cycleTab(event.shiftKey ? -1 : 1)
+        const tab = tabsRef.current[jumpIndex]
+        if (tab) setActiveId(tab.session.id)
+        return
+      }
+      const command = commandForEvent('terminal', event, shortcutSettings)
+      if (!command) return
+      // ⌘W is also the native Close Window accelerator; preventDefault here
+      // keeps WKWebView from forwarding it to the menu.
+      event.preventDefault()
+      switch (command) {
+        case 'terminalNewTab':
+          void createTerminal()
+          break
+        case 'terminalCloseTab':
+          if (activeId) closeTerminal(activeId)
+          break
+        case 'terminalNextTab':
+          cycleTab(1)
+          break
+        case 'terminalPreviousTab':
+          cycleTab(-1)
+          break
+        default:
+          break
       }
     }
     window.addEventListener('keydown', handleKey)
     return () => window.removeEventListener('keydown', handleKey)
-  }, [cycleTab, visible])
+  }, [activeId, closeTerminal, createTerminal, cycleTab, shortcutSettings, visible])
 
   return (
     <section
@@ -304,7 +339,10 @@ export function TerminalPanel({
             <Search aria-hidden="true" className="h-4 w-4" />
           </Button>
         </Tooltip>
-        <Tooltip label="New terminal" shortcut={shortcutHintTokens('newTerminal', shortcutSettings)}>
+        <Tooltip
+          label="New terminal"
+          shortcut={shortcutHintTokens('terminalNewTab', shortcutSettings)}
+        >
           <button
             type="button"
             aria-label="New terminal"
@@ -337,12 +375,15 @@ export function TerminalPanel({
           aria-label="Find in terminal"
           className="flex items-center gap-1 border-b border-border-subtle bg-surface-2 px-2 py-1"
           onKeyDown={(event) => {
-            event.stopPropagation()
+            // Only the keys the find bar consumes stop here; ⌘T, ⌘W and the
+            // other panel shortcuts still reach the window handler.
             if (event.key === 'Escape') {
               event.preventDefault()
+              event.stopPropagation()
               closeFind()
             } else if (event.key === 'Enter') {
               event.preventDefault()
+              event.stopPropagation()
               runFind(event.shiftKey)
             }
           }}
@@ -424,11 +465,31 @@ export function TerminalPanel({
               </div>
             )
           })
-        ) : loaded ? (
-          <div className="flex h-full items-center justify-center text-sm text-fg-muted">
-            No terminals
+        ) : !loaded || creating || !autoCreated ? (
+          <div
+            role="status"
+            className="flex h-full items-center justify-center gap-2 text-sm text-fg-muted"
+          >
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 animate-pulse rounded-full bg-fg-muted"
+            />
+            Starting terminal…
           </div>
-        ) : null}
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-fg-muted">
+            <span>No open terminals</span>
+            <span className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)]">
+              Press
+              {(shortcutHintTokens('terminalNewTab', shortcutSettings) ?? ['⌘', 'T']).map(
+                (token, index) => (
+                  <Kbd key={`${token}-${index}`}>{token}</Kbd>
+                ),
+              )}
+              to start one
+            </span>
+          </div>
+        )}
       </div>
     </section>
   )

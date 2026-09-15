@@ -24,7 +24,7 @@ import {
   type ShortcutCommandId,
 } from '../../shortcuts'
 
-const CATEGORIES = ['App', 'Navigation', 'View', 'Conversation', 'Composer'] as const
+const CATEGORIES = ['App', 'Navigation', 'View', 'Terminal', 'Conversation', 'Composer'] as const
 
 function Keycaps({ shortcut }: { shortcut: string }) {
   return (

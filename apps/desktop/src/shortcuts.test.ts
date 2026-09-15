@@ -103,6 +103,19 @@ describe('keyboard shortcuts', () => {
     expect(shortcutConflict('Enter', 'insertNewline')?.id).toBe('sendMessage')
   })
 
+  it('resolves terminal tab chords only in the terminal context', () => {
+    expect(commandForEvent('terminal', key('t', { metaKey: true }))).toBe('terminalNewTab')
+    expect(commandForEvent('terminal', key('w', { metaKey: true }))).toBe('terminalCloseTab')
+    // macOS reports the produced character for shifted brackets.
+    expect(commandForEvent('terminal', key('}', { metaKey: true, shiftKey: true }))).toBe('terminalNextTab')
+    expect(commandForEvent('terminal', key('{', { metaKey: true, shiftKey: true }))).toBe('terminalPreviousTab')
+    expect(commandForEvent('terminal', key('Tab', { ctrlKey: true }))).toBe('terminalNextTab')
+    expect(commandForEvent('terminal', key('Tab', { ctrlKey: true, shiftKey: true }))).toBe('terminalPreviousTab')
+    expect(commandForEvent('global', key('t', { metaKey: true }))).toBeNull()
+    expect(commandForEvent('global', key('w', { metaKey: true }))).toBeNull()
+    expect(shortcutValidation('T', 'terminal')).toMatch(/Command, Control, or Option/)
+  })
+
   it('rejects unsafe unmodified global letters', () => {
     expect(shortcutValidation('K', 'global')).toMatch(/need Command/)
     expect(shortcutValidation('Mod+K', 'global')).toBeNull()

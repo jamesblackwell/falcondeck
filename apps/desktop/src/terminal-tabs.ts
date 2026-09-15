@@ -32,3 +32,19 @@ export function adjacentTabId(
   const next = tabs[(start + offset + tabs.length) % tabs.length]
   return next?.session.id ?? null
 }
+
+/**
+ * Index of the tab addressed by ⌘1–⌘9 (⌘9 is always the last tab, as in
+ * browsers and Terminal.app), or null when the event is not a tab jump.
+ */
+export function tabIndexForKeyEvent(
+  event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
+  tabCount: number,
+): number | null {
+  if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null
+  if (!/^[1-9]$/.test(event.key)) return null
+  if (tabCount === 0) return null
+  const digit = Number(event.key)
+  if (digit === 9) return tabCount - 1
+  return digit <= tabCount ? digit - 1 : null
+}

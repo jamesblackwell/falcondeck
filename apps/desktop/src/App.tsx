@@ -5457,6 +5457,16 @@ function AppInner() {
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       if (event.isComposing || event.keyCode === 229 || event.repeat) return;
+      // The terminal panel owns its tab shortcuts (⌘T, ⌘W, ⌘⇧[ ]) while it
+      // has focus; they must not fall through to the global bindings.
+      const inTerminalPanel =
+        event.target instanceof Element &&
+        Boolean(event.target.closest("[data-terminal-panel]"));
+      if (
+        inTerminalPanel &&
+        commandForEvent("terminal", event, shortcutSettings)
+      )
+        return;
       const command = commandForEvent("global", event, shortcutSettings);
       if (!command) return;
       if (isEditableTarget(event.target) && !event.metaKey && !event.ctrlKey)

@@ -51,6 +51,7 @@ describe('DesktopShell panel collapse', () => {
     expect(container.querySelector('[data-fd-shell]')?.parentElement).toHaveClass('h-full')
     const holder = screen.getByText('bottom content').parentElement
     expect(holder).toHaveStyle({ height: '0px' })
+    expect(holder).toHaveClass('bg-surface-0')
 
     rerender(
       <DesktopShell

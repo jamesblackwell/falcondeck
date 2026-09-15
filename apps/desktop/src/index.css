@@ -117,3 +117,11 @@ body {
   --terminal-ansi-14: #126068;
   --terminal-ansi-15: #24292f;
 }
+
+/* xterm ships `.xterm-viewport { background-color: #000 }` as an opaque
+   scrollbar backdrop beneath the themed scrollable element. It peeks through
+   before the first layout and while the panel animates open, which reads as
+   a black flash in light themes; paint it with the terminal surface instead. */
+.xterm .xterm-viewport {
+  background-color: var(--terminal-bg);
+}

@@ -12,6 +12,8 @@ import {
   TERMINAL_WIRE_INPUT,
   writeStatusNotice,
 } from '../terminal-utils'
+import { tabIndexForKeyEvent } from '../terminal-tabs'
+import { commandForEvent } from '../shortcuts'
 
 const RECONNECT_DELAY_MS = 1_000
 const PING_INTERVAL_MS = 15_000
@@ -371,7 +373,10 @@ export const TerminalView = forwardRef<TerminalViewHandle, TerminalViewProps>(fu
       scheduleFit()
       activeTerminal.attachCustomKeyEventHandler((event) => {
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f') return false
-        if (event.ctrlKey && event.key === 'Tab') return false
+        // Panel-level shortcuts (find, tab strip navigation) bubble past xterm
+        // so the shell never sees them as input.
+        if (commandForEvent('terminal', event)) return false
+        if (tabIndexForKeyEvent(event, Number.MAX_SAFE_INTEGER) !== null) return false
         return true
       })
       activeTerminal.onData((data) => {

@@ -8,6 +8,25 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FalconDeck</title>
+    <script>
+      // Resolve the saved theme before any stylesheet lands so the boot
+      // background matches; the app re-applies the full appearance on load.
+      (() => {
+        try {
+          const raw = localStorage.getItem('fd-appearance')
+          const theme = raw ? JSON.parse(raw).theme : 'system'
+          const resolved =
+            theme === 'light' || theme === 'dark'
+              ? theme
+              : matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+          document.documentElement.dataset.theme = resolved
+        } catch {
+          // Keep the dark boot background.
+        }
+      })()
+    </script>
     <style>
       html,
       body,
@@ -16,8 +35,17 @@
         min-height: 100%;
         margin: 0;
         overflow: hidden;
-        background: #09090b;
-        color: #c4c4cc;
+        /* Follow the theme tokens once they load; until then paint a boot
+           colour for the resolved theme so nothing flashes black. */
+        background: var(--fd-bg-0, #09090b);
+        color: var(--fd-fg-0, #c4c4cc);
+      }
+
+      html[data-theme="light"],
+      html[data-theme="light"] body,
+      html[data-theme="light"] #root {
+        background: var(--fd-bg-0, #f4f4f5);
+        color: var(--fd-fg-0, #3f3f46);
       }
 
       .fd-startup {

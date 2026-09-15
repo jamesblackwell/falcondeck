@@ -169,7 +169,9 @@ export function DesktopShell({
       ) : null}
       <div
         style={{ height: bottomOpen ? bottomHeight : 0 }}
-        className="min-h-0 shrink-0 overflow-hidden"
+        // Painted here as well as inside the panel: the terminal chunk loads
+        // lazily, and an unpainted holder shows the boot background through.
+        className="min-h-0 shrink-0 overflow-hidden bg-surface-0"
         inert={!bottomOpen}
         aria-hidden={bottomOpen ? undefined : true}
       >

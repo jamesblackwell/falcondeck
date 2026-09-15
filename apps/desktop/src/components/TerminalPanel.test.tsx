@@ -5,7 +5,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalSessionInfo } from '@falcondeck/client-core'
 
 import { TerminalPanel } from './TerminalPanel'
-import { adjacentTabId, nextActiveTabId, terminalTabLabel, type TerminalTab } from '../terminal-tabs'
+import {
+  adjacentTabId,
+  nextActiveTabId,
+  tabIndexForKeyEvent,
+  terminalTabLabel,
+  type TerminalTab,
+} from '../terminal-tabs'
 
 vi.mock('../terminal-xterm', () => ({
   prefetchTerminalRuntime: () => Promise.resolve(),
@@ -248,6 +254,95 @@ describe('TerminalPanel', () => {
     await renderPanel()
     expect(await screen.findByText('Could not load terminals.')).toBeInTheDocument()
   })
+
+  it('shows a starting placeholder instead of a blank area while the first shell spawns', async () => {
+    apiMocks.openTerminal.mockReturnValue(new Promise(() => undefined))
+    await renderPanel()
+    expect(screen.getByRole('status')).toHaveTextContent('Starting terminal…')
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledOnce())
+    expect(screen.getByRole('status')).toHaveTextContent('Starting terminal…')
+    expect(screen.queryByText('No open terminals')).toBeNull()
+  })
+
+  describe('keyboard shortcuts', () => {
+    function activeTabIds() {
+      return [...document.querySelectorAll('[data-terminal-tab] button[data-active="true"]')].map(
+        (button) => button.textContent,
+      )
+    }
+
+    it('opens a new tab with ⌘T while the terminal has focus', async () => {
+      apiMocks.listTerminals.mockResolvedValue({ sessions: [session('term-1')] })
+      apiMocks.openTerminal.mockResolvedValue({ session: session('term-2', { title: 'fish' }) })
+      await renderPanel()
+      const view = await screen.findByTestId('terminal-view')
+
+      fireEvent.keyDown(view, { key: 't', metaKey: true })
+
+      await waitFor(() => expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(2))
+      expect(activeTabIds()).toEqual(['fish'])
+    })
+
+    it('ignores ⌘T when focus is outside the panel', async () => {
+      apiMocks.listTerminals.mockResolvedValue({ sessions: [session('term-1')] })
+      await renderPanel()
+      await screen.findByTestId('terminal-view')
+
+      fireEvent.keyDown(document.body, { key: 't', metaKey: true })
+
+      await act(async () => undefined)
+      expect(apiMocks.openTerminal).not.toHaveBeenCalled()
+    })
+
+    it('closes the active tab with ⌘W and hides the panel after the last one', async () => {
+      apiMocks.listTerminals.mockResolvedValue({
+        sessions: [session('term-1', { title: 'one' }), session('term-2', { title: 'two' })],
+      })
+      const onHide = vi.fn()
+      await renderPanel('workspace-1', onHide)
+      const views = await screen.findAllByTestId('terminal-view')
+      expect(activeTabIds()).toEqual(['two'])
+
+      const event = new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true, cancelable: true })
+      views[1]!.dispatchEvent(event)
+      // Prevented so WKWebView does not forward ⌘W to the native Close Window item.
+      expect(event.defaultPrevented).toBe(true)
+
+      await waitFor(() => expect(apiMocks.closeTerminal).toHaveBeenCalledWith('term-2'))
+      expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(1)
+      expect(activeTabIds()).toEqual(['one'])
+      expect(onHide).not.toHaveBeenCalled()
+
+      fireEvent.keyDown(screen.getByTestId('terminal-view'), { key: 'w', metaKey: true })
+      await waitFor(() => expect(apiMocks.closeTerminal).toHaveBeenCalledWith('term-1'))
+      expect(onHide).toHaveBeenCalledOnce()
+    })
+
+    it('switches tabs with ⌘⇧] / ⌘⇧[ and jumps with ⌘digit', async () => {
+      apiMocks.listTerminals.mockResolvedValue({
+        sessions: [
+          session('term-1', { title: 'one' }),
+          session('term-2', { title: 'two' }),
+          session('term-3', { title: 'three' }),
+        ],
+      })
+      await renderPanel()
+      const views = await screen.findAllByTestId('terminal-view')
+      expect(activeTabIds()).toEqual(['three'])
+
+      fireEvent.keyDown(views[2]!, { key: '}', metaKey: true, shiftKey: true })
+      expect(activeTabIds()).toEqual(['one'])
+
+      fireEvent.keyDown(views[0]!, { key: '{', metaKey: true, shiftKey: true })
+      expect(activeTabIds()).toEqual(['three'])
+
+      fireEvent.keyDown(views[2]!, { key: '2', metaKey: true })
+      expect(activeTabIds()).toEqual(['two'])
+
+      fireEvent.keyDown(views[1]!, { key: '9', metaKey: true })
+      expect(activeTabIds()).toEqual(['three'])
+    })
+  })
 })
 
 describe('terminal tab helpers', () => {
@@ -263,6 +358,17 @@ describe('terminal tab helpers', () => {
     expect(nextActiveTabId(tabs, 'a')).toBe('b')
     expect(nextActiveTabId([tab('a')], 'a')).toBeNull()
     expect(nextActiveTabId([], 'missing')).toBeNull()
+  })
+
+  it('maps ⌘1–⌘9 to tab indexes with ⌘9 pinned to the last tab', () => {
+    const meta = { metaKey: true, ctrlKey: false, altKey: false, shiftKey: false }
+    expect(tabIndexForKeyEvent({ ...meta, key: '1' }, 3)).toBe(0)
+    expect(tabIndexForKeyEvent({ ...meta, key: '3' }, 3)).toBe(2)
+    expect(tabIndexForKeyEvent({ ...meta, key: '4' }, 3)).toBeNull()
+    expect(tabIndexForKeyEvent({ ...meta, key: '9' }, 3)).toBe(2)
+    expect(tabIndexForKeyEvent({ ...meta, key: '1' }, 0)).toBeNull()
+    expect(tabIndexForKeyEvent({ ...meta, key: '1', shiftKey: true }, 3)).toBeNull()
+    expect(tabIndexForKeyEvent({ ...meta, metaKey: false, ctrlKey: true, key: '1' }, 3)).toBeNull()
   })
 
   it('cycles to the neighbouring tab', () => {

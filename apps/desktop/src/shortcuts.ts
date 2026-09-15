@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-export type ShortcutContext = 'global' | 'composer'
+export type ShortcutContext = 'global' | 'composer' | 'terminal'
 
 export type ShortcutCommandId =
   | 'commandPalette'
@@ -20,6 +20,10 @@ export type ShortcutCommandId =
   | 'toggleChanges'
   | 'toggleTerminal'
   | 'newTerminal'
+  | 'terminalNewTab'
+  | 'terminalCloseTab'
+  | 'terminalNextTab'
+  | 'terminalPreviousTab'
   | 'increaseTextSize'
   | 'decreaseTextSize'
   | 'resetTextSize'
@@ -38,7 +42,7 @@ export type ShortcutDefinition = {
   id: ShortcutCommandId
   label: string
   description: string
-  category: 'App' | 'Navigation' | 'View' | 'Conversation' | 'Composer'
+  category: 'App' | 'Navigation' | 'View' | 'Terminal' | 'Conversation' | 'Composer'
   context: ShortcutContext
   defaults: string[]
 }
@@ -70,8 +74,14 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'nextThread', label: 'Next chat', description: 'Select the next visible chat', category: 'Navigation', context: 'global', defaults: ['Mod+Shift+]'] },
   { id: 'toggleSidebar', label: 'Toggle sidebar', description: 'Show or hide projects and chats', category: 'View', context: 'global', defaults: ['Mod+B'] },
   { id: 'toggleChanges', label: 'Toggle changes panel', description: 'Show or hide the changes panel', category: 'View', context: 'global', defaults: ['Mod+Alt+B'] },
-  { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'View', context: 'global', defaults: ['Mod+J'] },
-  { id: 'newTerminal', label: 'New terminal', description: 'Open a new terminal tab in the current project', category: 'View', context: 'global', defaults: ['Ctrl+Shift+`'] },
+  { id: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the terminal panel', category: 'Terminal', context: 'global', defaults: ['Mod+J'] },
+  { id: 'newTerminal', label: 'New terminal', description: 'Open a new terminal tab in the current project from anywhere', category: 'Terminal', context: 'global', defaults: ['Ctrl+Shift+`'] },
+  // Terminal-context bindings win over global ones while the terminal has
+  // focus, so the tab strip behaves like Terminal.app and iTerm.
+  { id: 'terminalNewTab', label: 'New terminal tab', description: 'Open another tab while the terminal is focused', category: 'Terminal', context: 'terminal', defaults: ['Mod+T'] },
+  { id: 'terminalCloseTab', label: 'Close terminal tab', description: 'Close the active tab; closing the last one hides the panel', category: 'Terminal', context: 'terminal', defaults: ['Mod+W'] },
+  { id: 'terminalNextTab', label: 'Next terminal tab', description: 'Switch to the tab on the right', category: 'Terminal', context: 'terminal', defaults: ['Mod+Shift+]', 'Ctrl+Tab'] },
+  { id: 'terminalPreviousTab', label: 'Previous terminal tab', description: 'Switch to the tab on the left', category: 'Terminal', context: 'terminal', defaults: ['Mod+Shift+[', 'Ctrl+Shift+Tab'] },
   { id: 'increaseTextSize', label: 'Increase text size', description: 'Increase the interface text scale', category: 'View', context: 'global', defaults: ['Mod+=', 'Mod+Shift+Plus'] },
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },
@@ -276,8 +286,8 @@ export function shortcutValidation(shortcut: string, context: ShortcutContext): 
   const parts = normalized.split('+')
   const key = parts.at(-1) ?? ''
   if (!key || MODIFIER_ORDER.includes(key as (typeof MODIFIER_ORDER)[number])) return 'Press a non-modifier key.'
-  if (context === 'global' && key.length === 1 && /[a-z0-9]/i.test(key) && !parts.some((part) => ['Mod', 'Ctrl', 'Alt'].includes(part))) {
-    return 'Global letter and number shortcuts need Command, Control, or Option.'
+  if (context !== 'composer' && key.length === 1 && /[a-z0-9]/i.test(key) && !parts.some((part) => ['Mod', 'Ctrl', 'Alt'].includes(part))) {
+    return 'Letter and number shortcuts need Command, Control, or Option.'
   }
   return null
 }
