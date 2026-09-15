@@ -80,7 +80,7 @@ const CATALOG = {
   ],
 }
 
-function stubFetch() {
+function stubFetch(globalServers: Record<string, unknown> = {}) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     if (url.includes('/api/skills/registry')) {
@@ -94,7 +94,7 @@ function stubFetch() {
     }
     if (url.includes('/api/connectors')) {
       return new Response(
-        JSON.stringify({ global: {}, workspace: null, merged: [] }),
+        JSON.stringify({ global: globalServers, workspace: null, merged: [] }),
         { status: 200 },
       )
     }
@@ -140,7 +140,7 @@ describe('PluginsView', () => {
     )
   })
 
-  it('falls back to the initial letter when a plugin logo fails to load', async () => {
+  it('falls back to two-character initials when a plugin logo fails to load', async () => {
     stubFetch()
     render(
       <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
@@ -159,7 +159,21 @@ describe('PluginsView', () => {
     expect(
       document.querySelector('img[src*="/api/plugin-logos?domain=notion.so"]'),
     ).not.toBeInTheDocument()
-    expect(screen.getAllByText('N').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('No').length).toBeGreaterThan(0)
+  })
+
+  it('shows hand-configured global MCP servers in Installed with initials', async () => {
+    stubFetch({
+      AbletonMCP: { command: 'uvx', args: ['ableton12'], enabled: true },
+    })
+    render(
+      <PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />,
+    )
+
+    expect(await screen.findByText('Ab')).toBeInTheDocument()
+    expect(
+      screen.queryByText('Nothing installed yet. Connect a plugin below.'),
+    ).not.toBeInTheDocument()
   })
 
   it('lists installed skills and only offers removal for managed ones', async () => {

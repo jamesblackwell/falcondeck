@@ -30,7 +30,7 @@ import {
 
 import { falconDeckHttpError } from '../connection-copy'
 import { openExternalUrl } from '../api'
-import { ConnectorsPanel } from './settings/ConnectorsPanel'
+import { ConnectorsPanel, type ConnectorEntry } from './settings/ConnectorsPanel'
 
 type LibrarySkill = {
   name: string
@@ -143,6 +143,13 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
   )
 }
 
+/** First two characters of the first word, e.g. "AbletonMCP" → "Ab". */
+export function pluginInitials(name: string) {
+  const word = name.trim().split(/\s+/)[0] ?? ''
+  if (!word) return '?'
+  return word.charAt(0).toUpperCase() + word.slice(1, 2)
+}
+
 function PluginLogo({
   baseUrl,
   domain,
@@ -158,17 +165,17 @@ function PluginLogo({
   useEffect(() => {
     setFailed(false)
   }, [domain, baseUrl])
-  const letter = (name.trim().charAt(0) || '?').toUpperCase()
+  const initials = pluginInitials(name)
   if (!baseUrl || !domain || failed) {
     return (
       <div
         aria-hidden="true"
         className={cn(
-          'flex shrink-0 items-center justify-center bg-surface-3 font-medium text-fg-secondary',
+          'flex shrink-0 select-none items-center justify-center bg-surface-3 text-[length:var(--fd-text-sm)] font-semibold tracking-tight text-fg-secondary',
           className,
         )}
       >
-        {letter}
+        {initials}
       </div>
     )
   }
@@ -188,6 +195,7 @@ function PluginsSection({
   onToast,
 }: PluginsViewProps) {
   const [servers, setServers] = useState<CatalogServer[]>([])
+  const [customServers, setCustomServers] = useState<Record<string, ConnectorEntry>>({})
   const [loadError, setLoadError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
@@ -213,9 +221,24 @@ function PluginsSection({
     }
   }, [baseUrl])
 
+  // Hand-configured global MCP servers (Ableton, local scripts, …) are not in
+  // the catalog but are just as installed; the row should show them too.
+  const loadCustom = useCallback(async () => {
+    if (!baseUrl) return
+    try {
+      const response = await fetch(`${baseUrl}/api/connectors`)
+      if (!response.ok) return
+      const data = (await response.json()) as { global?: Record<string, ConnectorEntry> }
+      setCustomServers(data.global ?? {})
+    } catch {
+      // The catalog row still renders; custom entries just stay hidden.
+    }
+  }, [baseUrl])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadCustom()
+  }, [load, loadCustom])
 
   const waitUntilConnected = useCallback(
     async (id: string) => {
@@ -317,7 +340,14 @@ function PluginsSection({
       server.category.toLowerCase().includes(trimmedQuery)
     )
   })
-  const installed = servers.filter((server) => server.connected || server.installed)
+  const catalogIds = new Set(servers.map((server) => server.id))
+  const installed: Array<{ id: string; name: string; domain: string }> = [
+    ...servers.filter((server) => server.connected || server.installed),
+    ...Object.keys(customServers)
+      .filter((name) => !catalogIds.has(name))
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+      .map((name) => ({ id: `custom:${name}`, name, domain: '' })),
+  ]
   const featured = filtered.filter((server) => server.featured)
 
   const grouped = CATEGORY_ORDER.filter((category) => category !== 'Featured')
@@ -400,7 +430,15 @@ function PluginsSection({
 
       {manageOpen ? (
         <div className="mt-6">
-          <ConnectorsPanel baseUrl={baseUrl} workspaces={workspaces} onToast={onToast} />
+          <ConnectorsPanel
+            baseUrl={baseUrl}
+            workspaces={workspaces}
+            onToast={onToast}
+            onChanged={() => {
+              void load()
+              void loadCustom()
+            }}
+          />
         </div>
       ) : null}
 

@@ -52,6 +52,8 @@ export type ConnectorsPanelProps = {
     title: string
     description?: string
   }) => void
+  /** Fires after a successful save so parents mirroring the config can refresh. */
+  onChanged?: () => void
 }
 
 function workspaceLabel(path: string) {
@@ -99,7 +101,12 @@ function parseKeyValueLines(text: string, separator: '=' | ':'): Record<string, 
   return result
 }
 
-export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPanelProps) {
+export function ConnectorsPanel({
+  baseUrl,
+  workspaces,
+  onToast,
+  onChanged,
+}: ConnectorsPanelProps) {
   const [scope, setScope] = useState<string>('global')
   // The overview remembers which scope it was loaded for: writes replace a
   // whole file on the daemon, so a body built from one scope's data must
@@ -197,6 +204,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
           throw new Error(body || falconDeckHttpError(response.status))
         }
         await load()
+        onChanged?.()
         return true
       } catch (error) {
         onToast({
@@ -209,7 +217,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
         setIsWriting(false)
       }
     },
-    [baseUrl, load, onToast, overview, scope],
+    [baseUrl, load, onChanged, onToast, overview, scope],
   )
 
   const rows = useMemo(() => {
