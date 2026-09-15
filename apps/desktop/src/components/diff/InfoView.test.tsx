@@ -44,6 +44,28 @@ function renderInfo(overrides: Partial<ReviewInfoContext> = {}, count = 7) {
 }
 
 describe('InfoView', () => {
+  it('renders a folder without git as a calm empty state, not an error', () => {
+    render(
+      <InfoView
+        info={{
+          workspaceKind: 'project',
+          workspacePath: '/Users/James',
+          hostName: null,
+          thread: null,
+        }}
+        entries={[]}
+        branch={null}
+        isLoading={false}
+        error="not a git repository"
+        onSelectChangedFile={vi.fn()}
+        onViewAllChanges={vi.fn()}
+      />,
+    )
+    const state = screen.getByText('Not a git repository')
+    expect(state.closest('div')).not.toHaveClass('text-danger')
+    expect(screen.queryByText(/failed/)).not.toBeInTheDocument()
+  })
+
   it('summarises the checkout and totals the uncommitted diff', () => {
     renderInfo()
     expect(screen.getByText('Local')).toBeInTheDocument()

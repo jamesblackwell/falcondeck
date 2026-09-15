@@ -47,3 +47,9 @@ export function statusToneClass(status: GitFileStatus) {
       return 'text-info'
   }
 }
+
+/** The daemon reports a folder with no `.git` as an RPC error, but for the
+ * user it is an ordinary state, not a failure — render it calmly. */
+export function isNotRepositoryError(error: string | null | undefined) {
+  return !!error && /not a git repository/i.test(error)
+}

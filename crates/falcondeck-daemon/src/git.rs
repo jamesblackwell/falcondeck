@@ -37,7 +37,7 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
 
     if !status_output.status.success() {
         return Err(DaemonError::Rpc(
-            "git status failed — not a git repository?".to_string(),
+            "not a git repository".to_string(),
         ));
     }
 
@@ -176,7 +176,7 @@ pub async fn git_branches(workspace_path: &str) -> Result<GitBranchesResponse, D
 
     if !list_output.status.success() {
         return Err(DaemonError::Rpc(
-            "git for-each-ref failed — not a git repository?".to_string(),
+            "not a git repository".to_string(),
         ));
     }
 

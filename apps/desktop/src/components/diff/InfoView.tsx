@@ -4,6 +4,7 @@ import {
   ChevronDown,
   FolderClosed,
   GitBranch,
+  GitBranchPlus,
   Globe,
   Laptop,
   Split,
@@ -22,6 +23,7 @@ import {
   basePart,
   dirPart,
   homeRelativePath,
+  isNotRepositoryError,
   statusLabel,
   statusToneClass,
 } from "./diff-utils";
@@ -258,7 +260,18 @@ export const InfoView = memo(function InfoView({
 
       {!isCasualChat ? (
         <div className="mt-3 border-t border-border-subtle pt-3">
-          {error ? (
+          {isNotRepositoryError(error) ? (
+            <div className="px-3 text-[length:var(--fd-text-sm)] text-fg-muted">
+              <p className="flex items-center gap-2">
+                <GitBranchPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                Not a git repository
+              </p>
+              <p className="mt-1 pl-[1.375rem] text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                Changes and branches appear once this folder is under version
+                control.
+              </p>
+            </div>
+          ) : error ? (
             <p className="px-3 text-[length:var(--fd-text-xs)] text-danger">
               {error}
             </p>

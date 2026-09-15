@@ -14,7 +14,7 @@ import { useVirtualRows } from '../../hooks/useVirtualRows'
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
 import { InfoView, type ReviewInfoContext } from './InfoView'
-import { basePart, dirPart, statusLabel, statusToneClass } from './diff-utils'
+import { basePart, dirPart, isNotRepositoryError, statusLabel, statusToneClass } from './diff-utils'
 
 export type ReviewPanelTab = 'info' | 'changes' | 'files'
 
@@ -262,6 +262,10 @@ export const FileListView = memo(function FileListView({
             onSelectChangedFile={onSelectChangedFile}
             onViewAllChanges={() => onTabChange('changes')}
           />
+        ) : isNotRepositoryError(activeError) ? (
+          <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
+            Not a git repository
+          </div>
         ) : activeError ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">
             {activeError}
