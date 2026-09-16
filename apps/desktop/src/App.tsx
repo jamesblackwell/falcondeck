@@ -5168,8 +5168,12 @@ function AppInner() {
   // Navigating into a project (command palette, new thread, notification)
   // unfolds it, otherwise the chat you just opened would sit inside a closed
   // folder. Keyed on the selection *changing*, so folding the project you are
-  // currently in does not snap straight back open.
-  const lastExpandedWorkspaceRef = useRef<string | null>(selectedWorkspaceId);
+  // currently in does not snap straight back open. The ref starts empty on
+  // purpose: the selection restored at launch counts as arriving in that
+  // project, so a folded folder from the last session opens around the chat
+  // being shown instead of hiding it — a relaunch that shows the thread but
+  // not its row read as the project's threads having vanished.
+  const lastExpandedWorkspaceRef = useRef<string | null>(null);
   useEffect(() => {
     if (lastExpandedWorkspaceRef.current === selectedWorkspaceId) return;
     lastExpandedWorkspaceRef.current = selectedWorkspaceId;

@@ -1112,6 +1112,7 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
       runningCount={attention.running}
       unreadCount={attention.unread}
       unreadTone={attention.unreadTone}
+      threadCount={group.threads.length}
     >
       <ThreadList
         group={group}

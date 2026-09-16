@@ -1305,14 +1305,61 @@ describe("DesktopSidebar", () => {
     expect(summary).toHaveTextContent("1");
   });
 
-  it("leaves a collapsed project row blank when nothing needs attention", () => {
-    renderSidebar({
-      collapsedWorkspaceIds: ["workspace-1"],
-      onWorkspaceCollapsedChange: () => {},
-    });
+  it("counts idle threads on a collapsed project row so a fold never looks empty", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({ id: "thread-1", title: "TECH" }),
+          thread({ id: "thread-2", title: "TUTOR" }),
+          thread({ id: "thread-3", title: "RESEARCH" }),
+        ],
+      },
+    ];
 
+    render(
+      <DesktopSidebar
+        groups={groups}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-1"
+        collapsedWorkspaceIds={["workspace-1"]}
+        onWorkspaceCollapsedChange={() => {}}
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    );
+
+    expect(screen.getByTitle("3 threads")).toHaveTextContent("3");
     expect(screen.queryByText("running")).not.toBeInTheDocument();
     expect(screen.queryByText("unread")).not.toBeInTheDocument();
+    expect(screen.queryByText("TECH")).not.toBeInTheDocument();
+  });
+
+  it("lets the attention rollup stand in for the idle count while collapsed", () => {
+    renderSidebar(
+      { collapsedWorkspaceIds: ["workspace-1"], onWorkspaceCollapsedChange: () => {} },
+      { status: "running" },
+    );
+
+    expect(screen.getByTitle("1 running")).toBeInTheDocument();
+    expect(screen.queryByTitle(/threads?$/)).not.toBeInTheDocument();
+  });
+
+  it("leaves a collapsed empty project row blank", () => {
+    render(
+      <DesktopSidebar
+        groups={[{ workspace: workspace(), threads: [] }]}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId={null}
+        collapsedWorkspaceIds={["workspace-1"]}
+        onWorkspaceCollapsedChange={() => {}}
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTitle(/threads?$/)).not.toBeInTheDocument();
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
   });
 
   it("drops the summary once the project is expanded", () => {
