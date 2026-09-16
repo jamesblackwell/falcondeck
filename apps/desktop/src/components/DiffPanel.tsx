@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useToast } from '@falcondeck/ui'
+import type { LocalPathHandler } from '@falcondeck/chat-ui'
 
 import type {
   GitDiffResponse,
@@ -23,6 +24,12 @@ import { FileView } from './diff/FileView'
 import type { ReviewInfoContext } from './diff/InfoView'
 
 const EMPTY_ENTRIES: GitStatusEntry[] = []
+
+function joinLocalPath(root: string | null, relative: string): string | null {
+  if (!root) return null
+  if (relative.startsWith('/')) return relative
+  return `${root.replace(/\/+$/, '')}/${relative}`
+}
 const EMPTY_FILES: string[] = []
 
 type ReviewApi = {
@@ -71,6 +78,11 @@ export type DiffPanelProps = {
   onSelectionChange: (selection: DiffPanelSelection | null) => void
   /** Where the work happens, for the overview tab. Null hides that tab. */
   info?: ReviewInfoContext | null
+  /** Absolute directory the shown files live in on this machine (the thread's
+      checkout when isolated). Null when the checkout is not local. */
+  localRoot?: string | null
+  /** Host handler for opening / revealing files locally. */
+  onLocalPath?: LocalPathHandler | null
 }
 
 export const DiffPanel = memo(function DiffPanel({
@@ -82,6 +94,8 @@ export const DiffPanel = memo(function DiffPanel({
   selection,
   onSelectionChange,
   info = null,
+  localRoot = null,
+  onLocalPath = null,
 }: DiffPanelProps) {
   const { toast } = useToast()
   // The overview opens first: it frames what the changes list is a list *of*.
@@ -241,6 +255,8 @@ export const DiffPanel = memo(function DiffPanel({
           error={fileError}
           onBack={() => onSelectionChange(null)}
           onReload={() => void reloadFile()}
+          localPath={joinLocalPath(localRoot, selectedFile)}
+          onLocalPath={onLocalPath}
           onSave={async (nextContent) => {
             const saved = await saveFile(nextContent)
             if (saved) {

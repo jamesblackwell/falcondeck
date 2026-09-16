@@ -237,6 +237,63 @@ describe('FileView', () => {
     expect(screen.getAllByText('blob.bin').length).toBeGreaterThan(0)
   })
 
+  it('offers open and reveal actions for files that cannot be previewed', () => {
+    const onLocalPath = vi.fn()
+    render(
+      <FileView
+        filePath="artifacts/review.zip"
+        file={{
+          path: 'artifacts/review.zip',
+          content: null,
+          is_binary: true,
+          truncated: false,
+          version: 'v1',
+        }}
+        isLoading={false}
+        isSaving={false}
+        error={null}
+        onBack={vi.fn()}
+        onReload={vi.fn()}
+        onSave={vi.fn()}
+        localPath="/Users/me/project/artifacts/review.zip"
+        onLocalPath={onLocalPath}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    expect(onLocalPath).toHaveBeenCalledWith('open', '/Users/me/project/artifacts/review.zip')
+
+    const reveals = screen.getAllByRole('button', { name: /Reveal in Finder|Show in/ })
+    expect(reveals.length).toBe(2)
+    fireEvent.click(reveals[0]!)
+    expect(onLocalPath).toHaveBeenLastCalledWith('reveal', '/Users/me/project/artifacts/review.zip')
+  })
+
+  it('hides local actions without a host handler', () => {
+    render(
+      <FileView
+        filePath="artifacts/review.zip"
+        file={{
+          path: 'artifacts/review.zip',
+          content: null,
+          is_binary: true,
+          truncated: false,
+          version: 'v1',
+        }}
+        isLoading={false}
+        isSaving={false}
+        error={null}
+        onBack={vi.fn()}
+        onReload={vi.fn()}
+        onSave={vi.fn()}
+        localPath="/Users/me/project/artifacts/review.zip"
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Open' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Reveal in Finder|Show in/ })).toBeNull()
+  })
+
   it('copies the workspace-relative path', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.assign(navigator, { clipboard: { writeText } })

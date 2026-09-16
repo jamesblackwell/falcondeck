@@ -58,7 +58,7 @@ const LocalPathContext = createContext<LocalPathContextValue | null>(null)
 
 const NO_EDITORS: readonly LocalPathEditor[] = []
 
-function revealInFolderLabel() {
+export function revealInFolderLabel() {
   const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent
   if (/Mac|darwin/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua)) {
     return 'Reveal in Finder'

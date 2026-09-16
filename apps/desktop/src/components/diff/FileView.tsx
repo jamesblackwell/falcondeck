@@ -1,7 +1,23 @@
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { ArrowLeft, Check, Copy, Pencil, RotateCcw, Save, X } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowUpRight,
+  Check,
+  Copy,
+  FolderOpen,
+  Pencil,
+  RotateCcw,
+  Save,
+  X,
+} from 'lucide-react'
 
-import { HighlightedFileLine, languageFromPath, useShikiTokens } from '@falcondeck/chat-ui'
+import {
+  HighlightedFileLine,
+  languageFromPath,
+  revealInFolderLabel,
+  useShikiTokens,
+  type LocalPathHandler,
+} from '@falcondeck/chat-ui'
 import { formatArtifactSize, type WorkspaceFileResponse } from '@falcondeck/client-core'
 import { ActivityDiamond, Button, Tooltip } from '@falcondeck/ui'
 
@@ -33,6 +49,8 @@ export const FileView = memo(function FileView({
   onBack,
   onReload,
   onSave,
+  localPath = null,
+  onLocalPath = null,
 }: {
   filePath: string
   /** Line to scroll into view and highlight, e.g. from a `path:12` citation. */
@@ -44,7 +62,31 @@ export const FileView = memo(function FileView({
   onBack: () => void
   onReload: () => void
   onSave: (content: string) => Promise<boolean>
+  /** Absolute on-disk path, when the file lives on this machine. */
+  localPath?: string | null
+  /** Host handler for opening / revealing the file; null hides those actions. */
+  onLocalPath?: LocalPathHandler | null
 }) {
+  const canActLocally = localPath != null && onLocalPath != null
+  const openLocally = () => {
+    if (canActLocally) void onLocalPath('open', localPath)
+  }
+  const revealLocally = () => {
+    if (canActLocally) void onLocalPath('reveal', localPath)
+  }
+  const revealLabel = revealInFolderLabel()
+  const localActions = canActLocally ? (
+    <div className="mt-2 flex items-center gap-2">
+      <Button type="button" variant="secondary" size="sm" onClick={openLocally}>
+        <ArrowUpRight aria-hidden="true" className="h-3.5 w-3.5" />
+        Open
+      </Button>
+      <Button type="button" variant="ghost" size="sm" onClick={revealLocally}>
+        <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
+        {revealLabel}
+      </Button>
+    </div>
+  ) : null
   const [isEditing, setIsEditing] = useState(false)
   const [draft, setDraft] = useState('')
   useEffect(() => {
@@ -166,6 +208,18 @@ export const FileView = memo(function FileView({
             )}
           </button>
         </Tooltip>
+        {canActLocally ? (
+          <Tooltip label={revealLabel}>
+            <button
+              type="button"
+              onClick={revealLocally}
+              aria-label={revealLabel}
+              className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+            >
+              <FolderOpen aria-hidden="true" className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+        ) : null}
         {canTogglePreview && !isEditing ? (
           <FilePreviewToggle mode={mode} onChange={setMode} />
         ) : null}
@@ -262,6 +316,7 @@ export const FileView = memo(function FileView({
                 .filter(Boolean)
                 .join(' · ')}
             </p>
+            {localActions}
           </div>
         ) : file?.is_binary ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">
@@ -269,6 +324,7 @@ export const FileView = memo(function FileView({
             <p className="fd-type-meta text-fg-muted">
               {[fileName, sizeLabel].filter(Boolean).join(' · ')}
             </p>
+            {localActions}
           </div>
         ) : isEditing ? (
           <textarea
@@ -293,6 +349,12 @@ export const FileView = memo(function FileView({
                 active={index + 1 === targetLine}
               />
             ))}
+          </div>
+        ) : error && canActLocally ? (
+          <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">
+            <p className="text-[length:var(--fd-text-xs)] text-fg-secondary">This file couldn't be loaded</p>
+            <p className="fd-type-meta text-fg-muted">{fileName}</p>
+            {localActions}
           </div>
         ) : null}
       </div>

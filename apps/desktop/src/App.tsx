@@ -6355,6 +6355,18 @@ function AppInner() {
                   selection={diffSelection}
                   onSelectionChange={setDiffSelection}
                   info={reviewInfo}
+                  localRoot={
+                    isTauriDesktop() && !isRemoteWorkspaceSelected
+                      ? selectedThread?.variant?.path ??
+                        selectedWorkspace?.path ??
+                        null
+                      : null
+                  }
+                  onLocalPath={
+                    isTauriDesktop() && !isRemoteWorkspaceSelected
+                      ? handleLocalPath
+                      : null
+                  }
                 />
               </Suspense>
             )
