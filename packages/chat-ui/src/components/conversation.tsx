@@ -57,9 +57,9 @@ import {
 const AUTO_SCROLL_THRESHOLD = 40;
 const JUMP_THRESHOLD = 200;
 const SMOOTH_SCROLL_DURATION_MS = 320;
-/// Gap kept above the latest user message when it is lifted to the top of
-/// the viewport. Matches the transcript's own top padding.
-const TAIL_TURN_TOP_GAP = 16;
+/// Keep a few lines of the previous reply above a just-sent user message,
+/// including room for the reply's actions and the gap between messages.
+const TAIL_TURN_TOP_GAP = 112;
 const MAX_THREAD_UI_STATE = 48;
 // Keep the newest context fully laid out for streaming and bottom anchoring.
 // Older blocks use browser-native layout/paint deferral once a transcript is
@@ -526,8 +526,8 @@ export const Conversation = memo(function Conversation({
   );
 
   /// Sizes the spacer under the transcript so the latest turn — the last user
-  /// message and everything after it — can sit at the top of the viewport,
-  /// the way ChatGPT lifts a just-sent message. While the reply is shorter
+  /// message and everything after it — sits below a little previous context.
+  /// While the reply is shorter
   /// than the viewport it streams into this reserved space and the view does
   /// not move: the spacer shrinks by exactly what the reply grows, so the
   /// scroll bottom stays put. Once the turn outgrows the viewport the spacer
