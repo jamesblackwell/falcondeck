@@ -41,7 +41,7 @@ import {
   operationalConditionContentKey,
   operationalConditionDismissalKey,
   parseCompactThreadCommand,
-  workspaceOperationalConditions,
+  conversationOperationalConditions,
   mergeThreadDetailPage,
   optimisticallySetThreadStage,
   removeConversationItem,
@@ -5219,15 +5219,17 @@ function AppInner() {
   );
   const operationalConditions = useMemo(
     () =>
-      workspaceOperationalConditions(
+      conversationOperationalConditions(
         viewSnapshot?.operational_conditions,
         viewSnapshot?.service_notices,
         selectedWorkspaceId,
+        selectedThreadId,
         dismissedConditionVersions,
       ),
     [
       dismissedConditionVersions,
       selectedWorkspaceId,
+      selectedThreadId,
       viewSnapshot?.operational_conditions,
       viewSnapshot?.service_notices,
     ],

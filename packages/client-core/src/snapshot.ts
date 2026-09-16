@@ -184,9 +184,12 @@ export function operationalConditionDismissalKey(
  * until the wording or severity changes.
  */
 export function operationalConditionContentKey(
-  condition: Pick<OperationalCondition, "workspace_id" | "key" | "message" | "level">,
+  condition: Pick<
+    OperationalCondition,
+    "workspace_id" | "thread_id" | "key" | "message" | "level"
+  >,
 ): string {
-  return `content:${condition.workspace_id}|${condition.key}|${condition.level}|${condition.message}`;
+  return `content:${condition.workspace_id}|${condition.thread_id ?? ""}|${condition.key}|${condition.level}|${condition.message}`;
 }
 
 /** Active conditions for one workspace, highest severity and newest first. */
@@ -209,6 +212,7 @@ export function workspaceOperationalConditions(
             id: notice.id,
             key: `legacy:${notice.id}`,
             workspace_id: notice.workspace_id,
+            thread_id: notice.thread_id,
             level: notice.level,
             message: notice.message,
             source: notice.raw_method,
@@ -228,6 +232,35 @@ export function workspaceOperationalConditions(
       if (severityDifference !== 0) return severityDifference;
       return right.updated_at.localeCompare(left.updated_at);
     });
+}
+
+/** Conversation banners must not turn a server startup failure into workspace health. */
+export function conversationOperationalConditions(
+  conditions: readonly OperationalCondition[] | null | undefined,
+  legacyNotices: readonly ServiceNotice[] | null | undefined,
+  workspaceId: string | null | undefined,
+  threadId: string | null | undefined,
+  dismissedVersions: ReadonlySet<string>,
+): OperationalCondition[] {
+  if (!threadId) return [];
+  return workspaceOperationalConditions(
+    conditions,
+    legacyNotices,
+    workspaceId,
+    dismissedVersions,
+  ).filter((condition) => {
+    if (condition.thread_id) return condition.thread_id === threadId;
+    // Old daemons did not retain an origin. Never guess that the open
+    // conversation experienced an unscoped MCP startup failure.
+    return (
+      !condition.key.startsWith("mcp_startup:") &&
+      !condition.source?.startsWith("mcpServer/startup") &&
+      !(
+        condition.key.startsWith("legacy:") &&
+        /^\S+ failed to start:/i.test(condition.message)
+      )
+    );
+  });
 }
 
 /**
@@ -616,7 +649,9 @@ export function applySnapshotEvent(
           ...conditions.filter(
             (condition) =>
               condition.workspace_id !== daemonEvent.condition.workspace_id ||
-              condition.key !== daemonEvent.condition.key,
+              condition.key !== daemonEvent.condition.key ||
+              (condition.thread_id ?? null) !==
+                (daemonEvent.condition.thread_id ?? null),
           ),
         ],
       };
@@ -627,7 +662,7 @@ export function applySnapshotEvent(
         operational_conditions: (snapshot.operational_conditions ?? []).filter(
           (condition) =>
             condition.workspace_id !== event.workspace_id ||
-            condition.key !== daemonEvent.key,
+            condition.id !== daemonEvent.condition_id,
         ),
         service_notices: (snapshot.service_notices ?? []).filter(
           (notice) => notice.id !== daemonEvent.condition_id,

@@ -3563,7 +3563,7 @@ pub(super) async fn remove_workspace(
         .operational_conditions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(condition_workspace, _), _| condition_workspace != workspace_id);
+        .retain(|(condition_workspace, _, _), _| condition_workspace != workspace_id);
     app.inner
         .service_notices
         .lock()
@@ -3658,7 +3658,7 @@ pub(super) async fn close_workspace(
         .operational_conditions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|(condition_workspace, _), _| condition_workspace != workspace_id);
+        .retain(|(condition_workspace, _, _), _| condition_workspace != workspace_id);
     app.inner
         .service_notices
         .lock()

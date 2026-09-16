@@ -447,8 +447,9 @@ struct InnerState {
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     /// Capped session-level notices for workspace events without a transcript target.
     service_notices: StdMutex<Vec<ServiceNotice>>,
-    /// Current workspace degradation keyed by `(workspace_id, semantic_key)`.
-    operational_conditions: StdMutex<HashMap<(String, String), OperationalCondition>>,
+    /// Active degradation keyed by `(workspace_id, thread_id, semantic_key)`.
+    operational_conditions:
+        StdMutex<HashMap<(String, Option<String>, String), OperationalCondition>>,
     /// Last provider-plugin refresh attempt per workspace, so repeated MCP
     /// startup reports cannot spawn retirement tasks in a tight loop.
     plugin_refresh_attempts: StdMutex<HashMap<String, std::time::Instant>>,
@@ -4263,6 +4264,18 @@ impl AppState {
         message: String,
         source: Option<String>,
     ) -> Result<(), DaemonError> {
+        self.upsert_scoped_operational_condition(workspace_id, None, key, level, message, source)
+    }
+
+    pub(crate) fn upsert_scoped_operational_condition(
+        &self,
+        workspace_id: String,
+        thread_id: Option<String>,
+        key: impl Into<String>,
+        level: ServiceLevel,
+        message: String,
+        source: Option<String>,
+    ) -> Result<(), DaemonError> {
         let key = key.into();
         let now = Utc::now();
         let condition = {
@@ -4271,7 +4284,7 @@ impl AppState {
                 .operational_conditions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let map_key = (workspace_id.clone(), key.clone());
+            let map_key = (workspace_id.clone(), thread_id.clone(), key.clone());
             let existing = conditions.get(&map_key);
             let created_at = existing.map_or(now, |condition| condition.created_at);
             let updated_at = existing
@@ -4289,6 +4302,7 @@ impl AppState {
                 id,
                 key,
                 workspace_id: workspace_id.clone(),
+                thread_id: thread_id.clone(),
                 level: level.clone(),
                 message: message.clone(),
                 source: source.clone(),
@@ -4304,6 +4318,7 @@ impl AppState {
         let legacy_notice = ServiceNotice {
             id: condition.id.clone(),
             workspace_id: workspace_id.clone(),
+            thread_id: thread_id.clone(),
             level: level.clone(),
             message: message.clone(),
             raw_method: source.clone(),
@@ -4345,12 +4360,25 @@ impl AppState {
 
     /// Clears a recovered workspace condition. Unknown keys are a no-op.
     pub fn clear_operational_condition(&self, workspace_id: &str, key: &str) {
+        self.clear_scoped_operational_condition(workspace_id, None, key);
+    }
+
+    pub(crate) fn clear_scoped_operational_condition(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        key: &str,
+    ) {
         let removed = self
             .inner
             .operational_conditions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&(workspace_id.to_string(), key.to_string()));
+            .remove(&(
+                workspace_id.to_string(),
+                thread_id.map(str::to_string),
+                key.to_string(),
+            ));
         let Some(condition) = removed else {
             return;
         };
@@ -4374,7 +4402,7 @@ impl AppState {
     /// genuinely broken is re-reported by the replacement app-server on the
     /// next thread start.
     pub(crate) fn clear_mcp_startup_conditions(&self, workspace_id: &str) {
-        let keys: Vec<String> = {
+        let keys: Vec<(Option<String>, String)> = {
             let conditions = self
                 .inner
                 .operational_conditions
@@ -4382,12 +4410,12 @@ impl AppState {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             conditions
                 .keys()
-                .filter_map(|(id, key)| (id == workspace_id).then(|| key.clone()))
-                .filter(|key| key.starts_with("mcp_startup:"))
+                .filter(|(id, _, key)| id == workspace_id && key.starts_with("mcp_startup:"))
+                .map(|(_, thread_id, key)| (thread_id.clone(), key.clone()))
                 .collect()
         };
-        for key in keys {
-            self.clear_operational_condition(workspace_id, &key);
+        for (thread_id, key) in keys {
+            self.clear_scoped_operational_condition(workspace_id, thread_id.as_deref(), &key);
         }
     }
 

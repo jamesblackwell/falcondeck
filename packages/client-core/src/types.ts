@@ -1469,6 +1469,7 @@ export type ExtensionActionResponse = {
 export type ServiceNotice = {
   id: string;
   workspace_id: string;
+  thread_id?: string | null;
   level: ServiceLevel;
   message: string;
   raw_method: string | null;
@@ -1479,6 +1480,7 @@ export type OperationalCondition = {
   id: string;
   key: string;
   workspace_id: string;
+  thread_id?: string | null;
   level: ServiceLevel;
   message: string;
   source: string | null;

@@ -48,7 +48,7 @@ import {
   isDaemonRpcReady,
   operationalConditionDismissalKey,
   parseCompactThreadCommand,
-  workspaceOperationalConditions,
+  conversationOperationalConditions,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
   mergeGuidedComposerDraft,
@@ -1243,15 +1243,17 @@ function RemoteApp() {
   }, [composerSuggestionOffer?.key, selectedThreadId]);
   const operationalConditions = useMemo(
     () =>
-      workspaceOperationalConditions(
+      conversationOperationalConditions(
         snapshot?.operational_conditions,
         snapshot?.service_notices,
         selectedWorkspaceId,
+        selectedThreadId,
         dismissedConditionVersions,
       ),
     [
       dismissedConditionVersions,
       selectedWorkspaceId,
+      selectedThreadId,
       snapshot?.operational_conditions,
       snapshot?.service_notices,
     ],

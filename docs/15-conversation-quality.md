@@ -728,15 +728,23 @@ control failure stays beside that control. Short-lived failures caused by a
 user action may additionally use a toast. Raw provider stdout/stderr is daemon
 diagnostic logging and never becomes user-facing content by itself.
 
-Workspace degradation uses keyed active operational conditions. Re-emitting the
-same `(workspace, key)` replaces its severity and message while preserving its
-identity and first-seen time; successful recovery explicitly clears it. Clients
-show the highest-severity active condition in the top banner and expose all
-remaining conditions through a compact issue center. Dismissal applies to one
-condition version, so a materially updated condition becomes visible again.
-This zone is reserved for current provider availability, authentication,
-configuration, connection, and capability problems—not historical turn or tool
-failures. Fatal application startup failures remain a separate blocking screen.
+Operational conditions retain their reporting scope: workspace health has no
+`thread_id`; MCP startup failures preserve the provider's `threadId`. Identity
+is keyed by `(workspace, thread_id, key)`, so concurrent conversations can fail
+and recover independently. Repeated reports preserve identity and first-seen
+time. MCP startup recovery requires `ready`, not merely starting another retry.
+
+Conversation banners show conditions for the selected thread plus relevant
+workspace health. Unscoped MCP startup diagnostics, including legacy snapshots
+without an origin, never get assigned to the open conversation. They remain
+available in the daemon diagnostic state. Thread-scoped conditions remain outside
+the durable transcript. Recovery events remove the exact condition ID, not every
+condition with the same server key.
+
+Mobile and desktop retire non-blocking warnings after eight seconds. Explicit
+dismissals are scoped by workspace, thread, key, severity, and message; a changed
+problem can surface again. Actual tool and turn failures keep their own transcript
+receipts. Fatal application startup failures remain a separate blocking screen.
 
 Operational provider output is part of the transcript when it affects the
 user's understanding of a turn. Restored and live Codex plans preserve their

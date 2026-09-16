@@ -23,7 +23,7 @@ import {
   imageAttachmentSendBlockReason,
   latestVisibleAssistantMessageId,
   isDaemonRpcReady,
-  workspaceOperationalConditions,
+  conversationOperationalConditions,
   orderedInteractiveRequestQueue,
   providerForThread,
   reuseRetrySourcesByAssistantId,
@@ -166,15 +166,17 @@ export default function HomeScreen() {
   const dismissOperationalCondition = useOperationalNoticeStore((s) => s.dismiss);
   const operationalConditions = useMemo(
     () =>
-      workspaceOperationalConditions(
+      conversationOperationalConditions(
         operationalConditionSource,
         serviceNotices,
         selectedWorkspaceId,
+        selectedThreadId,
         dismissedConditionVersions,
       ),
     [
       dismissedConditionVersions,
       selectedWorkspaceId,
+      selectedThreadId,
       operationalConditionSource,
       serviceNotices,
     ],

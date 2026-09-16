@@ -10,8 +10,8 @@ use falcondeck_core::{
 /// did not come up". Codex reports these once per server on every session, so
 /// left alone they land as a durable red card per server in every new
 /// transcript. They describe the workspace's environment, not the
-/// conversation, so the name lets the caller key one replaceable workspace
-/// condition instead.
+/// conversation transcript, so the name lets the caller key a replaceable
+/// condition while retaining the reporting conversation scope.
 fn mcp_startup_failure_server(message: &str) -> Option<&str> {
     let name = message.split_once(" failed to start:")?.0.trim();
     if name.is_empty() || name.contains(char::is_whitespace) {
@@ -83,8 +83,9 @@ fn emit_scoped_diagnostic(
             app.schedule_codex_plugin_refresh(workspace_id);
         }
         let message = condense_mcp_startup_message(server, &message);
-        return app.upsert_operational_condition(
+        return app.upsert_scoped_operational_condition(
             workspace_id.to_string(),
+            thread_id,
             format!("mcp_startup:{server}"),
             ServiceLevel::Warning,
             message,
@@ -1862,6 +1863,7 @@ pub(super) async fn ingest_notification(
             }
         }
         "mcpServer/startupStatus/updated" => {
+            let thread_id = extract_thread_id(&params);
             let status = extract_string(&params, &["status"]);
             let name =
                 extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
@@ -1875,8 +1877,9 @@ pub(super) async fn ingest_notification(
                     Some(reason) => format!("{message} ({})", humanize_camel_case(&reason)),
                     None => message,
                 };
-                app.upsert_operational_condition(
+                app.upsert_scoped_operational_condition(
                     workspace_id.to_string(),
+                    thread_id,
                     condition_key,
                     ServiceLevel::Warning,
                     message,
@@ -1885,7 +1888,11 @@ pub(super) async fn ingest_notification(
             } else if status.as_deref() == Some("ready") {
                 // Starting a retry is not recovery. Clearing here would give
                 // the same failure a fresh identity on every thread start.
-                app.clear_operational_condition(workspace_id, &condition_key);
+                app.clear_scoped_operational_condition(
+                    workspace_id,
+                    thread_id.as_deref(),
+                    &condition_key,
+                );
             }
         }
         "mcpServer/oauthLogin/completed" => {

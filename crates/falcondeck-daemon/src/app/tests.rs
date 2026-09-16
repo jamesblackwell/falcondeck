@@ -391,7 +391,10 @@ async fn keeps_mcp_startup_failures_out_of_every_transcript() {
         snapshot
             .operational_conditions
             .iter()
-            .all(|condition| condition.level == falcondeck_core::ServiceLevel::Warning)
+            .all(
+                |condition| condition.level == falcondeck_core::ServiceLevel::Warning
+                    && condition.thread_id.as_deref() == Some("thread-1")
+            )
     );
 }
 
@@ -430,6 +433,50 @@ async fn mcp_startup_retry_preserves_failure_until_ready() {
     let snapshot = app.snapshot().await;
     assert!(snapshot.operational_conditions.is_empty());
     assert!(snapshot.service_notices.is_empty());
+}
+
+#[tokio::test]
+async fn mcp_startup_conditions_recover_only_in_the_reporting_thread() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    for thread_id in ["thread-a", "thread-b"] {
+        ingest_notification(&app, "workspace-1", "mcpServer/startupStatus/updated",
+            json!({"name": "AbletonMCP", "status": "failed", "threadId": thread_id, "error": "connection closed"}))
+            .await.unwrap();
+    }
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.operational_conditions.len(), 2);
+    assert!(
+        snapshot
+            .service_notices
+            .iter()
+            .all(|notice| notice.thread_id.is_some())
+    );
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "mcpServer/startupStatus/updated",
+        json!({"name": "AbletonMCP", "status": "ready", "threadId": "thread-a"}),
+    )
+    .await
+    .unwrap();
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.operational_conditions.len(), 1);
+    assert_eq!(
+        snapshot.operational_conditions[0].thread_id.as_deref(),
+        Some("thread-b")
+    );
+    assert_eq!(snapshot.service_notices.len(), 1);
+    assert_eq!(
+        snapshot.service_notices[0].thread_id.as_deref(),
+        Some("thread-b")
+    );
+    app.clear_mcp_startup_conditions("workspace-1");
+    assert!(app.snapshot().await.operational_conditions.is_empty());
 }
 
 #[test]

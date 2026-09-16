@@ -2058,13 +2058,16 @@ pub struct ExtensionActionResponse {
     pub updated_views: Vec<ExtensionView>,
 }
 
-/// Retained operational notice scoped to a workspace rather than a thread.
+/// Legacy projection of a retained operational condition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceNotice {
     /// Stable notice identity for replay deduplication and local dismissal.
     pub id: String,
     /// Workspace affected by the notice.
     pub workspace_id: String,
+    /// Conversation that reported this notice, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     /// Notice severity.
     pub level: ServiceLevel,
     /// Human-readable provider detail.
@@ -2076,7 +2079,7 @@ pub struct ServiceNotice {
     pub created_at: DateTime<Utc>,
 }
 
-/// Active workspace-level degradation that remains relevant until explicitly cleared.
+/// Active workspace or conversation degradation that remains relevant until cleared.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationalCondition {
     /// Stable identity retained across updates to the same condition.
@@ -2085,6 +2088,9 @@ pub struct OperationalCondition {
     pub key: String,
     /// Workspace affected by the condition.
     pub workspace_id: String,
+    /// Conversation that reported this condition, or None for workspace health.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
     /// Current severity.
     pub level: ServiceLevel,
     /// Human-readable explanation and recovery guidance when known.
