@@ -38,11 +38,7 @@ export type WorkspaceGroupProps = {
   /** Threads waiting on the user; surfaced while it is collapsed. */
   unreadCount?: number
   unreadTone?: 'info' | 'warning' | 'danger'
-  /**
-   * Every live thread inside the project. A folded project with only idle
-   * work used to render exactly like an empty one, so the row shows this
-   * count whenever nothing more urgent is there to stand in for it.
-   */
+  /** In-project chats, excluding global pins. Shown on a quiet folded row. */
   threadCount?: number
   children: React.ReactNode
 }

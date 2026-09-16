@@ -1335,6 +1335,42 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByText("TECH")).not.toBeInTheDocument();
   });
 
+  it("does not count globally pinned chats on a collapsed project row", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({ id: "thread-1", title: "TECH" }),
+          thread({
+            id: "thread-2",
+            title: "Pinned in project",
+            is_pinned_in_project: true,
+          }),
+          thread({
+            id: "thread-3",
+            title: "Pinned chat",
+            is_pinned: true,
+          }),
+        ],
+      },
+    ];
+
+    render(
+      <DesktopSidebar
+        groups={groups}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-1"
+        collapsedWorkspaceIds={["workspace-1"]}
+        onWorkspaceCollapsedChange={() => {}}
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    );
+
+    expect(screen.getByTitle("2 threads")).toHaveTextContent("2");
+    expect(screen.queryByTitle("3 threads")).not.toBeInTheDocument();
+  });
+
   it("lets the attention rollup stand in for the idle count while collapsed", () => {
     renderSidebar(
       { collapsedWorkspaceIds: ["workspace-1"], onWorkspaceCollapsedChange: () => {} },
