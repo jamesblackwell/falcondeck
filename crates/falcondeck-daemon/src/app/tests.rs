@@ -8488,3 +8488,127 @@ async fn codex_sub_agent_activity_items_render_as_tool_calls() {
         "{items:?}"
     );
 }
+
+#[test]
+fn codex_error_notification_text_unwraps_nested_shape() {
+    use super::notifications::{codex_error_notification_text, codex_error_will_retry};
+    let params = json!({
+        "error": {
+            "additionalDetails": "stream disconnected before completion: websocket closed by server before response.completed",
+            "codexErrorInfo": { "responseStreamDisconnected": { "httpStatusCode": null } },
+            "message": "Reconnecting... 2/5",
+            "misalignment": null
+        },
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "willRetry": true
+    });
+    assert!(codex_error_will_retry(&params));
+    assert_eq!(
+        codex_error_notification_text(&params),
+        "Reconnecting... 2/5: stream disconnected before completion: websocket closed by server before response.completed"
+    );
+    assert_eq!(
+        codex_error_notification_text(&json!({ "message": "boom", "threadId": "t" })),
+        "boom"
+    );
+    assert_eq!(
+        codex_error_notification_text(&json!({ "threadId": "t", "willRetry": false })),
+        "Provider error"
+    );
+    assert!(!codex_error_will_retry(&json!({ "threadId": "t" })));
+}
+
+#[tokio::test]
+async fn codex_retrying_error_is_a_replacing_warning_cleared_on_turn_end() {
+    use super::notifications::CODEX_RECONNECT_CONDITION_KEY;
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(&app, "workspace-1", "thread-1", "s", temp_dir.path())
+        .await;
+
+    for attempt in 1..=2 {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "error",
+            json!({
+                "error": {
+                    "additionalDetails": "stream disconnected before completion",
+                    "message": format!("Reconnecting... {attempt}/5")
+                },
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "willRetry": true
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    {
+        let workspaces = app.inner.workspaces.lock().await;
+        let items = &workspaces["workspace-1"].threads["thread-1"].items;
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, ConversationItem::Service { .. })),
+            "a self-healing reconnect must not become a transcript error"
+        );
+    }
+    let snapshot = app.snapshot().await;
+    let conditions: Vec<_> = snapshot
+        .operational_conditions
+        .iter()
+        .filter(|condition| condition.key == CODEX_RECONNECT_CONDITION_KEY)
+        .collect();
+    assert_eq!(conditions.len(), 1, "attempts replace, not stack");
+    assert_eq!(conditions[0].level, falcondeck_core::ServiceLevel::Warning);
+    assert_eq!(conditions[0].thread_id.as_deref(), Some("thread-1"));
+    assert!(conditions[0].message.starts_with("Reconnecting... 2/5"));
+    assert!(!conditions[0].message.contains('{'), "no raw JSON");
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "turn/completed",
+        json!({ "threadId": "thread-1", "turnId": "turn-1", "status": "completed" }),
+    )
+    .await
+    .unwrap();
+    let snapshot = app.snapshot().await;
+    assert!(
+        !snapshot
+            .operational_conditions
+            .iter()
+            .any(|condition| condition.key == CODEX_RECONNECT_CONDITION_KEY),
+        "reconnect banner clears when the turn ends"
+    );
+
+    // A non-retrying error still lands in the transcript as an error, with the
+    // nested message unwrapped.
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "error",
+        json!({
+            "error": { "message": "Unauthorized" },
+            "threadId": "thread-1",
+            "willRetry": false
+        }),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let workspaces = app.inner.workspaces.lock().await;
+    let items = &workspaces["workspace-1"].threads["thread-1"].items;
+    assert!(items.iter().any(|item| matches!(
+        item,
+        ConversationItem::Service { level: falcondeck_core::ServiceLevel::Error, message, .. }
+            if message == "Unauthorized"
+    )));
+}

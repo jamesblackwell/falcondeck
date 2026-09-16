@@ -500,6 +500,11 @@ pub(super) async fn ingest_notification(
                 let status =
                     extract_string(&params, &["status"]).unwrap_or_else(|| "completed".to_string());
                 let turn_was_interrupted = is_interrupt_turn_status(&status);
+                app.clear_scoped_operational_condition(
+                    workspace_id,
+                    Some(&thread_id),
+                    CODEX_RECONNECT_CONDITION_KEY,
+                );
                 let mut error = codex_turn_error_text(&params);
                 if error.is_none() && is_failed_turn_status(&status) {
                     error = Some("Turn failed".to_string());
@@ -1694,8 +1699,21 @@ pub(super) async fn ingest_notification(
         }
         "error" => {
             let thread_id = extract_thread_id(&params);
-            let message =
-                extract_string(&params, &["message"]).unwrap_or_else(|| params.to_string());
+            let message = codex_error_notification_text(&params);
+            if codex_error_will_retry(&params) {
+                // Codex is already reconnecting on its own. Keyed per thread so
+                // attempt 3/5 replaces 2/5 instead of stacking, and
+                // turn/completed clears it once the stream recovers or gives up.
+                app.upsert_scoped_operational_condition(
+                    workspace_id.to_string(),
+                    thread_id,
+                    CODEX_RECONNECT_CONDITION_KEY,
+                    ServiceLevel::Warning,
+                    message,
+                    Some(method.to_string()),
+                )?;
+                return Ok(());
+            }
             emit_scoped_diagnostic(
                 app,
                 workspace_id,
@@ -2563,6 +2581,57 @@ pub(super) fn is_failed_turn_status(status: &str) -> bool {
 /// the payload holds. Codex's `message` alone is often just a category
 /// ("stream error"); the cause lives in `data`, and unfamiliar shapes are
 /// still better shown verbatim than replaced with "Turn failed".
+pub(super) const CODEX_RECONNECT_CONDITION_KEY: &str = "codex_reconnect";
+
+pub(super) fn codex_error_will_retry(params: &Value) -> bool {
+    params
+        .get("willRetry")
+        .or_else(|| params.get("will_retry"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Human text for a Codex app-server `error` notification. Newer servers nest
+/// the cause under `error.message` / `error.additionalDetails`; older ones put
+/// `message` at the top level. Never dump the raw JSON at the user.
+pub(super) fn codex_error_notification_text(params: &Value) -> String {
+    let top_level = extract_string(params, &["message"])
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty());
+    let nested = params
+        .get("error")
+        .filter(|error| !error.is_null())
+        .map(|error| {
+            let message = if let Some(text) = error.as_str() {
+                Some(text.trim().to_string()).filter(|text| !text.is_empty())
+            } else {
+                extract_string(error, &["message"])
+                    .map(|message| message.trim().to_string())
+                    .filter(|message| !message.is_empty())
+            };
+            let details = extract_string(error, &["additionalDetails", "additional_details"])
+                .map(|details| details.trim().to_string())
+                .filter(|details| !details.is_empty());
+            match (message, details) {
+                (Some(message), Some(details)) if !message.contains(&details) => {
+                    format!("{message}: {details}")
+                }
+                (Some(message), _) => message,
+                (None, Some(details)) => details,
+                (None, None) => String::new(),
+            }
+        })
+        .filter(|text| !text.is_empty());
+    let will_retry = codex_error_will_retry(params);
+    match (top_level, nested) {
+        (Some(top), Some(nested)) if !top.contains(&nested) => format!("{top}: {nested}"),
+        (Some(top), _) => top,
+        (None, Some(nested)) => nested,
+        (None, None) if will_retry => "Provider connection dropped; reconnecting".to_string(),
+        (None, None) => "Provider error".to_string(),
+    }
+}
+
 pub(super) fn codex_turn_error_text(params: &Value) -> Option<String> {
     let error = params.get("error").filter(|error| !error.is_null())?;
     if let Some(text) = error.as_str() {
