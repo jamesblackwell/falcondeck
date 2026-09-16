@@ -395,6 +395,43 @@ async fn keeps_mcp_startup_failures_out_of_every_transcript() {
     );
 }
 
+#[tokio::test]
+async fn mcp_startup_retry_preserves_failure_until_ready() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    let mut original = None;
+    for status in ["failed", "starting", "cancelled", "failed"] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "mcpServer/startupStatus/updated",
+            json!({ "name": "AbletonMCP", "status": status, "error": "connection closed" }),
+        )
+        .await
+        .unwrap();
+        let snapshot = app.snapshot().await;
+        assert_eq!(snapshot.operational_conditions.len(), 1);
+        let condition = &snapshot.operational_conditions[0];
+        let identity = (condition.id.clone(), condition.updated_at);
+        assert_eq!(*original.get_or_insert(identity.clone()), identity);
+    }
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "mcpServer/startupStatus/updated",
+        json!({ "name": "AbletonMCP", "status": "ready" }),
+    )
+    .await
+    .unwrap();
+    let snapshot = app.snapshot().await;
+    assert!(snapshot.operational_conditions.is_empty());
+    assert!(snapshot.service_notices.is_empty());
+}
+
 #[test]
 fn mcp_startup_messages_drop_nested_wrappers_and_repeats() {
     let message = "AbletonMCP failed to start: MCP client for `AbletonMCP` failed to start: \

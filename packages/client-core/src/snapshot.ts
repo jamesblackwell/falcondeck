@@ -181,12 +181,12 @@ export function operationalConditionDismissalKey(
  * Identity that survives the daemon re-reporting the same problem under a
  * fresh condition id (a connector that fails identically on every session).
  * Explicit dismissals persist on this key so one click silences the repeat
- * until the wording changes.
+ * until the wording or severity changes.
  */
 export function operationalConditionContentKey(
-  condition: Pick<OperationalCondition, "workspace_id" | "key" | "message">,
+  condition: Pick<OperationalCondition, "workspace_id" | "key" | "message" | "level">,
 ): string {
-  return `content:${condition.workspace_id}|${condition.key}|${condition.message}`;
+  return `content:${condition.workspace_id}|${condition.key}|${condition.level}|${condition.message}`;
 }
 
 /** Active conditions for one workspace, highest severity and newest first. */

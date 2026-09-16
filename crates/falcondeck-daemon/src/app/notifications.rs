@@ -1882,7 +1882,9 @@ pub(super) async fn ingest_notification(
                     message,
                     Some(method.to_string()),
                 )?;
-            } else {
+            } else if status.as_deref() == Some("ready") {
+                // Starting a retry is not recovery. Clearing here would give
+                // the same failure a fresh identity on every thread start.
                 app.clear_operational_condition(workspace_id, &condition_key);
             }
         }

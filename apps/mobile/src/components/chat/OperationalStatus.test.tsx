@@ -9,6 +9,7 @@ import { OperationalNoticeBanner } from "./OperationalNoticeBanner";
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("operational conversation status", () => {
@@ -126,6 +127,7 @@ describe("operational conversation status", () => {
     act(() => dismiss.props.onPress());
     expect(onDismiss).toHaveBeenCalledWith(
       expect.objectContaining({ id: "notice-1" }),
+      true,
     );
   });
 
@@ -165,4 +167,67 @@ describe("operational conversation status", () => {
     );
     expect(textOf(rendered)).toContain("Test MCP unavailable");
   });
+});
+
+const startupWarning = {
+  id: "startup",
+  key: "mcp_startup:AbletonMCP",
+  workspace_id: "workspace-1",
+  level: "warning" as const,
+  message: "AbletonMCP failed to start",
+  source: null,
+  created_at: "2026-09-16T10:00:00Z",
+  updated_at: "2026-09-16T10:00:00Z",
+};
+
+it("expires a repeated warning without restarting the timer on snapshot replacement", () => {
+  vi.useFakeTimers();
+  const onDismiss = vi.fn();
+  const rendered = renderComponent(
+    <OperationalNoticeBanner
+      conditions={[startupWarning]}
+      onDismiss={onDismiss}
+    />,
+  );
+  act(() => {
+    vi.advanceTimersByTime(4000);
+  });
+  act(() =>
+    rendered.update(
+      <OperationalNoticeBanner
+        conditions={[{ ...startupWarning }]}
+        onDismiss={onDismiss}
+      />,
+    ),
+  );
+  act(() => {
+    vi.advanceTimersByTime(4000);
+  });
+  expect(onDismiss).toHaveBeenCalledWith(startupWarning, false);
+});
+
+it("keeps errors visible and cancels a warning timer on escalation", () => {
+  vi.useFakeTimers();
+  const onDismiss = vi.fn();
+  const rendered = renderComponent(
+    <OperationalNoticeBanner
+      conditions={[startupWarning]}
+      onDismiss={onDismiss}
+    />,
+  );
+  act(() => {
+    vi.advanceTimersByTime(4000);
+  });
+  act(() =>
+    rendered.update(
+      <OperationalNoticeBanner
+        conditions={[{ ...startupWarning, level: "error" }]}
+        onDismiss={onDismiss}
+      />,
+    ),
+  );
+  act(() => {
+    vi.advanceTimersByTime(16000);
+  });
+  expect(onDismiss).not.toHaveBeenCalled();
 });

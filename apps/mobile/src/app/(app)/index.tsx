@@ -22,7 +22,6 @@ import {
   pendingHandoffContextNotice,
   imageAttachmentSendBlockReason,
   latestVisibleAssistantMessageId,
-  operationalConditionDismissalKey,
   isDaemonRpcReady,
   workspaceOperationalConditions,
   orderedInteractiveRequestQueue,
@@ -43,9 +42,9 @@ import {
   type ConversationPresentation,
   type ConversationRenderBlock,
   type InteractiveResponsePayload,
-  type OperationalCondition,
   type QueuedTurnSummary,
 } from "@falcondeck/client-core";
+import { useOperationalNoticeStore } from "@/store/operational-notice-store";
 import { useShallow } from "zustand/react/shallow";
 
 import {
@@ -163,9 +162,8 @@ export default function HomeScreen() {
   );
   const serviceNotices = useSessionStore((s) => s.snapshot?.service_notices);
   const extensionSnapshot = useSessionStore((s) => s.snapshot?.extensions);
-  const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
-    Set<string>
-  >(() => new Set());
+  const dismissedConditionVersions = useOperationalNoticeStore((s) => s.dismissed);
+  const dismissOperationalCondition = useOperationalNoticeStore((s) => s.dismiss);
   const operationalConditions = useMemo(
     () =>
       workspaceOperationalConditions(
@@ -180,18 +178,6 @@ export default function HomeScreen() {
       operationalConditionSource,
       serviceNotices,
     ],
-  );
-  const dismissOperationalCondition = useCallback(
-    (condition: OperationalCondition) => {
-      const dismissalKey = operationalConditionDismissalKey(condition);
-      setDismissedConditionVersions((current) => {
-        if (current.has(dismissalKey)) return current;
-        const next = new Set(current);
-        next.add(dismissalKey);
-        return next;
-      });
-    },
-    [],
   );
   const {
     connectionStatus,

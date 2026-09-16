@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Pressable, View } from "react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { AlertCircle, AlertTriangle, Info, X } from "lucide-react-native";
@@ -13,7 +13,7 @@ import { CodeBlock } from "./CodeBlock";
 
 interface OperationalNoticeBannerProps {
   conditions: readonly OperationalCondition[];
-  onDismiss: (condition: OperationalCondition) => void;
+  onDismiss: (condition: OperationalCondition, explicit?: boolean) => void;
 }
 
 export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
@@ -24,6 +24,30 @@ export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
   const [issuesOpen, setIssuesOpen] = useState(false);
   const { theme } = useUnistyles();
   const notice = conditions[0];
+  const currentNotice = useRef(notice);
+  currentNotice.current = notice;
+  // Keep real errors visible; retire environmental warnings after eight seconds.
+  // An open details panel stays put while the user reads it.
+  useEffect(() => {
+    if (
+      !currentNotice.current ||
+      currentNotice.current.level === "error" ||
+      detailOpen ||
+      issuesOpen
+    )
+      return;
+    const timer = setTimeout(() => {
+      if (currentNotice.current) onDismiss(currentNotice.current, false);
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [
+    notice?.id,
+    notice?.updated_at,
+    notice?.level,
+    onDismiss,
+    detailOpen,
+    issuesOpen,
+  ]);
   if (!notice) return null;
   const presentation = serviceMessagePresentation(notice.level, notice.message);
   const Icon =
@@ -115,7 +139,7 @@ export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
                         {issue.message}
                       </Text>
                       <Pressable
-                        onPress={() => onDismiss(condition)}
+                        onPress={() => onDismiss(condition, true)}
                         accessibilityRole="button"
                         accessibilityLabel={`Dismiss issue: ${issue.message}`}
                         hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}
@@ -133,7 +157,7 @@ export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
         ) : null}
       </View>
       <Pressable
-        onPress={() => onDismiss(notice)}
+        onPress={() => onDismiss(notice, true)}
         accessibilityRole="button"
         accessibilityLabel="Dismiss issue"
         hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}

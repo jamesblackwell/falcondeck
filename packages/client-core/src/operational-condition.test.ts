@@ -81,6 +81,11 @@ describe("operational conditions", () => {
       workspaceOperationalConditions([reported], [], "workspace-1", dismissed),
     ).toEqual([]);
 
+    const escalated = { ...reported, level: "error" as const };
+    expect(
+      workspaceOperationalConditions([escalated], [], "workspace-1", dismissed),
+    ).toEqual([escalated]);
+
     const reworded = { ...reported, message: `${reported.message} (new)` };
     expect(
       workspaceOperationalConditions([reworded], [], "workspace-1", dismissed),
