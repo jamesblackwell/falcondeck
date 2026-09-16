@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
+import {
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from "react-native";
 import { Redirect } from "expo-router";
 import { FlashList } from "@shopify/flash-list";
 import { StyleSheet } from "react-native-unistyles";
@@ -48,7 +52,9 @@ function QaBlockView({ block, settle }: { block: QaBlock; settle: boolean }) {
     return () => clearTimeout(timer);
   }, [block.id, settle]);
 
-  const lines = settled ? block.lines : Math.max(1, Math.round(block.lines / 3));
+  const lines = settled
+    ? block.lines
+    : Math.max(1, Math.round(block.lines / 3));
 
   return (
     <View style={styles.block}>
@@ -56,7 +62,10 @@ function QaBlockView({ block, settle }: { block: QaBlock; settle: boolean }) {
         {block.id}
       </Text>
       <Text variant="body">
-        {Array.from({ length: lines }, (_, line) => `line ${line} of ${block.id}`).join("\n")}
+        {Array.from(
+          { length: lines },
+          (_, line) => `line ${line} of ${block.id}`,
+        ).join("\n")}
       </Text>
     </View>
   );
@@ -66,6 +75,8 @@ export default function ScrollQaScreen() {
   const [blocks, setBlocks] = useState(() => buildBlocks(200));
   const [streaming, setStreaming] = useState(true);
   const [settle, setSettle] = useState(true);
+  const [resizeViewport, setResizeViewport] = useState(false);
+  const [activityVisible, setActivityVisible] = useState(false);
   const [offset, setOffset] = useState(0);
   const [contentHeight, setContentHeight] = useState(0);
   const [yanks, setYanks] = useState(0);
@@ -92,11 +103,21 @@ export default function ScrollQaScreen() {
 
   useEffect(() => {
     if (!streaming) return;
+    let tick = 0;
     const timer = setInterval(() => {
-      setBlocks((current) => [
-        ...current,
-        ...buildBlocks(1, current.length + 1000),
-      ]);
+      tick += 1;
+      // Exercise token growth AND tool/markdown collapse within the same row,
+      // not just appends. Shrinking content used to masquerade as a downward drag.
+      setBlocks((current) =>
+        tick % 4 === 0
+          ? [...current, ...buildBlocks(1, current.length + 1000)]
+          : current.map((block, index) =>
+              index === current.length - 1
+                ? { ...block, lines: tick % 4 === 3 ? 2 : 20 + (tick % 4) * 5 }
+                : block,
+            ),
+      );
+      setActivityVisible(tick % 2 === 0);
     }, 900);
     return () => clearInterval(timer);
   }, [streaming]);
@@ -137,7 +158,9 @@ export default function ScrollQaScreen() {
   );
 
   const renderItem = useCallback(
-    ({ item }: { item: QaBlock }) => <QaBlockView block={item} settle={settle} />,
+    ({ item }: { item: QaBlock }) => (
+      <QaBlockView block={item} settle={settle} />
+    ),
     [settle],
   );
 
@@ -186,6 +209,12 @@ export default function ScrollQaScreen() {
           <Button
             variant="ghost"
             size="sm"
+            label={resizeViewport ? "Fixed viewport" : "Resize viewport"}
+            onPress={() => setResizeViewport((current) => !current)}
+          />
+          <Button
+            variant="ghost"
+            size="sm"
             label="Reset"
             onPress={() => {
               setYanks(0);
@@ -222,12 +251,22 @@ export default function ScrollQaScreen() {
           contentContainerStyle={styles.listContent}
           ListHeaderComponent={
             <View style={styles.loadOlderContainer}>
-              <Button variant="ghost" size="sm" label="Load older messages" onPress={() => {}} />
+              <Button
+                variant="ghost"
+                size="sm"
+                label="Load older messages"
+                onPress={() => {}}
+              />
             </View>
           }
           ListFooterComponent={<View style={styles.listBottomSpacer} />}
         />
       </View>
+      {resizeViewport && activityVisible ? (
+        <View style={{ height: 120 }}>
+          <Text variant="caption">Simulated live activity lane</Text>
+        </View>
+      ) : null}
       {showJumpButton ? (
         <Button
           variant="ghost"

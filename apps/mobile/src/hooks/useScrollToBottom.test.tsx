@@ -36,7 +36,9 @@ function renderHook() {
     getNativeScrollRef: () => ({ scrollToEnd: nativeScrollToEnd }),
   } as any
   return {
-    get value() { return value! },
+    get value() {
+      return value!
+    },
     scrollToEnd,
     nativeScrollToEnd,
     scrollToOffset,
@@ -98,18 +100,19 @@ describe('useScrollToBottom', () => {
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
-  it('falls back to FlashList.scrollToEnd when the native scroller is missing', () => {
+  it('waits for the native scroller instead of queuing uncancellable FlashList work', () => {
     const hook = renderHook()
     hook.value.listRef.current = {
       scrollToEnd: hook.scrollToEnd,
       scrollToOffset: hook.scrollToOffset,
+      getNativeScrollRef: () => null,
     } as any
 
     act(() => {
       hook.value.onContentSizeChange()
     })
 
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: false })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
   it('cancels an in-flight glide the moment a drag starts', () => {
@@ -118,17 +121,20 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.scrollToBottom()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: true })
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(420))
     })
-    expect(hook.scrollToOffset).toHaveBeenCalledWith({ offset: 420, animated: false })
+    expect(hook.scrollToOffset).toHaveBeenCalledWith({
+      offset: 420,
+      animated: false,
+    })
 
     act(() => {
       hook.value.onContentSizeChange()
     })
-    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
   })
 
   it('stops pinning the moment a drag starts, however much content arrives', () => {
@@ -177,17 +183,20 @@ describe('useScrollToBottom', () => {
     expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
-  it.each([4, 8])('keeps a %ipx upward peek detached through momentum and refresh', (peek) => {
-    const hook = renderHook()
-    act(() => {
-      hook.value.onScrollBeginDrag(scrollEvent(500))
-      hook.value.onScrollEndDrag(scrollEvent(500 - peek))
-      hook.value.onContentSizeChange()
-      hook.value.onMomentumScrollEnd(scrollEvent(480))
-      hook.value.scrollToBottomIfFollowing(false)
-    })
-    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
-  })
+  it.each([4, 8])(
+    'keeps a %ipx upward peek detached through momentum and refresh',
+    (peek) => {
+      const hook = renderHook()
+      act(() => {
+        hook.value.onScrollBeginDrag(scrollEvent(500))
+        hook.value.onScrollEndDrag(scrollEvent(500 - peek))
+        hook.value.onContentSizeChange()
+        hook.value.onMomentumScrollEnd(scrollEvent(480))
+        hook.value.scrollToBottomIfFollowing(false)
+      })
+      expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+    },
+  )
 
   it('does not re-arm before an upward fling whose release has not moved yet', () => {
     const hook = renderHook()
@@ -201,12 +210,12 @@ describe('useScrollToBottom', () => {
     expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
 
-  it('resumes following when a drag ends near the bottom without pulling up', () => {
+  it('resumes following when a drag reaches the bottom without pulling up', () => {
     const hook = renderHook()
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(300))
-      hook.value.onScrollEndDrag(scrollEvent(490))
+      hook.value.onScrollEndDrag(scrollEvent(500))
     })
 
     // Re-arm the flag only — do not animate shut the leftover gap.
@@ -234,7 +243,7 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(100))
       hook.value.onScrollEndDrag(scrollEvent(200))
-      hook.value.onMomentumScrollEnd(scrollEvent(495))
+      hook.value.onMomentumScrollEnd(scrollEvent(500))
     })
 
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
@@ -268,8 +277,8 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.onContentSizeChange()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
-    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(2)
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(500))
@@ -278,7 +287,7 @@ describe('useScrollToBottom', () => {
       hook.value.resetScrollState()
       hook.value.onContentSizeChange()
     })
-    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(2)
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(3)
   })
 
   it('forgets the old gesture after an explicit jump to the bottom', () => {
@@ -307,13 +316,13 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.scrollToBottomIfNear()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: true })
 
     // Re-armed: streamed content keeps pinning instantly, not as a glide.
     act(() => {
       hook.value.onContentSizeChange()
     })
-    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
     expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
   })
 
@@ -415,5 +424,102 @@ describe('useScrollToBottom', () => {
       hook.value.onContentSizeChange()
     })
     expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+  it('does not mistake shrinking content during a read-back for a return to the tail', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(460))
+      // No intermediate onScroll: FlashList can suppress it during anchoring.
+      // User moved UP 20px, but content shrank 60px: the gap falls 40 -> 0.
+      hook.value.onScrollEndDrag(scrollEvent(440, 940))
+      hook.value.onContentSizeChange()
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('does not infer a downward gesture from a viewport resize', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(400))
+      hook.value.onScrollEndDrag(scrollEvent(380, 1000, 620))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('does not re-arm at release before an upward reversal decelerates', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(400))
+      const release = scrollEvent(500)
+      release.nativeEvent.velocity = { x: 0, y: -0.4 }
+      hook.value.onScrollEndDrag(release)
+      hook.value.onContentSizeChange()
+      hook.value.onMomentumScrollEnd(scrollEvent(300))
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('leaves a small reading gap detached even after a downward drag', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(300))
+      hook.value.onScrollEndDrag(scrollEvent(490))
+      hook.value.onMomentumScrollEnd(scrollEvent(490))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('follows a deliberate downward fling through streaming only after it settles at the tail', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(300))
+      const release = scrollEvent(600, 1100)
+      release.nativeEvent.velocity = { x: 0, y: 0.5 }
+      hook.value.onScrollEndDrag(release)
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+    act(() => {
+      hook.value.onMomentumScrollEnd(scrollEvent(700, 1200))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not treat a layout change during momentum as a deliberate arrival', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(300))
+      hook.value.onScrollEndDrag(scrollEvent(400))
+      hook.value.onMomentumScrollEnd(scrollEvent(400, 900))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('never queues a delayed FlashList end scroll that can fire over a later drag', () => {
+    vi.useFakeTimers()
+    try {
+      const hook = renderHook()
+      hook.scrollToEnd.mockImplementation(() => {
+        setTimeout(() => hook.nativeScrollToEnd({ animated: true }), 300)
+      })
+      act(() => {
+        hook.value.scrollToBottom()
+        hook.value.onScrollBeginDrag(scrollEvent(450))
+      })
+      hook.nativeScrollToEnd.mockClear()
+      act(() => {
+        vi.runAllTimers()
+      })
+      expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+      expect(hook.scrollToEnd).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
