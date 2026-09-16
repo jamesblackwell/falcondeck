@@ -1,6 +1,10 @@
 import { useCallback, useRef, useState } from 'react'
 import type { FlashListRef } from '@shopify/flash-list'
-import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native'
+import {
+  Platform,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from 'react-native'
 
 const SHOW_JUMP_OFFSET = 200
 const RESUME_FOLLOW_OFFSET = 1
@@ -133,7 +137,11 @@ export function useScrollToBottom<T>() {
       const drag = observeDrag(event)
       fingerDownRef.current = false
       if (!drag) return
-      const velocity = event.nativeEvent.velocity?.y ?? 0
+      // iOS reports content velocity; Android's VelocityHelper reports finger
+      // velocity. Normalize so positive always means toward newer messages.
+      const nativeVelocity = event.nativeEvent.velocity?.y ?? 0
+      const velocity =
+        Platform.OS === 'android' ? -nativeVelocity : nativeVelocity
       drag.releaseVelocity = velocity
       if (velocity < 0) drag.readBack = true
       drag.releasedTowardBottom =

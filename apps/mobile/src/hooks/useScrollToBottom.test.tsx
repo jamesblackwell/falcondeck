@@ -1,4 +1,5 @@
 import React from 'react'
+import { Platform } from 'react-native'
 import { act } from 'react-test-renderer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -522,4 +523,42 @@ describe('useScrollToBottom', () => {
       vi.useRealTimers()
     }
   })
+  it.each([
+    { platform: 'ios', upward: -0.4, downward: 0.4 },
+    { platform: 'android', upward: 0.4, downward: -0.4 },
+  ] as const)(
+    'uses $platform release velocity in the content direction',
+    ({ platform, upward, downward }) => {
+      const previous = Platform.OS
+      Platform.OS = platform
+      try {
+        const hook = renderHook()
+        act(() => {
+          hook.value.onScrollBeginDrag(scrollEvent(400))
+          const release = scrollEvent(500)
+          release.nativeEvent.velocity = { x: 0, y: upward }
+          hook.value.onScrollEndDrag(release)
+          hook.value.onContentSizeChange()
+          hook.value.onMomentumScrollEnd(scrollEvent(500))
+          hook.value.onContentSizeChange()
+        })
+        expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+        act(() => {
+          hook.value.onScrollBeginDrag(scrollEvent(300))
+          const release = scrollEvent(600, 1100)
+          release.nativeEvent.velocity = { x: 0, y: downward }
+          hook.value.onScrollEndDrag(release)
+          hook.value.onContentSizeChange()
+        })
+        expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+        act(() => {
+          hook.value.onMomentumScrollEnd(scrollEvent(700, 1200))
+          hook.value.onContentSizeChange()
+        })
+        expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
+      } finally {
+        Platform.OS = previous
+      }
+    },
+  )
 })
