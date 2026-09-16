@@ -2026,7 +2026,8 @@ pub(crate) fn sanitize_codex_preview(text: &str) -> Option<String> {
         return None;
     }
     if !is_codex_attachment_manifest(trimmed) {
-        return Some(trimmed.to_string());
+        let plain = plain_text_preview(trimmed);
+        return (!plain.is_empty()).then_some(plain);
     }
     let heading = trimmed.find("## My request")?;
     let colon = trimmed[heading..].find(':')? + heading;
@@ -2034,7 +2035,109 @@ pub(crate) fn sanitize_codex_preview(text: &str) -> Option<String> {
     if body.is_empty() || is_codex_attachment_manifest(body) {
         return None;
     }
-    Some(collapse_whitespace(body))
+    let plain = collapse_whitespace(&plain_text_preview(body));
+    (!plain.is_empty()).then_some(plain)
+}
+
+/// Codex Desktop's composer serialises prompts as markdown: trailing spaces
+/// become `&#x20;`, apostrophes `&#39;`, and pasted URLs `[url](url)`. Those
+/// are fine inside a rendered transcript but garbage in a plain-text title,
+/// so decode character references and unwrap links before previewing.
+pub(crate) fn plain_text_preview(text: &str) -> String {
+    let unlinked = unwrap_markdown_links(text);
+    decode_character_references(&unlinked).trim().to_string()
+}
+
+fn unwrap_markdown_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let Some((label, after_label)) = split_markdown_link(&rest[open..]) else {
+            out.push_str(&rest[..open + 1]);
+            rest = &rest[open + 1..];
+            continue;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(label);
+        rest = after_label;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Splits `[label](target)` at the start of `text` into the label and the
+/// remainder after the closing paren. Labels and targets stay single-line and
+/// unnested so prose brackets are left alone.
+fn split_markdown_link(text: &str) -> Option<(&str, &str)> {
+    let body = text.strip_prefix('[')?;
+    let close = body.find(']')?;
+    let label = &body[..close];
+    if label.contains(['[', '\n']) {
+        return None;
+    }
+    let after_label = body[close + 1..].strip_prefix('(')?;
+    let end = after_label.find(')')?;
+    let target = &after_label[..end];
+    if target.is_empty() || target.contains(char::is_whitespace) {
+        return None;
+    }
+    let label = if label.trim().is_empty() {
+        target
+    } else {
+        label
+    };
+    Some((label, &after_label[end + 1..]))
+}
+
+fn decode_character_references(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let candidate = &rest[amp..];
+        match decode_character_reference(candidate) {
+            Some((decoded, len)) => {
+                out.push_str(&decoded);
+                rest = &candidate[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &candidate[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Decodes one reference at the start of `text`, returning the replacement
+/// and the number of bytes consumed. Only the entities markdown serialisers
+/// actually emit are named; numeric forms cover the rest.
+fn decode_character_reference(text: &str) -> Option<(String, usize)> {
+    let body = text.strip_prefix('&')?;
+    let semi = body.find(';')?;
+    let name = &body[..semi];
+    if name.is_empty() || name.len() > 10 {
+        return None;
+    }
+    let consumed = semi + 2;
+    let decoded = if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+        char::from_u32(u32::from_str_radix(hex, 16).ok()?)?.to_string()
+    } else if let Some(dec) = name.strip_prefix('#') {
+        char::from_u32(dec.parse().ok()?)?.to_string()
+    } else {
+        match name {
+            "amp" => "&",
+            "lt" => "<",
+            "gt" => ">",
+            "quot" => "\"",
+            "apos" => "'",
+            "nbsp" => " ",
+            _ => return None,
+        }
+        .to_string()
+    };
+    Some((decoded, consumed))
 }
 
 fn collapse_whitespace(text: &str) -> String {
@@ -2778,6 +2881,36 @@ mod tests {
                 "# Files pasted by the user:\n\n## \"# Handoff ## Goal Prepare a campaign\": /tmp/pasted-text.txt\n\nPasted text contains the user's request.\n\n## My request:\n"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn sanitize_codex_preview_decodes_codex_desktop_markdown() {
+        assert_eq!(
+            sanitize_codex_preview("&#x20;see email &#x20; in gmail&#x20;").as_deref(),
+            Some("see email   in gmail")
+        );
+        assert_eq!(
+            sanitize_codex_preview(
+                "don&#39;t &amp; won&#x27;t &lt;b&gt; &quot;hi&quot; &bogus; A&B"
+            )
+            .as_deref(),
+            Some("don't & won't <b> \"hi\" &bogus; A&B")
+        );
+        assert_eq!(
+            sanitize_codex_preview(
+                "[https://lucidpic.com/studio](https://lucidpic.com/studio)&#x20; change the [banner](https://x.y/z) [not a link] (either)"
+            )
+            .as_deref(),
+            Some("https://lucidpic.com/studio  change the banner [not a link] (either)")
+        );
+        assert_eq!(sanitize_codex_preview("&#x20;"), None);
+        assert_eq!(
+            sanitize_codex_preview(
+                "# Files mentioned by the user:\n\n## clip.png: /tmp/clip.png\n\n## My request:\nship it&#x20;"
+            )
+            .as_deref(),
+            Some("ship it")
         );
     }
 

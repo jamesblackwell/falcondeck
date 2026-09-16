@@ -787,9 +787,11 @@ fn restore_persisted_title_state(
             .as_deref()
             .is_some_and(|title| !is_placeholder_thread_title(title));
     if (state.manual_title || persisted_generated_title)
-        && let Some(title) = state.title.clone()
+        && let Some(title) = state.title.as_deref()
     {
-        managed.summary.title = title;
+        // Titles persisted before previews were decoded can still carry
+        // Codex Desktop's markdown escapes.
+        managed.summary.title = crate::codex::plain_text_preview(title);
     }
     managed.ai_title_generated = state.manual_title
         || persisted_generated_title
