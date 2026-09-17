@@ -7,6 +7,16 @@ listing, so the two never drift.
 Field limits: name 30, subtitle 30, promotional text 170, keywords 100,
 description 4000.
 
+## September 17 review build
+
+Build 100 uses the successful Build 98 source (`8838084`) plus the reviewed
+Now Playing fix (`28d5987`), combined as `e4c679a` in the isolated release
+checkout. EAS build: `8e6fadce-913f-4efe-a921-f6ba312aeb95`.
+Typecheck and all 1,154 mobile tests passed for that exact source.
+Build 99 failed because a later pairing-link change requires an Associated
+Domains provisioning entitlement absent from the stored profile. That unrelated
+change is deferred; the main checkout and existing pairing flows are unchanged.
+
 ## Name and subtitle
 
 **Name:** `FalconDeck`
