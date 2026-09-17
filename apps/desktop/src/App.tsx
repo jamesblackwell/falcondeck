@@ -462,6 +462,13 @@ function AppInner() {
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerState>(() => readPersistedComposerState());
   const [isAddingProject, setIsAddingProject] = useState(false);
+  // Folders added this session, kept until their first connect settles. The
+  // daemon publishes a fresh add and a post-restart restore as the same
+  // connecting placeholder, so this is the only way to avoid greeting a brand
+  // new project with "Reconnecting".
+  const [firstConnectWorkspaceIds, setFirstConnectWorkspaceIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [isImportingProjectSessions, setIsImportingProjectSessions] =
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
@@ -2547,6 +2554,9 @@ function AppInner() {
       }
       setIsImportingProjectSessions(true);
       const workspace = await api.connectWorkspace(path);
+      if (workspace.status === "connecting") {
+        setFirstConnectWorkspaceIds((ids) => new Set(ids).add(workspace.id));
+      }
       const nextSnapshot = await api.snapshot();
       setSnapshot(nextSnapshot);
       setSelectedWorkspaceId(workspace.id);
@@ -2831,8 +2841,9 @@ function AppInner() {
       submittedAttachments,
     );
     const blockReason =
-      workspaceSendBlockReason(selectedWorkspace, activeProvider) ??
-      imageBlockReason;
+      workspaceSendBlockReason(selectedWorkspace, activeProvider, {
+        firstConnect: firstConnectWorkspaceIds.has(selectedWorkspace.id),
+      }) ?? imageBlockReason;
     if (blockReason) {
       setActionError(blockReason);
       toast({
@@ -4869,6 +4880,7 @@ function AppInner() {
       const blockReason = workspaceSendBlockReason(
         workspace,
         providerForThread(null, workspace),
+        { firstConnect: firstConnectWorkspaceIds.has(workspace.id) },
       );
       if (blockReason) throw new Error(blockReason);
 
@@ -5337,6 +5349,11 @@ function AppInner() {
   const sendBlockReason = workspaceSendBlockReason(
     selectedWorkspace,
     activeProvider,
+    {
+      firstConnect: selectedWorkspace
+        ? firstConnectWorkspaceIds.has(selectedWorkspace.id)
+        : false,
+    },
   );
   const attachmentSendBlockReason = imageAttachmentSendBlockReason(
     activeCapabilities,
@@ -5386,6 +5403,22 @@ function AppInner() {
     () => viewSnapshot?.workspaces ?? [],
     [viewSnapshot?.workspaces],
   );
+  // Once a fresh add finishes booting (or is removed), a later drop really is
+  // a reconnect again.
+  useEffect(() => {
+    if (firstConnectWorkspaceIds.size === 0) return;
+    const stillBooting = new Set(
+      workspaces
+        .filter(
+          (workspace) =>
+            workspace.status === "connecting" &&
+            firstConnectWorkspaceIds.has(workspace.id),
+        )
+        .map((workspace) => workspace.id),
+    );
+    if (stillBooting.size === firstConnectWorkspaceIds.size) return;
+    setFirstConnectWorkspaceIds(stillBooting);
+  }, [firstConnectWorkspaceIds, workspaces]);
   const effectivePreferences = useMemo(
     () =>
       preferencesWithThinkingDisplay(
@@ -6275,6 +6308,12 @@ function AppInner() {
                 sendDisabledReason: selectedWorkspace
                   ? (attachmentSendBlockReason ?? sendBlockReason ?? undefined)
                   : undefined,
+                // A project still booting is an expected wait, not a warning.
+                sendDisabledReasonTone:
+                  !attachmentSendBlockReason &&
+                  selectedWorkspace?.status === "connecting"
+                    ? "muted"
+                    : "warning",
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.

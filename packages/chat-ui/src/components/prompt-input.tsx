@@ -206,6 +206,11 @@ export type PromptInputProps = {
   /** Visible explanation when content exists but the host cannot send it. */
   sendDisabledReason?: string;
   /**
+   * Expected, self-resolving waits (a project still booting) read as quiet
+   * status; anything the user must act on keeps the warning tone.
+   */
+  sendDisabledReasonTone?: "warning" | "muted";
+  /**
    * Standing note above the footer, such as a handoff whose source
    * conversation rides along with the next message. Not dismissable.
    */
@@ -315,6 +320,7 @@ export const PromptInput = memo(function PromptInput({
   disabled = false,
   sendDisabled = false,
   sendDisabledReason,
+  sendDisabledReasonTone = "warning",
   contextNotice,
   isRunning = false,
   isStopping = false,
@@ -1125,7 +1131,12 @@ export const PromptInput = memo(function PromptInput({
                 id={`${textareaId}-send-status`}
                 role="status"
                 aria-live="polite"
-                className="px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning"
+                className={cn(
+                  "px-4 pb-2 text-[length:var(--fd-text-xs)]",
+                  sendDisabledReasonTone === "muted"
+                    ? "text-muted-foreground"
+                    : "text-warning",
+                )}
               >
                 {sendDisabledReason}
               </p>

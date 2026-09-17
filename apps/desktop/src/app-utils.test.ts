@@ -95,6 +95,19 @@ describe('workspaceSendBlockReason', () => {
     ).toBe('Reconnecting to alpha. You can keep drafting while it reconnects.')
   })
 
+  it('calls a freshly added project a first connect, not a reconnect', () => {
+    expect(
+      workspaceSendBlockReason(
+        workspace({
+          status: 'connecting',
+          path: '/Users/james/marketing-data',
+        }),
+        'codex',
+        { firstConnect: true },
+      ),
+    ).toBe('Connecting to marketing-data. You can keep drafting while it starts.')
+  })
+
   it('lets a lazy ACP catalog send while the rest of the project is still reconnecting', () => {
     expect(
       workspaceSendBlockReason(
