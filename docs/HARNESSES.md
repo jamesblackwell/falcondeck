@@ -204,6 +204,12 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
 
 ## Client notes
 
+- ACP adapters without an advertised permission catalog (including Pi and
+  custom Pi-based harnesses) receive daemon-enforced `always-approve` and
+  `default` choices. Threads without a saved choice default to full access
+  before the next prompt; `default` explicitly keeps approval prompts enabled.
+  Provider-advertised catalogs and saved thread choices take precedence.
+
 - Settings offers **Upgrade all** for installed managed harnesses on the
   selected host. It runs jobs sequentially, skips confirmed current versions,
   includes unknown latest versions, and continues after an individual failure.

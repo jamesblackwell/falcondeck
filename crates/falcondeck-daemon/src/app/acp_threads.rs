@@ -3062,4 +3062,15 @@ mod tests {
         let modes = crate::acp::cursor_placeholder_permission_modes();
         assert_eq!(default_acp_mode(&modes), Some("always-approve"));
     }
+
+    #[test]
+    fn adapters_without_permission_catalogs_default_to_full_access() {
+        for provider in ["pi", "myharness", "custom-acp"] {
+            let modes = crate::acp::placeholder_permission_modes_for(provider);
+            let default = default_acp_mode(&modes).expect("a default permission mode");
+            assert!(crate::acp::is_blanket_approval_mode(default));
+            assert!(modes.iter().any(|mode| mode == "default"));
+            assert!(!crate::acp::is_blanket_approval_mode("default"));
+        }
+    }
 }

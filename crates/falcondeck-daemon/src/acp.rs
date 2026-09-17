@@ -121,15 +121,14 @@ pub fn cursor_placeholder_collaboration_modes() -> Vec<CollaborationModeSummary>
         .collect()
 }
 
-/// Pre-handshake permission list for adapters that do not publish one on
-/// `session/new`. Empty means the composer hides the picker.
+/// Fallback permission list for adapters that do not publish one on
+/// `session/new`, including Pi and custom adapters. These modes are enforced
+/// by the daemon; an advertised provider catalog takes precedence.
 pub fn placeholder_permission_modes_for(provider: &str) -> Vec<String> {
     if provider.eq_ignore_ascii_case("grok") {
         grok_placeholder_permission_modes()
-    } else if provider.eq_ignore_ascii_case("cursor") {
-        cursor_placeholder_permission_modes()
     } else {
-        Vec::new()
+        vec!["always-approve".to_string(), "default".to_string()]
     }
 }
 
@@ -4558,6 +4557,37 @@ mod tests {
             .await
             .expect("fixture should initialize");
         (runtime, receiver)
+    }
+
+    #[tokio::test]
+    async fn permission_catalog_falls_back_until_provider_advertises_one() {
+        let (runtime, _events) = fixture_runtime("startup-banner").await;
+        runtime
+            .capture_session_metadata("session", &json!({}))
+            .await;
+        assert_eq!(
+            runtime.capability_summary().await.permission_modes,
+            vec!["always-approve", "default"]
+        );
+        runtime
+            .capture_session_metadata(
+                "session",
+                &json!({
+                    "configOptions": [{
+                        "id": "permissions",
+                        "category": "permission",
+                        "type": "select",
+                        "currentValue": "ask",
+                        "options": [{ "value": "ask", "name": "Ask" }]
+                    }]
+                }),
+            )
+            .await;
+        assert_eq!(
+            runtime.capability_summary().await.permission_modes,
+            vec!["ask"]
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
