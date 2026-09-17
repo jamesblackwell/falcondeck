@@ -84,6 +84,13 @@ written and keep the demo steps accurate against the shipped build.
 ```
 HOW TO REVIEW THE APP
 
+SEPTEMBER 2026 REVIEW FOLLOW-UP
+- Guideline 2.3.3: The 13-inch iPad screenshots now show the native app in use: project activity, a conversation, and test results, rather than the welcome screen.
+- Guideline 5: China mainland is excluded from distribution.
+- Guideline 2.5.4: Read Aloud plays assistant responses and continues when the app is backgrounded. The attached physical-iPhone recording, "ScreenRecording_09-17-2026 13-44-45_1.mov", shows playback followed by navigation to the Home Screen with the iOS playback indicator visible. This is user-initiated audible playback, not background agent execution.
+
+To test Read Aloud without a Mac: open "Explore demo workspace", open "Add user authentication", scroll to a long assistant response, and tap the speaker icon below it. Return to the Home Screen while it is speaking. Demo conversation responses are simulated, but Read Aloud uses real on-device speech playback. The attached recording shows a paired session; the demo provides a no-pairing route to test playback.
+
 FalconDeck includes a fully interactive built-in demo workspace. It requires
 no sign-in, pairing, desktop setup, or network connection:
 
@@ -160,10 +167,13 @@ They are PNG, opaque, and exactly 1290 x 2796 pixels: an accepted 6.9-inch
 portrait target. App Store Connect scales this required size for smaller
 iPhones, so we do not need a separate set for every iPhone model.
 
-FalconDeck currently supports iPad, so App Store Connect also requires at
-least one 13-inch iPad screenshot. The truthful native iPad pairing and demo
-entry capture is `docs/app-store-assets/ipad-13/01-demo-entry.jpg`, at the
-required 2064 x 2752 pixels. More iPad screenshots are optional.
+FalconDeck supports iPad. Following the September 9 rejection, the 13-inch
+set uses three actual-use captures at 2064 x 2752 pixels:
+`02-workspace-conversation.png`, `03-test-results.png`, and
+`04-project-activity.png` in `docs/app-store-assets/ipad-13/`.
+The old `01-demo-entry.jpg` is retained locally but removed from the listing.
+These genuine iPad captures retain the demo indicator; do not fabricate live
+session content or obscure UI to imply functionality the app does not provide.
 
 Apple allows one to ten JPEG or PNG screenshots per device family and does not
 allow alpha/transparency. Review all generated compositions against the
