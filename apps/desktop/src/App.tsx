@@ -1,3 +1,4 @@
+import { ExternalLinkHandler } from "./external-links";
 import {
   lazy,
   Suspense,
@@ -301,6 +302,7 @@ function prefetchTerminalChrome() {
 export default function App() {
   return (
     <ToastProvider>
+      <ExternalLinkHandler />
       <TooltipProvider>
         <AppInner />
       </TooltipProvider>

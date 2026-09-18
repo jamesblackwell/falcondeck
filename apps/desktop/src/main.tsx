@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client'
 import { initAppearance } from '@falcondeck/ui'
 import './index.css'
 import App from './App.tsx'
-import { installExternalLinkHandler } from './external-links'
 import { initNativeWindowChrome } from './native-window-chrome'
 
 // Theme + font preferences must land on <html> before first paint.
@@ -11,10 +10,6 @@ initAppearance()
 
 // Keep the native window frame (corner mask, top hairline) in the app's colors.
 initNativeWindowChrome()
-
-// Markdown / settings / pairing links must leave the Tauri webview and open
-// in the system browser. target="_blank" alone is a no-op in WKWebView.
-installExternalLinkHandler()
 
 // Cmd+/- zoom support (persisted across sessions)
 const ZOOM_KEY = 'fd-zoom-level'

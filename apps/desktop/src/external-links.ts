@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+import { useToast } from '@falcondeck/ui'
 import { openExternalUrl } from './api'
 
 /** Schemes that should leave the app and open in the OS default handler. */
@@ -62,13 +64,18 @@ function shouldHandleClick(event: MouseEvent): boolean {
   return true
 }
 
-type ExternalOpenFailure = {
-  status: HTMLSpanElement
-  previousDescribedBy: string | null
-  previousTitle: string | null
+/** Own link feedback outside the message markup. */
+export function ExternalLinkHandler() {
+  const { toast } = useToast()
+  useEffect(() => installExternalLinkHandler(openExternalUrl, () => {
+    toast({
+      variant: 'danger',
+      title: 'Couldn’t open link',
+      description: 'Try again or copy the link into your browser.',
+    })
+  }), [toast])
+  return null
 }
-
-let externalOpenStatusId = 0
 
 /**
  * Install a capture-phase click interceptor so markdown and other `<a href>`
@@ -81,66 +88,10 @@ let externalOpenStatusId = 0
  */
 export function installExternalLinkHandler(
   openUrl: (url: string) => Promise<void> = openExternalUrl,
+  onError: () => void = () => {},
 ): () => void {
-  const failures = new WeakMap<HTMLAnchorElement, ExternalOpenFailure>()
+  let installed = true
   const requestVersions = new WeakMap<HTMLAnchorElement, number>()
-  const failedAnchors = new Set<HTMLAnchorElement>()
-
-  const clearFailure = (anchor: HTMLAnchorElement) => {
-    const failure = failures.get(anchor)
-    if (!failure) return
-    failure.status.remove()
-    if (failure.previousDescribedBy) {
-      anchor.setAttribute('aria-describedby', failure.previousDescribedBy)
-    } else {
-      anchor.removeAttribute('aria-describedby')
-    }
-    if (failure.previousTitle) {
-      anchor.setAttribute('title', failure.previousTitle)
-    } else {
-      anchor.removeAttribute('title')
-    }
-    failures.delete(anchor)
-    failedAnchors.delete(anchor)
-  }
-
-  const showStatus = (
-    anchor: HTMLAnchorElement,
-    message: string,
-    state: 'failed' | 'retrying',
-  ) => {
-    if (!anchor.isConnected) return
-    let failure = failures.get(anchor)
-    if (!failure) {
-      const status = document.createElement('span')
-      externalOpenStatusId += 1
-      status.id = `fd-external-open-status-${externalOpenStatusId}`
-      status.setAttribute('role', 'status')
-      status.setAttribute('aria-live', 'polite')
-      status.setAttribute('aria-atomic', 'true')
-      status.className =
-        'ml-2 inline-flex rounded-[var(--fd-radius-sm)] bg-danger/10 px-1.5 py-0.5 text-[length:var(--fd-text-xs)] leading-tight text-danger'
-      failure = {
-        status,
-        previousDescribedBy: anchor.getAttribute('aria-describedby'),
-        previousTitle: anchor.getAttribute('title'),
-      }
-      failures.set(anchor, failure)
-      failedAnchors.add(anchor)
-    }
-    if (!failure.status.isConnected) {
-      anchor.insertAdjacentElement('afterend', failure.status)
-    }
-    failure.status.dataset.externalOpenStatus = state
-    failure.status.textContent = message
-    anchor.setAttribute(
-      'aria-describedby',
-      [failure.previousDescribedBy, failure.status.id]
-        .filter(Boolean)
-        .join(' '),
-    )
-    anchor.setAttribute('title', 'Retry opening external link')
-  }
 
   const handle = (event: MouseEvent) => {
     if (!shouldHandleClick(event)) return
@@ -159,21 +110,17 @@ export function installExternalLinkHandler(
 
     const requestVersion = (requestVersions.get(anchor) ?? 0) + 1
     requestVersions.set(anchor, requestVersion)
-    if (failures.has(anchor)) {
-      showStatus(anchor, 'Opening link again…', 'retrying')
+    const reportFailure = (error: unknown) => {
+      if (!installed || requestVersions.get(anchor) !== requestVersion) return
+      console.error('Failed to open external URL', external, error)
+      onError()
     }
-
-    void Promise.resolve()
-      .then(() => openUrl(external))
-      .then(() => {
-        if (requestVersions.get(anchor) !== requestVersion) return
-        clearFailure(anchor)
-      })
-      .catch((error) => {
-        if (requestVersions.get(anchor) !== requestVersion) return
-        console.error('Failed to open external URL', external, error)
-        showStatus(anchor, 'Could not open link. Select it to retry.', 'failed')
-      })
+    // Preserve the browser's user activation for window.open.
+    try {
+      void openUrl(external).catch(reportFailure)
+    } catch (error) {
+      reportFailure(error)
+    }
   }
 
   document.addEventListener('click', handle, true)
@@ -182,6 +129,6 @@ export function installExternalLinkHandler(
   return () => {
     document.removeEventListener('click', handle, true)
     document.removeEventListener('auxclick', handle, true)
-    for (const anchor of failedAnchors) clearFailure(anchor)
+    installed = false
   }
 }

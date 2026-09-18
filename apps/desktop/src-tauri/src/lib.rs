@@ -641,7 +641,7 @@ fn is_safe_external_url(url: &str) -> bool {
         return false;
     };
     match parsed.scheme() {
-        "https" => {
+        "http" | "https" => {
             parsed.host_str().is_some()
                 && parsed.username().is_empty()
                 && parsed.password().is_none()
@@ -712,7 +712,7 @@ fn delete_host_session_secret(host_id: String) -> Result<(), String> {
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     if !is_safe_external_url(&url) {
-        return Err("FalconDeck can only open https, mailto, or tel links.".to_string());
+        return Err("FalconDeck can only open http, https, mailto, or tel links.".to_string());
     }
 
     open::that_detached(url).map_err(|error| error.to_string())
@@ -1617,7 +1617,10 @@ mod tests {
     #[test]
     fn external_url_validation_parses_exact_safe_schemes() {
         assert!(is_safe_external_url("https://falcondeck.com/docs"));
-        assert!(!is_safe_external_url("http://127.0.0.1:4520/api/health"));
+        assert!(is_safe_external_url("http://127.0.0.1:4520/api/health"));
+        assert!(is_safe_external_url("http://localhost:5173"));
+        assert!(is_safe_external_url("http://192.168.1.20:5173"));
+        assert!(!is_safe_external_url("http://user:secret@example.com"));
         assert!(is_safe_external_url("mailto:security@falcondeck.com"));
         assert!(is_safe_external_url("tel:+44-20-1234-5678"));
         assert!(!is_safe_external_url("https://user:secret@example.com"));

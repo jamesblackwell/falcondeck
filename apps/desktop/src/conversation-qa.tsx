@@ -21,9 +21,9 @@ import {
   type ToolActivityKind,
   type ToolLifecycle,
 } from "@falcondeck/client-core";
-import { ActivityDiamond, Button, initAppearance } from "@falcondeck/ui";
+import { ActivityDiamond, Button, initAppearance, ToastProvider } from "@falcondeck/ui";
 
-import { installExternalLinkHandler } from "./external-links";
+import { ExternalLinkHandler } from "./external-links";
 
 import "./index.css";
 
@@ -2184,9 +2184,11 @@ const qaTheme = new URLSearchParams(window.location.search).get("theme");
 if (qaTheme) document.documentElement.dataset.theme = qaTheme;
 const qaPalette = new URLSearchParams(window.location.search).get("palette");
 if (qaPalette) document.documentElement.dataset.palette = qaPalette;
-installExternalLinkHandler();
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <ConversationQa />
+    <ToastProvider>
+      <ExternalLinkHandler />
+      <ConversationQa />
+    </ToastProvider>
   </StrictMode>,
 );

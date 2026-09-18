@@ -1,6 +1,11 @@
+import { createElement } from 'react'
+import { cleanup, render, screen, fireEvent } from '@testing-library/react'
+import { ToastProvider } from '@falcondeck/ui'
+import * as api from './api'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  ExternalLinkHandler,
   installExternalLinkHandler,
   resolveExternalHref,
 } from './external-links'
@@ -40,6 +45,7 @@ describe('resolveExternalHref', () => {
 
 describe('installExternalLinkHandler', () => {
   afterEach(() => {
+    cleanup()
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -105,128 +111,58 @@ describe('installExternalLinkHandler', () => {
     uninstall()
   })
 
-  it('keeps a rejected native handoff visible and retryable beside its link', async () => {
+  it('shows a toast for a real failure without adding text to the message', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const openUrl = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('No system handler'))
-      .mockResolvedValueOnce(undefined)
-    const uninstall = installExternalLinkHandler(openUrl)
+    vi.spyOn(api, 'openExternalUrl').mockRejectedValue(new Error('No handler'))
+    render(createElement(ToastProvider, null,
+      createElement(ExternalLinkHandler),
+      createElement('p', { 'data-testid': 'message' },
+        'Built locally. ',
+        createElement('a', { href: 'http://localhost:5173/' }, 'Open prototype'),
+        '.',
+      ),
+    ))
+    fireEvent.click(screen.getByText('Open prototype'))
+    expect(await screen.findByText('Couldn’t open link')).toBeInTheDocument()
+    expect(screen.getByTestId('message').textContent).toBe('Built locally. Open prototype.')
+  })
 
-    const existingDescription = document.createElement('span')
-    existingDescription.id = 'existing-link-description'
-    const anchor = document.createElement('a')
-    anchor.href = 'https://example.com/source'
-    anchor.textContent = 'Provider source'
-    anchor.title = 'Original title'
-    anchor.setAttribute('aria-describedby', existingDescription.id)
-    document.body.append(existingDescription, anchor)
-
-    anchor.dispatchEvent(
-      new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
-    )
-
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-external-open-status="failed"]'),
-      ).toHaveTextContent('Could not open link. Select it to retry.')
-    })
-    const status = document.querySelector<HTMLElement>(
-      '[data-external-open-status="failed"]',
-    )
-    expect(status).toHaveAttribute('role', 'status')
-    expect(status).toHaveAttribute('aria-live', 'polite')
-    expect(anchor.getAttribute('aria-describedby')).toBe(
-      `${existingDescription.id} ${status?.id}`,
-    )
-    expect(anchor).toHaveAttribute('title', 'Retry opening external link')
-
-    anchor.dispatchEvent(
-      new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
-    )
-    expect(
-      document.querySelector('[data-external-open-status="retrying"]'),
-    ).toHaveTextContent('Opening link again…')
-
-    await vi.waitFor(() => {
-      expect(document.querySelector('[data-external-open-status]')).toBeNull()
-    })
+  it('reports failures without modifying message markup and allows retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const openUrl = vi.fn().mockRejectedValueOnce(new Error('No handler')).mockResolvedValueOnce(undefined)
+    const onError = vi.fn()
+    const uninstall = installExternalLinkHandler(openUrl, onError)
+    document.body.innerHTML = '<p>Built locally. <a href="http://localhost:5173" title="Prototype">Open prototype</a>.</p>'
+    const original = document.body.innerHTML
+    const anchor = document.querySelector('a')!
+    const click = () => anchor.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    click()
+    // The opener runs during the click, preserving browser user activation.
+    expect(openUrl).toHaveBeenCalledWith('http://localhost:5173/')
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+    expect(document.body.innerHTML).toBe(original)
+    click()
+    await Promise.resolve()
     expect(openUrl).toHaveBeenCalledTimes(2)
-    expect(anchor).toHaveAttribute('aria-describedby', existingDescription.id)
-    expect(anchor).toHaveAttribute('title', 'Original title')
-
+    expect(onError).toHaveBeenCalledTimes(1)
     uninstall()
   })
 
-  it('does not let an older failed attempt overwrite a newer successful retry', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    let rejectOlderRetry!: (error: unknown) => void
-    let resolveNewerRetry!: () => void
-    const olderRetry = new Promise<void>((_resolve, reject) => {
-      rejectOlderRetry = reject
-    })
-    const newerRetry = new Promise<void>((resolve) => {
-      resolveNewerRetry = resolve
-    })
-    const openUrl = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('Initial failure'))
-      .mockReturnValueOnce(olderRetry)
-      .mockReturnValueOnce(newerRetry)
-    const uninstall = installExternalLinkHandler(openUrl)
-    const anchor = document.createElement('a')
-    anchor.href = 'https://example.com/race'
-    anchor.textContent = 'Race-safe source'
-    document.body.appendChild(anchor)
-
-    const click = () =>
-      anchor.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
-      )
-    click()
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-external-open-status="failed"]'),
-      ).not.toBeNull()
-    })
-
+  it('ignores failures from superseded attempts and uninstalled handlers', async () => {
+    const pending: Array<(error: Error) => void> = []
+    const openUrl = vi.fn(() => new Promise<void>((_resolve, reject) => pending.push(reject)))
+    const onError = vi.fn()
+    const uninstall = installExternalLinkHandler(openUrl, onError)
+    document.body.innerHTML = '<a href="https://example.com">Example</a>'
+    const click = () => document.querySelector('a')!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     click()
     click()
-    resolveNewerRetry()
-    await vi.waitFor(() => {
-      expect(document.querySelector('[data-external-open-status]')).toBeNull()
-    })
-    rejectOlderRetry(new Error('Stale failure'))
+    pending[0](new Error('Stale'))
     await Promise.resolve()
+    expect(onError).not.toHaveBeenCalled()
+    uninstall()
+    pending[1](new Error('Unmounted'))
     await Promise.resolve()
-
-    expect(document.querySelector('[data-external-open-status]')).toBeNull()
-    expect(openUrl).toHaveBeenCalledTimes(3)
-    uninstall()
-  })
-
-  it('removes injected failure feedback when the handler uninstalls', async () => {
-    vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    const uninstall = installExternalLinkHandler(
-      vi.fn().mockRejectedValue(new Error('No handler')),
-    )
-    const anchor = document.createElement('a')
-    anchor.href = 'https://example.com/cleanup'
-    anchor.textContent = 'Cleanup source'
-    document.body.appendChild(anchor)
-
-    anchor.dispatchEvent(
-      new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
-    )
-    await vi.waitFor(() => {
-      expect(
-        document.querySelector('[data-external-open-status]'),
-      ).not.toBeNull()
-    })
-
-    uninstall()
-    expect(document.querySelector('[data-external-open-status]')).toBeNull()
-    expect(anchor).not.toHaveAttribute('aria-describedby')
-    expect(anchor).not.toHaveAttribute('title')
+    expect(onError).not.toHaveBeenCalled()
   })
 })

@@ -54,7 +54,7 @@ function isSafeExternalUrl(url: string) {
   }
   try {
     const parsed = new URL(url)
-    if (parsed.protocol === 'https:') {
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
       return Boolean(parsed.hostname) && !parsed.username && !parsed.password
     }
     if (parsed.protocol === 'mailto:') return Boolean(parsed.pathname)
@@ -139,7 +139,7 @@ export async function saveLocalFileAs(source: string) {
 
 export async function openExternalUrl(url: string) {
   if (!isSafeExternalUrl(url)) {
-    throw new Error('FalconDeck can only open https, mailto, or tel links.')
+    throw new Error('FalconDeck can only open http, https, mailto, or tel links.')
   }
 
   if (isTauriDesktop()) {
@@ -148,8 +148,6 @@ export async function openExternalUrl(url: string) {
     return
   }
 
-  const opened = window.open(url, '_blank', 'noopener,noreferrer')
-  if (!opened) {
-    throw new Error('FalconDeck could not hand this link off to your browser.')
-  }
+  // noopener intentionally returns null, even when the browser opens the tab.
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
