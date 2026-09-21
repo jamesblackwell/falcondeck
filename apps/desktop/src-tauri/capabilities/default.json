@@ -8,6 +8,7 @@
     "core:window:allow-set-background-color",
     "core:window:allow-set-theme",
     "core:window:allow-set-always-on-top",
+    "core:webview:allow-set-webview-zoom",
     "dialog:allow-open",
     "notification:default",
     "updater:default"
