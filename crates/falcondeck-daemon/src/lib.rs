@@ -7,8 +7,10 @@
 pub mod acp;
 pub mod acp_conformance;
 pub mod acp_protocol;
+mod activity;
 mod agent_binary;
 mod agent_context;
+mod agent_orphans;
 mod agy;
 mod api;
 mod app;
@@ -219,11 +221,13 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // never delay the local API from coming online.
     let restore_state = state.clone();
     let restore_task = tokio::spawn(async move {
-        // Prior daemons that died ungracefully strand their `opencode serve`
-        // children; each stranded server holds ~80-90MB forever. Reap them
+        // Prior daemons that died ungracefully strand their agent children:
+        // an `opencode serve` holds ~80-90MB forever, and an ACP agent holds
+        // both memory and the binary version it was started on. Reap them
         // before this daemon starts spawning its own.
         if let Some(state_dir) = restore_state.state_dir() {
             opencode::reap_orphaned_servers(&state_dir).await;
+            agent_orphans::reap(&state_dir, agent_orphans::ACP_REGISTRY_FILE, "acp agent").await;
         }
         if let Err(error) = restore_state.restore_local_state().await {
             tracing::warn!("failed to restore daemon local state: {error}");

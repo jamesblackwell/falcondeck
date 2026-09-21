@@ -142,6 +142,12 @@ pub struct OpenCodeRuntime {
     /// reasoning variants they accept. Cached because it only changes with a
     /// credential change, which restarts this runtime.
     runner_models: Mutex<Option<HashMap<String, RunnerModel>>>,
+    /// When the daemon last called this server. Read by the idle-retirement
+    /// timer in `app::runtime_health`.
+    activity: crate::activity::ActivityClock,
+    /// Whether this server has ever served a turn, as opposed to only
+    /// answering the composer's model-catalog hydration.
+    served_prompt: std::sync::atomic::AtomicBool,
 }
 
 impl OpenCodeRuntime {
@@ -230,6 +236,8 @@ impl OpenCodeRuntime {
             server_pid,
             server_errors: Mutex::new(Vec::new()),
             runner_models: Mutex::new(None),
+            activity: crate::activity::ActivityClock::new(),
+            served_prompt: std::sync::atomic::AtomicBool::new(false),
         });
         // Keep draining stderr so a noisy server cannot block.  Diagnostics
         // remain in the daemon log rather than being silently discarded, and
@@ -447,6 +455,8 @@ impl OpenCodeRuntime {
         files: &[Value],
         delivery: Delivery,
     ) -> Result<Value, DaemonError> {
+        self.served_prompt
+            .store(true, std::sync::atomic::Ordering::Release);
         let mut prompt = json!({ "text": text });
         if !files.is_empty() {
             prompt["files"] = Value::Array(files.to_vec());
@@ -854,6 +864,17 @@ impl OpenCodeRuntime {
         let _ = self.child.lock().await.kill().await;
     }
 
+    /// How long since the daemon last called this server.
+    pub fn idle_for(&self) -> Duration {
+        self.activity.idle_for()
+    }
+
+    /// Whether this server has ever served a turn.
+    pub fn served_prompt(&self) -> bool {
+        self.served_prompt
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     async fn request(
         &self,
         method: reqwest::Method,
@@ -881,6 +902,7 @@ impl OpenCodeRuntime {
         if let Some(body) = body {
             request = request.json(&body);
         }
+        self.activity.touch();
         let response = request.send().await.map_err(|error| {
             DaemonError::Process(format!("OpenCode native request failed: {error}"))
         })?;
@@ -1488,98 +1510,40 @@ fn summarize_server_error(line: &str) -> String {
 /// spawn records `{server_pid, daemon_pid}` here; the next daemon startup
 /// kills entries whose owning daemon is gone. Graceful shutdown paths and
 /// `kill_on_drop` still handle the in-process cases.
-const SERVER_REGISTRY_FILE: &str = "opencode-servers.json";
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
-struct RegisteredServer {
-    server_pid: u32,
-    daemon_pid: u32,
-}
-
-fn load_server_registry(state_dir: &std::path::Path) -> Vec<RegisteredServer> {
-    std::fs::read(state_dir.join(SERVER_REGISTRY_FILE))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
-}
-
-fn store_server_registry(state_dir: &std::path::Path, entries: &[RegisteredServer]) {
-    if let Ok(bytes) = serde_json::to_vec(entries) {
-        let _ = std::fs::write(state_dir.join(SERVER_REGISTRY_FILE), bytes);
-    }
-}
-
-fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-/// Whether the pid still names an `opencode … serve` process. Guards the
-/// reaper against pid reuse: a recycled pid must never get the kill.
-fn is_opencode_serve_process(pid: u32) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-    else {
-        return false;
-    };
-    let command = String::from_utf8_lossy(&output.stdout);
-    command.contains("opencode") && command.contains(" serve")
+/// Substrings that must appear in a live command line before a registered
+/// pid is treated as this daemon's `opencode serve`.
+fn server_markers() -> Vec<String> {
+    vec!["opencode".to_string(), " serve".to_string()]
 }
 
 /// Records a freshly spawned server against this daemon process.
 pub fn register_server_process(state_dir: &std::path::Path, server_pid: u32) {
-    let mut entries = load_server_registry(state_dir);
-    entries.retain(|entry| entry.server_pid != server_pid && process_alive(entry.server_pid));
-    entries.push(RegisteredServer {
+    crate::agent_orphans::register(
+        state_dir,
+        crate::agent_orphans::OPENCODE_REGISTRY_FILE,
         server_pid,
-        daemon_pid: std::process::id(),
-    });
-    store_server_registry(state_dir, &entries);
+        server_markers(),
+    );
+}
+
+/// Drops a server this daemon stopped on purpose.
+pub fn forget_server_process(state_dir: &std::path::Path, server_pid: u32) {
+    crate::agent_orphans::forget(
+        state_dir,
+        crate::agent_orphans::OPENCODE_REGISTRY_FILE,
+        server_pid,
+    );
 }
 
 /// Kills servers whose owning daemon is gone. Run once at daemon startup,
 /// off the readiness path (it shells out to `ps`/`kill`).
 pub async fn reap_orphaned_servers(state_dir: &std::path::Path) {
-    let state_dir = state_dir.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        let entries = load_server_registry(&state_dir);
-        let mut kept = Vec::new();
-        let mut reaped = 0usize;
-        for entry in entries {
-            if entry.daemon_pid != std::process::id() && process_alive(entry.daemon_pid) {
-                // Another live daemon owns this server; leave both alone.
-                kept.push(entry);
-                continue;
-            }
-            if entry.daemon_pid != std::process::id() && is_opencode_serve_process(entry.server_pid)
-            {
-                let _ = std::process::Command::new("kill")
-                    .arg(entry.server_pid.to_string())
-                    .status();
-                reaped += 1;
-            }
-            // Dead server, recycled pid, or now-killed orphan: drop the entry.
-        }
-        store_server_registry(&state_dir, &kept);
-        reaped
-    })
+    crate::agent_orphans::reap(
+        state_dir,
+        crate::agent_orphans::OPENCODE_REGISTRY_FILE,
+        "opencode serve",
+    )
     .await;
-    match result {
-        Ok(reaped) if reaped > 0 => {
-            tracing::info!(
-                reaped,
-                "reaped orphaned OpenCode servers from prior daemons"
-            );
-        }
-        Ok(_) => {}
-        Err(error) => tracing::warn!(%error, "OpenCode orphan reap task failed"),
-    }
 }
 
 fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> Value {

@@ -61,6 +61,18 @@ adapters are reserved for harnesses whose extra surface earns the maintenance
    (MCP servers) are re-read at spawn/snapshot boundaries; edits apply
    without a restart. Invariant: keep it that way — cached config is how
    hot-reload quietly dies.
+7. **Warm-runtime retirement (app/runtime_health.rs)** — every provider that
+   keeps a process alive between turns retires it on one timer per runtime:
+   wait out a warm grace period, stop the process only when no thread for
+   that provider is running, waiting, queued or dispatching. Codex 5 min, ACP
+   20 min, native OpenCode 10 min, and 2 min for any runtime started only to
+   answer the composer's catalog hydration. Claude and agy spawn a CLI per
+   turn and own no timer. Invariant: a warm runtime that nothing can stop is
+   a leak — a new long-lived provider process gets a timer in the same commit
+   that introduces it. Retirement takes `AcpRuntime::retirement_guard`
+   exclusively so it can never kill a process a caller has already resolved;
+   an ACP agent that holds sessions without negotiating `loadSession` opts
+   out, because it would come back having forgotten the conversation.
 
 ## Known traps (deliberate, documented, easy to "fix" wrongly)
 

@@ -253,12 +253,12 @@ impl AppState {
             let Some(workspace) = workspaces.get_mut(workspace_id) else {
                 return;
             };
-            let Some(agent) = workspace
-                .summary
-                .agents
-                .iter_mut()
-                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case(provider.as_str()))
-            else {
+            let Some(agent) = workspace.summary.agents.iter_mut().find(|agent| {
+                agent
+                    .provider
+                    .as_str()
+                    .eq_ignore_ascii_case(provider.as_str())
+            }) else {
                 return;
             };
             if agent.models_loading == loading {
@@ -288,12 +288,12 @@ impl AppState {
             let Some(workspace) = workspaces.get_mut(workspace_id) else {
                 return;
             };
-            let Some(agent) = workspace
-                .summary
-                .agents
-                .iter_mut()
-                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case(provider.as_str()))
-            else {
+            let Some(agent) = workspace.summary.agents.iter_mut().find(|agent| {
+                agent
+                    .provider
+                    .as_str()
+                    .eq_ignore_ascii_case(provider.as_str())
+            }) else {
                 return;
             };
             let mut changed = false;
@@ -748,13 +748,30 @@ impl AppState {
             );
         }
 
-        {
+        let cached = {
             let mut workspaces = self.inner.workspaces.lock().await;
-            if let Some(workspace) = workspaces.get_mut(workspace_id) {
-                workspace
-                    .acp_runtimes
-                    .insert(provider.clone(), Arc::clone(&runtime));
+            match workspaces.get_mut(workspace_id) {
+                Some(workspace) => {
+                    workspace
+                        .acp_runtimes
+                        .insert(provider.clone(), Arc::clone(&runtime));
+                    true
+                }
+                None => false,
             }
+        };
+        // Only a cached runtime needs a retirement timer; one that never
+        // reached the workspace is already nobody's to stop.
+        if cached {
+            if let (Some(state_dir), Some(child_pid)) = (self.state_dir(), runtime.child_pid()) {
+                crate::agent_orphans::register(
+                    &state_dir,
+                    crate::agent_orphans::ACP_REGISTRY_FILE,
+                    child_pid,
+                    runtime.command_markers(),
+                );
+            }
+            self.schedule_acp_idle_retirement(workspace_id, provider, Arc::clone(&runtime));
         }
         self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
             .await;

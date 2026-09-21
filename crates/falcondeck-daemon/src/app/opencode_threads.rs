@@ -136,6 +136,7 @@ impl AppState {
                 return Err(DaemonError::NotFound("workspace not found".to_string()));
             }
         }
+        self.schedule_opencode_idle_retirement(workspace_id, Arc::clone(&runtime));
         if let (Some(state_dir), Some(server_pid)) = (self.state_dir(), runtime.server_pid()) {
             crate::opencode::register_server_process(&state_dir, server_pid);
         }

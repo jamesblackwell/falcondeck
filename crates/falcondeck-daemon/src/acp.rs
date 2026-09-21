@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use tokio::time::{Duration, Instant, timeout};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -1328,6 +1328,11 @@ pub struct AcpRuntime {
     pub config: AcpProviderConfig,
     workspace_path: String,
     child: Mutex<Child>,
+    /// OS pid of the agent process, for the crash-orphan registry.
+    child_pid: Option<u32>,
+    /// Resolved executable, matched against a live command line so the
+    /// orphan reaper never signals a recycled pid.
+    executable: String,
     stdin: Mutex<ChildStdin>,
     next_id: AtomicI64,
     pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, DaemonError>>>>,
@@ -1416,6 +1421,17 @@ pub struct AcpRuntime {
     /// not a prompt but must still project as conversation items.
     replay_sessions: Mutex<HashSet<String>>,
     closed: AtomicBool,
+    /// When this process last exchanged a message with the daemon. Read by
+    /// the idle-retirement timer in `app::runtime_health`.
+    activity: crate::activity::ActivityClock,
+    /// Whether this process has ever served a `session/prompt`. A runtime
+    /// spawned only to answer the composer's model-catalog hydration has not,
+    /// and retires on a much shorter grace period.
+    served_prompt: AtomicBool,
+    /// Shared while a request is in flight, exclusive while retiring. Without
+    /// it the retirement timer could kill the child between a caller resolving
+    /// the cached runtime and writing to its stdin.
+    retirement: RwLock<()>,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
 
@@ -2044,6 +2060,8 @@ impl AcpRuntime {
             provider: AgentProvider::new(config.id.clone()),
             config,
             workspace_path: workspace_path.to_string(),
+            child_pid: child.id(),
+            executable: executable.clone(),
             child: Mutex::new(child),
             stdin: Mutex::new(stdin),
             next_id: AtomicI64::new(1),
@@ -2080,6 +2098,9 @@ impl AcpRuntime {
             turn_outcomes: Mutex::new(HashMap::new()),
             replay_sessions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
+            activity: crate::activity::ActivityClock::new(),
+            served_prompt: AtomicBool::new(false),
+            retirement: RwLock::new(()),
             events,
         });
 
@@ -2174,6 +2195,58 @@ impl AcpRuntime {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// OS pid of the agent process, for the crash-orphan registry.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
+    }
+
+    /// Command-line markers identifying this process to the orphan reaper.
+    pub fn command_markers(&self) -> Vec<String> {
+        vec![self.executable.clone()]
+    }
+
+    /// How long since this process last exchanged a message with the daemon.
+    pub fn idle_for(&self) -> Duration {
+        self.activity.idle_for()
+    }
+
+    /// Whether this process has ever served a turn, as opposed to only
+    /// answering the composer's model-catalog hydration.
+    pub fn served_prompt(&self) -> bool {
+        self.served_prompt.load(Ordering::Acquire)
+    }
+
+    /// Whether any thread has an ACP session bound to this process. A
+    /// runtime with no sessions can be retired without a continuity question:
+    /// there is no conversation to resume.
+    pub async fn has_sessions(&self) -> bool {
+        !self.sessions.lock().await.is_empty()
+    }
+
+    /// Whether any request this runtime issued is still awaiting a response.
+    /// A runtime with outstanding requests is working even when no thread
+    /// reads as running (background metadata discovery, a pending probe).
+    pub async fn has_requests_in_flight(&self) -> bool {
+        !self.pending.lock().await.is_empty()
+    }
+
+    /// Whether the agent is holding a user-facing question: a permission
+    /// prompt, a plan approval, or a `cursor/ask_question`. Retiring the
+    /// process under one of those would strand the thread waiting on a reply
+    /// nothing can deliver.
+    pub async fn has_open_user_requests(&self) -> bool {
+        !self.permission_requests.lock().await.is_empty()
+            || !self.plan_approval_requests.lock().await.is_empty()
+            || !self.question_requests.lock().await.is_empty()
+    }
+
+    /// Exclusive lease taken while retiring, blocking new requests and
+    /// waiting out in-flight ones. Callers that already resolved this runtime
+    /// hold the shared side for the length of their request.
+    pub async fn retirement_guard(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+        self.retirement.write().await
     }
 
     /// Whether `session/new` discovery has already answered for this process.
@@ -2420,6 +2493,7 @@ impl AcpRuntime {
                 self.config.id
             )));
         }
+        self.activity.touch();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
@@ -2444,6 +2518,11 @@ impl AcpRuntime {
         params: Value,
         response_timeout: Option<Duration>,
     ) -> Result<Value, DaemonError> {
+        // Held for the whole exchange so idle retirement cannot kill the
+        // child between resolving this runtime and reading its answer. Never
+        // acquire it again beneath this point: the lock is write-preferring,
+        // so a nested read behind a waiting retirement would deadlock.
+        let _lease = self.retirement.read().await;
         let (id, receiver) = self.begin_request(method, params).await?;
         let response = if let Some(response_timeout) = response_timeout {
             match timeout(response_timeout, receiver).await {
@@ -3020,6 +3099,7 @@ impl AcpRuntime {
         session_id: &str,
         content: Vec<Value>,
     ) -> Result<String, DaemonError> {
+        self.served_prompt.store(true, Ordering::Release);
         let mut content = if content.is_empty() {
             vec![json!({ "type": "text", "text": "[empty prompt]" })]
         } else {
@@ -3735,6 +3815,7 @@ impl AcpRuntime {
     }
 
     async fn handle_message(&self, message: Value) {
+        self.activity.touch();
         let has_id = message.get("id").is_some();
         let has_method = message.get("method").is_some();
         if has_id && !has_method {
@@ -4587,6 +4668,104 @@ mod tests {
             runtime.capability_summary().await.permission_modes,
             vec!["ask"]
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn only_a_real_turn_lengthens_the_warm_window() {
+        let (runtime, _events) = fixture_runtime("startup-banner").await;
+        assert!(
+            !runtime.served_prompt(),
+            "a freshly started process has served nothing"
+        );
+
+        let session_id = runtime
+            .ensure_session(
+                "thread-warm-window",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture session should start");
+        assert!(
+            !runtime.served_prompt(),
+            "opening a session to read the catalog is not a turn"
+        );
+
+        runtime
+            .prompt(&session_id, vec![json!({ "type": "text", "text": "hi" })])
+            .await
+            .expect("fixture prompt should settle");
+        assert!(runtime.served_prompt());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn provider_traffic_resets_the_idle_window() {
+        let (runtime, _events) = fixture_runtime("startup-banner").await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let idle_before = runtime.idle_for();
+        assert!(idle_before >= Duration::from_millis(40));
+
+        runtime
+            .ensure_session(
+                "thread-idle-window",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .expect("fixture session should start");
+
+        assert!(
+            runtime.idle_for() < idle_before,
+            "an exchange with the agent must count as activity"
+        );
+        assert!(runtime.has_sessions().await);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retirement_waits_for_a_request_that_already_resolved_the_runtime() {
+        let (runtime, _events) = fixture_runtime("startup-banner").await;
+        let retirement = runtime.retirement_guard().await;
+
+        let probe = tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            async move {
+                runtime
+                    .ensure_session(
+                        "thread-retirement-race",
+                        None,
+                        env!("CARGO_MANIFEST_DIR"),
+                        None,
+                        &Default::default(),
+                        None,
+                        None,
+                    )
+                    .await
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !probe.is_finished(),
+            "a request must not reach a process that is being retired"
+        );
+
+        drop(retirement);
+        timeout(Duration::from_secs(5), probe)
+            .await
+            .expect("request should resume once retirement releases")
+            .expect("probe task should not panic")
+            .expect("fixture session should start");
         runtime.shutdown().await;
     }
 
