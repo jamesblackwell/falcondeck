@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { Minus, Plus } from 'lucide-react'
 
 import { base64ToBytes, formatArtifactSize } from '@falcondeck/client-core'
+
+import { PdfFilePreview } from './pdf-file'
 
 /** Same budget the daemon uses for previewable media. */
 export const MAX_MEDIA_PREVIEW_BYTES = 16_000_000
@@ -11,7 +13,7 @@ export const MAX_IMAGE_ZOOM = 8
 export const IMAGE_ZOOM_STEP = 1.15
 const IMAGE_VIEW_PADDING = 32
 
-export type FileMediaKind = 'image' | 'video' | 'audio'
+export type FileMediaKind = 'image' | 'video' | 'audio' | 'pdf'
 
 const IMAGE_MIME_BY_EXT: Record<string, string> = {
   png: 'image/png',
@@ -47,6 +49,10 @@ const AUDIO_MIME_BY_EXT: Record<string, string> = {
   opus: 'audio/ogg',
 }
 
+const DOCUMENT_MIME_BY_EXT: Record<string, string> = {
+  pdf: 'application/pdf',
+}
+
 export function extensionOf(path: string) {
   const base = path.split('/').pop()?.toLowerCase() ?? ''
   const index = base.lastIndexOf('.')
@@ -59,6 +65,7 @@ export function mediaKindFromPath(path: string): FileMediaKind | null {
   if (extension in IMAGE_MIME_BY_EXT) return 'image'
   if (extension in VIDEO_MIME_BY_EXT) return 'video'
   if (extension in AUDIO_MIME_BY_EXT) return 'audio'
+  if (extension in DOCUMENT_MIME_BY_EXT) return 'pdf'
   return null
 }
 
@@ -68,6 +75,7 @@ export function mimeTypeFromPath(path: string) {
     IMAGE_MIME_BY_EXT[extension] ??
     VIDEO_MIME_BY_EXT[extension] ??
     AUDIO_MIME_BY_EXT[extension] ??
+    DOCUMENT_MIME_BY_EXT[extension] ??
     null
   )
 }
@@ -77,6 +85,7 @@ export function mediaKindFromMime(mime: string | null | undefined): FileMediaKin
   if (mime.startsWith('image/')) return 'image'
   if (mime.startsWith('video/')) return 'video'
   if (mime.startsWith('audio/')) return 'audio'
+  if (mime === 'application/pdf') return 'pdf'
   return null
 }
 
@@ -407,16 +416,50 @@ function ImageFilePreview({
   )
 }
 
+function PdfFileView({
+  contentBase64,
+  fileName,
+  sizeBytes,
+}: {
+  contentBase64: string | null
+  fileName: string
+  sizeBytes: number | null
+}) {
+  const bytes = useMemo(
+    () => (contentBase64 ? (base64ToBytes(contentBase64) as Uint8Array) : null),
+    [contentBase64],
+  )
+  return (
+    <PdfFilePreview
+      bytes={bytes}
+      fileName={fileName}
+      footer={({ facts, zoom, isFit, onZoomIn, onZoomOut, onToggleFit }) => (
+        <MediaStatus
+          facts={[...facts, formatArtifactSize(sizeBytes)]}
+          zoom={zoom}
+          isFit={isFit}
+          onZoomIn={onZoomIn}
+          onZoomOut={onZoomOut}
+          onToggleFit={onToggleFit}
+        />
+      )}
+    />
+  )
+}
+
 export function MediaFilePreview({
   kind,
   src,
   fileName,
   sizeBytes = null,
+  contentBase64 = null,
 }: {
   kind: FileMediaKind
   src: string
   fileName: string
   sizeBytes?: number | null
+  /** Raw bytes, needed by formats we decode ourselves rather than hand to the webview. */
+  contentBase64?: string | null
 }) {
   const [failed, setFailed] = useState(false)
   const [videoSize, setVideoSize] = useState<{ width: number; height: number } | null>(null)
@@ -429,6 +472,12 @@ export function MediaFilePreview({
 
   if (kind === 'image') {
     return <ImageFilePreview src={src} fileName={fileName} sizeBytes={sizeBytes} />
+  }
+
+  if (kind === 'pdf') {
+    return (
+      <PdfFileView contentBase64={contentBase64} fileName={fileName} sizeBytes={sizeBytes} />
+    )
   }
 
   if (failed) {

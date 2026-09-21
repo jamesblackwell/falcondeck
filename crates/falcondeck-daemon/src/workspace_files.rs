@@ -17,6 +17,9 @@ const MAX_FILE_BYTES: u64 = 1_000_000;
 /// Previewable media can be larger than the text editor budget. 16 MB stays
 /// under the relay websocket cap once base64-encoded.
 const MAX_MEDIA_BYTES: u64 = 16_000_000;
+
+/// The one preview media type served as text rather than base64 bytes.
+const SVG_MIME: &str = "image/svg+xml";
 const FALLBACK_IGNORED_DIRECTORIES: &[&str] =
     &[".git", "node_modules", "target", ".next", "dist", "build"];
 
@@ -104,6 +107,20 @@ pub async fn read_file(
     }
 
     let bytes = fs::read(full_path).await?;
+    // Small PDFs with uncompressed streams can be valid UTF-8, so binary media
+    // formats stay on the base64 path regardless of how their bytes decode.
+    if mime_type.is_some_and(|mime| mime != SVG_MIME) {
+        return Ok(WorkspaceFileResponse {
+            path: relative_path.to_string(),
+            content: None,
+            is_binary: true,
+            truncated: false,
+            version,
+            content_base64: Some(BASE64.encode(&bytes)),
+            mime_type: mime_type.map(str::to_string),
+            size_bytes,
+        });
+    }
     match String::from_utf8(bytes) {
         Ok(content) => Ok(WorkspaceFileResponse {
             path: relative_path.to_string(),
@@ -205,7 +222,7 @@ fn preview_mime_type(path: &str) -> Option<&'static str> {
         "jpg" | "jpeg" | "jfif" => "image/jpeg",
         "gif" => "image/gif",
         "webp" => "image/webp",
-        "svg" => "image/svg+xml",
+        "svg" => SVG_MIME,
         "ico" => "image/x-icon",
         "bmp" => "image/bmp",
         "avif" => "image/avif",
@@ -221,6 +238,7 @@ fn preview_mime_type(path: &str) -> Option<&'static str> {
         "aac" => "audio/aac",
         "flac" => "audio/flac",
         "opus" => "audio/ogg",
+        "pdf" => "application/pdf",
         _ => return None,
     })
 }
@@ -449,7 +467,11 @@ mod tests {
         assert_eq!(preview_mime_type("qa/shot.PNG"), Some("image/png"));
         assert_eq!(preview_mime_type("clip.webm"), Some("video/webm"));
         assert_eq!(preview_mime_type("voice.m4a"), Some("audio/mp4"));
-        assert_eq!(preview_mime_type("logo.svg"), Some("image/svg+xml"));
+        assert_eq!(preview_mime_type("logo.svg"), Some(SVG_MIME));
+        assert_eq!(
+            preview_mime_type("bids/Commercial-Offer.PDF"),
+            Some("application/pdf")
+        );
         assert_eq!(preview_mime_type("src/main.rs"), None);
     }
 
@@ -501,6 +523,25 @@ mod tests {
         assert_eq!(file.mime_type.as_deref(), Some("image/svg+xml"));
         assert!(file.content.is_some());
         assert_eq!(file.content_base64, None);
+    }
+
+    #[tokio::test]
+    async fn read_file_should_send_pdf_bytes_even_when_they_decode_as_utf8() {
+        let root = tempdir().unwrap();
+        // An uncompressed one-page PDF is pure ASCII, so the UTF-8 check alone
+        // would hand it to the text viewer.
+        let pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+        fs::write(root.path().join("offer.pdf"), pdf).await.unwrap();
+        let file = read_file(root.path().to_str().unwrap(), "offer.pdf")
+            .await
+            .unwrap();
+        assert!(file.is_binary);
+        assert_eq!(file.mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(file.content, None);
+        assert_eq!(
+            file.content_base64.as_deref(),
+            Some(BASE64.encode(pdf).as_str())
+        );
     }
 
     const MINIMAL_PNG: &[u8] = &[

@@ -302,6 +302,7 @@ export const FileView = memo(function FileView({
             src={mediaUrl}
             fileName={fileName}
             sizeBytes={file?.size_bytes}
+            contentBase64={file?.content_base64}
           />
         ) : file?.truncated ? (
           <div className="flex h-full flex-col items-center justify-center gap-1 p-6 text-center">

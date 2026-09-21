@@ -28,6 +28,9 @@ export const FileTypeIcon = memo(function FileTypeIcon({ path }: { path: string 
   if (mediaKind === 'audio') {
     return <Music aria-hidden="true" className={`${className} text-accent`} />
   }
+  if (mediaKind === 'pdf') {
+    return <FileText aria-hidden="true" className={`${className} text-danger`} />
+  }
   if (['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(extension)) {
     return <Braces aria-hidden="true" className={`${className} text-info`} />
   }
