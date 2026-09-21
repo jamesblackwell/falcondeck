@@ -718,14 +718,20 @@ fn open_external_url(url: String) -> Result<(), String> {
     open::that_detached(url).map_err(|error| error.to_string())
 }
 
-fn missing_local_path_error() -> String {
+fn missing_local_path_error(path: &Path) -> String {
     #[cfg(target_os = "macos")]
-    {
-        "This path is not on this Mac.".to_string()
-    }
+    let machine = "this Mac";
     #[cfg(not(target_os = "macos"))]
-    {
-        "This path is not on this computer.".to_string()
+    let machine = "this computer";
+
+    let shown = path.display();
+    match (path.file_name().and_then(|name| name.to_str()), path.parent()) {
+        // The folder is there but the file is not: say so, because that is
+        // almost always an agent naming a file it renamed or never wrote.
+        (Some(name), Some(parent)) if parent.is_dir() => {
+            format!("“{name}” is no longer in {}.", parent.display())
+        }
+        _ => format!("{shown} is not on {machine}."),
     }
 }
 
@@ -837,9 +843,82 @@ fn parse_local_path_input(raw: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Lowercases a file name and collapses every run of non-alphanumeric
+/// characters to a single `-`, so `Finish the Track - Guide` and
+/// `finish-the-track-guide` compare equal.
+fn loosely_normalized_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for character in name.chars() {
+        if character.is_alphanumeric() {
+            out.extend(character.to_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// The file an agent meant when the exact path is gone.
+///
+/// Agents routinely link the pretty name they wrote in prose while the file on
+/// disk kept a slugged name (or vice versa), which is the single most common
+/// reason a transcript link fails to open. Accept a sibling only when the
+/// folder exists, the extension matches, the names agree once case and
+/// punctuation are ignored, and exactly one candidate qualifies — so a click
+/// can never silently open some unrelated file.
+fn near_miss_sibling(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let parent = path.parent()?;
+    let stem = loosely_normalized_name(path.file_stem()?.to_str()?);
+    if stem.is_empty() {
+        return None;
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+
+    let mut found: Option<PathBuf> = None;
+    for entry in fs::read_dir(parent).ok()? {
+        let Ok(entry) = entry else { continue };
+        let candidate = entry.path();
+        let Some(candidate_name) = candidate.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if candidate_name == name {
+            continue;
+        }
+        if candidate
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            != extension
+        {
+            continue;
+        }
+        let Some(candidate_stem) = candidate.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if loosely_normalized_name(candidate_stem) != stem {
+            continue;
+        }
+        if found.is_some() {
+            // Ambiguous: two siblings normalize the same way, so guessing
+            // would be worse than reporting the path the agent gave.
+            return None;
+        }
+        found = Some(candidate);
+    }
+    found
+}
+
 fn resolve_existing_local_path(raw: &str) -> Result<PathBuf, String> {
-    let path = parse_local_path_input(raw)?;
-    let metadata = fs::metadata(&path).map_err(|_| missing_local_path_error())?;
+    let parsed = parse_local_path_input(raw)?;
+    let path = match fs::metadata(&parsed) {
+        Ok(_) => parsed,
+        Err(_) => near_miss_sibling(&parsed).ok_or_else(|| missing_local_path_error(&parsed))?,
+    };
+    let metadata = fs::metadata(&path).map_err(|_| missing_local_path_error(&path))?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err("FalconDeck can only open files and folders.".to_string());
     }
@@ -1051,8 +1130,12 @@ fn open_path_with_editor(path: String, editor: String) -> Result<(), String> {
 /// menu uses this to decide which file-only actions to offer.
 #[tauri::command]
 fn local_path_kind(path: String) -> Result<Option<&'static str>, String> {
-    let parsed = parse_local_path_input(&path)?;
-    let Ok(metadata) = fs::metadata(&parsed) else {
+    // Resolve the same way the open/reveal actions do, near miss included, so
+    // the menu offers file-only rows for exactly the paths those can act on.
+    let Ok(resolved) = resolve_existing_local_path(&path) else {
+        return Ok(None);
+    };
+    let Ok(metadata) = fs::metadata(&resolved) else {
         return Ok(None);
     };
     if metadata.is_file() {
@@ -1069,7 +1152,7 @@ fn local_path_kind(path: String) -> Result<Option<&'static str>, String> {
 const COPY_CONTENTS_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn read_text_file_contents(path: &Path) -> Result<String, String> {
-    let metadata = fs::metadata(path).map_err(|_| missing_local_path_error())?;
+    let metadata = fs::metadata(path).map_err(|_| missing_local_path_error(path))?;
     if !metadata.is_file() {
         return Err("Only file contents can be copied, not folders.".to_string());
     }
@@ -1694,11 +1777,41 @@ mod tests {
 
     #[test]
     fn missing_paths_are_rejected() {
-        assert!(
-            resolve_existing_local_path("/tmp/falcondeck-missing-local-path-test")
-                .unwrap_err()
-                .contains("not on this")
-        );
+        let error = resolve_existing_local_path("/tmp/falcondeck-missing-local-path-test/gone.txt")
+            .unwrap_err();
+        assert!(error.contains("not on this"), "{error}");
+    }
+
+    #[test]
+    fn missing_file_in_an_existing_folder_names_the_file() {
+        let dir = env::temp_dir().join("falcondeck-missing-name-test");
+        fs::create_dir_all(&dir).unwrap();
+        let error = resolve_existing_local_path(&dir.join("gone.txt").display().to_string())
+            .unwrap_err();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(error.contains("gone.txt"), "{error}");
+    }
+
+    #[test]
+    fn renamed_siblings_resolve_through_a_near_miss() {
+        let dir = env::temp_dir().join("falcondeck-near-miss-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("finish-the-track-field-guide.pdf"), "ok").unwrap();
+        let linked = dir.join("Finish the Track - Field Guide.pdf");
+        let resolved = resolve_existing_local_path(&linked.display().to_string()).unwrap();
+        assert!(resolved.ends_with("finish-the-track-field-guide.pdf"));
+
+        // A different extension is a different file, never a near miss.
+        let wrong_kind = dir.join("Finish the Track - Field Guide.png");
+        let wrong_kind = resolve_existing_local_path(&wrong_kind.display().to_string());
+        assert!(wrong_kind.is_err());
+
+        // Two siblings that normalize the same way stay ambiguous.
+        fs::write(dir.join("finish_the_track_field_guide.pdf"), "ok").unwrap();
+        let ambiguous = resolve_existing_local_path(&linked.display().to_string());
+        let _ = fs::remove_dir_all(&dir);
+        assert!(ambiguous.is_err());
     }
 
     #[test]
