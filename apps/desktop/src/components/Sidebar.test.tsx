@@ -1407,112 +1407,46 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByText("running")).not.toBeInTheDocument();
   });
 
-  it("collapses the Projects section to hide every folder", () => {
-    const onWorkspaceCollapsedChange = vi.fn();
-    const groups: ProjectGroup[] = [
-      {
-        workspace: workspace(),
-        threads: [thread()],
-      },
-      {
-        workspace: workspace({
-          id: "workspace-2",
-          path: "/Users/james/second-project",
-          current_thread_id: "thread-2",
-        }),
-        threads: [
-          thread({
-            id: "thread-2",
-            workspace_id: "workspace-2",
-            title: "Second thread",
-          }),
-        ],
-      },
-    ];
-    renderSidebar({
-      groups,
-      collapsedWorkspaceIds: ["workspace-2"],
-      onWorkspaceCollapsedChange,
-    });
-
-    expect(screen.getByRole("button", { name: "falcondeck" })).toBeInTheDocument();
-    expect(screen.getByText("Main thread")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "second-project" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("Second thread")).not.toBeInTheDocument();
-
-    const collapse = screen.getByRole("button", { name: "Collapse projects" });
-    expect(collapse).toHaveAttribute("aria-expanded", "true");
-    fireEvent.click(collapse);
-
-    expect(onWorkspaceCollapsedChange).not.toHaveBeenCalled();
-    expect(
-      screen.queryByRole("button", { name: "falcondeck" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "second-project" }),
-    ).not.toBeInTheDocument();
+  it("toggles every project while keeping folders available to open individually", () => {
+    renderSidebar({ groups: [
+      { workspace: workspace(), threads: [thread()] },
+      { workspace: workspace({ id: "workspace-2", path: "/tmp/second-project" }),
+        threads: [thread({ id: "thread-2", workspace_id: "workspace-2", title: "Second thread" })] },
+    ] });
+    fireEvent.click(screen.getByRole("button", { name: "second-project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse projects" }));
+    for (const name of ["falcondeck", "second-project"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute("aria-expanded", "false");
+    }
     expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
-
-    const expand = screen.getByRole("button", { name: "Expand projects" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(expand);
-
-    expect(screen.getByRole("button", { name: "falcondeck" })).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
-    expect(screen.getByText("Main thread")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "second-project" }),
-    ).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("Second thread")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Expand projects" }));
+    expect(screen.getByText("Main thread")).toBeInTheDocument();
+    expect(screen.getByText("Second thread")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse projects" }));
+    fireEvent.click(screen.getByRole("button", { name: "second-project" }));
+    expect(screen.getByText("Second thread")).toBeInTheDocument();
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Collapse projects" })).toBeInTheDocument();
   });
 
-  it("keeps the add-project action available while projects are collapsed", () => {
+  it("reports bulk project toggles through host-owned workspace state", () => {
+    const onWorkspaceCollapsedChange = vi.fn();
+    const { rerenderSidebar } = renderSidebar({ onWorkspaceCollapsedChange, collapsedWorkspaceIds: [] });
+    fireEvent.click(screen.getByRole("button", { name: "Collapse projects" }));
+    expect(onWorkspaceCollapsedChange).toHaveBeenLastCalledWith("workspace-1", true);
+    rerenderSidebar({ onWorkspaceCollapsedChange, collapsedWorkspaceIds: ["workspace-1"] });
+    fireEvent.click(screen.getByRole("button", { name: "Expand projects" }));
+    expect(onWorkspaceCollapsedChange).toHaveBeenLastCalledWith("workspace-1", false);
+  });
+
+  it("keeps add-project available while projects are collapsed", () => {
     const onAddProject = vi.fn();
     renderSidebar({ onAddProject });
-
     fireEvent.click(screen.getByRole("button", { name: "Collapse projects" }));
-    expect(
-      screen.queryByRole("button", { name: "falcondeck" }),
-    ).not.toBeInTheDocument();
-
-    const projects = screen.getByRole("region", { name: "Projects" });
-    fireEvent.click(
-      within(projects).getByRole("button", { name: "Add project" }),
-    );
+    fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: "Add project" }));
     expect(onAddProject).toHaveBeenCalledOnce();
-    expect(
-      screen.queryByRole("button", { name: "falcondeck" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("honors a host-owned projects collapsed flag and reports toggles back to it", () => {
-    const onProjectsCollapsedChange = vi.fn();
-    const { rerenderSidebar } = renderSidebar({
-      projectsCollapsed: true,
-      onProjectsCollapsedChange,
-    });
-
-    expect(
-      screen.queryByRole("button", { name: "falcondeck" }),
-    ).not.toBeInTheDocument();
-    const expand = screen.getByRole("button", { name: "Expand projects" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-
-    fireEvent.click(expand);
-    expect(onProjectsCollapsedChange).toHaveBeenCalledWith(false);
-    expect(
-      screen.queryByRole("button", { name: "falcondeck" }),
-    ).not.toBeInTheDocument();
-
-    rerenderSidebar({ projectsCollapsed: false, onProjectsCollapsedChange });
-    expect(
-      screen.getByRole("button", { name: "Collapse projects" }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: "falcondeck" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "falcondeck" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("honors a host-owned collapsed set and reports toggles back to it", () => {

@@ -16,8 +16,8 @@ export type SidebarRow =
       type: 'section'
       title: 'Pinned' | 'Chats' | 'Projects'
       /**
-       * Present on Chats when there is at least one row to hide. True while
-       * individual chats are visible.
+       * Present on collapsible section headings. Projects stays open while
+       * any project is expanded; Chats reflects individual chat visibility.
        */
       isOpen?: boolean
     }
@@ -226,6 +226,7 @@ export function buildSidebarRows(
             key: 'section:projects',
             type: 'section' as const,
             title: 'Projects' as const,
+            isOpen: projectGroups.some(({ workspace }) => !collapsedWorkspaces.has(workspace.id)),
           },
         ]
       : []),

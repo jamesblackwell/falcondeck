@@ -195,9 +195,6 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     collapsed: boolean,
   ) => void;
-  /** When true, the Projects list is folded away. Host-owned like chats collapse. */
-  projectsCollapsed?: boolean;
-  onProjectsCollapsedChange?: (collapsed: boolean) => void;
   /** When true, the Chats list is folded away. Host-owned like project collapse. */
   chatsCollapsed?: boolean;
   onChatsCollapsedChange?: (collapsed: boolean) => void;
@@ -781,8 +778,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
 });
 
 /**
- * Isolated so toggling the Projects heading does not rebuild every folder
- * row while the section collapse animation is running.
+ * Keep project rows independent of unrelated sidebar chrome updates.
  */
 const ProjectGroupList = memo(function ProjectGroupList({
   orderedGroups,
@@ -1178,8 +1174,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onWorkspaceOrderChange,
   collapsedWorkspaceIds,
   onWorkspaceCollapsedChange,
-  projectsCollapsed: projectsCollapsedProp,
-  onProjectsCollapsedChange,
   chatsCollapsed: chatsCollapsedProp,
   onChatsCollapsedChange,
   isAddingProject = false,
@@ -1217,8 +1211,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     uncontrolledCollapsedWorkspaceIds,
     setUncontrolledCollapsedWorkspaceIds,
   ] = useState<Set<string>>(() => new Set());
-  const [uncontrolledProjectsCollapsed, setUncontrolledProjectsCollapsed] =
-    useState(false);
   // Session-only, like the per-project chat pager: the fold rests closed on
   // every launch so a long project list starts compact.
   const [projectsRevealed, setProjectsRevealed] = useState(false);
@@ -1573,28 +1565,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     ],
   );
 
-  const projectsCollapsed = onProjectsCollapsedChange
-    ? Boolean(projectsCollapsedProp)
-    : uncontrolledProjectsCollapsed;
+  const projectsCollapsed = orderedGroups.length > 0 && orderedGroups.every(
+    ({ workspace }) => collapsedWorkspaces.has(workspace.id),
+  );
 
   const chatsCollapsed = onChatsCollapsedChange
     ? Boolean(chatsCollapsedProp)
     : uncontrolledChatsCollapsed;
-
-  const handleProjectsCollapsedChange = useCallback(
-    (collapsed: boolean) => {
-      if (onProjectsCollapsedChange) {
-        onProjectsCollapsedChange(collapsed);
-        return;
-      }
-      setUncontrolledProjectsCollapsed(collapsed);
-    },
-    [onProjectsCollapsedChange],
-  );
-
-  const handleToggleProjects = useCallback(() => {
-    handleProjectsCollapsedChange(!projectsCollapsed);
-  }, [handleProjectsCollapsedChange, projectsCollapsed]);
 
   const handleChatsCollapsedChange = useCallback(
     (collapsed: boolean) => {
@@ -1626,6 +1603,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     },
     [onWorkspaceCollapsedChange],
   );
+
+  const handleToggleProjects = useCallback(() => {
+    for (const { workspace } of orderedGroups) {
+      handleWorkspaceOpenChange(workspace.id, projectsCollapsed);
+    }
+  }, [handleWorkspaceOpenChange, orderedGroups, projectsCollapsed]);
 
   // Drop targets are computed over the rows on screen; folded projects have
   // no row to measure against. `finishWorkspaceDrag` maps the on-screen slot
@@ -2868,76 +2851,74 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               ) : null}
             </div>
           </div>
-          <Collapsible.Root open={!projectsCollapsed}>
-            <Collapsible.Content className="fd-collapsible-content min-w-0 data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
-              <ProjectGroupList
-                orderedGroups={displayedGroups}
-                draggingWorkspaceId={draggingWorkspaceId}
-                dropIndex={dropIndex}
-                onWorkspaceOrderChange={onWorkspaceOrderChange}
-                workspaceRowRefs={workspaceRowRefs}
-                onWorkspacePointerDown={handleWorkspacePointerDown}
-                onWorkspacePointerMove={handleWorkspacePointerMove}
-                onWorkspacePointerUp={finishWorkspaceDrag}
-                onWorkspaceClickCapture={handleWorkspaceClickCapture}
-                visualSelectedWorkspaceId={visualSelectedWorkspaceId}
-                onSelectWorkspace={handleSelectWorkspace}
-                onNewThread={onNewThread ? handleNewThread : undefined}
-                onSearchProjectThreads={onSearchProjectThreads}
-                onOpenWorkspaceContextMenu={handleOpenWorkspaceContextMenu}
-                workspaceColors={workspaceColors}
-                workspaceIconSrc={workspaceIconSrc}
-                workspaceHosts={workspaceHosts}
-                collapsedWorkspaces={collapsedWorkspaces}
-                onWorkspaceOpenChange={handleWorkspaceOpenChange}
-                threadSort={threadSort}
-                visualSelectedThreadId={visualSelectedThreadId}
-                viewingArchivedWorkspaceIds={archivedViewWorkspaceIds}
-                onHideArchived={handleHideArchived}
-                onSelectThread={handleSelectThread}
-                onArchiveThread={requestArchiveConfirm}
-                onUnarchiveThread={onUnarchiveThread}
-                onArchiveConfirm={confirmArchive}
-                onArchiveCancel={cancelArchiveConfirm}
-                pendingArchive={pendingArchive}
-                onOpenThreadContextMenu={handleOpenThreadContextMenu}
-                onRequestRenameThread={handleRequestRenameThread}
-                nowTick={nowTick}
-                threadTagsById={threadTagsById}
-              />
-              {foldedGroups.length > 0 ? (
-                <div className="mt-1.5 flex items-center">
-                  {projectsRevealed ? (
-                    <button
-                      type="button"
-                      onClick={() => setProjectsRevealed(false)}
-                      className={THREAD_PAGER_BUTTON_CLASS}
-                      aria-label="Show fewer projects"
-                    >
-                      Show less
-                      <ChevronDown
-                        aria-hidden="true"
-                        className="h-3 w-3 rotate-180"
-                      />
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setProjectsRevealed(true)}
-                      className={THREAD_PAGER_BUTTON_CLASS}
-                      aria-label={`Show ${foldedGroups.length} more ${
-                        foldedGroups.length === 1 ? "project" : "projects"
-                      }`}
-                    >
-                      <ChevronDown aria-hidden="true" className="h-3 w-3" />
-                      Show more
-                      <span className="tabular-nums">{foldedGroups.length}</span>
-                    </button>
-                  )}
-                </div>
-              ) : null}
-            </Collapsible.Content>
-          </Collapsible.Root>
+          <div className="min-w-0">
+            <ProjectGroupList
+              orderedGroups={displayedGroups}
+              draggingWorkspaceId={draggingWorkspaceId}
+              dropIndex={dropIndex}
+              onWorkspaceOrderChange={onWorkspaceOrderChange}
+              workspaceRowRefs={workspaceRowRefs}
+              onWorkspacePointerDown={handleWorkspacePointerDown}
+              onWorkspacePointerMove={handleWorkspacePointerMove}
+              onWorkspacePointerUp={finishWorkspaceDrag}
+              onWorkspaceClickCapture={handleWorkspaceClickCapture}
+              visualSelectedWorkspaceId={visualSelectedWorkspaceId}
+              onSelectWorkspace={handleSelectWorkspace}
+              onNewThread={onNewThread ? handleNewThread : undefined}
+              onSearchProjectThreads={onSearchProjectThreads}
+              onOpenWorkspaceContextMenu={handleOpenWorkspaceContextMenu}
+              workspaceColors={workspaceColors}
+              workspaceIconSrc={workspaceIconSrc}
+              workspaceHosts={workspaceHosts}
+              collapsedWorkspaces={collapsedWorkspaces}
+              onWorkspaceOpenChange={handleWorkspaceOpenChange}
+              threadSort={threadSort}
+              visualSelectedThreadId={visualSelectedThreadId}
+              viewingArchivedWorkspaceIds={archivedViewWorkspaceIds}
+              onHideArchived={handleHideArchived}
+              onSelectThread={handleSelectThread}
+              onArchiveThread={requestArchiveConfirm}
+              onUnarchiveThread={onUnarchiveThread}
+              onArchiveConfirm={confirmArchive}
+              onArchiveCancel={cancelArchiveConfirm}
+              pendingArchive={pendingArchive}
+              onOpenThreadContextMenu={handleOpenThreadContextMenu}
+              onRequestRenameThread={handleRequestRenameThread}
+              nowTick={nowTick}
+              threadTagsById={threadTagsById}
+            />
+            {foldedGroups.length > 0 ? (
+              <div className="mt-1.5 flex items-center">
+                {projectsRevealed ? (
+                  <button
+                    type="button"
+                    onClick={() => setProjectsRevealed(false)}
+                    className={THREAD_PAGER_BUTTON_CLASS}
+                    aria-label="Show fewer projects"
+                  >
+                    Show less
+                    <ChevronDown
+                      aria-hidden="true"
+                      className="h-3 w-3 rotate-180"
+                    />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setProjectsRevealed(true)}
+                    className={THREAD_PAGER_BUTTON_CLASS}
+                    aria-label={`Show ${foldedGroups.length} more ${
+                      foldedGroups.length === 1 ? "project" : "projects"
+                    }`}
+                  >
+                    <ChevronDown aria-hidden="true" className="h-3 w-3" />
+                    Show more
+                    <span className="tabular-nums">{foldedGroups.length}</span>
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
           {orderedGroups.length === 0 && chatGroups.length === 0 ? (
             <EmptyState
               icon={

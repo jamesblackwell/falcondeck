@@ -166,3 +166,30 @@ it('renders one Chats control and pages each unfinished chat workspace', async (
   expect(loadPage).toHaveBeenCalledTimes(4)
   expect(textOf(renderer)).not.toContain('Show more')
 })
+
+
+it('toggles all projects and still lets one project open on its own', () => {
+  useSessionStore.setState({ snapshot: snapshot() })
+  const renderer = renderComponent(<SidebarView
+    groups={[
+      { workspace: workspace({ id: 'one', path: '/tmp/one' }), threads: [] },
+      { workspace: workspace({ id: 'two', path: '/tmp/two' }), threads: [] },
+      { workspace: workspace({ id: 'chat', kind: 'casual' }), threads: [] },
+    ]}
+    selectedThreadId={null} onSelectThread={vi.fn()} onNewThread={vi.fn()}
+  />)
+  const control = (label: string) => renderer.root.findByProps({ accessibilityLabel: label })
+  const tap = (label: string) => act(() => { control(label).props.onPress() })
+  tap('two')
+  tap('Collapse projects')
+  expect(control('one').props.accessibilityState.expanded).toBe(false)
+  expect(control('two').props.accessibilityState.expanded).toBe(false)
+  tap('Expand projects')
+  expect(control('one').props.accessibilityState.expanded).toBe(true)
+  expect(control('two').props.accessibilityState.expanded).toBe(true)
+  tap('Collapse projects')
+  tap('one')
+  expect(control('one').props.accessibilityState.expanded).toBe(true)
+  expect(control('two').props.accessibilityState.expanded).toBe(false)
+  expect(control('Collapse projects').props.accessibilityState.expanded).toBe(true)
+})

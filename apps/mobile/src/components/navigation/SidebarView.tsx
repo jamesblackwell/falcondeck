@@ -421,6 +421,20 @@ export const SidebarView = memo(function SidebarView({
     });
   }, []);
 
+  const toggleProjectsCollapsed = useCallback(() => {
+    triggerProjectToggleHaptic();
+    setCollapsedWorkspaces((current) => {
+      const projects = displayGroups.filter(({ workspace }) => workspace.kind !== "casual");
+      const allCollapsed = projects.every(({ workspace }) => current.has(workspace.id));
+      const next = new Set(current);
+      for (const { workspace } of projects) {
+        if (allCollapsed) next.delete(workspace.id);
+        else next.add(workspace.id);
+      }
+      return next;
+    });
+  }, [displayGroups]);
+
   const toggleChatsCollapsed = useCallback(() => {
     setChatsCollapsed((current) => {
       const next = !current;
@@ -479,28 +493,29 @@ export const SidebarView = memo(function SidebarView({
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
       if (item.type === "section") {
-        const chatsCollapsible = item.title === "Chats" && item.isOpen != null;
+        const sectionCollapsible = item.isOpen != null;
+        const isProjects = item.title === "Projects";
         return (
           <View style={styles.sectionHeading}>
             {/* Explicitly 400: the bundled Geist has only Regular and Bold, so
                 RN resolves any in-between weight to the nearest real face.
                 Naming the weight we actually have keeps this row off that
                 rounding edge — see docs/MARKDOWN_STYLE.md. */}
-            {chatsCollapsible ? (
+            {sectionCollapsible ? (
               <Pressable
                 style={({ pressed }) => [
                   styles.sectionHeadingToggle,
                   pressed ? styles.filterButtonPressed : undefined,
                 ]}
-                onPress={toggleChatsCollapsed}
+                onPress={isProjects ? toggleProjectsCollapsed : toggleChatsCollapsed}
                 accessibilityRole="button"
                 accessibilityLabel={
-                  item.isOpen ? "Collapse chats" : "Expand chats"
+                  `${item.isOpen ? "Collapse" : "Expand"} ${isProjects ? "projects" : "chats"}`
                 }
                 accessibilityHint={
-                  item.isOpen
-                    ? "Hides individual chats"
-                    : "Shows individual chats"
+                  isProjects
+                    ? "Toggles all project contents; project names stay visible"
+                    : item.isOpen ? "Hides individual chats" : "Shows individual chats"
                 }
                 accessibilityState={{ expanded: item.isOpen }}
               >
@@ -795,6 +810,7 @@ export const SidebarView = memo(function SidebarView({
       theme.iconSize.xs,
       toggleWorkspaceCollapse,
       toggleChatsCollapsed,
+      toggleProjectsCollapsed,
       handleOverflowPress,
       overflowLoading,
       syncIndex?.token,

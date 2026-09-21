@@ -29,6 +29,7 @@ describe('buildSidebarRows', () => {
         key: 'section:projects',
         type: 'section',
         title: 'Projects',
+        isOpen: true,
       },
       {
         key: 'workspace:w1',
