@@ -146,6 +146,11 @@ export function SidebarDrawerContent({
     }
   }, [handleClose, router]);
 
+  const handleOpenActivity = useCallback(() => {
+    router.navigate("/(app)/activity");
+    handleClose();
+  }, [handleClose, router]);
+
   const handleOpenSettings = useCallback(() => {
     router.navigate("/(app)/settings");
     handleClose();
@@ -160,6 +165,8 @@ export function SidebarDrawerContent({
       onSelectThread={handleSelectThread}
       onNewThread={handleNewThread}
       onNewChat={handleNewChat}
+      onOpenActivity={handleOpenActivity}
+      activityOpen={pathname === "/activity"}
       onOpenSettings={handleOpenSettings}
       settingsOpen={settingsOpen}
       // A sidebar that never goes away has nothing to close, and an X on it

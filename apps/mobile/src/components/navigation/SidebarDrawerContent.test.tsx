@@ -43,6 +43,14 @@ afterEach(() => {
 })
 
 describe('SidebarDrawerContent', () => {
+  it('opens Activity and dismisses the drawer', () => {
+    const dispatch = vi.fn()
+    renderComponent(<SidebarDrawerContent navigation={{ dispatch } as never} />)
+    act(() => { mocks.sidebarProps?.onOpenActivity() })
+    expect(mocks.navigate).toHaveBeenCalledWith('/(app)/activity')
+    expect(dispatch).toHaveBeenCalledWith({ type: 'CLOSE_DRAWER' })
+  })
+
   it('closes the drawer after selecting a conversation', () => {
     const dispatch = vi.fn()
     renderComponent(

@@ -89,6 +89,8 @@ interface SidebarViewProps {
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread: (workspaceId: string) => void;
   onNewChat?: () => Promise<void> | void;
+  onOpenActivity?: () => void;
+  activityOpen?: boolean;
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
@@ -166,6 +168,8 @@ export const SidebarView = memo(function SidebarView({
   onSelectThread,
   onNewThread,
   onNewChat,
+  onOpenActivity,
+  activityOpen = false,
   onOpenSettings,
   settingsOpen = false,
   onClose,
@@ -848,6 +852,14 @@ export const SidebarView = memo(function SidebarView({
         ) : null}
       </View>
 
+      {onOpenActivity ? (
+        <Pressable style={[styles.activityButton, activityOpen ? styles.filterButtonActive : null]}
+          onPress={onOpenActivity} accessibilityRole="button" accessibilityLabel="Activity"
+          accessibilityState={{ selected: activityOpen }}>
+          <Text variant="label" color={activityOpen ? "accent" : "secondary"}>Activity</Text>
+          <Text variant="meta">Across all projects</Text>
+        </Pressable>
+      ) : null}
       <SyncBanner status={syncStatus} />
 
       <View style={styles.list}>
@@ -1007,6 +1019,13 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[1],
+  },
+  activityButton: {
+    minHeight: theme.minTouchTarget,
+    paddingHorizontal: theme.spacing[4],
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
   },
   list: {
     flex: 1,
