@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
+  type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
-import { Redirect } from "expo-router";
+import { Redirect, useLocalSearchParams } from "expo-router";
 import { FlashList } from "@shopify/flash-list";
 import { StyleSheet } from "react-native-unistyles";
 
@@ -72,6 +73,8 @@ function QaBlockView({ block, settle }: { block: QaBlock; settle: boolean }) {
 }
 
 export default function ScrollQaScreen() {
+  // /scroll-qa?stallJs=1 reproduces native scrolling ahead of a busy JS thread.
+  const { stallJs } = useLocalSearchParams<{ stallJs?: string }>();
   const [blocks, setBlocks] = useState(() => buildBlocks(200));
   const [streaming, setStreaming] = useState(true);
   const [settle, setSettle] = useState(true);
@@ -96,11 +99,21 @@ export default function ScrollQaScreen() {
     onScrollBeginDrag: onScrollBeginDragFollow,
     onScrollEndDrag: onScrollEndDragFollow,
     onMomentumScrollEnd,
-    onTouchStart,
+    onTouchStart: onTouchStartFollow,
     onTouchMove,
     onTouchEnd,
     scrollToBottom,
   } = useScrollToBottom<QaBlock>();
+
+  const onTouchStart = useCallback((event: GestureResponderEvent) => {
+    onTouchStartFollow(event);
+    if (stallJs === "1") {
+      const until = Date.now() + 500;
+      // Intentional dev-only stall: UIKit keeps scrolling while JS cannot
+      // receive begin-drag. Replaying its old offset used to rewind the swipe.
+      while (Date.now() < until) { /* Keep JS occupied. */ }
+    }
+  }, [onTouchStartFollow, stallJs]);
 
   useEffect(() => {
     if (!streaming) return;

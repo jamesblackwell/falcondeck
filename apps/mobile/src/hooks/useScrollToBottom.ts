@@ -148,10 +148,9 @@ export function useScrollToBottom<T>() {
         releaseVelocity: 0,
       }
       setFollowing(false)
-      listRef.current?.scrollToOffset({
-        offset: event.nativeEvent.contentOffset.y,
-        animated: false,
-      })
+      // Native dragging already interrupts a scroll animation. Replaying the
+      // begin event's offset here rewinds a gesture that progressed while JS
+      // was busy rendering streamed content.
     },
     [setFollowing],
   )

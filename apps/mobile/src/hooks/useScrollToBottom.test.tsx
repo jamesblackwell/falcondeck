@@ -120,7 +120,7 @@ describe('useScrollToBottom', () => {
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
-  it('cancels an in-flight glide the moment a drag starts', () => {
+  it('never rewinds a native drag to a stale JS begin-drag offset', () => {
     const hook = renderHook()
 
     act(() => {
@@ -128,13 +128,17 @@ describe('useScrollToBottom', () => {
     })
     expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: true })
 
+    // Streaming can occupy JS while the native scroller keeps moving. The
+    // queued begin event still says 500, although the finger is already at 360.
+    let nativeOffset = 360
+    hook.scrollToOffset.mockImplementation(({ offset }) => {
+      nativeOffset = offset
+    })
     act(() => {
-      hook.value.onScrollBeginDrag(scrollEvent(420))
+      hook.value.onScrollBeginDrag(scrollEvent(500))
     })
-    expect(hook.scrollToOffset).toHaveBeenCalledWith({
-      offset: 420,
-      animated: false,
-    })
+    expect(nativeOffset).toBe(360)
+    expect(hook.scrollToOffset).not.toHaveBeenCalled()
 
     act(() => {
       hook.value.onContentSizeChange()
