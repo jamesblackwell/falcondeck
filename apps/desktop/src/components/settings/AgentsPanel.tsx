@@ -85,6 +85,14 @@ const RECOMMENDED_AGENTS = [
     installCommand:
       'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
   },
+  {
+    id: 'unreal',
+    label: 'Unreal Agent',
+    detail: 'JSONL runner through FalconDeck’s ACP adapter; text and full-access tools (Go 1.27+)',
+    command: ['falcondeck-unreal-agent-acp'],
+    transport: undefined,
+    installCommand: 'go install github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest',
+  },
 ]
 
 const CUSTOM_AGENT_RESERVED_IDS = [

@@ -10,6 +10,28 @@ describe('AgentsPanel recommended agents', () => {
     vi.unstubAllGlobals()
   })
 
+  it('configures Unreal Agent through the bundled ACP adapter', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(emptyOverview), { status: 200 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        revision: 'revision-1',
+        providers: { unreal: { label: 'Unreal Agent', command: ['falcondeck-unreal-agent-acp'] } },
+        resolved: [{ id: 'unreal', label: 'Unreal Agent', command: ['falcondeck-unreal-agent-acp'], binary_found: true, reserved: false }],
+      }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure Unreal Agent' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: { unreal: { label: 'Unreal Agent', command: ['falcondeck-unreal-agent-acp'] } },
+      expected_revision: 'revision-0',
+    })
+  })
+
   it('configures Pi with the maintained ACP adapter command', async () => {
     const fetchMock = vi
       .fn()

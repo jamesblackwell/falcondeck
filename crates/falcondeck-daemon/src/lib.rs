@@ -33,6 +33,7 @@ mod skill_library;
 mod skills;
 mod ssh_config;
 pub mod stdio_helper;
+pub mod unreal_agent_acp;
 mod terminal;
 mod variant;
 mod workspace_files;

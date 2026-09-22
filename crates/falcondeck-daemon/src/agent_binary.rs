@@ -297,6 +297,8 @@ fn known_location_paths(bin_name: &str) -> Vec<PathBuf> {
     if let Ok(home) = env::var("HOME") {
         candidates.push(PathBuf::from(&home).join(".local/bin").join(bin_name));
         candidates.push(PathBuf::from(&home).join(".cargo/bin").join(bin_name));
+        // `go install` defaults to GOPATH/bin (~/go/bin when GOPATH is unset).
+        candidates.push(PathBuf::from(&home).join("go/bin").join(bin_name));
         // OpenCode's recommended install script keeps its standalone binary
         // here without necessarily adding the directory to GUI app PATHs.
         candidates.push(PathBuf::from(&home).join(".opencode/bin").join(bin_name));

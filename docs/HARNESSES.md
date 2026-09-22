@@ -31,7 +31,7 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, agy, opencode, pi, grok, and cursor. Each entry declares its npm
+   claude, agy, opencode, pi, grok, cursor, and unreal. Each entry declares its npm
    package (for latest-version lookups), upgrade command, and optional auth
    probe. Adding a harness means adding one struct — the panel, RPC, and
    per-host probing pick it up automatically. Cursor, Antigravity, and Grok ship via
@@ -43,6 +43,11 @@ Entries come from two sources, merged by id:
    bare commit hash, which the version parser treats as "no version". Cursor's
    installer also writes `~/.local/bin/agent`, colliding with Grok; the
    upgrade command restores a pre-existing non-Cursor `agent` symlink.
+   Unreal Agent installs through Go 1.27+ (`go install
+   github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest`). Its
+   runner does not expose `--version`, so the harness inventory reports an
+   installed path without a parsed version or latest-version check. Binary
+   resolution includes Go's default `~/go/bin` install location.
 2. **`providers.json` ACP entries**: overlaid on the curated list (matching
    ids switch to `kind: acp` and probe the configured command), and appended
    as new entries otherwise. Local overviews only: ACP commands are
@@ -203,6 +208,18 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   upgraded CLI without an app reload.
 
 ## Client notes
+
+- **Unreal Agent:** Settings → Agents offers `falcondeck-unreal-agent-acp`, a
+  FalconDeck-hosted ACP adapter for the one-request `unreal-agent-runner` CLI.
+  Configure it after installing the runner and setting credentials or
+  `UNREAL_HARNESS_LLM_PROVIDER`/`UNREAL_HARNESS_LLM_MODEL` in the daemon's
+  environment. The adapter launches the runner in the selected workspace,
+  translates its JSONL model/tool events, and reloads history from its native
+  `.harness/sessions` files. It accepts text prompts; the upstream runner does
+  not accept ACP images or MCP servers. Its Bash tool executes directly, so
+  the adapter offers only `always-approve` (full access) and never implies that
+  FalconDeck can gate individual tool calls. `UNREAL_AGENT_RUNNER_BIN` can point
+  the adapter at a nonstandard runner path.
 
 - ACP adapters without an advertised permission catalog (including Pi and
   custom Pi-based harnesses) receive daemon-enforced `always-approve` and

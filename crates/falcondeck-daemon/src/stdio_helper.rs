@@ -14,6 +14,8 @@ pub enum StdioHelper {
     Control,
     /// The bridge exposing enabled extension tools to agent harnesses.
     Extensions,
+    /// ACP adapter for the Unreal Agent JSONL runner.
+    UnrealAgentAcp,
     /// A reserved helper name this build does not understand.
     Unknown(String),
 }
@@ -26,6 +28,7 @@ pub fn from_first_arg(arg: Option<&OsStr>) -> Option<StdioHelper> {
     match arg {
         "mcp" => Some(StdioHelper::Control),
         "mcp-extensions" => Some(StdioHelper::Extensions),
+        "mcp-unreal-agent-acp" => Some(StdioHelper::UnrealAgentAcp),
         unknown if unknown.starts_with("mcp-") => Some(StdioHelper::Unknown(unknown.to_string())),
         _ => None,
     }
@@ -36,6 +39,7 @@ pub async fn run(helper: StdioHelper) -> i32 {
     match helper {
         StdioHelper::Control => crate::control::mcp::run_mcp_server().await,
         StdioHelper::Extensions => crate::extension_mcp::run_extension_mcp_server().await,
+        StdioHelper::UnrealAgentAcp => crate::unreal_agent_acp::run().await,
         StdioHelper::Unknown(command) => {
             eprintln!("falcondeck: unknown helper subcommand {command:?}");
             2
@@ -56,6 +60,10 @@ mod tests {
         assert_eq!(
             from_first_arg(Some(OsStr::new("mcp-extensions"))),
             Some(StdioHelper::Extensions)
+        );
+        assert_eq!(
+            from_first_arg(Some(OsStr::new("mcp-unreal-agent-acp"))),
+            Some(StdioHelper::UnrealAgentAcp)
         );
     }
 

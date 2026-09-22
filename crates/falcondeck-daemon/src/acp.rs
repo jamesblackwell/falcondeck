@@ -127,6 +127,8 @@ pub fn cursor_placeholder_collaboration_modes() -> Vec<CollaborationModeSummary>
 pub fn placeholder_permission_modes_for(provider: &str) -> Vec<String> {
     if provider.eq_ignore_ascii_case("grok") {
         grok_placeholder_permission_modes()
+    } else if provider.eq_ignore_ascii_case("unreal") {
+        vec!["always-approve".to_string()]
     } else {
         vec!["always-approve".to_string(), "default".to_string()]
     }
@@ -590,9 +592,20 @@ pub fn providers_overview(state_dir: &Path) -> Value {
             });
             let malformed = command.as_ref().is_none_or(Vec::is_empty);
             let command = command.unwrap_or_default();
-            let binary_found = command
-                .first()
-                .is_some_and(|bin| crate::agent_binary::agent_binary_available_cached(bin, bin));
+            let binary_found = command.first().is_some_and(|bin| {
+                let runner = entry
+                    .pointer("/env/UNREAL_AGENT_RUNNER_BIN")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::unreal_agent_acp::configured_runner_bin(None));
+                let bin = if bin == crate::unreal_agent_acp::COMMAND {
+                    runner.as_str()
+                } else {
+                    bin
+                };
+                crate::agent_binary::agent_binary_available_cached(bin, bin)
+            });
             json!({
                 "id": id,
                 "label": entry.get("label").and_then(Value::as_str).unwrap_or(id),
@@ -768,10 +781,13 @@ pub fn load_acp_provider_configs(state_dir: &Path) -> Vec<AcpProviderConfig> {
                     // appears automatically once the CLI is installed. Cached
                     // probe: this runs on every snapshot and the uncached
                     // resolver can spawn a login shell for missing binaries.
-                    let available = crate::agent_binary::agent_binary_available_cached(
-                        &config.command[0],
-                        &config.command[0],
-                    );
+                    let runner = crate::unreal_agent_acp::configured_runner_bin(Some(&config.env));
+                    let bin = if config.command[0] == crate::unreal_agent_acp::COMMAND {
+                        runner.as_str()
+                    } else {
+                        &config.command[0]
+                    };
+                    let available = crate::agent_binary::agent_binary_available_cached(bin, bin);
                     if !available {
                         tracing::info!(
                             provider = %config.id,
@@ -2025,12 +2041,25 @@ impl AcpRuntime {
         workspace_path: &str,
         events: mpsc::UnboundedSender<AcpEvent>,
     ) -> Result<Arc<Self>, DaemonError> {
-        let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
+        let bundled_unreal = config.command[0] == crate::unreal_agent_acp::COMMAND;
+        let executable = if bundled_unreal {
+            std::env::current_exe()
+                .map_err(|error| {
+                    DaemonError::Process(format!("cannot locate FalconDeck ACP adapter: {error}"))
+                })?
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            resolve_agent_binary(&config.command[0], &config.command[0]).executable
+        };
         let mut command = Command::new(&executable);
         apply_provider_environment(&mut command, &executable, &config.env).await;
         strip_terminal_advertising_env(&mut command);
         for (key, value) in crate::connectors::MCP_CLI_TIMEOUT_ENV {
             command.env(*key, *value);
+        }
+        if bundled_unreal {
+            command.arg("mcp-unreal-agent-acp");
         }
         command
             .args(&config.command[1..])
@@ -5710,6 +5739,33 @@ mod tests {
         assert_eq!(configs[0].command, vec!["echo", "agent", "stdio"]);
         assert_eq!(configs[1].id, "unlabeled");
         assert_eq!(configs[1].label, "unlabeled");
+    }
+
+    #[test]
+    fn bundled_unreal_adapter_uses_the_configured_runner_for_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = std::env::current_exe().unwrap();
+        std::fs::write(
+            dir.path().join("providers.json"),
+            json!({ "providers": {
+                "unreal": {
+                    "label": "Unreal Agent",
+                    "command": [crate::unreal_agent_acp::COMMAND],
+                    "env": { "UNREAL_AGENT_RUNNER_BIN": runner }
+                }
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let configs = load_acp_provider_configs(dir.path());
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].id, "unreal");
+        let overview = providers_overview(dir.path());
+        assert_eq!(overview["resolved"][0]["binary_found"], true);
+        assert_eq!(
+            placeholder_permission_modes_for("unreal"),
+            ["always-approve"]
+        );
     }
 
     #[test]

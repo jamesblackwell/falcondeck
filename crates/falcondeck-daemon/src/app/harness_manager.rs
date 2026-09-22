@@ -163,6 +163,17 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         auth_probe: Some(&["status"]),
         builtin: false,
     },
+    KnownHarness {
+        id: "unreal",
+        label: "Unreal Agent",
+        bin: "unreal-agent-runner",
+        npm_package: None,
+        upgrade_command: Some(
+            "go install github.com/unreallabsai/unreal-agent/cmd/unreal-agent-runner@latest",
+        ),
+        auth_probe: None,
+        builtin: false,
+    },
 ];
 
 impl KnownHarness {
@@ -546,6 +557,11 @@ impl AppState {
                             .and_then(|command| command.first())
                             .and_then(|value| value.as_str())?
                             .to_string();
+                        let bin = if bin == crate::unreal_agent_acp::COMMAND {
+                            "unreal-agent-runner".to_string()
+                        } else {
+                            bin
+                        };
                         Some((id, label, bin))
                     })
                     .collect()
@@ -732,7 +748,13 @@ async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
         return summary;
     }
     // Version and auth probes are independent; run them concurrently.
-    let version = probe_binary_version(&resolution.executable);
+    let version = async {
+        if harness.id == "unreal" {
+            Ok(None)
+        } else {
+            probe_binary_version(&resolution.executable).await
+        }
+    };
     let account = async {
         match harness.auth_probe {
             Some(args) => Some(probe_auth_status(&resolution.executable, args).await),
@@ -769,7 +791,11 @@ async fn probe_configured_bin(summary: &mut HarnessSummary, bin: &str) {
         summary.last_checked_at = Some(checked_at());
         return;
     }
-    match probe_binary_version(&resolution.executable).await {
+    match if summary.id == "unreal" {
+        Ok(None)
+    } else {
+        probe_binary_version(&resolution.executable).await
+    } {
         Ok(version) => summary.version = version,
         Err(failure) => summary.failure = Some(version_probe_failure(&summary.label, failure)),
     }
@@ -1219,12 +1245,13 @@ fn remote_probe_script() -> String {
     script.push_str(
         r#"
 for bin do
-  p=$(command -v "$bin" 2>/dev/null) || continue
+  p=$(command -v "$bin" 2>/dev/null) || p="$HOME/go/bin/$bin"
+  [ -f "$p" ] || continue
   echo "FD_BIN:$bin:$p"
   v=$("$p" --version 2>&1 | head -n 1)
   echo "FD_VER:$bin:$v"
   seen="$p"
-  for candidate in "$HOME/.local/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/.opencode/bin/$bin" /opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin
+  for candidate in "$HOME/.local/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.opencode/bin/$bin" /opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin
   do
     [ -f "$candidate" ] || continue
     case " $seen " in *" $candidate "*) continue ;; esac
