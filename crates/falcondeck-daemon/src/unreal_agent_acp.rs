@@ -448,8 +448,19 @@ async fn run_prompt(
     let stdout = child.stdout.take().ok_or("runner stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("runner stderr unavailable")?;
     let stderr_task = tokio::spawn(async move {
+        const TAIL_LIMIT: usize = 65_536;
+        let mut stderr = stderr;
         let mut bytes = Vec::new();
-        let _ = stderr.take(65_536).read_to_end(&mut bytes).await;
+        let mut chunk = [0u8; 8192];
+        while let Ok(size) = stderr.read(&mut chunk).await {
+            if size == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..size]);
+            if bytes.len() > TAIL_LIMIT {
+                bytes.drain(..bytes.len() - TAIL_LIMIT);
+            }
+        }
         String::from_utf8_lossy(&bytes).trim().to_string()
     });
     let mut lines = BufReader::new(stdout).lines();
@@ -457,7 +468,7 @@ async fn run_prompt(
     loop {
         tokio::select! {
             _ = &mut cancelled => {
-                let _ = child.kill().await;
+                cancel_runner(&mut child).await;
                 return Ok("cancelled");
             }
             line = lines.next_line() => match line {
@@ -493,6 +504,22 @@ async fn run_prompt(
             format!("Unreal Agent exited with {status}: {stderr}")
         }
     }))
+}
+
+async fn cancel_runner(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The runner traps SIGINT and cancels its coordinator and tool actors.
+        // Give those children a chance to settle before a forced kill.
+        unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        if tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.kill().await;
 }
 
 fn replay(history: &str, output: &Sender, session_id: &str) {

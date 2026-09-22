@@ -78,14 +78,32 @@ async fn prompt_cancel_and_reload_native_history() {
     let session_id = created[0]["result"]["sessionId"].as_str().unwrap();
     let session_id = session_id.to_string();
 
-    send(&mut child, 30, "session/set_config_option", json!({
-        "sessionId": session_id, "configId": "permission", "value": "always-approve"
-    })).await;
-    assert_eq!(receive(&mut lines, 30).await[0]["result"]["sessionId"], session_id);
-    send(&mut child, 31, "session/set_model", json!({
-        "sessionId": session_id, "modelId": "gpt-6-astra"
-    })).await;
-    assert_eq!(receive(&mut lines, 31).await[0]["result"]["sessionId"], session_id);
+    send(
+        &mut child,
+        30,
+        "session/set_config_option",
+        json!({
+            "sessionId": session_id, "configId": "permission", "value": "always-approve"
+        }),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut lines, 30).await[0]["result"]["sessionId"],
+        session_id
+    );
+    send(
+        &mut child,
+        31,
+        "session/set_model",
+        json!({
+            "sessionId": session_id, "modelId": "gpt-6-astra"
+        }),
+    )
+    .await;
+    assert_eq!(
+        receive(&mut lines, 31).await[0]["result"]["sessionId"],
+        session_id
+    );
 
     send(
         &mut child,
@@ -105,11 +123,33 @@ async fn prompt_cancel_and_reload_native_history() {
 
     send(
         &mut child,
+        32,
+        "session/prompt",
+        json!({
+            "sessionId": session_id, "prompt": [{ "type": "text", "text": "noisy" }]
+        }),
+    )
+    .await;
+    let events = receive(&mut lines, 32).await;
+    assert_eq!(events.last().unwrap()["result"]["stopReason"], "end_turn");
+
+    send(
+        &mut child,
         4,
         "session/prompt",
         json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "wait" }] }),
     )
     .await;
+    let waiting = timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let waiting: Value = serde_json::from_str(&waiting).unwrap();
+    assert_eq!(
+        waiting.pointer("/params/update/content/text"),
+        Some(&json!("WAITING"))
+    );
     send(
         &mut child,
         5,
@@ -119,6 +159,7 @@ async fn prompt_cancel_and_reload_native_history() {
     .await;
     let events = receive(&mut lines, 4).await;
     assert_eq!(events.last().unwrap()["result"]["stopReason"], "cancelled");
+    assert!(workspace.path().join("runner-interrupted").exists());
     child.kill().await.unwrap();
 
     let (mut child, mut lines) = start_adapter();
