@@ -271,6 +271,7 @@ export default function HomeScreen() {
     onScrollEndDrag,
     onMomentumScrollEnd,
     onTouchStart,
+    onTouchMove,
     onTouchEnd,
     resetScrollState,
     scrollToBottom,
@@ -1456,6 +1457,7 @@ export default function HomeScreen() {
             onScrollEndDrag={onScrollEndDrag}
             onMomentumScrollEnd={onMomentumScrollEnd}
             onTouchStart={onTouchStart}
+            onTouchMove={onTouchMove}
             onTouchEnd={onTouchEnd}
             onTouchCancel={onTouchEnd}
             onResponderRelease={onTouchEnd}

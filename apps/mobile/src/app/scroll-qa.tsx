@@ -61,7 +61,7 @@ function QaBlockView({ block, settle }: { block: QaBlock; settle: boolean }) {
       <Text variant="caption" color="muted">
         {block.id}
       </Text>
-      <Text variant="body">
+      <Text variant="body" selectable>
         {Array.from(
           { length: lines },
           (_, line) => `line ${line} of ${block.id}`,
@@ -97,6 +97,7 @@ export default function ScrollQaScreen() {
     onScrollEndDrag: onScrollEndDragFollow,
     onMomentumScrollEnd,
     onTouchStart,
+    onTouchMove,
     onTouchEnd,
     scrollToBottom,
   } = useScrollToBottom<QaBlock>();
@@ -243,6 +244,7 @@ export default function ScrollQaScreen() {
           onContentSizeChange={onContentSizeChange}
           onMomentumScrollEnd={onMomentumScrollEnd}
           onTouchStart={onTouchStart}
+          onTouchMove={onTouchMove}
           onTouchEnd={onTouchEnd}
           onTouchCancel={onTouchEnd}
           onResponderRelease={onTouchEnd}

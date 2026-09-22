@@ -19,6 +19,10 @@ function scrollEvent(y: number, contentHeight = 1000, viewportHeight = 500) {
   } as any
 }
 
+function touchEvent(pageY: number) {
+  return { nativeEvent: { identifier: 0, pageY } } as any
+}
+
 function renderHook() {
   let value: ReturnType<typeof useScrollToBottom<string>> | null = null
 
@@ -373,7 +377,7 @@ describe('useScrollToBottom', () => {
 
     // At the tail: y=500, content=1000, viewport=500 → distance 0.
     act(() => {
-      hook.value.onTouchStart()
+      hook.value.onTouchStart(touchEvent(300))
       hook.value.onScrollBeginDrag(scrollEvent(500))
     })
     // Reader moved up ~20px, but a row above finished measuring and MVCP
@@ -395,7 +399,7 @@ describe('useScrollToBottom', () => {
     const hook = renderHook()
 
     act(() => {
-      hook.value.onTouchStart()
+      hook.value.onTouchStart(touchEvent(300))
       hook.value.onContentSizeChange()
       hook.value.scrollToBottomIfFollowing(false)
     })
@@ -404,7 +408,7 @@ describe('useScrollToBottom', () => {
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
 
     act(() => {
-      hook.value.onTouchEnd()
+      hook.value.onTouchEnd(touchEvent(300))
       hook.value.onContentSizeChange()
     })
     expect(hook.nativeScrollToEnd).toHaveBeenCalledWith({ animated: false })
@@ -426,6 +430,74 @@ describe('useScrollToBottom', () => {
     })
     expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
   })
+  it('remembers an upward touch through streaming layout and a small release reversal', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onTouchStart(touchEvent(300))
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onContentSizeChange()
+      // Row measurement moved the offset DOWN despite the finger reading UP.
+      hook.value.onScroll(scrollEvent(520, 1040))
+      // Native touch cancellation can carry the last finger position.
+      hook.value.onTouchEnd(touchEvent(330))
+      const release = scrollEvent(540, 1040)
+      release.nativeEvent.velocity = { x: 0, y: 0.1 }
+      hook.value.onScrollEndDrag(release)
+      hook.value.onMomentumScrollEnd(scrollEvent(540, 1040))
+      hook.value.onContentSizeChange()
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('latches touch movement before native drag recognition and cancellation', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onTouchStart(touchEvent(300))
+      hook.value.onTouchMove(touchEvent(320))
+      hook.value.onTouchEnd(touchEvent(320))
+      // A layout callback can arrive between touch cancellation and begin drag.
+      hook.value.onContentSizeChange()
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onContentSizeChange()
+      const release = scrollEvent(540, 1040)
+      release.nativeEvent.velocity = { x: 0, y: 0.1 }
+      hook.value.onScrollEndDrag(release)
+      hook.value.onMomentumScrollEnd(scrollEvent(540, 1040))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+  })
+
+  it('keeps an upward touch latched after the finger reverses past its starting point', () => {
+    const hook = renderHook()
+    act(() => {
+      hook.value.onTouchStart(touchEvent(300))
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onContentSizeChange()
+      hook.value.onTouchMove(touchEvent(330))
+      hook.value.onTouchMove(touchEvent(290))
+      hook.value.onTouchEnd(touchEvent(290))
+      const release = scrollEvent(540, 1040)
+      release.nativeEvent.velocity = { x: 0, y: 0.1 }
+      hook.value.onScrollEndDrag(release)
+      hook.value.onMomentumScrollEnd(scrollEvent(540, 1040))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).not.toHaveBeenCalled()
+
+    // A separate downward gesture can intentionally resume following.
+    act(() => {
+      hook.value.onTouchStart(touchEvent(400))
+      hook.value.onScrollBeginDrag(scrollEvent(400, 1040))
+      hook.value.onTouchMove(touchEvent(260))
+      hook.value.onTouchEnd(touchEvent(260))
+      hook.value.onScrollEndDrag(scrollEvent(540, 1040))
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.nativeScrollToEnd).toHaveBeenCalledTimes(1)
+  })
+
   it('does not mistake shrinking content during a read-back for a return to the tail', () => {
     const hook = renderHook()
     act(() => {

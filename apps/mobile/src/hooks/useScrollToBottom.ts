@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import type { FlashListRef } from '@shopify/flash-list'
 import {
   Platform,
+  type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native'
@@ -49,8 +50,8 @@ function distanceFromBottom(event: NativeSyntheticEvent<NativeScrollEvent>) {
  * Distance to the bottom is position, NOT gesture direction: content can
  * shrink and the viewport can grow while the reader scrolls up. FlashList
  * also drops onScroll during offset correction, so we cannot rely on seeing
- * every intermediate movement. Use native release velocity when available;
- * infer direction from offsets only when geometry stayed stable.
+ * every intermediate movement. Latch upward finger movement independently of
+ * layout; use release velocity and stable offsets to recognize a return.
  */
 export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
@@ -59,6 +60,11 @@ export function useScrollToBottom<T>() {
   const isFollowingRef = useRef(true)
   const fingerDownRef = useRef(false)
   const dragRef = useRef<Drag | null>(null)
+  const touchRef = useRef<{
+    id: GestureResponderEvent['nativeEvent']['identifier']
+    y: number
+    readBack: boolean
+  } | null>(null)
 
   const setFollowing = useCallback((next: boolean) => {
     isFollowingRef.current = next
@@ -71,13 +77,36 @@ export function useScrollToBottom<T>() {
     listRef.current?.getNativeScrollRef()?.scrollToEnd({ animated })
   }, [])
 
-  const onTouchStart = useCallback(() => {
+  const onTouchStart = useCallback((event: GestureResponderEvent) => {
+    if (!fingerDownRef.current) {
+      touchRef.current = {
+        id: event.nativeEvent.identifier,
+        y: event.nativeEvent.pageY,
+        readBack: false,
+      }
+    }
     fingerDownRef.current = true
   }, [])
 
-  const onTouchEnd = useCallback(() => {
+  const onTouchMove = useCallback((event: GestureResponderEvent) => {
+    const touch = touchRef.current
+    if (!touch || touch.id !== event.nativeEvent.identifier) return
+    // Screen coordinates preserve intent when streaming/anchoring changes
+    // content offsets. Once a finger pulls down to read older content, a tiny
+    // reversal at release must not re-arm following for this gesture.
+    if (event.nativeEvent.pageY > touch.y + UPWARD_PEEK) {
+      touch.readBack = true
+      setFollowing(false)
+      if (dragRef.current) dragRef.current.readBack = true
+    }
+  }, [setFollowing])
+
+  const onTouchEnd = useCallback((event: GestureResponderEvent) => {
+    // iOS can cancel React touches when the native scroll gesture takes over.
+    // Its final coordinates still carry intent; retain it for begin/end drag.
+    onTouchMove(event)
     fingerDownRef.current = false
-  }, [])
+  }, [onTouchMove])
 
   const observeDrag = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -114,7 +143,7 @@ export function useScrollToBottom<T>() {
       dragRef.current = {
         start: metrics(event),
         layoutChanged: false,
-        readBack: false,
+        readBack: touchRef.current?.readBack ?? false,
         releasedTowardBottom: false,
         releaseVelocity: 0,
       }
@@ -129,6 +158,7 @@ export function useScrollToBottom<T>() {
 
   const resumeFollowing = useCallback(() => {
     dragRef.current = null
+    touchRef.current = null
     setFollowing(true)
   }, [setFollowing])
 
@@ -198,6 +228,7 @@ export function useScrollToBottom<T>() {
       showJumpButtonRef.current = false
       setShowJumpButton(false)
       dragRef.current = null
+      touchRef.current = null
       setFollowing(true)
       pinToBottom(animated)
     },
@@ -235,6 +266,7 @@ export function useScrollToBottom<T>() {
     setShowJumpButton(false)
     fingerDownRef.current = false
     dragRef.current = null
+    touchRef.current = null
     setFollowing(true)
   }, [setFollowing])
 
@@ -248,6 +280,7 @@ export function useScrollToBottom<T>() {
     onScrollEndDrag,
     onMomentumScrollEnd,
     onTouchStart,
+    onTouchMove,
     onTouchEnd,
     resetScrollState,
     scrollToBottom,
