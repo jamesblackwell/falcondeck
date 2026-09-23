@@ -2871,10 +2871,16 @@ mod tests {
 
     #[tokio::test]
     async fn process_exit_only_fails_a_turn_that_is_still_active() {
+        for provider_id in ["grok", "cursor"] {
+            assert_process_exit_only_fails_active_turn(provider_id).await;
+        }
+    }
+
+    async fn assert_process_exit_only_fails_active_turn(provider_id: &str) {
         let temp_dir = tempdir().unwrap();
         let workspace_id = "workspace-acp-exit";
         let thread_id = "thread-acp-exit";
-        let provider = AgentProvider::new("grok");
+        let provider = AgentProvider::new(provider_id);
         let app = AppState::new_with_state_path(
             "test".to_string(),
             HashMap::new(),
@@ -2919,8 +2925,8 @@ mod tests {
         let (events, _receiver) = mpsc::unbounded_channel();
         let runtime = AcpRuntime::connect(
             AcpProviderConfig {
-                id: "grok".to_string(),
-                label: "Grok".to_string(),
+                id: provider_id.to_string(),
+                label: provider_id.to_string(),
                 command: vec![
                     "node".to_string(),
                     fixture.to_string_lossy().into_owned(),
@@ -2985,7 +2991,7 @@ mod tests {
             workspace_id,
             &runtime,
             AcpEvent::Fatal {
-                message: "Grok agent process exited".to_string(),
+                message: format!("{provider_id} agent process exited"),
             },
             &mut replaying,
         )
@@ -3022,7 +3028,7 @@ mod tests {
             workspace_id,
             &runtime,
             AcpEvent::Fatal {
-                message: "Grok agent process exited".to_string(),
+                message: format!("{provider_id} agent process exited"),
             },
             &mut replaying,
         )
