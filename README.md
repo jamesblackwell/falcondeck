@@ -76,7 +76,7 @@ The mobile source is available now. The iOS app will be published on the App Sto
 
 FalconDeck is under active development. It is useful today, but you should expect rough edges.
 
-Download the Mac app from the [GitHub Releases page](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.1). Use `FalconDeck_0.1.1_aarch64.dmg` on Apple Silicon and `FalconDeck_0.1.1_x64.dmg` on Intel. You can still run from source with the instructions below.
+Download the Mac app from the [GitHub Releases page](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.2). Use `FalconDeck_0.1.2_aarch64.dmg` on Apple Silicon and `FalconDeck_0.1.2_x64.dmg` on Intel. You can still run from source with the instructions below.
 
 ## How FalconDeck works
 
