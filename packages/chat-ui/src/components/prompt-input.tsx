@@ -47,7 +47,6 @@ import {
 import {
   ActivityDiamond,
   Button,
-  StatusTextSwap,
   Tooltip,
   cn,
 } from "@falcondeck/ui";
@@ -958,11 +957,9 @@ export const PromptInput = memo(function PromptInput({
                     muted={voice.state === "transcribing"}
                   />
                   {voice.state === "transcribing" ? (
-                    <StatusTextSwap
-                      text="Transcribing…"
-                      live
-                      className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary"
-                    />
+                    <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                      Transcribing…
+                    </span>
                   ) : (
                     <span
                       aria-hidden="true"

@@ -195,7 +195,7 @@ function LiveAgentStatus({ label }: { label: string }) {
   return (
     <div role="status" className={AGENT_STATUS_ROW_CLASS}>
       <ActivityDiamond />
-      <StatusTextSwap text={label} live className="font-medium" />
+      <StatusTextSwap text={label} className="font-medium" />
     </div>
   );
 }

@@ -58,7 +58,6 @@ export function PlanBar({
           </span>
           <StatusTextSwap
             text={summary}
-            live={Boolean(current)}
             className={cn(
               'min-w-0 flex-1 text-[length:var(--fd-text-sm)]',
               current ? 'text-fg-primary' : 'text-fg-muted',

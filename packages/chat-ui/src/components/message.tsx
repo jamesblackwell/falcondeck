@@ -2302,11 +2302,7 @@ function ReasoningMessage({
           className="h-3.5 w-3.5 shrink-0 text-danger"
         />
       ) : null}
-      <StatusTextSwap
-        text={label}
-        live={activelyStreaming}
-        className="min-w-0 font-medium"
-      />
+      <StatusTextSwap text={label} className="min-w-0 font-medium" />
       {durationLabel ? (
         <span
           aria-hidden={hasBody || undefined}
@@ -3531,7 +3527,6 @@ export const WorkSessionCard = memo(
                     : "Working…"
                   : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`
               }
-              live={running}
               className={cn("font-medium", running && "shrink-0")}
             />
             {running && currentLabel ? (
@@ -3597,13 +3592,11 @@ export const LiveActivityLane = memo(function LiveActivityLane({
               <div className="border-b border-border-subtle px-3 py-2">
                 <StatusTextSwap
                   text={group.summary.title}
-                  live
                   className="w-full text-[length:var(--fd-text-xs)] font-medium text-fg-primary"
                 />
                 {group.summary.subtitle ? (
                   <StatusTextSwap
                     text={group.summary.subtitle}
-                    live
                     className="w-full text-[length:var(--fd-text-xs)] text-fg-muted"
                   />
                 ) : null}

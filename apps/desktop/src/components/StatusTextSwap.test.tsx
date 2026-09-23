@@ -29,7 +29,7 @@ describe("StatusTextSwap", () => {
   });
 
   it("renders the current label on first paint without an outgoing copy", () => {
-    render(<StatusTextSwap text="Thinking…" live />);
+    render(<StatusTextSwap text="Thinking…" />);
 
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
     expect(document.querySelector(".fd-status-text__out")).toBeNull();
@@ -37,8 +37,8 @@ describe("StatusTextSwap", () => {
 
   it("swaps in place under reduced motion", () => {
     stubMatchMedia(true);
-    const { rerender } = render(<StatusTextSwap text="Sending…" live />);
-    rerender(<StatusTextSwap text="Thinking…" live />);
+    const { rerender } = render(<StatusTextSwap text="Sending…" />);
+    rerender(<StatusTextSwap text="Thinking…" />);
 
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
     expect(screen.queryByText("Sending…")).not.toBeInTheDocument();
@@ -48,9 +48,9 @@ describe("StatusTextSwap", () => {
   it("keeps the current label accessible while the previous copy exits", () => {
     stubMatchMedia(false);
     vi.useFakeTimers();
-    const { rerender } = render(<StatusTextSwap text="Sending…" live />);
+    const { rerender } = render(<StatusTextSwap text="Sending…" />);
 
-    rerender(<StatusTextSwap text="Thinking…" live />);
+    rerender(<StatusTextSwap text="Thinking…" />);
 
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
     expect(screen.queryByText("Sending…")).not.toBeInTheDocument();
@@ -67,10 +67,10 @@ describe("StatusTextSwap", () => {
   it("retargets the incoming label if a second swap arrives mid-animation", () => {
     stubMatchMedia(false);
     vi.useFakeTimers();
-    const { rerender } = render(<StatusTextSwap text="Sending…" live />);
+    const { rerender } = render(<StatusTextSwap text="Sending…" />);
 
-    rerender(<StatusTextSwap text="Setting up isolated copy…" live />);
-    rerender(<StatusTextSwap text="Thinking…" live />);
+    rerender(<StatusTextSwap text="Setting up isolated copy…" />);
+    rerender(<StatusTextSwap text="Thinking…" />);
 
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
     expect(document.querySelector(".fd-status-text__out")).toHaveAttribute(
@@ -83,23 +83,5 @@ describe("StatusTextSwap", () => {
     });
     expect(document.querySelector(".fd-status-text__out")).toBeNull();
     expect(screen.getByText("Thinking…")).toBeInTheDocument();
-  });
-
-  it("shimmers only while the slot is live and not mid-swap", () => {
-    stubMatchMedia(false);
-    vi.useFakeTimers();
-    const { rerender, container } = render(
-      <StatusTextSwap text="Thinking…" live />,
-    );
-    expect(container.querySelector(".fd-status-text--live")).not.toBeNull();
-
-    rerender(<StatusTextSwap text="Thought" live={false} />);
-    expect(container.querySelector(".fd-status-text--live")).toBeNull();
-
-    act(() => {
-      vi.advanceTimersByTime(STATUS_TEXT_SWAP_MS);
-    });
-    rerender(<StatusTextSwap text="Thought" live={false} />);
-    expect(container.querySelector(".fd-status-text--live")).toBeNull();
   });
 });

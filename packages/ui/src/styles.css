@@ -1843,35 +1843,6 @@ body {
   }
 }
 
-/* Quiet held-state shimmer. The highlight is a translating overlay, not an
-   animated mask or background-position, so it composites. */
-.fd-status-text--live .fd-status-text__in {
-  position: relative;
-  isolation: isolate;
-}
-.fd-status-text--live .fd-status-text__in::after {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 45%;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, currentColor 28%, transparent),
-    transparent
-  );
-  pointer-events: none;
-  animation: fd-status-shimmer 1.8s var(--fd-ease-default) infinite;
-}
-@keyframes fd-status-shimmer {
-  from {
-    transform: translateX(-120%);
-  }
-  to {
-    transform: translateX(280%);
-  }
-}
-
 @theme {
   --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-panel);
   --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-panel);

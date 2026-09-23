@@ -4,11 +4,6 @@ import { cn } from "../lib/utils";
 
 type StatusTextSwapProps = {
   text: string;
-  /**
-   * Held live state (thinking, sending, transcribing). Adds a quiet shimmer
-   * until the next label arrives. Settled copy should leave this off.
-   */
-  live?: boolean;
   className?: string;
 };
 
@@ -36,12 +31,10 @@ function prefersReducedMotion() {
  */
 export function StatusTextSwap({
   text,
-  live = false,
   className,
 }: StatusTextSwapProps) {
   const previousTextRef = useRef(text);
   const [outgoing, setOutgoing] = useState<string | null>(null);
-  const reduceMotion = prefersReducedMotion();
 
   useLayoutEffect(() => {
     if (text === previousTextRef.current) return;
@@ -65,16 +58,8 @@ export function StatusTextSwap({
     return () => window.clearTimeout(timeout);
   }, [outgoing]);
 
-  const shimmer = live && !reduceMotion && !outgoing;
-
   return (
-    <span
-      className={cn(
-        "fd-status-text",
-        shimmer && "fd-status-text--live",
-        className,
-      )}
-    >
+    <span className={cn("fd-status-text", className)}>
       {outgoing ? (
         <span
           aria-hidden="true"
