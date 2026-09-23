@@ -106,6 +106,14 @@ describe("mergeThreadDetailPage", () => {
     expect(merged.is_partial).toBe(false);
   });
 
+  it("keeps an empty replaying refresh partial until items arrive", () => {
+    const replaying = { ...detail([]), is_partial: true };
+
+    expect(mergeThreadDetailPage(detail([]), replaying, "refresh").is_partial).toBe(true);
+    const landed = { ...detail(["a"]), is_partial: true };
+    expect(mergeThreadDetailPage(replaying, landed, "refresh").is_partial).toBe(false);
+  });
+
   it("trusts a fresh non-overlapping tail instead of joining unrelated history", () => {
     const merged = mergeThreadDetailPage(
       detail(["old-a", "old-b"], { hasOlder: true }),

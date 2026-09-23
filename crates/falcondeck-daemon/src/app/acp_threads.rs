@@ -389,17 +389,25 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
+            let started = std::time::Instant::now();
             let gate = app.acp_hydration_gate(&workspace_id, &thread_id).await;
             let _guard = gate.lock_owned().await;
-            if let Err(error) = app
+            match app
                 .hydrate_acp_thread(&workspace_id, &thread_id, false)
                 .await
             {
-                tracing::info!(
+                Ok(items) => tracing::info!(
+                    thread = %thread_id,
+                    items,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "ACP thread hydration finished"
+                ),
+                Err(error) => tracing::info!(
                     thread = %thread_id,
                     %error,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
                     "ACP thread hydration failed; transcript stays empty until next attempt"
-                );
+                ),
             }
 
             // This set tracks in-flight hydration, not permanent attempts.
@@ -659,7 +667,17 @@ impl AppState {
         // A burst of restored thread opens can otherwise launch several heavy
         // optional agents at once. Only a new process waits behind this
         // bounded gate; cached runtimes returned above do not.
+        let permit_wait = std::time::Instant::now();
         let _startup_permit = self.inner.runtime_lifecycle.optional_start_permit().await?;
+        let waited = permit_wait.elapsed();
+        if waited >= std::time::Duration::from_secs(1) {
+            tracing::info!(
+                provider = %provider,
+                workspace_id,
+                waited_ms = waited.as_millis() as u64,
+                "ACP runtime start waited for a startup slot"
+            );
+        }
 
         let mut config = self
             .fresh_acp_provider_configs()

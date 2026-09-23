@@ -39,6 +39,17 @@ const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
 // snapshot fetch per interval until it speaks again.
 const THREAD_STATUS_RECHECK_AFTER_MS = 10_000
 const THREAD_STATUS_RECHECK_INTERVAL_MS = 5_000
+// A restored ACP thread answers its first detail read with an empty partial
+// window while the daemon replays the agent's session in the background. That
+// replay can queue behind other agents starting after a restart, so keep
+// re-reading until the transcript lands instead of trusting the empty window.
+const THREAD_HYDRATION_POLL_BASE_MS = 750
+const THREAD_HYDRATION_POLL_MAX_MS = 5_000
+const THREAD_HYDRATION_POLL_ATTEMPTS = 60
+
+function isHydratingDetail(detail: ThreadDetail) {
+  return detail.is_partial && detail.items.length === 0
+}
 
 type IdleWindow = Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
@@ -99,6 +110,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
+  const hydrationPollRef = useRef<{ key: string; attempts: number } | null>(null)
   const pendingEventsRef = useRef<EventEnvelope[]>([])
   // When each thread last produced any event, used to spot threads that are
   // still painted as live long after the daemon stopped talking about them.
@@ -523,12 +535,19 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
     if (cachedDetail) {
       setThreadDetail(cachedDetail)
-      if (!selectedSummary || cachedDetail.thread.updated_at === selectedSummary.updated_at) {
+      if (
+        !isHydratingDetail(cachedDetail) &&
+        (!selectedSummary || cachedDetail.thread.updated_at === selectedSummary.updated_at)
+      ) {
         return
       }
     }
 
+    if (hydrationPollRef.current?.key !== cacheKey) {
+      hydrationPollRef.current = { key: cacheKey, attempts: 0 }
+    }
     let cancelled = false
+    let pollTimer: number | null = null
     setThreadDetailError(null)
     const startedAt = performanceTracingEnabled ? performance.now() : 0
     void api
@@ -538,11 +557,31 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       })
       .then((detail) => {
         if (cancelled) return
+        const merged = mergeThreadDetailPage(
+          threadDetailCacheRef.current.get(cacheKey) ?? null,
+          detail,
+          'refresh',
+        )
         setThreadDetail((current) => {
-          const merged = mergeThreadDetailPage(current, detail, 'refresh')
-          threadDetailCacheRef.current.set(cacheKey, merged)
-          return merged
+          const next = mergeThreadDetailPage(current, detail, 'refresh')
+          threadDetailCacheRef.current.set(cacheKey, next)
+          return next
         })
+        const poll = hydrationPollRef.current
+        if (
+          isHydratingDetail(merged) &&
+          poll?.key === cacheKey &&
+          poll.attempts < THREAD_HYDRATION_POLL_ATTEMPTS
+        ) {
+          const wait = Math.min(
+            THREAD_HYDRATION_POLL_BASE_MS * 1.5 ** poll.attempts,
+            THREAD_HYDRATION_POLL_MAX_MS,
+          )
+          poll.attempts += 1
+          pollTimer = window.setTimeout(() => {
+            setThreadDetailRetry((current) => current + 1)
+          }, wait)
+        }
         recordPerformance('falcondeck:thread-detail', startedAt, {
           cached: Boolean(cachedDetail),
           itemCount: detail.items.length,
@@ -555,7 +594,10 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
           error instanceof Error ? error.message : 'Failed to load this conversation',
         )
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      if (pollTimer !== null) window.clearTimeout(pollTimer)
+    }
   }, [
     api,
     externalWorkspaceIds,

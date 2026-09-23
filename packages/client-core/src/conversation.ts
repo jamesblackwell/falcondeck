@@ -672,9 +672,10 @@ export function mergeThreadDetailPage(
     has_older: hasOlder,
     oldest_item_id: cursorRetained ? oldestItemId : (items[0]?.id ?? null),
     newest_item_id: items.at(-1)?.id ?? null,
-    // A continuous merged window is partial exactly while the daemon says
-    // more history remains before its oldest retained item.
-    is_partial: hasOlder,
+    // A continuous merged window is partial while the daemon says more
+    // history remains before its oldest retained item, or while an empty page
+    // reports a transcript the daemon is still replaying.
+    is_partial: hasOlder || (page.is_partial && items.length === 0),
   };
 }
 

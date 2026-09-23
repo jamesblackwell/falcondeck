@@ -179,6 +179,33 @@ describe('useDaemonConnection thread restoration', () => {
     await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
   })
 
+  it('re-reads a restored thread until its background replay lands', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      mocks.snapshot.mockResolvedValue(daemonSnapshot('ready'))
+      const replaying = { ...hydratedDetail(), items: [], is_partial: true }
+      mocks.threadDetail
+        .mockResolvedValueOnce(replaying)
+        .mockResolvedValueOnce(replaying)
+        .mockResolvedValue(hydratedDetail())
+      const { result } = renderHook(() => useDaemonConnection())
+
+      await waitFor(() => expect(mocks.threadDetail).toHaveBeenCalledTimes(1))
+      expect(result.current.threadDetail?.items ?? []).toHaveLength(0)
+
+      for (let step = 0; step < 4; step += 1) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1_000)
+        })
+      }
+
+      await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
+      expect(mocks.threadDetail).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it.each(['visible', 'hidden'] as const)(
     'applies workspace readiness when a queued paint stalls and visibility becomes %s',
     async (nextVisibility) => {
