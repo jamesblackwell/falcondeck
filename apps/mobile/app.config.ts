@@ -29,7 +29,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     bundleIdentifier: 'com.falcondeck.mobile',
     supportsTablet: true,
-    associatedDomains: ['applinks:falcondeck.com', 'applinks:app.falcondeck.com'],
     // Keeps Read Aloud playback running when the device is locked or the app
     // is backgrounded, like a music player. Requires a native rebuild.
     infoPlist: {
