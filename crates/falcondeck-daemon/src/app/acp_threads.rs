@@ -1726,35 +1726,60 @@ impl AppState {
                 runtime.end_turn(&session_id).await;
             }
             AcpEvent::Fatal { message } => {
+                let mut interrupted_turn = false;
                 for thread_id in runtime.active_thread_ids().await {
+                    // `active_thread_ids` includes idle sessions retained for
+                    // reuse; only a live turn can acquire a failure receipt.
+                    let is_active = {
+                        let workspaces = self.inner.workspaces.lock().await;
+                        workspaces
+                            .get(workspace_id)
+                            .and_then(|workspace| workspace.threads.get(&thread_id))
+                            .is_some_and(|thread| {
+                                matches!(
+                                    thread.summary.status,
+                                    ThreadStatus::Running | ThreadStatus::WaitingForInput
+                                )
+                            })
+                    };
+                    if !is_active {
+                        continue;
+                    }
+                    let mut was_active = false;
                     let _ = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             if matches!(
                                 thread.status,
                                 ThreadStatus::Running | ThreadStatus::WaitingForInput
                             ) {
+                                was_active = true;
                                 thread.status = ThreadStatus::Error;
                                 thread.last_error = Some(message.clone());
                                 thread.updated_at = Utc::now();
                             }
                         })
                         .await;
-                    self.settle_turn_items_with_error(
-                        workspace_id,
-                        &thread_id,
-                        Utc::now(),
-                        ToolSettlement::Failed,
-                        Some(&message),
-                    )
-                    .await;
+                    if was_active {
+                        interrupted_turn = true;
+                        self.settle_turn_items_with_error(
+                            workspace_id,
+                            &thread_id,
+                            Utc::now(),
+                            ToolSettlement::Failed,
+                            Some(&message),
+                        )
+                        .await;
+                    }
                 }
-                self.emit(
-                    Some(workspace_id.to_string()),
-                    None,
-                    UnifiedEvent::Snapshot {
-                        snapshot: self.snapshot().await,
-                    },
-                );
+                if interrupted_turn {
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        None,
+                        UnifiedEvent::Snapshot {
+                            snapshot: self.snapshot().await,
+                        },
+                    );
+                }
             }
         }
         Ok(())
@@ -2818,18 +2843,202 @@ async fn acp_turn_content(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::{HashMap, HashSet},
+        path::Path,
+        sync::Arc,
+        time::Duration,
+    };
 
     use chrono::Utc;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
 
     use super::{
         acp_empty_turn_stop_reason, acp_metadata_updated_at, conversation_item_from_projected_user,
         default_acp_mode, falcondeck_skill_path_preamble, latest_user_message_contains_echo,
     };
-    use falcondeck_core::{ContentLifecycle, ConversationItem};
+    use falcondeck_core::{
+        AgentProvider, ContentLifecycle, ConversationItem, ThreadStatus, WorkspaceStatus,
+        WorkspaceSummary,
+    };
 
-    use crate::app::AppState;
+    use crate::{
+        acp::{AcpEvent, AcpProviderConfig, AcpRuntime, ProviderTransport},
+        app::{AppState, ManagedWorkspace},
+        connectors::BuiltinConnectors,
+    };
+
+    #[tokio::test]
+    async fn process_exit_only_fails_a_turn_that_is_still_active() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_id = "workspace-acp-exit";
+        let thread_id = "thread-acp-exit";
+        let provider = AgentProvider::new("grok");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        app.inner.workspaces.lock().await.insert(
+            workspace_id.to_string(),
+            ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: workspace_id.to_string(),
+                    path: temp_dir.path().to_string_lossy().into_owned(),
+                    kind: falcondeck_core::WorkspaceKind::Project,
+                    status: WorkspaceStatus::Ready,
+                    agents: Vec::new(),
+                    skills: Vec::new(),
+                    default_provider: provider.clone(),
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    account: falcondeck_core::AccountSummary::default(),
+                    current_thread_id: Some(thread_id.to_string()),
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                    icon: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                agy_runtime: None,
+                opencode_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: HashMap::new(),
+            },
+        );
+        app.upsert_thread(workspace_id, thread_id, |thread| {
+            thread.provider = provider;
+        })
+        .await
+        .unwrap();
+
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(
+            AcpProviderConfig {
+                id: "grok".to_string(),
+                label: "Grok".to_string(),
+                command: vec![
+                    "node".to_string(),
+                    fixture.to_string_lossy().into_owned(),
+                    "startup-banner".to_string(),
+                ],
+                env: HashMap::new(),
+                transport: ProviderTransport::default(),
+            },
+            &temp_dir.path().to_string_lossy(),
+            events,
+        )
+        .await
+        .unwrap();
+        runtime
+            .ensure_session(
+                thread_id,
+                None,
+                &temp_dir.path().to_string_lossy(),
+                None,
+                &BuiltinConnectors::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        app.push_conversation_item(
+            workspace_id,
+            thread_id,
+            ConversationItem::UserMessage {
+                id: "user-complete".to_string(),
+                text: "Do the work".to_string(),
+                attachments: Vec::new(),
+                turn_id: None,
+                previous_turn_id: None,
+                created_at: Utc::now(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        app.push_conversation_item(
+            workspace_id,
+            thread_id,
+            ConversationItem::AssistantMessage {
+                id: "answer-complete".to_string(),
+                text: "Done".to_string(),
+                phase: None,
+                memory_citation: None,
+                citations: Vec::new(),
+                lifecycle: ContentLifecycle::Complete,
+                error: None,
+                created_at: Utc::now(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let mut replaying = HashSet::new();
+        app.apply_acp_event(
+            workspace_id,
+            &runtime,
+            AcpEvent::Fatal {
+                message: "Grok agent process exited".to_string(),
+            },
+            &mut replaying,
+        )
+        .await
+        .unwrap();
+        {
+            let workspaces = app.inner.workspaces.lock().await;
+            let thread = &workspaces[workspace_id].threads[thread_id];
+            assert_eq!(thread.summary.status, ThreadStatus::Idle);
+            assert_eq!(thread.items.len(), 2);
+        }
+
+        app.upsert_thread(workspace_id, thread_id, |thread| {
+            thread.status = ThreadStatus::Running;
+        })
+        .await
+        .unwrap();
+        app.push_conversation_item(
+            workspace_id,
+            thread_id,
+            ConversationItem::UserMessage {
+                id: "user-active".to_string(),
+                text: "One more thing".to_string(),
+                attachments: Vec::new(),
+                turn_id: None,
+                previous_turn_id: None,
+                created_at: Utc::now(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        app.apply_acp_event(
+            workspace_id,
+            &runtime,
+            AcpEvent::Fatal {
+                message: "Grok agent process exited".to_string(),
+            },
+            &mut replaying,
+        )
+        .await
+        .unwrap();
+        {
+            let workspaces = app.inner.workspaces.lock().await;
+            let thread = &workspaces[workspace_id].threads[thread_id];
+            assert_eq!(thread.summary.status, ThreadStatus::Error);
+            assert!(thread.items.iter().any(|item| matches!(item,
+                ConversationItem::AssistantMessage { id, lifecycle: ContentLifecycle::Error, .. }
+                    if id == "falcondeck-turn-receipt-user-active"
+            )));
+        }
+        runtime.shutdown().await;
+    }
 
     #[test]
     fn replayed_acp_metadata_preserves_the_activity_timestamp() {

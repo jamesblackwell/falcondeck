@@ -3743,7 +3743,7 @@ impl AcpRuntime {
             };
             runtime.handle_message(message).await;
         }
-        runtime.closed.store(true, Ordering::Release);
+        let expected_shutdown = runtime.closed.swap(true, Ordering::AcqRel);
         let stderr_tail = runtime.stderr_summary().await;
         let detail = if stderr_tail.is_empty() {
             String::new()
@@ -3751,15 +3751,20 @@ impl AcpRuntime {
             format!(": {stderr_tail}")
         };
         let mut pending = runtime.pending.lock().await;
+        // Sessions outlive turns. An exit with no outstanding RPC did not
+        // interrupt a response, even if a completed thread still uses it.
+        let interrupted_request = !pending.is_empty();
         for (_, sender) in pending.drain() {
             let _ = sender.send(Err(DaemonError::Process(format!(
                 "ACP provider '{}' exited{detail}",
                 runtime.config.id
             ))));
         }
-        let _ = runtime.events.send(AcpEvent::Fatal {
-            message: format!("{} agent process exited{detail}", runtime.config.label),
-        });
+        if !expected_shutdown && interrupted_request {
+            let _ = runtime.events.send(AcpEvent::Fatal {
+                message: format!("{} agent process exited{detail}", runtime.config.label),
+            });
+        }
     }
 
     /// Removes terminal-only OSC notifications that some harness integrations
@@ -4667,6 +4672,63 @@ mod tests {
             .await
             .expect("fixture should initialize");
         (runtime, receiver)
+    }
+
+    #[tokio::test]
+    async fn intentional_shutdown_does_not_report_a_process_failure() {
+        let (runtime, mut events) = fixture_runtime("startup-banner").await;
+        runtime.shutdown().await;
+        assert!(
+            timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err(),
+            "retiring an idle agent must not announce a fatal exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_process_exit_does_not_report_a_failed_turn() {
+        let (runtime, mut events) = fixture_runtime("startup-banner").await;
+        runtime.child.lock().await.start_kill().unwrap();
+        assert!(
+            timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err(),
+            "a crash without an interrupted request must not fail a finished turn"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unexpected_process_exit_still_reports_a_failure() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: "exit-fixture".to_string(),
+            label: "Exit fixture".to_string(),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                "session-new-timeout".to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events_tx, mut events) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events_tx)
+            .await
+            .unwrap();
+        let (_, pending) = runtime
+            .begin_request("session/new", json!({}))
+            .await
+            .unwrap();
+        runtime.child.lock().await.start_kill().unwrap();
+        assert!(matches!(
+            next_acp_event(&mut events).await,
+            AcpEvent::Fatal { .. }
+        ));
+        assert!(pending.await.unwrap().is_err());
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
