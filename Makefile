@@ -55,6 +55,8 @@ DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && node -e "require('@tauri-apps/cli'
 # `predev` typecheck on every launch (`make typecheck` still covers that).
 TAURI_DEV = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" dev --config src-tauri/tauri.dev.conf.json
 STOP_DEV_DAEMON = cd "$(DESKTOP_DIR)" && node ./scripts/stop-dev-daemon.mjs
+# Dev targets drop Cargo units no build has used in this many days (0 = off).
+CARGO_PRUNE_DAYS ?= 14
 RELAY_BIN := $(ROOT)/target/debug/falcondeck-relay
 # Kill anything already listening on the UI port (e.g. a stray Vite left
 # behind by an agent or background session) so dev targets always start
@@ -125,6 +127,7 @@ help:
 		'  make frontend-dev     Start the Vite frontend only' \
 		'  make remote-web-dev   Start the remote web client on the local network' \
 		'  make site-dev         Start the marketing site locally' \
+		'  make prune-cargo      Drop Cargo artifacts unused for $(CARGO_PRUNE_DAYS) days (runs with dev targets)' \
 		'  make daemon           Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
 		'  make relay            Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
 		'' \
@@ -209,7 +212,11 @@ site-prepare:
 # the stamp-checked desktop dev daemon running across restarts (stop explicitly
 # with `make desktop-dev-stop`). Starts sidecar services in parallel and polls
 # for readiness instead of fixed sleeps.
-dev: desktop-prepare remote-web-prepare
+.PHONY: prune-cargo
+prune-cargo:
+	@"$(ROOT)/scripts/prune-cargo-target.sh" $(CARGO_PRUNE_DAYS)
+
+dev: desktop-prepare remote-web-prepare prune-cargo
 	@set -e; \
 		$(FREE_UI_PORT); \
 		remote_web_pid=""; \
@@ -379,7 +386,7 @@ mobile-test: mobile-prepare
 test-mobile: mobile-test
 
 # Leaves a healthy stamp-checked daemon running across restarts for faster loops.
-desktop-dev: desktop-prepare
+desktop-dev: desktop-prepare prune-cargo
 	@$(FREE_UI_PORT)
 	@$(TAURI_DEV)
 
