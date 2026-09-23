@@ -63,6 +63,23 @@ describe('buildProjectGroups', () => {
     expect(groups[0]?.threads.map(({ id }) => id)).toEqual(['live'])
     expect(groups[0]?.archivedThreads?.map(({ id }) => id)).toEqual(['archived'])
   })
+
+  it('lists a thread id once, keeping its freshest summary', () => {
+    const stale = summary({ id: 'pinned', updated_at: '2026-08-12T12:00:00Z' })
+    const fresh = summary({
+      id: 'pinned',
+      is_pinned_in_project: true,
+      updated_at: '2026-08-12T12:00:00.5Z',
+    })
+    const groups = buildProjectGroups(
+      [workspace('workspace', '/projects/alpha')],
+      [stale, summary({ id: 'other' }), fresh],
+    )
+
+    const threads = groups[0]?.threads ?? []
+    expect(threads.map(({ id }) => id).sort()).toEqual(['other', 'pinned'])
+    expect(threads.find(({ id }) => id === 'pinned')).toBe(fresh)
+  })
 })
 
 describe('buildProjectGroups reuse', () => {
@@ -87,8 +104,8 @@ describe('buildProjectGroups reuse', () => {
   })
 
   it('keeps unchanged identities and swaps only the changed thread', () => {
-    const stable = fullSummary({})
-    const changed = fullSummary({})
+    const stable = fullSummary({ id: 'stable' })
+    const changed = fullSummary({ id: 'changed' })
     const previous = buildProjectGroups([workspace('workspace', '/projects/alpha')], [stable, changed])
 
     const next = buildProjectGroups(

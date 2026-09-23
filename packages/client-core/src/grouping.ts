@@ -104,9 +104,20 @@ export function buildProjectGroups(
   workspaceOrder: readonly string[] = [],
   previous?: ProjectGroup[] | null,
 ): ProjectGroup[] {
+  // A thread id must render once. Merged host snapshots and racing local
+  // updates can briefly carry the same id twice, and a repeated React key in
+  // the sidebar leaves a ghost row behind. Keep the freshest summary.
+  const uniqueThreads = new Map<string, ThreadSummary>()
+  for (const thread of threads) {
+    const seen = uniqueThreads.get(thread.id)
+    if (!seen || Date.parse(thread.updated_at) > Date.parse(seen.updated_at)) {
+      uniqueThreads.set(thread.id, thread)
+    }
+  }
+
   const threadsByWorkspace = new Map<string, ThreadSummary[]>()
   const archivedByWorkspace = new Map<string, ThreadSummary[]>()
-  for (const thread of threads) {
+  for (const thread of uniqueThreads.values()) {
     const buckets = thread.is_archived ? archivedByWorkspace : threadsByWorkspace
     const bucket = buckets.get(thread.workspace_id) ?? []
     bucket.push(thread)
