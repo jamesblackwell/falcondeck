@@ -201,11 +201,12 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
         />
       ) : null}
       <ScrollView
+        key={panel}
         ref={listRef}
         style={styles.list}
         bounces={false}
         keyboardShouldPersistTaps="handled"
-        onContentSizeChange={revealSelected}
+        onContentSizeChange={panel === 'model' ? revealSelected : undefined}
       >
         {panel === 'agent'
           ? providers.map((option) => {
@@ -217,7 +218,6 @@ export const ComposerModelSheet = memo(function ComposerModelSheet({
                   selected={selected}
                   provider={option.provider}
                   trailing="arrow"
-                  onLayout={selected ? markSelectedOffset : undefined}
                   onPress={() => handleSelectProvider(option.provider)}
                 />
               )
