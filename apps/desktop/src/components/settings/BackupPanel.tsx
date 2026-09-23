@@ -283,7 +283,7 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {pendingBackup.summary.extensions.map((ext) => (
-                    <Badge key={ext} variant="secondary">
+                    <Badge key={ext}>
                       {ext}
                     </Badge>
                   ))}
@@ -300,7 +300,6 @@ export function BackupPanel({ baseUrl, onToast }: BackupPanelProps) {
                 Cancel
               </Button>
               <Button
-                variant="primary"
                 onClick={handleConfirmImport}
                 disabled={isImporting}
                 className="gap-2"

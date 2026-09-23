@@ -39,7 +39,7 @@ export type UsagePanelProps = {
 }
 
 type ProviderConfig = {
-  key: keyof ProviderUsageOverview
+  key: Exclude<keyof ProviderUsageOverview, 'refreshed_at'>
   /** Provider id understood by `ProviderIcon` and provider marks. */
   providerId: string
   name: string

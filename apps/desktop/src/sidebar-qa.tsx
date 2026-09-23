@@ -73,6 +73,8 @@ function thread(overrides: Partial<ThreadSummary>): ThreadSummary {
     is_pinned: false,
     is_pinned_in_project: false,
     goal: null,
+    queued_turns: [],
+    variant: null,
     agent: {
       model_id: null,
       reasoning_effort: null,

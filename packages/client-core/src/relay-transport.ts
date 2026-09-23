@@ -27,8 +27,10 @@ export class RelayTransport {
   private queuedBytes = 0
   private sendTimer: ReturnType<typeof setTimeout> | null = null
   private receiveTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly socket: Socket
 
-  constructor(private readonly socket: Socket) {
+  constructor(socket: Socket) {
+    this.socket = socket
     socket.addEventListener?.('close', () => this.dispose())
   }
 

@@ -305,7 +305,10 @@ function automationAsScheduledTask(
   };
 }
 
-function recurringParts(detail: ScheduledTaskDetail | null) {
+function recurringParts(detail: ScheduledTaskDetail | null): {
+  time: string;
+  weekdays: string[];
+} {
   if (!detail || detail.schedule.kind !== "recurring")
     return { time: "09:00", weekdays: ["MO"] };
   const parts = Object.fromEntries(

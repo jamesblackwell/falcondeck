@@ -59,7 +59,7 @@ export function DictationShortcutPicker({
   const [preview, setPreview] = useState<string | null>(null);
   const previewRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const suggestedIds = new Set(suggested.map((item) => item.id));
+  const suggestedIds = new Set<string>(suggested.map((item) => item.id));
   const customSelected = !suggestedIds.has(value);
   const previewValidation = preview ? dictationShortcutValidation(preview) : null;
   const previewReserved =

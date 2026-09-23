@@ -6432,7 +6432,7 @@ function AppInner() {
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}
         bottom={
-          terminalMounted ? (
+          terminalMounted && baseUrl ? (
             <Suspense fallback={null}>
               <TerminalPanel
                 baseUrl={baseUrl}

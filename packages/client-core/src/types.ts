@@ -685,10 +685,13 @@ export type WorkspaceResolvedIcon = {
   domain?: string | null;
 };
 
+/** How a connected workspace is presented; mirrors `falcondeck_core::WorkspaceKind`. */
+export type WorkspaceKind = "project" | "casual";
+
 export type LibraryWorkspace = {
   id: string;
   path: string;
-  kind?: "project" | "casual";
+  kind?: WorkspaceKind;
   last_opened_at: string;
 };
 
@@ -696,7 +699,7 @@ export type WorkspaceSummary = {
   id: string;
   path: string;
   /** Omitted by older daemons, where every workspace was a project. */
-  kind?: "project" | "casual";
+  kind?: WorkspaceKind;
   status: WorkspaceStatus;
   agents: WorkspaceAgentSummary[];
   skills?: SkillSummary[];
