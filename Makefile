@@ -12,12 +12,10 @@ endif
 endif
 endif
 
+# Leave this empty on the host architecture. `tauri build --target <host>`
+# writes a second full Cargo tree under target/<triple>/ beside target/debug
+# and target/release. Native desktop builds share the host tree instead.
 DESKTOP_TAURI_TARGET :=
-ifeq ($(UNAME_S),Darwin)
-ifeq ($(UNAME_M),arm64)
-DESKTOP_TAURI_TARGET := aarch64-apple-darwin
-endif
-endif
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 DESKTOP_DIR := $(ROOT)/apps/desktop
@@ -105,13 +103,33 @@ DESKTOP_BUNDLE_APP := $(ROOT)/target/$(DESKTOP_TAURI_TARGET)/release/bundle/maco
 endif
 APPLICATIONS_APP := /Applications/FalconDeck.app
 MOBILE_METRO_PORT ?= 8081
-IOS_SIMULATOR ?= iPhone 16 Pro
+IOS_SIMULATOR ?= iPhone 17 Pro
 MOBILE_METRO_PID_FILE = /tmp/falcondeck-mobile-metro-$(MOBILE_METRO_PORT).pid
 MOBILE_METRO_LOG_FILE = /tmp/falcondeck-mobile-metro.log
+# Drops caches that otherwise keep growing: the reliability lab's Xcode
+# DerivedData, lab data older than 7 days, a duplicate host-triple Cargo
+# tree, and Cargo units no build has used in CARGO_PRUNE_DAYS days.
+# A live lab (var/reliability/lab.json) is left alone.
+PRUNE_LOCAL = set -e; \
+	rel="$(ROOT)/var/reliability"; \
+	if [ -d "$$rel" ] && [ ! -f "$$rel/lab.json" ]; then \
+		echo "Pruning reliability build output and data older than 7 days"; \
+		rm -rf "$$rel/DerivedData"; \
+		if [ -d "$$rel/runs" ]; then find "$$rel/runs" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} +; fi; \
+		if [ -d "$$rel/campaigns" ]; then find "$$rel/campaigns" -mindepth 1 -maxdepth 1 -mtime +7 -exec rm -rf {} +; fi; \
+		find "$$rel" -mindepth 1 -maxdepth 1 \( -name 'fdlab-*' -o -name '*-closed.json' -o -name '*.log' -o -name 'pairing-evidence' -o -name 'daemon' -o -name 'workspace' \) -mtime +7 -exec rm -rf {} +; \
+	elif [ -f "$$rel/lab.json" ]; then \
+		echo "Reliability lab is up; leaving var/reliability in place"; \
+	fi; \
+	rm -rf "$(MOBILE_DIR)/ios/DerivedData" "$(ROOT)/target/tmp"; \
+	if [ -z "$(strip $(DESKTOP_TAURI_TARGET))" ]; then \
+		rm -rf "$(ROOT)/target/aarch64-apple-darwin" "$(ROOT)/target/x86_64-apple-darwin"; \
+	fi; \
+	"$(ROOT)/scripts/prune-cargo-target.sh" $(CARGO_PRUNE_DAYS)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile mobile-build mobile-deploy mobile-test desktop-dev desktop-dev-stop desktop-build desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop test-mobile lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile mobile-build mobile-deploy mobile-test desktop-dev desktop-dev-stop desktop-build desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop test-mobile lint typecheck check fmt build prune-local clean
 
 help:
 	@printf '%s\n' \
@@ -138,9 +156,10 @@ help:
 		'  make desktop-restart  Restart the installed Mac app once and verify daemon health' \
 		'  make desktop-brand-assets Regenerate desktop icons/brand assets (skip if up to date; FORCE_BRAND=1 to force)' \
 		'  make build            Build desktop, remote web, and site bundles' \
+		'  make prune-local      Drop old reliability data and stale Cargo caches' \
 		'  make mobile-build     Build the iOS app via EAS (cloud, ad-hoc distribution)' \
 		'  make mobile-deploy    Push an OTA JS update to the preview channel' \
-		'  make clean            Remove Rust and desktop build outputs' \
+		'  make clean            Remove Rust, frontend, and reliability build outputs' \
 		'' \
 		'Validate:' \
 		'  make check            Typecheck + lint + all tests + cargo check' \
@@ -399,7 +418,7 @@ desktop-build: desktop-install
 desktop-restart:
 	cd "$(ROOT)" && node scripts/restart-desktop.mjs
 
-desktop-install: desktop-brand-assets
+desktop-install: desktop-brand-assets prune-local
 	@set -e; \
 		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
 			if command -v rustup >/dev/null 2>&1; then \
@@ -506,15 +525,23 @@ check: typecheck lint test
 fmt:
 	$(CARGO) fmt --all
 
-build: desktop-prepare
+build: desktop-prepare prune-local
 	$(NPM) run build
 	$(REMOTE_NPM) run build
 	$(SITE_NPM) run build
 	$(CARGO) build --workspace
 
+prune-local:
+	@$(PRUNE_LOCAL)
+
 clean:
 	$(CARGO) clean
 	rm -rf $(DESKTOP_DIR)/dist $(REMOTE_WEB_DIR)/dist $(SITE_DIR)/dist $(MOBILE_DIR)/ios/DerivedData
+	@rel="$(ROOT)/var/reliability"; \
+		if [ -d "$$rel" ] && [ ! -f "$$rel/lab.json" ]; then \
+			rm -rf "$$rel/DerivedData" "$$rel/runs" "$$rel/campaigns" "$$rel/pairing-evidence" "$$rel/daemon" "$$rel/workspace"; \
+			find "$$rel" -mindepth 1 -maxdepth 1 \( -name 'fdlab-*' -o -name '*-closed.json' -o -name '*.log' \) -exec rm -rf {} +; \
+		fi
 
 # Isolated simulator/network lab; never restarts the live desktop daemon.
 .PHONY: reliability-up reliability-down reliability-smoke reliability-run reliability-soak reliability-replay reliability-simulator reliability-pair reliability-test reliability-campaign
