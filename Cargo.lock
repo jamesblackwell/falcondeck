@@ -1347,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "falcondeck-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "falcondeck-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "falcondeck-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "cc",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "falcondeck-relay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "axum",
