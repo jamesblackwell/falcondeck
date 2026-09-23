@@ -1,6 +1,9 @@
-import { useEffect, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, type ReactNode } from 'react'
 
 import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Smartphone, Zap } from 'lucide-react'
+
+// Internal design playground; dev server only, never in the production bundle.
+const QAPromptPlayground = import.meta.env.DEV ? lazy(() => import('./qa-prompt-playground')) : null
 
 const REPO_URL = 'https://github.com/jamesblackwell/falcondeck'
 const RELEASES_URL = 'https://github.com/jamesblackwell/falcondeck/releases'
@@ -10,6 +13,7 @@ const IOS_APP_STORE_URL: string | null = null
 const SELF_HOSTING_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/SELF-HOSTING.md'
 const PRIVACY_URL = '/privacy'
 const TERMS_URL = '/terms'
+const QA_PROMPT_URL = '/qa-prompt'
 
 function SiteHeader() {
   return (
@@ -408,9 +412,17 @@ export default function App() {
   const search = new URLSearchParams(window.location.search)
   const isPairPage = path === PAIR_URL || (path === '/' && Boolean(search.get('code')?.trim()))
   const isLegalPage = path === PRIVACY_URL || path === TERMS_URL
-  useKeyShortcuts(!isLegalPage && !isPairPage)
+  const isPlaygroundPage = QAPromptPlayground !== null && path === QA_PROMPT_URL
+  useKeyShortcuts(!isLegalPage && !isPairPage && !isPlaygroundPage)
   if (path === PRIVACY_URL) return <LegalPage page="privacy" />
   if (path === TERMS_URL) return <LegalPage page="terms" />
+  if (isPlaygroundPage && QAPromptPlayground) {
+    return (
+      <Suspense fallback={null}>
+        <QAPromptPlayground />
+      </Suspense>
+    )
+  }
   if (isPairPage) return <PairPage />
 
   return (
