@@ -34,3 +34,4 @@ __pycache__/
 apps/mobile/src/vendor/mermaid.min.txt
 /.env
 /.deepsec
+/.harness
