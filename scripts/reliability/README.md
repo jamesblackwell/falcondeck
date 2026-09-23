@@ -10,7 +10,7 @@ or user conversation data are needed.
 
 Requires macOS, Xcode/simulator runtime, AXe, Docker with Compose, Node, Python3,
 Rust, and installed monorepo dependencies. The default simulator is iPhone 17 Pro
-on iOS 26.3; pass `simulator --runtime <identifier>` for another installed runtime.
+on iOS 26.5; pass `simulator --runtime <identifier>` for another installed runtime.
 
 ```sh
 make reliability-up

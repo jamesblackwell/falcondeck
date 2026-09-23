@@ -372,7 +372,7 @@ def main():
     sub = parser.add_subparsers(dest='action',required=True)
     p=sub.add_parser('up'); p.add_argument('--threads',type=int,default=30); p.add_argument('--workspaces',type=int,default=1); p.add_argument('--lines',type=int,default=100); p.add_argument('--bulk-bytes',type=int,default=5242880); p.add_argument('--ttl',type=int,default=14400); p.set_defaults(run=up)
     p=sub.add_parser('down');p.set_defaults(run=down)
-    p=sub.add_parser('simulator');p.add_argument('--skip-build',action='store_true');p.add_argument('--runtime',default='com.apple.CoreSimulator.SimRuntime.iOS-26-3');p.set_defaults(run=simulator)
+    p=sub.add_parser('simulator');p.add_argument('--skip-build',action='store_true');p.add_argument('--runtime',default='com.apple.CoreSimulator.SimRuntime.iOS-26-5');p.set_defaults(run=simulator)
     p=sub.add_parser('pair-ui');p.set_defaults(run=pair_ui)
     p=sub.add_parser('profile');p.add_argument('name',choices=[*PROFILES,'reset']);p.add_argument('--link',choices=['phone','daemon'],default='phone');p.set_defaults(run=lambda a:profile(load(),a.name,a.link))
     p=sub.add_parser('netem');p.add_argument('--loss',type=float,default=0);p.add_argument('--delay',type=int,default=0);p.add_argument('--seed',type=int,default=1);p.add_argument('--link',choices=['phone','daemon'],default='phone');p.set_defaults(run=lambda a:netem(load(),a.loss,a.delay,a.seed,a.link))
