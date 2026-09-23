@@ -39,6 +39,7 @@ export type SidebarOptionsMenuProps = {
   onOpenKeyboardShortcuts?: () => void
   onOpenSpeechSettings?: () => void
   onCheckForUpdates?: () => void
+  updateStatus?: 'available' | 'downloaded' | null
 }
 
 type Submenu = 'theme' | 'speech'
@@ -69,7 +70,9 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
   onOpenKeyboardShortcuts,
   onOpenSpeechSettings,
   onCheckForUpdates,
+  updateStatus = null,
 }: SidebarOptionsMenuProps) {
+  const updateAvailable = updateStatus !== null
   const [open, setOpen] = useState(false)
   const [openSubmenu, setOpenSubmenu] = useState<Submenu | null>(null)
   const appearance = useAppearance()
@@ -158,6 +161,9 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
         >
           <SlidersHorizontal aria-hidden="true" className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1">Options</span>
+          {updateAvailable ? (
+            <span className="h-1.5 w-1.5 rounded-full bg-warning" title="FalconDeck update available" />
+          ) : null}
         </button>
       </Popover.Trigger>
       <Popover.Portal>
@@ -367,12 +373,23 @@ export const SidebarOptionsMenu = memo(function SidebarOptionsMenu({
                 role="menuitem"
                 onClick={() => {
                   setOpen(false)
-                  onCheckForUpdates()
+                  if (updateAvailable && onOpenSettings) {
+                    onOpenSettings()
+                  } else {
+                    onCheckForUpdates()
+                  }
                 }}
                 className="fd-focus flex w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3"
               >
                 <RefreshCw aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
-                <span className="flex-1">Check for updates…</span>
+                <span className="flex-1">
+                  {updateStatus === 'downloaded'
+                    ? 'Restart to finish update…'
+                    : updateAvailable
+                      ? 'Update available…'
+                      : 'Check for updates…'}
+                </span>
+                {updateAvailable ? <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-warning" /> : null}
               </button>
             ) : null}
 

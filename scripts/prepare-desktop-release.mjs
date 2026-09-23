@@ -38,7 +38,11 @@ if (!tauriConfig.plugins?.updater) {
   throw new Error('apps/desktop/src-tauri/tauri.conf.json is missing plugins.updater')
 }
 
+const configuredPublicKey = tauriConfig.plugins.updater.pubkey?.trim()
 if (updaterPublicKey) {
+  if (configuredPublicKey && configuredPublicKey !== updaterPlaceholder && configuredPublicKey !== updaterPublicKey) {
+    throw new Error('FALCONDECK_UPDATER_PUBLIC_KEY does not match the public key in tauri.conf.json')
+  }
   tauriConfig.plugins.updater.pubkey = updaterPublicKey
 } else if (requireUpdaterKey) {
   throw new Error(

@@ -603,7 +603,7 @@ async fn active_thread_count(state: &DesktopState) -> usize {
     }
 }
 
-fn quit_warning_message(active_thread_count: usize) -> String {
+fn active_thread_warning_message(active_thread_count: usize, action: &str) -> String {
     let (active_turns, pronoun) = if active_thread_count == 1 {
         ("1 thread has an active turn".to_string(), "it")
     } else {
@@ -612,14 +612,34 @@ fn quit_warning_message(active_thread_count: usize) -> String {
             "them",
         )
     };
-    format!(
-        "{active_turns}. Quitting FalconDeck will stop {pronoun}. You can resume {pronoun} after reopening the app."
-    )
+    format!("{active_turns}. {action} FalconDeck will stop {pronoun}. You can resume {pronoun} after reopening the app.")
+}
+
+fn quit_warning_message(active_thread_count: usize) -> String {
+    active_thread_warning_message(active_thread_count, "Quitting")
 }
 
 #[tauri::command]
 async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
     if !cfg!(debug_assertions) {
+        let active_threads = active_thread_count(&state).await;
+        if active_threads > 0 {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            app.dialog()
+                .message(active_thread_warning_message(active_threads, "Restarting"))
+                .title("Stop active tasks and restart?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Restart and stop tasks".to_string(),
+                    "Keep FalconDeck open".to_string(),
+                ))
+                .show(move |should_restart| {
+                    let _ = sender.send(should_restart);
+                });
+            if !receiver.await.unwrap_or(false) {
+                return Ok(());
+            }
+        }
         shutdown_embedded_daemon(state).await;
     }
     app.restart();
@@ -1675,8 +1695,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_file_url, dev_daemon_command_matches, expand_tilde, is_safe_external_url,
-        parse_local_path_input, path_is_within_roots, quit_warning_message,
+        active_thread_warning_message, decode_file_url, dev_daemon_command_matches, expand_tilde,
+        is_safe_external_url, parse_local_path_input, path_is_within_roots, quit_warning_message,
         resolve_existing_local_path,
     };
     use std::{env, fs};
@@ -1694,6 +1714,14 @@ mod tests {
         assert_eq!(
             quit_warning_message(2),
             "2 threads have active turns. Quitting FalconDeck will stop them. You can resume them after reopening the app."
+        );
+    }
+
+    #[test]
+    fn restart_warning_explains_active_threads_will_stop() {
+        assert_eq!(
+            active_thread_warning_message(1, "Restarting"),
+            "1 thread has an active turn. Restarting FalconDeck will stop it. You can resume it after reopening the app."
         );
     }
 

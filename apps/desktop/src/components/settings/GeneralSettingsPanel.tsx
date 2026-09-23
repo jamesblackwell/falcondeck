@@ -83,7 +83,7 @@ export function GeneralSettingsPanel({
         }
       : updater.status === 'downloaded'
         ? {
-            label: 'Restart to install',
+            label: 'Restart to finish update',
             icon: RotateCcw,
             onClick: onRestartToInstallUpdate,
             disabled: false,
@@ -147,11 +147,11 @@ export function GeneralSettingsPanel({
               </p>
               <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
                 {updater.status === 'downloaded'
-                  ? 'The update is downloaded. Restart FalconDeck to install it cleanly with the embedded daemon.'
+                  ? 'The signed update is installed. Restart FalconDeck to run the new version with its embedded daemon.'
                   : updater.status === 'downloading'
                     ? `Downloading the release bundle${updaterProgressPercent !== null ? ` (${updaterProgressPercent}%)` : ''}.`
                     : updater.status === 'available'
-                      ? 'Download the signed release and install it on restart.'
+                      ? 'Download and install the signed release, then restart to use it.'
                       : (updater.errorMessage ??
                         'Background checks stay quiet unless a new release is available.')}
               </p>

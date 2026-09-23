@@ -1948,7 +1948,8 @@ function AppInner() {
     toast({
       variant: "warning",
       title: "Update available",
-      description: `FalconDeck ${updater.state.availableVersion} is ready to download from GitHub Releases.`,
+      description: `FalconDeck ${updater.state.availableVersion} is ready. Open Options → Update available to install it.`,
+      duration: 10000,
     });
   }, [toast, updater.state.availableVersion, updater.state.status, isOnboardingActive]);
 
@@ -1966,9 +1967,9 @@ function AppInner() {
     announcedDownloadedVersionRef.current = updater.state.availableVersion;
     toast({
       variant: "success",
-      title: "Update downloaded",
+      title: "Update installed",
       description:
-        "Restart FalconDeck when you are ready to install the new desktop build.",
+        "Restart FalconDeck when you are ready to run the new desktop build.",
     });
   }, [toast, updater.state.availableVersion, updater.state.status, isOnboardingActive]);
 
@@ -5828,6 +5829,11 @@ function AppInner() {
             onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
             onOpenSpeechSettings={openSpeechSettings}
             onCheckForUpdates={handleCheckForUpdates}
+            updateStatus={
+              updater.state.status === "available" || updater.state.status === "downloaded"
+                ? updater.state.status
+                : null
+            }
             onOpenScheduled={handleOpenScheduled}
             scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}

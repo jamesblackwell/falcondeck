@@ -16,7 +16,12 @@ This document is the maintainer reference for:
 
 - The desktop shell and embedded `falcondeck-daemon` ship as one versioned desktop release.
 - The updater checks GitHub Releases on startup after a short delay and then every 4 hours while the app stays open.
-- Updates are downloaded as signed installer artifacts and applied on restart.
+- A new version appears in Options and General settings, with a one-time in-app notice.
+- The user downloads the signed updater archive in General settings. Tauri verifies its signature and replaces the app bundle during installation. Restarting then runs the new app and embedded daemon; active tasks get a confirmation first.
+
+## Why Tauri's updater
+
+Tauri's updater works with the existing Rust plugin, JavaScript UI, Tauri signing key, and GitHub Release workflow. It already produces Mac `.app.tar.gz` archives and `latest.json` for both Apple Silicon and Intel. Sparkle is a mature Mac-only alternative with automatic installation and delta updates, but adopting it here would add a native framework, a separate appcast, and a second update pipeline. The current signed Tauri path fits this desktop release model.
 
 ## Implementation map
 
@@ -24,13 +29,14 @@ Source-of-truth files:
 
 - [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml): workspace version
 - [package.json](/Users/James/www/sites/falcondeck/package.json): release prep scripts
-- [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, embedded public key placeholder, macOS entitlements
+- [apps/desktop/src-tauri/tauri.conf.json](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/tauri.conf.json): updater endpoint, bundled updater artifacts, public key, macOS entitlements
 - [apps/desktop/src-tauri/entitlements.plist](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/entitlements.plist): Hardened Runtime entitlements for WebView JIT and microphone access
 - [apps/desktop/src-tauri/src/lib.rs](/Users/James/www/sites/falcondeck/apps/desktop/src-tauri/src/lib.rs): Tauri updater plugin registration and restart/shutdown behavior
 - [apps/desktop/src/hooks/useAppUpdater.ts](/Users/James/www/sites/falcondeck/apps/desktop/src/hooks/useAppUpdater.ts): startup polling, 4-hour checks, download/install state
 - [apps/desktop/src/components/SettingsView.tsx](/Users/James/www/sites/falcondeck/apps/desktop/src/components/SettingsView.tsx): user-facing updater UI
-- [scripts/prepare-desktop-release.mjs](/Users/James/www/sites/falcondeck/scripts/prepare-desktop-release.mjs): sync version fields and inject the updater public key during release prep
+- [scripts/prepare-desktop-release.mjs](/Users/James/www/sites/falcondeck/scripts/prepare-desktop-release.mjs): sync version fields and check the CI updater key against the committed public key
 - [release-desktop.yml](/Users/James/www/sites/falcondeck/.github/workflows/release-desktop.yml): GitHub Actions release pipeline
+- [scripts/verify-desktop-release.mjs](/Users/James/www/sites/falcondeck/scripts/verify-desktop-release.mjs): check both Mac targets, installer assets, and updater metadata after packaging
 
 Generated files:
 
@@ -90,6 +96,8 @@ npm run tauri signer generate -- -w ~/.tauri/falcondeck-updater.key
 
 Add the public key output to `FALCONDECK_UPDATER_PUBLIC_KEY`. Add the private key to `TAURI_SIGNING_PRIVATE_KEY`, and its password to `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
+The public key is also committed in `tauri.conf.json` so local packaged builds can verify published updates. Release preparation fails if the CI secret differs. Never rotate the key without a migration plan for existing installations.
+
 Then:
 
 1. Run `npm run desktop:version:sync` once to confirm the desktop package and Tauri config stay aligned with the Cargo workspace version.
@@ -102,7 +110,7 @@ GitHub Actions needs these secrets before the release workflow can publish insta
 
 - `TAURI_SIGNING_PRIVATE_KEY`: the Tauri updater private key contents.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: password for that private key.
-- `FALCONDECK_UPDATER_PUBLIC_KEY`: the matching updater public key contents. This is injected into the Tauri config during release prep.
+- `FALCONDECK_UPDATER_PUBLIC_KEY`: the matching updater public key contents. Release prep checks it against the committed public key.
 - `APPLE_CERTIFICATE`: base64 of the Developer ID Application `.p12`.
 - `APPLE_CERTIFICATE_PASSWORD`: password for that `.p12`.
 - `APPLE_TEAM_ID`: 10-character Apple team ID.
@@ -125,7 +133,7 @@ GitHub Actions secrets and the Mac-only notarizing workflow are in place. First 
 
 1. Bump `[workspace.package].version` in [Cargo.toml](/Users/James/www/sites/falcondeck/Cargo.toml) and run `npm run desktop:version:sync`.
 2. Push `main`, then `git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z` (or run the `release-desktop` workflow manually). That creates a **draft** GitHub Release.
-3. Wait for both macOS jobs (Apple Silicon and Intel). Confirm the draft has `.dmg` / `.app.tar.gz` assets and `latest.json`.
+3. Wait for both macOS jobs (Apple Silicon and Intel) and the `verify-updater` job. The verifier checks that the draft has both DMGs, update archives and signatures, and that `latest.json` points to the same signed files.
 4. Install from that DMG (not `make desktop-install`) and confirm Gatekeeper is silent, the daemon starts, and one real agent turn works.
 5. Publish the draft. Point README (and the site if needed) at the release URL.
 
@@ -139,7 +147,7 @@ Before publishing the draft release, verify:
 - the GitHub Actions job completed for each target platform you intend to support
 - the release contains installer artifacts
 - the release contains updater metadata such as `latest.json`
-- the updater public key placeholder is not what was baked into the built config
+- the updater public key in the built config matches the signing key used for the release
 - release notes are accurate enough for users to understand whether a restart is worthwhile
 
 ## Runtime behavior
@@ -148,8 +156,10 @@ Packaged FalconDeck desktop builds behave like this:
 
 - a delayed updater check happens shortly after startup
 - the app rechecks every 4 hours while it remains open
+- an available update is shown in Options and General settings; a background discovery also shows one in-app notice per version
 - background checks stop trying to replace an already available or already staged update
-- once an update is staged, FalconDeck asks the user to restart rather than trying to hot-swap the embedded daemon
+- Tauri verifies the downloaded archive's signature and installs the app bundle; FalconDeck then asks the user to restart so the embedded daemon and shell start from the same version
+- if tasks are active when the user restarts, the native quit warning lets them keep FalconDeck open
 
 Development behavior is different:
 
@@ -223,14 +233,14 @@ Check:
 - you are using a consistent Node/npm architecture
 - a fresh install resolves the missing binary package before assuming the app code is broken
 
-### A release cut from CI still contains the public key placeholder
+### Release prep reports a public key mismatch
 
-That means `FALCONDECK_UPDATER_PUBLIC_KEY` was not injected during release prep. Do not publish that release as a desktop auto-update target.
+The CI secret and the committed `tauri.conf.json` key differ. Keep the existing signing key for installed users; correct the CI secret rather than generating a replacement key.
 
 ## Local notes
 
 - Development builds keep the updater UI visible but do not hit GitHub Releases.
-- If the updater public key placeholder is still present, packaged release builds should not be considered shippable.
+- Local packaged builds now embed the same public key as release builds. Existing local installs built before this change may still contain the placeholder and need one manual reinstall.
 
 ## Related docs
 

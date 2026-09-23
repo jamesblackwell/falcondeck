@@ -74,6 +74,34 @@ describe('SidebarOptionsMenu', () => {
     expect(onCheckForUpdates).toHaveBeenCalledOnce()
   })
 
+  it('opens the updater settings when an update is available', () => {
+    const onOpenSettings = vi.fn()
+    const onCheckForUpdates = vi.fn()
+    const { rerender } = render(
+      <SidebarOptionsMenu
+        onOpenSettings={onOpenSettings}
+        onCheckForUpdates={onCheckForUpdates}
+        updateStatus="available"
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Options' })).toHaveTextContent('Options')
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update available…' }))
+    expect(onOpenSettings).toHaveBeenCalledOnce()
+    expect(onCheckForUpdates).not.toHaveBeenCalled()
+
+    rerender(
+      <SidebarOptionsMenu
+        onOpenSettings={onOpenSettings}
+        onCheckForUpdates={onCheckForUpdates}
+        updateStatus="downloaded"
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Options' }))
+    expect(screen.getByRole('menuitem', { name: 'Restart to finish update…' })).toBeInTheDocument()
+  })
+
   it('triggers onOpenSettings when clicking Settings', () => {
     const onOpenSettings = vi.fn()
     render(<SidebarOptionsMenu onOpenSettings={onOpenSettings} />)

@@ -25,6 +25,7 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenKeyboardShortcuts?: () => void;
   onOpenSpeechSettings?: () => void;
   onCheckForUpdates?: () => void;
+  updateStatus?: 'available' | 'downloaded' | null;
   onOpenScheduled?: () => void;
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
@@ -50,6 +51,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenKeyboardShortcuts,
   onOpenSpeechSettings,
   onCheckForUpdates,
+  updateStatus = null,
   onOpenScheduled,
   scheduledOpen = false,
   scheduledAttention = false,
@@ -233,6 +235,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
             onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
             onOpenSpeechSettings={onOpenSpeechSettings}
             onCheckForUpdates={onCheckForUpdates}
+            updateStatus={updateStatus}
           />
         ) : null
       }
