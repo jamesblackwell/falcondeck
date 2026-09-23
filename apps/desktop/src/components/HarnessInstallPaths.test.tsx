@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest'
 
 import type { HarnessSummary } from '@falcondeck/client-core'
 
+import { HarnessInstallPaths } from './HarnessInstallPaths'
 import {
-  HarnessInstallPaths,
   harnessHasDivergentInstall,
   upgradeFinishedDescription,
-} from './HarnessInstallPaths'
+} from './harness-install'
 
 const claude: HarnessSummary = {
   id: 'claude',

@@ -34,11 +34,12 @@ import {
   type ComputerUsePermissionStatus,
 } from "../computer-use";
 import { DictationSetup, SpeechCredentialField } from "./DictationSetup";
+import { HarnessInstallPaths } from "./HarnessInstallPaths";
 import {
-  HarnessInstallPaths,
   harnessHasDivergentInstall,
   upgradeFinishedDescription,
-} from "./HarnessInstallPaths";
+} from "./harness-install";
+import { ONBOARDING_STEP_INDEX, ONBOARDING_STEPS } from "./onboarding-steps";
 import { inspectBackupFile, executeImportBackup } from "../backup-service";
 import {
   readStoredOnboardingResume,
@@ -68,28 +69,6 @@ type OnboardingWizardProps = {
   overlayClassName?: string;
 };
 
-export const ONBOARDING_STEPS = [
-  "Welcome",
-  "Appearance",
-  "Fonts",
-  "Dictation",
-  "Computer use",
-  "OpenRouter",
-  "Tools",
-  "Project",
-  "Finish",
-] as const;
-export const ONBOARDING_STEP_INDEX = {
-  welcome: 0,
-  appearance: 1,
-  fonts: 2,
-  dictation: 3,
-  computerUse: 4,
-  openrouter: 5,
-  tools: 6,
-  project: 7,
-  finish: 8,
-} as const;
 const STEPS = ONBOARDING_STEPS;
 const STEP_INDEX = ONBOARDING_STEP_INDEX;
 const JOB_POLL_INTERVAL_MS = 1500;

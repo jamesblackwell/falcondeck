@@ -12,7 +12,7 @@ import {
   Settings,
 } from 'lucide-react'
 
-import { extensionOf, mediaKindFromPath } from './media-file'
+import { extensionOf, mediaKindFromPath } from './media-preview'
 
 export const FileTypeIcon = memo(function FileTypeIcon({ path }: { path: string }) {
   const extension = extensionOf(path)

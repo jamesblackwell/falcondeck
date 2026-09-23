@@ -25,4 +25,12 @@ export default defineConfig([
       'react-hooks/set-state-in-effect': 'off',
     },
   },
+  {
+    // QA pages are standalone Vite entries that mount themselves; nothing
+    // imports them, so there is no module for fast refresh to preserve.
+    files: ['src/*-qa.tsx'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

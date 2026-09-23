@@ -4988,7 +4988,13 @@ function AppInner() {
         user_item_id: generateUserItemId(),
       });
     },
-    [apiFor, groups, persistedComposerSelections, setSnapshot],
+    [
+      apiFor,
+      firstConnectWorkspaceIds,
+      groups,
+      persistedComposerSelections,
+      setSnapshot,
+    ],
   );
 
   useEffect(() => {

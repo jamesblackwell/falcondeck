@@ -2,7 +2,6 @@ import { useState, useRef } from 'react'
 import {
   Badge,
   Button,
-  Card,
   SettingList,
   SettingRow,
   SettingsPage,
@@ -10,7 +9,6 @@ import {
   SettingsSection,
 } from '@falcondeck/ui'
 import {
-  Archive,
   ArrowDownToLine,
   ArrowUpFromLine,
   CheckCircle2,

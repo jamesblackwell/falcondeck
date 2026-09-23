@@ -10,7 +10,7 @@ import {
   mimeTypeFromPath,
   shouldPreviewSvg,
   steppedImageZoom,
-} from './media-file'
+} from './media-preview'
 
 describe('mediaKindFromPath', () => {
   it('classifies images, video, and audio by extension', () => {

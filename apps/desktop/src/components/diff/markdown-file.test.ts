@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { MAX_MARKDOWN_PREVIEW_CHARS, shouldPreviewMarkdown } from './markdown-file'
+import { MAX_MARKDOWN_PREVIEW_CHARS, shouldPreviewMarkdown } from './markdown-preview'
 
 describe('shouldPreviewMarkdown', () => {
   it('allows markdown under the preview budget', () => {

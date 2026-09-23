@@ -16,11 +16,13 @@ import {
 import { Button, initAppearance, updateAppearance } from "@falcondeck/ui";
 
 import {
-  ONBOARDING_STEP_INDEX,
-  ONBOARDING_STEPS,
   OnboardingWizard,
   type OnboardingToast,
 } from "./components/OnboardingWizard";
+import {
+  ONBOARDING_STEP_INDEX,
+  ONBOARDING_STEPS,
+} from "./components/onboarding-steps";
 
 import "./index.css";
 

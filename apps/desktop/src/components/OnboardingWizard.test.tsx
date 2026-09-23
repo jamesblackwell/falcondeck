@@ -15,10 +15,8 @@ import {
   writeStoredOnboarding,
   writeStoredOnboardingResume,
 } from '../preferences'
-import {
-  ONBOARDING_STEP_INDEX,
-  OnboardingWizard,
-} from './OnboardingWizard'
+import { OnboardingWizard } from './OnboardingWizard'
+import { ONBOARDING_STEP_INDEX } from './onboarding-steps'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),

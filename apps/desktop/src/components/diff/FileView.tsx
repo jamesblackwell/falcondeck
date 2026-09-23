@@ -23,21 +23,17 @@ import { ActivityDiamond, Button, Tooltip } from '@falcondeck/ui'
 
 import { basePart, dirPart } from './diff-utils'
 import { FileTypeIcon } from './FileTypeIcon'
-import {
-  FilePreviewToggle,
-  MarkdownFileDocument,
-  shouldPreviewMarkdown,
-  useMarkdownPreviewMode,
-} from './markdown-file'
+import { FilePreviewToggle, MarkdownFileDocument } from './markdown-file'
+import { shouldPreviewMarkdown, useMarkdownPreviewMode } from './markdown-preview'
+import { MediaFilePreview } from './media-file'
 import {
   MAX_MEDIA_PREVIEW_BYTES,
-  MediaFilePreview,
   mediaKindFromMime,
   mediaKindFromPath,
   mimeTypeFromPath,
   shouldPreviewSvg,
   useMediaObjectUrl,
-} from './media-file'
+} from './media-preview'
 
 export const FileView = memo(function FileView({
   filePath,

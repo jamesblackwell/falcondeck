@@ -11,12 +11,8 @@ import {
 } from '@falcondeck/chat-ui'
 import { ActivityDiamond, Button } from '@falcondeck/ui'
 
-import {
-  FilePreviewToggle,
-  MarkdownFileDocument,
-  shouldPreviewMarkdown,
-  useMarkdownPreviewMode,
-} from './markdown-file'
+import { FilePreviewToggle, MarkdownFileDocument } from './markdown-file'
+import { shouldPreviewMarkdown, useMarkdownPreviewMode } from './markdown-preview'
 
 export type DiffViewProps = {
   filePath: string

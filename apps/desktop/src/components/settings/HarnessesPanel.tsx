@@ -24,11 +24,11 @@ import { CheckCircle2, Download, RefreshCw, Terminal } from 'lucide-react'
 
 import { falconDeckHttpError } from '../../connection-copy'
 import type { HostView } from '../../hosts'
+import { HarnessInstallPaths } from '../HarnessInstallPaths'
 import {
-  HarnessInstallPaths,
   harnessHasDivergentInstall,
   upgradeFinishedDescription,
-} from '../HarnessInstallPaths'
+} from '../harness-install'
 
 export type HarnessesPanelProps = {
   baseUrl: string | null

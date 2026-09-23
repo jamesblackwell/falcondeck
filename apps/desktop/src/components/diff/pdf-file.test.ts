@@ -7,7 +7,7 @@ import {
   computePdfFitZoom,
   formatPageCount,
   steppedPdfZoom,
-} from './pdf-file'
+} from './pdf-zoom'
 
 describe('computePdfFitZoom', () => {
   it('fits a page to the viewer width minus padding', () => {

@@ -144,7 +144,7 @@ export function PluginsView({ baseUrl, workspaces, onToast }: PluginsViewProps) 
 }
 
 /** First two characters of the first word, e.g. "AbletonMCP" → "Ab". */
-export function pluginInitials(name: string) {
+function pluginInitials(name: string) {
   const word = name.trim().split(/\s+/)[0] ?? ''
   if (!word) return '?'
   return word.charAt(0).toUpperCase() + word.slice(1, 2)
