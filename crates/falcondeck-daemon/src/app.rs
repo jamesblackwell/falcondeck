@@ -99,6 +99,7 @@ mod remote_lifecycle;
 mod runtime_health;
 mod scheduled_tasks;
 mod speech;
+mod speech_audio;
 mod storage;
 mod sync_index;
 mod thread_search;

@@ -14,6 +14,7 @@ use tokio::{
 };
 
 use super::AppState;
+use super::speech_audio::compact_speech_audio;
 use crate::error::DaemonError;
 
 #[cfg(not(test))]
@@ -280,8 +281,11 @@ impl AppState {
                 "OpenRouter is not configured on the connected desktop".to_string(),
             )
         })?;
-        let audio_duration =
-            estimated_audio_duration(request.duration_seconds, audio.len(), &request.format);
+        // Trimming dead air and long pauses shrinks the upload and the
+        // provider's transcription time.
+        let (audio, format, duration_seconds) =
+            compact_speech_audio(audio, &request.format, request.duration_seconds).await;
+        let audio_duration = estimated_audio_duration(duration_seconds, audio.len(), &format);
         let models = fallback_models(
             &request.model,
             request.fallback_model.as_deref(),
@@ -289,7 +293,7 @@ impl AppState {
         );
         let request_timeout = transcription_timeout(audio_duration);
         // The extension tells OpenRouter the container format.
-        let file_name = format!("audio.{}", request.format);
+        let file_name = format!("audio.{}", format);
         let language = request
             .language
             .as_deref()
