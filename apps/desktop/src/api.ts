@@ -74,6 +74,15 @@ export async function openLocalPath(path: string) {
   await invoke('open_local_path', { path })
 }
 
+export async function openLocalPathInDefaultEditor(path: string) {
+  if (!isTauriDesktop()) {
+    throw new Error('Opening local paths is only available in the FalconDeck desktop app.')
+  }
+
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('open_path_in_default_editor', { path })
+}
+
 export async function revealLocalPath(path: string) {
   if (!isTauriDesktop()) {
     throw new Error('Revealing local paths is only available in the FalconDeck desktop app.')

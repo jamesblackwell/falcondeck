@@ -39,11 +39,19 @@ export function MenuSurface({
       if (menuRef.current?.contains(event.target as Node)) return
       onClose()
     }
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return
+      onClose()
+    }
     document.addEventListener('keydown', onKeyDown)
     document.addEventListener('mousedown', onPointerDown)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onClose)
     return () => {
       document.removeEventListener('keydown', onKeyDown)
       document.removeEventListener('mousedown', onPointerDown)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onClose)
     }
   }, [onClose])
 
@@ -110,7 +118,7 @@ export function MenuSurface({
       role="menu"
       aria-label={ariaLabel}
       onKeyDown={handleKeyDown}
-      className="fixed z-50 w-56 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+      className="fixed z-50 max-h-[calc(100vh-16px)] w-56 overflow-y-auto rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
       style={{ left, top }}
     >
       {children}

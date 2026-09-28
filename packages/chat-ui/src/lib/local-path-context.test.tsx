@@ -33,6 +33,20 @@ function openContextMenu() {
 }
 
 describe("LocalPathProvider menu", () => {
+  it("offers the macOS default editor for files", async () => {
+    const userAgent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
+    try {
+      const handler = vi.fn();
+      renderPathMenu(handler, { describePath: () => Promise.resolve("file") });
+
+      openContextMenu();
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Open in Default Editor" }));
+      expect(handler).toHaveBeenCalledWith("open-default-editor", FILE);
+    } finally {
+      userAgent.mockRestore();
+    }
+  });
+
   it("offers detected editors as open-with actions", () => {
     const handler = vi.fn();
     renderPathMenu(handler, {
@@ -116,6 +130,15 @@ describe("LocalPathProvider menu", () => {
 
     expect(screen.queryByRole("link")).toBeNull();
     fireEvent.contextMenu(screen.getByText("notes.md"));
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("closes the menu when its surrounding view scrolls", () => {
+    renderPathMenu(vi.fn());
+    openContextMenu();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.scroll(window);
     expect(screen.queryByRole("menu")).toBeNull();
   });
 });

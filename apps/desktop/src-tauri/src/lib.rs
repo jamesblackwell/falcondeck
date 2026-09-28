@@ -951,6 +951,36 @@ fn open_local_path(path: String) -> Result<(), String> {
     open::that_detached(&resolved).map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn open_path_in_default_editor(path: String) -> Result<(), String> {
+    let resolved = resolve_existing_local_path(&path)?;
+    if !resolved.is_file() {
+        return Err("The default editor can only open files.".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .arg("-t")
+            .arg(&resolved)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| error.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("The default editor could not open that file.".to_string())
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Opening in the default editor is only available on macOS.".to_string())
+    }
+}
+
 fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -1608,6 +1638,7 @@ pub fn run() {
             read_host_session_secret,
             delete_host_session_secret,
             open_local_path,
+            open_path_in_default_editor,
             reveal_local_path,
             list_installed_editors,
             open_path_with_editor,

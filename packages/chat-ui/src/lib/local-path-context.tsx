@@ -23,6 +23,7 @@ import { MenuRow, MenuSurface, type MenuPosition } from './menu-surface'
 
 export type LocalPathAction =
   | 'open'
+  | 'open-default-editor'
   | 'reveal'
   | 'open-with'
   | 'save-as'
@@ -67,7 +68,7 @@ export function revealInFolderLabel() {
   return 'Show in folder'
 }
 
-async function copyTextToClipboard(text: string) {
+export async function copyTextToClipboard(text: string) {
   try {
     await navigator.clipboard.writeText(text)
   } catch {
@@ -231,6 +232,7 @@ function LocalPathMenu({
 }) {
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
   const isFile = kind === 'file'
+  const showDefaultEditor = isFile && revealInFolderLabel() === 'Reveal in Finder'
   const runAction = (action: LocalPathAction, editorId?: string) => {
     onClose()
     if (editorId) {
@@ -243,7 +245,7 @@ function LocalPathMenu({
   return (
     <MenuSurface
       position={{ x: menu.x, y: menu.y }}
-      itemCount={3 + editors.length + (isFile ? 2 : 0)}
+      itemCount={3 + editors.length + (isFile ? 2 : 0) + Number(showDefaultEditor)}
       ariaLabel={`Actions for ${menu.path}`}
       onClose={onClose}
     >
@@ -252,6 +254,13 @@ function LocalPathMenu({
         label="Open"
         onClick={() => runAction('open')}
       />
+      {showDefaultEditor ? (
+        <MenuRow
+          icon={<SquareCode className={iconClassName} />}
+          label="Open in Default Editor"
+          onClick={() => runAction('open-default-editor')}
+        />
+      ) : null}
       {editors.map((editor) => (
         <MenuRow
           key={editor.id}

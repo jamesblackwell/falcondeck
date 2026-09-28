@@ -147,6 +147,7 @@ import {
   openActivityWindow,
   openExternalUrl,
   openLocalPath,
+  openLocalPathInDefaultEditor,
   openLocalPathWithEditor,
   readLocalTextFile,
   revealLocalPath,
@@ -1240,6 +1241,11 @@ function AppInner() {
       switch (action) {
         case "open":
           void openLocalPath(path).catch(report("Could not open path"));
+          break;
+        case "open-default-editor":
+          void openLocalPathInDefaultEditor(path).catch(
+            report("Could not open path in default editor"),
+          );
           break;
         case "reveal":
           void revealLocalPath(path).catch(report("Could not reveal path"));
@@ -6405,6 +6411,7 @@ function AppInner() {
                       ? handleLocalPath
                       : null
                   }
+                  editors={desktopEditors}
                 />
               </Suspense>
             )

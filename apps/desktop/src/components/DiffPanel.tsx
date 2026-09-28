@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useToast } from '@falcondeck/ui'
-import type { LocalPathHandler } from '@falcondeck/chat-ui'
+import type { LocalPathEditor, LocalPathHandler } from '@falcondeck/chat-ui'
 
 import type {
   GitDiffResponse,
@@ -83,6 +83,7 @@ export type DiffPanelProps = {
   localRoot?: string | null
   /** Host handler for opening / revealing files locally. */
   onLocalPath?: LocalPathHandler | null
+  editors?: readonly LocalPathEditor[]
 }
 
 export const DiffPanel = memo(function DiffPanel({
@@ -96,6 +97,7 @@ export const DiffPanel = memo(function DiffPanel({
   info = null,
   localRoot = null,
   onLocalPath = null,
+  editors = [],
 }: DiffPanelProps) {
   const { toast } = useToast()
   // The overview opens first: it frames what the changes list is a list *of*.
@@ -297,6 +299,7 @@ export const DiffPanel = memo(function DiffPanel({
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-1">
       <FileListView
+        key={`${workspaceId}:${threadId}`}
         entries={status?.entries ?? EMPTY_ENTRIES}
         files={workspaceFiles?.files ?? EMPTY_FILES}
         filesTruncated={workspaceFiles?.truncated ?? false}
@@ -313,6 +316,9 @@ export const DiffPanel = memo(function DiffPanel({
         onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
         onSelectChangedFile={selectChangedFile}
         onSelectWorkspaceFile={selectWorkspaceFile}
+        localRoot={localRoot}
+        onLocalPath={onLocalPath}
+        editors={editors}
         query={filterQuery}
         onQueryChange={setFilterQuery}
         info={info}

@@ -14,6 +14,11 @@ type TreeRowsProps = {
   statusByPath: Map<string, GitStatusEntry>
   onToggle: (path: string) => void
   onSelectFile: (path: string) => void
+  onOpenContextMenu: (
+    path: string,
+    kind: FileTreeNode['kind'],
+    position: { x: number; y: number },
+  ) => void
 }
 
 const TreeRows = memo(function TreeRows({
@@ -24,6 +29,7 @@ const TreeRows = memo(function TreeRows({
   statusByPath,
   onToggle,
   onSelectFile,
+  onOpenContextMenu,
 }: TreeRowsProps) {
   return nodes.map((node) => {
     const isDirectory = node.kind === 'directory'
@@ -34,7 +40,18 @@ const TreeRows = memo(function TreeRows({
         <button
           type="button"
           data-tree-row
+          aria-haspopup="menu"
           onClick={() => (isDirectory ? onToggle(node.path) : onSelectFile(node.path))}
+          onContextMenu={(event) => {
+            event.preventDefault()
+            onOpenContextMenu(node.path, node.kind, { x: event.clientX, y: event.clientY })
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+            event.preventDefault()
+            const rect = event.currentTarget.getBoundingClientRect()
+            onOpenContextMenu(node.path, node.kind, { x: rect.left, y: rect.bottom })
+          }}
           className="fd-focus-inset flex h-7 w-full items-center gap-1.5 truncate pr-3 text-left text-[length:var(--fd-text-sm)] text-fg-secondary [contain-intrinsic-size:28px] [content-visibility:auto] hover:bg-surface-2 hover:text-fg-primary"
           style={{ paddingLeft: 8 + depth * 12 }}
         >
@@ -79,6 +96,7 @@ const TreeRows = memo(function TreeRows({
             statusByPath={statusByPath}
             onToggle={onToggle}
             onSelectFile={onSelectFile}
+            onOpenContextMenu={onOpenContextMenu}
           />
         ) : null}
       </div>
@@ -91,11 +109,13 @@ export const FileTreeView = memo(function FileTreeView({
   statusByPath,
   query,
   onSelectFile,
+  onOpenContextMenu,
 }: {
   paths: string[]
   statusByPath: Map<string, GitStatusEntry>
   query: string
   onSelectFile: (path: string) => void
+  onOpenContextMenu: TreeRowsProps['onOpenContextMenu']
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const tree = useMemo(() => buildFileTree(paths), [paths])
@@ -139,6 +159,7 @@ export const FileTreeView = memo(function FileTreeView({
         statusByPath={statusByPath}
         onToggle={onToggle}
         onSelectFile={onSelectFile}
+        onOpenContextMenu={onOpenContextMenu}
       />
     </div>
   )

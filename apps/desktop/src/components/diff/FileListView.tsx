@@ -1,4 +1,4 @@
-import { memo, useDeferredValue, useMemo } from 'react'
+import { memo, useCallback, useDeferredValue, useMemo, useState } from 'react'
 import {
   GitBranch,
   RefreshCw,
@@ -8,9 +8,11 @@ import {
 } from 'lucide-react'
 
 import type { GitStatusEntry } from '@falcondeck/client-core'
+import type { LocalPathEditor, LocalPathHandler, MenuPosition } from '@falcondeck/chat-ui'
 import { ActivityDiamond } from '@falcondeck/ui'
 
 import { useVirtualRows } from '../../hooks/useVirtualRows'
+import { FileBrowserContextMenu, type FileBrowserMenuTarget } from './FileBrowserContextMenu'
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
 import { InfoView, type ReviewInfoContext } from './InfoView'
@@ -33,6 +35,9 @@ export type FileListViewProps = {
   onRefreshFiles: () => void
   onSelectChangedFile: (entry: GitStatusEntry) => void
   onSelectWorkspaceFile: (path: string) => void
+  localRoot?: string | null
+  onLocalPath?: LocalPathHandler | null
+  editors?: readonly LocalPathEditor[]
   /** Owned by the host: on the files tab it is a daemon-side search. */
   query: string
   onQueryChange: (query: string) => void
@@ -50,18 +55,32 @@ const LIST_PADDING = 8
 // turns a truncated listing into a file the panel swears does not exist.
 const MAX_LISTED_FILES = 20_000
 const MAX_SEARCH_RESULTS = 500
+const NO_EDITORS: readonly LocalPathEditor[] = []
 
 const FileRow = memo(function FileRow({
   entry,
   onSelect,
+  onOpenContextMenu,
 }: {
   entry: GitStatusEntry
   onSelect: (entry: GitStatusEntry) => void
+  onOpenContextMenu: (entry: GitStatusEntry, position: MenuPosition) => void
 }) {
   return (
     <button
       type="button"
+      aria-haspopup="menu"
       onClick={() => onSelect(entry)}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        onOpenContextMenu(entry, { x: event.clientX, y: event.clientY })
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+        event.preventDefault()
+        const rect = event.currentTarget.getBoundingClientRect()
+        onOpenContextMenu(entry, { x: rect.left, y: rect.bottom })
+      }}
       className="fd-focus-inset flex h-8 w-full items-center gap-2 px-3 text-left hover:bg-surface-2"
     >
       <FileTypeIcon path={entry.path} />
@@ -93,6 +112,9 @@ export const FileListView = memo(function FileListView({
   onRefreshFiles,
   onSelectChangedFile,
   onSelectWorkspaceFile,
+  localRoot = null,
+  onLocalPath = null,
+  editors = NO_EDITORS,
   query,
   onQueryChange,
   onStartReview = null,
@@ -100,11 +122,22 @@ export const FileListView = memo(function FileListView({
   info = null,
   showChanges = true,
 }: FileListViewProps) {
+  const [menu, setMenu] = useState<FileBrowserMenuTarget | null>(null)
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
   const statusByPath = useMemo(
     () => new Map(entries.map((entry) => [entry.path, entry])),
     [entries],
   )
+  const openChangedContextMenu = useCallback((entry: GitStatusEntry, position: MenuPosition) => {
+    setMenu({ path: entry.path, kind: 'file', source: 'changes', entry, position })
+  }, [])
+  const openTreeContextMenu = useCallback(
+    (path: string, kind: FileBrowserMenuTarget['kind'], position: MenuPosition) => {
+      setMenu({ path, kind, source: 'files', entry: statusByPath.get(path) ?? null, position })
+    },
+    [statusByPath],
+  )
+  const closeContextMenu = useCallback(() => setMenu(null), [])
   const filteredEntries = useMemo(
     () =>
       deferredQuery
@@ -288,7 +321,12 @@ export const FileListView = memo(function FileListView({
                 style={{ transform: `translateY(${rows.offsetY + LIST_PADDING / 2}px)` }}
               >
                 {filteredEntries.slice(rows.start, rows.end).map((entry) => (
-                  <FileRow key={entry.path} entry={entry} onSelect={onSelectChangedFile} />
+                  <FileRow
+                    key={entry.path}
+                    entry={entry}
+                    onSelect={onSelectChangedFile}
+                    onOpenContextMenu={openChangedContextMenu}
+                  />
                 ))}
               </div>
             </div>
@@ -315,10 +353,22 @@ export const FileListView = memo(function FileListView({
               statusByPath={statusByPath}
               query={deferredQuery}
               onSelectFile={onSelectWorkspaceFile}
+              onOpenContextMenu={openTreeContextMenu}
             />
           </>
         )}
       </div>
+      {menu ? (
+        <FileBrowserContextMenu
+          target={menu}
+          localRoot={localRoot}
+          editors={editors}
+          onLocalPath={onLocalPath}
+          onSelectChangedFile={onSelectChangedFile}
+          onSelectWorkspaceFile={onSelectWorkspaceFile}
+          onClose={closeContextMenu}
+        />
+      ) : null}
     </div>
   )
 })
