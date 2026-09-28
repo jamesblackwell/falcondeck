@@ -1106,9 +1106,6 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
   // Only the collapsed row renders these, but the summary is cheap and the
   // row is memoised on scalars, so it costs nothing when open.
   const attention = summarizeThreadAttention(group.threads);
-  const threadCount = group.threads.filter(
-    (thread) => !thread.is_pinned,
-  ).length;
 
   return (
     <WorkspaceGroup
@@ -1127,7 +1124,6 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
       runningCount={attention.running}
       unreadCount={attention.unread}
       unreadTone={attention.unreadTone}
-      threadCount={threadCount}
     >
       <ThreadList
         group={group}

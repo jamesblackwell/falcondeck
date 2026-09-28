@@ -38,8 +38,6 @@ export type WorkspaceGroupProps = {
   /** Threads waiting on the user; surfaced while it is collapsed. */
   unreadCount?: number
   unreadTone?: 'info' | 'warning' | 'danger'
-  /** In-project chats, excluding global pins. Shown on a quiet folded row. */
-  threadCount?: number
   children: React.ReactNode
 }
 
@@ -65,7 +63,6 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   runningCount = 0,
   unreadCount = 0,
   unreadTone = 'info',
-  threadCount = 0,
   children,
 }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
@@ -205,18 +202,6 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
                   <span className="sr-only">unread</span>
                 </span>
               ) : null}
-            </span>
-          ) : !isOpen && threadCount > 0 ? (
-            // Quiet folded project: say how much is inside so the fold reads
-            // as a fold, not as a project with nothing in it.
-            <span
-              className="flex shrink-0 select-none items-center self-center text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted"
-              title={`${threadCount} ${threadCount === 1 ? 'thread' : 'threads'}`}
-            >
-              {threadCount}
-              <span className="sr-only">
-                {threadCount === 1 ? ' thread' : ' threads'}
-              </span>
             </span>
           ) : null}
           {onSearchThreads ? (

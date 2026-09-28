@@ -1305,7 +1305,7 @@ describe("DesktopSidebar", () => {
     expect(summary).toHaveTextContent("1");
   });
 
-  it("counts idle threads on a collapsed project row so a fold never looks empty", () => {
+  it("leaves a collapsed project with only idle threads free of counts", () => {
     const groups: ProjectGroup[] = [
       {
         workspace: workspace(),
@@ -1329,49 +1329,13 @@ describe("DesktopSidebar", () => {
       />,
     );
 
-    expect(screen.getByTitle("3 threads")).toHaveTextContent("3");
+    expect(screen.queryByTitle(/threads?$/)).not.toBeInTheDocument();
     expect(screen.queryByText("running")).not.toBeInTheDocument();
     expect(screen.queryByText("unread")).not.toBeInTheDocument();
     expect(screen.queryByText("TECH")).not.toBeInTheDocument();
   });
 
-  it("does not count globally pinned chats on a collapsed project row", () => {
-    const groups: ProjectGroup[] = [
-      {
-        workspace: workspace(),
-        threads: [
-          thread({ id: "thread-1", title: "TECH" }),
-          thread({
-            id: "thread-2",
-            title: "Pinned in project",
-            is_pinned_in_project: true,
-          }),
-          thread({
-            id: "thread-3",
-            title: "Pinned chat",
-            is_pinned: true,
-          }),
-        ],
-      },
-    ];
-
-    render(
-      <DesktopSidebar
-        groups={groups}
-        selectedWorkspaceId="workspace-1"
-        selectedThreadId="thread-1"
-        collapsedWorkspaceIds={["workspace-1"]}
-        onWorkspaceCollapsedChange={() => {}}
-        onSelectWorkspace={() => {}}
-        onSelectThread={() => {}}
-      />,
-    );
-
-    expect(screen.getByTitle("2 threads")).toHaveTextContent("2");
-    expect(screen.queryByTitle("3 threads")).not.toBeInTheDocument();
-  });
-
-  it("lets the attention rollup stand in for the idle count while collapsed", () => {
+  it("shows active threads on a collapsed project row", () => {
     renderSidebar(
       { collapsedWorkspaceIds: ["workspace-1"], onWorkspaceCollapsedChange: () => {} },
       { status: "running" },
