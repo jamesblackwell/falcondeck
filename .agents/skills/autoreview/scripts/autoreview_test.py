@@ -118,6 +118,41 @@ class AutoreviewPriorityTests(unittest.TestCase):
         self.assertIn("below the requested P0", report["overall_explanation"])
 
 
+class AutoreviewModelSelectionTests(unittest.TestCase):
+    def reviewer(self, *, model: str | None = None, thinking: str | None = None) -> argparse.Namespace:
+        args = argparse.Namespace(
+            engine="codex",
+            model=[model] if model else None,
+            thinking=[thinking] if thinking else None,
+            fallback_model=None,
+            codex_config=None,
+            codex_speed=None,
+            tools=True,
+        )
+        with mock.patch.object(AUTOREVIEW, "load_autoreview_config", return_value={}), mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            return AUTOREVIEW.reviewer_args(args)[0]
+
+    def test_codex_defaults_to_gpt6_sol_with_access_only_luna_retry(self) -> None:
+        reviewer = self.reviewer()
+        self.assertEqual((reviewer.model, reviewer.thinking, reviewer.fallback_model), ("gpt-6-sol", "high", "gpt-6-luna"))
+
+    def test_explicit_gpt56_sol_keeps_legacy_access_retry(self) -> None:
+        reviewer = self.reviewer(model="gpt-5.6-sol")
+        self.assertEqual(reviewer.fallback_model, "gpt-5.6-terra")
+
+    def test_explicit_gpt6_sol_keeps_access_retry(self) -> None:
+        reviewer = self.reviewer(model="gpt-6-sol")
+        self.assertEqual(reviewer.fallback_model, "gpt-6-luna")
+
+    def test_gpt6_models_reject_unsupported_effort(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "invalid thinking level for codex model gpt-6-sol"):
+            self.reviewer(thinking="minimal")
+        with self.assertRaisesRegex(SystemExit, "invalid thinking level for codex model gpt-6-astra"):
+            self.reviewer(model="gpt-6-astra", thinking="none")
+
+
 def amp_test_stream(
     cwd: Path,
     *,

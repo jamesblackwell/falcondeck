@@ -7,7 +7,7 @@ description: "Structured Codex, Claude, Amp, Pi, Kimi, or OpenCode code review w
 
 Run the bundled structured review helper only when the user explicitly asks for autoreview, a second-model review, or one of its named review engines. This is code review, not Guardian `auto_review` approval routing.
 
-OpenCode review with `openrouter/z-ai/glm-5.3-flash` is the repo-configured default when configured via `.agents/skills/autoreview/config.env`. Codex review uses `gpt-5.6-sol` with `high` reasoning by default, then retries once with `gpt-5.6-terra` only when the account cannot access Sol. Claude review uses `claude-fable-5` by default. Amp review uses `openai/gpt-5.6-sol` with `high` reasoning by default. Pi and Kimi use the model configured by their respective CLIs unless `--model` overrides it.
+Codex review uses `gpt-6-sol` with `high` reasoning by default, then retries once with `gpt-6-luna` only when the account cannot access Sol. Explicit `gpt-5.6-sol` selections keep their access-only `gpt-5.6-terra` retry. OpenCode remains available with its configured model (including `openrouter/z-ai/glm-5.3-flash`); Claude defaults to `claude-fable-5`, Amp to `openai/gpt-5.6-sol`, and Pi and Kimi use their CLI-configured models unless overridden.
 
 Do not invoke Autoreview automatically before a commit, push, PR, merge, deploy, or final reply. Repository or workflow rules may call it only when they explicitly name it.
 
@@ -26,7 +26,7 @@ Do not invoke Autoreview automatically before a commit, push, PR, merge, deploy,
 - Fix the same bug class across its owner-boundary neighborhood when practical; stop at unrelated invariants, different owners, and unapproved contract changes.
 - Run one bounded review pass. If an accepted finding changes code, run the smallest relevant test; rerun Autoreview only when the user explicitly requests another pass.
 - For security-audit suppression changes, verify accepted findings remain auditable: suppressed findings stay in structured output, active output keeps an unsuppressible suppression notice, and aggregate findings cannot hide unrelated active risk.
-- Never switch or override the requested review engine/model except for the documented Codex Sol-to-Terra account-access fallback. Capacity, rate-limit, and unrelated failures keep the same engine/model.
+- Honor an explicit engine/model choice. The only automatic model switch is the documented Codex account-access retry (`gpt-6-sol` to `gpt-6-luna`, or explicitly selected `gpt-5.6-sol` to `gpt-5.6-terra`). Capacity, rate-limit, safety, isolation, and unrelated failures keep the same engine/model.
 - Be patient with large bundles. Structured review can take up to 30 minutes while the model call is active, especially with Codex tools or web search.
 - Treat heartbeat lines like `review still running: ... elapsed=... pid=...` as healthy progress, not a hang. Let the helper continue while heartbeats are advancing. Pass `--stream-engine-output` when live engine text is useful; Codex and Claude filter tool/file chatter, other runnable engines pass raw output through.
 - Do not kill a review just because it has been quiet for 2-5 minutes, or because it is still running under the 30-minute window. Inspect the process only after missing multiple expected heartbeats, after 30 minutes, or after an obviously failed subprocess; prefer letting the same helper command finish.
@@ -118,6 +118,9 @@ Dirty local work:
 
 Use this only when the patch is actually unstaged/staged/untracked in the
 current checkout. `--mode uncommitted` is accepted as an alias for `--mode local`.
+Local mode includes both the index and working tree. A staged defect remains
+actionable even if an unstaged edit fixes it. The helper does not apply `--base`
+to local mode; select a committed branch review when a pinned base is required.
 For committed, pushed, or PR work, point the helper at the commit
 or branch diff instead; do not force dirty modes just
 because the helper docs mention dirty work first. A clean local review
@@ -134,6 +137,11 @@ Optional review context is first-class. Prompt files and datasets must be repo-r
 ```bash
 "$AUTOREVIEW" --mode branch --base origin/main --prompt-file review-notes.md --dataset evidence.json
 ```
+
+Context does not expand the selected Git target. The reviewer runs in an empty
+workspace and cannot read unchanged repository files. Supply relevant dependency
+or source evidence through `--prompt-file` or `--dataset` when the diff alone is
+insufficient. Keep credentials and unrelated files out of that evidence.
 
 If an open PR exists, use its actual base:
 
@@ -185,7 +193,7 @@ Recommended model defaults:
 | Engine              | Default model                                      | Source note                                           |
 | ------------------- | -------------------------------------------------- | ----------------------------------------------------- |
 | **opencode**        | `openrouter/z-ai/glm-5.3-flash`                    | OpenRouter GLM 5.3 Flash review default               |
-| **codex** (default) | `gpt-5.6-sol` -> `gpt-5.6-terra` on access failure | OpenClaw org review default                           |
+| **codex** (default) | `gpt-6-sol` -> `gpt-6-luna` on access failure       | OpenAI review default                                 |
 | **claude**          | `claude-fable-5`                                   | Anthropic's most capable widely released Claude model |
 | **amp**             | `openai/gpt-5.6-sol`                               | Amp structured-generation review default              |
 
@@ -194,7 +202,7 @@ CLI flags and environment variables override these defaults. Amp model IDs must 
 | Engine              | Model flag                 | Example model IDs                                                            | Thinking flag                             | Accepted levels                                            |
 | ------------------- | -------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------- |
 | **opencode**        | `opencode run -m X`        | `openrouter/z-ai/glm-5.3-flash`, `opencode/north-mini-code-free`              | `--variant Y`                             | `minimal`, `low`, `medium`, `high`, `max`                  |
-| **codex** (default) | `codex --model X exec ...` | `gpt-5.6-sol`, then `gpt-5.6-terra` on Sol access failure                    | `-c model_reasoning_effort=Y`             | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| **codex** (default) | `codex --model X exec ...` | `gpt-6-sol`, `gpt-6-luna`, `gpt-6-astra`, or explicit `gpt-5.6-sol`           | `-c model_reasoning_effort=Y`             | `none`, `low`, `medium`, `high`, `xhigh`, `max` for Sol/Luna |
 | **claude**          | `claude --model X`         | `claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5` | `--effort Y`                              | `low`, `medium`, `high`, `xhigh`, `max`                    |
 | **amp**             | Amp `amp.ai.generate`      | `openai/gpt-5.6-sol`                                                         | `reasoningEffort`                         | `none`, `low`, `medium`, `high`, `xhigh`, `max`            |
 | **pi**              | `pi --model X`             | `anthropic/claude-sonnet-4`, `openai/gpt-4o`                                 | `--thinking Y`                            | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`         |
@@ -202,13 +210,13 @@ CLI flags and environment variables override these defaults. Amp model IDs must 
 
 Claude also supports `--fallback-model a,b` for availability-based fallback chains ([model-config](https://code.claude.com/docs/en/model-config)). Current Claude docs note that auth, billing, rate-limit, request-size, and transport errors do not trigger fallback, and the changelog documents interactive-session support in `v2.1.166`.
 
-[OpenAI's model guidance](https://developers.openai.com/api/docs/guides/latest-model) identifies Sol as the GPT-5.6 frontier-capability route and documents `max` support. Autoreview keeps `high` as its default; use `max` only for the hardest quality-first reviews after comparing its latency and cost with `xhigh` on representative changes.
+[OpenAI's GPT-6 Sol guidance](https://developers.openai.com/api/docs/models/gpt-6-sol) documents its reasoning levels. Sol and Luna reject `minimal`; Astra also rejects `none`. Autoreview keeps `high` as its default. Use `max` for the hardest reviews. An effort-only override does not select an older model.
 
 Examples matching current `main` behavior:
 
 ```bash
 # Codex with explicit model and reasoning
-"$AUTOREVIEW" --engine codex --model gpt-5.6-sol --thinking high
+"$AUTOREVIEW" --engine codex --model gpt-6-sol --thinking high
 
 # Codex fast mode (priority service tier); needs a model whose catalog lists the tier, silently standard otherwise
 "$AUTOREVIEW" --engine codex --codex-speed fast
@@ -246,7 +254,7 @@ loader such as an untracked `.envrc`; the helper does not write a config file.
 | `AUTOREVIEW_THINKING`               | Default `--thinking` for all engines                                                                                             |
 | `AUTOREVIEW_FALLBACK_MODEL`         | Default Claude `--fallback-model` chain                                                                                          |
 | `AUTOREVIEW_ENGINE_TIMEOUT_SECONDS` | Optional positive wall-clock limit for each reviewer process; disabled by default                                                |
-| `AUTOREVIEW_<ENGINE>_MODEL`         | Per-engine model override, for example `AUTOREVIEW_CODEX_MODEL=gpt-5.6-sol`                                                      |
+| `AUTOREVIEW_<ENGINE>_MODEL`         | Per-engine model override, for example `AUTOREVIEW_CODEX_MODEL=gpt-6-sol`                                                        |
 | `AUTOREVIEW_<ENGINE>_THINKING`      | Per-engine thinking override                                                                                                     |
 | `AUTOREVIEW_CODEX_CONFIG`           | Safe Codex model/response tuning overrides, semicolon-separated, e.g. `service_tier="fast"`; capability-bearing keys fail closed |
 | `AUTOREVIEW_CODEX_SPEED`            | Codex service tier override: `fast` (priority), `flex`, or `default`; silently standard when the model does not list the tier    |
@@ -313,7 +321,7 @@ The helper:
 - otherwise uses current PR base if `gh pr view` works
 - otherwise uses `origin/main` for non-main branches
 - does not fetch automatically during branch review; the selected base ref must already resolve locally
-- supports `codex`, `claude`, `amp`, `pi`, and `kimi`; default is `AUTOREVIEW_ENGINE` or `codex`
+- supports `codex`, `claude`, `amp`, `pi`, `kimi`, and `opencode`; default is `AUTOREVIEW_ENGINE` or `codex`
 - resolves bare `git`, `gh`, reviewer, and PowerShell shell commands from absolute `PATH` entries only, never from the reviewed checkout; explicit `--*-bin` paths are interpreted from the reviewed repository root when relative and accepted only when both the supplied path and resolved target stay outside the reviewed repository
 - use `--mode commit --commit <ref>` for already-committed work, especially clean `main` after landing
 - scans safe Git patches in full, recognizes synthetic fixture values tied to their credential field, reviews them in one pass up to the aggregate prompt limit, and automatically uses complete bounded passes above it
@@ -322,7 +330,7 @@ The helper:
 - supports `--dry-run` (validates bundle construction and reviewer CLI binary resolution without contacting any engine; exits nonzero if either check fails), an opt-in per-reviewer wall-clock bound via `--engine-timeout-seconds`, `--prompt`, repo-relative `--prompt-file`, repo-relative `--dataset`, `--no-tools`, `--no-web-search`, repeatable Codex-only safe model/response tuning with `--codex-config key=value`, Codex-only `--codex-speed fast|flex|default`, and commit refs
 - supports `--stream-engine-output` or `AUTOREVIEW_STREAM_ENGINE_OUTPUT=1` for live engine text while preserving structured validation; Codex and Claude hide tool/file event details, emit compact activity summaries, and report usage at turn completion
 - supports per-engine `--model`, `--thinking`, and Claude `--fallback-model`
-- uses built-in defaults `codex=gpt-5.6-sol` with `high` reasoning and an access-only `gpt-5.6-terra` retry, `claude=claude-fable-5`, and `amp=openai/gpt-5.6-sol` with `high` reasoning; honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment overrides when CLI flags are omitted
+- uses built-in defaults `codex=gpt-6-sol` with `high` reasoning and an access-only `gpt-6-luna` retry, `claude=claude-fable-5`, and `amp=openai/gpt-5.6-sol` with `high` reasoning; honors `AUTOREVIEW_MODEL`, `AUTOREVIEW_THINKING`, `AUTOREVIEW_FALLBACK_MODEL`, and per-engine `AUTOREVIEW_<ENGINE>_MODEL` / `AUTOREVIEW_<ENGINE>_THINKING` environment overrides when CLI flags are omitted
 - gives Codex the bundle in an empty workspace with web search available; Claude receives the bundle plus WebSearch by default and optional domain-constrained WebFetch; Amp sends the bundle only through direct schema-constrained generation; Pi and Kimi receive the bundle with no tools
 - runs Claude with `--safe-mode` (`v2.1.169+`), `--setting-sources user`, MCP and auto-memory disabled, no filesystem/shell tools, an empty external workspace, and `--fallback-model` when set
 - runs Amp locally from an empty temporary workspace with isolated runtime roots, complete plugin inventory attestation that fails if any authenticated personal/workspace plugin exists, catch-all MCP denial verified by a no-spawn marker probe, a fixed outer trigger, one input-free adapter tool, and direct `amp.ai.generate`; requires `AMP_API_KEY`, refuses native Windows, and refuses cloud/orb agent execution

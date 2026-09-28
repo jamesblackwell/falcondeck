@@ -2458,6 +2458,47 @@ class AutoreviewHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "credentialed or malformed proxy"):
                 self.helper["safe_engine_env"](repo, engine="codex")
 
+    def test_opencode_run_merges_isolated_runtime_and_doppler_env(self) -> None:
+        args = argparse.Namespace(
+            engine_timeout_seconds=None,
+            stream_engine_output=False,
+            tools=True,
+            web_search=True,
+        )
+        captured_env: dict[str, str] = {}
+
+        def fake_run(
+            _command: list[str],
+            _cwd: Path,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            captured_env.update(kwargs["env"])
+            return subprocess.CompletedProcess([], 0, "review output", "")
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ):
+            root = Path(tempdir)
+            repo = init_repo(root)
+            with mock.patch.dict(
+                self.helper["run_opencode"].__globals__,
+                {
+                    "build_opencode_cmd": lambda *_args: ["/usr/bin/opencode"],
+                    "opencode_doppler_env": lambda _repo: {
+                        "ZHIPU_API_KEY": "test-provider-key"
+                    },
+                    "run_with_heartbeat": fake_run,
+                    "safe_temp_root": lambda _repo: root,
+                },
+            ):
+                output = self.helper["run_opencode"](args, repo, "review prompt")
+
+        self.assertEqual(output, "review output")
+        self.assertEqual(captured_env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+        self.assertEqual(captured_env["ZHIPU_API_KEY"], "test-provider-key")
+
     def test_safe_temp_root_rejects_reviewed_repo_parent(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             repo = init_repo(Path(tempdir))
