@@ -758,8 +758,8 @@ describe('ChatInput component', () => {
 
     expect(style.height).toBeUndefined()
     expect(style.minHeight).toBe(48)
-    // Window height in the RN mock is 874; allow roughly a third for text.
-    expect(style.maxHeight).toBe(288)
+    // The normal cap leaves room for the transcript and composer controls.
+    expect(style.maxHeight).toBe(320)
     expect(input.props.multiline).toBe(true)
     expect(input.props.scrollEnabled).toBeUndefined()
   })
@@ -780,6 +780,48 @@ describe('ChatInput component', () => {
     measureContent(500)
     act(() => r.update(<ChatInput value="" {...chatInputDefaults} />))
     expect(textOf(r)).not.toContain('Scroll to review message')
+  })
+
+  it('opens a larger editor for a long draft and keeps edits on closing it', () => {
+    const draft = 'Line\n'.repeat(20)
+    const onChangeText = vi.fn()
+    const r = renderComponent(<ChatInput value={draft} {...chatInputDefaults} onChangeText={onChangeText} />)
+    act(() => {
+      r.root.findByType('TextInput' as any).props.onContentSizeChange({
+        nativeEvent: { contentSize: { width: 320, height: 500 } },
+      })
+    })
+
+    act(() => r.root.findByProps({ accessibilityLabel: 'Expand prompt' }).props.onPress())
+    const editor = r.root.findByProps({ accessibilityLabel: 'Expanded prompt' })
+    expect(editor.props.value).toBe(draft)
+    expect(flattenStyle(editor.props.style).flex).toBe(1)
+    act(() => editor.props.onChangeText(`${draft}One more line`))
+    expect(onChangeText).toHaveBeenCalledWith(`${draft}One more line`)
+    act(() => r.update(<ChatInput value={`${draft}One more line`} {...chatInputDefaults} onChangeText={onChangeText} />))
+    act(() => r.root.findByProps({ accessibilityLabel: 'Done editing prompt' }).props.onPress())
+    expect(r.root.findAllByProps({ accessibilityLabel: 'Expanded prompt' })).toHaveLength(0)
+    expect(r.root.findByProps({ testID: 'message-composer' }).props.value).toBe(`${draft}One more line`)
+
+    act(() => r.update(<ChatInput value="" {...chatInputDefaults} />))
+    expect(r.root.findAllByProps({ accessibilityLabel: 'Expand prompt' })).toHaveLength(0)
+  })
+
+  it('sends from the expanded editor through the usual composer action', () => {
+    const onSubmit = vi.fn()
+    const r = renderComponent(
+      <ChatInput value={'Review this\n'.repeat(20)} {...chatInputDefaults} onSubmit={onSubmit} />,
+    )
+    act(() => {
+      r.root.findByProps({ testID: 'message-composer' }).props.onContentSizeChange({
+        nativeEvent: { contentSize: { width: 320, height: 500 } },
+      })
+    })
+    act(() => r.root.findByProps({ accessibilityLabel: 'Expand prompt' }).props.onPress())
+    act(() => r.root.findByProps({ accessibilityLabel: 'Send prompt' }).props.onPress())
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(r.root.findAllByProps({ accessibilityLabel: 'Expanded prompt' })).toHaveLength(0)
   })
 
   it('pins an empty draft so clearing the composer cannot balloon the input', () => {

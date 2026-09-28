@@ -12,6 +12,9 @@ import {
   View,
   TextInput,
   Pressable,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
   useWindowDimensions,
   type LayoutChangeEvent,
 } from 'react-native'
@@ -24,7 +27,8 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { BookOpen, Mic, Plus, Send, Square, Target } from 'lucide-react-native'
+import { BookOpen, ChevronUp, Mic, Plus, Send, Square, Target } from 'lucide-react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as Haptics from 'expo-haptics'
 
 import {
@@ -138,7 +142,7 @@ const MAX_INPUT_HEIGHT = 320
 // past the space left above the keyboard; once the message list has shrunk
 // to nothing the overflow — the send button — slides under the keyboard.
 // Cap growth to a fraction of the window so the composer always fits.
-const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.33
+const MAX_INPUT_HEIGHT_WINDOW_FRACTION = 0.48
 const COMPOSER_COLLAPSE_MS = 180
 const COMPOSER_COLLAPSE_TIMING = {
   duration: COMPOSER_COLLAPSE_MS,
@@ -270,7 +274,9 @@ export const ChatInput = memo(function ChatInput({
   textInputRef,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
+  const insets = useSafeAreaInsets()
   const { height: windowHeight } = useWindowDimensions()
+  const [isExpanded, setIsExpanded] = useState(false)
   const maxInputHeight = Math.max(
     MIN_INPUT_HEIGHT,
     Math.min(
@@ -282,6 +288,9 @@ export const ChatInput = memo(function ChatInput({
   const [inputContentHeight, setInputContentHeight] = useState(0)
   const draftIsEmpty = value.length === 0
   const inputOverflows = !draftIsEmpty && inputContentHeight > maxInputHeight + 1
+  useEffect(() => {
+    if (draftIsEmpty) setIsExpanded(false)
+  }, [draftIsEmpty])
   const { onInputLayout, prepareCollapse, slotStyle } =
     useEmptyComposerCollapse(draftIsEmpty)
   const [caretIndex, setCaretIndex] = useState(value.length)
@@ -312,6 +321,7 @@ export const ChatInput = memo(function ChatInput({
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const inputRef = useRef<TextInput | null>(null)
+  const expandedInputRef = useRef<TextInput | null>(null)
   const attachInput = useCallback(
     (node: TextInput | null) => {
       inputRef.current = node
@@ -704,6 +714,19 @@ export const ChatInput = memo(function ChatInput({
             <Text variant="caption" size="xs" color="muted">
               Scroll to review message
             </Text>
+            <Pressable
+              style={styles.expandButton}
+              onPress={() => setIsExpanded(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Expand prompt"
+              accessibilityHint="Opens a larger editor for this draft"
+              hitSlop={6}
+            >
+              <Text variant="caption" size="xs" color="secondary" weight="medium">
+                Expand
+              </Text>
+              <ChevronUp size={theme.iconSize.xs} color={theme.colors.fg.secondary} />
+            </Pressable>
           </View>
         ) : null}
         {slashQuery && !voiceProvider ? (
@@ -1031,6 +1054,76 @@ export const ChatInput = memo(function ChatInput({
           onClose={() => setOpenSheet(null)}
         />
       ) : null}
+      {isExpanded ? (
+        <Modal
+          visible
+          animationType="slide"
+          presentationStyle="fullScreen"
+          onRequestClose={() => setIsExpanded(false)}
+          onShow={() => expandedInputRef.current?.focus()}
+        >
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            style={[styles.editorScreen, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
+            accessibilityViewIsModal
+          >
+            <View style={styles.editorHeader}>
+              <View>
+                <Text variant="heading" size="md" weight="semibold">Edit prompt</Text>
+                <Text variant="caption" size="xs" color="muted">Draft saved automatically</Text>
+              </View>
+              <Pressable
+                style={styles.editorDone}
+                onPress={() => setIsExpanded(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Done editing prompt"
+              >
+                <Text variant="label" size="sm" color="accent">Done</Text>
+              </Pressable>
+            </View>
+            <TextInput
+              ref={expandedInputRef}
+              style={styles.editorInput}
+              value={value}
+              onChangeText={handleChangeText}
+              onSelectionChange={(event) => {
+                const nextSelection = event.nativeEvent.selection
+                selectionRangeRef.current = nextSelection
+                setCaretIndex(nextSelection.start)
+              }}
+              accessibilityLabel="Expanded prompt"
+              selectionColor={theme.colors.accent.default}
+              placeholder={placeholder}
+              placeholderTextColor={theme.colors.fg.muted}
+              multiline
+              maxLength={100_000}
+              editable={!disabled}
+              textAlignVertical="top"
+            />
+            <View style={styles.editorFooter}>
+              <Text variant="caption" size="xs" color={sendDisabled ? 'warning' : 'muted'} style={styles.editorStatus}>
+                {sendDisabled && sendDisabledReason ? sendDisabledReason : 'Your draft stays in this conversation'}
+              </Text>
+              <Pressable
+                style={[styles.editorSend, canSend ? styles.sendActive : styles.sendInactive]}
+                onPress={() => {
+                  setIsExpanded(false)
+                  handleSubmit()
+                }}
+                disabled={!canSend}
+                accessibilityRole="button"
+                accessibilityLabel="Send prompt"
+                accessibilityState={{ disabled: !canSend }}
+              >
+                <Send size={theme.iconSize.sm} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
+                <Text variant="label" size="sm" weight="semibold" style={{ color: canSend ? theme.colors.surface[0] : theme.colors.fg.faint }}>
+                  Send
+                </Text>
+              </Pressable>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      ) : null}
     </View>
   )
 })
@@ -1052,7 +1145,17 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[1],
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: theme.colors.border.subtle,
-    alignItems: 'flex-end',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    minHeight: 32,
+  },
+  expandButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[1],
+    minHeight: 32,
+    paddingLeft: theme.spacing[2],
   },
   inputSlot: {
     justifyContent: 'flex-end',
@@ -1175,5 +1278,56 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: glassFill(theme.isDark),
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: glassEdge(theme.isDark),
+  },
+  editorScreen: {
+    flex: 1,
+    backgroundColor: theme.colors.surface[0],
+  },
+  editorHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.spacing[5],
+    paddingVertical: theme.spacing[4],
+    gap: theme.spacing[3],
+  },
+  editorDone: {
+    minWidth: theme.minTouchTarget,
+    minHeight: theme.minTouchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editorInput: {
+    flex: 1,
+    minHeight: 0,
+    marginHorizontal: theme.spacing[3],
+    borderRadius: theme.radius.xl,
+    borderCurve: 'continuous',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: theme.colors.border.default,
+    backgroundColor: theme.colors.surface[1],
+    padding: theme.spacing[4],
+    fontSize: theme.fontSize.base,
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
+    fontFamily: theme.fontFamily.sans,
+    color: theme.colors.fg.primary,
+  },
+  editorFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[5],
+    paddingVertical: theme.spacing[3],
+  },
+  editorStatus: {
+    flex: 1,
+  },
+  editorSend: {
+    minHeight: theme.minTouchTarget,
+    borderRadius: theme.radius.full,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[4],
   },
 }))
