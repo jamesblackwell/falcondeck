@@ -216,6 +216,119 @@ describe('TerminalPanel', () => {
     expect(screen.getAllByTestId('terminal-view')).toHaveLength(1)
   })
 
+  it('does not lose a new-project terminal request behind an old-project spawn', async () => {
+    let resolveFirst!: (value: { session: TerminalSessionInfo }) => void
+    apiMocks.listTerminals.mockImplementation(async (workspaceId: string) => ({
+      sessions: workspaceId === 'workspace-2'
+        ? [session('term-existing-2', { workspace_id: 'workspace-2' })]
+        : [],
+    }))
+    apiMocks.openTerminal
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+      .mockResolvedValueOnce({ session: session('term-new-2', { workspace_id: 'workspace-2' }) })
+
+    const onHide = vi.fn()
+    const { rerender } = render(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" onHide={onHide} />,
+    )
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-1', { cols: 80, rows: 24 }))
+    rerender(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-2" onHide={onHide} />,
+    )
+    expect(await screen.findByTestId('terminal-view')).toHaveAttribute('data-session', 'term-existing-2')
+    rerender(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-2" createRequestKey={1} onHide={onHide} />,
+    )
+    await act(async () => { resolveFirst({ session: session('term-old-1') }) })
+
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-2', { cols: 80, rows: 24 }))
+    expect(screen.getAllByTestId('terminal-view')).toHaveLength(2)
+  })
+
+  it('waits for the new project list before honoring a terminal request', async () => {
+    let resolveSecond!: (value: { sessions: TerminalSessionInfo[] }) => void
+    apiMocks.listTerminals
+      .mockResolvedValueOnce({ sessions: [session('term-existing-1')] })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+    apiMocks.openTerminal.mockResolvedValue({
+      session: session('term-new-2', { workspace_id: 'workspace-2' }),
+    })
+
+    const onHide = vi.fn()
+    const { rerender } = render(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" onHide={onHide} />,
+    )
+    expect(await screen.findByTestId('terminal-view')).toHaveAttribute('data-session', 'term-existing-1')
+    rerender(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-2" createRequestKey={1} onHide={onHide} />,
+    )
+    await waitFor(() => expect(apiMocks.listTerminals).toHaveBeenCalledWith('workspace-2'))
+    expect(apiMocks.openTerminal).not.toHaveBeenCalled()
+
+    await act(async () => {
+      resolveSecond({ sessions: [session('term-existing-2', { workspace_id: 'workspace-2' })] })
+    })
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledWith('workspace-2', { cols: 80, rows: 24 }))
+    expect(screen.getAllByTestId('terminal-view')).toHaveLength(2)
+  })
+
+  it('keeps panel tab controls inactive until its terminal list loads', async () => {
+    let resolveList!: (value: { sessions: TerminalSessionInfo[] }) => void
+    apiMocks.listTerminals.mockReturnValue(new Promise((resolve) => { resolveList = resolve }))
+    apiMocks.openTerminal.mockResolvedValue({ session: session('term-new') })
+    const panel = render(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" onHide={vi.fn()} />,
+    )
+
+    const newButton = screen.getByLabelText('New terminal')
+    expect(newButton).toBeDisabled()
+    fireEvent.keyDown(panel.container.querySelector('[data-terminal-panel]')!, { key: 't', metaKey: true })
+    expect(apiMocks.openTerminal).not.toHaveBeenCalled()
+
+    await act(async () => { resolveList({ sessions: [session('term-existing')] }) })
+    expect(newButton).toBeEnabled()
+    fireEvent.click(newButton)
+    await waitFor(() => expect(screen.getAllByTestId('terminal-view')).toHaveLength(2))
+  })
+
+  it('keeps a shortcut request queued while this project is spawning a tab', async () => {
+    let resolveFirst!: (value: { session: TerminalSessionInfo }) => void
+    apiMocks.listTerminals.mockResolvedValue({ sessions: [session('term-existing')] })
+    apiMocks.openTerminal
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+      .mockResolvedValueOnce({ session: session('term-shortcut') })
+
+    const onHide = vi.fn()
+    const { rerender } = render(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" onHide={onHide} />,
+    )
+    await screen.findByTestId('terminal-view')
+    fireEvent.click(screen.getByLabelText('New terminal'))
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledOnce())
+    rerender(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" createRequestKey={1} onHide={onHide} />,
+    )
+
+    await act(async () => { resolveFirst({ session: session('term-click') }) })
+    await waitFor(() => expect(apiMocks.openTerminal).toHaveBeenCalledTimes(2))
+    expect(screen.getAllByTestId('terminal-view')).toHaveLength(3)
+  })
+
+  it('clears the previous project tabs when no project is selected', async () => {
+    apiMocks.listTerminals.mockResolvedValue({ sessions: [session('term-existing-1')] })
+    const onHide = vi.fn()
+    const { rerender } = render(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId="workspace-1" onHide={onHide} />,
+    )
+    await screen.findByTestId('terminal-view')
+
+    rerender(
+      <TerminalPanel baseUrl="http://127.0.0.1:4123" workspaceId={null} onHide={onHide} />,
+    )
+    expect(screen.getByText('Select a project to open a terminal.')).toBeInTheDocument()
+    expect(document.querySelectorAll('[data-terminal-tab]')).toHaveLength(0)
+  })
+
   it('closes a terminal through its tab button', async () => {
     apiMocks.listTerminals.mockResolvedValue({
       sessions: [session('term-1'), session('term-2')],

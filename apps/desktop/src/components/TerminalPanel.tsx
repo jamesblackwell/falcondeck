@@ -36,10 +36,12 @@ export function TerminalPanel({
   findRequestKey = 0,
 }: TerminalPanelProps) {
   const api = useMemo(() => createDaemonApiClient(baseUrl), [baseUrl])
+  const workspaceScope = workspaceId ? JSON.stringify([baseUrl, workspaceId]) : null
   const shortcutSettings = useShortcutSettings()
   const [tabs, setTabs] = useState<TerminalTab[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState(false)
+  const [loadedScope, setLoadedScope] = useState<string | null>(null)
+  const loaded = workspaceScope === null || loadedScope === workspaceScope
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [findOpen, setFindOpen] = useState(false)
@@ -53,14 +55,14 @@ export function TerminalPanel({
   const panelRef = useRef<HTMLElement | null>(null)
   const findInputRef = useRef<HTMLInputElement | null>(null)
   const viewRefs = useRef(new Map<string, TerminalViewHandle>())
-  const workspaceRef = useRef(workspaceId)
-  const createInFlightRef = useRef(false)
+  const workspaceScopeRef = useRef(workspaceScope)
+  const createInFlightRef = useRef(new Set<string>())
   const lastCreateRequestKey = useRef(0)
   const lastFindRequestKey = useRef(0)
 
   useLayoutEffect(() => {
-    workspaceRef.current = workspaceId
-  }, [workspaceId])
+    workspaceScopeRef.current = workspaceScope
+  }, [workspaceScope])
 
   useEffect(() => {
     tabsRef.current = tabs
@@ -71,16 +73,14 @@ export function TerminalPanel({
   }, [])
 
   useEffect(() => {
-    if (!workspaceId) {
-      setLoaded(true)
-      return
-    }
     let cancelled = false
     setAutoCreated(false)
     setTabs([])
     setActiveId(null)
-    setLoaded(false)
+    setLoadedScope(null)
+    setCreating(workspaceScope !== null && createInFlightRef.current.has(workspaceScope))
     setError(null)
+    if (!workspaceId || !workspaceScope) return
     void (async () => {
       try {
         const { sessions } = await api.listTerminals(workspaceId)
@@ -92,62 +92,63 @@ export function TerminalPanel({
         }))
         setTabs(restored)
         setActiveId(restored.at(-1)?.session.id ?? null)
-        setLoaded(true)
+        setLoadedScope(workspaceScope)
       } catch {
         if (!cancelled) {
           setError('Could not load terminals.')
-          setLoaded(true)
+          setLoadedScope(workspaceScope)
         }
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [api, workspaceId])
+  }, [api, workspaceId, workspaceScope])
 
   const createTerminal = useCallback(async () => {
-    if (!workspaceId || createInFlightRef.current) return
-    const requestedWorkspaceId = workspaceId
-    createInFlightRef.current = true
+    if (!workspaceId || !workspaceScope || !loaded || createInFlightRef.current.has(workspaceScope)) return
+    const requestedScope = workspaceScope
+    createInFlightRef.current.add(requestedScope)
     setCreating(true)
     setError(null)
     const measured = hostRef.current
       ? measureTerminalGrid(hostRef.current)
       : { cols: FALLBACK_TERMINAL_COLS, rows: FALLBACK_TERMINAL_ROWS }
     try {
-      const { session } = await api.openTerminal(requestedWorkspaceId, measured)
-      if (workspaceRef.current !== requestedWorkspaceId) return
+      const { session } = await api.openTerminal(workspaceId, measured)
+      if (workspaceScopeRef.current !== requestedScope) return
       setTabs((current) => {
         if (current.some((tab) => tab.session.id === session.id)) return current
         return [...current, { session, status: 'running' as const, observedTitle: null }]
       })
       setActiveId(session.id)
     } catch {
-      if (workspaceRef.current === requestedWorkspaceId) {
+      if (workspaceScopeRef.current === requestedScope) {
         setError('Could not start a terminal.')
       }
     } finally {
-      createInFlightRef.current = false
-      setCreating(false)
+      createInFlightRef.current.delete(requestedScope)
+      if (workspaceScopeRef.current === requestedScope) setCreating(false)
     }
-  }, [api, workspaceId])
+  }, [api, loaded, workspaceId, workspaceScope])
 
   useEffect(() => {
     if (!visible || !loaded || !workspaceId || error || autoCreated) return
+    if (createRequestKey > lastCreateRequestKey.current) return
     if (tabs.length > 0 || creating) return
     setAutoCreated(true)
     void createTerminal()
-  }, [autoCreated, createTerminal, creating, error, loaded, tabs.length, visible, workspaceId])
+  }, [autoCreated, createRequestKey, createTerminal, creating, error, loaded, tabs.length, visible, workspaceId])
 
   useEffect(() => {
     if (createRequestKey <= lastCreateRequestKey.current) return
-    // Session restore owns the initial tab snapshot. Queue shortcut requests
-    // until it lands so an older list response cannot erase a newly opened tab.
-    if (!loaded) return
+    // Wait for this project's list and any current spawn before consuming the
+    // shortcut, so neither can swallow the requested new tab.
+    if (!workspaceId || !loaded || creating) return
     lastCreateRequestKey.current = createRequestKey
     setAutoCreated(true)
     void createTerminal()
-  }, [createRequestKey, createTerminal, loaded])
+  }, [createRequestKey, createTerminal, creating, loaded, workspaceId])
 
   useEffect(() => {
     if (findRequestKey <= lastFindRequestKey.current) return
@@ -348,7 +349,7 @@ export function TerminalPanel({
             aria-label="New terminal"
             data-terminal-new=""
             onClick={() => void createTerminal()}
-            disabled={!workspaceId || creating}
+            disabled={!workspaceId || !loaded || creating}
             className="rounded p-1 text-fg-muted hover:bg-surface-2 hover:text-fg-primary disabled:opacity-40"
           >
             <Plus aria-hidden="true" className="h-4 w-4" />
