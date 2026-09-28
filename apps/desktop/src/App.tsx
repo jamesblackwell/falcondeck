@@ -2588,40 +2588,6 @@ function AppInner() {
     toast,
   ]);
 
-  const handleNewChat = useCallback(async () => {
-    if (!api) return;
-    try {
-      const workspace = await api.createChat();
-      setSnapshot(await api.snapshot());
-      setSelectedWorkspaceId(workspace.id);
-      setSelectedThreadId(null);
-      setThreadDetail(null);
-      setIsSettingsOpen(false);
-      setIsScheduledOpen(false);
-      setIsActivityOpen(false);
-      setIsExtensionsOpen(false);
-      setIsPluginsOpen(false);
-      setActionError(null);
-    } catch (error: unknown) {
-      const message =
-        error instanceof Error ? error.message : "Failed to create chat";
-      setActionError(message);
-      toast({
-        variant: "danger",
-        title: "Failed to create chat",
-        description: message,
-      });
-    }
-  }, [
-    api,
-    setActionError,
-    setSelectedThreadId,
-    setSelectedWorkspaceId,
-    setSnapshot,
-    setThreadDetail,
-    toast,
-  ]);
-
   const handleAddRemoteProject = useCallback(
     async (hostId: string, path: string) => {
       const connection = remoteHosts.manager.connection(hostId);
@@ -3264,6 +3230,25 @@ function AppInner() {
     },
     [setSelectedWorkspaceId, setSelectedThreadId, setThreadDetail],
   );
+
+  const handleNewChat = useCallback(async () => {
+    if (!api) return;
+    try {
+      const workspace = await api.createChat();
+      setSnapshot(await api.snapshot());
+      handleNewThread(workspace.id);
+      setActionError(null);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : "Failed to create chat";
+      setActionError(message);
+      toast({
+        variant: "danger",
+        title: "Failed to create chat",
+        description: message,
+      });
+    }
+  }, [api, handleNewThread, setSnapshot, toast]);
 
   const handleStartTaskWithDraft = useCallback(
     (guide: string) => {
