@@ -39,6 +39,15 @@ function toolCall(
   };
 }
 
+function runningToolCall(id: string, output: string, totalBytes?: number) {
+  return {
+    ...toolCall(id, output, totalBytes),
+    status: "running",
+    exit_code: null,
+    completed_at: null,
+  };
+}
+
 describe("imageNeedsFetch", () => {
   it("fetches stripped data URLs and daemon-local paths only", () => {
     expect(
@@ -151,6 +160,74 @@ describe("loadFullThreadItem", () => {
     expect(item?.kind === "tool_call" && item.output).toBe("new daemon");
   });
 
+  it("refetches a running tool after its output changes", async () => {
+    const rpc = vi.fn()
+      .mockResolvedValueOnce(runningToolCall("tool-1", "old full output"))
+      .mockResolvedValueOnce(toolCall("tool-1", "final full output"));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    useSessionStore.setState({
+      threadItems: { "thread-1": [runningToolCall("tool-1", "old", 40_000)] },
+    } as never);
+
+    await loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    useSessionStore.setState({
+      threadItems: { "thread-1": [toolCall("tool-1", "final", 50_000)] },
+    } as never);
+    await loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+
+    expect(rpc).toHaveBeenCalledTimes(2);
+    const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
+    expect(item?.kind === "tool_call" && item.output).toBe("final full output");
+  });
+
+  it("does not replace a newer tool update with an earlier in-flight response", async () => {
+    let complete!: (item: ConversationItem) => void;
+    const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
+      complete = resolve;
+    }));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    useSessionStore.setState({
+      threadItems: { "thread-1": [runningToolCall("tool-1", "old", 40_000)] },
+    } as never);
+
+    const load = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    await Promise.resolve();
+    useSessionStore.setState({
+      threadItems: { "thread-1": [toolCall("tool-1", "final full output")] },
+    } as never);
+    complete(runningToolCall("tool-1", "old full output"));
+    await load;
+
+    const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
+    expect(item?.kind === "tool_call" && item.output).toBe("final full output");
+    expect(item?.kind === "tool_call" && item.status).toBe("completed");
+  });
+
+  it("fetches the final output when a completed page overtakes a running response", async () => {
+    let completeRunning!: (item: ConversationItem) => void;
+    const rpc = vi.fn()
+      .mockImplementationOnce(() => new Promise<ConversationItem>((resolve) => {
+        completeRunning = resolve;
+      }))
+      .mockResolvedValueOnce(toolCall("tool-1", "final full output"));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    useSessionStore.setState({
+      threadItems: { "thread-1": [runningToolCall("tool-1", "old", 40_000)] },
+    } as never);
+
+    const load = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    await Promise.resolve();
+    useSessionStore.setState({
+      threadItems: { "thread-1": [toolCall("tool-1", "final", 50_000)] },
+    } as never);
+    completeRunning(runningToolCall("tool-1", "old full output"));
+    await load;
+
+    expect(rpc).toHaveBeenCalledTimes(2);
+    const item = useSessionStore.getState().threadItems["thread-1"]?.[0];
+    expect(item?.kind === "tool_call" && item.output).toBe("final full output");
+  });
+
   it("bounds an image-heavy render to two concurrent full-item transfers", async () => {
     const completions: ((item: ConversationItem) => void)[] = [];
     const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
@@ -191,6 +268,38 @@ describe("loadFullThreadItem", () => {
     expect(await queued).toBeNull();
     await Promise.all([first, second]);
     expect(rpc).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts the selected thread's transfers while old thread transfers finish", async () => {
+    const completions: ((item: ConversationItem) => void)[] = [];
+    const rpc = vi.fn(() => new Promise<ConversationItem>((resolve) => {
+      completions.push(resolve);
+    }));
+    useRelayStore.setState({ sessionId: "session-1", _callRpc: rpc } as never);
+    const first = loadFullThreadItem("workspace-1", "thread-1", "tool-1");
+    const second = loadFullThreadItem("workspace-1", "thread-1", "tool-2");
+    const staleQueued = loadFullThreadItem("workspace-1", "thread-1", "tool-3");
+    await Promise.resolve();
+    useSessionStore.setState({
+      selectedThreadId: "thread-2",
+      threadItems: { "thread-2": [toolCall("tool-4", "head", 40_000)] },
+    } as never);
+    const current = loadFullThreadItem("workspace-1", "thread-2", "tool-4");
+    await Promise.resolve();
+
+    expect(rpc).toHaveBeenCalledTimes(3);
+    completions[2]!(toolCall("tool-4", "new thread"));
+    await current;
+    completions[0]!(toolCall("tool-1", "old thread"));
+    completions[1]!(toolCall("tool-2", "old thread"));
+    const oldResults = await Promise.all([first, second, staleQueued]);
+    expect(oldResults.map((item) => item?.id ?? null)).toEqual([
+      "tool-1", "tool-2", null,
+    ]);
+    expect(rpc).toHaveBeenCalledTimes(3);
+    expect(useSessionStore.getState().threadItems["thread-2"]?.[0]).toMatchObject({
+      id: "tool-4", output: "new thread",
+    });
   });
 
   it("does not let old-session transfers block or overwrite the new session", async () => {

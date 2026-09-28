@@ -16,6 +16,7 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 import {
   isSafeMediaUrl,
   normalizeConversationItem,
+  toolLifecycle,
   type ConversationItem,
 } from "@falcondeck/client-core";
 
@@ -81,6 +82,12 @@ function remember(cacheKey: string, item: ConversationItem) {
   }
 }
 
+function isSettledTool(item: ToolCallItem): boolean {
+  const lifecycle = toolLifecycle(item);
+  return lifecycle === "succeeded" || lifecycle === "failed" ||
+    lifecycle === "denied" || lifecycle === "interrupted";
+}
+
 /** Whether a tool call's output was cut by the daemon page. */
 export function toolOutputIsTruncated(item: ToolCallItem): boolean {
   return (item.display.output_total_bytes ?? 0) > 0;
@@ -113,17 +120,26 @@ export function imageItemNeedsFetch(item: ImageItem): boolean {
   return imageNeedsFetch(item.image);
 }
 
-function applyResolved(threadId: string, item: ConversationItem) {
+function applyResolved(threadId: string, item: ConversationItem): boolean {
   const session = useSessionStore.getState();
   const items = session.threadItems[threadId];
-  if (!items) return;
+  if (!items) return true;
   const current = items.find(
     (entry) => entry.id === item.id && entry.kind === item.kind,
   );
   // Only replace what a page actually delivered; upsert would append a
   // stale item to a thread that has since dropped it.
-  if (!current || current === item) return;
+  if (!current || current === item) return true;
+  if (current.kind === "tool_call" && item.kind === "tool_call") {
+    // A live event can advance the tool while thread.item is crossing the
+    // relay. Never roll a completed tool back to running, or replace newer
+    // full output with an older partial response.
+    if ((!isSettledTool(item) && isSettledTool(current)) ||
+        (!toolOutputIsTruncated(current) &&
+          (current.output?.length ?? 0) > (item.output?.length ?? 0))) return false;
+  }
   session.upsertLocalThreadItem(threadId, item);
+  return true;
 }
 
 /**
@@ -143,15 +159,16 @@ export function loadFullThreadItem(
   const cacheKey = key(relayUrl, relaySessionId, workspaceId, threadId, itemId);
   const cached = resolved.get(cacheKey);
   if (cached) {
-    applyResolved(threadId, cached);
-    return Promise.resolve(cached);
+    if (applyResolved(threadId, cached)) return Promise.resolve(cached);
+    resolved.delete(cacheKey);
   }
   const pending = inflight.get(cacheKey);
   if (pending) return pending;
 
-  const scope = JSON.stringify([relayUrl, relaySessionId]);
+  const scope = JSON.stringify([relayUrl, relaySessionId, workspaceId, threadId]);
   if (transferSlots.scope !== scope) {
-    // Requests on the old pairing must not hold the new daemon's queue open.
+    // Requests on the old pairing or thread must not hold the selected
+    // thread's queue open while a reader navigates.
     transferSlots = { scope, active: 0, waiting: [] };
   }
   const slots = transferSlots;
@@ -167,17 +184,37 @@ export function loadFullThreadItem(
       const session = useSessionStore.getState();
       if (!ownsSession() || session.selectedWorkspaceId !== workspaceId ||
           session.selectedThreadId !== threadId) return null;
-      const item = normalizeConversationItem(
+      const fetchItem = async () => normalizeConversationItem(
         await relay._callRpc<ConversationItem>(
           "thread.item",
           { workspace_id: workspaceId, thread_id: threadId, item_id: itemId },
           { requestIdPrefix: "mobile-item" },
         ),
       );
+      let item = await fetchItem();
       if (!ownsSession()) return null;
+      if (item.kind === "tool_call" && !isSettledTool(item)) {
+        const currentSession = useSessionStore.getState();
+        const current = currentSession.threadItems[threadId]?.find(
+          (entry) => entry.id === itemId && entry.kind === "tool_call",
+        );
+        // The detail page can overtake an in-flight running-item response.
+        // Once the tool has settled, fetch its final output in the same slot.
+        if (currentSession.selectedWorkspaceId === workspaceId &&
+            currentSession.selectedThreadId === threadId &&
+            current?.kind === "tool_call" && isSettledTool(current) &&
+            toolOutputIsTruncated(current)) {
+          item = await fetchItem();
+          if (!ownsSession()) return null;
+        }
+      }
       failed.delete(cacheKey);
-      remember(cacheKey, item);
-      applyResolved(threadId, item);
+      const canCache = applyResolved(threadId, item);
+      // Running tools can still append output after this snapshot. A later
+      // trimmed page must fetch their final text instead of restoring it.
+      if (canCache && (item.kind !== "tool_call" || isSettledTool(item))) {
+        remember(cacheKey, item);
+      }
       return item;
     } catch (error) {
       if (ownsSession()) failed.add(cacheKey);
