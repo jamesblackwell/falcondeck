@@ -53,7 +53,7 @@ describe('useGitBranches', () => {
     )
     await waitFor(() => expect(result.current.branches?.current).toBe('first'))
 
-    let checkout: Promise<void>
+    let checkout!: Promise<void>
     act(() => { checkout = result.current.checkout('feature', false) })
     rerender({ workspaceId: 'second' })
     await waitFor(() => expect(result.current.branches?.current).toBe('second'))
