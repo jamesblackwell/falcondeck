@@ -25,14 +25,15 @@ export function useGitBranches(
   // Responses only write the state they were requested for; a slow reply for
   // the previous workspace must not overwrite the new one.
   const generationRef = useRef(0)
+  const checkoutRef = useRef(0)
 
   const fetchBranches = useCallback(async () => {
+    const generation = ++generationRef.current
     if (!api || !workspaceId) {
       setBranches(null)
       setUncommittedCount(null)
       return
     }
-    const generation = ++generationRef.current
     try {
       const [nextBranches, status] = await Promise.all([
         api.gitBranches(workspaceId),
@@ -51,6 +52,8 @@ export function useGitBranches(
   useEffect(() => {
     // A stale list from the previous workspace must not stay clickable while
     // the new one loads.
+    checkoutRef.current += 1
+    setIsCheckoutPending(false)
     setBranches(null)
     setUncommittedCount(null)
     void fetchBranches()
@@ -63,12 +66,18 @@ export function useGitBranches(
   const checkout = useCallback(
     async (branch: string, create: boolean) => {
       if (!api || !workspaceId) return
+      const checkoutGeneration = ++checkoutRef.current
+      // A listing begun before the switch describes the old branch.
+      generationRef.current += 1
       setIsCheckoutPending(true)
       try {
         const next = await api.gitCheckout(workspaceId, branch, create)
+        if (checkoutRef.current !== checkoutGeneration) return
+        // A refresh that began during checkout may also describe the old branch.
+        generationRef.current += 1
         setBranches(next)
       } finally {
-        setIsCheckoutPending(false)
+        if (checkoutRef.current === checkoutGeneration) setIsCheckoutPending(false)
       }
     },
     [api, workspaceId],

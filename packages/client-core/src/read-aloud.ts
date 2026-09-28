@@ -20,33 +20,35 @@ export function markdownToSpeechText(markdown: string): string {
   const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown) as MarkdownNode;
   const parts: string[] = [];
   const append = (value: string | undefined) => {
-    const normalized = value?.replace(/\s+/g, " ").trim();
-    if (normalized) parts.push(normalized);
+    if (value) parts.push(value);
   };
   const visit = (node: MarkdownNode) => {
     switch (node.type) {
       case "code":
-        append(CODE_PLACEHOLDER);
+        append(` ${CODE_PLACEHOLDER} `);
         return;
       case "table":
-        append(TABLE_PLACEHOLDER);
+        append(` ${TABLE_PLACEHOLDER} `);
         return;
       case "break":
-        append(".");
+        append(". ");
         return;
       case "inlineCode":
       case "text":
         append(node.value);
         return;
       case "image":
-        append(node.alt ? `Image: ${node.alt}.` : "Image in the conversation.");
+        append(` ${node.alt ? `Image: ${node.alt}.` : "Image in the conversation."} `);
         return;
       default:
         node.children?.forEach(visit);
+        if (node.type === "paragraph" || node.type === "heading" || node.type === "listItem") {
+          append(" ");
+        }
     }
   };
   visit(tree);
-  return parts.join(" ").replace(/\s+([,.;:!?])/g, "$1").trim();
+  return parts.join("").replace(/\s+/g, " ").replace(/\s+([,.;:!?])/g, "$1").trim();
 }
 
 export function prepareReadAloudText(markdown: string): string {

@@ -21,6 +21,12 @@ describe("markdownToSpeechText", () => {
     );
   });
 
+  it("keeps words intact when emphasis splits their Markdown nodes", () => {
+    expect(markdownToSpeechText("The un**break**able connection uses *Web*Socket.")).toBe(
+      "The unbreakable connection uses WebSocket.",
+    );
+  });
+
   it("keeps very long responses within the daemon speech limit", () => {
     const text = prepareReadAloudText("A".repeat(8_100));
     expect(Array.from(text)).toHaveLength(8_000);
