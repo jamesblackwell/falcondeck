@@ -67,6 +67,17 @@ describe("workspace icon normalization", () => {
   });
 });
 
+describe("hidden project preferences", () => {
+  it("defaults older snapshots and normalizes repeated ids", () => {
+    expect(normalizePreferences({}).hidden_workspace_ids).toEqual([]);
+    expect(
+      normalizePreferences({
+        hidden_workspace_ids: [" project-a ", "project-a", null, "", "project-b"],
+      }).hidden_workspace_ids,
+    ).toEqual(["project-a", "project-b"]);
+  });
+});
+
 describe("workspace capability normalization", () => {
   it("does not expose compaction when an older daemon omitted capabilities", () => {
     const workspace = normalizeWorkspaceSummary({

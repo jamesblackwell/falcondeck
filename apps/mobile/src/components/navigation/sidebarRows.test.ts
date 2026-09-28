@@ -8,6 +8,10 @@ const emptyCollapsed = new Set<string>()
 const defaultCounts = new Map<string, number>()
 
 describe('buildSidebarRows', () => {
+  it('keeps the Projects heading available when every project is hidden', () => {
+    const rows = buildSidebarRows([], emptyCollapsed, defaultCounts, null, 'last_updated', false, false, {}, {}, true)
+    expect(rows).toEqual([{ key: 'section:projects', type: 'section', title: 'Projects', isOpen: false }])
+  })
   it('creates workspace and thread rows in order', () => {
     const rows = buildSidebarRows(
       [

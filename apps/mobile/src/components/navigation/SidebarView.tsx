@@ -18,6 +18,8 @@ import { FlashList } from "@shopify/flash-list";
 import {
   ArrowUpDown,
   ChevronDown,
+  Eye,
+  EyeOff,
   FolderClosed,
   FolderOpen,
   ListFilter,
@@ -100,6 +102,7 @@ interface SidebarViewProps {
   extensionSnapshot?: ExtensionSnapshot | null;
   extensionSidebarFilters?: readonly ExtensionSidebarFilterDefinition[];
   workspaceColors?: Record<string, string>;
+  hiddenWorkspaceIds?: readonly string[];
 }
 
 function workspaceCatColor(
@@ -160,6 +163,7 @@ const CollapsibleRow = memo(function CollapsibleRow({
 });
 
 const FLOATING_ACTION_HEIGHT = 60;
+const EMPTY_HIDDEN_WORKSPACE_IDS: readonly string[] = [];
 
 export const SidebarView = memo(function SidebarView({
   groups,
@@ -178,12 +182,14 @@ export const SidebarView = memo(function SidebarView({
   extensionSnapshot,
   extensionSidebarFilters = [],
   workspaceColors,
+  hiddenWorkspaceIds = EMPTY_HIDDEN_WORKSPACE_IDS,
 }: SidebarViewProps) {
   const workspaceIconSrc = useWorkspaceIcons(groups);
   const [workspaceOptions, setWorkspaceOptions] = useState<{
     workspaceId: string;
     workspaceName: string;
   } | null>(null);
+  const [showHiddenProjects, setShowHiddenProjects] = useState(false);
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   // Cached projects stay on screen while a reconnect snapshot is in flight.
@@ -275,6 +281,29 @@ export const SidebarView = memo(function SidebarView({
       ),
     [activeExtensionFilters, extensionSnapshot, groups, sortMode],
   );
+  const hiddenWorkspaceIdSet = useMemo(
+    () => new Set(hiddenWorkspaceIds),
+    [hiddenWorkspaceIds],
+  );
+  const hiddenProjectCount = displayGroups.filter(
+    (group) =>
+      group.workspace.kind !== "casual" &&
+      hiddenWorkspaceIdSet.has(group.workspace.id),
+  ).length;
+  useEffect(() => {
+    if (hiddenProjectCount === 0) setShowHiddenProjects(false);
+  }, [hiddenProjectCount]);
+  const listedGroups = useMemo(
+    () =>
+      showHiddenProjects
+        ? displayGroups
+        : displayGroups.filter(
+            (group) =>
+              group.workspace.kind === "casual" ||
+              !hiddenWorkspaceIdSet.has(group.workspace.id),
+          ),
+    [displayGroups, hiddenWorkspaceIdSet, showHiddenProjects],
+  );
   const activeExtensionFilterCount = useMemo(
     () =>
       activeExtensionFilters.reduce(
@@ -293,9 +322,18 @@ export const SidebarView = memo(function SidebarView({
 
   // Fetch one bounded page per expanded scope. Filters need complete scope,
   // so continue one page at a time, yielding between store commits.
-  const pageScopes = groups.filter(group => group.workspace.kind === "casual"
-    ? !chatsCollapsed : !collapsedWorkspaces.has(group.workspace.id))
-    .map(group => group.workspace.id).join("\n");
+  const pageScopes = groups
+    .filter(
+      (group) =>
+        (group.workspace.kind === "casual" ||
+          showHiddenProjects ||
+          !hiddenWorkspaceIdSet.has(group.workspace.id)) &&
+        (group.workspace.kind === "casual"
+          ? !chatsCollapsed
+          : !collapsedWorkspaces.has(group.workspace.id)),
+    )
+    .map((group) => group.workspace.id)
+    .join("\n");
   useEffect(() => {
     if (!syncIndex?.token) {
       setIsPaging(false);
@@ -330,18 +368,18 @@ export const SidebarView = memo(function SidebarView({
   // open one is the obvious target, and the top of the list stands in before
   // anything is selected.
   const newThreadWorkspaceId = useMemo(() => {
-    const selected = displayGroups.some(
+    const selected = listedGroups.some(
       (group) => group.workspace.id === selectedWorkspaceId,
     )
       ? selectedWorkspaceId
       : null;
-    return selected ?? displayGroups[0]?.workspace.id ?? null;
-  }, [displayGroups, selectedWorkspaceId]);
+    return selected ?? listedGroups[0]?.workspace.id ?? null;
+  }, [listedGroups, selectedWorkspaceId]);
 
   const builtRows = useMemo(
     () =>
       buildSidebarRows(
-        displayGroups,
+        listedGroups,
         collapsedWorkspaces,
         visibleThreadCounts,
         selectedThreadId,
@@ -350,9 +388,11 @@ export const SidebarView = memo(function SidebarView({
         chatsCollapsed,
         activeExtensionFilterCount ? undefined : remoteCounts,
         syncIndex?.cursors,
+        hiddenProjectCount > 0,
+        displayGroups,
       ),
     [
-      displayGroups,
+      listedGroups,
       collapsedWorkspaces,
       visibleThreadCounts,
       selectedThreadId,
@@ -362,6 +402,8 @@ export const SidebarView = memo(function SidebarView({
       remoteCounts,
       syncIndex?.cursors,
       activeExtensionFilterCount,
+      hiddenProjectCount,
+      displayGroups,
     ],
   );
   // Selecting a visible thread rebuilds builtRows with identical content;
@@ -428,7 +470,7 @@ export const SidebarView = memo(function SidebarView({
   const toggleProjectsCollapsed = useCallback(() => {
     triggerProjectToggleHaptic();
     setCollapsedWorkspaces((current) => {
-      const projects = displayGroups.filter(({ workspace }) => workspace.kind !== "casual");
+      const projects = listedGroups.filter(({ workspace }) => workspace.kind !== "casual");
       const allCollapsed = projects.every(({ workspace }) => current.has(workspace.id));
       const next = new Set(current);
       for (const { workspace } of projects) {
@@ -437,7 +479,7 @@ export const SidebarView = memo(function SidebarView({
       }
       return next;
     });
-  }, [displayGroups]);
+  }, [listedGroups]);
 
   const toggleChatsCollapsed = useCallback(() => {
     setChatsCollapsed((current) => {
@@ -556,6 +598,29 @@ export const SidebarView = memo(function SidebarView({
               </Pressable>
             ) : item.title === "Projects" ? (
               <View style={styles.sectionActions}>
+                {hiddenProjectCount > 0 ? (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.filterButton,
+                      showHiddenProjects ? styles.filterButtonActive : undefined,
+                      pressed ? styles.filterButtonPressed : undefined,
+                    ]}
+                    onPress={() => setShowHiddenProjects((current) => !current)}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      showHiddenProjects
+                        ? "Hide hidden projects"
+                        : `Show hidden projects (${hiddenProjectCount})`
+                    }
+                    accessibilityState={{ selected: showHiddenProjects }}
+                  >
+                    {showHiddenProjects ? (
+                      <EyeOff size={theme.iconSize.xs} color={theme.colors.accent.default} />
+                    ) : (
+                      <Eye size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+                    )}
+                  </Pressable>
+                ) : null}
                 <Pressable
                   style={({ pressed }) => [
                     styles.filterButton,
@@ -643,7 +708,14 @@ export const SidebarView = memo(function SidebarView({
         // The name always collapses/expands; moving a new conversation to a
         // project is the pen button's job, so a tap never leaves the drawer.
         return (
-          <View style={styles.workspaceHeader}>
+          <View
+            style={[
+              styles.workspaceHeader,
+              hiddenWorkspaceIdSet.has(item.workspaceId)
+                ? styles.hiddenWorkspace
+                : undefined,
+            ]}
+          >
             <Pressable
               style={styles.workspaceLeft}
               onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
@@ -658,8 +730,8 @@ export const SidebarView = memo(function SidebarView({
               accessibilityLabel={item.workspaceName}
               accessibilityHint={
                 item.isOpen
-                  ? "Collapses this project. Double tap and hold to change the icon"
-                  : "Expands this project. Double tap and hold to change the icon"
+                  ? "Collapses this project. Double tap and hold for project options"
+                  : "Expands this project. Double tap and hold for project options"
               }
               accessibilityState={{
                 expanded: item.isOpen,
@@ -820,6 +892,9 @@ export const SidebarView = memo(function SidebarView({
       syncIndex?.token,
       threadTagsById,
       workspaceColors,
+      hiddenWorkspaceIdSet,
+      hiddenProjectCount,
+      showHiddenProjects,
       workspaceIconSrc,
       activeExtensionFilterCount,
       supportedExtensionFilters.length,
@@ -988,6 +1063,7 @@ export const SidebarView = memo(function SidebarView({
         <WorkspaceOptionsSheet
           workspaceId={workspaceOptions.workspaceId}
           workspaceName={workspaceOptions.workspaceName}
+          isHidden={hiddenWorkspaceIdSet.has(workspaceOptions.workspaceId)}
           onClose={() => setWorkspaceOptions(null)}
         />
       ) : null}
@@ -1111,6 +1187,9 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: "space-between",
     paddingHorizontal: theme.spacing[3],
     marginTop: theme.spacing[2],
+  },
+  hiddenWorkspace: {
+    opacity: 0.6,
   },
   sectionHeading: {
     minHeight: theme.minTouchTarget,

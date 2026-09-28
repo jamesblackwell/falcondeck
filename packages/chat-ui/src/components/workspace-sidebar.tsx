@@ -5,6 +5,8 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import {
   Archive,
   ChevronDown,
+  Eye,
+  EyeOff,
   FolderPlus,
   Plus,
   Search,
@@ -73,6 +75,7 @@ import { WorkspaceIcon } from "./workspace-icon";
 
 const VISIBLE_THREAD_LIMIT = 5;
 const SHOW_MORE_STEP = 10;
+const EMPTY_HIDDEN_WORKSPACE_IDS: readonly string[] = [];
 // Synthetic workspace id for the Chats heading context menu. Real workspace
 // ids are daemon-issued; this one never collides with a project folder.
 const CHATS_CONTEXT_MENU_ID = "__fd_chats__";
@@ -189,6 +192,11 @@ export type WorkspaceSidebarProps = {
   onThreadSortChange?: (mode: ThreadSortMode) => void;
   /** Called with the new project order after a drag completes. */
   onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
+  hiddenWorkspaceIds?: readonly string[];
+  onWorkspaceHiddenChange?: (
+    workspaceId: string,
+    hidden: boolean,
+  ) => Promise<void> | void;
   /** Projects the host wants rendered collapsed. */
   collapsedWorkspaceIds?: readonly string[];
   onWorkspaceCollapsedChange?: (
@@ -785,6 +793,7 @@ const ProjectGroupList = memo(function ProjectGroupList({
   draggingWorkspaceId,
   dropIndex,
   onWorkspaceOrderChange,
+  hiddenWorkspaceIdSet,
   workspaceRowRefs,
   onWorkspacePointerDown,
   onWorkspacePointerMove,
@@ -816,6 +825,7 @@ const ProjectGroupList = memo(function ProjectGroupList({
   threadTagsById,
 }: {
   orderedGroups: ProjectGroup[];
+  hiddenWorkspaceIdSet: ReadonlySet<string>;
   draggingWorkspaceId: string | null;
   dropIndex: number | null;
   onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
@@ -879,7 +889,12 @@ const ProjectGroupList = memo(function ProjectGroupList({
         return (
           <React.Fragment key={workspaceId}>
             {showDropBefore ? <WorkspaceDropIndicator /> : null}
-            <ProjectGroupRow
+            <div
+              className={
+                hiddenWorkspaceIdSet.has(workspaceId) ? "opacity-60" : undefined
+              }
+            >
+              <ProjectGroupRow
               group={group}
               isDragged={isDragged}
               draggable={Boolean(onWorkspaceOrderChange)}
@@ -916,7 +931,8 @@ const ProjectGroupList = memo(function ProjectGroupList({
               onRequestRenameThread={onRequestRenameThread}
               nowTick={nowTick}
               threadTagsById={threadTagsById}
-            />
+              />
+            </div>
             {draggingWorkspaceId != null &&
             workspaceId === lastRemainingWorkspaceId &&
             dropIndex === remainingWorkspaceIds.length ? (
@@ -1172,6 +1188,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   threadSort = "last_updated",
   onThreadSortChange,
   onWorkspaceOrderChange,
+  hiddenWorkspaceIds = EMPTY_HIDDEN_WORKSPACE_IDS,
+  onWorkspaceHiddenChange,
   collapsedWorkspaceIds,
   onWorkspaceCollapsedChange,
   chatsCollapsed: chatsCollapsedProp,
@@ -1214,6 +1232,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   // Session-only, like the per-project chat pager: the fold rests closed on
   // every launch so a long project list starts compact.
   const [projectsRevealed, setProjectsRevealed] = useState(false);
+  const [showHiddenProjects, setShowHiddenProjects] = useState(false);
   const [uncontrolledChatsCollapsed, setUncontrolledChatsCollapsed] =
     useState(false);
   const [viewingArchivedChats, setViewingArchivedChats] = useState(false);
@@ -1426,6 +1445,25 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     () => displayGroups.filter((group) => group.workspace.kind !== "casual"),
     [displayGroups],
   );
+  const hiddenWorkspaceIdSet = useMemo(
+    () => new Set(hiddenWorkspaceIds),
+    [hiddenWorkspaceIds],
+  );
+  const hiddenProjectCount = projectDisplayGroups.filter((group) =>
+    hiddenWorkspaceIdSet.has(group.workspace.id),
+  ).length;
+  useEffect(() => {
+    if (hiddenProjectCount === 0) setShowHiddenProjects(false);
+  }, [hiddenProjectCount]);
+  const listedProjectGroups = useMemo(
+    () =>
+      showHiddenProjects
+        ? projectDisplayGroups
+        : projectDisplayGroups.filter(
+            (group) => !hiddenWorkspaceIdSet.has(group.workspace.id),
+          ),
+    [hiddenWorkspaceIdSet, projectDisplayGroups, showHiddenProjects],
+  );
   const chatEntries = useMemo(() => {
     const compare = compareThreads(threadSort);
     return chatGroups
@@ -1511,13 +1549,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   ]);
 
   const orderedGroups = useMemo(() => {
-    if (!optimisticWorkspaceOrder) return projectDisplayGroups;
+    if (!optimisticWorkspaceOrder) return listedProjectGroups;
     const groupsById = new Map(
-      projectDisplayGroups.map((group) => [group.workspace.id, group]),
+      listedProjectGroups.map((group) => [group.workspace.id, group]),
     );
     const orderedIds = [
       ...optimisticWorkspaceOrder,
-      ...projectDisplayGroups.map((group) => group.workspace.id),
+      ...listedProjectGroups.map((group) => group.workspace.id),
     ];
     const seen = new Set<string>();
     return orderedIds.flatMap((workspaceId) => {
@@ -1526,7 +1564,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       const group = groupsById.get(workspaceId);
       return group ? [group] : [];
     });
-  }, [optimisticWorkspaceOrder, projectDisplayGroups]);
+  }, [optimisticWorkspaceOrder, listedProjectGroups]);
 
   const workspaceOrder = useMemo(
     () => orderedGroups.map((group) => group.workspace.id),
@@ -1734,11 +1772,26 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       if (nextOrder.join("\0") === workspaceOrder.join("\0")) return;
 
       setOptimisticWorkspaceOrder(nextOrder);
-      void Promise.resolve(onWorkspaceOrderChange(nextOrder)).catch(() => {
+      const reorderedVisible = [...nextOrder];
+      const savedOrder = showHiddenProjects
+        ? nextOrder
+        : projectDisplayGroups.map((group) =>
+            hiddenWorkspaceIdSet.has(group.workspace.id)
+              ? group.workspace.id
+              : (reorderedVisible.shift() ?? group.workspace.id),
+          );
+      void Promise.resolve(onWorkspaceOrderChange(savedOrder)).catch(() => {
         setOptimisticWorkspaceOrder(null);
       });
     },
-    [displayedWorkspaceOrder, onWorkspaceOrderChange, workspaceOrder],
+    [
+      displayedWorkspaceOrder,
+      hiddenWorkspaceIdSet,
+      onWorkspaceOrderChange,
+      projectDisplayGroups,
+      showHiddenProjects,
+      workspaceOrder,
+    ],
   );
 
   const handleWorkspaceClickCapture = useCallback(
@@ -2190,11 +2243,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       const canColor = !isChats && Boolean(onWorkspaceColorChange);
       const canIcon = !isChats && Boolean(onWorkspaceIconChange);
       const canClose = !isChats && Boolean(onCloseWorkspace);
+      const canHide = !isChats && Boolean(onWorkspaceHiddenChange);
       const canRemove = !isChats && Boolean(onRemoveWorkspace);
       if (
         !canColor &&
         !canIcon &&
         !canClose &&
+        !canHide &&
         !canRemove &&
         archivedCount === 0 &&
         !viewingArchived
@@ -2213,6 +2268,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       archivedChatEntries.length,
       archivedViewWorkspaceIds,
       onCloseWorkspace,
+      onWorkspaceHiddenChange,
       onRemoveWorkspace,
       onWorkspaceColorChange,
       onWorkspaceIconChange,
@@ -2339,6 +2395,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     }
     void Promise.resolve(onCloseWorkspace(workspaceId)).catch(() => {});
   }, [closeWorkspaceReason, onCloseWorkspace, workspaceContextMenu]);
+
+  const handleToggleWorkspaceHidden = useCallback(() => {
+    if (!workspaceContextMenu || !onWorkspaceHiddenChange) return;
+    const workspaceId = workspaceContextMenu.workspaceId;
+    setWorkspaceContextMenu(null);
+    void Promise.resolve(
+      onWorkspaceHiddenChange(workspaceId, !hiddenWorkspaceIdSet.has(workspaceId)),
+    ).catch(() => {});
+  }, [hiddenWorkspaceIdSet, onWorkspaceHiddenChange, workspaceContextMenu]);
 
   const closeCloseDialog = useCallback(() => {
     if (isClosingWorkspace) return;
@@ -2820,6 +2885,33 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                   onChange={onThreadSortChange}
                 />
               ) : null}
+              {hiddenProjectCount > 0 ? (
+                <Tooltip
+                  label={
+                    showHiddenProjects
+                      ? "Hide hidden projects"
+                      : `Show hidden projects (${hiddenProjectCount})`
+                  }
+                >
+                  <button
+                    type="button"
+                    className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
+                    onClick={() => setShowHiddenProjects((current) => !current)}
+                    aria-label={
+                      showHiddenProjects
+                        ? "Hide hidden projects"
+                        : `Show hidden projects (${hiddenProjectCount})`
+                    }
+                    aria-pressed={showHiddenProjects}
+                  >
+                    {showHiddenProjects ? (
+                      <EyeOff aria-hidden="true" className="h-3.5 w-3.5" />
+                    ) : (
+                      <Eye aria-hidden="true" className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </Tooltip>
+              ) : null}
               {/* Adding a project belongs beside the projects it adds to. */}
               {onAddProject ? (
                 libraryWorkspaces.length > 0 && onOpenLibraryWorkspace ? (
@@ -2854,6 +2946,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           <div className="min-w-0">
             <ProjectGroupList
               orderedGroups={displayedGroups}
+              hiddenWorkspaceIdSet={hiddenWorkspaceIdSet}
               draggingWorkspaceId={draggingWorkspaceId}
               dropIndex={dropIndex}
               onWorkspaceOrderChange={onWorkspaceOrderChange}
@@ -2919,7 +3012,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               </div>
             ) : null}
           </div>
-          {orderedGroups.length === 0 && chatGroups.length === 0 ? (
+          {projectDisplayGroups.length === 0 && chatGroups.length === 0 ? (
             <EmptyState
               icon={
                 onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined
@@ -3162,6 +3255,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                     workspaceContextMenu.workspaceId,
                   ),
               )
+        }
+        isHidden={Boolean(
+          workspaceContextMenu &&
+            hiddenWorkspaceIdSet.has(workspaceContextMenu.workspaceId),
+        )}
+        onToggleHidden={
+          onWorkspaceHiddenChange &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? handleToggleWorkspaceHidden
+            : undefined
         }
         onSetColor={
           onWorkspaceColorChange &&

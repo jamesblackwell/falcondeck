@@ -353,6 +353,7 @@ const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   workspace_order: [],
+  hidden_workspace_ids: [],
   workspace_colors: {},
   workspace_icons: {},
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
@@ -2252,6 +2253,16 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         ? raw.version
         : 1,
     workspace_order: workspaceOrder,
+    hidden_workspace_ids: Array.isArray(raw.hidden_workspace_ids)
+      ? [
+          ...new Set(
+            raw.hidden_workspace_ids
+              .filter((id): id is string => typeof id === "string")
+              .map((id) => id.trim())
+              .filter(Boolean),
+          ),
+        ]
+      : [],
     workspace_colors: normalizeWorkspaceColors(raw.workspace_colors),
     workspace_icons: normalizeWorkspaceIcons(raw.workspace_icons),
     conversation: {

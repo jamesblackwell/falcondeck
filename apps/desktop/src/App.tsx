@@ -3866,6 +3866,32 @@ function AppInner() {
     [api, setSnapshot, toast, viewSnapshot?.preferences.workspace_colors],
   );
 
+  const handleWorkspaceHiddenChange = useCallback(
+    async (workspaceId: string, hidden: boolean) => {
+      if (!api) throw new Error(CONNECTION_COPY.stillConnecting);
+      const current = viewSnapshot?.preferences.hidden_workspace_ids ?? [];
+      const hiddenWorkspaceIds = hidden
+        ? [...new Set([...current, workspaceId])]
+        : current.filter((id) => id !== workspaceId);
+      try {
+        const preferences = await api.updatePreferences({
+          hidden_workspace_ids: hiddenWorkspaceIds,
+        });
+        setSnapshot((snapshot) =>
+          snapshot ? { ...snapshot, preferences } : snapshot,
+        );
+      } catch (error) {
+        toast({
+          variant: "danger",
+          title: "Failed to save project visibility",
+          description: error instanceof Error ? error.message : "Please try again",
+        });
+        throw error;
+      }
+    },
+    [api, setSnapshot, toast, viewSnapshot?.preferences.hidden_workspace_ids],
+  );
+
   const handleWorkspaceIconChange = useCallback(
     async (workspaceId: string, icon: WorkspaceIconPreference | null) => {
       if (!api)
@@ -5810,6 +5836,8 @@ function AppInner() {
             threadSort={threadSort}
             onThreadSortChange={handleThreadSortChange}
             onWorkspaceOrderChange={handleWorkspaceOrderChange}
+            hiddenWorkspaceIds={viewSnapshot?.preferences.hidden_workspace_ids}
+            onWorkspaceHiddenChange={handleWorkspaceHiddenChange}
             workspaceColors={viewSnapshot?.preferences.workspace_colors}
             onWorkspaceColorChange={handleWorkspaceColorChange}
             workspaceIcons={viewSnapshot?.preferences.workspace_icons}

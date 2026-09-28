@@ -8,6 +8,8 @@ import {
   ChevronRight,
   CircleDashed,
   Copy,
+  Eye,
+  EyeOff,
   FolderClosed,
   GitFork,
   Globe,
@@ -665,6 +667,8 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   selectedIcon,
   archivedCount = 0,
   archivedOpen = false,
+  isHidden = false,
+  onToggleHidden,
   onSetColor,
   onSetIcon,
   onChooseWebsite,
@@ -678,6 +682,8 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   selectedIcon?: WorkspaceIconPreference
   archivedCount?: number
   archivedOpen?: boolean
+  isHidden?: boolean
+  onToggleHidden?: () => void
   onSetColor?: (color: WorkspaceColorId | null) => void
   onSetIcon?: (icon: WorkspaceIconPreference | null) => void
   onChooseWebsite?: () => void
@@ -697,7 +703,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
     Boolean(onViewArchived) && (archivedCount > 0 || archivedOpen)
   const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
-  const showMembership = showClose || showRemove
+  const showMembership = showClose || showRemove || Boolean(onToggleHidden)
   if (!showIcons && !showColors && !showArchivedAction && !showMembership) {
     return null
   }
@@ -714,6 +720,8 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
     (showArchivedAction && showMembership
       ? THREAD_MENU_SEPARATOR_HEIGHT_PX
       : 0) +
+    (onToggleHidden ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
+    (onToggleHidden && showClose ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showClose ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
     (showClose && showRemove ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showRemove ? THREAD_MENU_ROW_HEIGHT_PX : 0)
@@ -845,6 +853,22 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"
         />
+      ) : null}
+      {onToggleHidden ? (
+        <ThreadMenuItem
+          icon={
+            isHidden ? (
+              <Eye className="h-3.5 w-3.5" />
+            ) : (
+              <EyeOff className="h-3.5 w-3.5" />
+            )
+          }
+          label={isHidden ? 'Show project' : 'Hide project'}
+          onClick={onToggleHidden}
+        />
+      ) : null}
+      {onToggleHidden && showClose ? (
+        <div role="separator" className="mx-2 my-1 border-t border-border-subtle" />
       ) : null}
       {showClose && onCloseFromSidebar ? (
         <ThreadMenuItem

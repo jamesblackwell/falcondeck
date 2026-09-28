@@ -190,6 +190,23 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         }
     }
 
+    if let Some(hidden_workspace_ids) = value.get("hidden_workspace_ids").and_then(Value::as_array)
+    {
+        for workspace_id in hidden_workspace_ids.iter().filter_map(Value::as_str) {
+            let workspace_id = workspace_id.trim();
+            if !workspace_id.is_empty()
+                && !preferences
+                    .hidden_workspace_ids
+                    .iter()
+                    .any(|id| id == workspace_id)
+            {
+                preferences
+                    .hidden_workspace_ids
+                    .push(workspace_id.to_string());
+            }
+        }
+    }
+
     if let Some(workspace_colors) = value.get("workspace_colors").and_then(Value::as_object) {
         preferences.workspace_colors =
             normalize_workspace_colors(workspace_colors.iter().filter_map(
@@ -363,6 +380,19 @@ pub(super) fn apply_preferences_patch(
                     ordered.push(workspace_id);
                 }
                 ordered
+            });
+    }
+
+    if let Some(hidden_workspace_ids) = request.hidden_workspace_ids {
+        preferences.hidden_workspace_ids = hidden_workspace_ids
+            .into_iter()
+            .map(|workspace_id| workspace_id.trim().to_string())
+            .filter(|workspace_id| !workspace_id.is_empty())
+            .fold(Vec::new(), |mut hidden, workspace_id| {
+                if !hidden.contains(&workspace_id) {
+                    hidden.push(workspace_id);
+                }
+                hidden
             });
     }
 
@@ -983,6 +1013,7 @@ mod tests {
         let preferences = merge_preferences_from_value(json!({
             "version": 3,
             "workspace_order": ["workspace-b", "workspace-a", "workspace-b", "  "],
+            "hidden_workspace_ids": [" workspace-b ", "workspace-b", "", "workspace-a"],
             "workspace_colors": {
                 "workspace-b": "cat-3",
                 "workspace-a": "red",
@@ -1015,6 +1046,10 @@ mod tests {
         assert_eq!(preferences.version, 3);
         assert_eq!(preferences.workspace_order, ["workspace-b", "workspace-a"]);
         assert_eq!(
+            preferences.hidden_workspace_ids,
+            ["workspace-b", "workspace-a"]
+        );
+        assert_eq!(
             preferences
                 .workspace_colors
                 .get("workspace-b")
@@ -1045,6 +1080,23 @@ mod tests {
         assert!(preferences.notifications.notify_on_input_required);
         assert!(!preferences.notifications.notify_on_error);
         assert!(!preferences.notifications.suppress_when_desktop_active);
+    }
+
+    #[test]
+    fn applies_hidden_workspace_patch() {
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                hidden_workspace_ids: Some(vec![
+                    " workspace-a ".into(),
+                    "workspace-a".into(),
+                    "".into(),
+                ]),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+        assert_eq!(preferences.hidden_workspace_ids, ["workspace-a"]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 import { memo, useCallback, useState } from 'react'
 import { Pressable, View } from 'react-native'
-import { FolderClosed, Globe, Sparkles } from 'lucide-react-native'
+import { Eye, EyeOff, FolderClosed, Globe, Sparkles } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -16,12 +16,14 @@ import { useRelayStore, useSessionStore } from '@/store'
 interface WorkspaceOptionsSheetProps {
   workspaceId: string
   workspaceName: string
+  isHidden: boolean
   onClose: () => void
 }
 
 export const WorkspaceOptionsSheet = memo(function WorkspaceOptionsSheet({
   workspaceId,
   workspaceName,
+  isHidden,
   onClose,
 }: WorkspaceOptionsSheetProps) {
   const { theme } = useUnistyles()
@@ -57,6 +59,26 @@ export const WorkspaceOptionsSheet = memo(function WorkspaceOptionsSheet({
     },
     [onClose, setPreferences, workspaceId],
   )
+
+  const toggleHidden = useCallback(async () => {
+    setPending(true)
+    setError(null)
+    try {
+      const current = useSessionStore.getState().snapshot?.preferences.hidden_workspace_ids ?? []
+      const next = isHidden
+        ? current.filter((id) => id !== workspaceId)
+        : [...new Set([...current, workspaceId])]
+      const updated = await useRelayStore.getState()._callRpc('preferences.update', {
+        hidden_workspace_ids: next,
+      })
+      setPreferences(normalizePreferences(updated))
+      onClose()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Failed to save project visibility')
+    } finally {
+      setPending(false)
+    }
+  }, [isHidden, onClose, setPreferences, workspaceId])
 
   if (mode === 'website') {
     return (
@@ -101,13 +123,35 @@ export const WorkspaceOptionsSheet = memo(function WorkspaceOptionsSheet({
   }
 
   return (
-    <NativeSheet onClose={onClose} accessibilityLabel={`Icon for ${workspaceName}`}>
+    <NativeSheet onClose={onClose} accessibilityLabel={`Options for ${workspaceName}`}>
       <View style={styles.sheet}>
         <Text variant="label" color="primary" weight="semibold">
-          Icon
+          Project options
         </Text>
         <Text variant="supporting" color="secondary">
           {workspaceName}
+        </Text>
+        <Pressable
+          style={styles.row}
+          onPress={() => {
+            void Haptics.selectionAsync()
+            void toggleHidden()
+          }}
+          disabled={pending}
+          accessibilityRole="button"
+          accessibilityLabel={isHidden ? 'Show project' : 'Hide project'}
+        >
+          {isHidden ? (
+            <Eye size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+          ) : (
+            <EyeOff size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+          )}
+          <Text variant="body" color="primary" style={styles.rowLabel}>
+            {isHidden ? 'Show project' : 'Hide project'}
+          </Text>
+        </Pressable>
+        <Text variant="meta" color="muted">
+          Icon
         </Text>
         <Pressable
           style={styles.row}

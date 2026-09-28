@@ -66,6 +66,9 @@ pub struct FalconDeckPreferences {
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
+    /// Projects omitted from the sidebar until a client chooses to show hidden projects.
+    #[serde(default)]
+    pub hidden_workspace_ids: Vec<String>,
     /// Sidebar folder colors keyed by workspace id (`cat-1` through `cat-12`).
     #[serde(default)]
     pub workspace_colors: BTreeMap<String, String>,
@@ -93,6 +96,7 @@ impl Default for FalconDeckPreferences {
         Self {
             version: default_preferences_version(),
             workspace_order: Vec::new(),
+            hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
             workspace_icons: BTreeMap::new(),
             conversation: ConversationPreferences::default(),
@@ -588,6 +592,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,
+    /// Optional replacement for the hidden project ids.
+    #[serde(default)]
+    pub hidden_workspace_ids: Option<Vec<String>>,
     /// Optional replacement map of workspace id → categorical color token.
     #[serde(default)]
     pub workspace_colors: Option<BTreeMap<String, String>>,

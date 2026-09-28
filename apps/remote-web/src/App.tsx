@@ -4847,6 +4847,31 @@ function RemoteApp() {
     ],
   );
 
+  const handleWorkspaceHiddenChange = useCallback(
+    async (workspaceId: string, hidden: boolean) => {
+      const current = snapshot?.preferences.hidden_workspace_ids ?? [];
+      const hiddenWorkspaceIds = hidden
+        ? [...new Set([...current, workspaceId])]
+        : current.filter((id) => id !== workspaceId);
+      try {
+        const preferences = normalizePreferences(
+          await submitQueuedAction("preferences.update", {
+            hidden_workspace_ids: hiddenWorkspaceIds,
+          }),
+        );
+        setSnapshot((currentSnapshot) =>
+          currentSnapshot
+            ? { ...currentSnapshot, preferences }
+            : currentSnapshot,
+        );
+      } catch (error) {
+        reportError(error, "Failed to save project visibility");
+        throw error;
+      }
+    },
+    [reportError, setSnapshot, snapshot?.preferences.hidden_workspace_ids, submitQueuedAction],
+  );
+
   const handleWorkspaceIconChange = useCallback(
     async (workspaceId: string, icon: WorkspaceIconPreference | null) => {
       const nextIcons = {
@@ -5164,6 +5189,8 @@ function RemoteApp() {
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
+                hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
+                onWorkspaceHiddenChange={handleWorkspaceHiddenChange}
                 workspaceColors={snapshot?.preferences.workspace_colors}
                 onWorkspaceColorChange={handleWorkspaceColorChange}
                 workspaceIcons={snapshot?.preferences.workspace_icons}
@@ -5233,6 +5260,8 @@ function RemoteApp() {
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
+          hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
+          onWorkspaceHiddenChange={handleWorkspaceHiddenChange}
           workspaceColors={snapshot?.preferences.workspace_colors}
           onWorkspaceColorChange={handleWorkspaceColorChange}
           workspaceIcons={snapshot?.preferences.workspace_icons}

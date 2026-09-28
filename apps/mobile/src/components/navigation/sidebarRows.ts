@@ -92,11 +92,13 @@ export function buildSidebarRows(
   chatsCollapsed = false,
   remoteCounts: Record<string, import('@falcondeck/client-core').WorkspaceIndexCount> = {},
   remoteCursors: Record<string, number | null> = {},
+  showProjectsHeading = false,
+  pinnedGroups: ProjectGroup[] = groups,
 ): SidebarRow[] {
   const compare = compareThreads(sortMode)
   const chatGroups = groups.filter((group) => group.workspace.kind === 'casual')
   const projectGroups = groups.filter((group) => group.workspace.kind !== 'casual')
-  const pinnedRows: SidebarRow[] = groups
+  const pinnedRows: SidebarRow[] = pinnedGroups
     .flatMap((group) =>
       group.threads
         .filter((thread) => thread.is_pinned)
@@ -220,7 +222,7 @@ export function buildSidebarRows(
           ...pinnedRows,
         ]
       : []),
-    ...(projectGroups.length > 0
+    ...(projectGroups.length > 0 || showProjectsHeading
       ? [
           {
             key: 'section:projects',

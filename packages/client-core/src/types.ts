@@ -397,6 +397,8 @@ export type FalconDeckPreferences = {
   version: number;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
+  /** Project ids hidden from the sidebar by default. */
+  hidden_workspace_ids?: string[];
   /**
    * Sidebar folder colors keyed by workspace id. Values are categorical
    * tokens (`cat-1`…`cat-12`) so they retint with the active theme.
@@ -493,6 +495,7 @@ export type UpdateUtilityModelPreferences = {
 
 export type UpdatePreferencesPayload = {
   workspace_order?: string[] | null;
+  hidden_workspace_ids?: string[] | null;
   workspace_colors?: Record<string, string> | null;
   workspace_icons?: Record<string, WorkspaceIconPreference> | null;
   conversation?: UpdateConversationPreferences | null;

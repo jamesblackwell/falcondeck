@@ -177,6 +177,7 @@ export function SidebarDrawerContent({
       extensionSnapshot={snapshot?.extensions}
         extensionSidebarFilters={extensionSidebarFilters}
         workspaceColors={snapshot?.preferences.workspace_colors}
+        hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
       />
     </SidebarFreeze>
   );

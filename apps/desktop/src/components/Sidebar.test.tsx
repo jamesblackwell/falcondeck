@@ -2324,6 +2324,25 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("hides a project and lets it be shown again from the Projects heading", async () => {
+    const onWorkspaceHiddenChange = vi.fn().mockResolvedValue(undefined);
+    const { rerenderSidebar } = renderSidebar({ onWorkspaceHiddenChange });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hide project" }));
+    expect(onWorkspaceHiddenChange).toHaveBeenCalledWith("workspace-1", true);
+
+    rerenderSidebar({ hiddenWorkspaceIds: ["workspace-1"] });
+    const projects = screen.getByRole("region", { name: "Projects" });
+    expect(within(projects).queryByText("falcondeck")).not.toBeInTheDocument();
+    fireEvent.click(
+      within(projects).getByRole("button", { name: "Show hidden projects (1)" }),
+    );
+    fireEvent.contextMenu(within(projects).getByText("falcondeck"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Show project" }));
+    expect(onWorkspaceHiddenChange).toHaveBeenCalledWith("workspace-1", false);
+  });
+
   it("confirms closing a project that has a running turn", async () => {
     const onCloseWorkspace = vi.fn().mockResolvedValue(undefined);
     renderSidebar(
