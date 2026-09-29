@@ -5575,6 +5575,9 @@ function AppInner() {
         case "openProject":
           void handleAddProject();
           break;
+        case "newChat":
+          void handleNewChat();
+          break;
         case "newThread":
           if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
           break;
@@ -5681,6 +5684,7 @@ function AppInner() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [
     handleAddProject,
+    handleNewChat,
     handleNewThread,
     handleOpenActivity,
     handleOpenKeyboardShortcuts,

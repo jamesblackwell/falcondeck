@@ -74,7 +74,10 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   return (
     <WorkspaceSidebar
       {...props}
-      newThreadShortcut={shortcutHintTokens("newThread", shortcutSettings)}
+      newThreadShortcut={shortcutHintTokens(
+        props.onNewChat ? "newChat" : "newThread",
+        shortcutSettings,
+      )}
       addProjectShortcut={shortcutHintTokens(
         "openProject",
         shortcutSettings,

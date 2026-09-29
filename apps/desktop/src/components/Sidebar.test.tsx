@@ -258,6 +258,9 @@ describe("DesktopSidebar", () => {
     const onNewChat = vi.fn();
     renderSidebar({ onNewChat });
 
+    expect(screen.getByRole("button", { name: "New chat" })).toHaveTextContent(
+      "⌘⇧N",
+    );
     const chats = screen.getByRole("region", { name: "Chats" });
     const projects = screen.getByRole("region", { name: "Projects" });
     const startChat = within(chats).getByRole("button", {

@@ -254,41 +254,48 @@ describe("Activity takeover wiring", () => {
     testApi.current = null;
   });
 
-  it("opens a fresh no-project chat from the Chats plus while a panel is open", async () => {
-    const chatWorkspace = {
-      ...testSnapshot.workspaces[0],
-      id: "chat-workspace",
-      path: "/Documents/FalconDeck/2026-09-28/chat-1",
-      kind: "casual",
-      current_thread_id: null,
-    };
-    testApi.current = {
-      createChat: vi.fn().mockResolvedValue(chatWorkspace),
-      snapshot: vi.fn().mockResolvedValue({
-        ...testSnapshot,
-        workspaces: [...testSnapshot.workspaces, chatWorkspace],
-      }),
-      setClientActivity: vi.fn().mockResolvedValue(undefined),
-      markThreadRead: vi
-        .fn()
-        .mockResolvedValue({ thread: testSnapshot.threads[0] }),
-    };
-    render(<App />);
+  it.each(["Chats plus", "Command-Shift-N"])(
+    "opens a fresh no-project chat from %s while a panel is open",
+    async (trigger) => {
+      const chatWorkspace = {
+        ...testSnapshot.workspaces[0],
+        id: "chat-workspace",
+        path: "/Documents/FalconDeck/2026-09-28/chat-1",
+        kind: "casual",
+        current_thread_id: null,
+      };
+      testApi.current = {
+        createChat: vi.fn().mockResolvedValue(chatWorkspace),
+        snapshot: vi.fn().mockResolvedValue({
+          ...testSnapshot,
+          workspaces: [...testSnapshot.workspaces, chatWorkspace],
+        }),
+        setClientActivity: vi.fn().mockResolvedValue(undefined),
+        markThreadRead: vi
+          .fn()
+          .mockResolvedValue({ thread: testSnapshot.threads[0] }),
+      };
+      render(<App />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Mini Zen" }));
-    expect(await screen.findByText("One thing at a time")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Mini Zen" }));
+      expect(await screen.findByText("One thing at a time")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Start new chat" }));
-    await waitFor(() => {
-      expect(screen.getByText("Conversation pane")).toBeInTheDocument();
-      expect(screen.getByTestId("workspace-kind")).toHaveTextContent("casual");
-      expect(
-        Number(screen.getByTestId("composer-focus-key").textContent),
-      ).toBeGreaterThan(0);
-    });
-    expect(testApi.current.createChat).toHaveBeenCalledOnce();
-    expect(screen.queryByText("One thing at a time")).not.toBeInTheDocument();
-  });
+      if (trigger === "Chats plus") {
+        fireEvent.click(screen.getByRole("button", { name: "Start new chat" }));
+      } else {
+        fireEvent.keyDown(window, { key: "N", metaKey: true, shiftKey: true });
+      }
+      await waitFor(() => {
+        expect(screen.getByText("Conversation pane")).toBeInTheDocument();
+        expect(screen.getByTestId("workspace-kind")).toHaveTextContent("casual");
+        expect(
+          Number(screen.getByTestId("composer-focus-key").textContent),
+        ).toBeGreaterThan(0);
+      });
+      expect(testApi.current.createChat).toHaveBeenCalledOnce();
+      expect(screen.queryByText("One thing at a time")).not.toBeInTheDocument();
+    },
+  );
 
   it("suppresses the rail and closes the takeover when a thread is selected", async () => {
     render(<App />);

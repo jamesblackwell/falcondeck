@@ -24,6 +24,9 @@ opening a project, creating and navigating chats, chat search, in-chat find,
 sidebar and changes-panel visibility, text zoom, composer focus, send, newline,
 one-shot Queue/Steer inversion, and stopping a running turn.
 
+On Mac, `⌘N` starts a chat in the current project, while `⌘⇧N` creates a chat
+without a project in the Chats section.
+
 The registry is the source of truth for labels, descriptions, contexts, and
 defaults. Custom values are versioned and stored locally because shortcuts are
 device and keyboard-layout preferences. Empty binding arrays explicitly unbind

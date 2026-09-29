@@ -9,6 +9,7 @@ export type ShortcutCommandId =
   | 'openUsage'
   | 'openKeyboardShortcuts'
   | 'openProject'
+  | 'newChat'
   | 'newThread'
   | 'searchThreads'
   | 'findInThread'
@@ -65,7 +66,8 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   // and ⌘? stays bound for the macOS Help-menu muscle memory.
   { id: 'openKeyboardShortcuts', label: 'Keyboard shortcuts', description: 'Review and customize every binding', category: 'App', context: 'global', defaults: ['Shift+/', 'Mod+Shift+/'] },
   { id: 'openProject', label: 'Open project', description: 'Add a local project folder', category: 'App', context: 'global', defaults: ['Mod+O'] },
-  { id: 'newThread', label: 'New chat', description: 'Start a chat in the current project', category: 'Conversation', context: 'global', defaults: ['Mod+N', 'Mod+Shift+O'] },
+  { id: 'newChat', label: 'New chat', description: 'Start a chat without a project', category: 'Conversation', context: 'global', defaults: ['Mod+Shift+N'] },
+  { id: 'newThread', label: 'New project chat', description: 'Start a chat in the current project', category: 'Conversation', context: 'global', defaults: ['Mod+N', 'Mod+Shift+O'] },
   { id: 'searchThreads', label: 'Search chats', description: 'Open the command menu focused on chats', category: 'Conversation', context: 'global', defaults: ['Mod+G'] },
   { id: 'findInThread', label: 'Find in chat', description: 'Find text in the current conversation', category: 'Conversation', context: 'global', defaults: ['Mod+F'] },
   { id: 'navigateBack', label: 'Navigate back', description: 'Return to the previously selected chat', category: 'Navigation', context: 'global', defaults: ['Mod+['] },

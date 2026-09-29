@@ -40,6 +40,8 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFromEvent(key('}', { metaKey: true, shiftKey: true }))).toBe('Mod+Shift+]')
     expect(commandForEvent('composer', key('Enter', { metaKey: true }))).toBe('invertFollowUp')
     expect(commandForEvent('global', key('k', { metaKey: true }))).toBe('commandPalette')
+    expect(commandForEvent('global', key('n', { metaKey: true, shiftKey: true }))).toBe('newChat')
+    expect(commandForEvent('global', key('n', { metaKey: true }))).toBe('newThread')
     expect(commandForEvent('global', key('u', { metaKey: true }))).toBe('openActivity')
     expect(commandForEvent('global', key('u', { metaKey: true, shiftKey: true }))).toBe('openUsage')
     expect(commandForEvent('global', key('j', { metaKey: true }))).toBe('toggleTerminal')
@@ -83,6 +85,7 @@ describe('keyboard shortcuts', () => {
     expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity (⌘U)')
     expect(shortcutHint('openUsage')).toBe('⌘⇧U')
     expect(shortcutHintTokens('openUsage')).toEqual(['⌘', '⇧', 'U'])
+    expect(shortcutHint('newChat')).toBe('⌘⇧N')
 
     setShortcutBindings('openActivity', [])
     expect(shortcutHint('openActivity')).toBeNull()
