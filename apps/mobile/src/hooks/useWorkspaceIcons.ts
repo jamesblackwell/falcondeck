@@ -1,71 +1,78 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore } from '@/store'
 
-export function useWorkspaceIcons(groups: ProjectGroup[]) {
+export function useWorkspaceIcons(groups: ProjectGroup[], paused = false) {
   const [uris, setUris] = useState<Record<string, string>>({})
-  const cacheRef = useRef(new Map<string, string>())
+  const sessionId = useRelayStore((state) => state.sessionId)
+  const relayUrl = useRelayStore((state) => state.relayUrl)
+  const isEncrypted = useRelayStore((state) => state.isEncrypted)
   const iconPreferences = useSessionStore(
     (state) => state.snapshot?.preferences.workspace_icons,
   )
-  const signature = groups
-    .map(
-      (group) =>
-        `${group.workspace.id}:${group.workspace.icon?.kind ?? ''}:${group.workspace.icon?.etag ?? ''}`,
-    )
-    .join('|')
+  // Thread updates replace groups without changing the requested icons.
+  const signature = JSON.stringify(groups.flatMap(({ workspace }) =>
+    workspace.icon?.kind === 'image' ? [[workspace.id, workspace.icon.etag ?? '']] : [],
+  ))
+  const icons = useMemo(() => JSON.parse(signature) as [string, string][], [signature])
+  const scope = JSON.stringify([relayUrl, sessionId])
+  const cache = useMemo(() => ({
+    scope,
+    resolved: new Map<string, string>(),
+    pending: new Map<string, Promise<string | null>>(),
+  }), [scope])
+  const iconKeys = useMemo(() => new Map(icons.map(([id, etag]) =>
+    [id, JSON.stringify([scope, id, etag])],
+  )), [icons, scope])
 
   useEffect(() => {
+    if (paused || !sessionId || !isEncrypted) return
     let cancelled = false
     const callRpc = useRelayStore.getState()._callRpc
-    for (const group of groups) {
-      const workspace = group.workspace
-      if (workspace.icon?.kind !== 'image') continue
-      const cacheKey = `${workspace.id}:${workspace.icon.etag ?? ''}`
-      const cached = cacheRef.current.get(cacheKey)
+    for (const [workspaceId, cacheKey] of iconKeys) {
+      const publish = (uri: string | null) => {
+        if (cancelled || !uri) return
+        setUris((current) => current[cacheKey] === uri
+          ? current : { ...current, [cacheKey]: uri })
+      }
+      const cached = cache.resolved.get(cacheKey)
       if (cached) {
-        setUris((current) =>
-          current[workspace.id] === cached
-            ? current
-            : { ...current, [workspace.id]: cached },
-        )
+        publish(cached)
         continue
       }
-      void callRpc<{
-        kind?: string
-        content_type?: string
-        data?: string
-      }>('workspace.icon', { workspace_id: workspace.id })
-        .then((payload) => {
-          if (
-            cancelled ||
-            payload.kind !== 'image' ||
-            !payload.data ||
-            !payload.content_type
-          ) {
-            return
-          }
-          const uri = `data:${payload.content_type};base64,${payload.data}`
-          cacheRef.current.set(cacheKey, uri)
-          setUris((current) => ({ ...current, [workspace.id]: uri }))
-        })
-        .catch(() => {})
+      let request = cache.pending.get(cacheKey)
+      if (!request) {
+        request = callRpc<{
+          kind?: string
+          content_type?: string
+          data?: string
+        }>('workspace.icon', { workspace_id: workspaceId })
+          .then((payload) => {
+            if (payload.kind !== 'image' || !payload.data || !payload.content_type) return null
+            const uri = `data:${payload.content_type};base64,${payload.data}`
+            // Cache valid responses even if the consumer's effect was superseded.
+            cache.resolved.set(cacheKey, uri)
+            return uri
+          })
+          .catch(() => null)
+          .finally(() => cache.pending.delete(cacheKey))
+        cache.pending.set(cacheKey, request)
+      }
+      void request.then(publish)
     }
     return () => {
       cancelled = true
     }
-    // Signature covers id + resolved icon etag; `groups` is listed so we read
-    // the current workspace objects without refetching on unrelated snapshot
-    // churn.
-  }, [groups, signature])
+  }, [cache, iconKeys, isEncrypted, paused, sessionId])
 
   return useCallback(
     (workspaceId: string) => {
       if (iconPreferences?.[workspaceId]?.mode === 'folder') return null
-      return uris[workspaceId] ?? null
+      const cacheKey = iconKeys.get(workspaceId)
+      return cacheKey ? uris[cacheKey] ?? null : null
     },
-    [iconPreferences, uris],
+    [iconKeys, iconPreferences, uris],
   )
 }

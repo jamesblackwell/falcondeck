@@ -6,7 +6,13 @@ import { snapshot, thread, workspace } from '@/test/factories'
 import type { ExtensionSidebarFilterDefinition } from '@falcondeck/client-core'
 import { useSessionStore } from '@/store'
 import { LOADING_PILL_SHOW_AFTER_MS } from '@/components/ui'
-import { SidebarView } from './SidebarView'
+import { SidebarView as SampledSidebarView } from './SidebarView'
+
+// Production receives coverage from the drawer's sampled snapshot.
+function SidebarView(props: React.ComponentProps<typeof SampledSidebarView>) {
+  const syncIndex = useSessionStore(state => state.snapshot?.sync_index)
+  return <SampledSidebarView {...props} syncIndex={syncIndex} />
+}
 
 const { loadPage, isInFlight } = vi.hoisted(() => ({
   loadPage: vi.fn(),

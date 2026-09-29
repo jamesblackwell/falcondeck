@@ -377,7 +377,7 @@ function upsertThread(
   }
 
   // A live turn emits one of these per chunk just to bump the attention seq.
-  // The visible row (spinner, title, preview) does not change, so replacing
+  // Once the unread badge is current, the visible row does not change. Replacing
   // the threads array — and waking every snapshot subscriber — is wasted work
   // until the terminal summary arrives.
   if (isRunningAttentionOnlyUpdate(current, nextThread)) {
@@ -442,6 +442,7 @@ function isRunningAttentionOnlyUpdate(
     current.provider === next.provider &&
     current.agent.model_id === next.agent.model_id &&
     current.agent.reasoning_effort === next.agent.reasoning_effort &&
+    current.attention.unread === next.attention.unread &&
     current.attention.pending_approval_count ===
       next.attention.pending_approval_count &&
     current.attention.pending_question_count ===

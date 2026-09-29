@@ -29,6 +29,26 @@ function renderHarness() {
 }
 
 describe('useThrottledSnapshot', () => {
+  it('cancels trailing samples while paused and resumes with the current snapshot', () => {
+    vi.useFakeTimers()
+    useSessionStore.setState({ snapshot: snapshot({ threads: [thread({ title: 'first' })] }) })
+    const renders: (string | undefined)[] = []
+    function Harness({ paused }: { paused: boolean }) {
+      renders.push(useThrottledSnapshot(INTERVAL_MS, paused)?.threads[0]?.title)
+      return null
+    }
+    const renderer = renderComponent(<Harness paused={false} />)
+    act(() => useSessionStore.getState().applyDaemonEvent(threadUpdatedEvent(thread({ title: 'queued' }))))
+    act(() => renderer.update(<Harness paused />))
+    const before = renders.length
+    act(() => {
+      useSessionStore.getState().applyDaemonEvent(threadUpdatedEvent(thread({ title: 'latest' })))
+      vi.advanceTimersByTime(INTERVAL_MS * 4)
+    })
+    expect(renders).toHaveLength(before)
+    act(() => renderer.update(<Harness paused={false} />))
+    expect(renders.at(-1)).toBe('latest')
+  })
   it('samples a burst of snapshot changes once per interval', () => {
     vi.useFakeTimers()
     useSessionStore.getState().applyDaemonEvent(

@@ -35,6 +35,7 @@ import {
 } from '@falcondeck/client-core';
 
 import { clearMobileSessionCache, persistMobileSessionCache } from '@/storage/mobile-session-cache';
+import { conversationItemBytes } from '@/lib/conversation-item-size';
 
 import { useUIStore } from './ui-store';
 
@@ -104,6 +105,48 @@ interface SessionState {
   /** Per-thread tail-load failures, so a flaky network shows an explicit
    * error instead of a false "No messages yet" empty state. */
   threadDetailErrors: Record<string, string>;
+}
+
+const MAX_RETAINED_THREADS = 5;
+const MAX_INACTIVE_HISTORY_BYTES = 4 * 1024 * 1024;
+const historyRecency = new Map<string, number>();
+const historySizes = new WeakMap<ConversationItem[], number>();
+let historyUse = 0;
+
+function touchHistory(threadId: string | null) {
+  if (threadId) historyRecency.set(threadId, ++historyUse);
+}
+
+/** Evict whole inactive windows and their cursors; reopening fetches a fresh tail.
+ * The selected transcript, including explicitly paged older items, is exempt. */
+function retainThreadHistories<T extends SessionState>(state: T): T {
+  const ids = Object.keys(state.threadItems);
+  for (const id of historyRecency.keys()) {
+    if (!state.threadItems[id]) historyRecency.delete(id);
+  }
+  const inactive = ids.filter(id => id !== state.selectedThreadId)
+    .sort((a, b) => (historyRecency.get(b) ?? 0) - (historyRecency.get(a) ?? 0));
+  const keep = new Set(state.selectedThreadId && state.threadItems[state.selectedThreadId]
+    ? [state.selectedThreadId] : []);
+  let bytes = 0;
+  for (const id of inactive) {
+    const items = state.threadItems[id];
+    let size = historySizes.get(items);
+    if (size === undefined) {
+      size = items.reduce((total, item) => total + conversationItemBytes(item), 0);
+      historySizes.set(items, size);
+    }
+    if (keep.size >= MAX_RETAINED_THREADS || bytes + size > MAX_INACTIVE_HISTORY_BYTES) continue;
+    keep.add(id);
+    bytes += size;
+  }
+  if (keep.size === ids.length) return state;
+  for (const id of ids) if (!keep.has(id)) historyRecency.delete(id);
+  return {
+    ...state,
+    threadItems: Object.fromEntries(Object.entries(state.threadItems).filter(([id]) => keep.has(id))),
+    threadHistory: Object.fromEntries(Object.entries(state.threadHistory).filter(([id]) => keep.has(id))),
+  };
 }
 
 interface SessionActions {
@@ -822,7 +865,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
   const reconciledThreadDetail =
     nextThreadDetail?.thread.id === nextSelection.threadId ? nextThreadDetail : null;
 
-  return {
+  const nextState = {
     snapshot: nextSnapshot ?? state.snapshot,
     threadItems: nextThreadItems,
     threadHistory: nextThreadHistory,
@@ -831,6 +874,9 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     selectedWorkspaceId: nextSelection.workspaceId,
     selectedThreadId: nextSelection.threadId,
   };
+  if (nextSelection.threadId === state.selectedThreadId) return nextState;
+  touchHistory(nextSelection.threadId);
+  return retainThreadHistories(nextState);
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
@@ -892,7 +938,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       { preserveEmptyThreadSelection: true },
     );
 
-    set({
+    touchHistory(nextSelection.threadId);
+    set(retainThreadHistories({
       snapshot,
       selectedWorkspaceId: nextSelection.workspaceId,
       selectedThreadId: nextSelection.threadId,
@@ -900,14 +947,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       threadHistory,
       threadDetail: null,
       threadDetailErrors: {},
-    });
+    }));
     persistStateCache(get());
   },
 
   exportCache: () => buildCacheFromState(get()),
 
   selectThread: (workspaceId, threadId) => {
-    set((state) => ({
+    touchHistory(threadId);
+    set((state) => retainThreadHistories({
+      ...state,
       selectedWorkspaceId: workspaceId,
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
@@ -919,7 +968,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const { snapshot } = get();
     const workspace = snapshot?.workspaces.find((entry) => entry.id === workspaceId);
     const threadId = workspace?.current_thread_id ?? null;
-    set((state) => ({
+    touchHistory(threadId);
+    set((state) => retainThreadHistories({
+      ...state,
       selectedWorkspaceId: workspaceId,
       selectedThreadId: threadId,
       threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
@@ -928,11 +979,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   selectNewThread: (workspaceId) => {
-    set({
+    set((state) => retainThreadHistories({
+      ...state,
       selectedWorkspaceId: workspaceId,
       selectedThreadId: null,
       threadDetail: null,
-    });
+    }));
     schedulePersistStateCache();
   },
 
@@ -994,7 +1046,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   restoreArchivedThread: (undo) => {
-    set((state) => restoreArchivedThreadState(state, undo));
+    touchHistory(undo.thread.id);
+    set((state) => retainThreadHistories(restoreArchivedThreadState(state, undo)));
     persistStateCache(get());
   },
 
@@ -1007,6 +1060,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
     set((state) => {
       const threadId = detail.thread.id;
+      touchHistory(threadId);
       const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS;
       const mergeMode = options?.mergeMode ?? 'refresh';
       const existingHistory = state.threadHistory[threadId] ?? EMPTY_HISTORY;
@@ -1031,7 +1085,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       });
       const isSelectedThread = state.selectedThreadId === threadId;
 
-      return {
+      return retainThreadHistories({
+        ...state,
         threadDetail: isSelectedThread ? mergedDetail : state.threadDetail,
         threadItems: { ...state.threadItems, [threadId]: mergedItems },
         threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
@@ -1040,7 +1095,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
               Object.entries(state.threadDetailErrors).filter(([id]) => id !== threadId),
             )
           : state.threadDetailErrors,
-      };
+      });
     });
     // The RPC continuation that lands here has just decrypted, normalized and
     // merged up to 150 items and is about to derive presentation for all of
@@ -1071,7 +1126,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         mergedItems,
         state.threadHistory[threadId] ?? EMPTY_HISTORY,
       );
-      return {
+      const next = {
+        ...state,
         threadItems: { ...state.threadItems, [threadId]: mergedItems },
         threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
         threadDetail:
@@ -1079,6 +1135,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             ? reconcileThreadDetail(state.threadDetail, mergedItems, nextHistory)
             : state.threadDetail,
       };
+      if (threadId === state.selectedThreadId) return next;
+      touchHistory(threadId);
+      return retainThreadHistories(next);
     });
     persistStateCache(get());
   },
@@ -1112,7 +1171,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         state.selectedThreadId,
         { preserveEmptyThreadSelection: true },
       );
-      return {
+      touchHistory(next.threadId);
+      return retainThreadHistories({
+        ...state,
         selectedWorkspaceId: next.workspaceId,
         selectedThreadId: next.threadId,
         threadDetail:
@@ -1120,7 +1181,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           state.threadDetail.thread.id === next.threadId
             ? state.threadDetail
             : null,
-      };
+      });
     });
     persistStateCache(get());
   },
@@ -1128,7 +1189,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   reset: (options) => {
     const previous = get();
     const preserveCache = options?.preserveCache === true;
-    set({
+    if (!preserveCache) historyRecency.clear();
+    set(retainThreadHistories({
       ...initialState,
       // Truncation recovery still has to fetch an authoritative snapshot, but
       // the last-known project list (and open transcript) should stay on
@@ -1147,7 +1209,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       selectedThreadId: options?.preserveSelection
         ? previous.selectedThreadId
         : initialState.selectedThreadId,
-    });
+    }));
     // Drop any throttled trailing write: it would persist (or, before the
     // null-cache guard, delete) a cache derived from the cleared state.
     if (trailingCachePersistTimer) {
@@ -1332,10 +1394,11 @@ export const useApprovals = useInteractiveRequests;
  * between samples, and the flush always reads the current store value, so the
  * only cost is up to `intervalMs` of staleness.
  */
-export function useThrottledSnapshot(intervalMs: number): DaemonSnapshot | null {
+export function useThrottledSnapshot(intervalMs: number, paused = false): DaemonSnapshot | null {
   const [snapshot, setSnapshot] = useState(() => useSessionStore.getState().snapshot);
 
   useEffect(() => {
+    if (paused) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let lastFlushedAt = 0;
 
@@ -1363,7 +1426,7 @@ export function useThrottledSnapshot(intervalMs: number): DaemonSnapshot | null 
       unsubscribe();
       if (timer) clearTimeout(timer);
     };
-  }, [intervalMs]);
+  }, [intervalMs, paused]);
 
   return snapshot;
 }

@@ -13,7 +13,7 @@ function currentTick(): number {
  *
  * Rows that render a relative label have no reason of their own to re-render:
  * a thread nobody has touched keeps the same summary object for hours, and the
- * sidebar's memoized rows plus the closed-drawer freeze mean React can leave a
+ * sidebar's memoized rows plus paused snapshot sampling mean React can leave a
  * cell untouched just as long. The label then stays at whatever the age was
  * when it was last computed — the sidebar showed "13m" next to a thread that
  * had been idle for seven hours. Threading this counter through the row props
@@ -24,10 +24,11 @@ function currentTick(): number {
  * re-reads the clock on the way back in, which is exactly when a stale label
  * would otherwise be visible.
  */
-export function useRelativeTimeTick(): number {
+export function useRelativeTimeTick(paused = false): number {
   const [tick, setTick] = useState(currentTick)
 
   useEffect(() => {
+    if (paused) return;
     let interval: ReturnType<typeof setInterval> | null = null
 
     const start = () => {
@@ -50,7 +51,7 @@ export function useRelativeTimeTick(): number {
       stop()
       subscription.remove()
     }
-  }, [])
+  }, [paused])
 
   return tick
 }

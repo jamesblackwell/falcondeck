@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { normalizeDaemonSnapshot, normalizeThreadSummary } from './normalization'
 import { expandSyncIndex, mergeSyncExtensions, mergeSyncThreadPage, trackSyncIndexEvent, type SyncIndex } from './sync-index'
 import type { EventEnvelope } from './types'
+import { applySnapshotEvent } from './snapshot'
 
 function base() {
   return expandSyncIndex({ token: 'one', snapshot: normalizeDaemonSnapshot({ daemon: { version: 'test', started_at: '2026-09-05T12:00:00Z' } }),
@@ -13,6 +14,29 @@ function event(body: EventEnvelope['event']): EventEnvelope {
 }
 
 describe('compact index coverage', () => {
+  it('preserves coverage identity after the first touch when counts do not change', () => {
+    const snapshot = { ...base(), threads: [thread] }
+    const touched = trackSyncIndexEvent(snapshot, event({ type: 'thread-updated', thread }))
+    expect(touched.sync_index?.touched_threads.one).toBe(true)
+    expect(touched.sync_index?.counts).toBe(snapshot.sync_index?.counts)
+    expect(trackSyncIndexEvent(touched, event({ type: 'thread-updated', thread }))).toBe(touched)
+  })
+
+  it('counts an unread transition once even for a running thread', () => {
+    const current = { ...thread, status: 'running' as const }
+    const snapshot = { ...base(), threads: [current], sync_index: { ...base().sync_index!,
+      counts: { workspace: { total: 1, running: 1, unread: 0, awaiting: 0 } } } }
+    const unread = { ...current, attention: { ...current.attention, unread: true, last_agent_activity_seq: 1 },
+      updated_at: '2026-09-29T10:00:00Z' }
+    const updated = applySnapshotEvent(snapshot, event({ type: 'thread-updated', thread: unread }))!
+    expect(updated.threads[0].attention.unread).toBe(true)
+    expect(updated.sync_index?.counts.workspace.unread).toBe(1)
+    const next = applySnapshotEvent(updated, event({ type: 'thread-updated', thread: {
+      ...unread, updated_at: '2026-09-29T10:00:01Z',
+    } }))!
+    expect(next.sync_index).toBe(updated.sync_index)
+    expect(next.sync_index?.counts.workspace.unread).toBe(1)
+  })
   it('merges missing rows without deleting loaded rows or accepting another revision', () => {
     const snapshot = base()
     const page = { token: 'one', workspace_id: 'workspace', threads: [thread], next_cursor: null }

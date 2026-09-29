@@ -22,6 +22,7 @@ import {
 
 import { isDemoSession } from "@/features/demo/demoRpc";
 import { useRelayStore, useSessionStore } from "@/store";
+import { conversationItemBytes } from './conversation-item-size';
 
 type ToolCallItem = Extract<ConversationItem, { kind: "tool_call" }>;
 type ImageItem = Extract<ConversationItem, { kind: "image" }>;
@@ -29,10 +30,12 @@ type ImageItem = Extract<ConversationItem, { kind: "image" }>;
 export type FullItemStatus = "idle" | "loading" | "ready" | "error";
 
 const RESOLVED_CACHE_LIMIT = 48;
+const RESOLVED_CACHE_BYTES = 8 * 1024 * 1024;
 const MAX_CONCURRENT_ITEM_LOADS = 2;
 
 const inflight = new Map<string, Promise<ConversationItem | null>>();
 const resolved = new Map<string, ConversationItem>();
+let resolvedBytes = 0;
 const failed = new Set<string>();
 const listeners = new Set<() => void>();
 let transferSlots = { scope: "", active: 0, waiting: [] as (() => void)[] };
@@ -72,13 +75,22 @@ function subscribe(listener: () => void) {
   };
 }
 
-function remember(cacheKey: string, item: ConversationItem) {
+function forget(cacheKey: string) {
+  const item = resolved.get(cacheKey);
+  if (item) resolvedBytes -= conversationItemBytes(item);
   resolved.delete(cacheKey);
+}
+
+function remember(cacheKey: string, item: ConversationItem) {
+  forget(cacheKey);
+  const bytes = conversationItemBytes(item);
+  if (bytes > RESOLVED_CACHE_BYTES) return;
   resolved.set(cacheKey, item);
-  while (resolved.size > RESOLVED_CACHE_LIMIT) {
+  resolvedBytes += bytes;
+  while (resolved.size > RESOLVED_CACHE_LIMIT || resolvedBytes > RESOLVED_CACHE_BYTES) {
     const oldest = resolved.keys().next().value;
     if (oldest === undefined) break;
-    resolved.delete(oldest);
+    forget(oldest);
   }
 }
 
@@ -159,8 +171,11 @@ export function loadFullThreadItem(
   const cacheKey = key(relayUrl, relaySessionId, workspaceId, threadId, itemId);
   const cached = resolved.get(cacheKey);
   if (cached) {
-    if (applyResolved(threadId, cached)) return Promise.resolve(cached);
-    resolved.delete(cacheKey);
+    if (applyResolved(threadId, cached)) {
+      remember(cacheKey, cached);
+      return Promise.resolve(cached);
+    }
+    forget(cacheKey);
   }
   const pending = inflight.get(cacheKey);
   if (pending) return pending;
@@ -234,6 +249,7 @@ export function loadFullThreadItem(
 export function resetThreadItemLoaderForTests() {
   inflight.clear();
   resolved.clear();
+  resolvedBytes = 0;
   failed.clear();
   transferSlots = { scope: "", active: 0, waiting: [] };
 }

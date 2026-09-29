@@ -103,7 +103,7 @@ export const FileChangeBlock = memo(function FileChangeBlock({
           </Animated.View>
         ) : null}
       </Pressable>
-      {count > 0 ? (
+      {count > 0 && isOpen ? (
         <Animated.View style={bodyStyle}>
           <View onLayout={onContentLayout} style={styles.body}>
             {item.changes.map((change, index) => (
@@ -119,7 +119,7 @@ export const FileChangeBlock = memo(function FileChangeBlock({
                   </Text>
                 </View>
                 {change.diff.trim() ? (
-                  <CodeBlock code={change.diff} language="diff" previewLines={isOpen ? 0 : 8} />
+                  <CodeBlock code={change.diff} language="diff" previewLines={0} />
                 ) : null}
               </View>
             ))}

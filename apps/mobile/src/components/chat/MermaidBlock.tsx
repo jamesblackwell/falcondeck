@@ -20,7 +20,7 @@ export const MermaidBlock = memo(function MermaidBlock({
   pending = false,
 }: {
   code: string
-  /** Quiet parse failures while the enclosing fence may still be growing. */
+  /** Show source until streaming finishes to avoid rebuilding the WebView per chunk. */
   pending?: boolean
 }) {
   const { theme } = useUnistyles()
@@ -50,7 +50,7 @@ export const MermaidBlock = memo(function MermaidBlock({
   useEffect(() => {
     let cancelled = false
     const trimmed = code.trim()
-    if (!trimmed) {
+    if (pending || !trimmed) {
       setHtml(null)
       setError(null)
       return
@@ -80,7 +80,7 @@ export const MermaidBlock = memo(function MermaidBlock({
     return () => {
       cancelled = true
     }
-  }, [code, theme])
+  }, [code, pending, theme])
 
   const onMessage = useCallback((event: { nativeEvent: { data: string } }) => {
     const message = parseMermaidWebViewMessage(event.nativeEvent.data)
@@ -132,7 +132,7 @@ export const MermaidBlock = memo(function MermaidBlock({
           onPress={() => { void copy() }}
         />
       </View>
-      {html && !showSource && !error ? (
+      {html && !pending && !showSource && !error ? (
         <WebView
           originWhitelist={['*']}
           source={{ html }}

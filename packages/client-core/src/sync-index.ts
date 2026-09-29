@@ -72,7 +72,7 @@ export function trackSyncIndexEvent(snapshot: DaemonSnapshot, event: EventEnvelo
   if (body.type === 'thread-updated' || body.type === 'thread-started') {
     const previous = snapshot.threads.find(thread => thread.id === body.thread.id)
     const current = body.thread
-    const counts = { ...index.counts }
+    let counts = index.counts
     // The base already counts unseen rows. Only adjust membership we can prove.
     if (previous && previous.updated_at <= current.updated_at) {
       const count = counts[current.workspace_id]
@@ -81,15 +81,23 @@ export function trackSyncIndexEvent(snapshot: DaemonSnapshot, event: EventEnvelo
         const running = (thread: ThreadSummary) => active(thread) * Number(thread.status === 'running')
         const unread = (thread: ThreadSummary) => active(thread) * Number(thread.attention.unread)
         const awaiting = (thread: ThreadSummary) => active(thread) * Number(thread.attention.pending_approval_count + thread.attention.pending_question_count > 0)
-        counts[current.workspace_id] = {
+        const nextCount = {
           total: Math.max(0, count.total + active(current) - active(previous)),
           running: Math.max(0, count.running + running(current) - running(previous)),
           unread: Math.max(0, count.unread + unread(current) - unread(previous)),
           awaiting: Math.max(0, count.awaiting + awaiting(current) - awaiting(previous)),
         }
+        if (nextCount.total !== count.total || nextCount.running !== count.running ||
+            nextCount.unread !== count.unread || nextCount.awaiting !== count.awaiting) {
+          counts = { ...counts, [current.workspace_id]: nextCount }
+        }
       }
     }
-    return { ...snapshot, sync_index: { ...index, counts, touched_threads: { ...index.touched_threads, [current.id]: true } } }
+    const touched_threads = index.touched_threads[current.id]
+      ? index.touched_threads
+      : { ...index.touched_threads, [current.id]: true as const }
+    if (counts === index.counts && touched_threads === index.touched_threads) return snapshot
+    return { ...snapshot, sync_index: { ...index, counts, touched_threads } }
   }
   if (body.type === 'extension-view-updated') {
     return { ...snapshot, sync_index: { ...index, touched_views: { ...index.touched_views, [syncViewKey(body)]: true } } }

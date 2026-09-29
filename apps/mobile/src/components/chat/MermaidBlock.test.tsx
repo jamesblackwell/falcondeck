@@ -4,6 +4,7 @@ import { act } from 'react-test-renderer'
 
 import { cleanup, renderComponent, textOf } from '@/test/render'
 import {
+  WebView,
   __resetWebViewMock,
   __setWebViewMessage,
 } from 'react-native-webview'
@@ -14,6 +15,22 @@ import { setMermaidAssetLoader } from './mermaidEngine'
 const SOURCE = 'flowchart TD\n  home --> studio'
 
 describe('MermaidBlock', () => {
+  it('defers engine documents across pending edits and renders the latest source once complete', async () => {
+    const load = vi.fn(async () => 'window.mermaid={}')
+    setMermaidAssetLoader(load)
+    let source = SOURCE
+    const renderer = renderComponent(<MermaidBlock code={source} pending />)
+    for (let index = 0; index < 8; index++) {
+      source += `\n studio --> N${index}`
+      await act(async () => { renderer.update(<MermaidBlock code={source} pending />) })
+    }
+    expect(load).not.toHaveBeenCalled()
+    expect(renderer.root.findAllByType(WebView)).toHaveLength(0)
+    expect(textOf(renderer)).toContain('studio --> N7')
+    await act(async () => { renderer.update(<MermaidBlock code={source} />) })
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(renderer.root.findByType(WebView).props.source.html).toContain('studio --> N7')
+  })
   beforeEach(() => {
     __resetWebViewMock()
     setMermaidAssetLoader(async () => 'window.mermaid={}')

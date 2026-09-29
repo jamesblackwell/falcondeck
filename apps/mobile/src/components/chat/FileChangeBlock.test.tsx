@@ -30,6 +30,22 @@ function fileChange(
 }
 
 describe('FileChangeBlock', () => {
+  it('leaves all file previews unmounted while collapsed and after recycling', () => {
+    const item = fileChange({ changes: Array.from({ length: 50 }, (_, index) => ({
+      path: `file-${index}.ts`, change_kind: 'update', diff: '+one\n+two\n+three', move_path: null,
+    })) })
+    const renderer = renderComponent(<FileChangeBlock item={item} defaultOpen={false} />)
+    const lines = () => renderer.root.findAll(node => String(node.type) === 'Text' && node.props.selectable)
+    expect(lines()).toHaveLength(0)
+    const header = () => renderer.root.findByProps({ accessibilityLabel: '50 files changed, Completed' })
+    act(() => header().props.onPress())
+    expect(lines()).toHaveLength(200)
+    act(() => header().props.onPress())
+    expect(lines()).toHaveLength(0)
+    act(() => header().props.onPress())
+    act(() => renderer.update(<FileChangeBlock item={{ ...item, id: 'patch-2' }} defaultOpen={false} />))
+    expect(lines()).toHaveLength(0)
+  })
   it('reveals structured paths, rename destination, and diff accessibly', () => {
     const renderer = renderComponent(<FileChangeBlock item={fileChange()} defaultOpen={false} />)
     const disclosure = renderer.root.findByProps({ accessibilityLabel: 'Renamed old.ts, Completed' })

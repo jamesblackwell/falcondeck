@@ -74,6 +74,21 @@ describe("imageNeedsFetch", () => {
 });
 
 describe("loadFullThreadItem", () => {
+  it('bounds cached output bytes and still returns oversized selected items', async () => {
+    const rpc = vi.fn((_method, params) => Promise.resolve(
+      toolCall(params.item_id, 'x'.repeat(params.item_id === 'huge' ? 5 * 1024 * 1024 : 2 * 1024 * 1024)),
+    ))
+    useRelayStore.setState({ sessionId: 'session-1', _callRpc: rpc } as never)
+    await loadFullThreadItem('workspace-1', 'thread-1', 'one')
+    await loadFullThreadItem('workspace-1', 'thread-1', 'two')
+    await loadFullThreadItem('workspace-1', 'thread-1', 'three')
+    await loadFullThreadItem('workspace-1', 'thread-1', 'one')
+    expect(rpc).toHaveBeenCalledTimes(4)
+    const huge = await loadFullThreadItem('workspace-1', 'thread-1', 'huge')
+    expect(huge?.kind === 'tool_call' && huge.output?.length).toBe(5 * 1024 * 1024)
+    await loadFullThreadItem('workspace-1', 'thread-1', 'huge')
+    expect(rpc).toHaveBeenCalledTimes(6)
+  })
   beforeEach(() => {
     resetThreadItemLoaderForTests();
     useSessionStore.setState({

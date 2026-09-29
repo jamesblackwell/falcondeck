@@ -2,14 +2,11 @@
  * Drawer content wrapper that keeps the sidebar cheap while it is closed.
  *
  * The drawer stays mounted for the life of the app, and the session snapshot
- * changes on every applied event batch — during a streaming turn that meant
- * the entire (large) SidebarView re-rendered many times per second behind a
- * closed drawer. While closed, this wrapper keeps returning the same element
- * so React bails out of the whole sidebar subtree; the drawer re-opens with a
- * fresh render, so at worst the sidebar is a closed-drawer's-worth stale
- * during the opening animation.
+ * changes on every applied event batch. Pause sampling while closed and pass
+ * every snapshot-derived input, including sync coverage, through one sampled
+ * snapshot. Opening the drawer catches up to the current store value.
  */
-import { memo, useCallback, useMemo, useRef, type ReactElement } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { Alert } from "react-native";
 import { usePathname, useRouter } from "expo-router";
 import { DrawerActions } from "@react-navigation/native";
@@ -44,9 +41,7 @@ export function SidebarDrawerContent({
   const router = useRouter();
   const pathname = usePathname();
   const { hasPermanentSidebar } = useTabletLayout();
-  // A permanent sidebar is always visible, so it must never take the freeze
-  // path below — frozen, it would keep showing whatever the thread list held
-  // at first render and never pick up a new or finished task.
+  // A permanent sidebar is always visible and must continue sampling.
   const drawerStatus = useDrawerStatus();
   const isOpen = hasPermanentSidebar || drawerStatus === "open";
   const settingsOpen =
@@ -54,11 +49,8 @@ export function SidebarDrawerContent({
     pathname.startsWith("/settings/") ||
     pathname === "/automations" ||
     pathname.startsWith("/automations/");
-  // Sampled, not subscribed: while the drawer is open the freeze below cannot
-  // help, and rebuilding groups/filters/rows over every thread once per relay
-  // frame is pure heat. Four refreshes a second is past the point anyone can
-  // read a moving sidebar.
-  const snapshot = useThrottledSnapshot(SIDEBAR_REFRESH_INTERVAL_MS);
+  // Four refreshes per second keep visible navigation current during streaming.
+  const snapshot = useThrottledSnapshot(SIDEBAR_REFRESH_INTERVAL_MS, !isOpen);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
   // Groups built from an unchanged workspace keep their previous identity, so
@@ -157,8 +149,9 @@ export function SidebarDrawerContent({
   }, [handleClose, router]);
 
   return (
-    <SidebarFreeze isOpen={isOpen}>
-      <SidebarView
+    <SidebarView
+      isVisible={isOpen}
+      syncIndex={snapshot?.sync_index}
       groups={groups}
       selectedWorkspaceId={selectedWorkspaceId}
       selectedThreadId={selectedThreadId}
@@ -175,25 +168,9 @@ export function SidebarDrawerContent({
       threadTagsById={threadTags.byThreadId}
       threadTagOptions={threadTags.tags}
       extensionSnapshot={snapshot?.extensions}
-        extensionSidebarFilters={extensionSidebarFilters}
-        workspaceColors={snapshot?.preferences.workspace_colors}
-        hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
-      />
-    </SidebarFreeze>
+      extensionSidebarFilters={extensionSidebarFilters}
+      workspaceColors={snapshot?.preferences.workspace_colors}
+      hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
+    />
   );
 }
-
-// While the drawer is closed the comparator reports "equal", so React keeps
-// the previously rendered sidebar subtree untouched no matter how often the
-// snapshot churns; the first render after opening goes through normally.
-const SidebarFreeze = memo(
-  function SidebarFreeze({
-    children,
-  }: {
-    isOpen: boolean;
-    children: ReactElement;
-  }) {
-    return children;
-  },
-  (_prev, next) => !next.isOpen,
-);

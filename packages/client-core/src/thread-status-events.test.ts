@@ -134,18 +134,18 @@ describe("thread status events", () => {
     expect(snapshot.threads[0]?.status).toBe("running");
   });
 
-  it("does not replace the threads array for a running attention-only update", () => {
+  it("does not replace the threads array for running sequence updates with an unchanged unread badge", () => {
     const initial = thread({
       status: "running",
       updated_at: "2026-08-13T18:28:14Z",
       attention: {
         level: "running",
         badge_label: null,
-        unread: false,
+        unread: true,
         pending_approval_count: 0,
         pending_question_count: 0,
         last_agent_activity_seq: 10,
-        last_read_seq: 10,
+        last_read_seq: 9,
       },
     });
     const snapshot = snapshotWith(initial);

@@ -40,6 +40,7 @@ import type {
   ThreadSortMode,
   ThreadSummary,
   ThreadTag,
+  SyncIndexCoverage,
 } from "@falcondeck/client-core";
 import {
   filterProjectGroupsByExtensions,
@@ -84,6 +85,8 @@ import { ExtensionFilterSheet } from "./ExtensionFilterSheet";
 import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcons";
 
 interface SidebarViewProps {
+  isVisible?: boolean;
+  syncIndex?: SyncIndexCoverage;
   groups: ProjectGroup[];
   /** Target for the top-level "New thread" row, before any per-project pick. */
   selectedWorkspaceId?: string | null;
@@ -166,6 +169,8 @@ const FLOATING_ACTION_HEIGHT = 60;
 const EMPTY_HIDDEN_WORKSPACE_IDS: readonly string[] = [];
 
 export const SidebarView = memo(function SidebarView({
+  isVisible = true,
+  syncIndex,
   groups,
   selectedWorkspaceId = null,
   selectedThreadId,
@@ -184,7 +189,7 @@ export const SidebarView = memo(function SidebarView({
   workspaceColors,
   hiddenWorkspaceIds = EMPTY_HIDDEN_WORKSPACE_IDS,
 }: SidebarViewProps) {
-  const workspaceIconSrc = useWorkspaceIcons(groups);
+  const workspaceIconSrc = useWorkspaceIcons(groups, !isVisible);
   const [workspaceOptions, setWorkspaceOptions] = useState<{
     workspaceId: string;
     workspaceName: string;
@@ -195,12 +200,11 @@ export const SidebarView = memo(function SidebarView({
   // Cached projects stay on screen while a reconnect snapshot is in flight.
   // Page requests continue after the initial snapshot is ready.
   const syncStatus = useSessionSyncStatus();
-  const syncIndex = useSessionStore(s => s.snapshot?.sync_index);
   const remoteCounts = syncIndex?.counts;
   // Rows only repaint when their own inputs move, and an idle thread's summary
   // never does — without this the "9h" a row was born with is still there a
   // day later. It reaches the cells through renderRow (the list's extraData).
-  const nowTick = useRelativeTimeTick();
+  const nowTick = useRelativeTimeTick(!isVisible);
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
     () => new Set(),
@@ -337,7 +341,7 @@ export const SidebarView = memo(function SidebarView({
     .map((group) => group.workspace.id)
     .join("\n");
   useEffect(() => {
-    if (!syncIndex?.token) {
+    if (!isVisible || !syncIndex?.token) {
       setIsPaging(false);
       return;
     }
@@ -364,7 +368,7 @@ export const SidebarView = memo(function SidebarView({
       }
     })();
     return () => { cancelled = true; };
-  }, [syncIndex?.token, pageScopes, sortMode, activeExtensionFilterCount, loadPage]);
+  }, [isVisible, syncIndex?.token, pageScopes, sortMode, activeExtensionFilterCount, loadPage]);
 
   // Starting a thread should never depend on first finding a project row: the
   // open one is the obvious target, and the top of the list stands in before

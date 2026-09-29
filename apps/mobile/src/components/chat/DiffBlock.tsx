@@ -43,11 +43,13 @@ export const DiffBlock = memo(function DiffBlock({ item, defaultOpen }: DiffBloc
         </Animated.View>
       </Pressable>
       <Animated.View style={bodyStyle}>
-        <View onLayout={onContentLayout}>
-          <View style={styles.body}>
-            <CodeBlock code={item.diff} language="diff" previewLines={0} />
+        {isOpen ? (
+          <View onLayout={onContentLayout}>
+            <View style={styles.body}>
+              <CodeBlock code={item.diff} language="diff" previewLines={0} />
+            </View>
           </View>
-        </View>
+        ) : null}
       </Animated.View>
     </View>
   )
