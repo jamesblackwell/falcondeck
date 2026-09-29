@@ -458,7 +458,7 @@ fn resolve_agent_bin(bin_name: &str, override_var: &str) -> String {
 
     if !cfg!(debug_assertions) {
         if let Some(preferred) = preferred_packaged_agent_bin(bin_name) {
-            return resolve_agent_binary(bin_name, &preferred).executable;
+            return preferred;
         }
     }
 
@@ -487,9 +487,16 @@ fn preferred_packaged_agent_bin(bin_name: &str) -> Option<String> {
         candidates.push(PathBuf::from("/usr/bin").join(bin_name));
     }
 
+    // Keep the stable symlink (for example ~/.local/bin/codex). Resolving it
+    // here pins the embedded daemon to one release until the app restarts.
+    first_existing_agent_bin(candidates)
+}
+
+fn first_existing_agent_bin(candidates: impl IntoIterator<Item = PathBuf>) -> Option<String> {
     candidates
         .into_iter()
-        .find_map(|path| normalize_existing_path(&path))
+        .find(|path| path.is_file())
+        .map(|path| path.display().to_string())
 }
 
 fn normalize_existing_path(path: &Path) -> Option<String> {
@@ -1727,10 +1734,32 @@ pub fn run() {
 mod tests {
     use super::{
         active_thread_warning_message, decode_file_url, dev_daemon_command_matches, expand_tilde,
-        is_safe_external_url, parse_local_path_input, path_is_within_roots, quit_warning_message,
-        resolve_existing_local_path,
+        first_existing_agent_bin, is_safe_external_url, parse_local_path_input,
+        path_is_within_roots, quit_warning_message, resolve_existing_local_path,
     };
     use std::{env, fs};
+
+    #[cfg(unix)]
+    #[test]
+    fn packaged_agent_bin_keeps_stable_symlink() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let link = env::temp_dir().join(format!(
+            "falcondeck-agent-bin-{}-{suffix}",
+            std::process::id()
+        ));
+        symlink(env::current_exe().unwrap(), &link).unwrap();
+        assert_eq!(
+            first_existing_agent_bin([link.clone()]),
+            Some(link.display().to_string())
+        );
+        fs::remove_file(link).unwrap();
+    }
 
     #[test]
     fn quit_warning_uses_singular_copy_for_one_active_thread() {
