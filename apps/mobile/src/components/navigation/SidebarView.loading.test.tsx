@@ -3,6 +3,7 @@ import { act } from 'react-test-renderer'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, renderComponent, textOf } from '@/test/render'
 import { snapshot, thread, workspace } from '@/test/factories'
+import type { ExtensionSidebarFilterDefinition } from '@falcondeck/client-core'
 import { useSessionStore } from '@/store'
 import { LOADING_PILL_SHOW_AFTER_MS } from '@/components/ui'
 import { SidebarView } from './SidebarView'
@@ -14,9 +15,6 @@ const { loadPage, isInFlight } = vi.hoisted(() => ({
 vi.mock('@/hooks/sync-index', () => ({
   loadSyncThreadPage: loadPage,
   isSyncThreadPageInFlight: () => isInFlight(),
-}))
-vi.mock('@/components/chat', () => ({
-  SessionListItem: ({ thread: item }: { thread: { title: string } }) => item.title,
 }))
 vi.mock('@/hooks/useSessionSyncStatus', () => ({
   useSessionSyncStatus: () => ({ isBusy: false, stage: 'ready' }),
@@ -46,6 +44,43 @@ const pagingIndex = {
     'workspace-1': { total: 10, running: 0, unread: 0, awaiting: 0 },
   },
 }
+
+const threadFilter: ExtensionSidebarFilterDefinition = {
+  key: 'example.colors:colors',
+  extensionId: 'example.colors',
+  extensionName: 'Colours',
+  contributionId: 'colors',
+  title: 'Colours',
+  document: {
+    version: 1,
+    root: {
+      type: 'select', id: 'colors', label: 'Filter by colour', multiple: true,
+      options: [{ value: 'red', label: 'Red' }],
+      binding: { view: 'thread-tags', path: ['tagIds'], operator: 'includes_any' },
+    },
+  },
+  unsupportedReason: null,
+}
+
+it('keeps hidden projects revealable when a thread filter has no loaded matches', async () => {
+  loadPage.mockResolvedValue(undefined)
+  useSessionStore.setState({ snapshot: snapshot({ sync_index: pagingIndex }) })
+  const renderer = renderComponent(<SidebarView
+    groups={[{ workspace: workspace({ id: 'hidden', path: '/tmp/hidden' }), threads: [] }]}
+    hiddenWorkspaceIds={['hidden']}
+    extensionSnapshot={{ catalog: [], views: [] }}
+    extensionSidebarFilters={[threadFilter]}
+    selectedThreadId={null} onSelectThread={vi.fn()} onNewThread={vi.fn()}
+  />)
+  act(() => { renderer.root.findByProps({ accessibilityLabel: 'Filter threads' }).props.onPress() })
+  act(() => { renderer.root.findByProps({ accessibilityLabel: 'Red' }).props.onPress() })
+  act(() => { renderer.root.findByProps({ accessibilityLabel: 'Close thread filters' }).props.onClose() })
+  expect(renderer.root.findByProps({ accessibilityLabel: 'Show hidden projects (1)' })).toBeDefined()
+  await act(async () => {
+    renderer.root.findByProps({ accessibilityLabel: 'Show hidden projects (1)' }).props.onPress()
+  })
+  expect(loadPage).toHaveBeenCalledWith('hidden', 'last_updated', 50)
+})
 
 it('pages a hidden project only after it is revealed and keeps its pin hidden meanwhile', async () => {
   loadPage.mockResolvedValue(undefined)

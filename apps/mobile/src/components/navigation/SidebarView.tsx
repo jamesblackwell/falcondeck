@@ -285,7 +285,9 @@ export const SidebarView = memo(function SidebarView({
     () => new Set(hiddenWorkspaceIds),
     [hiddenWorkspaceIds],
   );
-  const hiddenProjectCount = displayGroups.filter(
+  // A thread filter can drop a hidden project before any of its rows load.
+  // Keep the reveal control based on the unfiltered project list.
+  const hiddenProjectCount = groups.filter(
     (group) =>
       group.workspace.kind !== "casual" &&
       hiddenWorkspaceIdSet.has(group.workspace.id),

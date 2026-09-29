@@ -39,13 +39,14 @@ export default function ActivityScreen() {
   const syncStatus = useSessionSyncStatus()
   const nowTick = useRelativeTimeTick()
   const [loadingMore, setLoadingMore] = useState(false)
-  const preferences = snapshot?.preferences
+  const workspaceOrder = snapshot?.preferences.workspace_order
+  const hiddenWorkspaceIds = snapshot?.preferences.hidden_workspace_ids
   const groups = useMemo(() => {
-    const hidden = new Set(preferences?.hidden_workspace_ids ?? [])
+    const hidden = new Set(hiddenWorkspaceIds ?? [])
     return buildProjectGroups(
-      snapshot?.workspaces ?? [], snapshot?.threads ?? [], preferences?.workspace_order,
+      snapshot?.workspaces ?? [], snapshot?.threads ?? [], workspaceOrder,
     ).filter(group => group.workspace.kind === 'casual' || !hidden.has(group.workspace.id))
-  }, [snapshot?.workspaces, snapshot?.threads, preferences])
+  }, [snapshot?.workspaces, snapshot?.threads, workspaceOrder, hiddenWorkspaceIds])
   const rows = useMemo(() => {
     const requests = snapshot?.interactive_requests ?? []
     const active = collectActivityEntries(groups, requests)
@@ -71,12 +72,12 @@ export default function ActivityScreen() {
   const remainingWorkspaces = useMemo(() => {
     const index = snapshot?.sync_index
     if (!index) return []
-    const hidden = new Set(snapshot?.preferences.hidden_workspace_ids ?? [])
+    const hidden = new Set(hiddenWorkspaceIds ?? [])
     return (snapshot?.workspaces ?? []).filter(workspace =>
       (workspace.kind === 'casual' || !hidden.has(workspace.id)) &&
       (index.counts[workspace.id]?.total ?? 0) > 0 && index.cursors[`${workspace.id}:last_updated`] !== null,
     )
-  }, [snapshot?.sync_index, snapshot?.workspaces, snapshot?.preferences.hidden_workspace_ids])
+  }, [snapshot?.sync_index, snapshot?.workspaces, hiddenWorkspaceIds])
   const loadMore = useCallback(async () => {
     const token = useSessionStore.getState().snapshot?.sync_index?.token
     setLoadingMore(true)
@@ -126,7 +127,7 @@ export default function ActivityScreen() {
         </Button>
         <View style={styles.title}>
           <Text variant="heading" size="lg">Activity</Text>
-          <Text variant="meta">{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects'}</Text>
+          <Text variant="meta">{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects and chats'}</Text>
         </View>
       </View>
       <SyncBanner status={syncStatus} />

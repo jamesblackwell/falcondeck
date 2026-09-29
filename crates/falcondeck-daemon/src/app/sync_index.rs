@@ -152,7 +152,7 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
         .map(|workspace| &workspace.id)
         .collect();
     // Keep hidden rows in the frozen view for paging when a project is shown.
-    // The open thread stays in the bootstrap so its transcript can recover.
+    // The open thread remains eligible for the bounded bootstrap page.
     let mut initial: Vec<_> = threads
         .iter()
         .filter(|thread| {
@@ -338,7 +338,8 @@ mod tests {
     #[test]
     fn hidden_project_rows_wait_for_paging_but_keep_counts_and_selection() {
         let mut source = fixture();
-        source.preferences.hidden_workspace_ids = vec!["workspace-39".into()];
+        source.preferences.hidden_workspace_ids = vec!["workspace-0".into(), "workspace-39".into()];
+        source.workspaces[0].kind = WorkspaceKind::Casual;
         source.threads.retain(|thread| {
             thread.workspace_id == "workspace-0" || thread.workspace_id == "workspace-39"
         });
@@ -348,6 +349,11 @@ mod tests {
             .threads
             .iter()
             .all(|thread| thread.workspace_id != "workspace-39"));
+        assert!(index
+            .snapshot
+            .threads
+            .iter()
+            .any(|thread| thread.workspace_id == "workspace-0"));
         assert_eq!(index.counts["workspace-39"].total, 50);
         assert_eq!(
             frozen
