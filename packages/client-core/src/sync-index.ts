@@ -42,13 +42,16 @@ export function expandSyncIndex(index: SyncIndex): DaemonSnapshot {
 }
 
 /** A compact index is partial: omission does not mean a loaded thread was deleted. */
-export function retainSyncIndexThreads(next: DaemonSnapshot, previous: DaemonSnapshot | null): DaemonSnapshot {
+export function retainSyncIndexThreads(next: DaemonSnapshot, previous: DaemonSnapshot | null, selectedThreadId: string | null = null): DaemonSnapshot {
   if (!next.sync_index || !previous) return next
   const workspaces = new Set(next.workspaces.map(workspace => workspace.id))
+  const hiddenIds = new Set(next.preferences.hidden_workspace_ids)
+  const hidden = new Set(next.workspaces.filter(workspace => workspace.kind !== 'casual' && hiddenIds.has(workspace.id)).map(workspace => workspace.id))
   const rows = new Map(next.threads.map(thread => [thread.id, thread]))
   const carried: Record<string, true> = {}
   for (const thread of previous.threads) {
     if (rows.has(thread.id) || thread.is_archived || !workspaces.has(thread.workspace_id) ||
+        (hidden.has(thread.workspace_id) && thread.id !== selectedThreadId) ||
         next.sync_index.counts[thread.workspace_id]?.total === 0) continue
     rows.set(thread.id, thread)
     carried[thread.id] = true

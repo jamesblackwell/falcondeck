@@ -2,7 +2,7 @@ import React from 'react'
 import { act } from 'react-test-renderer'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, renderComponent, textOf } from '@/test/render'
-import { snapshot, workspace } from '@/test/factories'
+import { snapshot, thread, workspace } from '@/test/factories'
 import { useSessionStore } from '@/store'
 import { LOADING_PILL_SHOW_AFTER_MS } from '@/components/ui'
 import { SidebarView } from './SidebarView'
@@ -14,6 +14,9 @@ const { loadPage, isInFlight } = vi.hoisted(() => ({
 vi.mock('@/hooks/sync-index', () => ({
   loadSyncThreadPage: loadPage,
   isSyncThreadPageInFlight: () => isInFlight(),
+}))
+vi.mock('@/components/chat', () => ({
+  SessionListItem: ({ thread: item }: { thread: { title: string } }) => item.title,
 }))
 vi.mock('@/hooks/useSessionSyncStatus', () => ({
   useSessionSyncStatus: () => ({ isBusy: false, stage: 'ready' }),
@@ -43,6 +46,36 @@ const pagingIndex = {
     'workspace-1': { total: 10, running: 0, unread: 0, awaiting: 0 },
   },
 }
+
+it('pages a hidden project only after it is revealed and keeps its pin hidden meanwhile', async () => {
+  loadPage.mockResolvedValue(undefined)
+  useSessionStore.setState({ snapshot: snapshot({ sync_index: {
+    ...pagingIndex,
+    counts: {
+      visible: { total: 1, running: 0, unread: 0, awaiting: 0 },
+      hidden: { total: 2, running: 0, unread: 0, awaiting: 0 },
+    },
+  } }) })
+  const renderer = renderComponent(<SidebarView
+    groups={[
+      { workspace: workspace({ id: 'visible', path: '/tmp/visible' }), threads: [] },
+      { workspace: workspace({ id: 'hidden', path: '/tmp/hidden' }), threads: [
+        thread({ id: 'hidden-pin', workspace_id: 'hidden', title: 'Hidden pin', is_pinned: true }),
+      ] },
+    ]}
+    hiddenWorkspaceIds={['hidden']}
+    selectedThreadId={null} onSelectThread={vi.fn()} onNewThread={vi.fn()}
+  />)
+
+  expect(loadPage).toHaveBeenCalledWith('visible', 'last_updated', 5)
+  expect(loadPage).not.toHaveBeenCalledWith('hidden', 'last_updated', 5)
+  expect(textOf(renderer)).not.toContain('Hidden pin')
+  await act(async () => {
+    renderer.root.findByProps({ accessibilityLabel: 'Show hidden projects (1)' }).props.onPress()
+  })
+  expect(loadPage).toHaveBeenCalledWith('hidden', 'last_updated', 5)
+  expect(textOf(renderer)).toContain('Hidden pin')
+})
 
 it('floats page activity over the list without shifting rows', async () => {
   let finish!: () => void

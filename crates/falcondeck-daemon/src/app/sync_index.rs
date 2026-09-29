@@ -1,10 +1,10 @@
 use super::AppState;
 use falcondeck_core::{
-    DaemonSnapshot, ExtensionSnapshot, ThreadStatus, ThreadSummary,
     sync_index::{SyncIndex, SyncThreadPage, WorkspaceIndexCount},
+    DaemonSnapshot, ExtensionSnapshot, ThreadStatus, ThreadSummary, WorkspaceKind,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -136,7 +136,29 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
             thread.attention.pending_approval_count + thread.attention.pending_question_count > 0,
         );
     }
-    let mut initial: Vec<_> = threads.iter().collect();
+    let hidden_ids: HashSet<_> = index
+        .snapshot
+        .preferences
+        .hidden_workspace_ids
+        .iter()
+        .collect();
+    let hidden: HashSet<_> = index
+        .snapshot
+        .workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace.kind != WorkspaceKind::Casual && hidden_ids.contains(&workspace.id)
+        })
+        .map(|workspace| &workspace.id)
+        .collect();
+    // Keep hidden rows in the frozen view for paging when a project is shown.
+    // The open thread stays in the bootstrap so its transcript can recover.
+    let mut initial: Vec<_> = threads
+        .iter()
+        .filter(|thread| {
+            selected == Some(thread.id.as_str()) || !hidden.contains(&thread.workspace_id)
+        })
+        .collect();
     initial.sort_by(|a, b| {
         priority(a, selected)
             .cmp(&priority(b, selected))
@@ -313,6 +335,42 @@ mod tests {
         })).unwrap()
     }
 
+    #[test]
+    fn hidden_project_rows_wait_for_paging_but_keep_counts_and_selection() {
+        let mut source = fixture();
+        source.preferences.hidden_workspace_ids = vec!["workspace-39".into()];
+        source.threads.retain(|thread| {
+            thread.workspace_id == "workspace-0" || thread.workspace_id == "workspace-39"
+        });
+        let (index, frozen) = freeze(source.clone(), None);
+        assert!(index
+            .snapshot
+            .threads
+            .iter()
+            .all(|thread| thread.workspace_id != "workspace-39"));
+        assert_eq!(index.counts["workspace-39"].total, 50);
+        assert_eq!(
+            frozen
+                .threads
+                .iter()
+                .filter(|thread| thread.workspace_id == "workspace-39")
+                .count(),
+            50
+        );
+
+        let (selected, _) = freeze(source, Some("thread-1999"));
+        assert_eq!(selected.snapshot.threads[0].id, "thread-1999");
+        assert_eq!(
+            selected
+                .snapshot
+                .threads
+                .iter()
+                .filter(|thread| thread.workspace_id == "workspace-39")
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn large_library_has_bounded_initial_index_and_complete_frozen_pages() {
         let source = fixture();
@@ -326,13 +384,11 @@ mod tests {
         assert_eq!(index.counts.len(), 40);
         assert_eq!(index.counts.values().map(|v| v.total).sum::<usize>(), 2000);
         assert_eq!(index.model_catalogs.len(), 1);
-        assert!(
-            index
-                .snapshot
-                .threads
-                .iter()
-                .all(|t| t.latest_diff.is_none())
-        );
+        assert!(index
+            .snapshot
+            .threads
+            .iter()
+            .all(|t| t.latest_diff.is_none()));
         let temp = tempfile::tempdir().unwrap();
         let app = AppState::new_with_state_path(
             "test".into(),

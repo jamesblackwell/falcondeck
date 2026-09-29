@@ -24,6 +24,25 @@ it('retains the open transcript and recent threads when a partial refresh omits 
   expect(state.snapshot?.threads.map(row => row.id)).toEqual(['other', 'thread-1', 'recent'])
 })
 
+it('drops cached hidden project rows on refresh while retaining the selected thread', () => {
+  const hidden = 'hidden-project'
+  const old = snapshot({
+    workspaces: [workspace(), workspace({ id: hidden })],
+    threads: [thread(), thread({ id: 'hidden-selected', workspace_id: hidden }), thread({ id: 'hidden-other', workspace_id: hidden })],
+  })
+  const store = useSessionStore.getState()
+  store.applyDaemonEvent(snapshotEvent(old))
+  store.selectThread(hidden, 'hidden-selected')
+  const next = partialIndex([thread()])
+  next.workspaces = old.workspaces
+  next.preferences = { ...next.preferences, hidden_workspace_ids: [hidden] }
+  next.sync_index!.counts[hidden] = { total: 2, running: 0, unread: 0, awaiting: 0 }
+  store.applyDaemonEvent(snapshotEvent(next))
+
+  expect(useSessionStore.getState().snapshot?.threads.map(row => row.id)).toEqual(['thread-1', 'hidden-selected'])
+  expect(useSessionStore.getState().selectedThreadId).toBe('hidden-selected')
+})
+
 it('refreshes retained rows from pages and removes missing rows only after a complete traversal', () => {
   const store = useSessionStore.getState()
   store.applyDaemonEvent(snapshotEvent(snapshot({ threads: [thread(), thread({ id: 'deleted' })] })))

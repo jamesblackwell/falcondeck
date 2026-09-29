@@ -2,7 +2,7 @@ import React from 'react'
 import { act } from 'react-test-renderer'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, renderComponent, textOf } from '@/test/render'
-import { snapshot, thread } from '@/test/factories'
+import { snapshot, thread, workspace } from '@/test/factories'
 import { useSessionStore } from '@/store'
 import ActivityScreen from '@/app/(app)/activity'
 
@@ -58,4 +58,27 @@ it('shows recent completed work without duplicating unread results', () => {
   expect(textOf(renderer)).toContain('Recent')
   expect(textOf(renderer)).toContain('Finished task')
   expect(textOf(renderer).match(/Unread task/g)).toHaveLength(1)
+})
+
+it('excludes hidden projects from activity and load-more paging', async () => {
+  useSessionStore.setState({ snapshot: snapshot({
+    workspaces: [workspace(), workspace({ id: 'hidden', path: '/tmp/hidden' })],
+    threads: [
+      thread({ id: 'visible', title: 'Visible task', status: 'running' }),
+      thread({ id: 'hidden-task', workspace_id: 'hidden', title: 'Hidden task', status: 'running' }),
+    ],
+    preferences: { ...snapshot().preferences, hidden_workspace_ids: ['hidden'] },
+    sync_index: {
+      token: 'index', cursors: {}, touched_threads: {}, touched_views: {}, catalog_touched: false, extensions_loaded: false,
+      counts: {
+        'workspace-1': { total: 2, running: 1, unread: 0, awaiting: 0 },
+        hidden: { total: 2, running: 1, unread: 0, awaiting: 0 },
+      },
+    },
+  }) })
+  const renderer = renderComponent(<ActivityScreen />)
+  expect(textOf(renderer)).toContain('Visible task')
+  expect(textOf(renderer)).not.toContain('Hidden task')
+  await act(async () => renderer.root.findByProps({ label: 'Load more tasks' }).props.onPress())
+  expect(loadPage).toHaveBeenCalledExactlyOnceWith('workspace-1', 'last_updated', 50)
 })

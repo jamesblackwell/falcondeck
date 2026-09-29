@@ -39,9 +39,13 @@ export default function ActivityScreen() {
   const syncStatus = useSessionSyncStatus()
   const nowTick = useRelativeTimeTick()
   const [loadingMore, setLoadingMore] = useState(false)
-  const groups = useMemo(() => buildProjectGroups(
-    snapshot?.workspaces ?? [], snapshot?.threads ?? [], snapshot?.preferences.workspace_order,
-  ), [snapshot?.workspaces, snapshot?.threads, snapshot?.preferences.workspace_order])
+  const preferences = snapshot?.preferences
+  const groups = useMemo(() => {
+    const hidden = new Set(preferences?.hidden_workspace_ids ?? [])
+    return buildProjectGroups(
+      snapshot?.workspaces ?? [], snapshot?.threads ?? [], preferences?.workspace_order,
+    ).filter(group => group.workspace.kind === 'casual' || !hidden.has(group.workspace.id))
+  }, [snapshot?.workspaces, snapshot?.threads, preferences])
   const rows = useMemo(() => {
     const requests = snapshot?.interactive_requests ?? []
     const active = collectActivityEntries(groups, requests)
@@ -67,16 +71,20 @@ export default function ActivityScreen() {
   const remainingWorkspaces = useMemo(() => {
     const index = snapshot?.sync_index
     if (!index) return []
+    const hidden = new Set(snapshot?.preferences.hidden_workspace_ids ?? [])
     return (snapshot?.workspaces ?? []).filter(workspace =>
+      (workspace.kind === 'casual' || !hidden.has(workspace.id)) &&
       (index.counts[workspace.id]?.total ?? 0) > 0 && index.cursors[`${workspace.id}:last_updated`] !== null,
     )
-  }, [snapshot?.sync_index, snapshot?.workspaces])
+  }, [snapshot?.sync_index, snapshot?.workspaces, snapshot?.preferences.hidden_workspace_ids])
   const loadMore = useCallback(async () => {
     const token = useSessionStore.getState().snapshot?.sync_index?.token
     setLoadingMore(true)
     try {
       for (const workspace of remainingWorkspaces) {
-        if (useSessionStore.getState().snapshot?.sync_index?.token !== token) break
+        const current = useSessionStore.getState().snapshot
+        if (!current || current.sync_index?.token !== token) break
+        if (workspace.kind !== 'casual' && current.preferences.hidden_workspace_ids?.includes(workspace.id)) continue
         await loadSyncThreadPage(workspace.id, 'last_updated', 50)
       }
     } finally {
@@ -118,7 +126,7 @@ export default function ActivityScreen() {
         </Button>
         <View style={styles.title}>
           <Text variant="heading" size="lg">Activity</Text>
-          <Text variant="meta">{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across all projects'}</Text>
+          <Text variant="meta">{remainingWorkspaces.length ? 'Activity from loaded tasks' : 'Across visible projects'}</Text>
         </View>
       </View>
       <SyncBanner status={syncStatus} />

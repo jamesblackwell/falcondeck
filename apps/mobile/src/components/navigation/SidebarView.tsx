@@ -389,7 +389,7 @@ export const SidebarView = memo(function SidebarView({
         activeExtensionFilterCount ? undefined : remoteCounts,
         syncIndex?.cursors,
         hiddenProjectCount > 0,
-        displayGroups,
+        listedGroups,
       ),
     [
       listedGroups,
@@ -403,7 +403,6 @@ export const SidebarView = memo(function SidebarView({
       syncIndex?.cursors,
       activeExtensionFilterCount,
       hiddenProjectCount,
-      displayGroups,
     ],
   );
   // Selecting a visible thread rebuilds builtRows with identical content;
