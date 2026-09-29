@@ -134,27 +134,21 @@ class AutoreviewModelSelectionTests(unittest.TestCase):
         ):
             return AUTOREVIEW.reviewer_args(args)[0]
 
-    def test_codex_defaults_to_gpt61_sol_with_access_only_luna_retry(self) -> None:
+    def test_codex_defaults_to_gpt6_sol_with_access_only_luna_retry(self) -> None:
         reviewer = self.reviewer()
-        self.assertEqual((reviewer.model, reviewer.thinking, reviewer.fallback_model), ("gpt-6.1-sol", "high", "gpt-6-luna"))
+        self.assertEqual((reviewer.model, reviewer.thinking, reviewer.fallback_model), ("gpt-6-sol", "high", "gpt-6-luna"))
 
     def test_explicit_gpt56_sol_keeps_legacy_access_retry(self) -> None:
         reviewer = self.reviewer(model="gpt-5.6-sol")
         self.assertEqual(reviewer.fallback_model, "gpt-5.6-terra")
-
-    def test_explicit_gpt61_sol_keeps_access_retry(self) -> None:
-        reviewer = self.reviewer(model="gpt-6.1-sol")
-        self.assertEqual(reviewer.fallback_model, "gpt-6-luna")
 
     def test_explicit_gpt6_sol_keeps_access_retry(self) -> None:
         reviewer = self.reviewer(model="gpt-6-sol")
         self.assertEqual(reviewer.fallback_model, "gpt-6-luna")
 
     def test_gpt6_models_reject_unsupported_effort(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "invalid thinking level for codex model gpt-6.1-sol"):
-            self.reviewer(thinking="minimal")
         with self.assertRaisesRegex(SystemExit, "invalid thinking level for codex model gpt-6-sol"):
-            self.reviewer(model="gpt-6-sol", thinking="minimal")
+            self.reviewer(thinking="minimal")
         with self.assertRaisesRegex(SystemExit, "invalid thinking level for codex model gpt-6-astra"):
             self.reviewer(model="gpt-6-astra", thinking="none")
 
