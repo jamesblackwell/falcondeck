@@ -1734,8 +1734,9 @@ fn format_ai_thread_title_prompt(
     });
     if let Some(title) = current_title {
         excerpts.push(format!(
-            "Current title: {title}\n\
-The conversation may have moved on from that name. Write a title that reflects the work happening now."
+            "Current title: {}\n\
+The conversation may have moved on from that name. Write a title that reflects the work happening now.",
+            truncate_preview(title, 120)
         ));
     }
 
@@ -1763,14 +1764,14 @@ The conversation may have moved on from that name. Write a title that reflects t
             ConversationItem::UserMessage { text, .. } => {
                 super::harness_user_text::visible_user_prompt(text)
                     .and_then(|text| sanitize_codex_preview(&text))
-                    .map(|text| format!("User: {text}"))
+                    .map(|text| format!("User: {}", truncate_preview(&text, 900)))
             }
             ConversationItem::AssistantMessage { text, .. } => {
-                Some(format!("Assistant: {}", text.trim()))
+                Some(format!("Assistant: {}", truncate_preview(text, 900)))
             }
             ConversationItem::ToolCall { title, output, .. } => Some(format!(
                 "Tool: {}{}",
-                title.trim(),
+                truncate_preview(title, 120),
                 output
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())

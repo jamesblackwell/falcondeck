@@ -382,8 +382,9 @@ The same MCP bridge also publishes a daemon-owned `falcondeck_rename_thread`
 tool whenever it is injected. That tool is not an extension: it applies a
 3–7 word title to the calling thread so an agent can retitle a conversation
 that has moved on. The rename dialog's Suggest title control is a separate,
-user-initiated path that generates a candidate through the same cheap utility
-models as auto-titling and fills the field without saving.
+user-initiated path that uses GPT-6 Luna through OpenRouter with the daemon's
+stored OpenRouter key and fills the field without saving. Automatic titles
+continue to use the coding-harness utility models.
 
 Published extension tool names must not contain `__` and must stay at most 41
 characters. Clients such as Grok qualify every MCP tool as `server__tool` and

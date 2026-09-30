@@ -1134,7 +1134,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<falcondeck_core::SuggestThreadTitleResponse, DaemonError> {
-        let title_input = {
+        let prompt = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get(workspace_id)
@@ -1152,37 +1152,10 @@ impl AppState {
                     "this thread doesn't have enough conversation to suggest a title".to_string(),
                 ));
             }
-            AiThreadTitleInput {
-                workspace_path: thread
-                    .summary
-                    .working_directory(&workspace.summary.path)
-                    .to_string(),
-                prompt: build_refresh_ai_thread_title_prompt(&thread.items, &thread.summary.title),
-            }
+            build_refresh_ai_thread_title_prompt(&thread.items, &thread.summary.title)
         };
 
-        let candidates = self.utility_model_candidates(workspace_id).await;
-        if candidates.is_empty() {
-            return Err(DaemonError::BadRequest(
-                "no signed-in harness available to suggest a title".to_string(),
-            ));
-        }
-        let text = self
-            .run_utility_prompt(
-                &candidates,
-                &title_input.workspace_path,
-                &title_input.prompt,
-                Duration::from_secs(25),
-            )
-            .await
-            .ok_or_else(|| {
-                DaemonError::BadRequest(
-                    "couldn't generate a title from this conversation".to_string(),
-                )
-            })?;
-        let title = normalize_generated_thread_title(&text).ok_or_else(|| {
-            DaemonError::BadRequest("couldn't generate a title from this conversation".to_string())
-        })?;
+        let title = self.request_openrouter_thread_title(&prompt).await?;
         Ok(falcondeck_core::SuggestThreadTitleResponse { title })
     }
 

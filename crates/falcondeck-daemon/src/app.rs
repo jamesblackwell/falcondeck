@@ -105,6 +105,7 @@ mod sync_index;
 mod thread_search;
 mod thread_tools;
 mod threads;
+mod title_suggestions;
 mod utility_model;
 mod workspace_ops;
 

@@ -25,7 +25,7 @@ const KEYRING_SERVICE: &str = "com.falcondeck.daemon.speech";
 const KEYRING_ACCOUNT: &str = "openrouter-api-key";
 const OPENROUTER_TRANSCRIPTIONS_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 const OPENROUTER_SPEECH_URL: &str = "https://openrouter.ai/api/v1/audio/speech";
-const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+pub(super) const OPENROUTER_CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODELS_URL: &str =
     "https://openrouter.ai/api/v1/models?output_modalities=transcription";
 const DEFAULT_REWRITE_MODEL: &str = "openai/gpt-5.6-luna";
@@ -97,7 +97,7 @@ const UNCOMPRESSED_BYTES_PER_SECOND: f64 = 32_000.0;
 /// One client for every OpenRouter call. Reusing the pool skips the DNS +
 /// TCP + TLS handshake on each dictation after the first; timeouts are set
 /// per request because transcription and synthesis have different budgets.
-static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+pub(super) static OPENROUTER_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()
@@ -256,7 +256,7 @@ impl AppState {
 
     /// The OpenRouter key, from cache when possible, from the host secret
     /// store otherwise.
-    async fn openrouter_key_cached(&self) -> Result<Option<String>, DaemonError> {
+    pub(super) async fn openrouter_key_cached(&self) -> Result<Option<String>, DaemonError> {
         if let Some(key) = self.inner.speech_credentials.key.lock().unwrap().clone() {
             return Ok(Some(key));
         }
