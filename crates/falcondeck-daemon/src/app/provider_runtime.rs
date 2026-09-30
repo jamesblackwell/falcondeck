@@ -374,7 +374,7 @@ impl ProviderRuntime {
                 Ok(())
             }
             Self::Claude => {
-                let runtime = app.claude_runtime_for(spec.workspace_id).await?;
+                let runtime = app.ensure_claude_runtime_for(spec.workspace_id).await?;
                 let session_id = spec.thread.native_session_id.clone();
                 let new_session_id = session_id.is_none().then(|| Uuid::new_v4().to_string());
                 if let Some(new_session_id) = new_session_id.as_deref() {

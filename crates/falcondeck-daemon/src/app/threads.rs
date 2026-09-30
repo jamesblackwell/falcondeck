@@ -558,6 +558,25 @@ impl AppState {
             })
     }
 
+    /// Claude has no persistent child process, so a turn can attach its
+    /// runtime before the workspace's slower history and account hydration
+    /// finishes. Keep this handle when that hydration installs its result.
+    pub(super) async fn ensure_claude_runtime_for(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Arc<ClaudeRuntime>, DaemonError> {
+        let mut workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        Ok(Arc::clone(workspace.claude_runtime.get_or_insert_with(|| {
+            ClaudeRuntime::for_workspace(
+                workspace.summary.path.clone(),
+                self.provider_bin(&AgentProvider::CLAUDE),
+            )
+        })))
+    }
+
     pub(super) async fn agy_runtime_for(
         &self,
         workspace_id: &str,
@@ -2997,10 +3016,11 @@ fn user_message_turn_key(item: &ConversationItem) -> Option<(String, String)> {
 }
 
 impl ManagedWorkspace {
-    pub(super) fn has_runtime(&self) -> bool {
-        // A workspace is live if at least one provider runtime is attached;
-        // requiring both would treat a Claude-only workspace as a placeholder.
-        self.codex_session.is_some() || self.claude_runtime.is_some() || self.agy_runtime.is_some()
+    pub(super) fn is_bootstrapped(&self) -> bool {
+        // The full connect installs both CLI runtimes, even if their binaries
+        // are unavailable. A Codex wake or an early Claude turn can attach one
+        // runtime to a placeholder without completing workspace hydration.
+        self.claude_runtime.is_some() && self.agy_runtime.is_some()
     }
 }
 

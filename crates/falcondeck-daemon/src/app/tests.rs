@@ -239,6 +239,77 @@ async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
     assert_eq!(launches.lines().count(), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn restoring_a_partly_live_workspace_attaches_claude_without_losing_new_threads() {
+    let temp = tempdir().unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let path = project.to_string_lossy().to_string();
+    let persisted = super::PersistedWorkspaceState {
+        path: path.clone(),
+        id: Some("workspace-partly-live".to_string()),
+        updated_at: Some(Utc::now() - Duration::minutes(5)),
+        in_sidebar: true,
+        ..Default::default()
+    };
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([
+            (AgentProvider::CODEX, "missing-codex".to_string()),
+            (AgentProvider::CLAUDE, "/usr/bin/false".to_string()),
+            (AgentProvider::AGY, "/usr/bin/false".to_string()),
+        ]),
+        temp.path().join("state.json"),
+    );
+    let placeholder = app
+        .restore_workspace_placeholder(&persisted, WorkspaceStatus::Connecting, None)
+        .await
+        .unwrap();
+    let new_thread = app
+        .start_thread(falcondeck_core::StartThreadRequest {
+            workspace_id: placeholder.id.clone(),
+            provider: Some(AgentProvider::CLAUDE),
+            model_id: None,
+            collaboration_mode_id: None,
+            approval_policy: None,
+            sandbox_mode: None,
+            permission_mode: None,
+            isolation: falcondeck_core::ThreadIsolation::ProjectFolder,
+            handoff_from: None,
+            handoff_context: None,
+        })
+        .await
+        .unwrap();
+    let early_runtime = app.ensure_claude_runtime_for(&placeholder.id).await.unwrap();
+    assert!(!app.inner.workspaces.lock().await[&placeholder.id].is_bootstrapped());
+
+    super::workspace_ops::connect_workspace_internal(
+        &app,
+        falcondeck_core::ConnectWorkspaceRequest {
+            path,
+            kind: falcondeck_core::WorkspaceKind::Project,
+        },
+        Some(&persisted),
+    )
+    .await
+    .unwrap();
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let workspace = &workspaces[&placeholder.id];
+    assert!(workspace.is_bootstrapped());
+    assert!(std::sync::Arc::ptr_eq(
+        workspace.claude_runtime.as_ref().unwrap(),
+        &early_runtime
+    ));
+    assert!(workspace.threads.contains_key(&new_thread.thread.id));
+    assert_eq!(
+        workspace.summary.current_thread_id.as_deref(),
+        Some(new_thread.thread.id.as_str())
+    );
+    assert_eq!(workspace.summary.default_provider, AgentProvider::CLAUDE);
+}
+
 #[test]
 fn extension_thread_summaries_enforce_count_title_and_byte_limits() {
     let summary = |index: usize, id: String| ExtensionThreadSummary {

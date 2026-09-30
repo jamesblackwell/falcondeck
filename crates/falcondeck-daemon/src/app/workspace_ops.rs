@@ -247,7 +247,7 @@ pub(super) async fn connect_workspace_internal(
         {
             let should_upgrade_placeholder = workspaces
                 .get(&existing_id)
-                .map(|workspace| !workspace.has_runtime())
+                .map(|workspace| !workspace.is_bootstrapped())
                 .unwrap_or(false);
             if should_upgrade_placeholder {
                 Some(existing_id)
@@ -275,7 +275,7 @@ pub(super) async fn connect_workspace_internal(
                         workspace.summary.updated_at = updated_at;
                     }
                     let summary = workspace.summary.clone();
-                    let should_refresh_metadata = workspace.has_runtime();
+                    let should_refresh_metadata = workspace.is_bootstrapped();
                     drop(workspaces);
                     if should_refresh_metadata {
                         return refresh_connected_workspace_metadata(app, &existing_id).await;
@@ -517,7 +517,7 @@ pub(super) async fn connect_workspace_internal(
         .and_then(|workspace| workspace.default_provider.clone())
         .unwrap_or(AgentProvider::CODEX);
     let cached_icon = app.cached_workspace_icon_meta(&workspace_id).await;
-    let summary = WorkspaceSummary {
+    let mut summary = WorkspaceSummary {
         id: workspace_id.clone(),
         path: path_string.clone(),
         kind: if persisted_workspace_ref.is_some() {
@@ -632,9 +632,19 @@ pub(super) async fn connect_workspace_internal(
         // roll running threads back to the hydrated/persisted view, which
         // still records the last turn as interrupted by shutdown.
         let previous = workspaces.remove(&workspace_id);
-        let (previous_acp_runtimes, previous_opencode_runtime, previous_threads) = previous
+        let (
+            previous_summary,
+            previous_codex_session,
+            previous_claude_runtime,
+            previous_acp_runtimes,
+            previous_opencode_runtime,
+            previous_threads,
+        ) = previous
             .map(|workspace| {
                 (
+                    Some(workspace.summary),
+                    workspace.codex_session,
+                    workspace.claude_runtime,
                     workspace.acp_runtimes,
                     workspace.opencode_runtime,
                     workspace.threads,
@@ -651,10 +661,24 @@ pub(super) async fn connect_workspace_internal(
                 &subagent_thread_ids,
             )
         });
-        // The session only starts supervising its own exit once it is about
-        // to become the workspace's authoritative handle. Until this point
-        // its RAII lease cleans it up if workspace restore is cancelled.
-        let codex_session = codex_session.map(|session| session.activate());
+        // A turn may have attached a provider while this connect was
+        // hydrating history. Keep those handles so installing the hydrated
+        // workspace cannot orphan a running turn.
+        let codex_session = previous_codex_session
+            .filter(|session| !session.is_closed())
+            .or_else(|| codex_session.map(|session| session.activate()));
+        let claude_runtime = previous_claude_runtime.unwrap_or(claude_runtime);
+        if let Some(previous) = previous_summary {
+            if let Some(current) = previous.current_thread_id
+                && threads.contains_key(&current)
+            {
+                summary.current_thread_id = Some(current);
+            }
+            if previous.updated_at > summary.updated_at {
+                summary.default_provider = previous.default_provider;
+                summary.updated_at = previous.updated_at;
+            }
+        }
         workspaces.insert(
             workspace_id.clone(),
             ManagedWorkspace {
@@ -754,7 +778,10 @@ fn carry_over_live_threads(
             .get(&thread_id)
             .is_some_and(|rebuilt| rebuilt.items.is_empty())
             && !thread.items.is_empty();
-        if keep_live || keep_replayed_transcript {
+        // Threads opened after the persisted snapshot was captured have no
+        // rebuilt counterpart yet, even if their first turn has finished.
+        let opened_during_connect = !hydrated.contains_key(&thread_id);
+        if keep_live || keep_replayed_transcript || opened_during_connect {
             // A startup placeholder is empty of queued requests even when
             // disk still has them. The rebuilt copy carries that persist;
             // keeping the live thread must not throw the outbox away.
@@ -1344,6 +1371,39 @@ pub(super) async fn archive_thread(
     );
     let _ = app.persist_local_state().await;
     Ok(summary)
+}
+
+pub(super) async fn archive_all_threads(
+    app: &AppState,
+    workspace_id: &str,
+) -> Result<CommandResponse, DaemonError> {
+    let mut workspaces = app.inner.workspaces.lock().await;
+    let workspace = workspaces
+        .get_mut(workspace_id)
+        .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+    let mut changed = false;
+    for thread in workspace.threads.values_mut() {
+        if !thread.summary.is_archived {
+            thread.summary.is_archived = true;
+            changed = true;
+        }
+    }
+    drop(workspaces);
+
+    if changed {
+        app.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+        let _ = app.persist_local_state().await;
+    }
+    Ok(CommandResponse {
+        ok: true,
+        message: None,
+    })
 }
 
 /// Drops a thread and, if it ran in an isolated copy, the checkout behind it.
@@ -5669,7 +5729,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnecting_a_workspace_keeps_threads_that_are_mid_turn() {
+    fn reconnecting_a_workspace_keeps_live_and_newly_opened_threads() {
         // The hydrated view is what a restart-time reconnect rebuilds: the
         // last turn recorded as interrupted by shutdown.
         let mut hydrated = HashMap::from([
@@ -5693,8 +5753,8 @@ mod tests {
                 managed_thread("waiting", ThreadStatus::WaitingForInput),
             ),
             (
-                "finished".to_string(),
-                managed_thread("finished", ThreadStatus::Idle),
+                "opened".to_string(),
+                managed_thread("opened", ThreadStatus::Idle),
             ),
         ]);
 
@@ -5708,9 +5768,10 @@ mod tests {
             hydrated["waiting"].summary.status,
             ThreadStatus::WaitingForInput
         );
-        // Nothing was in flight for these, so the rebuilt view stands.
+        // The rebuilt idle copy wins; a thread absent from that view may have
+        // been opened while this workspace was still connecting.
         assert_eq!(hydrated["idle"].summary.status, ThreadStatus::Idle);
-        assert!(!hydrated.contains_key("finished"));
+        assert!(hydrated.contains_key("opened"));
     }
 
     #[test]

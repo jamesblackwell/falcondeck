@@ -187,10 +187,11 @@ pub struct ClaudeRuntime {
 }
 
 impl ClaudeRuntime {
-    #[cfg(test)]
-    pub(crate) fn for_test(workspace_path: String, claude_bin: String) -> Arc<Self> {
+    pub(crate) fn for_workspace(workspace_path: String, claude_bin: String) -> Arc<Self> {
         Arc::new(Self {
             workspace_path,
+            // Resolve the stable CLI reference for each turn so upgrades take
+            // effect without replacing an active runtime.
             claude_bin,
             active_turns: Mutex::new(HashMap::new()),
             interrupted_turns: Mutex::new(HashSet::new()),
@@ -199,24 +200,17 @@ impl ClaudeRuntime {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(workspace_path: String, claude_bin: String) -> Arc<Self> {
+        Self::for_workspace(workspace_path, claude_bin)
+    }
+
     pub async fn connect(
         workspace_path: String,
         claude_bin: String,
     ) -> Result<ClaudeBootstrap, DaemonError> {
         let resolved = resolve_agent_binary("claude", &claude_bin);
-        let runtime = Arc::new(Self {
-            workspace_path: workspace_path.clone(),
-            // Keep the configured lookup (usually `claude` or its stable
-            // symlink), not the version-specific canonical target. Upgrade
-            // installers replace that target while FalconDeck is running;
-            // resolving before each new process lets later turns use the new
-            // CLI without disturbing an active turn on the old executable.
-            claude_bin,
-            active_turns: Mutex::new(HashMap::new()),
-            interrupted_turns: Mutex::new(HashSet::new()),
-            turn_locks: Mutex::new(HashMap::new()),
-            next_turn_generation: std::sync::atomic::AtomicU64::new(1),
-        });
+        let runtime = Self::for_workspace(workspace_path.clone(), claude_bin);
 
         let (account, models) = tokio::join!(read_auth_status(&resolved.executable), list_models());
         let collaboration_modes = Vec::new();
