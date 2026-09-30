@@ -1247,12 +1247,15 @@ fn claude_model(
     }
 }
 
+/// The ids are CLI aliases that always run the newest model in each family;
+/// only the labels are ours. Re-check them when the CLI moves an alias
+/// (`claude -p --model <alias> --output-format json` reports `modelUsage`).
 pub fn curated_models() -> Vec<ModelSummary> {
     vec![
         claude_model("haiku", "Haiku 4.5", false, "medium", claude_base_efforts()),
-        claude_model("sonnet", "Sonnet 5", true, "medium", claude_base_efforts()),
-        claude_model("opus", "Opus 5", false, "high", claude_max_efforts()),
-        claude_model("fable", "Fable 5", false, "high", claude_max_efforts()),
+        claude_model("sonnet", "Sonnet 5.5", true, "medium", claude_base_efforts()),
+        claude_model("opus", "Opus 5.5", false, "high", claude_max_efforts()),
+        claude_model("fable", "Fable 5.1", false, "high", claude_max_efforts()),
     ]
 }
 
@@ -1355,9 +1358,24 @@ pub fn parse_additional_model_options(value: &Value) -> Vec<DiscoveredClaudeMode
             .map(str::trim)
             .filter(|label| !label.is_empty())
             .unwrap_or(id);
+        // The cache labels by family ("Fable") and puts the version in the
+        // description ("Fable 5.1 · Most capable…"), which would read as a
+        // duplicate of the curated alias row.
+        let versioned = entry
+            .get("description")
+            .and_then(Value::as_str)
+            .and_then(|description| description.split('·').next())
+            .map(str::trim)
+            .filter(|name| name.starts_with(label) && name.len() > label.len())
+            .unwrap_or(label);
+        let label = if id.to_ascii_lowercase().ends_with("[1m]") {
+            format!("{versioned} 1M")
+        } else {
+            versioned.to_string()
+        };
         models.push(DiscoveredClaudeModel {
             id: id.to_string(),
-            label: label.to_string(),
+            label,
         });
     }
     models
@@ -2066,12 +2084,12 @@ mod tests {
         assert_eq!(models[0].id, "haiku");
         assert_eq!(models[0].label, "Haiku 4.5");
         assert_eq!(models[1].id, "sonnet");
-        assert_eq!(models[1].label, "Sonnet 5");
+        assert_eq!(models[1].label, "Sonnet 5.5");
         assert!(models[1].is_default);
         assert_eq!(models[2].id, "opus");
-        assert_eq!(models[2].label, "Opus 5");
+        assert_eq!(models[2].label, "Opus 5.5");
         assert_eq!(models[3].id, "fable");
-        assert_eq!(models[3].label, "Fable 5");
+        assert_eq!(models[3].label, "Fable 5.1");
     }
 
     #[test]
@@ -2094,7 +2112,7 @@ mod tests {
         ];
         let merged = merge_claude_models(curated_models(), &extras);
         assert_eq!(merged.len(), 5);
-        assert_eq!(merged[1].label, "Sonnet 5");
+        assert_eq!(merged[1].label, "Sonnet 5.5");
         assert!(merged[1].is_default);
         let extra = merged.last().unwrap();
         assert_eq!(extra.id, "claude-fable-5[1m]");
@@ -2113,9 +2131,14 @@ mod tests {
         let extras = parse_additional_model_options(&json!({
             "additionalModelOptionsCache": [
                 {
-                    "value": "claude-fable-5[1m]",
+                    "value": "claude-fable-5-1[1m]",
                     "label": "Fable",
-                    "description": "ignored"
+                    "description": "Fable 5.1 · Most capable for your hardest tasks"
+                },
+                {
+                    "value": "claude-sonnet-5-5",
+                    "label": "Sonnet",
+                    "description": "Unrelated description"
                 },
                 { "value": "" },
                 { "label": "orphan" }
@@ -2123,10 +2146,16 @@ mod tests {
         }));
         assert_eq!(
             extras,
-            vec![DiscoveredClaudeModel {
-                id: "claude-fable-5[1m]".to_string(),
-                label: "Fable".to_string(),
-            }]
+            vec![
+                DiscoveredClaudeModel {
+                    id: "claude-fable-5-1[1m]".to_string(),
+                    label: "Fable 5.1 1M".to_string(),
+                },
+                DiscoveredClaudeModel {
+                    id: "claude-sonnet-5-5".to_string(),
+                    label: "Sonnet".to_string(),
+                },
+            ]
         );
     }
 
