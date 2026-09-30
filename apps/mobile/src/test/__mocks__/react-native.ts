@@ -44,14 +44,18 @@ export const Animated = {
     setValue(value: number) {
       this.value = value
     }
+    interpolate(config: unknown) { return config }
   },
   spring: (_value: unknown, _config: unknown) => ({
     start: (callback?: () => void) => callback?.(),
   }),
   timing: (_value: unknown, _config: unknown) => ({
     start: (callback?: () => void) => callback?.(),
+    stop: () => {},
   }),
+  loop: (_animation: unknown) => ({ start: () => {}, stop: () => {} }),
 }
+export const Easing = { linear: (value: number) => value }
 // Returns the config as panHandlers so tests can invoke the gesture
 // callbacks (onPanResponderRelease etc.) directly off the rendered props.
 export const PanResponder = {

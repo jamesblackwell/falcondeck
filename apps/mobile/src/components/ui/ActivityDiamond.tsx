@@ -1,14 +1,6 @@
 import { memo, useEffect, useMemo } from 'react'
-import Animated, {
-  cancelAnimation,
-  Easing,
-  interpolate,
-  makeMutable,
-  useAnimatedStyle,
-  useReducedMotion,
-  withRepeat,
-  withTiming,
-} from 'react-native-reanimated'
+import { Animated, Easing } from 'react-native'
+import { useReducedMotion } from 'react-native-reanimated'
 import { StyleSheet } from 'react-native-unistyles'
 
 interface ActivityDiamondProps {
@@ -20,7 +12,6 @@ interface ActivityDiamondProps {
 }
 
 const CYCLE_DURATION_MS = 2400
-const STATIC_PROGRESS = 0.47
 const KEYFRAMES = [0, 0.1, 0.19, 0.29, 0.38, 0.47, 0.5, 0.74, 0.77, 0.86, 1]
 const OPACITY = [0.55, 1, 0.55, 1, 0.55, 1, 1, 1, 1, 0.55, 0.55]
 const SCALE = [0.82, 1, 0.82, 1, 0.82, 1, 1, 1, 1, 0.82, 0.82]
@@ -33,28 +24,43 @@ const ROTATION = [0, 0, 0, 0, 0, 0, 12, 348, 360, 360, 360]
  * for each running thread and again on every in-flight block in the transcript
  * — and FlashList recycling mounts and unmounts them constantly. Giving each
  * instance its own repeating timing meant a separate animation driver per
- * diamond plus a JS-to-UI-thread animation start on every remount. A single
- * module-level driver, reference counted so it runs only while something is
- * actually using it, costs the same whether one diamond is visible or thirty,
- * and a remounting row simply reads the clock that is already running (which
- * also keeps the diamonds in phase with each other).
+ * diamond. The native Animated driver updates transform/opacity directly;
+ * Reanimated's worklet driver committed the Fabric view tree every frame,
+ * even while the conversation was idle. Share the clock and interpolation
+ * nodes so recycled rows join the existing animation without restarting it.
  */
-const clock = makeMutable(0)
+const clock = new Animated.Value(0)
+const animatedStyle = {
+  opacity: clock.interpolate({ inputRange: KEYFRAMES, outputRange: OPACITY }),
+  transform: [
+    { rotate: clock.interpolate({ inputRange: KEYFRAMES, outputRange: ROTATION.map(value => `${45 + value}deg`) }) },
+    { scale: clock.interpolate({ inputRange: KEYFRAMES, outputRange: SCALE }) },
+  ],
+}
+const staticStyle = { opacity: 1, transform: [{ rotate: '45deg' }, { scale: 1 }] }
 let clockSubscribers = 0
+let animation: Animated.CompositeAnimation | null = null
 
 function acquireClock() {
   clockSubscribers += 1
   if (clockSubscribers > 1) return
-  clock.value = 0
-  clock.value = withRepeat(
-    withTiming(1, { duration: CYCLE_DURATION_MS, easing: Easing.linear }),
-    -1,
-  )
+  clock.setValue(0)
+  animation = Animated.loop(Animated.timing(clock, {
+    toValue: 1,
+    duration: CYCLE_DURATION_MS,
+    easing: Easing.linear,
+    useNativeDriver: true,
+    isInteraction: false,
+  }))
+  animation.start()
 }
 
 function releaseClock() {
   clockSubscribers = Math.max(0, clockSubscribers - 1)
-  if (clockSubscribers === 0) cancelAnimation(clock)
+  if (clockSubscribers === 0) {
+    animation?.stop()
+    animation = null
+  }
 }
 
 /** A small double-pulse-and-turn diamond for live agent work. */
@@ -71,16 +77,6 @@ export const ActivityDiamond = memo(function ActivityDiamond({
     return releaseClock
   }, [reducedMotion])
 
-  const animatedStyle = useAnimatedStyle(() => {
-    const value = reducedMotion ? STATIC_PROGRESS : clock.get()
-    return {
-      opacity: interpolate(value, KEYFRAMES, OPACITY),
-      transform: [
-        { rotate: `${45 + interpolate(value, KEYFRAMES, ROTATION)}deg` },
-        { scale: interpolate(value, KEYFRAMES, SCALE) },
-      ],
-    }
-  }, [reducedMotion])
   const diamondStyle = useMemo(
     () => ({
       width: size * 0.58,
@@ -92,7 +88,7 @@ export const ActivityDiamond = memo(function ActivityDiamond({
     [color, size, variant],
   )
 
-  return <Animated.View accessible={false} style={[styles.base, diamondStyle, animatedStyle]} />
+  return <Animated.View accessible={false} style={[styles.base, diamondStyle, reducedMotion ? staticStyle : animatedStyle]} />
 })
 
 const styles = StyleSheet.create({
