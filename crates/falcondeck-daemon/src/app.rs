@@ -3775,6 +3775,13 @@ impl AppState {
         workspace_ops::archive_thread(self, workspace_id, thread_id).await
     }
 
+    pub async fn archive_all_threads(
+        &self,
+        workspace_id: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        workspace_ops::archive_all_threads(self, workspace_id).await
+    }
+
     pub async fn unarchive_thread(
         &self,
         workspace_id: &str,

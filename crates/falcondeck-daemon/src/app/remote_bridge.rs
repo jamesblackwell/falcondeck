@@ -297,6 +297,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.update",
     "thread.suggestTitle",
     "thread.archive",
+    "thread.archiveAll",
     "thread.unarchive",
     "thread.delete",
     "thread.mark_read",
@@ -2042,6 +2043,15 @@ impl AppState {
                         })
                         .map_err(|error| error.to_string())
                 }
+                "thread.archiveAll" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    self.archive_all_threads(&workspace_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
                 "thread.unarchive" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let thread_id = required(&["threadId", "thread_id"])?;
@@ -2398,6 +2408,19 @@ impl AppState {
                         .await
                         .and_then(|summary| {
                             serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.archiveAll" => {
+                if let Some(workspace_id) = required(&["workspaceId", "workspace_id"]) {
+                    self.archive_all_threads(&workspace_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
                         })
                 } else {
                     Err(DaemonError::BadRequest(

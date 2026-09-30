@@ -58,6 +58,7 @@ import { ThreadStageFilterMenu } from "./thread-stage-filter-menu";
 import { ThreadSortMenu } from "./thread-sort-menu";
 import {
   AddThreadStageDialog,
+  ArchiveAllThreadsDialog,
   CloseWorkspaceDialog,
   DeleteThreadDialog,
   ForkThreadDialog,
@@ -113,6 +114,7 @@ export type WorkspaceSidebarProps = {
   /** Open the command palette scoped to one project's threads. */
   onSearchProjectThreads?: (workspaceId: string) => void;
   onArchiveThread?: ThreadItemArchiveHandler;
+  onArchiveAllThreads?: (workspaceId: string) => Promise<void> | void;
   /** Restores a put-away chat to the project list. */
   onUnarchiveThread?: ThreadItemArchiveHandler;
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
@@ -1157,6 +1159,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onNewChat,
   onSearchProjectThreads,
   onArchiveThread,
+  onArchiveAllThreads,
   onUnarchiveThread,
   onDeleteThread,
   onRenameThread,
@@ -1281,6 +1284,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [isForkingThread, setIsForkingThread] = useState(false);
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null);
+  const [archiveAllTarget, setArchiveAllTarget] = useState<{
+    workspaceId: string;
+    path: string;
+  } | null>(null);
+  const [archiveAllError, setArchiveAllError] = useState<string | null>(null);
+  const [isArchivingAll, setIsArchivingAll] = useState(false);
   const [iconWebsiteTarget, setIconWebsiteTarget] = useState<{
     workspaceId: string;
     path: string;
@@ -2226,6 +2235,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
       const isChats = workspaceId === CHATS_CONTEXT_MENU_ID;
+      const activeCount = isChats
+        ? 0
+        : (groups.find((group) => group.workspace.id === workspaceId)?.threads.length ?? 0);
       const archivedCount = isChats
         ? archivedChatEntries.length
         : archivedThreadsOf(
@@ -2247,6 +2259,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !canClose &&
         !canHide &&
         !canRemove &&
+        (!onArchiveAllThreads || activeCount === 0) &&
         archivedCount === 0 &&
         !viewingArchived
       ) {
@@ -2263,6 +2276,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [
       archivedChatEntries.length,
       archivedViewWorkspaceIds,
+      groups,
+      onArchiveAllThreads,
       onCloseWorkspace,
       onWorkspaceHiddenChange,
       onRemoveWorkspace,
@@ -2281,6 +2296,36 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       return next;
     });
   }, []);
+
+  const openArchiveAllDialog = useCallback(() => {
+    if (!workspaceContextMenu || !onArchiveAllThreads) return;
+    const { workspaceId, path } = workspaceContextMenu;
+    setWorkspaceContextMenu(null);
+    setArchiveAllError(null);
+    setArchiveAllTarget({ workspaceId, path });
+  }, [onArchiveAllThreads, workspaceContextMenu]);
+
+  const closeArchiveAllDialog = useCallback(() => {
+    if (isArchivingAll) return;
+    setArchiveAllTarget(null);
+    setArchiveAllError(null);
+  }, [isArchivingAll]);
+
+  const handleConfirmArchiveAll = useCallback(async () => {
+    if (!archiveAllTarget || !onArchiveAllThreads) return;
+    setIsArchivingAll(true);
+    setArchiveAllError(null);
+    try {
+      await onArchiveAllThreads(archiveAllTarget.workspaceId);
+      setArchiveAllTarget(null);
+    } catch (error) {
+      setArchiveAllError(
+        error instanceof Error ? error.message : "Failed to archive tasks",
+      );
+    } finally {
+      setIsArchivingAll(false);
+    }
+  }, [archiveAllTarget, onArchiveAllThreads]);
 
   const handleViewArchivedFromContextMenu = useCallback(() => {
     if (!workspaceContextMenu) return;
@@ -3230,6 +3275,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? (workspaceIcons?.[workspaceContextMenu.workspaceId] ?? { mode: "auto" })
             : undefined
         }
+        activeCount={
+          workspaceContextMenu == null
+            ? 0
+            : (groups.find(
+                (group) => group.workspace.id === workspaceContextMenu.workspaceId,
+              )?.threads.length ?? 0)
+        }
         archivedCount={
           workspaceContextMenu == null
             ? 0
@@ -3281,6 +3333,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             : undefined
         }
         onViewArchived={handleViewArchivedFromContextMenu}
+        onArchiveAll={
+          onArchiveAllThreads &&
+          workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
+            ? openArchiveAllDialog
+            : undefined
+        }
         onCloseFromSidebar={
           onCloseWorkspace &&
           workspaceContextMenu?.workspaceId !== CHATS_CONTEXT_MENU_ID
@@ -3310,6 +3368,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         pending={isClosingWorkspace}
         onClose={closeCloseDialog}
         onConfirm={handleConfirmCloseWorkspace}
+      />
+      <ArchiveAllThreadsDialog
+        target={archiveAllTarget}
+        error={archiveAllError}
+        pending={isArchivingAll}
+        onClose={closeArchiveAllDialog}
+        onConfirm={handleConfirmArchiveAll}
       />
       <RemoveWorkspaceDialog
         target={removeTarget}

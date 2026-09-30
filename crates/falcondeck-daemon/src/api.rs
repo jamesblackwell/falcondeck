@@ -189,6 +189,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
         .route(
+            "/api/workspaces/{workspace_id}/threads/archive",
+            post(archive_all_threads),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/fork",
             post(fork_thread),
         )
@@ -817,6 +821,13 @@ async fn archive_thread(
     Path((workspace_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
     Ok(Json(state.archive_thread(&workspace_id, &thread_id).await?))
+}
+
+async fn archive_all_threads(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.archive_all_threads(&workspace_id).await?))
 }
 
 async fn delete_thread(

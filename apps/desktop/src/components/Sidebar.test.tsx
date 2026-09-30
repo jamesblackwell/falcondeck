@@ -91,6 +91,7 @@ function renderSidebar(
 
   const onRenameThread = vi.fn().mockResolvedValue(undefined);
   const onArchiveThread = vi.fn().mockResolvedValue(undefined);
+  const onArchiveAllThreads = vi.fn().mockResolvedValue(undefined);
   const onDeleteThread = vi.fn().mockResolvedValue(undefined);
   const onRemoveWorkspace = vi.fn().mockResolvedValue(undefined);
 
@@ -103,6 +104,7 @@ function renderSidebar(
       onSelectThread={() => {}}
       onRenameThread={onRenameThread}
       onArchiveThread={onArchiveThread}
+      onArchiveAllThreads={onArchiveAllThreads}
       onDeleteThread={onDeleteThread}
       onRemoveWorkspace={onRemoveWorkspace}
       {...overrides}
@@ -121,6 +123,7 @@ function renderSidebar(
         onSelectThread={() => {}}
         onRenameThread={onRenameThread}
         onArchiveThread={onArchiveThread}
+        onArchiveAllThreads={onArchiveAllThreads}
         onDeleteThread={onDeleteThread}
         onRemoveWorkspace={onRemoveWorkspace}
         {...overrides}
@@ -132,6 +135,7 @@ function renderSidebar(
   return {
     onRenameThread,
     onArchiveThread,
+    onArchiveAllThreads,
     onDeleteThread,
     onRemoveWorkspace,
     rerenderSidebar,
@@ -1606,6 +1610,44 @@ describe("DesktopSidebar", () => {
     await waitFor(() => {
       expect(onArchiveThread).toHaveBeenCalledWith("workspace-1", "thread-1");
     });
+  });
+
+  it("archives all project tasks only after confirmation", async () => {
+    const { onArchiveAllThreads } = renderSidebar();
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive all" }));
+
+    expect(onArchiveAllThreads).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("dialog", {
+      name: "Archive all tasks in falcondeck?",
+    });
+    expect(dialog).toHaveTextContent("including tasks hidden by filters");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onArchiveAllThreads).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive all" }));
+    await waitFor(() => {
+      expect(onArchiveAllThreads).toHaveBeenCalledOnce();
+      expect(onArchiveAllThreads).toHaveBeenCalledWith("workspace-1");
+    });
+  });
+
+  it("keeps bulk archive errors visible and omits the action for empty projects", async () => {
+    const onArchiveAllThreads = vi.fn().mockRejectedValue(new Error("Offline"));
+    const { rerenderSidebar } = renderSidebar({ onArchiveAllThreads });
+
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive all" }));
+    fireEvent.click(screen.getByRole("button", { name: "Archive all" }));
+    expect(await screen.findByText("Offline")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    rerenderSidebar({ groups: [{ workspace: workspace(), threads: [] }] });
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.queryByRole("menuitem", { name: "Archive all" })).not.toBeInTheDocument();
   });
 
   it("asks for confirmation when the row's archive button is used", async () => {

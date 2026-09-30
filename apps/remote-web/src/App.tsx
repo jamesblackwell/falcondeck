@@ -4142,6 +4142,20 @@ function RemoteApp() {
     }
   }
 
+  async function handleArchiveAllThreads(workspaceId: string) {
+    try {
+      await callRpc("thread.archiveAll", { workspace_id: workspaceId });
+      if (selectedWorkspaceId === workspaceId) {
+        setThreadDetail(null);
+        setSelectedThreadId(null);
+      }
+      setError(null);
+    } catch (e) {
+      reportError(e, "Failed to archive tasks");
+      throw e;
+    }
+  }
+
   async function handleUnarchiveThread(workspaceId: string, threadId: string) {
     try {
       await callRpc("thread.unarchive", {
@@ -5175,6 +5189,7 @@ function RemoteApp() {
                 onSelectThread={handleSelectThread}
                 onNewThread={handleNewThread}
                 onArchiveThread={handleArchiveThread}
+                onArchiveAllThreads={handleArchiveAllThreads}
                 onUnarchiveThread={handleUnarchiveThread}
                 onRenameThread={handleRenameThread}
                 onSuggestThreadTitle={handleSuggestThreadTitle}
@@ -5246,6 +5261,7 @@ function RemoteApp() {
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
           onArchiveThread={handleArchiveThread}
+          onArchiveAllThreads={handleArchiveAllThreads}
           onUnarchiveThread={handleUnarchiveThread}
           onRenameThread={handleRenameThread}
           onSuggestThreadTitle={handleSuggestThreadTitle}

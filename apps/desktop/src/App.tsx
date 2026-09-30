@@ -4389,6 +4389,43 @@ function AppInner() {
     ],
   );
 
+  const handleArchiveAllThreads = useCallback(
+    async (workspaceId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error(CONNECTION_COPY.notConnected);
+      try {
+        await client.archiveAllThreads(workspaceId);
+        if (selectedWorkspaceId === workspaceId) {
+          setSelectedThreadId(null);
+        }
+        if (!workspaceHostIndex.has(workspaceId) && api) {
+          setSnapshot(await api.snapshot());
+        }
+        setActionError(null);
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error ? error.message : "Failed to archive tasks";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to archive tasks",
+          description: msg,
+        });
+        throw error;
+      }
+    },
+    [
+      api,
+      apiFor,
+      selectedWorkspaceId,
+      setActionError,
+      setSelectedThreadId,
+      setSnapshot,
+      toast,
+      workspaceHostIndex,
+    ],
+  );
+
   const handleUnarchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId);
@@ -5824,6 +5861,7 @@ function AppInner() {
             onNewThread={handleNewThread}
             onNewChat={handleNewChat}
             onArchiveThread={handleArchiveThread}
+            onArchiveAllThreads={handleArchiveAllThreads}
             onUnarchiveThread={handleUnarchiveThread}
             onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}

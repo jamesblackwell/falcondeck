@@ -665,6 +665,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
   selectedColor = null,
   selectedIcon,
+  activeCount = 0,
   archivedCount = 0,
   archivedOpen = false,
   isHidden = false,
@@ -672,6 +673,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   onSetColor,
   onSetIcon,
   onChooseWebsite,
+  onArchiveAll,
   onViewArchived,
   onCloseFromSidebar,
   onRemove,
@@ -680,6 +682,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target: WorkspaceContextMenuState | null
   selectedColor?: string | null
   selectedIcon?: WorkspaceIconPreference
+  activeCount?: number
   archivedCount?: number
   archivedOpen?: boolean
   isHidden?: boolean
@@ -687,6 +690,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   onSetColor?: (color: WorkspaceColorId | null) => void
   onSetIcon?: (icon: WorkspaceIconPreference | null) => void
   onChooseWebsite?: () => void
+  onArchiveAll?: () => void
   onViewArchived?: () => void
   onCloseFromSidebar?: () => void
   onRemove?: () => void
@@ -701,23 +705,26 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   const showColors = Boolean(onSetColor)
   const showArchivedAction =
     Boolean(onViewArchived) && (archivedCount > 0 || archivedOpen)
+  const showArchiveAllAction = Boolean(onArchiveAll) && activeCount > 0
+  const showArchiveActions = showArchivedAction || showArchiveAllAction
   const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
   const showMembership = showClose || showRemove || Boolean(onToggleHidden)
-  if (!showIcons && !showColors && !showArchivedAction && !showMembership) {
+  if (!showIcons && !showColors && !showArchiveActions && !showMembership) {
     return null
   }
-  const showBelowIcons = showColors || showArchivedAction || showMembership
+  const showBelowIcons = showColors || showArchiveActions || showMembership
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
     (showIcons ? WORKSPACE_ICON_SECTION_HEIGHT_PX : 0) +
     (showIcons && showBelowIcons ? THREAD_MENU_SEPARATOR_HEIGHT_PX : 0) +
     (showColors ? WORKSPACE_COLOR_SECTION_HEIGHT_PX : 0) +
-    (showColors && (showArchivedAction || showMembership)
+    (showColors && (showArchiveActions || showMembership)
       ? THREAD_MENU_SEPARATOR_HEIGHT_PX
       : 0) +
     (showArchivedAction ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
-    (showArchivedAction && showMembership
+    (showArchiveAllAction ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
+    (showArchiveActions && showMembership
       ? THREAD_MENU_SEPARATOR_HEIGHT_PX
       : 0) +
     (onToggleHidden ? THREAD_MENU_ROW_HEIGHT_PX : 0) +
@@ -829,7 +836,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           </div>
         </div>
       ) : null}
-      {showColors && (showArchivedAction || showMembership) ? (
+      {showColors && (showArchiveActions || showMembership) ? (
         <div
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"
@@ -848,7 +855,14 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
           onClick={onViewArchived}
         />
       ) : null}
-      {showArchivedAction && showMembership ? (
+      {showArchiveAllAction && onArchiveAll ? (
+        <ThreadMenuItem
+          icon={<Archive className="h-3.5 w-3.5" />}
+          label="Archive all"
+          onClick={onArchiveAll}
+        />
+      ) : null}
+      {showArchiveActions && showMembership ? (
         <div
           role="separator"
           className="mx-2 my-1 border-t border-border-subtle"
@@ -970,6 +984,65 @@ export const WorkspaceIconDialog = memo(function WorkspaceIconDialog({
           </Button>
         </div>
       </form>
+    </div>,
+    document.body,
+  )
+})
+
+export const ArchiveAllThreadsDialog = memo(function ArchiveAllThreadsDialog({
+  target,
+  error,
+  pending,
+  onClose,
+  onConfirm,
+}: {
+  target: { workspaceId: string; path: string } | null
+  error: string | null
+  pending: boolean
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const projectLabel = target.path.split('/').pop() || target.path
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-archive-all-title"
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <h2
+          id="fd-archive-all-title"
+          className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+        >
+          Archive all tasks in {projectLabel}?
+        </h2>
+        <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          All tasks in this project will move to View archived, including tasks hidden by filters. You can restore them later. Running work will continue.
+        </p>
+        {error ? (
+          <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">{error}</p>
+        ) : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="ghost" autoFocus onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button type="button" onClick={onConfirm} aria-busy={pending} disabled={pending}>
+            {pending ? 'Archiving…' : 'Archive all'}
+          </Button>
+        </div>
+      </div>
     </div>,
     document.body,
   )

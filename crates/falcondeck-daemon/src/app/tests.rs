@@ -7064,6 +7064,103 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
 }
 
 #[tokio::test]
+async fn archive_all_threads_updates_once_and_is_idempotent() {
+    let temp = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp.path().join("state.json"),
+    );
+    let workspace_id = "workspace-archive-all".to_string();
+    let active_thread = ThreadSummary {
+        id: "thread-active".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Active thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        is_pinned_in_project: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    let mut archived_thread = active_thread.clone();
+    archived_thread.id = "thread-already-archived".to_string();
+    archived_thread.is_archived = true;
+    let mut running_thread = active_thread.clone();
+    running_thread.id = "thread-running".to_string();
+    running_thread.status = ThreadStatus::Running;
+
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.clone(),
+                path: temp.path().to_string_lossy().to_string(),
+                kind: falcondeck_core::WorkspaceKind::Project,
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::CODEX,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some(active_thread.id.clone()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+                icon: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            agy_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [active_thread, archived_thread, running_thread]
+                .into_iter()
+                .map(|thread| (thread.id.clone(), super::ManagedThread::new(thread)))
+                .collect(),
+        },
+    );
+
+    let mut events = app.subscribe();
+    assert!(app.archive_all_threads(&workspace_id).await.unwrap().ok);
+    let snapshot = app.snapshot().await;
+    assert!(snapshot.threads.iter().all(|thread| thread.is_archived));
+    assert_eq!(
+        snapshot
+            .threads
+            .iter()
+            .find(|thread| thread.id == "thread-running")
+            .unwrap()
+            .status,
+        ThreadStatus::Running
+    );
+    assert!(matches!(
+        events.try_recv().unwrap().event,
+        UnifiedEvent::Snapshot { .. }
+    ));
+    assert!(events.try_recv().is_err());
+
+    assert!(app.archive_all_threads(&workspace_id).await.unwrap().ok);
+    assert!(events.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn snapshot_with_request_strips_duplicated_agent_skill_catalogs() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-a");

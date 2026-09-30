@@ -698,6 +698,14 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
+    async archiveAllThreads(workspaceId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/archive`,
+          { method: "POST" },
+        ),
+      );
+    },
     async unarchiveThread(workspaceId: string, threadId: string) {
       return normalizeThreadSummary(
         await parseJson<ThreadSummary>(
