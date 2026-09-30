@@ -16,6 +16,7 @@ import {
   bootstrapSessionCrypto,
   buildPairingPublicKeyBundle,
   buildProjectGroups,
+  canBulkArchiveThread,
   bytesToBase64,
   captureRelayDisplayFrame,
   countAwaitingResponseThreads,
@@ -4145,7 +4146,11 @@ function RemoteApp() {
   async function handleArchiveAllThreads(workspaceId: string) {
     try {
       await callRpc("thread.archiveAll", { workspace_id: workspaceId });
-      if (selectedWorkspaceId === workspaceId) {
+      if (
+        selectedWorkspaceId === workspaceId &&
+        selectedThread &&
+        canBulkArchiveThread(selectedThread)
+      ) {
         setThreadDetail(null);
         setSelectedThreadId(null);
       }

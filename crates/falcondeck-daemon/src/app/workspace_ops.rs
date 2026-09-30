@@ -1360,6 +1360,9 @@ pub(super) async fn archive_thread(
         .get_mut(thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
     thread.summary.is_archived = true;
+    if workspace.summary.current_thread_id.as_deref() == Some(thread_id) {
+        workspace.summary.current_thread_id = latest_unarchived_thread_id(workspace);
+    }
     drop(workspaces);
     let summary = app.thread_summary(workspace_id, thread_id).await?;
     app.emit(
@@ -1383,10 +1386,33 @@ pub(super) async fn archive_all_threads(
         .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
     let mut changed = false;
     for thread in workspace.threads.values_mut() {
-        if !thread.summary.is_archived {
+        if !thread.summary.is_archived
+            && !matches!(
+                thread.summary.status,
+                ThreadStatus::Running | ThreadStatus::WaitingForInput
+            )
+            && thread.summary.queued_turns.is_empty()
+            && thread.queued_requests.is_empty()
+            && thread.dispatching_request.is_none()
+        {
             thread.summary.is_archived = true;
             changed = true;
         }
+    }
+    let current_is_archived =
+        workspace
+            .summary
+            .current_thread_id
+            .as_ref()
+            .is_some_and(|thread_id| {
+                workspace
+                    .threads
+                    .get(thread_id)
+                    .is_none_or(|thread| thread.summary.is_archived)
+            });
+    if current_is_archived {
+        workspace.summary.current_thread_id = latest_unarchived_thread_id(workspace);
+        changed = true;
     }
     drop(workspaces);
 
@@ -1404,6 +1430,20 @@ pub(super) async fn archive_all_threads(
         ok: true,
         message: None,
     })
+}
+
+fn latest_unarchived_thread_id(workspace: &ManagedWorkspace) -> Option<String> {
+    workspace
+        .threads
+        .values()
+        .filter(|thread| !thread.summary.is_archived)
+        .max_by(|left, right| {
+            left.summary
+                .updated_at
+                .cmp(&right.summary.updated_at)
+                .then_with(|| left.summary.id.cmp(&right.summary.id))
+        })
+        .map(|thread| thread.summary.id.clone())
 }
 
 /// Drops a thread and, if it ran in an isolated copy, the checkout behind it.

@@ -665,7 +665,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target,
   selectedColor = null,
   selectedIcon,
-  activeCount = 0,
+  hasArchivableThreads = false,
   archivedCount = 0,
   archivedOpen = false,
   isHidden = false,
@@ -682,7 +682,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   target: WorkspaceContextMenuState | null
   selectedColor?: string | null
   selectedIcon?: WorkspaceIconPreference
-  activeCount?: number
+  hasArchivableThreads?: boolean
   archivedCount?: number
   archivedOpen?: boolean
   isHidden?: boolean
@@ -705,7 +705,7 @@ export const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
   const showColors = Boolean(onSetColor)
   const showArchivedAction =
     Boolean(onViewArchived) && (archivedCount > 0 || archivedOpen)
-  const showArchiveAllAction = Boolean(onArchiveAll) && activeCount > 0
+  const showArchiveAllAction = Boolean(onArchiveAll) && hasArchivableThreads
   const showArchiveActions = showArchivedAction || showArchiveAllAction
   const showClose = Boolean(onCloseFromSidebar)
   const showRemove = Boolean(onRemove)
@@ -1026,10 +1026,13 @@ export const ArchiveAllThreadsDialog = memo(function ArchiveAllThreadsDialog({
           id="fd-archive-all-title"
           className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
         >
-          Archive all tasks in {projectLabel}?
+          Archive tasks in {projectLabel}?
         </h2>
+        <p className="mt-1 truncate text-[length:var(--fd-text-sm)] text-fg-muted" title={target.path}>
+          {target.path}
+        </p>
         <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
-          All tasks in this project will move to View archived, including tasks hidden by filters. You can restore them later. Running work will continue.
+          Tasks running, waiting for input, or holding queued messages stay visible. Other tasks, including those hidden by filters, move to View archived. You can restore them later.
         </p>
         {error ? (
           <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">{error}</p>

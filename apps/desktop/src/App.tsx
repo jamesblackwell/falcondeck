@@ -17,6 +17,7 @@ import {
   buildPairingPageUrl,
   DEFAULT_PAIRING_PAGE_ORIGIN,
   buildProjectGroups,
+  canBulkArchiveThread,
   approvalPolicyForProvider,
   composerProviderFor,
   composerSelectionFor,
@@ -4395,13 +4396,6 @@ function AppInner() {
       if (!client) throw new Error(CONNECTION_COPY.notConnected);
       try {
         await client.archiveAllThreads(workspaceId);
-        if (selectedWorkspaceId === workspaceId) {
-          setSelectedThreadId(null);
-        }
-        if (!workspaceHostIndex.has(workspaceId) && api) {
-          setSnapshot(await api.snapshot());
-        }
-        setActionError(null);
       } catch (error: unknown) {
         const msg =
           error instanceof Error ? error.message : "Failed to archive tasks";
@@ -4413,10 +4407,30 @@ function AppInner() {
         });
         throw error;
       }
+      if (
+        selectedWorkspaceId === workspaceId &&
+        selectedThread &&
+        canBulkArchiveThread(selectedThread)
+      ) {
+        setSelectedThreadId(null);
+      }
+      setActionError(null);
+      if (!workspaceHostIndex.has(workspaceId) && api) {
+        try {
+          setSnapshot(await api.snapshot());
+        } catch (error) {
+          toast({
+            variant: "warning",
+            title: "Tasks archived, but the list did not refresh",
+            description: error instanceof Error ? error.message : undefined,
+          });
+        }
+      }
     },
     [
       api,
       apiFor,
+      selectedThread,
       selectedWorkspaceId,
       setActionError,
       setSelectedThreadId,

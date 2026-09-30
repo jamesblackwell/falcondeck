@@ -98,6 +98,15 @@ export function archivedThreadsOf(
   return group.archivedThreads ?? EMPTY_ARCHIVED_THREADS
 }
 
+export function canBulkArchiveThread(
+  thread: Pick<ThreadSummary, 'is_archived' | 'status' | 'queued_turns'>,
+): boolean {
+  return !thread.is_archived &&
+    thread.status !== 'running' &&
+    thread.status !== 'waiting_for_input' &&
+    thread.queued_turns.length === 0
+}
+
 export function buildProjectGroups(
   workspaces: WorkspaceSummary[],
   threads: ThreadSummary[],

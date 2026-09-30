@@ -7104,6 +7104,22 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
     let mut running_thread = active_thread.clone();
     running_thread.id = "thread-running".to_string();
     running_thread.status = ThreadStatus::Running;
+    let mut waiting_thread = active_thread.clone();
+    waiting_thread.id = "thread-waiting".to_string();
+    waiting_thread.status = ThreadStatus::WaitingForInput;
+    waiting_thread.updated_at = Utc::now() - Duration::seconds(1);
+    let mut queued_thread = active_thread.clone();
+    queued_thread.id = "thread-queued".to_string();
+    queued_thread.updated_at = Utc::now() - Duration::seconds(2);
+    queued_thread
+        .queued_turns
+        .push(falcondeck_core::QueuedTurnSummary {
+            id: "queued-1".to_string(),
+            preview: "Follow up".to_string(),
+            text: "Follow up".to_string(),
+            attachment_count: 0,
+            queued_at: Utc::now(),
+        });
 
     app.inner.workspaces.lock().await.insert(
         workspace_id.clone(),
@@ -7130,26 +7146,38 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
             agy_runtime: None,
             opencode_runtime: None,
             acp_runtimes: HashMap::new(),
-            threads: [active_thread, archived_thread, running_thread]
-                .into_iter()
-                .map(|thread| (thread.id.clone(), super::ManagedThread::new(thread)))
-                .collect(),
+            threads: [
+                active_thread,
+                archived_thread,
+                running_thread,
+                waiting_thread,
+                queued_thread,
+            ]
+            .into_iter()
+            .map(|thread| (thread.id.clone(), super::ManagedThread::new(thread)))
+            .collect(),
         },
     );
 
     let mut events = app.subscribe();
     assert!(app.archive_all_threads(&workspace_id).await.unwrap().ok);
     let snapshot = app.snapshot().await;
-    assert!(snapshot.threads.iter().all(|thread| thread.is_archived));
-    assert_eq!(
+    let thread = |id: &str| {
         snapshot
             .threads
             .iter()
-            .find(|thread| thread.id == "thread-running")
+            .find(|thread| thread.id == id)
             .unwrap()
-            .status,
-        ThreadStatus::Running
+    };
+    assert!(thread("thread-active").is_archived);
+    assert_eq!(
+        snapshot.workspaces[0].current_thread_id.as_deref(),
+        Some("thread-running")
     );
+    assert!(!thread("thread-running").is_archived);
+    assert!(!thread("thread-waiting").is_archived);
+    assert!(!thread("thread-queued").is_archived);
+    assert_eq!(thread("thread-running").status, ThreadStatus::Running);
     assert!(matches!(
         events.try_recv().unwrap().event,
         UnifiedEvent::Snapshot { .. }
@@ -7158,6 +7186,29 @@ async fn archive_all_threads_updates_once_and_is_idempotent() {
 
     assert!(app.archive_all_threads(&workspace_id).await.unwrap().ok);
     assert!(events.try_recv().is_err());
+
+    app.archive_thread(&workspace_id, "thread-running")
+        .await
+        .unwrap();
+    assert_eq!(
+        app.snapshot().await.workspaces[0]
+            .current_thread_id
+            .as_deref(),
+        Some("thread-waiting")
+    );
+    app.archive_thread(&workspace_id, "thread-waiting")
+        .await
+        .unwrap();
+    assert_eq!(
+        app.snapshot().await.workspaces[0]
+            .current_thread_id
+            .as_deref(),
+        Some("thread-queued")
+    );
+    app.archive_thread(&workspace_id, "thread-queued")
+        .await
+        .unwrap();
+    assert_eq!(app.snapshot().await.workspaces[0].current_thread_id, None);
 }
 
 #[tokio::test]

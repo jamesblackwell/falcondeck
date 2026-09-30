@@ -15,6 +15,7 @@ import {
 
 import {
   archivedThreadsOf,
+  canBulkArchiveThread,
   compareThreads,
   forkProviderOptions,
   filterProjectGroupsByExtensions,
@@ -93,6 +94,13 @@ const RELATIVE_TIME_TICK_MS = 60_000;
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500;
 const WORKSPACE_DRAG_THRESHOLD_PX = 4;
 const PRIORITY_THREAD_COMPARATOR = compareThreads("priority");
+
+function defaultProjectThreadId(group: ProjectGroup): string | null {
+  const currentId = group.workspace.current_thread_id;
+  return group.threads.find((thread) => thread.id === currentId)?.id ??
+    group.threads[0]?.id ??
+    null;
+}
 
 type SidebarEmptyState = {
   title: string;
@@ -1031,8 +1039,7 @@ const ProjectGroupRow = memo(function ProjectGroupRow({
 }) {
   const workspaceId = group.workspace.id;
   const workspacePath = group.workspace.path;
-  const defaultThreadId =
-    group.workspace.current_thread_id ?? group.threads[0]?.id ?? null;
+  const defaultThreadId = defaultProjectThreadId(group);
 
   const dragHandleProps = useMemo(
     () =>
@@ -1828,8 +1835,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         groups.map((group) => [
           group.workspace.id,
           {
-            initialThreadId:
-              group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
+            initialThreadId: defaultProjectThreadId(group),
             threadIds: new Set(group.threads.map((thread) => thread.id)),
           },
         ]),
@@ -2235,9 +2241,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
       const isChats = workspaceId === CHATS_CONTEXT_MENU_ID;
-      const activeCount = isChats
-        ? 0
-        : (groups.find((group) => group.workspace.id === workspaceId)?.threads.length ?? 0);
+      const hasArchivableThreads = !isChats && Boolean(
+        groups
+          .find((group) => group.workspace.id === workspaceId)
+          ?.threads.some(canBulkArchiveThread),
+      );
       const archivedCount = isChats
         ? archivedChatEntries.length
         : archivedThreadsOf(
@@ -2259,7 +2267,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !canClose &&
         !canHide &&
         !canRemove &&
-        (!onArchiveAllThreads || activeCount === 0) &&
+        (!onArchiveAllThreads || !hasArchivableThreads) &&
         archivedCount === 0 &&
         !viewingArchived
       ) {
@@ -3275,13 +3283,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             ? (workspaceIcons?.[workspaceContextMenu.workspaceId] ?? { mode: "auto" })
             : undefined
         }
-        activeCount={
-          workspaceContextMenu == null
-            ? 0
-            : (groups.find(
-                (group) => group.workspace.id === workspaceContextMenu.workspaceId,
-              )?.threads.length ?? 0)
-        }
+        hasArchivableThreads={Boolean(
+          workspaceContextMenu &&
+            groups
+              .find((group) => group.workspace.id === workspaceContextMenu.workspaceId)
+              ?.threads.some(canBulkArchiveThread),
+        )}
         archivedCount={
           workspaceContextMenu == null
             ? 0

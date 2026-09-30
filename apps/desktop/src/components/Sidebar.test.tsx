@@ -58,6 +58,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     is_pinned: false,
     is_pinned_in_project: false,
     goal: null,
+    queued_turns: [],
+    variant: null,
     agent: {
       model_id: null,
       reasoning_effort: null,
@@ -1620,9 +1622,10 @@ describe("DesktopSidebar", () => {
 
     expect(onArchiveAllThreads).not.toHaveBeenCalled();
     const dialog = screen.getByRole("dialog", {
-      name: "Archive all tasks in falcondeck?",
+      name: "Archive tasks in falcondeck?",
     });
-    expect(dialog).toHaveTextContent("including tasks hidden by filters");
+    expect(dialog).toHaveTextContent("including those hidden by filters");
+    expect(dialog).toHaveTextContent("running, waiting for input, or holding queued messages");
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(onArchiveAllThreads).not.toHaveBeenCalled();
 
@@ -1633,6 +1636,35 @@ describe("DesktopSidebar", () => {
       expect(onArchiveAllThreads).toHaveBeenCalledOnce();
       expect(onArchiveAllThreads).toHaveBeenCalledWith("workspace-1");
     });
+  });
+
+  it("does not reopen an archived task when a project is selected", () => {
+    const onSelectWorkspace = vi.fn();
+    const { rerenderSidebar } = renderSidebar({
+      onSelectWorkspace,
+      selectedThreadId: null,
+      groups: [{
+        workspace: workspace({ current_thread_id: "thread-1" }),
+        threads: [],
+        archivedThreads: [thread({ is_archived: true })],
+      }],
+    });
+
+    const project = screen.getByRole("button", { name: "falcondeck" });
+    fireEvent.click(project);
+    fireEvent.click(project);
+    expect(onSelectWorkspace).toHaveBeenCalledWith("workspace-1", null);
+
+    rerenderSidebar({
+      groups: [{
+        workspace: workspace({ current_thread_id: "thread-1" }),
+        threads: [thread({ id: "thread-2", title: "Visible thread" })],
+        archivedThreads: [thread({ is_archived: true })],
+      }],
+    });
+    fireEvent.click(project);
+    fireEvent.click(project);
+    expect(onSelectWorkspace).toHaveBeenCalledWith("workspace-1", "thread-2");
   });
 
   it("keeps bulk archive errors visible and omits the action for empty projects", async () => {
@@ -1646,6 +1678,43 @@ describe("DesktopSidebar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     rerenderSidebar({ groups: [{ workspace: workspace(), threads: [] }] });
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.queryByRole("menuitem", { name: "Archive all" })).not.toBeInTheDocument();
+  });
+
+  it("keeps active and queued tasks out of bulk archive", () => {
+    const { rerenderSidebar } = renderSidebar({
+      groups: [{ workspace: workspace(), threads: [thread({ status: "running" })] }],
+    });
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.queryByRole("menuitem", { name: "Archive all" })).not.toBeInTheDocument();
+
+    rerenderSidebar({
+      groups: [
+        { workspace: workspace(), threads: [thread({ status: "waiting_for_input" })] },
+      ],
+    });
+    fireEvent.contextMenu(screen.getByText("falcondeck"));
+    expect(screen.queryByRole("menuitem", { name: "Archive all" })).not.toBeInTheDocument();
+
+    rerenderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({
+              queued_turns: [{
+                id: "queued-1",
+                preview: "Follow up",
+                text: "Follow up",
+                attachment_count: 0,
+                queued_at: "2026-03-15T10:00:00Z",
+              }],
+            }),
+          ],
+        },
+      ],
+    });
     fireEvent.contextMenu(screen.getByText("falcondeck"));
     expect(screen.queryByRole("menuitem", { name: "Archive all" })).not.toBeInTheDocument();
   });
