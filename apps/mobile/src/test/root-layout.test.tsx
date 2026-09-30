@@ -11,7 +11,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/theme/unistyles', () => ({}))
 vi.mock('react-native-gesture-handler', () => ({ GestureHandlerRootView: 'Root' }))
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaProvider: 'SafeArea' }))
-vi.mock('react-native', () => ({ InteractionManager: { runAfterInteractions: mocks.schedule } }))
+vi.mock('react-native', () => ({
+  InteractionManager: { runAfterInteractions: mocks.schedule },
+  AppState: { currentState: 'active', addEventListener: () => ({ remove: vi.fn() }) },
+}))
 vi.mock('expo-router', () => ({ Slot: 'Slot', useRouter: () => ({ navigate: vi.fn() }) }))
 vi.mock('expo-status-bar', () => ({ StatusBar: 'StatusBar' }))
 vi.mock('expo-splash-screen', () => ({ preventAutoHideAsync: vi.fn(), hideAsync: vi.fn() }))

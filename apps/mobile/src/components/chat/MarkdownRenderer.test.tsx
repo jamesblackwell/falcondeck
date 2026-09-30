@@ -671,7 +671,7 @@ describe("MarkdownRenderer", () => {
     expect(textOf(renderer)).not.toContain("flowchart TD");
   });
 
-  it("renders a closed mermaid fence while streaming", async () => {
+  it("keeps mermaid source while streaming and renders the settled diagram", async () => {
     setMermaidAssetLoader(async () => "window.mermaid={}");
     const renderer = renderComponent(
       <MarkdownRenderer
@@ -682,6 +682,12 @@ describe("MarkdownRenderer", () => {
     await act(async () => {
       await Promise.resolve();
     });
+    expect(textOf(renderer)).not.toContain("Source");
+    expect(textOf(renderer)).toContain("flowchart TD");
+    act(() => renderer.update(
+      <MarkdownRenderer text={"```mermaid\nflowchart TD\n  A-->B\n```"} />,
+    ));
+    await act(async () => { await Promise.resolve(); });
     expect(textOf(renderer)).toContain("Source");
     expect(textOf(renderer)).not.toContain("flowchart TD");
   });

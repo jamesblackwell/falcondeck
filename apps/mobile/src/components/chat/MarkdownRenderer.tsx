@@ -3,6 +3,7 @@ import {
   memo,
   useContext,
   useMemo,
+  useState,
   type ComponentProps,
   type ReactNode,
 } from "react";
@@ -25,6 +26,7 @@ import {
 } from "@falcondeck/client-core";
 
 import { Text } from "@/components/ui";
+import { createStreamingMarkdownParser } from '@/lib/streaming-markdown';
 import { CodeBlock } from "./CodeBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { useExternalUrl } from "./useExternalUrl";
@@ -1157,6 +1159,9 @@ export const MarkdownRenderer = memo(
     compact = false,
   }: MarkdownRendererProps) {
     const parsedText = useStreamingText(text, streaming);
+    const [parseStreaming] = useState(() =>
+      createStreamingMarkdownParser<MarkdownNode, MarkdownRoot>(parseMarkdown),
+    );
 
     const renderedBlocks = useMemo(() => {
       const segments = interpretDirectives
@@ -1167,8 +1172,11 @@ export const MarkdownRenderer = memo(
       // order around the native annotations.
       const singleMarkdownSegment =
         segments.length === 1 && segments[0].kind === "markdown" ? segments[0] : null;
-      const cleanTree = parseMarkdown(
-        singleMarkdownSegment ? singleMarkdownSegment.text : stripAgentDirectiveLines(parsedText),
+      const cleanTree = parseStreaming(
+        normalizeMarkdownForStreaming(
+          singleMarkdownSegment ? singleMarkdownSegment.text : stripAgentDirectiveLines(parsedText),
+        ),
+        streaming && singleMarkdownSegment !== null,
       );
       const definitions = buildMarkdownDefinitions(cleanTree);
       const definitionFooter = markdownDefinitionFooter(cleanTree);
@@ -1205,7 +1213,7 @@ export const MarkdownRenderer = memo(
         );
       });
       return blocks;
-    }, [highlightCommands, interpretDirectives, parsedText, streaming]);
+    }, [highlightCommands, interpretDirectives, parseStreaming, parsedText, streaming]);
 
     return (
       <CompactMarkdownContext.Provider value={compact}>
