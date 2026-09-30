@@ -349,7 +349,8 @@ The desktop shell has two optional panels around the main column.
 - `⌘B` toggles the left sidebar; `⌥⌘B` toggles the right side panel.
 - Both toggles are also exposed as icon buttons with `aria-pressed` reflecting visibility, so the state is discoverable without the shortcut.
 - Visibility persists across launches. The sidebar defaults to visible, the right panel to hidden.
-- Hiding a panel unmounts it rather than shrinking it to zero width.
+- A hidden left sidebar keeps its contents mounted at zero width. Hovering at the far left edge reveals it over the main column until the pointer leaves, without changing the saved visibility.
+- The right panel unmounts its contents after the close animation.
 
 ### Focus and keyboard access
 

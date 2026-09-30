@@ -68,6 +68,12 @@ body {
   margin: 0;
 }
 
+/* When the project sidebar is hidden, the main header sits beneath the native
+   macOS window controls. Keep its leading content clear of that corner. */
+.desktop-main--sidebar-collapsed > section > [data-tauri-drag-region]:first-child {
+  padding-left: 86px;
+}
+
 /* Terminal palette. Surfaces and foreground follow the active app theme via
    the shared tokens; the 16 ANSI colors are concrete values tuned per
    light/dark because terminal output needs fixed hue contrast. The terminal

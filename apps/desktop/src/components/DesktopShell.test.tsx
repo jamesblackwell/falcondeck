@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { DesktopShell } from './DesktopShell'
@@ -95,6 +95,53 @@ describe('DesktopShell panel collapse', () => {
       />,
     )
     expect(screen.getByText('sidebar content').closest('[inert]')).toBeNull()
+  })
+
+  it('peeks the mounted sidebar from the left edge without expanding the layout', () => {
+    const { container, rerender } = renderShell({ sidebarVisible: true, railVisible: false })
+    rerender(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        rail={<div>rail content</div>}
+        sidebarVisible={false}
+        railVisible={false}
+      />,
+    )
+    const sidebar = screen.getByText('sidebar content')
+    const panel = container.querySelector<HTMLElement>('[data-panel]#sidebar')
+    const trigger = container.querySelector('[data-sidebar-peek-trigger]')
+
+    expect(sidebar.closest('[inert]')).not.toBeNull()
+    expect(screen.getByText('main content').parentElement).toHaveClass('desktop-main--sidebar-collapsed')
+    expect(trigger).not.toBeNull()
+    fireEvent.pointerEnter(trigger!, { pointerType: 'touch' })
+    expect(sidebar.closest('[inert]')).not.toBeNull()
+
+    fireEvent.pointerEnter(trigger!, { pointerType: 'mouse' })
+    const peek = sidebar.closest('[data-peeking]')
+    expect(peek).not.toBeNull()
+    expect(sidebar.closest('[inert]')).toBeNull()
+    expect(panel?.style.flexGrow).toBe('0')
+
+    fireEvent.pointerLeave(peek!, { pointerType: 'mouse' })
+    expect(sidebar.closest('[inert]')).not.toBeNull()
+    expect(screen.getByText('sidebar content')).toBe(sidebar)
+    expect(container.querySelector('[data-sidebar-peek-trigger]')).not.toBeNull()
+  })
+
+  it('does not peek while another view owns the left edge', () => {
+    const { container } = render(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        sidebarVisible={false}
+        sidebarPeekEnabled={false}
+      />,
+    )
+
+    expect(container.querySelector('[data-sidebar-peek-trigger]')).toBeNull()
+    expect(screen.getByText('sidebar content').closest('[inert]')).not.toBeNull()
   })
 
   it('collapses through flex-grow, the property the shell transitions', () => {

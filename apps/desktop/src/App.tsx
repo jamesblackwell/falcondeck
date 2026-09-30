@@ -6452,6 +6452,7 @@ function AppInner() {
         // Settings takes over the window: the project sidebar steps aside so
         // its own nav owns the left edge, and comes back on "Back to app".
         sidebarVisible={sidebarVisible && !isSettingsOpen}
+        sidebarPeekEnabled={!isSettingsOpen}
         railVisible={railVisible}
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}

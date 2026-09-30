@@ -10,9 +10,11 @@ export function ResizableShell({
   children,
   className,
   animating = false,
+  overlay,
 }: {
   children: React.ReactNode
   className?: string
+  overlay?: React.ReactNode
   /**
    * True while a panel is collapsing or expanding. Only then do panels get a
    * flex transition — leaving it on permanently would make separator drags
@@ -31,6 +33,7 @@ export function ResizableShell({
           {children}
         </Group>
       </div>
+      {overlay}
     </div>
   )
 }
@@ -69,6 +72,8 @@ export function ResizablePanel({
 export function ResizableSidePanel({
   children,
   open,
+  peek = false,
+  peekWidth,
   side,
   className,
   contentWidth,
@@ -76,9 +81,14 @@ export function ResizableSidePanel({
   minSize,
   id,
   onCollapsedByDrag,
+  onOpenResize,
+  onPeekPointerLeave,
 }: {
   children: React.ReactNode
   open: boolean
+  /** Show collapsed content over the main panel without changing the group layout. */
+  peek?: boolean
+  peekWidth?: string
   side: 'left' | 'right'
   className?: string
   /** Width the content holds onto while the panel animates shut. */
@@ -88,7 +98,10 @@ export function ResizableSidePanel({
   id?: string
   /** Fired when a separator drag pushes the panel past its collapse threshold. */
   onCollapsedByDrag?: () => void
+  onOpenResize?: (percentage: number) => void
+  onPeekPointerLeave?: React.PointerEventHandler<HTMLDivElement>
 }) {
+  const peeking = peek && !open
   const panelRef = React.useRef<PanelImperativeHandle | null>(null)
   const openRef = React.useRef(open)
   openRef.current = open
@@ -144,12 +157,15 @@ export function ResizableSidePanel({
       defaultSize={initialSize}
       minSize={minSize}
       id={id}
-      className={cn('relative min-h-0', className)}
+      className={cn('relative min-h-0', peeking && 'z-20', className)}
       // Panel applies its own inline `overflow: auto`, so clipping the
       // sliding content has to be set here rather than via a class.
-      style={{ overflow: 'hidden' }}
+      style={{ overflow: peeking ? 'visible' : 'hidden' }}
       onResize={(size, _id, previousSize) => {
-        if (size.asPercentage > 0) return
+        if (size.asPercentage > 0) {
+          if (openRef.current) onOpenResize?.(size.asPercentage)
+          return
+        }
         // The group reports an initial size with no previous one, and it can
         // report zero before the shell has been measured. Only a transition
         // from a real width is the user dragging the panel shut.
@@ -160,14 +176,16 @@ export function ResizableSidePanel({
       }}
     >
       <div
+        data-peeking={peeking ? '' : undefined}
         className={cn(
-          'absolute inset-y-0 flex w-full [&>*]:min-w-0 [&>*]:flex-1',
+          'absolute inset-y-0 flex [&>*]:min-w-0 [&>*]:flex-1',
           'transition-opacity duration-[var(--fd-duration-fast)] ease-[var(--fd-ease-default)]',
-          side === 'left' ? 'right-0' : 'left-0',
-          open ? 'opacity-100' : 'opacity-0',
+          peeking ? 'left-0' : side === 'left' ? 'right-0' : 'left-0',
+          open || peeking ? 'opacity-100' : 'opacity-0',
         )}
-        style={{ minWidth: contentWidth }}
-        inert={!open ? true : undefined}
+        style={{ minWidth: contentWidth, width: peeking ? peekWidth : '100%' }}
+        inert={!open && !peeking ? true : undefined}
+        onPointerLeave={peeking ? onPeekPointerLeave : undefined}
       >
         {children}
       </div>

@@ -15,6 +15,7 @@ export type DesktopShellProps = {
   bottom?: React.ReactNode
   bottomVisible?: boolean
   sidebarVisible?: boolean
+  sidebarPeekEnabled?: boolean
   railVisible?: boolean
   onSidebarCollapsedByDrag?: () => void
   onRailCollapsedByDrag?: () => void
@@ -101,6 +102,7 @@ export function DesktopShell({
   bottom,
   bottomVisible = true,
   sidebarVisible = true,
+  sidebarPeekEnabled = true,
   railVisible = true,
   onSidebarCollapsedByDrag,
   onRailCollapsedByDrag,
@@ -109,6 +111,13 @@ export function DesktopShell({
   const bottomOpen = Boolean(bottom) && bottomVisible
   const animating = useToggleAnimation([sidebarVisible, railOpen, bottomOpen])
   const [bottomHeight, setBottomHeight] = React.useState(BOTTOM_PANEL_DEFAULT_HEIGHT)
+  const [sidebarPeeking, setSidebarPeeking] = React.useState(false)
+  const [sidebarWidthPercent, setSidebarWidthPercent] = React.useState(20)
+  const showSidebarPeek = !sidebarVisible && sidebarPeekEnabled && sidebarPeeking
+
+  React.useEffect(() => {
+    if (sidebarVisible || !sidebarPeekEnabled) setSidebarPeeking(false)
+  }, [sidebarVisible, sidebarPeekEnabled])
 
   // The rail's contents poll git state, so they are torn down once the close
   // animation has finished rather than kept alive behind a zero-width panel.
@@ -123,20 +132,43 @@ export function DesktopShell({
   }, [railOpen])
 
   const shell = (
-    <ResizableShell animating={animating} className={bottom ? 'h-full' : undefined}>
+    <ResizableShell
+      animating={animating}
+      className={bottom ? 'h-full' : undefined}
+      overlay={
+        !sidebarVisible && sidebarPeekEnabled && !showSidebarPeek ? (
+          <div
+            data-sidebar-peek-trigger=""
+            aria-hidden="true"
+            className="absolute inset-y-0 left-0 z-10 w-2"
+            onPointerEnter={(event) => {
+              if (event.pointerType === 'mouse') setSidebarPeeking(true)
+            }}
+          />
+        ) : null
+      }
+    >
       <ResizableSidePanel
         id="sidebar"
         side="left"
         open={sidebarVisible}
+        peek={showSidebarPeek}
+        peekWidth={`max(200px, ${sidebarWidthPercent}vw)`}
         defaultSize="20%"
         minSize="200px"
         contentWidth="200px"
         onCollapsedByDrag={onSidebarCollapsedByDrag}
+        onOpenResize={setSidebarWidthPercent}
+        onPeekPointerLeave={() => setSidebarPeeking(false)}
       >
         {sidebar}
       </ResizableSidePanel>
       <ResizeHandle collapsed={!sidebarVisible} />
-      <ResizablePanel minSize="400px" id="main">
+      <ResizablePanel
+        minSize="400px"
+        id="main"
+        className={!sidebarVisible ? 'desktop-main--sidebar-collapsed' : undefined}
+      >
         {main}
       </ResizablePanel>
       {/* The rail panel stays in the group even with no rail to show. Taking
