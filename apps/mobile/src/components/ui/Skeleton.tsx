@@ -9,6 +9,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import { useAnimationActive } from './AnimationVisibility'
 
 interface SkeletonProps extends ViewProps {
   width?: number | string
@@ -26,14 +27,15 @@ export const Skeleton = memo(function Skeleton({
   const { theme } = useUnistyles()
   const opacity = useSharedValue(0.4)
   const reducedMotion = useReducedMotion()
+  const active = useAnimationActive()
 
   useEffect(() => {
     cancelAnimation(opacity)
-    opacity.value = reducedMotion
+    opacity.value = reducedMotion || !active
       ? 0.65
       : withRepeat(withTiming(1, { duration: 1000 }), -1, true)
     return () => cancelAnimation(opacity)
-  }, [opacity, reducedMotion])
+  }, [active, opacity, reducedMotion])
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,

@@ -9,7 +9,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { FlashList } from "@shopify/flash-list";
 import { ChevronLeft, MoreHorizontal, SquarePen } from "lucide-react-native";
-import { DrawerActions } from "@react-navigation/native";
+import { DrawerActions, useIsFocused } from "@react-navigation/native";
 import { useDrawerStatus } from "@react-navigation/drawer";
 import { useNavigation } from "expo-router";
 import {
@@ -117,11 +117,13 @@ import {
 import { CONNECTION_COPY } from "@/lib/connection-copy";
 import { sessionSendBlockReason } from "@/lib/session-status";
 import { READING_MAX_WIDTH, useTabletLayout } from "@/hooks/useTabletLayout";
+import { AnimationVisibility } from '@/components/ui/AnimationVisibility';
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
 const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = [];
 
 export default function HomeScreen() {
+  const isFocused = useIsFocused();
   const insets = useSafeAreaInsets();
   const { theme } = useUnistyles();
   const navigation = useNavigation();
@@ -1279,6 +1281,7 @@ export default function HomeScreen() {
   );
 
   return (
+    <AnimationVisibility active={isFocused && !pauseLiveTranscript}>
     <View
       style={[
         styles.container,
@@ -1634,6 +1637,7 @@ export default function HomeScreen() {
 
       {isConnectionDebugMounted ? <ConnectionDebugScreen /> : null}
     </View>
+    </AnimationVisibility>
   );
 }
 

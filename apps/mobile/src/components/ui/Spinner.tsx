@@ -9,6 +9,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { Loader2 } from 'lucide-react-native'
+import { useAnimationActive } from './AnimationVisibility'
 
 interface SpinnerProps {
   size?: number
@@ -24,9 +25,10 @@ interface SpinnerProps {
 export const Spinner = memo(function Spinner({ size = 14, color }: SpinnerProps) {
   const rotation = useSharedValue(0)
   const reducedMotion = useReducedMotion()
+  const active = useAnimationActive()
 
   useEffect(() => {
-    if (reducedMotion) {
+    if (reducedMotion || !active) {
       cancelAnimation(rotation)
       rotation.value = 0
       return
@@ -38,7 +40,7 @@ export const Spinner = memo(function Spinner({ size = 14, color }: SpinnerProps)
     return () => {
       cancelAnimation(rotation)
     }
-  }, [reducedMotion, rotation])
+  }, [active, reducedMotion, rotation])
 
   const style = useAnimatedStyle(() => ({
     transform: [{ rotate: `${rotation.value}deg` }],

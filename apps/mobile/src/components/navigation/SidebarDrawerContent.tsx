@@ -24,6 +24,7 @@ import {
 } from "@falcondeck/client-core";
 
 import { useRelayStore, useSessionStore, useThrottledSnapshot } from "@/store";
+import { AnimationVisibility } from '@/components/ui/AnimationVisibility';
 import { SidebarView } from "./SidebarView";
 import { useTabletLayout } from "@/hooks/useTabletLayout";
 import { triggerThreadSelectionHaptic } from "@/lib/haptics";
@@ -149,6 +150,7 @@ export function SidebarDrawerContent({
   }, [handleClose, router]);
 
   return (
+    <AnimationVisibility active={isOpen}>
     <SidebarView
       isVisible={isOpen}
       syncIndex={snapshot?.sync_index}
@@ -172,5 +174,6 @@ export function SidebarDrawerContent({
       workspaceColors={snapshot?.preferences.workspace_colors}
       hiddenWorkspaceIds={snapshot?.preferences.hidden_workspace_ids}
     />
+    </AnimationVisibility>
   );
 }

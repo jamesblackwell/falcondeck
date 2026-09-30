@@ -6,6 +6,7 @@ import * as Reanimated from 'react-native-reanimated'
 
 import { ActivityDiamond } from './ActivityDiamond'
 import { cleanup, renderComponent } from '@/test/render'
+import { AnimationVisibility } from './AnimationVisibility'
 
 const setReducedMotion = (
   Reanimated as unknown as { __setReducedMotionForTests: (value: boolean) => void }
@@ -46,4 +47,19 @@ describe('ActivityDiamond clock', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('releases the driver when covered and restarts when revealed', () => {
+    const start = vi.fn(), stop = vi.fn()
+    const loop = vi.spyOn(Animated, 'loop').mockReturnValue({ start, stop, reset: vi.fn() })
+    const render = (active: boolean) => (
+      <AnimationVisibility active={active}><ActivityDiamond color="#fff" /></AnimationVisibility>
+    )
+    const tree = renderComponent(render(false))
+    expect(loop).not.toHaveBeenCalled()
+    act(() => tree.update(render(true)))
+    expect(start).toHaveBeenCalledTimes(1)
+    act(() => tree.update(render(false)))
+    expect(stop).toHaveBeenCalledTimes(1)
+    act(() => tree.update(render(true)))
+    expect(start).toHaveBeenCalledTimes(2)
+  })
 })

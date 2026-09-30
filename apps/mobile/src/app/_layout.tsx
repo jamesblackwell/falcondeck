@@ -23,6 +23,7 @@ import {
   hydrateEncryptedComposerPersistence,
 } from '@/store/ui-store'
 import { OtaUpdateBanner } from '@/features/updates/OtaUpdateBanner'
+import { ForegroundAnimations } from '@/components/ui/AnimationVisibility'
 
 SplashScreen.preventAutoHideAsync()
 
@@ -145,6 +146,7 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
+        <ForegroundAnimations>
         <StatusBar style={rt.themeName === 'light' ? 'dark' : 'light'} />
         <Slot />
         {/* sync.index must capture the restored selection. Connecting before
@@ -152,6 +154,7 @@ export default function RootLayout() {
             reconcile the restored conversation back to an empty composer. */}
         {isHydrated ? <RelayConnection /> : null}
         <OtaUpdateBanner />
+        </ForegroundAnimations>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   )

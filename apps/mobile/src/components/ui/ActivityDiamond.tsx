@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo } from 'react'
 import { Animated, Easing } from 'react-native'
 import { useReducedMotion } from 'react-native-reanimated'
 import { StyleSheet } from 'react-native-unistyles'
+import { useAnimationActive } from './AnimationVisibility'
 
 interface ActivityDiamondProps {
   size?: number
@@ -70,12 +71,13 @@ export const ActivityDiamond = memo(function ActivityDiamond({
   variant = 'solid',
 }: ActivityDiamondProps) {
   const reducedMotion = useReducedMotion()
+  const active = useAnimationActive()
 
   useEffect(() => {
-    if (reducedMotion) return
+    if (reducedMotion || !active) return
     acquireClock()
     return releaseClock
-  }, [reducedMotion])
+  }, [active, reducedMotion])
 
   const diamondStyle = useMemo(
     () => ({
@@ -88,7 +90,7 @@ export const ActivityDiamond = memo(function ActivityDiamond({
     [color, size, variant],
   )
 
-  return <Animated.View accessible={false} style={[styles.base, diamondStyle, reducedMotion ? staticStyle : animatedStyle]} />
+  return <Animated.View accessible={false} style={[styles.base, diamondStyle, reducedMotion || !active ? staticStyle : animatedStyle]} />
 })
 
 const styles = StyleSheet.create({

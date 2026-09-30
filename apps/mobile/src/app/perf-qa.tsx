@@ -7,6 +7,7 @@ import { ActivityDiamond } from '@/components/ui/ActivityDiamond'
 import { MarkdownRenderer } from '@/components/chat/MarkdownRenderer'
 import { Text } from '@/components/ui/Text'
 import { samplePerfStats } from '@/lib/perf-stats'
+import { AnimationVisibility } from '@/components/ui/AnimationVisibility'
 
 const PARAGRAPH = 'The agent checks **CPU usage**, memory, and responsiveness. Keep the completed paragraphs stable while the current answer streams.\n\n'
 const DOCUMENT = PARAGRAPH.repeat(80)
@@ -23,6 +24,7 @@ function Workload({ scenario }: { scenario: string }) {
     return () => clearInterval(timer)
   }, [scenario])
   return (
+    <AnimationVisibility active={scenario !== 'hidden'}>
     <View style={{ flex: 1, backgroundColor: theme.colors.surface[0], paddingTop: 64 }}>
       <Text accessibilityLabel={`perf-ready-${scenario}`} variant="label">Performance workload: {scenario}</Text>
       {scenario === 'diamonds' || scenario === 'diamond' || scenario === 'hidden' ? (
@@ -36,6 +38,7 @@ function Workload({ scenario }: { scenario: string }) {
         <ScrollView><MarkdownRenderer streaming text={DOCUMENT + 'Streaming tokens '.repeat(1 + tick % 80)} /></ScrollView>
       ) : null}
     </View>
+    </AnimationVisibility>
   )
 }
 

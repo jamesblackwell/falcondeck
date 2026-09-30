@@ -8,6 +8,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { StyleSheet } from 'react-native-unistyles'
+import { useAnimationActive } from './AnimationVisibility'
 
 type Status = 'connected' | 'connecting' | 'disconnected' | 'error' | 'idle' | 'active'
 
@@ -24,16 +25,17 @@ export const StatusIndicator = memo(function StatusIndicator({
 }: StatusIndicatorProps) {
   const opacity = useSharedValue(1)
   const reducedMotion = useReducedMotion()
+  const active = useAnimationActive()
 
   useEffect(() => {
     cancelAnimation(opacity)
-    if (pulse && !reducedMotion) {
+    if (pulse && !reducedMotion && active) {
       opacity.value = withRepeat(withTiming(0.3, { duration: 800 }), -1, true)
     } else {
-      opacity.value = reducedMotion ? 1 : withTiming(1, { duration: 150 })
+      opacity.value = reducedMotion || !active ? 1 : withTiming(1, { duration: 150 })
     }
     return () => cancelAnimation(opacity)
-  }, [pulse, reducedMotion, opacity])
+  }, [active, pulse, reducedMotion, opacity])
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
