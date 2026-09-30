@@ -49,5 +49,17 @@ Simulator CPU/memory trends are useful; battery consumption and thermal
 behavior require physical-device verification. Release-mode profiling is also
 recommended by [React Native](https://reactnative.dev/docs/profiling).
 
+The native sampler's resource regression runs directly against production
+Swift source on macOS:
+
+```sh
+xcrun swiftc apps/mobile/modules/falcondeck-perf/ios/FalconDeckPerfModule.swift \
+  scripts/mobile-perf/check-sampler.swift -o /tmp/falcondeck-check-sampler
+/tmp/falcondeck-check-sampler
+```
+
+It checks valid CPU/memory results and zero thread-reference growth over 1,000
+samples. The `sampling` simulator scenario separately verifies the Expo binding.
+
 When finished, shut down and delete only the dedicated simulator:
 `xcrun simctl shutdown "$task_sim"` then `xcrun simctl delete "$task_sim"`.

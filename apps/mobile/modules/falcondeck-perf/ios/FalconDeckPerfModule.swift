@@ -1,4 +1,5 @@
 import Darwin
+#if canImport(ExpoModulesCore)
 import ExpoModulesCore
 
 /**
@@ -11,17 +12,22 @@ public class FalconDeckPerfModule: Module {
     Name("FalconDeckPerf")
 
     Function("sample") { () -> [String: Double] in
-      let (cpuPercent, threadCount) = Self.cpuUsage()
+      let (cpuPercent, threadCount) = PerformanceSampler.cpuUsage()
       return [
         "cpuPercent": cpuPercent,
-        "memoryBytes": Self.memoryFootprintBytes(),
+        "memoryBytes": PerformanceSampler.memoryFootprintBytes(),
         "threadCount": Double(threadCount),
       ]
     }
   }
+}
+#endif
+
+// Kept independent of Expo so the native resource lifecycle can be tested.
+enum PerformanceSampler {
 
   /// phys_footprint matches the number Xcode's memory gauge reports.
-  private static func memoryFootprintBytes() -> Double {
+  static func memoryFootprintBytes() -> Double {
     var info = task_vm_info_data_t()
     var count = mach_msg_type_number_t(
       MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
@@ -37,7 +43,7 @@ public class FalconDeckPerfModule: Module {
 
   /// Sum of per-thread cpu_usage across the task, as a percentage of one
   /// core (so values above 100 mean more than one core busy).
-  private static func cpuUsage() -> (Double, Int) {
+  static func cpuUsage() -> (Double, Int) {
     var threadList: thread_act_array_t?
     var threadCount = mach_msg_type_number_t(0)
     guard task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS,
@@ -45,6 +51,11 @@ public class FalconDeckPerfModule: Module {
       return (-1, 0)
     }
     defer {
+      // task_threads returns owned send rights as well as the array. Releasing
+      // only the array leaked a reference to every thread on every sample.
+      for index in 0..<Int(threadCount) {
+        mach_port_deallocate(mach_task_self_, threads[index])
+      }
       let size = vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.size)
       vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: threads)), size)
     }
