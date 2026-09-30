@@ -413,6 +413,8 @@ export type FalconDeckPreferences = {
   notifications: NotificationPreferences;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   utility_models?: UtilityModelPreferences;
+  /** OpenRouter model used by Rename's Suggest title action. */
+  title_suggestion_model?: string;
   /** Older daemons omit this; `normalizePreferences` always fills it in. */
   computer_use?: ComputerUsePreferences;
 };
@@ -501,6 +503,7 @@ export type UpdatePreferencesPayload = {
   conversation?: UpdateConversationPreferences | null;
   notifications?: UpdateNotificationPreferences | null;
   utility_models?: UpdateUtilityModelPreferences | null;
+  title_suggestion_model?: string;
 };
 
 export type ToolArtifactKind =

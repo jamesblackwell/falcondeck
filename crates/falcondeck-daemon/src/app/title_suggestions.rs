@@ -1,3 +1,4 @@
+use falcondeck_core::DEFAULT_TITLE_SUGGESTION_MODEL;
 use serde_json::{Value, json};
 use tokio::time::Duration;
 
@@ -8,7 +9,6 @@ use super::{
 };
 use crate::error::DaemonError;
 
-const TITLE_MODEL: &str = "openai/gpt-6-luna";
 // Remote RPCs have a roughly 30-second budget, including credential lookup.
 const TITLE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -17,12 +17,26 @@ impl AppState {
         &self,
         prompt: &str,
     ) -> Result<String, DaemonError> {
+        let model = self
+            .inner
+            .preferences
+            .lock()
+            .await
+            .title_suggestion_model
+            .clone();
         let api_key = self.openrouter_key_cached().await?.ok_or_else(|| {
             DaemonError::BadRequest(
                 "Add an OpenRouter API key in Speech settings to suggest a title.".to_string(),
             )
         })?;
-        request_title(&OPENROUTER_CLIENT, OPENROUTER_CHAT_URL, &api_key, prompt).await
+        request_title(
+            &OPENROUTER_CLIENT,
+            OPENROUTER_CHAT_URL,
+            &api_key,
+            &model,
+            prompt,
+        )
+        .await
     }
 }
 
@@ -30,19 +44,23 @@ async fn request_title(
     client: &reqwest::Client,
     url: &str,
     api_key: &str,
+    model: &str,
     prompt: &str,
 ) -> Result<String, DaemonError> {
+    let mut body = json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": prompt }],
+        "max_tokens": 256,
+    });
+    if model == DEFAULT_TITLE_SUGGESTION_MODEL {
+        body["reasoning"] = json!({ "effort": "none" });
+    }
     let response = client
         .post(url)
         .bearer_auth(api_key)
         .header("X-Title", "FalconDeck")
         .timeout(TITLE_TIMEOUT)
-        .json(&json!({
-            "model": TITLE_MODEL,
-            "messages": [{ "role": "user", "content": prompt }],
-            "reasoning": { "effort": "none" },
-            "max_tokens": 80,
-        }))
+        .json(&body)
         .send()
         .await
         .map_err(|error| {
@@ -127,15 +145,27 @@ mod tests {
         let url = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
-        let title = request_title(&reqwest::Client::new(), &url, "test-key", "Recent work")
+        for model in [DEFAULT_TITLE_SUGGESTION_MODEL, "openai/gpt-5.6-luna"] {
+            let title = request_title(
+                &reqwest::Client::new(),
+                &url,
+                "test-key",
+                model,
+                "Recent work",
+            )
             .await
             .unwrap();
-        let (headers, body) = rx.recv().await.unwrap();
-        assert_eq!(title, "Improve Sidebar Search");
-        assert_eq!(headers.get("authorization").unwrap(), "Bearer test-key");
-        assert_eq!(body["model"], TITLE_MODEL);
-        assert_eq!(body["messages"][0]["content"], "Recent work");
-        assert_eq!(body["reasoning"]["effort"], "none");
+            let (headers, body) = rx.recv().await.unwrap();
+            assert_eq!(title, "Improve Sidebar Search");
+            assert_eq!(headers.get("authorization").unwrap(), "Bearer test-key");
+            assert_eq!(body["model"], model);
+            assert_eq!(body["messages"][0]["content"], "Recent work");
+            if model == DEFAULT_TITLE_SUGGESTION_MODEL {
+                assert_eq!(body["reasoning"]["effort"], "none");
+            } else {
+                assert!(body.get("reasoning").is_none());
+            }
+        }
         server.abort();
     }
 

@@ -10,6 +10,12 @@ import { DictationSetup } from "./DictationSetup";
 describe("DictationSetup voice rewrite", () => {
   afterEach(() => window.localStorage.clear());
 
+  it("shows the OpenRouter key for title suggestions with Apple Speech selected", () => {
+    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
+    expect(screen.getByLabelText("API key")).toBeInTheDocument();
+    expect(screen.getByText(/Used for title suggestions/)).toBeInTheDocument();
+  });
+
   it("opens the custom prompt pre-filled with the built-in prompt", () => {
     render(<DictationSetup baseUrl={null} onToast={() => {}} />);
     expect(screen.queryByLabelText("Rewrite prompt")).not.toBeInTheDocument();

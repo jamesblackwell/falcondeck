@@ -341,6 +341,8 @@ const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
   models: [{ provider: "claude", model_id: "haiku" }],
 };
 
+export const DEFAULT_TITLE_SUGGESTION_MODEL = "openai/gpt-6-luna";
+
 const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
   FalconDeckPreferences["computer_use"]
 > = {
@@ -359,6 +361,7 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
   utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
+  title_suggestion_model: DEFAULT_TITLE_SUGGESTION_MODEL,
   computer_use: DEFAULT_COMPUTER_USE_PREFERENCES,
 };
 
@@ -2288,8 +2291,16 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         notifications.suppress_when_desktop_active ?? true,
     },
     utility_models: normalizeUtilityModelPreferences(raw.utility_models),
+    title_suggestion_model: normalizeTitleSuggestionModel(raw.title_suggestion_model),
     computer_use: normalizeComputerUsePreferences(raw.computer_use),
   };
+}
+
+function normalizeTitleSuggestionModel(value: unknown): string {
+  const model = typeof value === "string" ? value.trim() : "";
+  return model && model.length <= 200 && !/\s/.test(model)
+    ? model
+    : DEFAULT_TITLE_SUGGESTION_MODEL;
 }
 
 function normalizeComputerUsePreferences(

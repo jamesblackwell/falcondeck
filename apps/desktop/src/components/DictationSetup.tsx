@@ -80,7 +80,7 @@ type SpeechCredentialFieldProps = {
 };
 
 /**
- * Masked OpenRouter key field against the daemon speech secret. Shared by
+ * Masked OpenRouter key field against the daemon secret. Shared by
  * Settings → Speech and the optional onboarding step so save/remove/status
  * stay one implementation.
  */
@@ -199,7 +199,7 @@ export function SpeechCredentialField({
         {configured === null ? (
           <span className="text-fg-muted">
             {baseUrl
-              ? "Checking speech credentials…"
+              ? "Checking OpenRouter key…"
               : "Connect to this computer to save a key."}
           </span>
         ) : configured ? (
@@ -572,21 +572,15 @@ export function DictationSetup({
             </div>
           ) : null}
 
-          {settings.provider === "open_router" || settings.rewriteEnabled ? (
-            <div className="space-y-5 border-t border-border-subtle pt-5">
-              <SpeechCredentialField
-                baseUrl={baseUrl}
-                onToast={onToast}
-                id="openrouter-speech-key"
-                hint={
-                  settings.provider === "open_router"
-                    ? "Stored on this computer only. The daemon calls OpenRouter directly — paired devices never see the key."
-                    : "Rewrite sends selected text to OpenRouter with this key. Stored on this computer only."
-                }
-                onConfiguredChange={setConfigured}
-              />
-            </div>
-          ) : null}
+          <div className="space-y-5 border-t border-border-subtle pt-5">
+            <SpeechCredentialField
+              baseUrl={baseUrl}
+              onToast={onToast}
+              id="openrouter-speech-key"
+              hint="Used for title suggestions, voice rewrite, and optional cloud speech. Stored on this computer; paired devices never see the key."
+              onConfiguredChange={setConfigured}
+            />
+          </div>
         </SettingsSection>
       )}
 

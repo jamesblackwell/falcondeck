@@ -33,6 +33,7 @@ import {
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 import { BackgroundModelsCard } from './BackgroundModelsCard'
+import { TitleSuggestionModelCard } from './TitleSuggestionModelCard'
 import {
   formatDateTime,
   formatRelative,
@@ -308,6 +309,11 @@ export function GeneralSettingsPanel({
           />
         </SettingList>
       </SettingsSection>
+
+      <TitleSuggestionModelCard
+        preferences={current}
+        onUpdatePreferences={onUpdatePreferences}
+      />
 
       <BackgroundModelsCard
         workspace={workspace}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_TITLE_SUGGESTION_MODEL,
   normalizeConversationItem,
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
@@ -16,6 +17,22 @@ import {
 } from "./normalization";
 import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
+
+describe("rename suggestion model preferences", () => {
+  it("defaults older daemons and preserves a chosen OpenRouter model", () => {
+    expect(normalizePreferences({}).title_suggestion_model).toBe(
+      DEFAULT_TITLE_SUGGESTION_MODEL,
+    );
+    expect(
+      normalizePreferences({ title_suggestion_model: " openai/gpt-5.6-luna " })
+        .title_suggestion_model,
+    ).toBe("openai/gpt-5.6-luna");
+    expect(
+      normalizePreferences({ title_suggestion_model: "invalid model" })
+        .title_suggestion_model,
+    ).toBe(DEFAULT_TITLE_SUGGESTION_MODEL);
+  });
+});
 
 describe("existing-profile consent normalization", () => {
   it("defaults missing and malformed grants to off", () => {

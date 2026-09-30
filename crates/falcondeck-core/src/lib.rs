@@ -57,6 +57,9 @@ pub struct DaemonCapabilities {
     pub computer_use: bool,
 }
 
+/// Default OpenRouter model for on-demand title suggestions.
+pub const DEFAULT_TITLE_SUGGESTION_MODEL: &str = "openai/gpt-6-luna";
+
 /// Global FalconDeck preferences persisted by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FalconDeckPreferences {
@@ -86,6 +89,9 @@ pub struct FalconDeckPreferences {
     /// Cheap models FalconDeck uses for its own background work.
     #[serde(default)]
     pub utility_models: UtilityModelPreferences,
+    /// OpenRouter model used when the user requests a title in the rename dialog.
+    #[serde(default = "default_title_suggestion_model")]
+    pub title_suggestion_model: String,
     /// Host-local computer-use settings. Older daemons omit this.
     #[serde(default)]
     pub computer_use: ComputerUsePreferences,
@@ -102,9 +108,14 @@ impl Default for FalconDeckPreferences {
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
             utility_models: UtilityModelPreferences::default(),
+            title_suggestion_model: default_title_suggestion_model(),
             computer_use: ComputerUsePreferences::default(),
         }
     }
+}
+
+fn default_title_suggestion_model() -> String {
+    DEFAULT_TITLE_SUGGESTION_MODEL.to_string()
 }
 
 /// Host-local computer-use settings persisted with other preferences.
@@ -610,6 +621,9 @@ pub struct UpdatePreferencesRequest {
     /// Optional background utility model updates.
     #[serde(default)]
     pub utility_models: Option<UtilityModelPreferencesPatch>,
+    /// Optional OpenRouter model for on-demand rename suggestions.
+    #[serde(default)]
+    pub title_suggestion_model: Option<String>,
 }
 
 /// Partial update payload for background utility model preferences.

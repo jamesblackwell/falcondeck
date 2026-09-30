@@ -2,13 +2,13 @@
 
 > Status: **Phase 1 implemented** (2026-08-17, extended 2026-09-02) — flag +
 > gating (`shouldShowFirstRunOnboarding`), `OnboardingWizard` (welcome /
-> appearance / fonts / dictation / computer use / optional OpenRouter speech key / tools / project /
+> appearance / fonts / dictation / computer use / optional OpenRouter key / tools / project /
 > finish), rerun control in Settings → General, browser fixture at
 > `/onboarding-qa.html`, and the client-core harness methods (`harnesses`,
 > `refreshHarnesses`, `upgradeHarness`, `harnessUpgradeJob`). Phases 2–4
-> below remain planned. The OpenRouter step in the wizard is the **speech**
-> secret (`/api/speech/openrouter-key`) for read-aloud, voice rewrite, and
-> cloud transcription — not the still-planned OpenCode provider key.
+> below remain planned. The OpenRouter step uses the daemon's shared key
+> (`/api/speech/openrouter-key`) for title suggestions, read-aloud, voice
+> rewrite, and cloud transcription — not the still-planned OpenCode provider key.
 >
 > The Mac app is the entry point into FalconDeck for most new users. A fresh
 > install opens this wizard once the daemon is ready. Every step is skippable;
@@ -37,8 +37,9 @@ sequence:
    off. macOS caches those grants per process, so the step offers Restart
    FalconDeck; the in-progress step is stored device-locally and the wizard
    reopens there after relaunch. Fine-tune stays in Settings → Computer use.
-6. **Optional: OpenRouter** — one speech key on this computer unlocks
-   read-aloud, voice rewrite, and cloud transcription. Continue skips it.
+6. **Optional: OpenRouter** — one key on this computer unlocks title
+   suggestions, read-aloud, voice rewrite, and cloud transcription. Continue
+   skips it.
 7. **Check your tools** — probe installed harnesses (Claude Code, Codex,
    OpenCode, Gemini, Pi), show version / update / sign-in state, offer
    one-click install and update.

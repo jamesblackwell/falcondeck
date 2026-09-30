@@ -13,9 +13,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use falcondeck_core::{
-    AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
-    UpdatePreferencesRequest, WorkspaceIconPreference, crypto::verify_pairing_public_key_bundle,
-    normalize_workspace_colors, normalize_workspace_icons,
+    AgentProvider, ConversationAutoExpandPreferencesPatch, DEFAULT_TITLE_SUGGESTION_MODEL,
+    FalconDeckPreferences, ToolDetailsMode, UpdatePreferencesRequest, WorkspaceIconPreference,
+    crypto::verify_pairing_public_key_bundle, normalize_workspace_colors,
+    normalize_workspace_icons,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -174,6 +175,9 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
     let mut preferences = FalconDeckPreferences::default();
     if let Some(version) = value.get("version").and_then(Value::as_u64) {
         preferences.version = version as u32;
+    }
+    if let Some(model) = value.get("title_suggestion_model").and_then(Value::as_str) {
+        preferences.title_suggestion_model = normalize_title_suggestion_model(model);
     }
 
     if let Some(workspace_order) = value.get("workspace_order").and_then(Value::as_array) {
@@ -370,6 +374,9 @@ pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
+    if let Some(model) = request.title_suggestion_model {
+        preferences.title_suggestion_model = normalize_title_suggestion_model(&model);
+    }
     if let Some(workspace_order) = request.workspace_order {
         preferences.workspace_order = workspace_order
             .into_iter()
@@ -482,6 +489,20 @@ pub(super) fn apply_preferences_patch(
                         choices
                     });
         }
+    }
+}
+
+fn normalize_title_suggestion_model(value: &str) -> String {
+    let model = value.trim();
+    if !model.is_empty()
+        && model.len() <= 200
+        && !model
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        model.to_string()
+    } else {
+        DEFAULT_TITLE_SUGGESTION_MODEL.to_string()
     }
 }
 
@@ -1184,6 +1205,41 @@ mod tests {
         assert_eq!(
             empty_order.utility_models.provider_order,
             falcondeck_core::UtilityModelPreferences::default().provider_order
+        );
+    }
+
+    #[test]
+    fn title_suggestion_model_loads_and_resets_independently_of_utility_models() {
+        assert_eq!(
+            merge_preferences_from_value(json!({})).title_suggestion_model,
+            DEFAULT_TITLE_SUGGESTION_MODEL
+        );
+        let mut preferences = merge_preferences_from_value(json!({
+            "title_suggestion_model": " openai/gpt-5.6-luna "
+        }));
+        assert_eq!(preferences.title_suggestion_model, "openai/gpt-5.6-luna");
+
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                title_suggestion_model: Some("anthropic/claude-haiku-4.5".to_string()),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+        assert_eq!(
+            preferences.title_suggestion_model,
+            "anthropic/claude-haiku-4.5"
+        );
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                title_suggestion_model: Some(" ".to_string()),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+        assert_eq!(
+            preferences.title_suggestion_model,
+            DEFAULT_TITLE_SUGGESTION_MODEL
         );
     }
 

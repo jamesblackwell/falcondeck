@@ -23,7 +23,7 @@ type BackgroundModelsCardProps = {
 }
 
 /**
- * Thread titles run on a cheap model out of band. Most users have only one
+ * Automatic thread titles run on a cheap model out of band. Most users have only one
  * agent CLI installed, so the chain matters more than any single choice —
  * the first provider that is installed and signed in wins.
  */
@@ -67,7 +67,7 @@ export function BackgroundModelsCard({
   return (
     <SettingsSection
       title="Background models"
-      description="FalconDeck runs its own short, tool-free jobs — currently thread titles — on the first provider below that is installed and signed in. Pick each provider's cheapest model; leave a model blank to use that CLI's own default."
+      description="Automatic thread titles run on the first provider below that is installed and signed in. Pick each provider's cheapest model; leave a model blank to use that CLI's own default. Rename suggestions use OpenRouter above."
       actions={
         <Button
           type="button"

@@ -536,9 +536,9 @@ export function OnboardingWizard({
                   Optional: OpenRouter
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  One key on this computer unlocks read-aloud, voice rewrite,
-                  and cloud transcription. Apple Speech dictation works without
-                  it — continue to skip.
+                  One key on this computer unlocks title suggestions,
+                  read-aloud, voice rewrite, and cloud transcription. Apple
+                  Speech dictation works without it — continue to skip.
                 </p>
               </div>
               <div className="mx-auto w-full max-w-lg rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">

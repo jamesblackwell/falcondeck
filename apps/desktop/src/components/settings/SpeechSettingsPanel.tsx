@@ -16,7 +16,7 @@ export function SpeechSettingsPanel({
     <SettingsPage>
       <SettingsPageHeader
         title="Speech"
-        description="Dictate on this computer or configure cloud transcription for paired devices."
+        description="Dictate on this computer or configure the OpenRouter key used for title suggestions, voice rewrite, and cloud speech."
       />
       <DictationSetup baseUrl={baseUrl} onToast={onToast} />
       <DictationHistoryCard baseUrl={baseUrl} onToast={onToast} />

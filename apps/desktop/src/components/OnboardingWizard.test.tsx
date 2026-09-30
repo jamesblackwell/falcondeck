@@ -420,7 +420,7 @@ describe('OnboardingWizard', () => {
     expect(screen.queryByText('Custom prompt')).toBeNull()
   })
 
-  it('offers an optional OpenRouter key for read-aloud and rewrite', () => {
+  it('offers an optional OpenRouter key for title suggestions and speech', () => {
     renderWizard({ initialStep: ONBOARDING_STEP_INDEX.openrouter })
 
     expect(screen.getByText('Optional: OpenRouter')).toBeInTheDocument()
