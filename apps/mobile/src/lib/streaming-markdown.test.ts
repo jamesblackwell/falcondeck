@@ -19,6 +19,9 @@ describe('streaming Markdown parser', () => {
   })
 
   it.each([
+    '> foo\n***\n\nTail',
+    '1. a\n\n  2. b\n\n   3. c\n',
+    '    code\n\n   more code\n\nTail',
     'Paragraph\n\nSecond paragraph\nsetext heading\n---\n\nTail',
     'Paragraph\n\n- one\n\n  two\n- three\n\nTail',
     'Paragraph\n\n> quote\n>\n> next\n\nTail',
