@@ -191,8 +191,6 @@ impl CodexSession {
 #[derive(Default)]
 pub(super) struct SubagentNotifications {
     thread_ids: HashSet<String>,
-    known_thread_ids: HashSet<String>,
-    unknown_thread_ids: HashSet<String>,
 }
 
 impl SubagentNotifications {
@@ -205,10 +203,7 @@ impl SubagentNotifications {
             return None;
         }
         let id = extract_thread_id(params)?;
-        (!self.thread_ids.contains(&id)
-            && !self.known_thread_ids.contains(&id)
-            && !self.unknown_thread_ids.contains(&id))
-        .then_some(id)
+        (!self.thread_ids.contains(&id)).then_some(id)
     }
 
     pub(super) fn should_ignore(
@@ -217,32 +212,30 @@ impl SubagentNotifications {
         params: &Value,
         thread_is_known: bool,
     ) -> bool {
+        if let Some(item) = params.get("item")
+            && matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("subAgentActivity" | "SubAgentActivity")
+            )
+            && let Some(child_id) = extract_string(item, &["agentThreadId", "agent_thread_id"])
+        {
+            self.thread_ids.insert(child_id);
+        }
         let Some(thread_id) = extract_thread_id(params) else {
             return false;
         };
         if method == "thread/started" && is_subagent_thread(params.get("thread").unwrap_or(params))
         {
             self.thread_ids.insert(thread_id.clone());
-            self.unknown_thread_ids.remove(&thread_id);
-        } else if method == "thread/started" {
-            self.known_thread_ids.insert(thread_id.clone());
-            self.unknown_thread_ids.remove(&thread_id);
-        } else if !self.thread_ids.contains(&thread_id)
-            && !self.known_thread_ids.contains(&thread_id)
-            && !self.unknown_thread_ids.contains(&thread_id)
-        {
-            if thread_is_known {
-                self.known_thread_ids.insert(thread_id.clone());
-            } else if method.starts_with("thread/")
-                || method.starts_with("turn/")
-                || method.starts_with("item/")
-            {
-                self.unknown_thread_ids.insert(thread_id.clone());
-            }
         }
         // Keep IDs for this app-server's lifetime: status/turn/item events
         // omit source metadata and can otherwise recreate sidebar entries.
-        self.thread_ids.contains(&thread_id) || self.unknown_thread_ids.contains(&thread_id)
+        self.thread_ids.contains(&thread_id)
+            || (method != "thread/started"
+                && !thread_is_known
+                && (method.starts_with("thread/")
+                    || method.starts_with("turn/")
+                    || method.starts_with("item/")))
     }
 }
 
@@ -428,7 +421,7 @@ mod tests {
         assert!(filter.should_ignore("turn/started", &json!({"threadId": "child"}), false));
         assert_eq!(
             filter.thread_to_check("item/started", &json!({"threadId": "child"})),
-            None
+            Some("child".to_string())
         );
         assert!(!filter.should_ignore("turn/started", &json!({"threadId": "root"}), true));
         for child in [
@@ -461,9 +454,20 @@ mod tests {
         assert!(!filter.should_ignore(
             "item/started",
             &json!({
-                "threadId": "root", "item": {"type": "subAgentActivity", "threadId": "child"}
+                "threadId": "root", "item": {
+                    "type": "subAgentActivity", "agentThreadId": "activity-child"
+                }
             }),
             true
+        ));
+        assert_eq!(
+            filter.thread_to_check("turn/started", &json!({"threadId": "activity-child"})),
+            None
+        );
+        assert!(filter.should_ignore(
+            "turn/started",
+            &json!({"threadId": "activity-child"}),
+            false
         ));
         assert!(!filter.should_ignore(
             "thread/started",
@@ -474,17 +478,22 @@ mod tests {
         ));
         assert!(!filter.should_ignore("account/updated", &json!({}), false));
 
-        // A real thread may also send a status before its start metadata.
+        // An unknown ID must be checked again after workspace hydration.
         assert!(filter.should_ignore(
             "thread/status/changed",
             &json!({"threadId": "late-root"}),
             false
         ));
         assert!(!filter.should_ignore(
+            "thread/status/changed",
+            &json!({"threadId": "late-root"}),
+            true
+        ));
+        assert!(!filter.should_ignore(
             "thread/started",
             &json!({"thread": {"id": "late-root", "source": "vscode"}}),
             false
         ));
-        assert!(!filter.should_ignore("turn/started", &json!({"threadId": "late-root"}), false));
+        assert!(!filter.should_ignore("turn/started", &json!({"threadId": "late-root"}), true));
     }
 }
