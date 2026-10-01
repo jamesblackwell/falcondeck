@@ -437,24 +437,9 @@ pub(super) async fn connect_workspace_internal(
         && persisted_workspace_ref.is_some_and(|workspace| !workspace.thread_states.is_empty())
     {
         let candidates = persisted_workspace_ref
-            .into_iter()
-            .flat_map(|workspace| &workspace.thread_states)
-            .filter(|state| {
-                state
-                    .provider
-                    .as_ref()
-                    .is_none_or(|provider| *provider == AgentProvider::CODEX)
-                    && state.native_session_id.is_none()
-            })
-            .map(|state| state.thread_id.clone())
-            .collect::<Vec<_>>();
-        match session.subagent_thread_ids(&candidates).await {
-            Ok(ids) => ids,
-            Err(error) => {
-                tracing::warn!("could not identify saved Codex subagents: {error}");
-                HashSet::new()
-            }
-        }
+            .map(|workspace| saved_codex_subagent_lookup_ids(&workspace.thread_states))
+            .unwrap_or_default();
+        session.subagent_thread_ids(&candidates).await
     } else {
         HashSet::new()
     };
@@ -756,6 +741,33 @@ pub(super) async fn connect_workspace_internal(
     }
 
     Ok(summary)
+}
+
+fn saved_codex_subagent_lookup_ids(states: &[PersistedThreadState]) -> Vec<String> {
+    let mut ids = states
+        .iter()
+        .filter(|state| {
+            state
+                .provider
+                .as_ref()
+                .is_none_or(|provider| *provider == AgentProvider::CODEX)
+                && (state.native_session_id.is_none()
+                    || state
+                        .title
+                        .as_deref()
+                        .is_none_or(is_placeholder_thread_title))
+        })
+        .map(|state| {
+            state
+                .native_session_id
+                .as_ref()
+                .unwrap_or(&state.thread_id)
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 fn is_saved_codex_subagent(
@@ -6659,6 +6671,24 @@ mod tests {
         assert!(missing.is_err());
         let empty = edit_queued_turn(&app, "workspace-1", "thread-1", "queued-1", "   ").await;
         assert!(empty.is_err());
+    }
+
+    #[test]
+    fn saved_codex_subagent_lookup_includes_legacy_native_sessions() {
+        let mut legacy_child = persisted_thread("local-child", Some("native-child"));
+        legacy_child.provider = Some(AgentProvider::CODEX);
+        legacy_child.title = Some("Untitled thread".to_string());
+        let mut recent_child = persisted_thread("recent-child", None);
+        recent_child.provider = Some(AgentProvider::CODEX);
+        let mut named_root = persisted_thread("root", Some("native-root"));
+        named_root.provider = Some(AgentProvider::CODEX);
+        named_root.title = Some("Refocus the product".to_string());
+        let claude = persisted_thread("claude", None);
+
+        assert_eq!(
+            saved_codex_subagent_lookup_ids(&[legacy_child, recent_child, named_root, claude]),
+            ["native-child", "recent-child"]
+        );
     }
 
     #[test]

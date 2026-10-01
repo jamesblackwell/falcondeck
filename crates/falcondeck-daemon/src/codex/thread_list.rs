@@ -129,24 +129,23 @@ fn is_subagent_thread(thread: &Value) -> bool {
 
 fn subagent_id_from_thread_read(value: &Value) -> Option<String> {
     let thread = value.get("thread").unwrap_or(value);
-    is_subagent_thread(thread)
-        .then(|| extract_thread_id(thread))
-        .flatten()
+    if is_subagent_thread(thread) {
+        extract_thread_id(thread)
+    } else {
+        None
+    }
 }
 
 impl CodexSession {
     /// Identify saved sidebar entries created by older daemons. Codex omits
-    /// multi-agent child sessions from thread/list, so inspect the saved rows
-    /// that notifications created without a native session binding as well.
+    /// multi-agent child sessions from thread/list, so inspect saved rows that
+    /// look like child notifications or older placeholder child threads too.
     /// Native sessions and transcripts are never deleted.
-    pub(crate) async fn subagent_thread_ids(
-        &self,
-        candidate_ids: &[String],
-    ) -> Result<HashSet<String>, DaemonError> {
+    pub(crate) async fn subagent_thread_ids(&self, candidate_ids: &[String]) -> HashSet<String> {
         let mut ids = HashSet::new();
         let mut cursor = None::<String>;
         loop {
-            let page = self
+            let page = match self
                 .send_control_request(
                     "thread/list",
                     json!({
@@ -156,7 +155,14 @@ impl CodexSession {
                         "cursor": cursor,
                     }),
                 )
-                .await?;
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(%error, "could not list saved Codex subagents");
+                    break;
+                }
+            };
             ids.extend(
                 extract_thread_entries(&page)
                     .into_iter()
@@ -173,18 +179,28 @@ impl CodexSession {
             if ids.contains(id) {
                 continue;
             }
-            if let Ok(read) = self
+            match self
                 .send_control_request(
                     "thread/read",
                     json!({ "threadId": id, "includeTurns": false }),
                 )
                 .await
-                && let Some(child_id) = subagent_id_from_thread_read(&read)
             {
-                ids.insert(child_id);
+                Ok(read) => {
+                    if let Some(child_id) = subagent_id_from_thread_read(&read) {
+                        ids.insert(child_id);
+                    }
+                }
+                // App-server serializes a rejected thread/read as a JSON RPC
+                // error object. A missing or unpersisted candidate is normal.
+                Err(DaemonError::Rpc(error)) if error.starts_with('{') => {}
+                Err(error) => {
+                    tracing::warn!(%error, "stopped checking saved Codex subagents");
+                    break;
+                }
             }
         }
-        Ok(ids)
+        ids
     }
 }
 
@@ -193,13 +209,13 @@ pub(super) struct SubagentNotifications {
     thread_ids: HashSet<String>,
 }
 
+fn is_thread_scoped_notification(method: &str) -> bool {
+    method.starts_with("thread/") || method.starts_with("turn/") || method.starts_with("item/")
+}
+
 impl SubagentNotifications {
     pub(super) fn thread_to_check(&self, method: &str, params: &Value) -> Option<String> {
-        if method == "thread/started"
-            || !(method.starts_with("thread/")
-                || method.starts_with("turn/")
-                || method.starts_with("item/"))
-        {
+        if method == "thread/started" || !is_thread_scoped_notification(method) {
             return None;
         }
         let id = extract_thread_id(params)?;
@@ -233,9 +249,7 @@ impl SubagentNotifications {
         self.thread_ids.contains(&thread_id)
             || (method != "thread/started"
                 && !thread_is_known
-                && (method.starts_with("thread/")
-                    || method.starts_with("turn/")
-                    || method.starts_with("item/")))
+                && is_thread_scoped_notification(method))
     }
 }
 
@@ -404,7 +418,8 @@ mod tests {
         );
         assert_eq!(
             subagent_id_from_thread_read(&json!({"thread": {
-                "id": "root", "source": "vscode", "parentThreadId": null
+                "id": "root", "source": "vscode", "parentThreadId": null,
+                "threadSource": "subagent"
             }})),
             None
         );
