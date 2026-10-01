@@ -436,7 +436,19 @@ pub(super) async fn connect_workspace_internal(
     let subagent_thread_ids = if let Some(session) = codex_session.as_ref()
         && persisted_workspace_ref.is_some_and(|workspace| !workspace.thread_states.is_empty())
     {
-        match session.subagent_thread_ids().await {
+        let candidates = persisted_workspace_ref
+            .into_iter()
+            .flat_map(|workspace| &workspace.thread_states)
+            .filter(|state| {
+                state
+                    .provider
+                    .as_ref()
+                    .is_none_or(|provider| *provider == AgentProvider::CODEX)
+                    && state.native_session_id.is_none()
+            })
+            .map(|state| state.thread_id.clone())
+            .collect::<Vec<_>>();
+        match session.subagent_thread_ids(&candidates).await {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::warn!("could not identify saved Codex subagents: {error}");

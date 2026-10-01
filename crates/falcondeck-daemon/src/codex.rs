@@ -1257,7 +1257,16 @@ impl CodexSession {
                             {
                                 warn!("failed to ingest server request {method}: {error}");
                             }
-                        } else if subagent_notifications.should_ignore(method, &params) {
+                        } else if subagent_notifications.should_ignore(
+                            method,
+                            &params,
+                            match subagent_notifications.thread_to_check(method, &params) {
+                                Some(thread_id) => {
+                                    self.state.has_thread(&self.workspace_id, &thread_id).await
+                                }
+                                None => false,
+                            },
+                        ) {
                             continue;
                         } else if let Err(error) = self
                             .state

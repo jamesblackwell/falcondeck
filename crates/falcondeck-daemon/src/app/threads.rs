@@ -748,6 +748,15 @@ impl AppState {
         Ok(self.build_thread_summary_from_clone(summary).await)
     }
 
+    pub(crate) async fn has_thread(&self, workspace_id: &str, thread_id: &str) -> bool {
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .is_some_and(|workspace| workspace.threads.contains_key(thread_id))
+    }
+
     pub(super) async fn build_thread_summary_from_clone(
         &self,
         mut summary: ThreadSummary,

@@ -118,18 +118,31 @@ fn parse_reasoning_efforts(value: &Value) -> Vec<ReasoningEffortSummary> {
 fn is_subagent_thread(thread: &Value) -> bool {
     thread
         .get("parentThreadId")
+        .or_else(|| thread.get("parent_thread_id"))
         .and_then(Value::as_str)
         .is_some()
         || thread
             .get("source")
-            .and_then(|source| source.get("subAgent"))
+            .and_then(|source| source.get("subAgent").or_else(|| source.get("subagent")))
             .is_some()
 }
 
+fn subagent_id_from_thread_read(value: &Value) -> Option<String> {
+    let thread = value.get("thread").unwrap_or(value);
+    is_subagent_thread(thread)
+        .then(|| extract_thread_id(thread))
+        .flatten()
+}
+
 impl CodexSession {
-    /// Identify saved sidebar entries created by older daemons. Only metadata
-    /// is listed; native sessions and transcripts are never deleted.
-    pub(crate) async fn subagent_thread_ids(&self) -> Result<HashSet<String>, DaemonError> {
+    /// Identify saved sidebar entries created by older daemons. Codex omits
+    /// multi-agent child sessions from thread/list, so inspect the saved rows
+    /// that notifications created without a native session binding as well.
+    /// Native sessions and transcripts are never deleted.
+    pub(crate) async fn subagent_thread_ids(
+        &self,
+        candidate_ids: &[String],
+    ) -> Result<HashSet<String>, DaemonError> {
         let mut ids = HashSet::new();
         let mut cursor = None::<String>;
         loop {
@@ -156,6 +169,21 @@ impl CodexSession {
             }
             cursor = next;
         }
+        for id in candidate_ids {
+            if ids.contains(id) {
+                continue;
+            }
+            if let Ok(read) = self
+                .send_control_request(
+                    "thread/read",
+                    json!({ "threadId": id, "includeTurns": false }),
+                )
+                .await
+                && let Some(child_id) = subagent_id_from_thread_read(&read)
+            {
+                ids.insert(child_id);
+            }
+        }
         Ok(ids)
     }
 }
@@ -163,20 +191,58 @@ impl CodexSession {
 #[derive(Default)]
 pub(super) struct SubagentNotifications {
     thread_ids: HashSet<String>,
+    known_thread_ids: HashSet<String>,
+    unknown_thread_ids: HashSet<String>,
 }
 
 impl SubagentNotifications {
-    pub(super) fn should_ignore(&mut self, method: &str, params: &Value) -> bool {
+    pub(super) fn thread_to_check(&self, method: &str, params: &Value) -> Option<String> {
+        if method == "thread/started"
+            || !(method.starts_with("thread/")
+                || method.starts_with("turn/")
+                || method.starts_with("item/"))
+        {
+            return None;
+        }
+        let id = extract_thread_id(params)?;
+        (!self.thread_ids.contains(&id)
+            && !self.known_thread_ids.contains(&id)
+            && !self.unknown_thread_ids.contains(&id))
+        .then_some(id)
+    }
+
+    pub(super) fn should_ignore(
+        &mut self,
+        method: &str,
+        params: &Value,
+        thread_is_known: bool,
+    ) -> bool {
         let Some(thread_id) = extract_thread_id(params) else {
             return false;
         };
         if method == "thread/started" && is_subagent_thread(params.get("thread").unwrap_or(params))
         {
             self.thread_ids.insert(thread_id.clone());
+            self.unknown_thread_ids.remove(&thread_id);
+        } else if method == "thread/started" {
+            self.known_thread_ids.insert(thread_id.clone());
+            self.unknown_thread_ids.remove(&thread_id);
+        } else if !self.thread_ids.contains(&thread_id)
+            && !self.known_thread_ids.contains(&thread_id)
+            && !self.unknown_thread_ids.contains(&thread_id)
+        {
+            if thread_is_known {
+                self.known_thread_ids.insert(thread_id.clone());
+            } else if method.starts_with("thread/")
+                || method.starts_with("turn/")
+                || method.starts_with("item/")
+            {
+                self.unknown_thread_ids.insert(thread_id.clone());
+            }
         }
         // Keep IDs for this app-server's lifetime: status/turn/item events
         // omit source metadata and can otherwise recreate sidebar entries.
-        self.thread_ids.contains(&thread_id)
+        self.thread_ids.contains(&thread_id) || self.unknown_thread_ids.contains(&thread_id)
     }
 }
 
@@ -310,6 +376,9 @@ mod tests {
                 {"id": "child", "source": {"subAgent": {"thread_spawn": {
                     "parent_thread_id": "root", "depth": 1
                 }}}},
+                {"id": "raw-child", "source": {"subagent": {"thread_spawn": {
+                    "parent_thread_id": "root", "depth": 1
+                }}}},
                 {"id": "review", "source": {"subAgent": "review"}},
                 {"id": "compact", "source": {"subAgent": "compact"}},
                 {"id": "other", "source": {"subAgent": {"other": "worker"}}},
@@ -328,15 +397,47 @@ mod tests {
     }
 
     #[test]
+    fn thread_read_identifies_multi_agent_child_sessions() {
+        let read = json!({"thread": {
+            "id": "child",
+            "source": {"subAgent": {"thread_spawn": {
+                "parent_thread_id": "root", "depth": 1
+            }}},
+            "parentThreadId": null
+        }});
+        assert_eq!(
+            subagent_id_from_thread_read(&read).as_deref(),
+            Some("child")
+        );
+        assert_eq!(
+            subagent_id_from_thread_read(&json!({"thread": {
+                "id": "root", "source": "vscode", "parentThreadId": null
+            }})),
+            None
+        );
+    }
+
+    #[test]
     fn subagent_notifications_filter_the_entire_child_lifecycle() {
         let mut filter = SubagentNotifications::default();
+        // Codex can report a child's turn before any thread/started metadata.
+        assert_eq!(
+            filter.thread_to_check("turn/started", &json!({"threadId": "child"})),
+            Some("child".to_string())
+        );
+        assert!(filter.should_ignore("turn/started", &json!({"threadId": "child"}), false));
+        assert_eq!(
+            filter.thread_to_check("item/started", &json!({"threadId": "child"})),
+            None
+        );
+        assert!(!filter.should_ignore("turn/started", &json!({"threadId": "root"}), true));
         for child in [
             json!({"id": "child", "source": {"subAgent": {"thread_spawn": {
                 "parent_thread_id": "root", "depth": 1
             }}}}),
             json!({"id": "parent-marked", "parentThreadId": "root"}),
         ] {
-            assert!(filter.should_ignore("thread/started", &json!({"thread": child})));
+            assert!(filter.should_ignore("thread/started", &json!({"thread": child}), false));
             for method in [
                 "thread/status/changed",
                 "turn/started",
@@ -347,11 +448,11 @@ mod tests {
                 "thread/status/changed",
             ] {
                 assert!(
-                    filter.should_ignore(method, &json!({"threadId": child["id"]})),
+                    filter.should_ignore(method, &json!({"threadId": child["id"]}), false),
                     "{method}"
                 );
                 assert!(
-                    !filter.should_ignore(method, &json!({"threadId": "root"})),
+                    !filter.should_ignore(method, &json!({"threadId": "root"}), true),
                     "{method}"
                 );
             }
@@ -361,14 +462,29 @@ mod tests {
             "item/started",
             &json!({
                 "threadId": "root", "item": {"type": "subAgentActivity", "threadId": "child"}
-            })
+            }),
+            true
         ));
         assert!(!filter.should_ignore(
             "thread/started",
             &json!({"thread": {
                 "id": "fork", "forkedFromId": "root", "source": "appServer", "parentThreadId": null
-            }})
+            }}),
+            false
         ));
-        assert!(!filter.should_ignore("account/updated", &json!({})));
+        assert!(!filter.should_ignore("account/updated", &json!({}), false));
+
+        // A real thread may also send a status before its start metadata.
+        assert!(filter.should_ignore(
+            "thread/status/changed",
+            &json!({"threadId": "late-root"}),
+            false
+        ));
+        assert!(!filter.should_ignore(
+            "thread/started",
+            &json!({"thread": {"id": "late-root", "source": "vscode"}}),
+            false
+        ));
+        assert!(!filter.should_ignore("turn/started", &json!({"threadId": "late-root"}), false));
     }
 }
