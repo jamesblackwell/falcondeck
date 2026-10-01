@@ -3032,19 +3032,14 @@ function ContextCompactionMessage({
       role={lifecycle === "failed" ? "alert" : "status"}
       aria-live={lifecycle === "failed" ? "assertive" : "polite"}
       aria-label={`${presentation.label}. ${presentation.detail}`}
-      className={cn(
-        "mx-auto flex max-w-2xl items-start justify-center gap-2 py-1.5 text-center text-[length:var(--fd-text-xs)] text-fg-muted",
-        lifecycle === "failed" && "text-danger",
-        (lifecycle === "interrupted" || lifecycle === "denied") &&
-          "text-warning",
-      )}
+      className="fd-type-supporting flex min-w-0 max-w-2xl items-start gap-2 py-2 text-left font-sans"
     >
-      <span className="mt-0.5">{icon}</span>
+      <span className="flex h-[1lh] shrink-0 items-center">{icon}</span>
       <span className="min-w-0">
         <span className="block font-medium text-fg-secondary">
           {presentation.label}
         </span>
-        <span className="fd-type-readout mt-0.5 block text-fg-muted">
+        <span className="fd-type-meta mt-0.5 block text-fg-muted">
           {presentation.detail}
         </span>
       </span>
