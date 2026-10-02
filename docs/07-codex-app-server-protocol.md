@@ -431,12 +431,36 @@ Threads have source metadata indicating where they originated:
 
 Internal sub-agent threads (e.g., memory consolidation) can be filtered from UI by excluding `subAgent` from sourceKinds.
 
+For live `subAgentActivity` items, only `kind: "started"` identifies a new
+child thread. An `interacted` activity names the message receiver, which can
+be the parent. Treating every `agentThreadId` as a child hides the parent
+after its first child replies, including the parent's final answer and
+`turn/completed` notification.
+
 ## Session Storage
 
 - **Location**: `$CODEX_HOME/sessions/` (default: `~/.codex/sessions/`)
 - **Format**: JSONL transcript files
 - **Naming**: `*-{sessionId}.jsonl`
 - **Nested**: Files may be in subdirectories
+
+FalconDeck's `thread.detail` request accepts `refresh_native: true` for an
+explicit Codex history repair. The HTTP equivalent is the existing thread
+detail URL with `?refresh_native=true`. It reads `thread/read` and
+`thread/turns/list`; it never resumes, interrupts, or unsubscribes a provider.
+Normal detail reads keep their cached behavior.
+
+When Codex returns no turns, repair reads transcript items and the latest
+turn's start/completion markers from one bounded rollout snapshot. It
+validates the native session id and working directory, and accepts a
+completion only for that snapshot's latest matching turn.
+
+A repair replaces stale native items and adopts a terminal native status
+only when it matches the local latest turn and the local state has not
+changed during the read. Pending approvals, a turn being dispatched, or a
+retry prevent repair. A newer live event causes the request to fail rather
+than overwrite it. The current writer subscription and queued turns stay
+unchanged.
 
 ## FalconDeck Compatibility Assessment
 

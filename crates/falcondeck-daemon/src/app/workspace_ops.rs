@@ -4899,6 +4899,10 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
+    if request.refresh_native.unwrap_or(false) {
+        app.refresh_codex_thread_history(&request.workspace_id, &request.thread_id)
+            .await?;
+    }
     let (needs_codex_history, should_refresh_codex_goal) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -4914,8 +4918,14 @@ pub(super) async fn thread_detail(
         // A thread that already holds items must not: its goal enrichment
         // runs in the background instead of gating the response.
         (
-            is_codex && thread.requires_resume && thread.items.is_empty(),
-            is_codex && !thread.requires_resume && thread.summary.goal.is_none(),
+            is_codex
+                && !request.refresh_native.unwrap_or(false)
+                && thread.requires_resume
+                && thread.items.is_empty(),
+            is_codex
+                && !request.refresh_native.unwrap_or(false)
+                && !thread.requires_resume
+                && thread.summary.goal.is_none(),
         )
     };
     if needs_codex_history
@@ -7138,6 +7148,7 @@ mod tests {
                 tool_output_bytes: None,
                 strict_limit: None,
                 compact_workspace: None,
+                refresh_native: None,
             },
         )
         .unwrap();
@@ -7173,6 +7184,7 @@ mod tests {
                 tool_output_bytes: None,
                 strict_limit: None,
                 compact_workspace: None,
+                refresh_native: None,
             },
         )
         .unwrap();
@@ -7204,6 +7216,7 @@ mod tests {
                 tool_output_bytes: None,
                 strict_limit: Some(true),
                 compact_workspace: None,
+                refresh_native: None,
             },
         )
         .unwrap();
@@ -7384,6 +7397,7 @@ mod tests {
                     tool_output_bytes: Some(512),
                     strict_limit: Some(true),
                     compact_workspace: Some(true),
+                    refresh_native: None,
                 },
             )
             .unwrap();
@@ -7480,6 +7494,7 @@ mod tests {
                 tool_output_bytes: None,
                 strict_limit: None,
                 compact_workspace: None,
+                refresh_native: None,
             },
         )
         .unwrap();
@@ -7515,6 +7530,7 @@ mod tests {
                 tool_output_bytes: None,
                 strict_limit: None,
                 compact_workspace: None,
+                refresh_native: None,
             },
         )
         .unwrap();

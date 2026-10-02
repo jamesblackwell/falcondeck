@@ -304,6 +304,92 @@ impl AppState {
             .await
     }
 
+    /// Recover one cached transcript from the provider's native history.
+    /// This never acquires, releases, or interrupts its native writer.
+    pub(super) async fn refresh_codex_thread_history(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<(), DaemonError> {
+        let (guard, cwd) = {
+            let pending = self.inner.interactive_requests.lock().await;
+            let workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let thread = workspace
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            if pending.values().any(|request| {
+                request.request.workspace_id == workspace_id
+                    && request.request.thread_id.as_deref() == Some(thread_id)
+            }) {
+                return Err(DaemonError::BadRequest(
+                    "native refresh cannot replace pending input".to_string(),
+                ));
+            }
+            (
+                CodexNativeRefreshGuard::capture(thread)?,
+                thread
+                    .summary
+                    .working_directory(&workspace.summary.path)
+                    .to_string(),
+            )
+        };
+        let session = self.session_for(workspace_id).await?;
+        let response = session.read_thread_history(thread_id).await?;
+        let summary = guard.summary.clone();
+        let (hydrated, native_turn) = tokio::task::spawn_blocking(move || {
+            crate::codex::hydrate_thread_response_for_refresh(summary, &response, &cwd)
+        })
+        .await
+        .map_err(|error| {
+            DaemonError::Process(format!("failed to refresh Codex history: {error}"))
+        })?;
+        {
+            let pending = self.inner.interactive_requests.lock().await;
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let thread = workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.threads.get_mut(thread_id))
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            if pending.values().any(|request| {
+                request.request.workspace_id == workspace_id
+                    && request.request.thread_id.as_deref() == Some(thread_id)
+            }) {
+                return Err(DaemonError::BadRequest(
+                    "native refresh cannot replace pending input".to_string(),
+                ));
+            }
+            let events =
+                apply_codex_native_refresh(thread, &guard, hydrated, native_turn.as_ref())?;
+            // Publish recovered items before releasing the state lock so a
+            // newer live delta cannot be followed by an older recovery item.
+            for event in events {
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    event,
+                );
+            }
+        }
+        let summary = self.thread_summary(workspace_id, thread_id).await?;
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadUpdated { thread: summary },
+        );
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+        self.persist_local_state().await
+    }
+
     async fn load_codex_thread_if_needed(
         &self,
         workspace_id: &str,
@@ -2919,6 +3005,157 @@ impl ManagedThread {
     }
 }
 
+struct CodexNativeRefreshGuard {
+    summary: ThreadSummary,
+    items: Vec<ConversationItem>,
+    requires_resume: bool,
+    retry_generation: u64,
+}
+
+impl CodexNativeRefreshGuard {
+    fn capture(thread: &ManagedThread) -> Result<Self, DaemonError> {
+        if thread.summary.provider != AgentProvider::CODEX {
+            return Err(DaemonError::BadRequest(
+                "native refresh is supported only for Codex threads".to_string(),
+            ));
+        }
+        if thread.dispatching_request.is_some()
+            || thread.transient_retry_in_flight
+            || thread.has_unpersisted_codex_start()
+            || thread.items.iter().any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::InteractiveRequest {
+                        resolved: false,
+                        ..
+                    }
+                )
+            })
+            || (thread.summary.latest_turn_id.is_none()
+                && (!thread.items.is_empty()
+                    || matches!(
+                        thread.summary.status,
+                        ThreadStatus::Running | ThreadStatus::WaitingForInput
+                    )))
+        {
+            return Err(DaemonError::BadRequest(
+                "native refresh cannot replace a pending turn or input".to_string(),
+            ));
+        }
+        Ok(Self {
+            summary: thread.summary.clone(),
+            items: thread.items.clone(),
+            requires_resume: thread.requires_resume,
+            retry_generation: thread.transient_retry_generation,
+        })
+    }
+
+    fn still_matches(&self, thread: &ManagedThread) -> bool {
+        thread.summary == self.summary
+            && thread.items == self.items
+            && thread.requires_resume == self.requires_resume
+            && thread.transient_retry_generation == self.retry_generation
+            && thread.dispatching_request.is_none()
+            && !thread.transient_retry_in_flight
+    }
+}
+
+fn apply_codex_native_refresh(
+    thread: &mut ManagedThread,
+    guard: &CodexNativeRefreshGuard,
+    hydrated: crate::codex::HydratedThread,
+    native_turn: Option<&Value>,
+) -> Result<Vec<UnifiedEvent>, DaemonError> {
+    let native_turn_id = native_turn
+        .and_then(|turn| turn.get("id"))
+        .and_then(Value::as_str);
+    if !guard.still_matches(thread)
+        || guard
+            .summary
+            .latest_turn_id
+            .as_deref()
+            .is_some_and(|id| Some(id) != native_turn_id)
+    {
+        return Err(DaemonError::BadRequest(
+            "thread changed during native refresh; retry after its current work settles"
+                .to_string(),
+        ));
+    }
+    let native_status = native_turn
+        .and_then(|turn| turn.get("status"))
+        .and_then(Value::as_str);
+    let terminal = match native_status {
+        Some("completed") => Some(ToolSettlement::Completed),
+        Some("interrupted" | "aborted" | "canceled" | "cancelled") => {
+            Some(ToolSettlement::Interrupted)
+        }
+        Some("failed" | "error") => Some(ToolSettlement::Failed),
+        _ => None,
+    };
+    let mut items = if terminal.is_some() {
+        // Native terminal items replace a cached streaming prefix by identity.
+        // Daemon-only receipts and queued user messages still stay present.
+        merge_resumed_codex_items(&hydrated.items, thread.items.clone())
+    } else {
+        // While native work is running, preserve live streaming items and the
+        // WaitingForInput status rather than rolling them back to disk.
+        merge_resumed_codex_items(&thread.items, hydrated.items)
+    };
+    if let Some(settlement) = terminal {
+        let error = native_turn
+            .and_then(super::notifications::codex_turn_error_text)
+            .or_else(|| {
+                matches!(settlement, ToolSettlement::Failed).then(|| "Turn failed".to_string())
+            });
+        let completed_at = hydrated.summary.updated_at;
+        let _ = settle_tool_call_items(&mut items, completed_at, settlement);
+        let _ = settle_content_items(
+            &mut items,
+            match settlement {
+                ToolSettlement::Completed => ContentLifecycle::Complete,
+                ToolSettlement::Interrupted => ContentLifecycle::Interrupted,
+                ToolSettlement::Failed => ContentLifecycle::Error,
+            },
+            completed_at,
+            error.as_deref(),
+        );
+        thread.summary.status = if error.is_some() {
+            ThreadStatus::Error
+        } else {
+            ThreadStatus::Idle
+        };
+        thread.summary.last_error = error;
+        thread.summary.last_message_preview = hydrated.summary.last_message_preview;
+        thread.summary.last_tool = hydrated.summary.last_tool;
+        thread.summary.updated_at = thread.summary.updated_at.max(completed_at);
+    }
+    if thread.summary.latest_turn_id.is_none() {
+        thread.summary.latest_turn_id = native_turn_id.map(str::to_string);
+    }
+    if thread.summary.native_session_id.is_none() {
+        thread.summary.native_session_id = hydrated.summary.native_session_id;
+    }
+    thread.replace_items(items);
+    // An explicit read must preserve both a live subscription and a restored
+    // thread's need to acquire its writer on the next send.
+    let previous = guard
+        .items
+        .iter()
+        .map(|item| (conversation_item_identity(item), item))
+        .collect::<HashMap<_, _>>();
+    Ok(thread
+        .items
+        .iter()
+        .filter_map(
+            |item| match previous.get(conversation_item_identity(item)) {
+                Some(old) if *old == item => None,
+                Some(_) => Some(UnifiedEvent::ConversationItemUpdated { item: item.clone() }),
+                None => Some(UnifiedEvent::ConversationItemAdded { item: item.clone() }),
+            },
+        )
+        .collect())
+}
+
 fn apply_codex_thread_hydration(
     thread: &mut ManagedThread,
     hydrated: crate::codex::HydratedThread,
@@ -3547,6 +3784,267 @@ mod tests {
             thread.requires_resume,
             "the next send must still acquire native ownership"
         );
+    }
+
+    fn cached_codex_streaming_thread() -> ManagedThread {
+        let mut thread = isolated_codex_thread();
+        thread.summary.latest_turn_id = Some("turn-1".to_string());
+        thread.summary.status = ThreadStatus::Running;
+        thread.summary.last_message_preview = Some("Partial output".to_string());
+        thread.replace_items(vec![ConversationItem::AssistantMessage {
+            id: "message-1".to_string(),
+            text: "Partial output".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: Utc::now(),
+        }]);
+        thread
+    }
+
+    fn native_refresh_response(turn_id: &str, status: &str) -> Value {
+        json!({"thread": {"id": "thread-isolated", "turns": [{
+            "id": turn_id, "status": status, "completedAt": "2026-10-02T15:38:48Z",
+            "items": [{"id": "message-1", "type": "agentMessage", "text": "Finished output"}]
+        }]}})
+    }
+
+    #[test]
+    fn codex_native_refresh_recovers_when_native_turn_pages_are_empty() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        let records = [
+            json!({"type": "session_meta", "payload": {
+                "id": "thread-isolated", "cwd": "/tmp/project"
+            }}),
+            json!({"type": "event_msg", "timestamp": "2026-10-02T15:09:06Z",
+                "payload": {"type": "task_started", "turn_id": "turn-1"}}),
+            json!({"type": "response_item", "timestamp": "2026-10-02T15:38:48Z",
+                "payload": {"type": "message", "id": "message-1", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Finished output"}]}}),
+            json!({"type": "event_msg", "timestamp": "2026-10-02T15:38:48Z",
+                "payload": {"type": "task_complete", "turn_id": "turn-1"}}),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut thread = cached_codex_streaming_thread();
+        let guard = CodexNativeRefreshGuard::capture(&thread).unwrap();
+        let response = json!({"thread": {
+            "id": "thread-isolated", "path": path, "turns": []
+        }});
+        let (hydrated, native_turn) = crate::codex::hydrate_thread_response_for_refresh(
+            thread.summary.clone(),
+            &response,
+            "/tmp/project",
+        );
+        apply_codex_native_refresh(&mut thread, &guard, hydrated, native_turn.as_ref()).unwrap();
+        assert_eq!(thread.summary.status, ThreadStatus::Idle);
+        assert!(thread.items.iter().any(|item| matches!(
+            item, ConversationItem::AssistantMessage { text, lifecycle: ContentLifecycle::Complete, .. }
+                if text == "Finished output"
+        )));
+        assert!(!thread.requires_resume);
+    }
+
+    #[test]
+    fn codex_native_refresh_recovers_completion_without_releasing_writer_or_queue() {
+        let mut thread = cached_codex_streaming_thread();
+        thread.summary.last_error = Some("Old error".to_string());
+        let queued = super::super::QueuedTurnRequest {
+            id: "queued-1".to_string(),
+            request: serde_json::from_value(json!({
+                "workspace_id": "workspace-1", "thread_id": "thread-isolated", "inputs": []
+            }))
+            .unwrap(),
+            summary: falcondeck_core::QueuedTurnSummary {
+                id: "queued-1".to_string(),
+                preview: "Later".to_string(),
+                text: "Later".to_string(),
+                attachment_count: 0,
+                queued_at: Utc::now(),
+            },
+        };
+        thread.queued_requests.push(queued.clone());
+        thread.summary.queued_turns.push(queued.summary.clone());
+        let guard = CodexNativeRefreshGuard::capture(&thread).unwrap();
+        let response = native_refresh_response("turn-1", "completed");
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &response,
+            "/tmp/project",
+        );
+        let events = apply_codex_native_refresh(
+            &mut thread,
+            &guard,
+            hydrated,
+            response.pointer("/thread/turns/0"),
+        )
+        .unwrap();
+
+        assert_eq!(thread.summary.status, ThreadStatus::Idle);
+        assert_eq!(
+            thread.summary.last_message_preview.as_deref(),
+            Some("Finished output")
+        );
+        assert!(thread.summary.last_error.is_none());
+        let completed_at = chrono::DateTime::parse_from_rfc3339("2026-10-02T15:38:48Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            thread.summary.updated_at,
+            guard.summary.updated_at.max(completed_at)
+        );
+        assert_eq!(thread.queued_requests, vec![queued.clone()]);
+        assert_eq!(thread.summary.queued_turns, vec![queued.summary]);
+        assert!(
+            !thread.requires_resume,
+            "a read must preserve the live writer subscription"
+        );
+        assert!(
+            matches!(&thread.items[..], [ConversationItem::AssistantMessage {
+            text, lifecycle: ContentLifecycle::Complete, ..
+        }] if text == "Finished output")
+        );
+        assert!(
+            matches!(&events[..], [UnifiedEvent::ConversationItemUpdated {
+            item: ConversationItem::AssistantMessage { text, .. }
+        }] if text == "Finished output")
+        );
+    }
+
+    #[test]
+    fn codex_native_refresh_bootstraps_restored_empty_history() {
+        let mut thread = isolated_codex_thread();
+        thread.requires_resume = true;
+        let guard = CodexNativeRefreshGuard::capture(&thread).unwrap();
+        let response = native_refresh_response("turn-1", "completed");
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &response,
+            "/tmp/project",
+        );
+        let events = apply_codex_native_refresh(
+            &mut thread,
+            &guard,
+            hydrated,
+            response.pointer("/thread/turns/0"),
+        )
+        .unwrap();
+        assert_eq!(thread.summary.latest_turn_id.as_deref(), Some("turn-1"));
+        assert!(thread.requires_resume);
+        assert_eq!(thread.items.len(), 1);
+        assert!(matches!(
+            &events[..],
+            [UnifiedEvent::ConversationItemAdded { .. }]
+        ));
+    }
+
+    #[test]
+    fn codex_native_refresh_rejects_new_turns_and_concurrent_local_activity() {
+        for change in 0..5 {
+            let mut thread = cached_codex_streaming_thread();
+            let guard = CodexNativeRefreshGuard::capture(&thread).unwrap();
+            let response = native_refresh_response(
+                if change == 0 {
+                    "different-turn"
+                } else {
+                    "turn-1"
+                },
+                "completed",
+            );
+            let hydrated = crate::codex::hydrate_thread_response(
+                thread.summary.clone(),
+                &response,
+                "/tmp/project",
+            );
+            match change {
+                1 => thread.summary.attention.last_agent_activity_seq += 1,
+                2 => {
+                    if let ConversationItem::AssistantMessage { text, .. } = &mut thread.items[0] {
+                        text.push_str(" live delta");
+                    }
+                }
+                3 => thread.transient_retry_generation += 1,
+                4 => thread.requires_resume = true,
+                _ => {}
+            }
+            let previous_summary = thread.summary.clone();
+            let previous_items = thread.items.clone();
+            assert!(
+                apply_codex_native_refresh(
+                    &mut thread,
+                    &guard,
+                    hydrated,
+                    response.pointer("/thread/turns/0")
+                )
+                .is_err()
+            );
+            assert_eq!(thread.summary, previous_summary);
+            assert_eq!(thread.items, previous_items);
+        }
+    }
+
+    #[test]
+    fn codex_native_refresh_preserves_live_waiting_state_and_streaming_items() {
+        let mut thread = cached_codex_streaming_thread();
+        thread.summary.status = ThreadStatus::WaitingForInput;
+        let guard = CodexNativeRefreshGuard::capture(&thread).unwrap();
+        let response = native_refresh_response("turn-1", "inProgress");
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &response,
+            "/tmp/project",
+        );
+        apply_codex_native_refresh(
+            &mut thread,
+            &guard,
+            hydrated,
+            response.pointer("/thread/turns/0"),
+        )
+        .unwrap();
+        assert_eq!(thread.summary, guard.summary);
+        assert_eq!(thread.items, guard.items);
+        assert!(!thread.requires_resume);
+    }
+
+    #[test]
+    fn codex_native_refresh_rejects_other_providers_and_pending_dispatch() {
+        let mut thread = cached_codex_streaming_thread();
+        thread.summary.provider = AgentProvider::CLAUDE;
+        assert!(CodexNativeRefreshGuard::capture(&thread).is_err());
+        thread.summary.provider = AgentProvider::CODEX;
+        thread.transient_retry_in_flight = true;
+        assert!(CodexNativeRefreshGuard::capture(&thread).is_err());
+        thread.transient_retry_in_flight = false;
+        thread.dispatching_request = Some(serde_json::from_value(json!({
+            "id": "dispatch-1",
+            "request": {"workspace_id": "workspace-1", "thread_id": "thread-isolated", "inputs": []},
+            "summary": {"id": "dispatch-1", "preview": "Later", "queued_at": Utc::now()}
+        })).unwrap());
+        assert!(CodexNativeRefreshGuard::capture(&thread).is_err());
+        thread.dispatching_request = None;
+        thread.items.push(ConversationItem::InteractiveRequest {
+            id: "input-1".to_string(),
+            request: Box::new(serde_json::from_value(json!({
+                "request_id": "input-1", "workspace_id": "workspace-1", "thread_id": "thread-isolated",
+                "method": "item/tool/requestUserInput", "kind": "question", "title": "Answer",
+                "questions": [], "created_at": Utc::now()
+            })).unwrap()),
+            created_at: Utc::now(), resolved: false, resolution: None,
+        });
+        assert!(CodexNativeRefreshGuard::capture(&thread).is_err());
+        thread.items.pop();
+        thread.summary.latest_turn_id = None;
+        assert!(CodexNativeRefreshGuard::capture(&thread).is_err());
     }
 
     #[test]

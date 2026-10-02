@@ -761,6 +761,7 @@ async fn thread_detail(
                 tool_output_bytes: query.tool_output_bytes,
                 strict_limit: query.strict_limit,
                 compact_workspace: query.compact_workspace,
+                refresh_native: query.refresh_native,
             })
             .await?,
     ))
@@ -782,6 +783,8 @@ struct ThreadDetailQuery {
     strict_limit: Option<bool>,
     #[serde(default)]
     compact_workspace: Option<bool>,
+    #[serde(default)]
+    refresh_native: Option<bool>,
 }
 
 async fn thread_item(

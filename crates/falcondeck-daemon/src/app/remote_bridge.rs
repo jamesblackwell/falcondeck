@@ -1611,6 +1611,10 @@ impl AppState {
                             .get("compact_workspace")
                             .or_else(|| params.get("compactWorkspace"))
                             .and_then(Value::as_bool),
+                        refresh_native: params
+                            .get("refresh_native")
+                            .or_else(|| params.get("refreshNative"))
+                            .and_then(Value::as_bool),
                     };
                     self.thread_detail_with_request(&request)
                         .await

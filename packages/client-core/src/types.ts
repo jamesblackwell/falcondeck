@@ -1563,6 +1563,9 @@ export type ThreadDetailRequest = {
   /** `true` drops the agent/skill/model catalogs from the page's workspace
    * summary; clients read only its id. Older daemons ignore it. */
   compact_workspace?: boolean | null;
+  /** Explicitly recover Codex native history without resuming its writer.
+   * The daemon rejects refresh if local work changes during the read. */
+  refresh_native?: boolean | null;
 };
 
 export type EventEnvelope = {

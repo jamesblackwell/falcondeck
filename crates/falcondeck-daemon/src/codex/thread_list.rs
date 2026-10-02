@@ -233,6 +233,10 @@ impl SubagentNotifications {
                 item.get("type").and_then(Value::as_str),
                 Some("subAgentActivity" | "SubAgentActivity")
             )
+            // An interaction names its receiver, which can be the parent
+            // (a child sending a message back). Only a spawn identifies a
+            // child; otherwise we suppress the parent's remaining output.
+            && item.get("kind").and_then(Value::as_str) == Some("started")
             && let Some(child_id) = extract_string(item, &["agentThreadId", "agent_thread_id"])
         {
             self.thread_ids.insert(child_id);
@@ -470,7 +474,8 @@ mod tests {
             "item/started",
             &json!({
                 "threadId": "root", "item": {
-                    "type": "subAgentActivity", "agentThreadId": "activity-child"
+                    "type": "subAgentActivity", "kind": "started",
+                    "agentThreadId": "activity-child"
                 }
             }),
             true
@@ -510,5 +515,53 @@ mod tests {
             false
         ));
         assert!(!filter.should_ignore("turn/started", &json!({"threadId": "late-root"}), true));
+    }
+
+    #[test]
+    fn child_interactions_with_parent_keep_parent_notifications_visible() {
+        let mut filter = SubagentNotifications::default();
+        for child_id in ["frontend-child", "php-child"] {
+            assert!(!filter.should_ignore(
+                "item/completed",
+                &json!({
+                    "threadId": "root",
+                    "item": {
+                        "type": "subAgentActivity", "kind": "started",
+                        "agentThreadId": child_id
+                    }
+                }),
+                true,
+            ));
+        }
+
+        // The frontend child reports back after both children started. Its
+        // receiver is the root, not another child to hide from the sidebar.
+        assert!(filter.should_ignore(
+            "item/completed",
+            &json!({
+                "threadId": "frontend-child",
+                "item": {
+                    "type": "subAgentActivity", "kind": "interacted",
+                    "agentThreadId": "root", "agentPath": "/root"
+                }
+            }),
+            false,
+        ));
+
+        assert_eq!(
+            filter.thread_to_check("turn/completed", &json!({"threadId": "root"})),
+            Some("root".to_string()),
+        );
+        for method in [
+            "item/agentMessage/delta",
+            "item/completed",
+            "turn/completed",
+            "thread/status/changed",
+        ] {
+            assert!(!filter.should_ignore(method, &json!({"threadId": "root"}), true));
+            for child_id in ["frontend-child", "php-child"] {
+                assert!(filter.should_ignore(method, &json!({"threadId": child_id}), false));
+            }
+        }
     }
 }

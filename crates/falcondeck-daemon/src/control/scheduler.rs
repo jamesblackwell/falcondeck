@@ -493,6 +493,7 @@ async fn final_assistant_text(
             tool_output_bytes: None,
             strict_limit: None,
             compact_workspace: None,
+            refresh_native: None,
         })
         .await
         .ok()?;

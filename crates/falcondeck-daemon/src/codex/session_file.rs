@@ -59,9 +59,20 @@ pub(super) fn hydrate_thread_items_from_session_file(
     session_path: &str,
     workspace_path: &str,
 ) -> Vec<ConversationItem> {
+    hydrate_thread_history_from_session_file(session_path, workspace_path, None).0
+}
+
+/// Refresh reads transcript and terminal metadata from the same file snapshot.
+/// An expected ID requires native session metadata, rather than inferring
+/// ownership or completion from conversation text.
+pub(super) fn hydrate_thread_history_from_session_file(
+    session_path: &str,
+    workspace_path: &str,
+    expected_thread_id: Option<&str>,
+) -> (Vec<ConversationItem>, Option<Value>) {
     let file = match File::open(session_path) {
         Ok(file) => file,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), None),
     };
     // Read a stable snapshot. Without `take`, a rollout that is still being
     // appended can keep a restore scan chasing a moving EOF indefinitely.
@@ -70,15 +81,17 @@ pub(super) fn hydrate_thread_items_from_session_file(
         .map(|metadata| metadata.len())
         .unwrap_or(u64::MAX);
     if snapshot_len == 0 {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let mut reader = StdBufReader::new(file.take(snapshot_len));
     let mut items: Vec<SessionHydratedItem> = Vec::new();
     let mut tool_calls_by_call_id: HashMap<String, usize> = HashMap::new();
     let mut matches_workspace = false;
     let mut rejected_workspace = false;
+    let mut verified_session = false;
+    let mut latest_turn = None;
 
-    let _ = visit_bounded_lines(&mut reader, |line| {
+    let scan_result = visit_bounded_lines(&mut reader, |line| {
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             return true;
         };
@@ -86,6 +99,21 @@ pub(super) fn hydrate_thread_items_from_session_file(
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+
+        if entry_type == "session_meta"
+            && let Some(expected_id) = expected_thread_id
+        {
+            verified_session = value
+                .get("payload")
+                .and_then(|payload| payload.get("id"))
+                .and_then(Value::as_str)
+                == Some(expected_id)
+                && extract_cwd(&value).as_deref() == Some(workspace_path);
+            if !verified_session {
+                rejected_workspace = true;
+                return false;
+            }
+        }
 
         if matches!(entry_type, "session_meta" | "turn_context")
             && let Some(cwd) = extract_cwd(&value)
@@ -97,9 +125,11 @@ pub(super) fn hydrate_thread_items_from_session_file(
             }
         }
 
-        if !matches_workspace {
+        if !matches_workspace || (expected_thread_id.is_some() && !verified_session) {
             return true;
         }
+
+        update_session_latest_turn(&mut latest_turn, &value);
 
         if let Some((call_id, output, completed_at)) = session_tool_call_output(&value) {
             if let Some(index) = tool_calls_by_call_id.get(&call_id).copied() {
@@ -117,8 +147,18 @@ pub(super) fn hydrate_thread_items_from_session_file(
         true
     });
 
-    if rejected_workspace {
-        return Vec::new();
+    if rejected_workspace
+        || (expected_thread_id.is_some()
+            && (!verified_session
+                || scan_result.is_err()
+                || reader
+                    .get_ref()
+                    .get_ref()
+                    .metadata()
+                    .map(|metadata| metadata.len() != snapshot_len)
+                    .unwrap_or(true)))
+    {
+        return (Vec::new(), None);
     }
 
     let mut conversation_items = items
@@ -128,7 +168,59 @@ pub(super) fn hydrate_thread_items_from_session_file(
         .map(|item| item.item)
         .collect::<Vec<_>>();
     conversation_items.sort_by_key(conversation_item_created_at);
-    conversation_items
+    (conversation_items, latest_turn)
+}
+
+fn update_session_latest_turn(latest_turn: &mut Option<Value>, value: &Value) {
+    let Some(payload) = value.get("payload") else {
+        return;
+    };
+    let Some(turn_id) = extract_string(payload, &["turn_id"]) else {
+        return;
+    };
+    let entry_type = value.get("type").and_then(Value::as_str);
+    let event_type = payload.get("type").and_then(Value::as_str);
+    let starts_turn = entry_type == Some("turn_context")
+        || (entry_type == Some("event_msg") && event_type == Some("task_started"));
+    if starts_turn {
+        if event_type == Some("task_started")
+            || latest_turn
+                .as_ref()
+                .and_then(|turn| turn.get("id"))
+                .and_then(Value::as_str)
+                != Some(turn_id.as_str())
+        {
+            let mut turn = json!({"id": turn_id, "status": "inProgress"});
+            if let Some(started_at) = extract_datetime_or_timestamp(payload, &["started_at"])
+                .or_else(|| extract_datetime_or_timestamp(value, &["timestamp"]))
+            {
+                turn["startedAt"] = json!(started_at.to_rfc3339());
+            }
+            *latest_turn = Some(turn);
+        }
+        return;
+    }
+
+    if entry_type != Some("event_msg") {
+        return;
+    }
+    let status = match event_type {
+        Some("task_complete") => "completed",
+        Some("turn_aborted") => "interrupted",
+        _ => return,
+    };
+    let Some(turn) = latest_turn
+        .as_mut()
+        .filter(|turn| turn.get("id").and_then(Value::as_str) == Some(turn_id.as_str()))
+    else {
+        return;
+    };
+    turn["status"] = json!(status);
+    if let Some(completed_at) = extract_datetime_or_timestamp(payload, &["completed_at"])
+        .or_else(|| extract_datetime_or_timestamp(value, &["timestamp"]))
+    {
+        turn["completedAt"] = json!(completed_at.to_rfc3339());
+    }
 }
 
 pub(super) fn supplement_thread_items_with_session_tool_calls(
@@ -405,7 +497,159 @@ fn normalized_session_message(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
+    use tempfile::NamedTempFile;
+
+    fn refresh_fixture(
+        native_id: &str,
+        cwd: &str,
+        entries: &[Value],
+    ) -> (HydratedThread, Option<Value>) {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "session_meta", "payload": {"id": native_id, "cwd": cwd}
+            })
+        )
+        .unwrap();
+        for entry in entries {
+            writeln!(file, "{entry}").unwrap();
+        }
+        let summary = parse_threads(
+            "workspace",
+            "/project",
+            &json!({
+                "data": [{"id": "thread", "cwd": "/project"}]
+            }),
+        )
+        .remove(0)
+        .summary;
+        hydrate_thread_response_for_refresh(
+            summary,
+            &json!({"thread": {
+                "id": "thread", "path": file.path(), "historyMode": "paginated", "turns": []
+            }}),
+            "/project",
+        )
+    }
+
+    fn task_event(kind: &str, turn_id: &str) -> Value {
+        json!({
+            "timestamp": "2026-10-02T15:38:48.722Z",
+            "type": "event_msg", "payload": {"type": kind, "turn_id": turn_id}
+        })
+    }
+
+    #[test]
+    fn native_refresh_restores_complete_rollout_and_final_answer_together() {
+        let mut completed = task_event("task_complete", "turn-1");
+        completed["payload"]["completed_at"] = json!(1790955528);
+        let (hydrated, turn) = refresh_fixture(
+            "thread",
+            "/project",
+            &[
+                task_event("task_started", "turn-1"),
+                json!({
+                    "timestamp": "2026-10-02T15:38:48.625Z", "type": "response_item",
+                    "payload": {"id": "final-1", "type": "message", "role": "assistant",
+                        "phase": "final_answer", "content": [{"type": "output_text",
+                            "text": "Committed bd3bafc080."}]}
+                }),
+                completed,
+            ],
+        );
+        let turn = turn.unwrap();
+        assert_eq!(turn["id"], "turn-1");
+        assert_eq!(turn["status"], "completed");
+        assert_eq!(hydrated.summary.status, ThreadStatus::Idle);
+        assert_eq!(hydrated.summary.latest_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(hydrated.summary.updated_at.timestamp(), 1790955528);
+        assert_eq!(
+            hydrated.summary.last_message_preview.as_deref(),
+            Some("Committed bd3bafc080.")
+        );
+        assert!(
+            matches!(&hydrated.items[..], [ConversationItem::AssistantMessage {id, text, ..}]
+            if id == "final-1" && text == "Committed bd3bafc080.")
+        );
+    }
+
+    #[test]
+    fn native_refresh_does_not_apply_previous_completion_to_a_new_turn() {
+        for start in [
+            task_event("task_started", "turn-2"),
+            json!({"type": "turn_context", "payload": {"turn_id": "turn-2", "cwd": "/project"}}),
+        ] {
+            let (hydrated, turn) = refresh_fixture(
+                "thread",
+                "/project",
+                &[
+                    task_event("task_started", "turn-1"),
+                    task_event("task_complete", "turn-1"),
+                    start,
+                    task_event("task_complete", "turn-1"),
+                ],
+            );
+            let turn = turn.unwrap();
+            assert_eq!(turn["id"], "turn-2");
+            assert_eq!(turn["status"], "inProgress");
+            assert!(turn.get("completedAt").is_none());
+            assert_eq!(hydrated.summary.status, ThreadStatus::Running);
+        }
+    }
+
+    #[test]
+    fn native_refresh_requires_matching_start_and_completion_ids() {
+        let (_, unmatched) = refresh_fixture(
+            "thread",
+            "/project",
+            &[
+                task_event("task_started", "turn-1"),
+                task_event("task_complete", "other-turn"),
+            ],
+        );
+        assert_eq!(unmatched.unwrap()["status"], "inProgress");
+        let (_, without_start) = refresh_fixture(
+            "thread",
+            "/project",
+            &[task_event("task_complete", "turn-1")],
+        );
+        assert!(without_start.is_none());
+    }
+
+    #[test]
+    fn native_refresh_rejects_wrong_rollout_thread_or_workspace() {
+        for (native_id, cwd) in [("other-thread", "/project"), ("thread", "/other-project")] {
+            let (hydrated, turn) = refresh_fixture(
+                native_id,
+                cwd,
+                &[
+                    task_event("task_started", "turn-1"),
+                    task_event("task_complete", "turn-1"),
+                ],
+            );
+            assert!(hydrated.items.is_empty());
+            assert!(turn.is_none());
+            assert!(hydrated.summary.latest_turn_id.is_none());
+        }
+    }
+
+    #[test]
+    fn native_refresh_uses_outer_timestamp_for_matching_abort() {
+        let (_, turn) = refresh_fixture(
+            "thread",
+            "/project",
+            &[
+                task_event("task_started", "turn-1"),
+                task_event("turn_aborted", "turn-1"),
+            ],
+        );
+        let turn = turn.unwrap();
+        assert_eq!(turn["status"], "interrupted");
+        assert_eq!(turn["completedAt"], "2026-10-02T15:38:48.722+00:00");
+    }
 
     #[test]
     fn bounded_line_reader_discards_oversized_records_and_continues() {

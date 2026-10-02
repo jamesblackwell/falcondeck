@@ -2532,6 +2532,10 @@ pub struct ThreadDetailRequest {
     /// already hold the snapshot only read the workspace id from a page.
     #[serde(default)]
     pub compact_workspace: Option<bool>,
+    /// Explicitly recover Codex history from native storage without resuming
+    /// or interrupting its writer. Concurrent local activity rejects refresh.
+    #[serde(default)]
+    pub refresh_native: Option<bool>,
 }
 
 /// Image attachment metadata used in turn inputs and conversation history.

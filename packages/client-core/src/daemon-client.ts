@@ -615,6 +615,8 @@ export function createDaemonApiClient(baseUrl: string) {
       if (request.limit != null) params.set("limit", String(request.limit));
       if (request.before_item_id)
         params.set("before_item_id", request.before_item_id);
+      if (request.refresh_native != null)
+        params.set("refresh_native", String(request.refresh_native));
       // URLSearchParams.size is missing in some RN polyfills.
       const query = params.toString();
       const suffix = query ? `?${query}` : "";

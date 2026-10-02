@@ -320,6 +320,7 @@ impl AppState {
                 tool_output_bytes: Some(2000),
                 strict_limit: Some(true),
                 compact_workspace: Some(true),
+                refresh_native: None,
             })
             .await?;
         Ok(handoff_markdown(&detail, limit, cap))

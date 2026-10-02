@@ -6,6 +6,36 @@ import type { ProviderUsageOverview } from "./types";
 describe("createDaemonApiClient sendTurn", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("opts into native thread repair without changing ordinary detail reads", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          workspace: { id: "ws-1" },
+          thread: { id: "thread-1", status: "idle" },
+          items: [],
+        }),
+        { headers: { "content-type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createDaemonApiClient("http://daemon.test");
+
+    await client.threadDetail("ws-1", "thread-1");
+    const repaired = await client.threadDetail("ws-1", "thread-1", {
+      mode: "tail",
+      refresh_native: true,
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/ws-1/threads/thread-1",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "http://daemon.test/api/workspaces/ws-1/threads/thread-1?mode=tail&refresh_native=true",
+    );
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBeUndefined();
+    expect(repaired.thread.status).toBe("idle");
+  });
+
   it("reads provider usage from the daemon usage endpoint", async () => {
     const overview: ProviderUsageOverview = {
       codex: {

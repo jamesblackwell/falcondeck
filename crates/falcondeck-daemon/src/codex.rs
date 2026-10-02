@@ -56,7 +56,8 @@ mod session_file;
 mod thread_list;
 
 use session_file::{
-    hydrate_thread_items_from_session_file, supplement_thread_items_with_session_tool_calls,
+    hydrate_thread_history_from_session_file, hydrate_thread_items_from_session_file,
+    supplement_thread_items_with_session_tool_calls,
 };
 use thread_list::{SubagentNotifications, parse_collaboration_modes, parse_models, parse_threads};
 
@@ -107,6 +108,58 @@ pub(crate) fn hydrate_thread_response(
         items,
         title_is_provider_preview: false,
     }
+}
+
+/// Native refresh requires turn identity and terminal metadata. Some Codex
+/// sessions return no structured turns, even in paginated history mode; read
+/// their transcript and task records together from the verified native file.
+pub(crate) fn hydrate_thread_response_for_refresh(
+    summary: ThreadSummary,
+    value: &Value,
+    workspace_path: &str,
+) -> (HydratedThread, Option<Value>) {
+    let expected_id = summary.native_session_id.as_deref().unwrap_or(&summary.id);
+    let thread = extract_thread_record(value);
+    if thread
+        .and_then(|thread| thread.get("id"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != expected_id)
+    {
+        return (
+            HydratedThread {
+                summary,
+                items: Vec::new(),
+                title_is_provider_preview: false,
+            },
+            None,
+        );
+    }
+    if let Some(latest_turn) = thread
+        .and_then(|thread| thread.get("turns"))
+        .and_then(Value::as_array)
+        .and_then(|turns| turns.last())
+    {
+        return (
+            hydrate_thread_response(summary, value, workspace_path),
+            Some(latest_turn.clone()),
+        );
+    }
+
+    let (items, latest_turn) = extract_thread_session_path(value)
+        .map(|path| {
+            hydrate_thread_history_from_session_file(&path, workspace_path, Some(expected_id))
+        })
+        .unwrap_or_default();
+    let metadata = json!({"thread": {"turns": latest_turn.iter().collect::<Vec<_>>()}});
+    let summary = hydrate_thread_summary(summary, &metadata, &items);
+    (
+        HydratedThread {
+            summary,
+            items,
+            title_is_provider_preview: false,
+        },
+        latest_turn,
+    )
 }
 
 /// Conversation items from a `thread/read` payload, including rollout-file
