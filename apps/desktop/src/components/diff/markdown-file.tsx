@@ -41,7 +41,7 @@ export function FilePreviewToggle({
 
 export function MarkdownFileDocument({ text }: { text: string }) {
   return (
-    <div className="px-4 py-3 text-fg-primary">
+    <div data-selectable className="px-4 py-3 text-fg-primary">
       <MessageMarkdown text={text} defer={false} interpretDirectives={false} />
     </div>
   )
