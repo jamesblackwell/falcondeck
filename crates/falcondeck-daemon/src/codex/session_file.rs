@@ -161,10 +161,10 @@ pub(super) fn hydrate_thread_history_from_session_file(
         return (Vec::new(), None);
     }
 
+    let response_timestamps = session_response_timestamps(&items);
     let mut conversation_items = items
-        .iter()
-        .filter(|item| should_keep_session_hydrated_item(item, &items))
-        .cloned()
+        .into_iter()
+        .filter(|item| should_keep_session_hydrated_item(item, &response_timestamps))
         .map(|item| item.item)
         .collect::<Vec<_>>();
     conversation_items.sort_by_key(conversation_item_created_at);
@@ -229,14 +229,18 @@ pub(super) fn supplement_thread_items_with_session_tool_calls(
     workspace_path: &str,
 ) {
     let session_items = hydrate_thread_items_from_session_file(session_path, workspace_path);
+    let mut tool_ids = items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
     for session_item in session_items {
         let ConversationItem::ToolCall { id, .. } = &session_item else {
             continue;
         };
-        let already_present = items.iter().any(
-            |item| matches!(item, ConversationItem::ToolCall { id: existing_id, .. } if existing_id == id),
-        );
-        if !already_present {
+        if tool_ids.insert(id.clone()) {
             items.push(session_item);
         }
     }
@@ -455,9 +459,33 @@ fn apply_session_tool_call_output(
     sanitize_conversation_item(item);
 }
 
+fn session_response_timestamps(
+    items: &[SessionHydratedItem],
+) -> HashMap<String, Vec<chrono::DateTime<Utc>>> {
+    let mut timestamps = HashMap::<String, Vec<chrono::DateTime<Utc>>>::new();
+    for item in items {
+        if matches!(
+            item.kind,
+            SessionHydratedItemKind::AssistantMessageFromResponse
+        ) && let ConversationItem::AssistantMessage {
+            text, created_at, ..
+        } = &item.item
+        {
+            timestamps
+                .entry(normalized_session_message(text))
+                .or_default()
+                .push(*created_at);
+        }
+    }
+    for times in timestamps.values_mut() {
+        times.sort_unstable();
+    }
+    timestamps
+}
+
 fn should_keep_session_hydrated_item(
     candidate: &SessionHydratedItem,
-    all_items: &[SessionHydratedItem],
+    response_timestamps: &HashMap<String, Vec<chrono::DateTime<Utc>>>,
 ) -> bool {
     match candidate.kind {
         SessionHydratedItemKind::AssistantMessageFromEvent => {
@@ -470,28 +498,39 @@ fn should_keep_session_hydrated_item(
                 return true;
             };
 
-            !all_items.iter().any(|existing| {
-                matches!(
-                    existing.kind,
-                    SessionHydratedItemKind::AssistantMessageFromResponse
-                ) && matches!(&existing.item, ConversationItem::AssistantMessage {
-                    text,
-                    created_at,
-                    ..
-                } if normalized_session_message(text) == normalized_session_message(candidate_text)
-                    && created_at
+            let Some(times) = response_timestamps.get(&normalized_session_message(candidate_text))
+            else {
+                return true;
+            };
+            // Only the nearest response on either side can match. Indexing
+            // timestamps also avoids scanning every repeated "Done" message
+            // in long rollouts, while preserving the original second rounding.
+            let next = times.partition_point(|created_at| created_at < candidate_created_at);
+            !times
+                .get(next)
+                .into_iter()
+                .chain(next.checked_sub(1).and_then(|index| times.get(index)))
+                .any(|created_at| {
+                    created_at
                         .signed_duration_since(*candidate_created_at)
                         .num_seconds()
                         .abs()
-                        <= 5)
-            })
+                        <= 5
+                })
         }
         _ => true,
     }
 }
 
 fn normalized_session_message(text: &str) -> String {
+    #[cfg(test)]
+    SESSION_MESSAGE_NORMALIZATIONS.with(|count| count.set(count.get() + 1));
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+thread_local! {
+    static SESSION_MESSAGE_NORMALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -540,6 +579,128 @@ mod tests {
             "timestamp": "2026-10-02T15:38:48.722Z",
             "type": "event_msg", "payload": {"type": kind, "turn_id": turn_id}
         })
+    }
+
+    #[test]
+    fn large_rollout_normalizes_each_assistant_message_once() {
+        const MESSAGES: usize = 512;
+        let mut entries = Vec::new();
+        for index in 0..MESSAGES {
+            entries.push(json!({
+                "timestamp": "2026-10-02T15:38:48.722Z", "type": "event_msg",
+                "payload": {"id": format!("event-{index}"), "type": "agent_message",
+                    "message": format!("Message\n  {index}")}
+            }));
+        }
+        // Response records can be reordered; matching must not depend on the
+        // relative position of the event and response in the rollout.
+        for index in (0..MESSAGES).rev() {
+            entries.push(json!({
+                "timestamp": "2026-10-02T15:38:49.722Z", "type": "response_item",
+                "payload": {"id": format!("response-{index}"), "type": "message",
+                    "role": "assistant", "content": [{"type": "output_text",
+                        "text": format!("Message {index}")}]}
+            }));
+        }
+
+        SESSION_MESSAGE_NORMALIZATIONS.with(|count| count.set(0));
+        let (hydrated, _) = refresh_fixture("thread", "/project", &entries);
+        assert_eq!(hydrated.items.len(), MESSAGES);
+        assert!(hydrated.items.iter().all(|item| matches!(item,
+            ConversationItem::AssistantMessage { id, .. } if id.starts_with("response-"))));
+        let normalizations = SESSION_MESSAGE_NORMALIZATIONS.with(std::cell::Cell::get);
+        assert!(
+            normalizations <= MESSAGES * 2,
+            "normalized {normalizations} messages for {} records",
+            MESSAGES * 2
+        );
+    }
+
+    #[test]
+    fn rollout_deduplication_preserves_repeated_text_and_timestamp_boundaries() {
+        let timestamp = |offset_ms: i64| {
+            chrono::DateTime::<Utc>::from_timestamp_millis(1_790_955_520_000 + offset_ms)
+                .unwrap()
+                .to_rfc3339()
+        };
+        let mut entries = vec![
+            json!({"timestamp": timestamp(60_000), "type": "response_item",
+                "payload": {"id": "later-response", "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done now"}]}}),
+            json!({"timestamp": timestamp(0), "type": "response_item",
+                "payload": {"id": "earlier-response", "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done now"}]}}),
+        ];
+        for offset_ms in [-6_000, -5_999, 0, 5_999, 6_000, 65_999] {
+            entries.push(
+                json!({"timestamp": timestamp(offset_ms), "type": "event_msg",
+                "payload": {"id": format!("event-{offset_ms}"), "type": "agent_message",
+                    "message": "\t Done \n now "}}),
+            );
+        }
+        entries.push(json!({"timestamp": timestamp(0), "type": "event_msg",
+            "payload": {"id": "different-text", "type": "agent_message", "message": "Done later"}}));
+
+        let (hydrated, _) = refresh_fixture("thread", "/project", &entries);
+        let ids = hydrated
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::AssistantMessage { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            ids,
+            HashSet::from([
+                "event--6000",
+                "event-6000",
+                "different-text",
+                "earlier-response",
+                "later-response",
+            ])
+        );
+    }
+
+    #[test]
+    fn supplement_adds_each_missing_tool_once_and_preserves_native_tools() {
+        let tool = |id: &str, call_id: &str, name: &str| {
+            json!({
+                "timestamp": "2026-10-02T15:38:48.722Z", "type": "response_item",
+                "payload": {"id": id, "type": "custom_tool_call", "call_id": call_id, "name": name}
+            })
+        };
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "session_meta", "payload": {"cwd": "/project"}})
+        )
+        .unwrap();
+        for entry in [
+            tool("shared", "shared-call", "Rollout copy"),
+            tool("missing", "missing-call-1", "First missing"),
+            tool("missing", "missing-call-2", "Duplicate missing"),
+        ] {
+            writeln!(file, "{entry}").unwrap();
+        }
+        let mut items = vec![
+            build_session_hydrated_item_from_entry(&tool("shared", "shared-call", "Native original")).unwrap().item,
+            build_session_hydrated_item_from_entry(&json!({
+                "timestamp": "2026-10-02T15:38:48.722Z", "type": "event_msg",
+                "payload": {"id": "missing", "type": "agent_message", "message": "Same id, another kind"}
+            })).unwrap().item,
+        ];
+        supplement_thread_items_with_session_tool_calls(
+            &mut items,
+            file.path().to_str().unwrap(),
+            "/project",
+        );
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().any(|item| matches!(item,
+            ConversationItem::ToolCall { id, title, .. } if id == "shared" && title == "Native original")));
+        assert!(items.iter().any(|item| matches!(item,
+            ConversationItem::ToolCall { id, title, .. } if id == "missing" && title == "First missing")));
     }
 
     #[test]

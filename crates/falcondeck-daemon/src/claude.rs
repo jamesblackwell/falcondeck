@@ -1523,6 +1523,11 @@ pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
     } else {
         collect_session_files(&root, &mut files);
     }
+    if let Some(cache) = SESSION_FILE_CACHE.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.prune_missing_files();
+    }
 
     let mut threads_by_session = HashMap::new();
     for thread in files
@@ -1599,11 +1604,10 @@ fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// A fully parsed session file, cached keyed by (mtime, len) so re-opening a
-/// workspace does not re-parse megabytes of unchanged JSONL. Session files are
-/// append-only, so any write changes the length and invalidates the entry.
-/// The cwd stays alongside the thread rather than being filtered during
-/// parsing so one cached parse can answer lookups from any workspace.
+/// A fully parsed session file. The cache is only a re-open optimization;
+/// active workspace transcripts and native files remain the sources used by
+/// the daemon. Its budget uses source bytes as an estimate of retained content
+/// and caps entry count to bound metadata overhead from many tiny sessions.
 #[derive(Clone)]
 struct ParsedSessionFile {
     cwd: String,
@@ -1614,10 +1618,101 @@ struct SessionFileCacheEntry {
     modified: Option<std::time::SystemTime>,
     len: u64,
     session: Option<ParsedSessionFile>,
+    last_access: u64,
 }
 
-static SESSION_FILE_CACHE: OnceLock<std::sync::Mutex<HashMap<PathBuf, SessionFileCacheEntry>>> =
-    OnceLock::new();
+const SESSION_FILE_CACHE_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const SESSION_FILE_CACHE_MAX_ENTRIES: usize = 256;
+
+#[derive(Default)]
+struct SessionFileCache {
+    entries: HashMap<PathBuf, SessionFileCacheEntry>,
+    source_bytes: u64,
+    next_access: u64,
+}
+
+impl SessionFileCache {
+    fn next_access(&mut self) -> u64 {
+        self.next_access = self.next_access.saturating_add(1);
+        self.next_access
+    }
+
+    /// The outer option identifies a cache hit, including a known-unparseable
+    /// file or a session from another cwd. Filter before deep-cloning items.
+    fn get_thread(
+        &mut self,
+        path: &Path,
+        modified: Option<std::time::SystemTime>,
+        len: u64,
+        workspace_path: &str,
+    ) -> Option<Option<HydratedClaudeThread>> {
+        let entry = self.entries.get(path)?;
+        if entry.modified != modified || entry.len != len {
+            self.remove(path);
+            return None;
+        }
+        let last_access = self.next_access();
+        let entry = self.entries.get_mut(path)?;
+        entry.last_access = last_access;
+        Some(
+            entry.session.as_ref().and_then(|session| {
+                (session.cwd == workspace_path).then(|| session.thread.clone())
+            }),
+        )
+    }
+
+    fn remove(&mut self, path: &Path) {
+        if let Some(entry) = self.entries.remove(path) {
+            self.source_bytes -= entry.len;
+        }
+    }
+
+    fn prune_missing_files(&mut self) {
+        self.entries.retain(|path, _| path.is_file());
+        self.source_bytes = self.entries.values().map(|entry| entry.len).sum();
+    }
+
+    fn insert(
+        &mut self,
+        path: &Path,
+        modified: Option<std::time::SystemTime>,
+        len: u64,
+        session: &Option<ParsedSessionFile>,
+    ) {
+        self.remove(path);
+        // Oversized files still hydrate normally; don't create another full
+        // transcript copy just to make a future workspace re-open cheaper.
+        if len > SESSION_FILE_CACHE_MAX_BYTES {
+            return;
+        }
+        while self.entries.len() >= SESSION_FILE_CACHE_MAX_ENTRIES
+            || self.source_bytes > SESSION_FILE_CACHE_MAX_BYTES - len
+        {
+            let Some(oldest_path) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.remove(&oldest_path);
+        }
+        let last_access = self.next_access();
+        self.source_bytes += len;
+        self.entries.insert(
+            path.to_path_buf(),
+            SessionFileCacheEntry {
+                modified,
+                len,
+                session: session.clone(),
+                last_access,
+            },
+        );
+    }
+}
+
+static SESSION_FILE_CACHE: OnceLock<std::sync::Mutex<SessionFileCache>> = OnceLock::new();
 
 fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<HydratedClaudeThread> {
     let session = match fs::metadata(path) {
@@ -1625,32 +1720,29 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             let modified = metadata.modified().ok();
             let len = metadata.len();
             let cache = SESSION_FILE_CACHE.get_or_init(Default::default);
-            let cached = cache.lock().ok().and_then(|entries| {
-                entries.get(path).and_then(|entry| {
-                    (entry.modified == modified && entry.len == len).then(|| entry.session.clone())
-                })
-            });
-            match cached {
-                Some(session) => session,
-                None => {
-                    let session = parse_session_file(path);
-                    if let Ok(mut entries) = cache.lock() {
-                        entries.insert(
-                            path.to_path_buf(),
-                            SessionFileCacheEntry {
-                                modified,
-                                len,
-                                session: session.clone(),
-                            },
-                        );
-                    }
-                    session
-                }
+            if let Some(thread) = cache
+                .lock()
+                .ok()
+                .and_then(|mut cache| cache.get_thread(path, modified, len, workspace_path))
+            {
+                return thread;
             }
+            let session = parse_session_file(path);
+            if let Ok(mut cache) = cache.lock() {
+                cache.insert(path, modified, len, &session);
+            }
+            session
         }
         // Unstat-able files can't be validated against a cache entry; parse
         // fresh (which will almost certainly fail to open too).
-        Err(_) => parse_session_file(path),
+        Err(_) => {
+            if let Some(cache) = SESSION_FILE_CACHE.get()
+                && let Ok(mut cache) = cache.lock()
+            {
+                cache.remove(path);
+            }
+            parse_session_file(path)
+        }
     };
     let session = session?;
     (session.cwd == workspace_path).then_some(session.thread)
@@ -2303,6 +2395,118 @@ mod tests {
 
         let rehydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
         assert_eq!(rehydrated.items.len(), 2, "{:?}", rehydrated.items);
+    }
+
+    #[test]
+    fn oversized_session_is_hydrated_without_retaining_a_cached_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("large-session.jsonl");
+        let content = "a".repeat(33 * 1024 * 1024);
+        fs::write(&session_path, json!({
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "cwd": "/tmp/project", "type": "user", "message": {"role": "user", "content": content},
+            "created_at": "2026-03-19T10:00:00Z"
+        }).to_string()).unwrap();
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 1);
+        assert!(
+            matches!(&hydrated.items[0], ConversationItem::UserMessage { text, .. }
+            if text.len() == 33 * 1024 * 1024)
+        );
+        let cache = SESSION_FILE_CACHE.get().unwrap().lock().unwrap();
+        assert!(
+            !cache.entries.contains_key(&session_path),
+            "large transcript retained twice"
+        );
+    }
+
+    #[test]
+    fn session_cache_evicts_least_recent_files_to_fit_byte_budget() {
+        let mut cache = SessionFileCache::default();
+        let first = Path::new("first.jsonl");
+        let second = Path::new("second.jsonl");
+        let third = Path::new("third.jsonl");
+        let len = SESSION_FILE_CACHE_MAX_BYTES / 2;
+        cache.insert(first, None, len, &None);
+        cache.insert(second, None, len, &None);
+        assert_eq!(cache.source_bytes, SESSION_FILE_CACHE_MAX_BYTES);
+        assert!(matches!(
+            cache.get_thread(first, None, len, "/project"),
+            Some(None)
+        ));
+        cache.insert(third, None, len, &None);
+        assert!(cache.entries.contains_key(first));
+        assert!(!cache.entries.contains_key(second));
+        assert!(cache.entries.contains_key(third));
+        assert_eq!(cache.source_bytes, SESSION_FILE_CACHE_MAX_BYTES);
+
+        // A formerly-small file that grows past the budget must lose its old
+        // copy as well as bypass insertion of the new transcript.
+        cache.insert(first, None, SESSION_FILE_CACHE_MAX_BYTES + 1, &None);
+        assert!(!cache.entries.contains_key(first));
+        assert_eq!(cache.source_bytes, len);
+        assert!(cache.get_thread(third, None, len + 1, "/project").is_none());
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.source_bytes, 0);
+    }
+
+    #[test]
+    fn session_cache_caps_tiny_entries_and_invalidates_modified_files() {
+        let mut cache = SessionFileCache::default();
+        for index in 0..=SESSION_FILE_CACHE_MAX_ENTRIES {
+            cache.insert(Path::new(&format!("{index}.jsonl")), None, 1, &None);
+        }
+        assert_eq!(cache.entries.len(), SESSION_FILE_CACHE_MAX_ENTRIES);
+        assert_eq!(cache.source_bytes, SESSION_FILE_CACHE_MAX_ENTRIES as u64);
+        assert!(!cache.entries.contains_key(Path::new("0.jsonl")));
+        assert!(
+            cache
+                .get_thread(
+                    Path::new("1.jsonl"),
+                    Some(std::time::UNIX_EPOCH),
+                    1,
+                    "/project"
+                )
+                .is_none()
+        );
+        assert_eq!(cache.entries.len(), SESSION_FILE_CACHE_MAX_ENTRIES - 1);
+        assert_eq!(
+            cache.source_bytes,
+            (SESSION_FILE_CACHE_MAX_ENTRIES - 1) as u64
+        );
+    }
+
+    #[test]
+    fn session_cache_filters_workspace_hits_and_prunes_removed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, json!({
+            "session_id": "33333333-3333-4333-8333-333333333333",
+            "cwd": "/tmp/project", "type": "user", "message": {"role": "user", "content": "cached prompt"},
+            "created_at": "2026-03-19T10:00:00Z"
+        }).to_string()).unwrap();
+        let len = fs::metadata(&path).unwrap().len();
+        let mut cache = SessionFileCache::default();
+        cache.insert(&path, None, len, &parse_session_file(&path));
+        assert!(matches!(
+            cache.get_thread(&path, None, len, "/tmp/other"),
+            Some(None)
+        ));
+        let first = cache
+            .get_thread(&path, None, len, "/tmp/project")
+            .unwrap()
+            .unwrap();
+        let second = cache
+            .get_thread(&path, None, len, "/tmp/project")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.summary.id, second.summary.id);
+        assert_eq!(first.items, second.items);
+        assert_eq!(cache.source_bytes, len);
+        fs::remove_file(&path).unwrap();
+        cache.prune_missing_files();
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.source_bytes, 0);
     }
 
     #[test]
