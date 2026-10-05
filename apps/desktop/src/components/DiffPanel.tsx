@@ -171,8 +171,19 @@ export const DiffPanel = memo(function DiffPanel({
     selectedFile,
   )
 
+  // A transcript path can name a folder. The content endpoint validates the
+  // path on disk, so use its answer rather than guessing from the capped file
+  // listing (which also omits empty and ignored directories).
+  const selectedDirectory =
+    selectedView === 'files' && fileError === 'workspace path is not a file'
+      ? selectedFile?.replace(/\/+$/, '') ?? null
+      : null
+
   useEffect(() => {
-    if (selectedFile) setActiveTab(selectedView)
+    if (selectedFile) {
+      setActiveTab(selectedView)
+      setFilterQuery('')
+    }
   }, [selectedFile, selectedView])
 
   const selectFile = useCallback(
@@ -244,7 +255,7 @@ export const DiffPanel = memo(function DiffPanel({
     selectedFile != null &&
     (selectedView === 'files' || !gitEnabled || (hasLoadedDiff && !hasParseableDiff))
 
-  if (showFileViewer && selectedFile) {
+  if (showFileViewer && selectedFile && selectedDirectory == null) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-1">
         <FileView
@@ -272,7 +283,7 @@ export const DiffPanel = memo(function DiffPanel({
     )
   }
 
-  if (selectedFile) {
+  if (selectedFile && selectedDirectory == null) {
     const previewContent = content ?? file?.content ?? null
     const waitingForMarkdown =
       isMarkdownFilePath(selectedFile) &&
@@ -309,7 +320,10 @@ export const DiffPanel = memo(function DiffPanel({
         isFilesLoading={isFilesLoading}
         error={error}
         filesError={filesError}
-        onTabChange={setActiveTab}
+        onTabChange={(tab) => {
+          setActiveTab(tab)
+          if (selectedDirectory != null) onSelectionChange(null)
+        }}
         onRefresh={refreshChanges}
         onRefreshFiles={refreshWorkspaceFiles}
         isReviewPending={isReviewPending}
@@ -323,6 +337,7 @@ export const DiffPanel = memo(function DiffPanel({
         onQueryChange={setFilterQuery}
         info={info}
         showChanges={gitEnabled}
+        expandedDirectory={selectedDirectory}
       />
     </div>
   )

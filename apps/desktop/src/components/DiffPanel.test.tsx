@@ -41,6 +41,50 @@ function renderPanel(
 describe('DiffPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    api.workspaceFiles.mockResolvedValue({ files: [], truncated: false })
+  })
+
+  it('opens a linked folder in the files tree and expands its ancestors', async () => {
+    api.workspaceFiles.mockResolvedValue({
+      files: ['docs/marketing/submissions/acp/draft.md', 'README.md'],
+      truncated: false,
+    })
+    api.workspaceFile.mockRejectedValueOnce(new Error('workspace path is not a file'))
+    const onSelectionChange = vi.fn()
+    renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'docs/marketing/submissions/', view: 'files' },
+      'thread-1',
+      onSelectionChange,
+    )
+
+    const folder = await screen.findByRole('button', { name: 'submissions' })
+    expect(folder.closest('[role="treeitem"]')).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('button', { name: 'acp' })).toBeVisible()
+    expect(screen.queryByText('workspace path is not a file')).toBeNull()
+    expect(screen.getByRole('button', { name: 'files' })).toHaveAttribute('aria-pressed', 'true')
+
+    // Folder expansion remains interactive after opening a link.
+    fireEvent.click(folder)
+    expect(screen.queryByRole('button', { name: 'acp' })).toBeNull()
+    fireEvent.click(folder)
+    fireEvent.click(screen.getByRole('button', { name: 'acp' }))
+    fireEvent.click(screen.getByRole('button', { name: 'draft.md' }))
+    expect(onSelectionChange).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1', filePath: 'docs/marketing/submissions/acp/draft.md', view: 'files',
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'changes' }))
+    expect(onSelectionChange).toHaveBeenCalledWith(null)
+  })
+
+  it('keeps missing paths on the file error view', async () => {
+    api.workspaceFile.mockRejectedValueOnce(new Error('workspace file not found'))
+    renderPanel(
+      { workspaceId: 'workspace-1', filePath: 'missing.md', view: 'files' },
+      'thread-1',
+    )
+    expect(await screen.findByText('workspace file not found')).toBeVisible()
+    expect(screen.queryByRole('tree')).toBeNull()
   })
 
   it('keeps casual chat folders out of the git review surface', () => {

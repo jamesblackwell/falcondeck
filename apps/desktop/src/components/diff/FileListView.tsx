@@ -47,6 +47,8 @@ export type FileListViewProps = {
   info?: ReviewInfoContext | null
   /** Git-only review UI is irrelevant for casual chat document folders. */
   showChanges?: boolean
+  /** Folder opened from a transcript path; expand it in the files tree. */
+  expandedDirectory?: string | null
 }
 
 const ROW_HEIGHT = 32
@@ -121,6 +123,7 @@ export const FileListView = memo(function FileListView({
   isReviewPending = false,
   info = null,
   showChanges = true,
+  expandedDirectory = null,
 }: FileListViewProps) {
   const [menu, setMenu] = useState<FileBrowserMenuTarget | null>(null)
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
@@ -354,6 +357,7 @@ export const FileListView = memo(function FileListView({
               query={deferredQuery}
               onSelectFile={onSelectWorkspaceFile}
               onOpenContextMenu={openTreeContextMenu}
+              expandedDirectory={expandedDirectory}
             />
           </>
         )}

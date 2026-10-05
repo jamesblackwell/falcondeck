@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState, type KeyboardEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { ChevronRight, Folder, FolderOpen } from 'lucide-react'
 
 import type { GitStatusEntry } from '@falcondeck/client-core'
@@ -110,14 +110,21 @@ export const FileTreeView = memo(function FileTreeView({
   query,
   onSelectFile,
   onOpenContextMenu,
+  expandedDirectory = null,
 }: {
   paths: string[]
   statusByPath: Map<string, GitStatusEntry>
   query: string
   onSelectFile: (path: string) => void
   onOpenContextMenu: TreeRowsProps['onOpenContextMenu']
+  expandedDirectory?: string | null
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  useEffect(() => {
+    if (expandedDirectory == null) return
+    const ancestors = directoryPathsForMatches([`${expandedDirectory}/`])
+    setExpanded((current) => new Set([...current, ...ancestors]))
+  }, [expandedDirectory])
   const tree = useMemo(() => buildFileTree(paths), [paths])
   const autoExpanded = useMemo(
     () => (query ? directoryPathsForMatches(paths) : new Set<string>()),
