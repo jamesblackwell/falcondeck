@@ -724,7 +724,8 @@ impl PeerQueue {
                 _ => {}
             }
         }
-        let message_bytes = serde_json::to_vec(&message).map_err(|_| ())?.len().max(1);
+        let message_bytes =
+            bounded_json_size(&message, self.available_bytes.available_permits())?.max(1);
         let permits = u32::try_from(message_bytes).map_err(|_| ())?;
         let permit = Arc::clone(&self.available_bytes)
             .try_acquire_many_owned(permits)
@@ -736,6 +737,36 @@ impl PeerQueue {
             })
             .map_err(|_| ())
     }
+}
+
+struct JsonByteCounter {
+    bytes: usize,
+    limit: usize,
+}
+
+impl std::io::Write for JsonByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let Some(bytes) = self
+            .bytes
+            .checked_add(buffer.len())
+            .filter(|&bytes| bytes <= self.limit)
+        else {
+            return Err(std::io::Error::other("relay queue byte budget exhausted"));
+        };
+        self.bytes = bytes;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_json_size<T: Serialize + ?Sized>(value: &T, limit: usize) -> Result<usize, ()> {
+    // Count the exact wire bytes without allocating a second full payload.
+    let mut counter = JsonByteCounter { bytes: 0, limit };
+    serde_json::to_writer(&mut counter, value).map_err(|_| ())?;
+    Ok(counter.bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -2264,7 +2295,12 @@ impl AppState {
                     peer_id,
                     &peer.tx,
                     RelayServerMessage::Update {
-                        update: update.clone(),
+                        update: project_update_for_peer(
+                            &update,
+                            peer.tx
+                                .compact_index
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        ),
                     },
                 );
             }
@@ -3522,20 +3558,7 @@ impl AppState {
             Vec::new()
         } else {
             candidates
-                .map(|update| {
-                    if compact_index
-                        && matches!(&update.body, RelayUpdateBody::Encrypted { envelope } if envelope.snapshot_hint)
-                    {
-                        RelayUpdate {
-                            id: update.id.clone(),
-                            seq: update.seq,
-                            created_at: update.created_at,
-                            body: RelayUpdateBody::SnapshotInvalidated,
-                        }
-                    } else {
-                        update.clone()
-                    }
-                })
+                .map(|update| project_update_for_peer(update, compact_index))
                 .collect()
         };
 
@@ -4373,6 +4396,21 @@ fn prune_state(
     });
 
     report
+}
+
+fn project_update_for_peer(update: &RelayUpdate, compact_index: bool) -> RelayUpdate {
+    if compact_index
+        && matches!(&update.body, RelayUpdateBody::Encrypted { envelope } if envelope.snapshot_hint)
+    {
+        RelayUpdate {
+            id: update.id.clone(),
+            seq: update.seq,
+            created_at: update.created_at,
+            body: RelayUpdateBody::SnapshotInvalidated,
+        }
+    } else {
+        update.clone()
+    }
 }
 
 fn compact_snapshot_update(update: &mut RelayUpdate) {
@@ -5291,6 +5329,43 @@ mod tests {
     }
 
     #[test]
+    fn bounded_json_size_stops_serializing_when_queue_budget_is_exhausted() {
+        use serde::ser::SerializeSeq;
+        use std::cell::Cell;
+
+        struct CountedSequence<'a>(&'a Cell<usize>);
+
+        impl serde::Serialize for CountedSequence<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut sequence = serializer.serialize_seq(Some(100_000))?;
+                for _ in 0..100_000 {
+                    self.0.set(self.0.get() + 1);
+                    sequence.serialize_element("large-payload-item")?;
+                }
+                sequence.end()
+            }
+        }
+
+        let visited = Cell::new(0);
+        assert!(super::bounded_json_size(&CountedSequence(&visited), 32).is_err());
+        assert!(visited.get() < 3, "visited {} items", visited.get());
+
+        visited.set(0);
+        assert!(super::bounded_json_size(&CountedSequence(&visited), 0).is_err());
+        assert_eq!(visited.get(), 0);
+    }
+
+    #[test]
+    fn bounded_json_size_counts_exact_escaped_utf8_wire_bytes() {
+        let message = falcondeck_core::RelayServerMessage::Error {
+            message: "quotes \" slash \\ newline\n tab\t null\0 café 🦅".into(),
+        };
+        let expected = serde_json::to_vec(&message).unwrap().len();
+        assert_eq!(super::bounded_json_size(&message, expected), Ok(expected));
+        assert!(super::bounded_json_size(&message, expected - 1).is_err());
+    }
+
+    #[test]
     fn peer_queue_enforces_aggregate_bytes_and_releases_budget_after_receive() {
         let message = falcondeck_core::RelayServerMessage::Error {
             message: "bounded-message".repeat(8),
@@ -5299,13 +5374,40 @@ mod tests {
         let (queue, mut rx) = PeerQueue::new_with_byte_budget(4, encoded_bytes);
 
         assert!(queue.try_send(message.clone()).is_ok());
+        assert_eq!(queue.available_bytes.available_permits(), 0);
         assert!(queue.try_send(message.clone()).is_err());
 
         let received = rx.try_recv().expect("first queued message");
         assert_eq!(received.message(), &message);
+        assert_eq!(queue.available_bytes.available_permits(), 0);
         drop(received);
+        assert_eq!(queue.available_bytes.available_permits(), encoded_bytes);
 
         assert!(queue.try_send(message).is_ok());
+    }
+
+    #[test]
+    fn peer_queue_rejection_does_not_leak_byte_permits() {
+        let message = falcondeck_core::RelayServerMessage::Error {
+            message: "bounded-message".into(),
+        };
+        let encoded_bytes = serde_json::to_vec(&message).unwrap().len();
+        let budget = 2 * encoded_bytes;
+        let (queue, mut rx) = PeerQueue::new_with_byte_budget(1, budget);
+        assert!(queue.try_send(message.clone()).is_ok());
+        assert!(queue.try_send(message.clone()).is_err());
+        assert_eq!(queue.available_bytes.available_permits(), encoded_bytes);
+
+        let oversized = falcondeck_core::RelayServerMessage::Error {
+            message: "x".repeat(budget),
+        };
+        assert!(queue.try_send(oversized).is_err());
+        assert_eq!(queue.available_bytes.available_permits(), encoded_bytes);
+
+        drop(rx.try_recv().unwrap());
+        drop(rx);
+        assert!(queue.try_send(message).is_err());
+        assert_eq!(queue.available_bytes.available_permits(), budget);
     }
 
     #[test]

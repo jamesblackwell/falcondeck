@@ -650,6 +650,84 @@ async fn peer_registration_rechecks_device_revocation_after_ticket_consumption()
 }
 
 #[tokio::test]
+async fn compact_live_fanout_preserves_snapshot_identity_and_legacy_replay() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let (daemon_id, _daemon_rx, _) = server
+        .state
+        .register_peer(&claim.session_id, RelayPeerRole::Daemon, None)
+        .await
+        .unwrap();
+    let (phone_id, mut phone_rx, _) = server
+        .state
+        .register_peer(
+            &claim.session_id,
+            RelayPeerRole::Client,
+            Some(claim.device_id.clone()),
+        )
+        .await
+        .unwrap();
+    server
+        .state
+        .set_peer_compact_index(&claim.session_id, &phone_id)
+        .await;
+    let (_, mut legacy_rx, _) = server
+        .state
+        .register_peer(
+            &claim.session_id,
+            RelayPeerRole::Client,
+            Some(claim.device_id.clone()),
+        )
+        .await
+        .unwrap();
+
+    let mut snapshot = test_envelope(&"s".repeat(3 * 1024 * 1024));
+    snapshot.snapshot_hint = true;
+    for envelope in [snapshot.clone(), test_envelope("new-thread-title")] {
+        server
+            .state
+            .handle_message(
+                &claim.session_id,
+                &daemon_id,
+                RelayPeerRole::Daemon,
+                RelayClientMessage::Update {
+                    body: RelayUpdateBody::Encrypted {
+                        envelope: envelope.clone(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        let phone_message = phone_rx.try_recv().unwrap();
+        let legacy_message = legacy_rx.try_recv().unwrap();
+        let RelayServerMessage::Update { update: compact } = phone_message.message() else {
+            panic!("expected compact live update");
+        };
+        let RelayServerMessage::Update { update: legacy } = legacy_message.message() else {
+            panic!("expected legacy live update");
+        };
+        assert_eq!(compact.id, legacy.id);
+        assert_eq!(compact.seq, legacy.seq);
+        assert_eq!(compact.created_at, legacy.created_at);
+        assert!(
+            matches!(&legacy.body, RelayUpdateBody::Encrypted { envelope: received } if received == &envelope)
+        );
+        if envelope.snapshot_hint {
+            assert!(matches!(compact.body, RelayUpdateBody::SnapshotInvalidated));
+        } else {
+            assert_eq!(compact, legacy);
+        }
+        let history = server
+            .state
+            .session_updates(&claim.session_id, &pairing.daemon_token, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(history.updates.last(), Some(legacy));
+    }
+}
+
+#[tokio::test]
 async fn compact_replay_projects_large_snapshots_without_discarding_small_live_events() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
