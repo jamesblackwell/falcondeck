@@ -222,7 +222,7 @@ When adding a new shared pattern:
 
 Every surface that replaces the conversation column is a **main view**: Activity,
 Extensions, Plugins, Automations, Settings, and every extension `panels`
-contribution (Notes, Kanban, Mini Zen, and later packages).
+contribution (Notes, Kanban, and later packages).
 
 These used to be several unrelated pages — marketing-sized `text-3xl` titles at
 `max-w-3xl`, settings headers at `max-w-4xl`, catalog pages at `max-w-5xl`, and

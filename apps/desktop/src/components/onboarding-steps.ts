@@ -1,22 +1,12 @@
 export const ONBOARDING_STEPS = [
   "Welcome",
-  "Appearance",
-  "Fonts",
-  "Dictation",
-  "Computer use",
-  "OpenRouter",
-  "Tools",
+  "Agent",
   "Project",
   "Finish",
 ] as const;
 export const ONBOARDING_STEP_INDEX = {
   welcome: 0,
-  appearance: 1,
-  fonts: 2,
-  dictation: 3,
-  computerUse: 4,
-  openrouter: 5,
-  tools: 6,
-  project: 7,
-  finish: 8,
+  tools: 1,
+  project: 2,
+  finish: 3,
 } as const;

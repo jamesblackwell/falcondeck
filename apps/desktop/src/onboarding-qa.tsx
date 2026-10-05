@@ -1,10 +1,8 @@
 /* Standalone first-run onboarding fixture: `npm run dev` → /onboarding-qa.html.
-   Walks the real OnboardingWizard without launching Tauri. Appearance and
-   dictation writes go to this browser's localStorage (same keys as the app).
-   `?step=welcome|appearance|fonts|dictation|computerUse|openrouter|tools|project|finish` jumps
-   in, `?theme=light|dark` picks the mode, `?workspaces=1` pretends a project
-   is already connected, `?baseUrl=` points the OpenRouter + harness steps at
-   a live daemon. */
+   Walks the real OnboardingWizard without launching Tauri.
+   `?step=welcome|agent|tools|project|finish` jumps in, `?theme=light|dark`
+   picks the mode, `?workspaces=1` pretends a project is connected,
+   and `?baseUrl=` points agent setup at a live daemon. */
 import { StrictMode, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -32,24 +30,10 @@ const theme = params.get("theme");
 if (theme === "light" || theme === "dark") {
   updateAppearance({ theme });
 }
-const dictation = params.get("dictation");
-if (dictation) {
-  const key = "falcondeck.desktop.dictation.v2";
-  const current = JSON.parse(window.localStorage.getItem(key) ?? "{}");
-  window.localStorage.setItem(
-    key,
-    JSON.stringify({ ...current, ...JSON.parse(dictation) }),
-  );
-}
-
 const STEP_ALIASES: Record<string, number> = Object.fromEntries(
   ONBOARDING_STEPS.map((label, index) => [label.toLowerCase(), index]),
 );
-STEP_ALIASES.openrouter = ONBOARDING_STEP_INDEX.openrouter;
-STEP_ALIASES.computeruse = ONBOARDING_STEP_INDEX.computerUse;
-STEP_ALIASES["computer-use"] = ONBOARDING_STEP_INDEX.computerUse;
-STEP_ALIASES.typography = ONBOARDING_STEP_INDEX.fonts;
-STEP_ALIASES.type = ONBOARDING_STEP_INDEX.fonts;
+STEP_ALIASES.tools = ONBOARDING_STEP_INDEX.tools;
 
 function parseStep(value: string | null): number {
   if (!value) return 0;

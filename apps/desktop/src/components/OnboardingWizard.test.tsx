@@ -1,11 +1,10 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as backupService from '../backup-service'
 
 import { invoke } from '@tauri-apps/api/core'
 import { createDaemonApiClient } from '@falcondeck/client-core'
-import { DEFAULT_APPEARANCE, updateAppearance } from '@falcondeck/ui'
 
 import {
   clearStoredOnboarding,
@@ -185,7 +184,6 @@ describe('OnboardingWizard', () => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
     vi.clearAllMocks()
-    act(() => updateAppearance(DEFAULT_APPEARANCE))
     window.localStorage.clear()
     delete window.__TAURI_INTERNALS__
   })
@@ -216,219 +214,70 @@ describe('OnboardingWizard', () => {
     expect(props.onComplete).not.toHaveBeenCalled()
   })
 
-  it('applies and persists an appearance choice immediately', () => {
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.appearance })
+  it('finishes the four-step flow without configuring optional features', async () => {
+    mockedInvoke.mockResolvedValue('default')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(overview)))
+    const props = renderWizard()
 
-    expect(screen.getByText('Choose your appearance')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'System' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-    // jsdom has no matchMedia, so system resolves to light and the light
-    // palettes render as a gallery; dark stays a compact dropdown.
-    expect(screen.getByRole('group', { name: 'Light theme' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Falcon Light' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-    expect(screen.getByLabelText('Dark theme')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Interface font')).toBeNull()
-
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'One Light' }))
-    })
-    expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
-      lightColorTheme: 'one-light',
-    })
-
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Dark' }))
-    })
-
-    expect(screen.getByRole('button', { name: 'Dark' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-    expect(screen.getByRole('group', { name: 'Dark theme' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Falcon Dark' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
-    expect(document.documentElement.dataset.theme).toBe('dark')
-    expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
-      theme: 'dark',
-    })
-  })
-
-  it('splits fonts onto the next step with a live sample', () => {
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.appearance })
-
+    expect(screen.getByRole('status')).toHaveTextContent('Step 1 of 4')
+    fireEvent.click(screen.getByRole('button', { name: 'Quick setup' }))
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Step 2 of 4')
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-
-    expect(screen.getByText('Fonts and size')).toBeInTheDocument()
-    expect(screen.getByText('Interface')).toBeInTheDocument()
-    expect(screen.getByText('The quick brown fox jumps over the lazy dog.')).toBeInTheDocument()
-    expect(screen.getByText(/Transcripts read in this face/)).toBeInTheDocument()
-    expect(screen.getByLabelText('Interface font')).toBeInTheDocument()
-    expect(screen.getByLabelText('Chat font')).toBeInTheDocument()
-    expect(screen.getByLabelText('Code font')).toBeInTheDocument()
-    expect(screen.getByText('Text size')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'System' })).toBeNull()
-
-    act(() => {
-      fireEvent.click(screen.getByRole('button', { name: 'Large' }))
+    expect(screen.getByText('Add your first project')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Step 3 of 4')
+    fireEvent.click(screen.getByRole('button', { name: 'Choose a folder…' }))
+    expect(props.onAddProject).toHaveBeenCalledOnce()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
     })
-    expect(JSON.parse(window.localStorage.getItem('fd-appearance') ?? '{}')).toMatchObject({
-      fontScale: 1.15,
-    })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    expect(screen.getByText('Dictate on this computer')).toBeInTheDocument()
+    expect(screen.getByText('Ready when you are')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Step 4 of 4')
+    fireEvent.click(screen.getByRole('button', { name: 'Start using FalconDeck' }))
+    expect(props.onComplete).toHaveBeenCalledWith(false)
+    expect(mockedInvoke).toHaveBeenCalledWith('macos_notification_permission_state')
+    expect(mockedInvoke).not.toHaveBeenCalledWith('request_macos_notification_permission')
+    expect(screen.queryByLabelText('API key')).toBeNull()
   })
 
-  it('offers computer-use permission grants after dictation', () => {
-    window.__TAURI_INTERNALS__ = {}
-    mockedInvoke.mockResolvedValue({
-      accessibility: false,
-      screenRecording: false,
-      macosOk: true,
-      macosMajor: 15,
-      supported: true,
-    })
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.computerUse })
+  it.each(['appearance', 'fonts', 'dictation', 'computerUse', 'openrouter'])(
+    'resumes a removed %s step at agent setup without enabling extra features', async (step) => {
+      writeStoredOnboardingResume(step)
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(overview)))
+      renderWizard()
 
-    expect(screen.getByText('Let agents use your Mac')).toBeInTheDocument()
-    expect(screen.getByText('Accessibility')).toBeInTheDocument()
-    expect(screen.getByText('Screen Recording')).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Grant' })).toHaveLength(2)
-    expect(
-      screen.getByRole('button', { name: 'Restart FalconDeck' }),
-    ).toBeInTheDocument()
-    expect(
-      screen.getByText(/Setup continues on this step/),
-    ).toBeInTheDocument()
+      expect(await screen.findByText('Codex')).toBeInTheDocument()
+      expect(readStoredOnboardingResume()).toBe('tools')
+      expect(mockedInvoke).not.toHaveBeenCalled()
+    },
+  )
+
+  it('leaves setup with Escape', () => {
+    const props = renderWizard({ initialStep: ONBOARDING_STEP_INDEX.project })
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(props.onComplete).toHaveBeenCalledWith(true)
   })
 
-  it('reopens the computer-use step after an in-progress restart', async () => {
-    window.__TAURI_INTERNALS__ = {}
-    mockedInvoke.mockResolvedValue({
-      accessibility: true,
-      screenRecording: true,
-      macosOk: true,
-      macosMajor: 15,
-      supported: true,
-    })
-    writeStoredOnboardingResume('computerUse')
+  it('keeps installed agents visible and reveals other agents on demand', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({
+      ...overview,
+      harnesses: [...overview.harnesses, {
+        id: 'pi', label: 'Pi', kind: 'detected', bin: 'pi', installed: true,
+        update_available: false, upgrade_command: 'npm install -g pi',
+      }],
+    })))
+    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.tools })
 
-    renderWizard()
-
-    expect(await screen.findByText('Let agents use your Mac')).toBeInTheDocument()
-    expect(readStoredOnboardingResume()).toBe('computerUse')
-  })
-
-  it('asks the app to restart from the computer-use step', async () => {
-    window.__TAURI_INTERNALS__ = {}
-    mockedInvoke.mockImplementation(async (command) => {
-      if (command === 'restart_app') return
-      return {
-        accessibility: false,
-        screenRecording: false,
-        macosOk: true,
-        macosMajor: 15,
-        supported: true,
-      }
-    })
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.computerUse })
-
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Restart FalconDeck' }),
-    )
-
-    await waitFor(() => {
-      expect(mockedInvoke).toHaveBeenCalledWith('restart_app')
-    })
-    expect(readStoredOnboardingResume()).toBe('computerUse')
-  })
-
-  it('enables computer use on continue after a restart even while grants are still loading', async () => {
-    window.__TAURI_INTERNALS__ = {}
-    let resolvePermissions: (value: unknown) => void = () => {}
-    const pendingPermissions = new Promise((resolve) => {
-      resolvePermissions = resolve
-    })
-    mockedInvoke.mockImplementation(async (command) => {
-      if (command === 'computer_use_permission_status') return pendingPermissions
-      return {}
-    })
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({
-        enabled: true,
-        available: true,
-        macos_ok: true,
-        permissions: { accessibility: true, screen_recording: true },
-      }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-    writeStoredOnboardingResume('computerUse')
-    renderWizard()
-
-    expect(await screen.findByText('Let agents use your Mac')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    expect(screen.getByText('Optional: OpenRouter')).toBeInTheDocument()
-
-    resolvePermissions({
-      accessibility: true,
-      screenRecording: true,
-      macosOk: true,
-      macosMajor: 15,
-      supported: true,
-    })
-
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:4317/api/computer-use',
-        expect.objectContaining({ method: 'POST' }),
-      )
-    })
-    const post = fetchMock.mock.calls.find(
-      (call) => (call[1] as { method?: string } | undefined)?.method === 'POST',
-    )
-    expect(JSON.parse((post?.[1] as { body: string }).body)).toEqual({
-      enabled: true,
-    })
-  })
-
-  it('offers dictation enable, shortcut, and voice rewrite during onboarding', () => {
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.dictation })
-
-    expect(screen.getByText('Dictate on this computer')).toBeInTheDocument()
-    expect(screen.getByText('System-wide dictation')).toBeInTheDocument()
-    expect(
-      within(screen.getByRole('group', { name: 'Dictation shortcut' })).getByRole(
-        'button',
-        { name: 'Right Command' },
-      ),
-    ).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.getByText('Rewrite selected text')).toBeInTheDocument()
-    expect(
-      within(screen.getByRole('group', { name: 'Rewrite shortcut' })).getByRole(
-        'button',
-        { name: 'Right Option' },
-      ),
-    ).toHaveAttribute('aria-pressed', 'true')
-    expect(screen.queryByRole('button', { name: 'Apple Speech' })).toBeNull()
-    expect(screen.queryByText('Custom prompt')).toBeNull()
-  })
-
-  it('offers an optional OpenRouter key for title suggestions and speech', () => {
-    renderWizard({ initialStep: ONBOARDING_STEP_INDEX.openrouter })
-
-    expect(screen.getByText('Optional: OpenRouter')).toBeInTheDocument()
-    expect(screen.getByLabelText('API key')).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /get a key/i })).toHaveAttribute(
-      'href',
-      'https://openrouter.ai/keys',
-    )
+    expect(await screen.findByText('Pi')).toBeInTheDocument()
+    expect(screen.queryByText('Custom Agent')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Show more agents' }))
+    expect(screen.getByText('Custom Agent')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show fewer agents' })).toHaveAttribute('aria-expanded', 'true')
+    // A current installed agent does not need an update before starting.
+    expect(screen.getAllByRole('button', { name: 'Update' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Show fewer agents' }))
+    expect(screen.queryByText('Custom Agent')).toBeNull()
+    expect(screen.getByText('Pi')).toBeInTheDocument()
   })
 
   it('refreshes the displayed harness version after an upgrade completes', async () => {
@@ -508,7 +357,7 @@ describe('OnboardingWizard', () => {
     ).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
-    await screen.findByText("You're set")
+    await screen.findByText('Ready when you are')
     fireEvent.click(screen.getByRole('button', { name: 'Start using FalconDeck' }))
     expect(props.onComplete).toHaveBeenCalledWith(false)
   })
@@ -519,7 +368,7 @@ describe('OnboardingWizard', () => {
     const first = screen.getByRole('button', {
       name: 'Or restore from a previous backup',
     })
-    const continueButton = screen.getByRole('button', { name: 'Continue' })
+    const continueButton = screen.getByRole('button', { name: 'Quick setup' })
 
     continueButton.focus()
     fireEvent.keyDown(continueButton, { key: 'Tab' })
@@ -608,7 +457,7 @@ describe('OnboardingWizard', () => {
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('Restored 1 project(s) and 3 extension(s). 2 project(s) could not be connected.')
     expect(props.onComplete).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Quick setup' })).toBeEnabled()
   })
 
   it('prevents leaving setup during a restore and unlocks after failure', async () => {
@@ -620,10 +469,12 @@ describe('OnboardingWizard', () => {
     fireEvent.change(screen.getByTestId('onboarding-backup-file-input'), {
       target: { files: [new File(['{}'], 'backup.json')] },
     })
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Quick setup' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Skip setup' })).toBeDisabled()
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    expect(props.onComplete).not.toHaveBeenCalled()
     await act(async () => rejectRestore(new Error('Invalid backup')))
-    expect(screen.getByRole('button', { name: 'Continue' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Quick setup' })).toBeEnabled()
     expect(props.onComplete).not.toHaveBeenCalled()
     expect(props.onToast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Could not restore backup' }))
   })
@@ -631,7 +482,7 @@ describe('OnboardingWizard', () => {
   it('explains denied notifications without offering an ineffective permission request', async () => {
     mockedInvoke.mockResolvedValue('denied')
     renderWizard({ initialStep: ONBOARDING_STEP_INDEX.finish })
-    expect(await screen.findByText(/re-enable FalconDeck in System Settings/)).toBeInTheDocument()
+    expect(await screen.findByText(/enable FalconDeck in System Settings/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Enable notifications' })).toBeNull()
   })
 

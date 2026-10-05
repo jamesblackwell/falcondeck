@@ -301,15 +301,11 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
   "Test it" (runs the test endpoint, shows the thumbnail); driver version;
   Restart driver; telemetry toggle; cursor overlay toggle; unsupported
   states (macOS < 14, remote host).
-- Onboarding: new step "Let agents use your Mac" after Dictation
-  (`ONBOARDING_STEPS`/`ONBOARDING_STEP_INDEX` in `OnboardingWizard.tsx`),
-  reusing a shared `ComputerUseSetup` component; skippable; fixture params in
-  `onboarding-qa.tsx`. Enabling computer use is the act of completing this
-  step, so the switch defaults off until a human has seen the prompt. The
-  compact layout offers Restart FalconDeck; the wizard persists the current
-  step id (`falcondeck.desktop.onboarding.resume.v1`) so a relaunch for TCC
-  returns to this step instead of Welcome. Completing or rerunning setup
-  clears that resume.
+- First-run onboarding stays focused on agents and project folders. Computer
+  use is configured later in Settings → Computer use, where the switch
+  defaults off until the user enables it. Old onboarding resume ids for this
+  step now open agent setup without enabling computer use or requesting TCC
+  permissions.
 - Grant-change handling: when the panel observes a grant flip, call
   restart; if `screen_recording` is true but the test screenshot is black,
   offer "Restart FalconDeck" (`restart_app` exists).

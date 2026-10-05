@@ -38,8 +38,6 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   subscriptions through independently supervised per-extension queues;
 - daemon-owned, denied-by-default `threads:read` grants, summary-only thread
   reduction, local HTTP and relay RPC mutation, and desktop grant controls;
-- the bundled, disabled-by-default Mini Zen proof extension, using public event,
-  thread-summary, storage, and panel APIs with a useful pre-grant fallback;
 - the bundled, enabled-by-default Notes panel, using private storage, a
   declared action, and a trusted React editor — a note list beside a Markdown
   editor — on desktop and remote web;
@@ -202,20 +200,22 @@ the SDK's monorepo source location.
 which official packages are bundled and enabled on fresh installation. An
 extension cannot declare itself trusted or default-enabled in its manifest.
 
-Initial policy:
+Current policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
 - `falcondeck.notes`: bundled and enabled by default as a personal Markdown
   notes panel. It requests no permissions. It replaced `falcondeck.scratch-pad`
   in 0.3.0; the daemon moves that id's persisted state across on restore.
-- `falcondeck.mini-zen`: bundled but disabled by default so enabling the
-  opinionated panel remains an explicit choice; its requested `threads:read`
-  permission is still denied until separately granted.
 - `falcondeck.follow-up-suggestions`: bundled and enabled by default, and the
   first package to use a catalog `defaultGrantedPermissions` entry. Its
   `agent-tools:register` grant is applied once, on first discovery; afterwards
   the daemon-owned grant set is the only authority, so a revoked permission is
   never silently re-granted by a later restart or upgrade.
+
+Mini Zen was an unfinished proof extension and is no longer bundled. Upgrades
+remove its managed package files and retired enablement, grants, storage, and
+views. Its source remains in the repository as a prototype for SDK tests; the
+historical implementation notes below describe that prototype.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest

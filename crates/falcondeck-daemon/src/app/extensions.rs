@@ -28,6 +28,7 @@ const MAX_SCOPE_ID_CHARS: usize = 512;
 const LEGACY_SCRATCH_PAD_ID: &str = "falcondeck.scratch-pad";
 const NOTES_ID: &str = "falcondeck.notes";
 pub(crate) const RETIRED_MISSIONS_ID: &str = "falcondeck.missions";
+const RETIRED_MINI_ZEN_ID: &str = "falcondeck.mini-zen";
 const RETIRED_MISSIONS_SKILL: &str = "falcondeck-missions";
 const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
@@ -179,7 +180,7 @@ impl ExtensionRegistry {
             Err(error) => return Err(error.into()),
         };
         migrate_scratch_pad_to_notes(&mut self.persisted);
-        retire_missions_extension(&mut self.persisted);
+        retire_bundled_extensions(&mut self.persisted);
         self.discover().await?;
         self.persist().await
     }
@@ -251,22 +252,12 @@ impl ExtensionRegistry {
                         "../../../../extensions/official/follow-up-suggestions/server.ts"
                     ),
                 ),
-                (
-                    self.root
-                        .join("official/mini-zen/falcondeck.extension.json"),
-                    include_str!(
-                        "../../../../extensions/official/mini-zen/falcondeck.extension.json"
-                    ),
-                ),
-                (
-                    self.root.join("official/mini-zen/server.ts"),
-                    include_str!("../../../../extensions/official/mini-zen/server.ts"),
-                ),
             ]);
             // Scratch pad shipped as its own package directory; nothing reads
             // it once the catalog points at Notes, so clear it out.
             let _ = tokio::fs::remove_dir_all(self.root.join("official/scratch-pad")).await;
             let _ = tokio::fs::remove_dir_all(self.root.join("official/missions")).await;
+            let _ = tokio::fs::remove_dir_all(self.root.join("official/mini-zen")).await;
             let _ = tokio::fs::remove_dir_all(
                 crate::agent_context::skills_root(&self.state_path).join(RETIRED_MISSIONS_SKILL),
             )
@@ -1002,16 +993,16 @@ fn migrate_scratch_pad_to_notes(state: &mut PersistedExtensionState) {
         .retain(|_, view| view.extension_id != LEGACY_SCRATCH_PAD_ID);
 }
 
-/// Missions shipped as a bundled extension and was removed. Drop its
+/// Missions and Mini Zen were removed from the bundled catalog. Drop their
 /// persisted enablement, grants, storage, and views so a later restore does
 /// not keep a ghost package. Owned Automations are retired separately.
-fn retire_missions_extension(state: &mut PersistedExtensionState) {
-    state.enabled.remove(RETIRED_MISSIONS_ID);
-    state.grants.remove(RETIRED_MISSIONS_ID);
-    state.storage.remove(RETIRED_MISSIONS_ID);
-    state
-        .views
-        .retain(|_, view| view.extension_id != RETIRED_MISSIONS_ID);
+fn retire_bundled_extensions(state: &mut PersistedExtensionState) {
+    for id in [RETIRED_MISSIONS_ID, RETIRED_MINI_ZEN_ID] {
+        state.enabled.remove(id);
+        state.grants.remove(id);
+        state.storage.remove(id);
+        state.views.retain(|_, view| view.extension_id != id);
+    }
 }
 
 fn extension_view_key(
@@ -2063,16 +2054,12 @@ mod tests {
         assert_eq!(notes.contributes.panels.len(), 1);
         assert!(notes.permissions.is_empty());
 
-        let mini_zen = snapshot
-            .catalog
-            .iter()
-            .find(|extension| extension.id == "falcondeck.mini-zen")
-            .expect("Mini Zen should be bundled");
-        assert!(!mini_zen.enabled);
-        assert_eq!(mini_zen.status, ExtensionStatus::Disabled);
-        assert_eq!(mini_zen.contributes.panels.len(), 1);
-        assert_eq!(mini_zen.permissions, [THREADS_READ_PERMISSION]);
-        assert!(mini_zen.granted_permissions.is_empty());
+        assert!(
+            snapshot
+                .catalog
+                .iter()
+                .all(|extension| extension.id != RETIRED_MINI_ZEN_ID)
+        );
 
         let host_path = state_dir.path().join("extension-host/main.ts");
         tokio::fs::write(&host_path, "// stale bundled host")
@@ -2098,18 +2085,22 @@ mod tests {
         let mut registry = ExtensionRegistry::new(&state_path);
         registry.restore().await.expect("registry should restore");
 
-        assert!(!registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        registry
+            .update_enabled("falcondeck.thread-tags", false)
+            .await
+            .expect("Kanban should disable");
+        assert!(!registry.has_grant("falcondeck.thread-tags", THREADS_READ_PERMISSION));
         let granted = registry
-            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, true)
             .await
             .expect("declared permission should grant");
         assert_eq!(granted.granted_permissions, [THREADS_READ_PERMISSION]);
-        assert!(!registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        assert!(!registry.has_grant("falcondeck.thread-tags", THREADS_READ_PERMISSION));
         registry
-            .update_enabled("falcondeck.mini-zen", true)
+            .update_enabled("falcondeck.thread-tags", true)
             .await
-            .expect("Mini Zen should enable");
-        assert!(registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+            .expect("Kanban should enable");
+        assert!(registry.has_grant("falcondeck.thread-tags", THREADS_READ_PERMISSION));
         assert!(
             registry
                 .update_permission("falcondeck.thread-tags", "workspace:read", true,)
@@ -2119,19 +2110,19 @@ mod tests {
 
         let mut restored = ExtensionRegistry::new(&state_path);
         restored.restore().await.expect("grant should restore");
-        let mini_zen = restored
+        let kanban = restored
             .snapshot()
             .catalog
             .into_iter()
-            .find(|extension| extension.id == "falcondeck.mini-zen")
-            .expect("Mini Zen should restore");
-        assert_eq!(mini_zen.granted_permissions, [THREADS_READ_PERMISSION]);
+            .find(|extension| extension.id == "falcondeck.thread-tags")
+            .expect("Kanban should restore");
+        assert_eq!(kanban.granted_permissions, [THREADS_READ_PERMISSION]);
 
         restored.persisted.views.insert(
             "permission-derived".to_string(),
             ExtensionView {
-                extension_id: "falcondeck.mini-zen".to_string(),
-                view_id: "attention-panel".to_string(),
+                extension_id: "falcondeck.thread-tags".to_string(),
+                view_id: "kanban-board".to_string(),
                 scope: None,
                 value: serde_json::json!({ "title": "private thread title" }),
                 updated_at: Utc::now(),
@@ -2139,20 +2130,20 @@ mod tests {
         );
 
         restored
-            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, false)
+            .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, false)
             .await
             .expect("grant should revoke");
         let mut revoked = ExtensionRegistry::new(&state_path);
         revoked.restore().await.expect("revocation should restore");
-        assert!(!revoked.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        assert!(!revoked.has_grant("falcondeck.thread-tags", THREADS_READ_PERMISSION));
         assert!(revoked.persisted.views.is_empty());
         assert!(
             revoked
                 .snapshot()
                 .catalog
                 .into_iter()
-                .find(|extension| extension.id == "falcondeck.mini-zen")
-                .expect("Mini Zen should restore after revocation")
+                .find(|extension| extension.id == "falcondeck.thread-tags")
+                .expect("Kanban should restore after revocation")
                 .granted_permissions
                 .is_empty()
         );
@@ -2164,34 +2155,34 @@ mod tests {
         let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
         registry.restore().await.expect("registry should restore");
         registry
-            .update_enabled("falcondeck.mini-zen", true)
+            .update_enabled("falcondeck.thread-tags", true)
             .await
-            .expect("Mini Zen should enable");
+            .expect("Kanban should enable");
 
         registry
             .mark_error(
-                "falcondeck.mini-zen",
+                "falcondeck.thread-tags",
                 "threads:read permission is not granted",
             )
             .await
             .expect("permission denial should be recorded");
         let recovered = registry
-            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, true)
             .await
             .expect("matching permission should grant");
         assert_eq!(recovered.status, ExtensionStatus::Active);
         assert_eq!(recovered.last_error, None);
 
         registry
-            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, false)
+            .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, false)
             .await
             .expect("permission should revoke");
         registry
-            .mark_error("falcondeck.mini-zen", "extension host crashed")
+            .mark_error("falcondeck.thread-tags", "extension host crashed")
             .await
             .expect("unrelated failure should be recorded");
         let still_failed = registry
-            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, true)
             .await
             .expect("permission should grant without hiding another failure");
         assert_eq!(still_failed.status, ExtensionStatus::Error);
@@ -2256,6 +2247,73 @@ mod tests {
         assert!(!state.storage.contains_key(LEGACY_SCRATCH_PAD_ID));
     }
 
+    #[tokio::test]
+    async fn retired_mini_zen_is_removed_from_existing_installs() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("state.json");
+        let root = state_dir.path().join("extensions");
+        let stale_package = root.join("official/mini-zen");
+        tokio::fs::create_dir_all(&stale_package).await.unwrap();
+        tokio::fs::write(stale_package.join("server.ts"), "// old Mini Zen")
+            .await
+            .unwrap();
+
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.root = root;
+        registry.manages_bundled_root = true;
+        registry
+            .persisted
+            .enabled
+            .insert(RETIRED_MINI_ZEN_ID.to_string(), true);
+        registry.persisted.grants.insert(
+            RETIRED_MINI_ZEN_ID.to_string(),
+            BTreeSet::from([THREADS_READ_PERMISSION.to_string()]),
+        );
+        registry.persisted.storage.insert(
+            RETIRED_MINI_ZEN_ID.to_string(),
+            BTreeMap::from([("attention".to_string(), serde_json::json!({}))]),
+        );
+        registry.persisted.views.insert(
+            "stale".to_string(),
+            ExtensionView {
+                extension_id: RETIRED_MINI_ZEN_ID.to_string(),
+                view_id: "attention-panel".to_string(),
+                scope: None,
+                value: serde_json::json!({}),
+                updated_at: Utc::now(),
+            },
+        );
+        registry.persist().await.unwrap();
+        registry.restore().await.unwrap();
+
+        assert!(!stale_package.exists());
+        assert!(!registry.persisted.enabled.contains_key(RETIRED_MINI_ZEN_ID));
+        assert!(!registry.persisted.grants.contains_key(RETIRED_MINI_ZEN_ID));
+        assert!(!registry.persisted.storage.contains_key(RETIRED_MINI_ZEN_ID));
+        assert!(registry.persisted.views.is_empty());
+        assert!(
+            registry
+                .snapshot()
+                .catalog
+                .iter()
+                .all(|extension| extension.id != RETIRED_MINI_ZEN_ID)
+        );
+        assert!(
+            registry
+                .snapshot()
+                .catalog
+                .iter()
+                .any(|extension| extension.id == NOTES_ID)
+        );
+        let persisted: PersistedExtensionState = serde_json::from_str(
+            &tokio::fs::read_to_string(&registry.state_path)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!persisted.enabled.contains_key(RETIRED_MINI_ZEN_ID));
+    }
+
     #[test]
     fn retired_missions_state_is_dropped() {
         let mut state = PersistedExtensionState::default();
@@ -2279,7 +2337,7 @@ mod tests {
             },
         );
 
-        retire_missions_extension(&mut state);
+        retire_bundled_extensions(&mut state);
 
         assert!(!state.enabled.contains_key(RETIRED_MISSIONS_ID));
         assert!(!state.grants.contains_key(RETIRED_MISSIONS_ID));

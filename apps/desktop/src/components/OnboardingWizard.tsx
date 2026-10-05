@@ -16,8 +16,6 @@ import {
   ActivityDiamond,
   Badge,
   Button,
-  ThemeControls,
-  TypographyControls,
   cn,
 } from "@falcondeck/ui";
 import {
@@ -28,17 +26,7 @@ import {
   RefreshCw,
   Terminal,
 } from "lucide-react";
-import { ComputerUseSetup } from "./ComputerUseSetup";
-import {
-  readComputerUsePermissions,
-  type ComputerUsePermissionStatus,
-} from "../computer-use";
-import { DictationSetup, SpeechCredentialField } from "./DictationSetup";
-import { HarnessInstallPaths } from "./HarnessInstallPaths";
-import {
-  harnessHasDivergentInstall,
-  upgradeFinishedDescription,
-} from "./harness-install";
+import { upgradeFinishedDescription } from "./harness-install";
 import { ONBOARDING_STEP_INDEX, ONBOARDING_STEPS } from "./onboarding-steps";
 import { inspectBackupFile, executeImportBackup } from "../backup-service";
 import {
@@ -81,6 +69,10 @@ function onboardingStepId(index: number): string {
 }
 
 function onboardingStepFromId(id: string | null): number | null {
+  // Resume older, longer setup flows at the first useful step.
+  if (["appearance", "fonts", "dictation", "computerUse", "openrouter"].includes(id ?? "")) {
+    return STEP_INDEX.tools;
+  }
   if (!id || !Object.hasOwn(STEP_INDEX, id)) return null;
   return STEP_INDEX[id as keyof typeof STEP_INDEX];
 }
@@ -130,11 +122,10 @@ export function OnboardingWizard({
   const installPendingRef = useRef(false);
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [jobLog, setJobLog] = useState<string[]>([]);
+  const [showAllAgents, setShowAllAgents] = useState(false);
   const [notificationPermission, setNotificationPermission] =
     useState<MacNotificationPermission>("default");
   const [isRequestingPermission, setIsRequestingPermission] = useState(false);
-  const [computerUsePermissions, setComputerUsePermissions] =
-    useState<ComputerUsePermissionStatus | null>(null);
   const [isRestoringBackup, setIsRestoringBackup] = useState(false);
   const [restoreWarning, setRestoreWarning] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement>(null);
@@ -326,8 +317,19 @@ export function OnboardingWizard({
   const installedCount =
     overview?.harnesses.filter((harness) => harness.installed).length ?? 0;
   const isLastStep = step === STEPS.length - 1;
+  const isPrimaryAgent = (harness: HarnessSummary) =>
+    harness.installed || harness.id === "codex" || harness.id === "claude";
+  const hasMoreAgents = overview?.harnesses.some((harness) => !isPrimaryAgent(harness));
+  const visibleHarnesses = overview?.harnesses.filter(
+    (harness) => showAllAgents || isPrimaryAgent(harness),
+  );
 
   const trapDialogFocus = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!isRestoringBackup) onComplete(true);
+      return;
+    }
     if (event.key !== "Tab") return;
 
     const focusable = Array.from(
@@ -373,8 +375,6 @@ export function OnboardingWizard({
         aria-labelledby="onboarding-title"
         onKeyDown={trapDialogFocus}
         className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-lg)]"
-        // A setup assistant is modal: Escape does not dismiss it. Skip is an
-        // explicit button so the choice is deliberate.
       >
         <div className="shrink-0 px-6 pt-6">
           <p className="mb-3 text-center text-xs text-fg-muted" role="status">
@@ -410,11 +410,11 @@ export function OnboardingWizard({
                 Welcome to FalconDeck
               </h2>
               <p className="max-w-md text-[length:var(--fd-text-sm)] text-fg-muted">
-                FalconDeck orchestrates coding agents — Codex, Claude Code,
-                OpenCode, and others — from this computer. Choose your
-                preferences, check your tools, and connect a project. Dictation,
-                computer use, and OpenRouter are optional. You can change
-                everything later in Settings.
+                Run coding agents in your project folders. Check your agents and
+                add a folder, or skip setup and jump in.
+              </p>
+              <p className="max-w-md text-sm text-fg-muted">
+                Themes, voice, and computer use are available later in Settings.
               </p>
               <button
                 type="button"
@@ -434,124 +434,6 @@ export function OnboardingWizard({
             </div>
           ) : null}
 
-          {step === STEP_INDEX.appearance ? (
-            <div className="space-y-5">
-              <div className="text-center">
-                <h2
-                  id="onboarding-title"
-                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
-                >
-                  Choose your appearance
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Light, dark, or follow this Mac. Palettes apply immediately.
-                </p>
-              </div>
-              <div className="mx-auto w-full max-w-xl">
-                <ThemeControls presentation="gallery" />
-              </div>
-            </div>
-          ) : null}
-
-          {step === STEP_INDEX.fonts ? (
-            <div className="space-y-5">
-              <div className="text-center">
-                <h2
-                  id="onboarding-title"
-                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
-                >
-                  Fonts and size
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Choose comfortable fonts and text sizes. You can fine-tune
-                  them later in Settings → Appearance.
-                </p>
-              </div>
-              <div className="mx-auto w-full max-w-lg">
-                <TypographyControls preview />
-              </div>
-            </div>
-          ) : null}
-
-          {step === STEP_INDEX.dictation ? (
-            <div className="space-y-4">
-              <div className="text-center">
-                <h2
-                  id="onboarding-title"
-                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
-                >
-                  Dictate on this computer
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Turn on system-wide dictation and pick a shortcut. Voice
-                  rewrite is optional — you can add an OpenRouter key later in
-                  setup.
-                </p>
-              </div>
-              <DictationSetup
-                baseUrl={baseUrl}
-                onToast={onToast}
-                compact
-              />
-            </div>
-          ) : null}
-
-          {step === STEP_INDEX.computerUse ? (
-            <div className="space-y-4">
-              <div className="text-center">
-                <h2
-                  id="onboarding-title"
-                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
-                >
-                  Let agents use your Mac
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Grant Accessibility and Screen Recording to FalconDeck.
-                  Agents can then click and type in other apps without a
-                  second permission prompt. Continue turns this on once both
-                  permissions are granted.
-                </p>
-              </div>
-              <ComputerUseSetup
-                baseUrl={baseUrl}
-                onToast={onToast}
-                compact
-                onPermissionsChange={setComputerUsePermissions}
-                onBeforeAppRestart={() => {
-                  // Flush before `restart_app`: invoke() is async and the
-                  // process is killed without waiting for a later effect.
-                  writeStoredOnboardingResume("computerUse");
-                }}
-              />
-            </div>
-          ) : null}
-
-          {step === STEP_INDEX.openrouter ? (
-            <div className="space-y-4">
-              <div className="text-center">
-                <h2
-                  id="onboarding-title"
-                  className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
-                >
-                  Optional: OpenRouter
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  One key on this computer unlocks title suggestions,
-                  read-aloud, voice rewrite, and cloud transcription. Apple
-                  Speech dictation works without it — continue to skip.
-                </p>
-              </div>
-              <div className="mx-auto w-full max-w-lg rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
-                <SpeechCredentialField
-                  baseUrl={baseUrl}
-                  onToast={onToast}
-                  id="onboarding-openrouter-key"
-                  hint="Stored only on this computer. Paired devices never see the key."
-                />
-              </div>
-            </div>
-          ) : null}
-
           {step === STEP_INDEX.tools ? (
             <div className="space-y-4">
               <div className="text-center">
@@ -559,11 +441,11 @@ export function OnboardingWizard({
                   id="onboarding-title"
                   className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
                 >
-                  Check your tools
+                  Set up an agent
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  FalconDeck doesn&apos;t ship coding CLIs. Install at least one
-                  to start talking to an agent.
+                  Use an agent already on this Mac, or install one below.
+                  You only need one to get started.
                 </p>
               </div>
               {loadError ? (
@@ -586,7 +468,7 @@ export function OnboardingWizard({
                 </div>
               ) : (
                 <div className="space-y-2">
-                  {overview.harnesses.map((harness) => {
+                  {visibleHarnesses?.map((harness) => {
                     const status = harnessStatus(harness);
                     const jobForThis = activeJob?.harnessId === harness.id;
                     const startingThis = startingHarnessId === harness.id;
@@ -619,9 +501,6 @@ export function OnboardingWizard({
                               <Badge variant={status.variant}>
                                 {status.label}
                               </Badge>
-                              {harnessHasDivergentInstall(harness) ? (
-                                <Badge variant="warning">Another install</Badge>
-                              ) : null}
                               {harness.version ? (
                                 <span className="font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
                                   v{harness.version}
@@ -631,7 +510,6 @@ export function OnboardingWizard({
                                 </span>
                               ) : null}
                             </div>
-                            <HarnessInstallPaths harness={harness} />
                             {harness.account_status ? (
                               <p className="mt-0.5 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                                 {harness.account_status}
@@ -644,7 +522,7 @@ export function OnboardingWizard({
                               </p>
                             ) : null}
                           </div>
-                          {harness.upgrade_command ? (
+                          {harness.upgrade_command && (!harness.installed || harness.update_available === true) ? (
                             <Button
                               size="sm"
                               variant={harness.installed ? "secondary" : "default"}
@@ -669,6 +547,18 @@ export function OnboardingWizard({
                       </div>
                     );
                   })}
+                  {hasMoreAgents ? (
+                    <div className="flex justify-center">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-expanded={showAllAgents}
+                        onClick={() => setShowAllAgents((current) => !current)}
+                      >
+                        {showAllAgents ? "Show fewer agents" : "Show more agents"}
+                      </Button>
+                    </div>
+                  ) : null}
                   <div className="flex justify-center pt-1">
                     <Button
                       size="sm"
@@ -682,8 +572,7 @@ export function OnboardingWizard({
                   </div>
                   {installedCount === 0 ? (
                     <p className="pt-1 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
-                      Nothing installed yet? Continue to add a project anyway —
-                      you can install a CLI any time in Settings → Harnesses.
+                      You can install an agent later in Settings → Harnesses.
                     </p>
                   ) : null}
                 </div>
@@ -703,10 +592,13 @@ export function OnboardingWizard({
                     : "Add your first project"}
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  Pick a folder you work in. FalconDeck connects its agent
-                  sessions and history to it.
+                  Choose a folder you work in. Existing agent conversations
+                  appear automatically. You can add more folders later.
                 </p>
               </div>
+              <p className="text-center text-sm text-fg-muted">
+                Just exploring? Continue without a folder.
+              </p>
               <div className="flex flex-col items-center gap-3 py-4">
                 {workspacesCount > 0 ? (
                   <p className="flex items-center gap-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
@@ -741,11 +633,11 @@ export function OnboardingWizard({
                   id="onboarding-title"
                   className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary"
                 >
-                  You&apos;re set
+                  Ready when you are
                 </h2>
                 <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-muted">
-                  FalconDeck can notify you when an agent finishes or needs your
-                  decision.
+                  Open a project and start a task. Notifications are optional;
+                  turn them on to hear when an agent finishes or needs you.
                 </p>
               </div>
               <div className="flex flex-col items-center gap-3 py-2">
@@ -776,7 +668,7 @@ export function OnboardingWizard({
                 )}
                 {notificationPermission === "denied" ? (
                   <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                    Denied — you can re-enable FalconDeck in System Settings →
+                    You can enable FalconDeck in System Settings →
                     Notifications.
                   </p>
                 ) : null}
@@ -799,7 +691,7 @@ export function OnboardingWizard({
             ) : null}
           </div>
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" disabled={isRestoringBackup} onClick={() => onComplete(true)}>
+            <Button type="button" variant="secondary" disabled={isRestoringBackup} onClick={() => onComplete(true)}>
               Skip setup
             </Button>
             {isLastStep ? (
@@ -816,41 +708,9 @@ export function OnboardingWizard({
                 ref={nextRef}
                 type="button"
                 disabled={isRestoringBackup}
-                onClick={() => {
-                  if (step === STEP_INDEX.computerUse && api) {
-                    const enableIfGranted = (granted: boolean) => {
-                      if (!granted) return;
-                      void api.updateComputerUse({ enabled: true }).catch(() => {
-                        onToast({
-                          variant: "warning",
-                          title: "Computer use was not enabled",
-                          description:
-                            "You can turn it on later in Settings → Computer use.",
-                        });
-                      });
-                    };
-                    if (computerUsePermissions) {
-                      enableIfGranted(
-                        computerUsePermissions.accessibility &&
-                          computerUsePermissions.screenRecording,
-                      );
-                    } else {
-                      // After a permission restart the grant probe may still
-                      // be in flight; don't skip enable because state is null.
-                      void readComputerUsePermissions()
-                        .then((permissions) => {
-                          enableIfGranted(
-                            permissions.accessibility &&
-                              permissions.screenRecording,
-                          );
-                        })
-                        .catch(() => {});
-                    }
-                  }
-                  setStep((current) => current + 1);
-                }}
+                onClick={() => setStep((current) => current + 1)}
               >
-                Continue
+                {step === STEP_INDEX.welcome ? "Quick setup" : "Continue"}
               </Button>
             )}
           </div>

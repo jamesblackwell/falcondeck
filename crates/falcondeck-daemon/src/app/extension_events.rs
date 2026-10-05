@@ -367,29 +367,28 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             assert!(queues.contains_key("falcondeck.thread-tags"));
-            assert!(!queues.contains_key("falcondeck.mini-zen"));
         }
 
-        app.update_extension("falcondeck.mini-zen", true)
+        app.update_extension("falcondeck.thread-tags", false)
             .await
-            .expect("Mini Zen should enable");
-        assert!(
-            app.inner
-                .extension_event_queues
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains_key("falcondeck.mini-zen")
-        );
-
-        app.update_extension("falcondeck.mini-zen", false)
-            .await
-            .expect("Mini Zen should disable");
+            .expect("Kanban should disable");
         assert!(
             !app.inner
                 .extension_event_queues
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains_key("falcondeck.mini-zen")
+                .contains_key("falcondeck.thread-tags")
+        );
+
+        app.update_extension("falcondeck.thread-tags", true)
+            .await
+            .expect("Kanban should enable");
+        assert!(
+            app.inner
+                .extension_event_queues
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key("falcondeck.thread-tags")
         );
         app.shutdown().await.expect("test daemon should stop");
     }

@@ -182,17 +182,17 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
         .json::<falcondeck_core::ExtensionSnapshot>()
         .await
         .unwrap();
-    let mini_zen = before
+    let kanban = before
         .catalog
         .iter()
-        .find(|extension| extension.id == "falcondeck.mini-zen")
+        .find(|extension| extension.id == "falcondeck.thread-tags")
         .unwrap();
-    assert_eq!(mini_zen.permissions, ["threads:read"]);
-    assert!(mini_zen.granted_permissions.is_empty());
+    assert_eq!(kanban.permissions, ["threads:read"]);
+    assert!(kanban.granted_permissions.is_empty());
 
     let granted = client
         .patch(format!(
-            "{}/api/extensions/falcondeck.mini-zen/permissions",
+            "{}/api/extensions/falcondeck.thread-tags/permissions",
             daemon.base_url()
         ))
         .json(&serde_json::json!({
@@ -243,7 +243,7 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
         snapshot
             .catalog
             .iter()
-            .find(|extension| extension.id == "falcondeck.mini-zen")
+            .find(|extension| extension.id == "falcondeck.thread-tags")
             .unwrap()
             .granted_permissions,
         ["threads:read"]
