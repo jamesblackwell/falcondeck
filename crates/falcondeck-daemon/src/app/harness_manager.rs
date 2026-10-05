@@ -53,6 +53,9 @@ const MAX_LOG_ENTRIES: usize = 100;
 const MAX_LOG_ENTRY_CHARS: usize = 4000;
 /// Unused copies of the same CLI listed on a harness row.
 const MAX_EXTRA_INSTALLS: usize = 8;
+/// Antigravity's bootstrap endpoint can return a gzip-encoded shell script.
+const AGY_NATIVE_INSTALL: &str =
+    "curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash";
 /// Official Claude Code native installer (also used when nothing is installed).
 const CLAUDE_NATIVE_INSTALL: &str = "curl -fsSL https://claude.ai/install.sh | bash";
 /// npm global upgrade for Claude Code when the resolved binary is the npm package.
@@ -108,7 +111,7 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         label: "Antigravity",
         bin: "agy",
         npm_package: None,
-        upgrade_command: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+        upgrade_command: Some(AGY_NATIVE_INSTALL),
         auth_probe: None,
         builtin: true,
     },
@@ -290,10 +293,10 @@ impl AppState {
                 harness.label
             ))
         })?;
-        let upgrade_command = if harness.id == "claude" {
-            claude_upgrade_command_for_host(&host)
-        } else {
-            upgrade_command.to_string()
+        let upgrade_command = match harness.id {
+            "claude" => claude_upgrade_command_for_host(&host),
+            "agy" => agy_upgrade_command_for_host(&host),
+            _ => upgrade_command.to_string(),
         };
 
         let job_id = Uuid::new_v4().to_string();
@@ -637,6 +640,29 @@ async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
     }
 }
 
+fn agy_upgrade_command_for_host(host: &str) -> String {
+    if host == LOCAL_HOST {
+        let resolution = crate::agent_binary::resolve_agent_binary("agy", "agy");
+        return agy_upgrade_command_for_path(
+            Path::new(&resolution.executable)
+                .is_file()
+                .then_some(resolution.executable.as_str()),
+        );
+    }
+    format!(
+        r#"p=$(command -v agy 2>/dev/null) || true; if [ -n "$p" ]; then "$p" update; else {AGY_NATIVE_INSTALL}; fi"#,
+    )
+}
+
+fn agy_upgrade_command_for_path(path: Option<&str>) -> String {
+    // The bootstrapper exits successfully without changing an existing install.
+    // Keep update failures visible instead of falling back to that no-op.
+    match path {
+        Some(path) => format!("{} update", shell_quote(path)),
+        None => AGY_NATIVE_INSTALL.to_string(),
+    }
+}
+
 /// Picks the Claude upgrade that will actually move the binary FalconDeck
 /// probes. Packaged macOS prefers `~/.local/bin/claude` (native installer)
 /// over Homebrew npm; a hardcoded `npm install -g` updates the other copy.
@@ -687,13 +713,19 @@ fn is_homebrew_claude_cask(path: &str) -> bool {
 }
 
 fn refine_upgrade_command(summary: &mut HarnessSummary) {
-    if summary.id != "claude" {
-        return;
-    }
-    summary.upgrade_command = Some(match summary.resolved_path.as_deref() {
-        Some(path) if summary.installed => claude_upgrade_command_for_path(path),
-        _ => CLAUDE_NATIVE_INSTALL.to_string(),
-    });
+    let path = summary
+        .resolved_path
+        .as_deref()
+        .filter(|_| summary.installed);
+    let command = match summary.id.as_str() {
+        "agy" => agy_upgrade_command_for_path(path),
+        "claude" => match path {
+            Some(path) => claude_upgrade_command_for_path(path),
+            None => CLAUDE_NATIVE_INSTALL.to_string(),
+        },
+        _ => return,
+    };
+    summary.upgrade_command = Some(command);
 }
 
 /// Re-applies a previously fetched latest version to a fresh probe.
@@ -1300,6 +1332,74 @@ fn prune_finished_jobs(jobs: &mut HashMap<String, HarnessUpgradeJob>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_upgrade_decodes_gzip_installer() {
+        use base64::Engine;
+
+        // Gzipped script: #!/bin/bash\nprintf 'agy installer decoded\\n'\n
+        let installer = base64::engine::general_purpose::STANDARD
+            .decode("H4sIAAAAAAAC/1NW1E/KzNNPSizO4CooyswrSVNQT0yvVMjMKy5JzMlJLVJISU3OT0lNiclT5wIACK+dvy0AAAA=")
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route(
+            "/install.sh",
+            axum::routing::get(move || async move {
+                (
+                    [("content-encoding", "gzip"), ("content-type", "text/x-sh")],
+                    installer,
+                )
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let command = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "agy")
+            .unwrap()
+            .upgrade_command
+            .unwrap()
+            .replace(
+                "https://antigravity.google/cli/install.sh",
+                &format!("http://{address}/install.sh"),
+            );
+
+        let result = run_local_upgrade(&command).await;
+        server.abort();
+
+        assert_eq!(result.unwrap().trim(), "agy installer decoded");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn antigravity_upgrade_updates_the_resolved_binary_and_preserves_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("agy copy's binary");
+        std::fs::write(&binary, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut summary = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "agy")
+            .unwrap()
+            .summary();
+        summary.installed = true;
+        summary.resolved_path = Some(binary.to_string_lossy().into_owned());
+        refine_upgrade_command(&mut summary);
+        let command = summary.upgrade_command.unwrap();
+
+        assert_eq!(run_local_upgrade(&command).await.unwrap().trim(), "update");
+
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nprintf 'update failed\\n' >&2\nexit 23\n",
+        )
+        .unwrap();
+        let error = run_local_upgrade(&command).await.unwrap_err();
+        assert!(error.contains("exit code 23: update failed"), "{error}");
+    }
 
     #[test]
     fn parses_versions_from_common_cli_output() {

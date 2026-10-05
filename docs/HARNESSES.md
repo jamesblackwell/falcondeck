@@ -192,6 +192,10 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   npm → `npm install -g @anthropic-ai/claude-code@latest`; Homebrew cask →
   `brew upgrade --cask`. Remote upgrades classify `command -v claude`
   (following one symlink) the same way.
+- Antigravity upgrades the resolved `agy` binary with `agy update`, locally
+  and over SSH. Its bootstrap script exits without changing existing installs,
+  so it is used only when AGY is missing. Bootstrap downloads use curl's
+  `--compressed` flag because the endpoint can return gzip-encoded script bytes.
 - A cheap re-probe that carries over `latest_version` recomputes
   `update_available` against the new current version, so a successful
   upgrade cannot keep the pre-upgrade badge.
