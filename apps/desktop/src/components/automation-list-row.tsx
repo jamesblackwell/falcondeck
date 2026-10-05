@@ -366,7 +366,7 @@ export function AutomationListRow({
                   <AutomationRowMenuContent
                     title={title}
                     paused={paused}
-                    online={online}
+                    online={online && !busy}
                     canToggle={canToggle}
                     onClose={() => onMenuOpenChange(false)}
                     onRun={onRun}

@@ -8,8 +8,10 @@ import {
   useState,
 } from "react";
 import {
+  ArrowDownWideNarrow,
   CalendarClock,
   ChevronDown,
+  Folder,
   Laptop,
   MessageCircle,
   Network,
@@ -31,7 +33,6 @@ import type {
   ScheduledTaskRunSummary,
   ScheduledTaskSummary,
   UpdateScheduledTaskPayload,
-  WorkspaceSummary,
 } from "@falcondeck/client-core";
 import {
   approvalPolicyForProvider,
@@ -70,6 +71,19 @@ import {
   AutomationRowMenuContent,
   type AutomationRowTone,
 } from "./automation-list-row";
+import {
+  AUTOMATION_LIST_FIELDS,
+  automationLastRunFailed,
+  automationProject,
+  automationProjectOptions,
+  filterAutomationEntries,
+  taskEntryKey,
+  type AutomationActivityFilter,
+  type AutomationSort,
+  type AutomationStatusFilter,
+  type TaskEntry,
+} from "./automation-list-model";
+import { AutomationDeleteDialog } from "./automation-delete-dialog";
 
 type Toast = (toast: {
   variant: "default" | "success" | "danger";
@@ -77,18 +91,8 @@ type Toast = (toast: {
   description?: string;
 }) => void;
 
-type TaskEntry = {
-  hostId: string | null;
-  hostName: string;
-  online: boolean;
-  supported: boolean;
-  workspaces: WorkspaceSummary[];
-  task: ScheduledTaskSummary;
-  automation: Automation | null;
-};
-
 type LegacyEditorState =
-  | { kind: "create" }
+  | { kind: "create"; hostId?: string | null; workspacePath?: string }
   | { kind: "edit"; entry: TaskEntry; detail: ScheduledTaskDetail }
   | null;
 
@@ -111,10 +115,6 @@ function HostFilterIcon({
       className={cn("shrink-0 text-fg-muted", className)}
     />
   );
-}
-
-function taskEntryKey(entry: TaskEntry) {
-  return `${entry.hostId ?? "local"}:${entry.task.id}`;
 }
 
 function controlErrorMessage(
@@ -200,14 +200,6 @@ function cronExpression(entry: TaskEntry) {
   return trigger?.kind === "cron" ? trigger.expression : null;
 }
 
-function projectLabel(entry: TaskEntry) {
-  const workspace = entry.workspaces.find(
-    (item) => item.id === entry.task.workspace_id,
-  );
-  const path = workspace?.path ?? entry.automation?.target.workspace_path;
-  return path?.split(/[\\/]/).filter(Boolean).at(-1) ?? null;
-}
-
 function rowTone(entry: TaskEntry): AutomationRowTone {
   const last = entry.task.last_run?.status;
   if (last === "running") return "running";
@@ -239,7 +231,7 @@ function attentionFor(entry: TaskEntry) {
   if (last === "awaiting_input") {
     return { text: "Needs input", tone: "warning" as const };
   }
-  if (last === "failed") {
+  if (automationLastRunFailed(entry)) {
     return { text: "Last run failed", tone: "danger" as const };
   }
   return null;
@@ -254,7 +246,7 @@ function automationStatus(automation: Automation): ScheduledTaskSummary["status"
 
 function automationAsScheduledTask(
   automation: Automation,
-  workspaces: WorkspaceSummary[],
+  workspaces: TaskEntry["workspaces"],
 ): ScheduledTaskSummary {
   const workspace = workspaces.find(
     (candidate) => candidate.path === automation.target.workspace_path,
@@ -343,22 +335,27 @@ function TaskEditor({
   const initialHostId =
     state.kind === "edit"
       ? state.entry.hostId
-      : localApi && localSnapshot?.daemon.capabilities?.scheduled_tasks
-        ? null
-        : (hosts.find(
+      : state.hostId !== undefined
+        ? state.hostId
+        : localApi && localSnapshot?.daemon.capabilities?.scheduled_tasks
+          ? null
+          : (hosts.find(
             (entry) =>
               entry.snapshot?.daemon.capabilities?.scheduled_tasks &&
               entry.status === "encrypted" &&
               entry.presence?.daemon_connected,
-          )?.id ?? null);
+            )?.id ?? null);
   const [hostId, setHostId] = useState<string | null>(initialHostId);
   const host = hostId
     ? (hosts.find((entry) => entry.id === hostId) ?? null)
     : null;
-  const snapshot = host?.snapshot ?? localSnapshot;
+  const snapshot = hostId ? host?.snapshot : localSnapshot;
   const workspaces = snapshot?.workspaces ?? [];
   const [workspaceId, setWorkspaceId] = useState(
-    editing?.workspace_id ?? workspaces[0]?.id ?? "",
+    editing?.workspace_id ??
+      (state.kind === "create"
+        ? workspaces.find((workspace) => workspace.path === state.workspacePath)?.id
+        : undefined) ?? workspaces[0]?.id ?? "",
   );
   const workspace =
     workspaces.find((entry) => entry.id === workspaceId) ?? null;
@@ -565,7 +562,7 @@ function TaskEditor({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/35"
+      className="fixed inset-0 z-50 flex justify-end bg-[var(--fd-overlay)]"
       role="presentation"
       onMouseDown={onClose}
       onKeyDown={(event) => {
@@ -1069,8 +1066,12 @@ export function ScheduledTasksView({
   onToast: Toast;
 }) {
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | "active" | "paused">("all");
+  const [filter, setFilter] = useState<AutomationStatusFilter>("active");
   const [hostFilter, setHostFilter] = useState("all");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [activityFilter, setActivityFilter] = useState<AutomationActivityFilter>("all");
+  const [sort, setSort] = useState<AutomationSort>("next");
+  const [deleteEntry, setDeleteEntry] = useState<TaskEntry | null>(null);
   const [selected, setSelected] = useState<TaskEntry | null>(null);
   const [selectedDetail, setSelectedDetail] =
     useState<ScheduledTaskDetail | null>(null);
@@ -1124,20 +1125,27 @@ export function ScheduledTasksView({
   const loadAutomations = useCallback(
     async (key: string, scopedApi: HostScopedApi) => {
       try {
-        const [automationResponse, settingsResponse] = await Promise.all([
-          scopedApi.controlGet({ resource: "automations", limit: 100 }),
+        const readList = async () => {
+          const rows: Automation[] = [];
+          let cursor: string | undefined;
+          do {
+            const response = await scopedApi.controlGet({
+              resource: "automations", limit: 100, fields: AUTOMATION_LIST_FIELDS,
+              ...(cursor ? { cursor } : {}),
+            });
+            if (Array.isArray(response.data)) rows.push(...response.data as Automation[]);
+            cursor = response.next_cursor ?? undefined;
+          } while (cursor);
+          return rows.filter((automation) =>
+            typeof automation?.id === "string" && typeof automation?.name === "string" && typeof automation?.revision === "number",
+          );
+        };
+        const [automations, settingsResponse] = await Promise.all([
+          readList(),
           scopedApi
             .controlGet({ resource: "agent_control.settings" })
             .catch(() => null),
         ]);
-        const automations = Array.isArray(automationResponse.data)
-          ? (automationResponse.data as Automation[]).filter(
-              (automation) =>
-                typeof automation?.id === "string" &&
-                typeof automation?.name === "string" &&
-                typeof automation?.revision === "number",
-            )
-          : [];
         setAutomationsByHost((current) => ({
           ...current,
           [key]: {
@@ -1190,11 +1198,6 @@ export function ScheduledTasksView({
     }
   });
 
-  const openCreateEditor = () => {
-    editorRequest.current += 1;
-    setEditor({ kind: "create" });
-  };
-
   const entries = useMemo(() => {
     const local: TaskEntry[] = (localSnapshot?.scheduled_tasks ?? []).map(
       (task) => ({
@@ -1225,7 +1228,8 @@ export function ScheduledTasksView({
         const host = hostKey === "local"
           ? null
           : (hosts.find((candidate) => candidate.id === hostKey) ?? null);
-        const snapshot = host?.snapshot ?? localSnapshot;
+        if (hostKey !== "local" && !host) return [];
+        const snapshot = host ? host.snapshot : localSnapshot;
         const workspaces = snapshot?.workspaces ?? [];
         return state.automations.map((automation) => ({
           hostId: host?.id ?? null,
@@ -1252,22 +1256,36 @@ export function ScheduledTasksView({
       ...automationEntries,
     ];
   }, [automationsByHost, hosts, localApi, localSnapshot]);
-  const visible = entries.filter((entry) => {
-    const workspace = entry.workspaces.find(
-      (item) => item.id === entry.task.workspace_id,
-    );
-    const haystack =
-      `${entry.task.title} ${entry.task.prompt_preview} ${entry.task.provider} ${entry.hostName} ${workspace?.path ?? ""} ${cadenceFor(entry)}`.toLowerCase();
-    return (
-      (filter === "all" || entry.task.status === filter) &&
-      (hostFilter === "all" || (entry.hostId ?? "local") === hostFilter) &&
-      haystack.includes(query.trim().toLowerCase())
-    );
-  }).sort((left, right) =>
-    Number(Boolean(left.automation?.owner)) -
-      Number(Boolean(right.automation?.owner)) ||
-    left.task.title.localeCompare(right.task.title),
-  );
+  const projects = useMemo(() => automationProjectOptions(entries, hostFilter), [entries, hostFilter]);
+  const openCreateEditor = () => {
+    editorRequest.current += 1;
+    const project = projects.find((item) => item.key === projectFilter);
+    setEditor({
+      kind: "create",
+      hostId: project ? project.hostId : hostFilter === "all" ? undefined : hostFilter === "local" ? null : hostFilter,
+      workspacePath: project?.path ?? undefined,
+    });
+  };
+  useEffect(() => {
+    if (projectFilter !== "all" && !projects.some((project) => project.key === projectFilter)) {
+      setProjectFilter("all");
+    }
+  }, [projects, projectFilter]);
+  const scopedEntries = useMemo(() => filterAutomationEntries(entries, {
+    query, status: "all", host: hostFilter, project: projectFilter,
+    activity: activityFilter, sort,
+  }), [entries, query, hostFilter, projectFilter, activityFilter, sort]);
+  const visible = scopedEntries.filter((entry) => filter === "all" || entry.task.status === filter);
+  const statusCount = (status: AutomationStatusFilter) =>
+    status === "all" ? scopedEntries.length : scopedEntries.filter((entry) => entry.task.status === status).length;
+  const hasRefinements = Boolean(query.trim() || hostFilter !== "all" || projectFilter !== "all" || activityFilter !== "all");
+  const clearFilters = () => {
+    setQuery("");
+    setHostFilter("all");
+    setProjectFilter("all");
+    setActivityFilter("all");
+    setFilter("all");
+  };
   const firstOwnedIndex = visible.findIndex(
     (entry) => entry.automation?.owner,
   );
@@ -1290,25 +1308,17 @@ export function ScheduledTasksView({
     action: "run" | "toggle" | "delete",
   ) => {
     const api = hostApi(entry.hostId, localApi, manager);
-    if (!api) return;
+    if (!api) return false;
     const selectionVersion = detailRequest.current;
     setBusyKey(taskEntryKey(entry));
     try {
-      if (action === "delete") {
-        if (
-          !window.confirm(
-            `Delete “${entry.task.title}”? Generated agent tasks will be kept.`,
-          )
-        )
-          return;
-      }
       if (entry.automation) {
         const operation =
           action === "run"
             ? "automation.run_now"
             : action === "delete"
               ? "automation.delete"
-              : entry.automation.state === "paused"
+              : entry.task.status === "paused"
                 ? "automation.resume"
                 : "automation.pause";
         const response = await api.controlExecute({
@@ -1364,24 +1374,31 @@ export function ScheduledTasksView({
                 : [],
             );
           }
-          return;
-        }
-        const [detail, runs] = await Promise.all([
-          api.scheduledTask(entry.task.id),
-          api.scheduledTaskRuns(entry.task.id),
-        ]);
-        if (detailRequest.current === selectionVersion) {
-          setSelected({ ...entry, task: detail });
-          setSelectedDetail(detail);
-          setSelectedRuns(runs);
+        } else {
+          const [detail, runs] = await Promise.all([
+            api.scheduledTask(entry.task.id),
+            api.scheduledTaskRuns(entry.task.id),
+          ]);
+          if (detailRequest.current === selectionVersion) {
+            setSelected({ ...entry, task: detail });
+            setSelectedDetail(detail);
+            setSelectedRuns(runs);
+          }
         }
       }
+      onToast({
+        variant: "success",
+        title: action === "delete" ? "Automation deleted" : action === "run" ? "Automation queued" :
+          entry.task.status === "paused" ? "Automation resumed" : "Automation paused",
+      });
+      return true;
     } catch (error) {
       onToast({
         variant: "danger",
         title: "Could not update automation",
         description: error instanceof Error ? error.message : String(error),
       });
+      return false;
     } finally {
       setBusyKey(null);
     }
@@ -1548,29 +1565,95 @@ export function ScheduledTasksView({
         <MainViewLead>
           Run recurring agent work on this Mac or an enrolled server.
         </MainViewLead>
-        <SearchField
-          label="Search automations"
-          className="mt-5"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search automations"
-        />
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="relative mt-5">
+          <SearchField
+            label="Search automations"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search automations"
+            style={query ? { paddingRight: "2.5rem" } : undefined}
+          />
+          {query ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Clear search"
+              className="absolute right-1 top-1/2 -translate-y-1/2"
+              onClick={() => setQuery("")}
+            >
+              <X aria-hidden="true" className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
           <SegmentedControl
             ariaLabel="Automation status filter"
             value={filter}
             options={[
-              { value: "all", label: "All" },
-              { value: "active", label: "Active" },
-              { value: "paused", label: "Paused" },
+              { value: "all", label: `All ${statusCount("all")}` },
+              { value: "active", label: `Active ${statusCount("active")}` },
+              { value: "paused", label: `Paused ${statusCount("paused")}` },
+              { value: "completed", label: `Completed ${statusCount("completed")}` },
             ]}
             onChange={setFilter}
+            className="max-w-full overflow-x-auto"
           />
+          <Select value={activityFilter} onValueChange={(value) => setActivityFilter(value as AutomationActivityFilter)}>
+            <SelectTrigger
+              aria-label="Filter automations by run status"
+              variant="quiet"
+              className="h-9 text-sm"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end" label="Run status">
+              <SelectItem value="all">All run statuses</SelectItem>
+              <SelectItem value="attention">Needs attention</SelectItem>
+              <SelectItem value="running">Running or queued</SelectItem>
+              <SelectItem value="failed">Last run failed</SelectItem>
+              <SelectItem value="waiting">Waiting for input</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <SelectTrigger
+              aria-label="Filter automations by project"
+              className="h-9 min-w-40 flex-1 bg-surface-2 px-3 text-sm sm:max-w-64 sm:flex-none"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <Folder aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                <span className="truncate"><SelectValue /></span>
+              </span>
+            </SelectTrigger>
+            <SelectContent label="Filter by project" className="max-w-[min(28rem,calc(100vw-2rem))]">
+              <SelectItem value="all" leading={<Folder aria-hidden="true" className="h-4 w-4 text-fg-muted" />}>
+                All projects
+              </SelectItem>
+              {projects.map((project) => (
+                <SelectItem
+                  key={project.key}
+                  value={project.key}
+                  aria-label={`${project.label} · ${project.hostName} · ${project.path ?? "Unavailable project"}`}
+                  aria-labelledby={undefined}
+                  leading={<Folder aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />}
+                  description={<span className="block truncate" title={project.path ?? undefined}>
+                    {hosts.length ? `${project.hostName} · ` : ""}{project.path ?? "Project is no longer connected"}
+                  </span>}
+                >
+                  {project.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           {hosts.length ? (
-            <Select value={hostFilter} onValueChange={setHostFilter}>
+            <Select value={hostFilter} onValueChange={(value) => {
+              setHostFilter(value);
+              setProjectFilter("all");
+            }}>
               <SelectTrigger
                 aria-label="Filter automations by host"
-                className="ml-auto h-9 min-w-44 max-w-64 bg-surface-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
+                className="h-9 min-w-40 flex-1 bg-surface-2 px-3 text-sm text-fg-primary sm:max-w-64 sm:flex-none"
               >
                 <span className="flex min-w-0 items-center gap-2">
                   <HostFilterIcon
@@ -1621,6 +1704,23 @@ export function ScheduledTasksView({
               </SelectContent>
             </Select>
           ) : null}
+          <Select value={sort} onValueChange={(value) => setSort(value as AutomationSort)}>
+            <SelectTrigger
+              aria-label="Sort automations"
+              className="ml-auto h-9 min-w-40 bg-surface-2 px-3 text-sm"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                <ArrowDownWideNarrow aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                <SelectValue />
+              </span>
+            </SelectTrigger>
+            <SelectContent align="end" label="Sort by">
+              <SelectItem value="next" description="Running work, then the soonest scheduled run">Next up</SelectItem>
+              <SelectItem value="name">Name (A–Z)</SelectItem>
+              <SelectItem value="updated">Recently updated</SelectItem>
+              <SelectItem value="last_run">Last run</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         {unsupportedHosts.length ? (
           <p className="mt-4 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-4 py-3 text-sm text-warning">
@@ -1643,7 +1743,14 @@ export function ScheduledTasksView({
             Loading automations…
           </p>
         ) : null}
-        <div className="mt-6 divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
+        <div className="mb-2 mt-5 flex min-h-7 items-center justify-between gap-3">
+          <p role="status" className="fd-type-meta text-fg-muted">
+            {visible.length} {visible.length === 1 ? "automation" : "automations"}
+            {hasRefinements ? ` matching filters` : ""}
+          </p>
+          {hasRefinements ? <Button variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button> : null}
+        </div>
+        <div className="divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2">
           {visible.map((entry, index) => {
             const key = taskEntryKey(entry);
             const owner = entry.automation?.owner;
@@ -1670,7 +1777,7 @@ export function ScheduledTasksView({
                 <AutomationListRow
                   title={entry.task.title}
                   cadence={cadenceFor(entry)}
-                  projectLabel={projectLabel(entry)}
+                  projectLabel={automationProject(entry).label}
                   hostLabel={
                     hosts.length > 0 && hostFilter === "all"
                       ? entry.hostName
@@ -1690,14 +1797,14 @@ export function ScheduledTasksView({
                   }
                   busy={busyKey === key}
                   online={entry.online && entry.supported}
-                  canToggle={entry.task.status !== "completed"}
+                  canToggle={entry.task.status !== "completed" && entry.automation?.state !== "failed"}
                   paused={entry.task.status === "paused"}
                   menuOpen={menuKey === key}
                   onOpen={open}
                   onRun={() => void mutate(entry, "run")}
                   onToggle={() => void mutate(entry, "toggle")}
                   onEdit={() => void edit(entry)}
-                  onDelete={() => void mutate(entry, "delete")}
+                  onDelete={() => setDeleteEntry(entry)}
                   onMenuOpenChange={(openMenu) => {
                     setCursorMenu(null);
                     setMenuKey(openMenu ? key : null);
@@ -1729,6 +1836,11 @@ export function ScheduledTasksView({
                   ? "Try another search or filter."
                   : "Create one to run agent work on a schedule."
               }
+              action={entries.length ? (
+                <Button variant="secondary" size="sm" onClick={clearFilters}>Show all automations</Button>
+              ) : canCreate ? (
+                <Button size="sm" onClick={openCreateEditor}><Plus aria-hidden="true" className="h-3.5 w-3.5" />New automation</Button>
+              ) : null}
             />
           ) : null}
         </div>
@@ -1752,13 +1864,13 @@ export function ScheduledTasksView({
               <AutomationRowMenuContent
                 title={cursorEntry.task.title}
                 paused={cursorEntry.task.status === "paused"}
-                online={cursorEntry.online && cursorEntry.supported}
-                canToggle={cursorEntry.task.status !== "completed"}
+                online={cursorEntry.online && cursorEntry.supported && busyKey !== taskEntryKey(cursorEntry)}
+                canToggle={cursorEntry.task.status !== "completed" && cursorEntry.automation?.state !== "failed"}
                 onClose={() => setCursorMenu(null)}
                 onRun={() => void mutate(cursorEntry, "run")}
                 onEdit={() => void edit(cursorEntry)}
                 onToggle={() => void mutate(cursorEntry, "toggle")}
-                onDelete={() => void mutate(cursorEntry, "delete")}
+                onDelete={() => setDeleteEntry(cursorEntry)}
               />
             </Popover.Content>
           </Popover.Portal>
@@ -1959,14 +2071,14 @@ export function ScheduledTasksView({
             <Button
               variant="outline"
               onClick={() => void edit(selected)}
-              disabled={!selected.online || !selected.supported}
+              disabled={!selected.online || !selected.supported || busyKey !== null}
             >
               Edit
             </Button>
             <Button
               variant="outline"
               onClick={() => void mutate(selected, "run")}
-              disabled={!selected.online || !selected.supported}
+              disabled={!selected.online || !selected.supported || busyKey !== null}
             >
               Run now
             </Button>
@@ -1976,6 +2088,8 @@ export function ScheduledTasksView({
               disabled={
                 !selected.online ||
                 !selected.supported ||
+                busyKey !== null ||
+                selected.automation?.state === "failed" ||
                 selected.task.status === "completed"
               }
             >
@@ -1984,8 +2098,8 @@ export function ScheduledTasksView({
             <Button
               variant="outline"
               className="text-danger"
-              onClick={() => void mutate(selected, "delete")}
-              disabled={!selected.online || !selected.supported}
+              onClick={() => setDeleteEntry(selected)}
+              disabled={!selected.online || !selected.supported || busyKey !== null}
             >
               <Trash2 className="mr-2 h-4 w-4" />
               Delete
@@ -2099,7 +2213,7 @@ export function ScheduledTasksView({
       ) : null}
       {automationEditor ? (
         <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/35"
+          className="fixed inset-0 z-50 flex justify-end bg-[var(--fd-overlay)]"
           role="presentation"
           onMouseDown={() => setAutomationEditor(null)}
         >
@@ -2172,6 +2286,18 @@ export function ScheduledTasksView({
             />
           </section>
         </div>
+      ) : null}
+      {deleteEntry ? (
+        <AutomationDeleteDialog
+          title={deleteEntry.task.title}
+          busy={busyKey === taskEntryKey(deleteEntry)}
+          onCancel={() => setDeleteEntry(null)}
+          onDelete={() => {
+            void mutate(deleteEntry, "delete").then((deleted) => {
+              if (deleted) setDeleteEntry(null);
+            });
+          }}
+        />
       ) : null}
     </MainView>
   );
