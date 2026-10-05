@@ -25,6 +25,12 @@ Codex's native storage; the next operation wakes the app-server and resumes the
 requested thread transparently. Shutdown and wake are serialized so an
 in-flight operation cannot race idle retirement.
 
+Adding a folder publishes its workspace immediately and accepts the first
+message while providers start. Initial startup, first use and crash recovery
+share one gated Codex wake. The runtime and its model catalog become available
+before sidebar history, other providers and skill discovery finish; newly
+opened threads survive that background hydration.
+
 ```
 Client                           App Server
   |                                  |

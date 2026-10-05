@@ -97,27 +97,18 @@ function workspaceProviderCanSend(
   return agent.models.length > 0
 }
 
-export type WorkspaceSendBlockOptions = {
-  /**
-   * The workspace was added in this session and is booting its providers for
-   * the first time. The daemon publishes the same connecting placeholder for
-   * a fresh add and for a restore after restart, so only the client knows the
-   * folder has never been connected before and must not call it a reconnect.
-   */
-  firstConnect?: boolean
-}
-
 export function workspaceSendBlockReason(
   workspace: WorkspaceSummary | null | undefined,
   provider: AgentProvider,
-  options: WorkspaceSendBlockOptions = {},
 ) {
   if (!workspace) return 'Select a project to get started.'
 
-  // A new casual chat is published as a connecting placeholder so its folder
-  // opens immediately while the provider starts in the background. It is not
-  // a reconnect, and the daemon can wake the selected provider on first send.
-  if (workspace.kind === 'casual' && workspace.status === 'connecting') {
+  // Every provider can wake on first use. History and skills discovery must
+  // not block send; the optimistic user item appears while startup finishes.
+  if (
+    workspace.status === 'connecting' &&
+    workspaceAccount(workspace, provider)?.status !== 'needs_auth'
+  ) {
     return null
   }
 
@@ -126,12 +117,6 @@ export function workspaceSendBlockReason(
   }
 
   switch (workspace.status) {
-    case 'connecting': {
-      const name = workspace.path.split('/').pop() ?? 'this project'
-      return options.firstConnect
-        ? `Connecting to ${name}. You can keep drafting while it starts.`
-        : `Reconnecting to ${name}. You can keep drafting while it reconnects.`
-    }
     case 'disconnected':
       return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is disconnected. Reconnect it and try again.`
     case 'error':

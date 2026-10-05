@@ -83,7 +83,7 @@ describe('workspaceSendBlockReason', () => {
     ).toBeNull()
   })
 
-  it('surfaces concise reconnecting project guidance', () => {
+  it('lets a connecting project send before its provider catalog arrives', () => {
     expect(
       workspaceSendBlockReason(
         workspace({
@@ -92,20 +92,28 @@ describe('workspaceSendBlockReason', () => {
         }),
         'codex',
       ),
-    ).toBe('Reconnecting to alpha. You can keep drafting while it reconnects.')
+    ).toBeNull()
   })
 
-  it('calls a freshly added project a first connect, not a reconnect', () => {
+  it('still requires authentication while project discovery is running', () => {
     expect(
       workspaceSendBlockReason(
         workspace({
           status: 'connecting',
           path: '/Users/james/marketing-data',
+          agents: [
+            {
+              provider: 'codex',
+              label: 'Codex',
+              account: { status: 'needs_auth', label: 'Sign in' },
+              models: [],
+              collaboration_modes: [],
+            },
+          ],
         }),
         'codex',
-        { firstConnect: true },
       ),
-    ).toBe('Connecting to marketing-data. You can keep drafting while it starts.')
+    ).toBe('Codex needs authentication in this project before you can send messages.')
   })
 
   it('lets a lazy ACP catalog send while the rest of the project is still reconnecting', () => {

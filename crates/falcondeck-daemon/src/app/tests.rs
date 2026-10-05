@@ -241,6 +241,141 @@ async fn connect_workspace_returns_placeholder_while_provider_bootstraps() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn first_codex_send_shares_startup_and_does_not_wait_for_workspace_discovery() {
+    let temp = tempdir().unwrap();
+    let provider = temp.path().join("fake-codex");
+    let script = r#"#!/usr/bin/env python3
+import json, pathlib, sys, threading, time
+root = pathlib.Path(__ROOT__)
+with (root / 'launches').open('a') as log:
+    log.write('launch\n')
+output = threading.Lock()
+def handle(request):
+    method = request['method']
+    if method == 'initialize':
+        (root / 'initializing').touch()
+        while not (root / 'initialized').exists():
+            time.sleep(0.01)
+    if method in ('thread/list', 'skills/list'):
+        (root / 'discovering').touch()
+        while not (root / 'discovered').exists():
+            time.sleep(0.01)
+    result = {}
+    if method == 'account/read':
+        result = {'account': {'type': 'chatgpt', 'email': 'test@example.com'}}
+    elif method == 'model/list':
+        result = {'data': [{'id': 'test-model', 'isDefault': True}]}
+    elif method in ('thread/list', 'skills/list', 'collaborationMode/list'):
+        result = {'data': []}
+    elif method == 'thread/start':
+        result = {'thread': {'id': 'early-thread', 'name': 'New thread'}}
+    with output:
+        print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' in request:
+        threading.Thread(target=handle, args=(request,), daemon=True).start()
+"#
+    .replace(
+        "__ROOT__",
+        &serde_json::to_string(&temp.path().to_string_lossy()).unwrap(),
+    );
+    std::fs::write(&provider, script).unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([
+            (AgentProvider::CODEX, provider.to_string_lossy().to_string()),
+            (AgentProvider::CLAUDE, "/usr/bin/false".to_string()),
+            (AgentProvider::AGY, "/usr/bin/false".to_string()),
+        ]),
+        temp.path().join("state.json"),
+    );
+    let summary = tokio::time::timeout(
+        TokioDuration::from_millis(500),
+        app.connect_workspace(falcondeck_core::ConnectWorkspaceRequest {
+            path: project.to_string_lossy().to_string(),
+            kind: falcondeck_core::WorkspaceKind::Project,
+        }),
+    )
+    .await
+    .expect("adding a folder must not wait for startup")
+    .unwrap();
+    tokio::time::timeout(TokioDuration::from_secs(5), async {
+        while !temp.path().join("initializing").exists() {
+            sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Codex should start in the background");
+    let send_app = app.clone();
+    let workspace_id = summary.id.clone();
+    let send = tokio::spawn(async move {
+        send_app
+            .start_thread(falcondeck_core::StartThreadRequest {
+                workspace_id,
+                provider: Some(AgentProvider::CODEX),
+                model_id: None,
+                collaboration_mode_id: None,
+                approval_policy: None,
+                sandbox_mode: None,
+                permission_mode: None,
+                isolation: falcondeck_core::ThreadIsolation::ProjectFolder,
+                handoff_from: None,
+                handoff_context: None,
+            })
+            .await
+    });
+    std::fs::write(temp.path().join("initialized"), "").unwrap();
+    let handle = tokio::time::timeout(TokioDuration::from_secs(2), send)
+        .await
+        .expect("first send must not wait for history and skills")
+        .unwrap()
+        .unwrap();
+    assert_eq!(handle.thread.id, "early-thread");
+    let launches = std::fs::read_to_string(temp.path().join("launches")).unwrap();
+    assert_eq!(
+        launches.lines().count(),
+        1,
+        "startup must share one process"
+    );
+    let snapshot = app.snapshot().await;
+    let workspace = snapshot
+        .workspaces
+        .iter()
+        .find(|w| w.id == summary.id)
+        .unwrap();
+    assert_eq!(workspace.status, WorkspaceStatus::Connecting);
+    let codex = workspace
+        .agents
+        .iter()
+        .find(|a| a.provider == AgentProvider::CODEX)
+        .unwrap();
+    assert_eq!(codex.account.status, falcondeck_core::AccountStatus::Ready);
+    assert_eq!(codex.models[0].id, "test-model");
+
+    std::fs::write(temp.path().join("discovered"), "").unwrap();
+    tokio::time::timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let workspaces = app.inner.workspaces.lock().await;
+            let workspace = &workspaces[&summary.id];
+            if workspace.summary.status == WorkspaceStatus::Ready {
+                assert!(workspace.threads.contains_key("early-thread"));
+                break;
+            }
+            drop(workspaces);
+            sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background discovery should finish without losing the early thread");
+    app.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn restoring_a_partly_live_workspace_attaches_claude_without_losing_new_threads() {
     let temp = tempdir().unwrap();
     let project = temp.path().join("project");

@@ -307,6 +307,21 @@ pub(super) async fn connect_workspace_internal(
             reusable_id.unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()))
         }
     };
+    // Automation and backup imports can connect directly without the public
+    // add-folder flow. Register their placeholder before waking a provider.
+    if !app
+        .inner
+        .workspaces
+        .lock()
+        .await
+        .contains_key(&workspace_id)
+    {
+        let mut placeholder = persisted_workspace.clone().unwrap_or_default();
+        placeholder.path = path_string.clone();
+        placeholder.id = Some(workspace_id.clone());
+        app.restore_workspace_placeholder(&placeholder, WorkspaceStatus::Connecting, None)
+            .await?;
+    }
     // The three bootstraps are independent (separate binaries, separate
     // session stores), and each spawns CLI probes that take seconds. Run
     // Claude and Antigravity as tasks alongside the Codex connect so a
@@ -325,25 +340,41 @@ pub(super) async fn connect_workspace_internal(
     // A failure to bootstrap one provider must not brick the workspace for the
     // other: keep the workspace usable and report the broken provider through
     // its agent summary instead.
+    // Startup and first send use the same gated wake. It attaches the runtime
+    // and publishes its catalog before history, other providers or skills can
+    // delay it, and prevents two app-servers competing for one SQLite index.
+    let codex_bootstrap = async {
+        let session = app.session_for(&workspace_id).await?;
+        let agent = {
+            let workspaces = app.inner.workspaces.lock().await;
+            workspaces
+                .get(&workspace_id)
+                .and_then(|workspace| {
+                    workspace
+                        .summary
+                        .agents
+                        .iter()
+                        .find(|agent| agent.provider == AgentProvider::CODEX)
+                })
+                .cloned()
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
+        };
+        let threads = session.workspace_threads().await?;
+        Ok::<_, DaemonError>((session, agent, threads))
+    }
+    .await;
     let (codex_session, codex_account, codex_models, codex_collaboration_modes, codex_threads) =
-        match CodexSession::connect(
-            workspace_id.clone(),
-            path_string.clone(),
-            app.provider_bin(&AgentProvider::CODEX),
-            app.clone(),
-        )
-        .await
-        {
-            Ok(CodexBootstrap {
-                session,
-                account,
-                models,
-                collaboration_modes,
-                threads,
-            }) => {
+        match codex_bootstrap {
+            Ok((session, agent, threads)) => {
                 app.clear_operational_condition(&workspace_id, "codex_bootstrap");
                 app.clear_operational_condition(&workspace_id, "codex_connection");
-                (Some(session), account, models, collaboration_modes, threads)
+                (
+                    Some(session),
+                    agent.account,
+                    agent.models,
+                    agent.collaboration_modes,
+                    threads,
+                )
             }
             Err(error) => {
                 // Degrading to a Claude-only workspace is only useful when
@@ -396,7 +427,11 @@ pub(super) async fn connect_workspace_internal(
     } = agy_task
         .await
         .map_err(|error| DaemonError::Process(format!("agy bootstrap task failed: {error}")))??;
-    let file_backed_skills = discover_file_backed_skills(&path_string);
+    let skill_path = path_string.clone();
+    let file_backed_skills =
+        tokio::task::spawn_blocking(move || discover_file_backed_skills(&skill_path))
+            .await
+            .unwrap_or_default();
     let codex_provider_skills = match codex_session.as_ref() {
         Some(session) => load_codex_provider_skills(app, session)
             .await
@@ -661,9 +696,7 @@ pub(super) async fn connect_workspace_internal(
         // A turn may have attached a provider while this connect was
         // hydrating history. Keep those handles so installing the hydrated
         // workspace cannot orphan a running turn.
-        let codex_session = previous_codex_session
-            .filter(|session| !session.is_closed())
-            .or_else(|| codex_session.map(|session| session.activate()));
+        let codex_session = previous_codex_session.filter(|session| !session.is_closed());
         let claude_runtime = previous_claude_runtime.unwrap_or(claude_runtime);
         if let Some(previous) = previous_summary {
             if let Some(current) = previous.current_thread_id
@@ -4721,11 +4754,23 @@ enum CodexReconnectAttempt {
 
 impl AppState {
     /// Restores an intentionally retired Codex runtime on demand. The keyed
-    /// gate is shared with crash recovery, so a user action and the background
-    /// supervisor cannot launch competing app-servers for one workspace.
+    /// gate is shared with initial startup and crash recovery, so a user action
+    /// and background discovery cannot launch competing app-servers.
     pub(super) async fn wake_codex_runtime(&self, workspace_id: &str) -> Result<(), DaemonError> {
         match try_codex_reconnect(self, workspace_id).await {
-            CodexReconnectAttempt::AlreadyConnected | CodexReconnectAttempt::Reconnected => Ok(()),
+            CodexReconnectAttempt::AlreadyConnected => Ok(()),
+            CodexReconnectAttempt::Reconnected => {
+                self.clear_operational_condition(workspace_id, "codex_connection");
+                self.clear_operational_condition(workspace_id, "codex_bootstrap");
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: self.snapshot().await,
+                    },
+                );
+                Ok(())
+            }
             CodexReconnectAttempt::WorkspaceGone => Err(DaemonError::NotFound(format!(
                 "workspace {workspace_id} was not found"
             ))),
@@ -4869,6 +4914,9 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
         .get_mut(workspace_id)
         .expect("workspace checked above");
     workspace.codex_session = Some(session.activate());
+    workspace.summary.account = account.clone();
+    workspace.summary.models = models.clone();
+    workspace.summary.collaboration_modes = collaboration_modes.clone();
     let codex_skills = workspace
         .summary
         .agents

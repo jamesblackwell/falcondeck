@@ -434,8 +434,8 @@ struct InnerState {
     /// overlapping. Replay cleanup resets ACP turn accumulators, so it must
     /// finish before the continuation is admitted.
     acp_hydration_gates: Mutex<AcpHydrationGates>,
-    /// Per-workspace gates collapse a cold Codex wake and a background
-    /// reconnect into one app-server process.
+    /// Per-workspace gates collapse initial startup, a cold Codex wake and a
+    /// background reconnect into one app-server process.
     codex_runtime_gates: Mutex<CodexRuntimeGates>,
     /// Per-path gates prevent simultaneous first-time connect requests from
     /// spawning duplicate provider bootstraps for one workspace.

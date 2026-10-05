@@ -827,21 +827,7 @@ impl CodexSession {
             // eagerly issuing 100 sequential thread/read calls made daemon
             // readiness proportional to the user's entire Codex history.
             let threads = if list_threads {
-                let threads_value = session
-                    .send_control_request(
-                        "thread/list",
-                        json!({
-                            "limit": 100,
-                            "sourceKinds": [
-                                "cli",
-                                "vscode",
-                                "appServer",
-                                "unknown"
-                            ]
-                        }),
-                    )
-                    .await?;
-                parse_threads(&workspace_id, &workspace_path, &threads_value)
+                session.workspace_threads().await?
             } else {
                 Vec::new()
             };
@@ -870,6 +856,25 @@ impl CodexSession {
 
     pub(crate) fn workspace_id(&self) -> &str {
         &self.workspace_id
+    }
+
+    /// History discovery runs after the runtime is attached, so first sends
+    /// can share that runtime while the sidebar is still hydrating.
+    pub(crate) async fn workspace_threads(&self) -> Result<Vec<HydratedThread>, DaemonError> {
+        let value = self
+            .send_control_request(
+                "thread/list",
+                json!({
+                    "limit": 100,
+                    "sourceKinds": ["cli", "vscode", "appServer", "unknown"]
+                }),
+            )
+            .await?;
+        Ok(parse_threads(
+            &self.workspace_id,
+            &self.workspace_path,
+            &value,
+        ))
     }
 
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
