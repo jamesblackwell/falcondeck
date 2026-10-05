@@ -648,10 +648,6 @@ export function InlineVoiceRecorder({
               <View style={styles.waveform}>
                 <VoiceWaveform levels={levels} />
               </View>
-            ) : state === 'transcribing' ? (
-              <Text variant="caption" color="muted" size="xs">
-                Turning audio into text
-              </Text>
             ) : null}
           </View>
           {state === 'transcribing' ? (
