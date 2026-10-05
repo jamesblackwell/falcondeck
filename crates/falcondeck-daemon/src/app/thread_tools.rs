@@ -468,7 +468,14 @@ mod tests {
         let state_path = temp_dir.path().join("daemon-state.json");
         let app = AppState::new_with_state_path(
             "test".to_string(),
-            HashMap::new(),
+            HashMap::from([(
+                AgentProvider::CLAUDE,
+                temp_dir
+                    .path()
+                    .join("missing-claude-for-thread-tools-test")
+                    .to_string_lossy()
+                    .to_string(),
+            )]),
             PathBuf::from(&state_path),
         );
 
@@ -742,7 +749,7 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("First prompt failed")
-        ); // No provider runtime in fixture.
+        ); // The fixture's configured Claude executable does not exist.
         assert!(
             app.thread_summary("workspace-1", &created_id(&result))
                 .await

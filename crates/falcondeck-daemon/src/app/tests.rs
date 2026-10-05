@@ -7920,15 +7920,14 @@ async fn busy_thread_app(
 ) -> (AppState, String) {
     let workspace_path = temp_dir.path().join("project-steer");
     std::fs::create_dir_all(&workspace_path).unwrap();
-    // A cold Codex workspace now wakes on demand. Keep these routing tests
-    // hermetic rather than accidentally launching the developer's real Codex
-    // binary when they intentionally attach no runtime to the fixture.
-    let provider_bins = if provider == AgentProvider::CODEX {
+    // Native providers attach their runtimes on demand. A fixture without a
+    // runtime must fail dispatch without launching an installed coding CLI.
+    let provider_bins = if provider == AgentProvider::CODEX || provider == AgentProvider::CLAUDE {
         HashMap::from([(
-            AgentProvider::CODEX,
+            provider.clone(),
             temp_dir
                 .path()
-                .join("missing-codex-for-steer-test")
+                .join(format!("missing-{provider}-for-steer-test"))
                 .to_string_lossy()
                 .to_string(),
         )])
@@ -8231,8 +8230,8 @@ async fn a_steer_against_an_idle_thread_starts_a_normal_turn() {
     .await
     .unwrap();
 
-    // Nothing to steer into: the send must fall through to a normal dispatch,
-    // which here fails on the missing runtime and marks the thread Error.
+    // Nothing to steer into: the send falls through to normal dispatch,
+    // which fails on the configured missing executable and marks Error.
     let error = app
         .send_turn(steer_request(&workspace_id, true))
         .await
@@ -8241,7 +8240,7 @@ async fn a_steer_against_an_idle_thread_starts_a_normal_turn() {
     assert!(
         error
             .to_string()
-            .contains("not currently connected to Claude"),
+            .contains("could not find the `claude` executable"),
         "unexpected error: {error}"
     );
     let summary = &app.snapshot().await.threads[0];
