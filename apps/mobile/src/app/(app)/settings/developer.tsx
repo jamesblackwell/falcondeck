@@ -58,8 +58,8 @@ export default function DeveloperScreen() {
             color="muted"
             style={{ padding: theme.spacing[4] }}
           >
-            Performance sampling needs a newer TestFlight build — this binary
-            predates the native sampler.
+            Performance sampling isn’t available in this build. Update the app
+            or rebuild with the native sampler.
           </Text>
         )}
         <PreferenceSwitch

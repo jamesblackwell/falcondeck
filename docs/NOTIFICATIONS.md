@@ -1,7 +1,6 @@
 # FalconDeck notifications and attention
 
-Status: plumbing implemented; external mobile credentials and a real-device
-delivery test remain release work.
+Install [FalconDeck for iPhone and iPad from the App Store](https://apps.apple.com/app/falcondeck/id6760899257) and enable notifications when prompted. This guide covers delivery, preferences, and maintainer release checks.
 
 ## Product boundary
 
@@ -91,8 +90,9 @@ notification so stale task completions do not arrive indefinitely.
 ## Release and testing checklist
 
 1. The Expo project is `@quizgecko/falcondeck-mobile` with project ID
-   `14208bcf-41e5-478e-b88c-386745568d6a`; the existing iOS TestFlight profile
-   is `preview-testflight`.
+   `14208bcf-41e5-478e-b88c-386745568d6a`; the App Store build profile and
+   update channel are `production`. Optional beta builds are covered in the
+   [mobile development guide](14-mobile-app.md).
 2. Build a fresh physical iOS binary after native notification configuration
    changes, then grant notification permission on the device. OTA updates are
    sufficient for JavaScript-only changes after a compatible binary exists.

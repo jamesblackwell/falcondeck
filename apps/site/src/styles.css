@@ -404,9 +404,13 @@ svg {
   margin-top: 36px;
 }
 
+.hero__source {
+  margin: 18px 0 0;
+}
+
 .hero__footnote {
   margin: 26px 0 0;
-  color: var(--fd-fg-4);
+  color: var(--fd-fg-2);
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: none;
@@ -1090,8 +1094,56 @@ svg {
 }
 
 /* ==========================================================================
-   Harness strip, security strip, footer
+   iOS download, harness strip, security strip, footer
    ========================================================================== */
+
+.mobile-download {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+  gap: 48px;
+  padding: 48px var(--site-gutter);
+  border-bottom: 1px solid var(--site-frame-border);
+}
+
+.mobile-download h2 {
+  margin: 16px 0 12px;
+  font-size: clamp(24px, 3vw, 32px);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+.mobile-download p:not(.eyebrow) {
+  margin: 0;
+  color: var(--fd-fg-2);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.mobile-download .btn {
+  margin-top: 24px;
+}
+
+.mobile-download__steps {
+  display: grid;
+  list-style: decimal;
+  gap: 20px;
+  margin: 0;
+  padding-left: 24px;
+}
+
+.mobile-download__steps li::marker {
+  color: var(--fd-accent-strong);
+  font-family: var(--fd-font-mono);
+}
+
+.mobile-download__steps strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
 
 .harnesses {
   display: flex;
@@ -1192,8 +1244,9 @@ svg {
 
 .site-footer__links {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 22px;
+  gap: 12px 22px;
   color: var(--fd-fg-2);
   font-size: 12px;
 }
@@ -1248,6 +1301,12 @@ svg {
     font-size: 16px;
   }
 
+  .mobile-download {
+    grid-template-columns: 1fr;
+    gap: 32px;
+    padding-block: 36px;
+  }
+
   .feature {
     border-left: none;
     border-top: 1px solid var(--site-frame-border);
@@ -1269,8 +1328,12 @@ svg {
 }
 
 @media (max-width: 620px) {
-  .site-header__actions .nav-link {
+  .site-header__actions .desktop-download {
     display: none;
+  }
+
+  .btn {
+    min-height: 44px;
   }
 
   .hero__actions .btn {

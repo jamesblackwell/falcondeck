@@ -6,8 +6,9 @@ Last updated: 2026-03-14
 
 Open-source agent control plane for managing multiple coding agents from one interface. Will evolve beyond coding agents toward general task/office agent management.
 
-- **Domain**: falcondeck.com
-- **License**: Open source (license TBD)
+- **Domain**: [falcondeck.com](https://falcondeck.com)
+- **Downloads**: [Mac](https://github.com/jamesblackwell/falcondeck/releases/latest) · [iPhone and iPad](https://apps.apple.com/app/falcondeck/id6760899257)
+- **License**: MIT
 
 ## Design Philosophy
 

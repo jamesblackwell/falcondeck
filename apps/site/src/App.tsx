@@ -9,7 +9,7 @@ const REPO_URL = 'https://github.com/jamesblackwell/falcondeck'
 const RELEASES_URL = 'https://github.com/jamesblackwell/falcondeck/releases'
 const PAIR_URL = '/pair'
 const PAIRING_APP_SCHEME = 'falcondeck'
-const IOS_APP_STORE_URL: string | null = null
+const IOS_APP_STORE_URL = 'https://apps.apple.com/app/falcondeck/id6760899257'
 const SELF_HOSTING_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/SELF-HOSTING.md'
 const PRIVACY_URL = '/privacy'
 const TERMS_URL = '/terms'
@@ -37,7 +37,7 @@ function SiteFooter() {
       <div className="site-footer__links">
         <a href={REPO_URL}>GitHub</a>
         <a href={RELEASES_URL}>Releases</a>
-        <a href={PAIR_URL}>iOS app</a>
+        <a className="fd-focus" href={IOS_APP_STORE_URL}>Download for iOS</a>
         <a href={PRIVACY_URL}>Privacy</a>
         <a href={TERMS_URL}>Terms</a>
       </div>
@@ -89,30 +89,31 @@ function PairPage() {
       <SiteHeader />
       <main className="pair-page">
         <p className="eyebrow">FalconDeck</p>
-        <h1>Open the iOS app</h1>
+        <h1>{hasPairingCode ? 'Connect to your Mac' : 'Get FalconDeck for iOS'}</h1>
         <p className="pair-page__lede">
           {hasPairingCode
-            ? 'This pairing link is for the FalconDeck mobile app. It does not open a web session.'
-            : 'Scan the QR code from FalconDeck on your Mac, or open a pairing link on this iPhone.'}
+            ? 'Open this pairing link in FalconDeck on your iPhone or iPad to join your Mac’s live session.'
+            : 'Download the free iPhone and iPad app, then scan the pairing QR code from FalconDeck on your Mac.'}
         </p>
         <div className="pair-page__actions">
-          <a className="btn btn--accent" href={appUrl}>
-            <Smartphone aria-hidden="true" />
-            Open FalconDeck
+          {hasPairingCode && (
+            <a className="btn btn--accent fd-focus" href={appUrl}>
+              <Smartphone aria-hidden="true" />
+              Open FalconDeck
+            </a>
+          )}
+          <a className={`btn ${hasPairingCode ? 'btn--outline' : 'btn--accent'} fd-focus`} href={IOS_APP_STORE_URL}>
+            <Download aria-hidden="true" />
+            Download on the App Store
           </a>
         </div>
-        {IOS_APP_STORE_URL ? (
-          <p className="pair-page__fallback">
-            Don&apos;t have the app?{' '}
-            <a href={IOS_APP_STORE_URL}>Download FalconDeck on the App Store</a>.
-          </p>
-        ) : (
-          <p className="pair-page__fallback">
-            Don&apos;t have the app yet? FalconDeck is not on the App Store yet. If you already have a
-            TestFlight or developer build, tap Open FalconDeck. Otherwise install the app on this
-            iPhone, then scan the QR code again.
-          </p>
-        )}
+        <p className="pair-page__fallback">
+          {hasPairingCode ? (
+            'After installing the app, scan a fresh pairing QR code from your Mac.'
+          ) : (
+            <>Already installed? <a className="fd-focus" href={appUrl}>Open FalconDeck</a>.</>
+          )}
+        </p>
       </main>
       <SiteFooter />
     </div>
@@ -442,11 +443,12 @@ export default function App() {
           <a href={REPO_URL}>Docs</a>
         </nav>
         <div className="site-header__actions">
-          <a className="nav-link" href={PAIR_URL}>
+          <a className="btn btn--outline btn--sm fd-focus" href={IOS_APP_STORE_URL}>
+            <Smartphone aria-hidden="true" />
             iOS app
           </a>
-          <a className="btn btn--accent btn--sm" href={RELEASES_URL}>
-            Download
+          <a className="btn btn--accent btn--sm desktop-download fd-focus" href={RELEASES_URL}>
+            Download for Mac
             <KeyBadge>D</KeyBadge>
           </a>
         </div>
@@ -462,22 +464,29 @@ export default function App() {
             <span>Start on your Mac.</span> <span>Keep going from your phone.</span>
           </h1>
           <p className="hero__lede">
-            FalconDeck runs Codex, Claude Code, OpenCode, and any ACP harness against your own code — then hands you the
-            same live session on your phone. One daemon owns the turn, so there is nothing to catch up.
+            Run Codex, Claude Code, OpenCode, and other coding agents against your own code on your Mac.
+            Get the free iPhone and iPad app to follow live work, approve actions, and send the next instruction
+            from anywhere.
           </p>
           <div className="hero__actions">
-            <a className="btn btn--accent" href={RELEASES_URL}>
+            <a className="btn btn--accent fd-focus" href={RELEASES_URL}>
               <Download aria-hidden="true" />
               Download for Mac
               <KeyBadge>D</KeyBadge>
             </a>
-            <a className="btn btn--outline" href={REPO_URL}>
+            <a className="btn btn--outline fd-focus" href={IOS_APP_STORE_URL}>
+              <Smartphone aria-hidden="true" />
+              Download on the App Store
+            </a>
+          </div>
+          <p className="hero__source">
+            <a className="text-link fd-focus" href={REPO_URL}>
               <Github aria-hidden="true" />
               Read the source
               <KeyBadge variant="ghost">S</KeyBadge>
             </a>
-          </div>
-          <p className="hero__footnote">macOS · end-to-end encrypted · MIT licensed</p>
+          </p>
+          <p className="hero__footnote">Mac · iPhone · iPad · free and open source</p>
         </section>
 
         <section className="features" id="product">
@@ -509,6 +518,35 @@ export default function App() {
             </div>
             <PhoneMock />
           </div>
+        </section>
+
+        <section className="mobile-download" id="ios" aria-labelledby="ios-heading">
+          <div>
+            <p className="eyebrow">Available on the App Store</p>
+            <h2 id="ios-heading">FalconDeck for iPhone and iPad</h2>
+            <p>
+              Step away from your desk and keep your agents moving. Read responses, review changes,
+              answer questions, and approve actions from the same live session.
+            </p>
+            <a className="btn btn--accent fd-focus" href={IOS_APP_STORE_URL}>
+              <Smartphone aria-hidden="true" />
+              Download on the App Store
+            </a>
+          </div>
+          <ol className="mobile-download__steps">
+            <li>
+              <strong>Install the Mac and iOS apps</strong>
+              <p>Download FalconDeck for your Mac and get the free app on your iPhone or iPad.</p>
+            </li>
+            <li>
+              <strong>Pair your device</strong>
+              <p>On your Mac, open Settings → Remote Access. Scan the QR code with the iOS app.</p>
+            </li>
+            <li>
+              <strong>Continue from anywhere</strong>
+              <p>Your projects and agent work are ready on your phone. No FalconDeck account needed.</p>
+            </li>
+          </ol>
         </section>
 
         <section className="harnesses" id="architecture">

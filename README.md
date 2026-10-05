@@ -8,8 +8,8 @@
   <p>FalconDeck is a free, open-source app for Codex, Claude Code, OpenCode, and other coding agents. It uses the subscriptions and model access you already have. FalconDeck does not sell another AI plan or lock your sessions into its own service.</p>
   <p>
     <a href="https://falcondeck.com">Website</a> ·
-    <a href="https://app.falcondeck.com">Open the remote client</a> ·
     <a href="https://github.com/jamesblackwell/falcondeck/releases">Download for Mac</a> ·
+    <a href="https://apps.apple.com/app/falcondeck/id6760899257">Download for iPhone and iPad</a> ·
     <a href="docs/00-architecture-overview.md">Technical overview</a>
   </p>
 </div>
@@ -20,7 +20,7 @@
 
 FalconDeck gives coding agents a proper Mac app and keeps the same live sessions available on your phone and in a browser. Start work at your desk, step away, and continue following the agent, answering questions, approving actions, or sending the next instruction.
 
-The project is early-stage, but functional. The desktop app, mobile app, browser client, relay, and local service are all being developed in this repository.
+FalconDeck is available for Mac, iPhone, and iPad. The desktop app, mobile app, browser client, relay, and local service are all developed in this repository.
 
 ## Why use FalconDeck?
 
@@ -70,13 +70,17 @@ The whole FalconDeck stack is included under the MIT license:
 
 The hosted FalconDeck relay is free to use. If you would rather own the full path, you can run the relay and web client on your own server. See the [self-hosting guide](docs/SELF-HOSTING.md).
 
-The mobile source is available now. The iOS app will be published on the App Store shortly, and the same app also supports Android.
+The free iPhone and iPad app is [available on the App Store](https://apps.apple.com/app/falcondeck/id6760899257). Android can be built from the same mobile source.
 
-## Download and status
+## Download and get started
 
 FalconDeck is under active development. It is useful today, but you should expect rough edges.
 
-Download the Mac app from the [GitHub Releases page](https://github.com/jamesblackwell/falcondeck/releases/tag/desktop-v0.1.2). Use `FalconDeck_0.1.2_aarch64.dmg` on Apple Silicon and `FalconDeck_0.1.2_x64.dmg` on Intel. You can still run from source with the instructions below.
+1. Download the [Mac app from GitHub Releases](https://github.com/jamesblackwell/falcondeck/releases/latest). Choose the Apple Silicon (`aarch64`) or Intel (`x64`) DMG for your Mac.
+2. Download [FalconDeck for iPhone and iPad from the App Store](https://apps.apple.com/app/falcondeck/id6760899257).
+3. On your Mac, open **Settings → Remote Access** and scan the pairing QR code with the iOS app. Your phone joins the same live workspace; no FalconDeck account is required.
+
+You can also run from source with the instructions below.
 
 ## How FalconDeck works
 
@@ -127,7 +131,7 @@ make site-dev
 make remote-web-dev
 ```
 
-The mobile app uses Expo. See the [mobile development guide](docs/14-mobile-app.md) for setup and build instructions.
+The mobile app uses Expo. If you want to build your own version, see the [mobile development guide](docs/14-mobile-app.md).
 
 For technical detail, start with the [architecture overview](docs/00-architecture-overview.md), [agent integration guide](docs/02-agent-integration-paths.md), and [adapter guide](docs/ADAPTERS.md).
 

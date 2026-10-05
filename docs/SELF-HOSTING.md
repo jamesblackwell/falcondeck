@@ -61,6 +61,7 @@ The repo's own deployment is a working reference: `deploy.sh` +
 
 ## Pointing FalconDeck at your relay
 
+- **iPhone and iPad**: install [FalconDeck from the App Store](https://apps.apple.com/app/falcondeck/id6760899257), then scan the pairing QR code from your Mac or server. The pairing link carries your relay URL; you can use the published app with your own relay.[^custom-mobile-app]
 - **Desktop → Settings → Servers → Add server → Advanced**: set the relay
   URL before connecting a server. The URL is stored per server, so different
   servers can use different relays.
@@ -112,7 +113,9 @@ this) with `FALCONDECK_STATE_PATH` and `FALCONDECK_SECRET_FILE` set under
   `FALCONDECK_RELAY_EXPO_ACCESS_TOKEN` if the Expo project requires
   authenticated Push API requests. Receipt polling can be pointed at a test
   endpoint with `FALCONDECK_RELAY_EXPO_RECEIPTS_URL`.
-- The mobile app must be installed as a physical development, ad-hoc, or
-  TestFlight build with the `expo-notifications` native configuration. Expo Go
-  and simulators are not a valid end-to-end push test. See
-  `docs/NOTIFICATIONS.md` for the release checklist.
+- Test push delivery with the App Store app on a physical iPhone or iPad.
+  Custom builds need the `expo-notifications` native configuration. Expo Go
+  and simulators are not a valid end-to-end push test. See the
+  [notification guide](NOTIFICATIONS.md) for the release checklist.
+
+[^custom-mobile-app]: Building your own mobile app is optional. See the [mobile development guide](14-mobile-app.md), and configure your own Expo project, app identifiers, and signing credentials. Development or ad-hoc builds are useful for local testing; TestFlight is an optional beta distribution route for your own build.

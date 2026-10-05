@@ -1,6 +1,6 @@
 /**
  * Own-process CPU/memory sampling, backed by the FalconDeckPerf native module
- * (modules/falcondeck-perf). The module ships with TestFlight builds ≥ 55;
+ * (modules/falcondeck-perf). The module ships with native builds ≥ 55;
  * older binaries running a newer OTA bundle simply report it as unavailable,
  * so every caller must handle the null case.
  */

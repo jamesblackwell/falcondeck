@@ -201,7 +201,7 @@ the composer and cached content usable during catch-up. Persist bounded batches
 away from per-token rendering; cancellation discards stale generation results.
 
 Measure JSON decode, normalisation, store update, React commit, and cache write
-separately on a physical iPhone running a release/TestFlight build. Start with
+separately on a physical iPhone running a release build. Start with
 an 8 ms batch work budget and a hard investigation threshold of 50 ms for a
 single synchronous JS task. If a bounded page still exceeds it, reduce its
 size or move the measured hotspot off the JS thread. Do not infer the cause of
@@ -252,7 +252,7 @@ integration suites rather than relying only on a throughput benchmark.
 5. Run focused checks and the repository-required autoreview on each significant
    completed change; fix verified findings. Roll out the backward-compatible
    relay first, coordinate the Mac rebuild/restart with James's other agent,
-   then release mobile via TestFlight and the aligned remote web client.
+   then release mobile via the [App Store](https://apps.apple.com/app/falcondeck/id6760899257) and the aligned remote web client.
 
 Advertise new capabilities only after both ends support them; test mixed-version
 devices and keep a rollback switch to the legacy protocol. Enable for one

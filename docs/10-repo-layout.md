@@ -7,7 +7,7 @@ FalconDeck is a monorepo.
 ## Apps
 
 - `apps/desktop` — local desktop shell around the daemon (Tauri)
-- `apps/mobile` — iOS mobile app (React Native / Expo) — see `docs/14-mobile-app.md`
+- `apps/mobile` — iPhone and iPad app (React Native / Expo): [App Store download](https://apps.apple.com/app/falcondeck/id6760899257) · [development guide](14-mobile-app.md)
 - `apps/site` — public website
 - `apps/remote-web` — paired remote client
 

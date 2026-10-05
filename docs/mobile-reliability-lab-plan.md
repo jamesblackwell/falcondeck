@@ -42,7 +42,7 @@ product conversation store. Run a smaller real-harness smoke test separately.
 
 Create an isolated simulator device rather than reusing currently booted ones.
 Build an optimized simulator app with bundled JavaScript for timing tests; keep
-a cached development build for rapid debugging. Neither requires TestFlight.
+a cached development build for rapid debugging.
 Record all binary/JS commits, build modes, protocol capabilities, OS versions,
 fixture versions, and fault configuration in each run manifest.
 

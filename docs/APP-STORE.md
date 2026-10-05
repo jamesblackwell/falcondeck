@@ -7,6 +7,12 @@ listing, so the two never drift.
 Field limits: name 30, subtitle 30, promotional text 170, keywords 100,
 description 4000.
 
+## Public release
+
+FalconDeck 1.0 is live on the [App Store for iPhone and iPad](https://apps.apple.com/app/falcondeck/id6760899257). Use that link in public download instructions and marketing copy.
+
+Version 1.1 (106) was submitted on October 5, 2026. App Store Connect confirmed **Waiting for Review**, with automatic release after approval. The production build uses source commit `0875eb868767e70694441ae700b0969df905f742`; [EAS build](https://expo.dev/accounts/quizgecko/projects/falcondeck-mobile/builds/8a2ad501-c197-44a3-854b-98448fe0f763).
+
 ## September 17 review build
 
 Version 1.0 (100) was resubmitted on September 17, 2026 at 15:02 BST.

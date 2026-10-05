@@ -1,10 +1,16 @@
 # Mobile App (React Native / Expo)
 
-Last updated: 2026-08-28
+Last updated: 2026-10-05
 
 ## Overview
 
 `apps/mobile` is a React Native app built with Expo SDK 55. It connects to the desktop daemon via the FalconDeck relay, providing full remote control of agent workspaces from iOS.
+
+## Install and connect
+
+Download the free [FalconDeck app for iPhone and iPad from the App Store](https://apps.apple.com/app/falcondeck/id6760899257). Install the [Mac app](https://github.com/jamesblackwell/falcondeck/releases/latest), open **Settings → Remote Access**, and scan the pairing QR code with the iOS app.
+
+The rest of this guide is for contributors and people building their own app. You can use the App Store app with a self-hosted relay; see the [self-hosting guide](SELF-HOSTING.md).
 
 ## Tech Stack
 
@@ -131,9 +137,20 @@ make mobile-test
 cd apps/mobile && npx vitest run
 ```
 
-## Building & Deploying
+## Building and releasing your own app
 
-### EAS Cloud Build (ad-hoc — direct install link)
+The checked-in EAS profiles target FalconDeck's Expo project and App Store listing. For a fork, configure your own Expo project, bundle identifiers, signing credentials, and submission app ID in `app.config.ts` and `eas.json` first.
+
+### App Store build
+
+```bash
+cd apps/mobile
+eas build --profile production --platform ios --auto-submit
+```
+
+This builds the native app on the `production` channel and uploads it to App Store Connect. Select the uploaded build in an App Store version and submit it for Apple review before releasing it. Uploading a binary alone does not publish the app.
+
+### Development build (ad-hoc — direct install link)
 
 ```bash
 make mobile-build
@@ -141,26 +158,32 @@ make mobile-build
 cd apps/mobile && eas build --profile preview --platform ios
 ```
 
-Opens an interactive prompt to set up ad-hoc credentials (first time only). Produces a direct install link — tap it on your phone, no TestFlight needed.
+Opens an interactive prompt to set up ad-hoc credentials (first time only). Produces a direct install link for a registered test device.
 
-### EAS Cloud Build (TestFlight)
+### Production OTA updates (JavaScript only)
 
-```bash
-cd apps/mobile && eas build --profile preview-testflight --platform ios --non-interactive
-cd apps/mobile && eas submit --profile preview-testflight --platform ios --latest --non-interactive
-```
-
-### OTA Updates (JS-only, instant)
-
-After a native build is installed, push JS updates without rebuilding:
+For a compatible native build on the `production` channel, push JS updates without rebuilding:
 
 ```bash
-make mobile-deploy MSG="description of changes"
-# or
-cd apps/mobile && eas update --branch preview-testflight --message "update description"
+cd apps/mobile
+eas update --channel production --message "description of changes"
 ```
 
 OTA only works if the native binary hasn't changed. If you added native modules, changed `app.config.ts` plugins, or modified `Podfile.properties.json`, you need a full build.
+
+<details>
+<summary>Optional TestFlight beta builds</summary>
+
+For beta testing your own native build before an App Store release:
+
+```bash
+cd apps/mobile
+eas build --profile preview-testflight --platform ios --auto-submit
+```
+
+The `preview-testflight` profile uses its own update channel. `make mobile-deploy MSG="description of changes"` publishes to that channel. Match your OTA update to the channel and runtime version embedded in the target binary.
+
+</details>
 
 ## Native Module Gotchas
 
@@ -197,7 +220,7 @@ OTA only works if the native binary hasn't changed. If you added native modules,
 | `app.config.ts` | Expo config (plugins, splash, bundle ID, EAS project) |
 | `babel.config.js` | Babel plugins (unistyles, reanimated) |
 | `metro.config.js` | Metro bundler config (monorepo paths, React dedup) |
-| `eas.json` | EAS Build profiles (preview, testflight, production) |
+| `eas.json` | Development, App Store, and optional beta build profiles |
 | `ios/Podfile.properties.json` | CocoaPods settings (Hermes, New Arch) |
 | `plugins/withLibz.js` | Config plugin to link libz for MMKV |
 
