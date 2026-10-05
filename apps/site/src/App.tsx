@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, type ReactNode } from 'react'
 
 import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Smartphone, Zap } from 'lucide-react'
+import { ProductFeatures } from './ProductFeatures'
 
 // Internal design playground; dev server only, never in the production bundle.
 const QAPromptPlayground = import.meta.env.DEV ? lazy(() => import('./qa-prompt-playground')) : null
@@ -134,7 +135,7 @@ function LegalPage({ page }: { page: 'privacy' | 'terms' }) {
       <main className="legal-page">
         <p className="eyebrow">FalconDeck</p>
         <h1>{isPrivacy ? 'Privacy Policy' : 'Terms of Use'}</h1>
-        <p className="legal-page__updated">Effective 25 August 2026</p>
+        <p className="legal-page__updated">Effective {isPrivacy ? '5 October 2026' : '25 August 2026'}</p>
         {isPrivacy ? <PrivacyPolicy /> : <TermsOfUse />}
       </main>
       <SiteFooter />
@@ -151,10 +152,10 @@ function PrivacyPolicy() {
       <p>To make remote access work, the relay processes device and session identifiers, connection and routing metadata, IP-address-level network information, and encrypted session updates. It retains encrypted update envelopes for replay after a reconnect. The relay cannot read the encrypted session content. You can use a relay that you operate instead of the hosted relay.</p>
       <h2>Notifications and optional features</h2>
       <p>If you enable notifications, FalconDeck stores a push token with the relay. A notification can include a thread title so that the relay, Expo Push Service, and your device notification service can route and display it. Notifications do not include a transcript or message preview.</p>
-      <p>The app may use the microphone for dictation, the camera or photo library to attach an image, and on-device speech recognition when you choose those features. These inputs stay on your device unless you send them in a message or request transcription.</p>
-      <p>If you choose cloud transcription in the paired desktop app, the recording is sent end-to-end encrypted to your paired daemon. The daemon sends it to the transcription provider you selected and configured (for example, through OpenRouter). That provider handles the audio under its own terms and privacy policy. FalconDeck does not receive or store your provider credential; it stays in the operating-system credential store on your paired computer.</p>
+      <p>The app may use the microphone for dictation, the camera or photo library to attach an image, and on-device speech recognition when you choose those features. These inputs stay on your device unless you send them in a message or use an optional cloud feature.</p>
+      <p>Optional OpenRouter features send the content needed for the action you request: recordings for cloud transcription, selected text and an editing instruction for voice rewrite, a short conversation excerpt for title suggestions, or an agent reply for Read Aloud. Recordings from your phone are sent end-to-end encrypted to your paired computer before it sends them to OpenRouter. OpenRouter and the selected model provider handle this content under their own terms and privacy policies. Your provider key stays in the operating-system credential store on your connected computer; paired devices do not receive it.</p>
       <h2>How information is used and shared</h2>
-      <p>We use the information above only to provide remote control, synchronization, notifications, security, and support. We do not sell personal information, run advertising, or use agent-session content for advertising or training. Information is shared only with the services needed for the features you choose: the hosted relay (encrypted content and routing data), Expo Push Service (push token and notification title), Apple or your platform notification service, and your selected transcription provider for cloud transcription.</p>
+      <p>We use the information above only to provide remote control, synchronization, notifications, security, and support. We do not sell personal information, run advertising, or use agent-session content for advertising or training. Information is shared only with the services needed for the features you choose: the hosted relay (encrypted content and routing data), Expo Push Service (push token and notification title), Apple or your platform notification service, and OpenRouter and selected model providers for optional cloud speech and writing features.</p>
       <h2>Storage, retention, and security</h2>
       <p>The mobile app stores its pairing material and a local encrypted connection/cache state on the device. The hosted relay keeps encrypted replay data for service continuity; it may be pruned, after which the app refreshes from your daemon. Your underlying agent and desktop determine retention of the original session content. Recordings remain on the phone until a transcription succeeds; a failed or cancelled transcription can leave the recording available to retry or discard.</p>
       <p>FalconDeck uses end-to-end encryption for session content between paired devices. No transmission or storage system is completely secure, and you should protect pairing links, device access, and your chosen service credentials.</p>
@@ -441,7 +442,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           <span>FalconDeck</span>
         </a>
         <nav className="site-nav" aria-label="Main navigation">
-          <a href="#product">Product</a>
+          <a href="#features">Features</a>
           <a href="#security">Security</a>
           <a href="#agents">Agents</a>
           <a href="#get-started">Get started</a>
@@ -524,6 +525,8 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           </div>
         </section>
 
+        <ProductFeatures />
+
         <section className="mobile-download" id="get-started" aria-labelledby="get-started-heading">
           <div>
             <p className="eyebrow">Start with your Mac</p>
@@ -585,7 +588,8 @@ export default function App({ location = window.location }: { location?: Pick<Lo
 
         <section className="site-faq" aria-labelledby="faq-heading">
           <h2 id="faq-heading">A few things to know</h2>
-          <details><summary>Is FalconDeck free?</summary><p>Yes. The Mac app, iPhone and iPad app, and hosted relay are free. Your chosen coding agent uses its own account and model access, so its usual subscription or provider charges still apply.</p></details>
+          <details><summary>Is FalconDeck free?</summary><p>Yes. The Mac app, iPhone and iPad app, and hosted relay are free. Your coding agent’s usual subscription or provider charges still apply. Optional OpenRouter features use your own key and are billed by OpenRouter.</p></details>
+          <details><summary>What does OpenRouter power?</summary><p>Optional cloud transcription, voice rewrite, title suggestions, and Read Aloud. Add your own key in Settings → Speech on your Mac. These features send the audio or text needed for the action to the provider. Mac dictation can also use on-device Apple Speech.</p></details>
           <details><summary>Do I need to change editors or move my code?</summary><p>No. Connect your existing project folders and keep using your favourite editor. FalconDeck gives your coding agents a workspace alongside it.</p></details>
           <details><summary>Does my Mac need to stay on?</summary><p>For work running on your Mac, keep it awake, online, and running FalconDeck. You can also run agents on another machine over SSH for an always-on setup.</p></details>
           <details><summary>Where does my work live?</summary><p>Your code stays in your folders, and your coding agents own their sessions. Remote session content is end-to-end encrypted between your paired devices. You can use the free hosted relay or run your own.</p></details>

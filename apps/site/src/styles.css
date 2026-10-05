@@ -451,6 +451,337 @@ svg {
 }
 
 /* ==========================================================================
+   Product features — the same quiet panels as the main product showcase
+   ========================================================================== */
+
+.product-features {
+  border-bottom: 1px solid var(--site-frame-border);
+}
+
+.product-features__intro {
+  max-width: 700px;
+  padding: 56px var(--site-gutter) 36px;
+}
+
+.product-features__intro h2 {
+  margin: 14px 0 16px;
+  font-size: clamp(26px, 3vw, 36px);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+  text-wrap: balance;
+}
+
+.product-features__intro > p:last-child {
+  margin: 0;
+  color: var(--fd-fg-2);
+  font-size: 16px;
+  line-height: 1.65;
+}
+
+.product-features__grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.product-feature {
+  min-width: 0;
+  padding: 28px var(--site-gutter) 32px;
+  border-top: 1px solid var(--site-frame-border);
+  border-right: 1px solid var(--site-frame-border);
+}
+
+.product-feature:nth-child(3n) {
+  border-right: none;
+}
+
+.product-feature h3,
+.product-features__essentials h3 {
+  margin: 10px 0 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.4;
+}
+
+.product-feature__description,
+.product-features__essentials p {
+  margin: 10px 0 0;
+  color: var(--fd-fg-2);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.product-feature__preview {
+  display: flex;
+  align-items: center;
+  min-height: 224px;
+  margin-bottom: 26px;
+}
+
+.feature-preview {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--fd-border-1);
+  border-radius: var(--fd-radius-lg);
+  background: var(--fd-bg-1);
+  color: var(--fd-fg-1);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.feature-preview svg {
+  width: 14px;
+  height: 14px;
+  color: var(--fd-accent-strong);
+}
+
+.feature-preview__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--fd-border-0);
+  background: var(--site-chrome);
+  font-family: var(--fd-font-mono);
+  font-size: 11px;
+}
+
+.feature-preview__task,
+.feature-preview__setting,
+.feature-preview__approval {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.feature-preview__task + .feature-preview__task,
+.feature-preview__setting + .feature-preview__setting {
+  border-top: 1px solid var(--fd-border-0);
+}
+
+.feature-preview__task strong {
+  display: block;
+  font-weight: 500;
+}
+
+.feature-preview__task small {
+  display: block;
+  margin-top: 2px;
+  color: var(--fd-fg-3);
+  font-size: 11px;
+}
+
+.feature-preview__state,
+.feature-preview__connected,
+.feature-preview__approval > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.feature-preview__state,
+.feature-preview__connected {
+  flex-shrink: 0;
+  color: var(--fd-accent-strong);
+  font-size: 10px;
+}
+
+.feature-preview__bar .feature-preview__connected {
+  margin-left: auto;
+}
+
+.feature-preview__diff {
+  padding: 18px 12px;
+  font-family: var(--fd-font-mono);
+  font-size: 12px;
+}
+
+.feature-preview__diff code {
+  display: block;
+  padding: 4px 8px;
+}
+
+.feature-preview__removed {
+  background: var(--fd-danger-muted);
+  color: var(--fd-danger);
+}
+
+.feature-preview__added {
+  background: var(--fd-accent-muted);
+  color: var(--fd-accent-strong);
+}
+
+.feature-preview__approval {
+  border-top: 1px solid var(--fd-border-0);
+}
+
+.feature-preview__pill {
+  padding: 3px 8px;
+  border: 1px solid var(--fd-border-2);
+  border-radius: var(--fd-radius-sm);
+  color: var(--fd-fg-1);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.feature-preview__waveform {
+  display: flex;
+  height: 64px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding-top: 8px;
+}
+
+.feature-preview__waveform span {
+  width: 4px;
+  border-radius: var(--fd-radius-full);
+  background: var(--fd-accent);
+}
+
+.feature-preview__transcript,
+.feature-preview__response {
+  margin: 0;
+  padding: 12px;
+  color: var(--fd-fg-1);
+}
+
+.feature-preview__transcript {
+  text-align: center;
+}
+
+.feature-preview__tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  padding: 0 12px 12px;
+  color: var(--fd-fg-3);
+  font-family: var(--fd-font-mono);
+  font-size: 10px;
+}
+
+.feature-preview__player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px 16px;
+  color: var(--fd-fg-3);
+  font-family: var(--fd-font-mono);
+  font-size: 10px;
+}
+
+.feature-preview__play {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--fd-border-2);
+  border-radius: var(--fd-radius-full);
+}
+
+.feature-preview__track {
+  flex: 1;
+  height: 3px;
+  overflow: hidden;
+  border-radius: var(--fd-radius-full);
+  background: var(--fd-bg-4);
+}
+
+.feature-preview__track > span {
+  display: block;
+  width: 35%;
+  height: 100%;
+  background: var(--fd-accent);
+}
+
+.feature-preview__schedule {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 12px 8px;
+}
+
+.feature-preview__schedule strong {
+  font-weight: 500;
+}
+
+.product-features__essentials {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 32px;
+  margin: 0;
+  padding: 32px var(--site-gutter) 40px;
+  border-top: 1px solid var(--site-frame-border);
+  list-style: none;
+}
+
+.product-features__essentials > li > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--fd-accent-strong);
+}
+
+.product-features__essentials h3 {
+  font-size: 15px;
+}
+
+@media (max-width: 1060px) {
+  .product-features__grid,
+  .product-features__essentials {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .product-feature:nth-child(3n) {
+    border-right: 1px solid var(--site-frame-border);
+  }
+
+  .product-feature:nth-child(2n) {
+    border-right: none;
+  }
+}
+
+@media (max-width: 620px) {
+  .product-features__intro {
+    padding-block: 36px 28px;
+  }
+
+  .product-features__grid,
+  .product-features__essentials {
+    grid-template-columns: 1fr;
+  }
+
+  .product-features__grid .product-feature {
+    border-right: none;
+  }
+
+  .product-feature__preview {
+    min-height: 0;
+    margin-bottom: 22px;
+  }
+
+  .product-features__essentials > li {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .product-features__essentials > li > svg {
+    margin-top: 2px;
+  }
+
+  .product-features__essentials h3 {
+    margin-top: 0;
+  }
+}
+
+/* ==========================================================================
    Showcase — the product mock bleeds off the bottom of its section
    ========================================================================== */
 
@@ -1259,6 +1590,13 @@ svg {
    Responsive
    ========================================================================== */
 
+/* The rails sit outside the 1240px frame and need a gutter on both sides. */
+@media (max-width: 1256px) {
+  .site-rail {
+    display: none;
+  }
+}
+
 /* Below the mock's natural width the phone would crowd the window; drop it and
    let the desktop mock keep bleeding off the right edge instead. */
 @media (max-width: 1180px) {
@@ -1279,10 +1617,6 @@ svg {
   .site-frame {
     border-left: none;
     border-right: none;
-  }
-
-  .site-rail {
-    display: none;
   }
 
   .site-nav {
