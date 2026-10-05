@@ -19,6 +19,7 @@ mod codex;
 mod connector_catalog;
 mod connector_logos;
 mod connector_oauth;
+mod connector_proxy;
 mod connectors;
 pub mod control;
 mod error;

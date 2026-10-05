@@ -470,6 +470,49 @@ async fn keeps_mcp_startup_failures_out_of_every_transcript() {
 }
 
 #[tokio::test]
+async fn brokered_login_failures_do_not_repeat_as_per_thread_startup_errors() {
+    let directory = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        directory.path().join("state.json"),
+    );
+    let message = crate::connector_oauth::reauthentication_message("sentry");
+    app.set_connector_auth_error("workspace-1", "sentry", Some(&message))
+        .unwrap();
+    for thread_id in ["thread-a", "thread-b"] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "mcpServer/startupStatus/updated",
+            json!({
+                "threadId":thread_id, "name":"sentry", "status":"failed",
+                "error":"The sentry MCP server is not logged in. Run codex mcp login sentry."
+            }),
+        )
+        .await
+        .unwrap();
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "error",
+            json!({
+                "threadId":thread_id,
+                "message":"sentry failed to start: The sentry MCP server is not logged in."
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let snapshot = app.snapshot().await;
+    assert_eq!(snapshot.operational_conditions.len(), 1);
+    let condition = &snapshot.operational_conditions[0];
+    assert_eq!(condition.key, "mcp_auth:sentry");
+    assert_eq!(condition.thread_id, None);
+    assert_eq!(condition.message, message);
+}
+
+#[tokio::test]
 async fn mcp_startup_retry_preserves_failure_until_ready() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(

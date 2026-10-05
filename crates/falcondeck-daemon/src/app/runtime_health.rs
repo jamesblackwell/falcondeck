@@ -273,6 +273,46 @@ impl AppState {
         });
     }
 
+    /// A previously skipped connector is disabled in the app-server's launch
+    /// overrides. After a browser login, rebuild quiet runtimes so it becomes
+    /// available; an active turn must retain its process and approvals.
+    pub(crate) async fn reconnect_codex_after_connector_login(&self) {
+        let workspaces = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .map(|workspace| {
+                    (
+                        workspace.summary.id.clone(),
+                        workspace.codex_session.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let connected = crate::connectors::global_server_names()
+            .into_iter()
+            .filter(|name| crate::connector_oauth::access_token(name).is_some())
+            .collect::<Vec<_>>();
+        for (workspace_id, session) in workspaces {
+            for name in &connected {
+                let _ = self.set_connector_auth_error(&workspace_id, name, None);
+            }
+            let Some(session) = session else { continue };
+            let app = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    if app.is_shutting_down() || session.is_closed() {
+                        return;
+                    }
+                    match app.retire_codex_session_if_quiet(&session, false).await {
+                        IdleRetirement::Busy => tokio::time::sleep(BUSY_RECHECK_INTERVAL).await,
+                        IdleRetirement::Retired | IdleRetirement::Stale => return,
+                    }
+                }
+            });
+        }
+    }
+
     /// Starts the retirement timer owned by one warm ACP agent process.
     ///
     /// The process is shared by every thread for its provider in this

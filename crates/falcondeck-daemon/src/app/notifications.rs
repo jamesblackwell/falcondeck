@@ -64,6 +64,14 @@ fn emit_scoped_diagnostic(
     // A dead MCP server never blocks the turn, so it stays out of the
     // transcript and out of the error tier no matter which scope reported it.
     if let Some(server) = mcp_startup_failure_server(&message) {
+        if app.has_connector_auth_error(workspace_id, server) {
+            app.clear_scoped_operational_condition(
+                workspace_id,
+                thread_id.as_deref(),
+                &format!("mcp_startup:{server}"),
+            );
+            return Ok(());
+        }
         // A provider-plugin server resolved to a versioned path can fail every
         // thread start after the provider prunes its plugin cache. Retiring the
         // warm Codex runtime when it is quiet lets the next thread start
@@ -1887,6 +1895,17 @@ pub(super) async fn ingest_notification(
                 extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
             let condition_key = format!("mcp_startup:{name}");
             if status.as_deref() == Some("failed") {
+                if app.has_connector_auth_error(workspace_id, &name) {
+                    // The transport already reported the actionable workspace
+                    // login failure. Codex's generic startup error would repeat
+                    // it in every conversation and recommend a separate CLI login.
+                    app.clear_scoped_operational_condition(
+                        workspace_id,
+                        thread_id.as_deref(),
+                        &condition_key,
+                    );
+                    return Ok(());
+                }
                 let error = extract_string(&params, &["error"])
                     .unwrap_or_else(|| "Startup failed".to_string());
                 let reason = extract_string(&params, &["failureReason", "failure_reason"]);

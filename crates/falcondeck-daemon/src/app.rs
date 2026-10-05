@@ -4373,6 +4373,36 @@ impl AppState {
         self.clear_scoped_operational_condition(workspace_id, None, key);
     }
 
+    pub(crate) fn set_connector_auth_error(
+        &self,
+        workspace_id: &str,
+        name: &str,
+        error: Option<&str>,
+    ) -> Result<(), DaemonError> {
+        let key = format!("mcp_auth:{name}");
+        if let Some(error) = error {
+            self.upsert_operational_condition(
+                workspace_id.to_string(),
+                key,
+                ServiceLevel::Warning,
+                error.to_string(),
+                Some("connector/oauth".to_string()),
+            )
+        } else {
+            self.clear_operational_condition(workspace_id, &key);
+            Ok(())
+        }
+    }
+
+    pub(crate) fn has_connector_auth_error(&self, workspace_id: &str, name: &str) -> bool {
+        self.inner
+            .operational_conditions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&(workspace_id.to_string(), None, format!("mcp_auth:{name}")))
+            .is_some_and(|condition| condition.source.as_deref() == Some("connector/oauth"))
+    }
+
     pub(crate) fn clear_scoped_operational_condition(
         &self,
         workspace_id: &str,

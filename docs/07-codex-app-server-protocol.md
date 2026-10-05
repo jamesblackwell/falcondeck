@@ -53,6 +53,30 @@ Client                           App Server
   |-- turn/interrupt --------------->|  (cancel running turn)
 ```
 
+### MCP authentication
+
+FalconDeck owns connector names configured in the global and workspace
+`connectors.json` files. It explicitly disables skipped entries in Codex's
+launch overrides, including disabled, provider-filtered and unauthenticated
+connectors. Omitting an override would let Codex fall back to a same-named
+native entry in `~/.codex/config.toml` and attempt a separate, stale OAuth login.
+Unrelated native MCP entries remain available.
+
+OAuth connectors use an authenticated loopback transport owned by each Codex
+runtime (`connector_proxy.rs`). Codex receives a local capability tied to that process,
+while provider tokens stay in the daemon. Each HTTP request obtains a current
+token from `connector_oauth.rs`; a provider 401 triggers one serialized refresh
+and retry. The transport preserves MCP session and SSE headers and streams
+responses without buffering. Browser-origin requests are denied, destinations
+are fixed by connector configuration, and redirects are not followed.
+
+Rejected refresh grants are discarded without overwriting a newer browser
+login. The daemon publishes one workspace authentication condition with the
+action **Open Plugins and choose Reconnect**. A successful browser login clears
+that condition and retires existing Codex runtimes once they are quiet, making
+previously skipped connectors available without interrupting active turns.
+The local transport stops when its app-server exits or is shut down.
+
 ## Initialize Handshake
 
 ```json

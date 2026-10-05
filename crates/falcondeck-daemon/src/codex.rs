@@ -504,6 +504,7 @@ pub struct CodexSession {
     /// Homebrew `codex` entry point is a Node script which spawns the native
     /// app-server, so killing only `Child` leaves the real server orphaned.
     process_group_id: Option<u32>,
+    connector_proxy: Option<crate::connector_proxy::ConnectorProxy>,
     state: AppState,
 }
 
@@ -634,13 +635,28 @@ impl CodexSession {
         let resolved = resolve_agent_binary("codex", &codex_bin);
         let mut command = Command::new(&resolved.executable);
         command.arg("app-server");
-        let mcp_servers = crate::connectors::with_builtin_servers(
-            crate::connectors::materialize_mcp_servers(&workspace_path, "codex").await,
+        let connectors = crate::connectors::materialize_connectors(&workspace_path, "codex").await;
+        for name in &connectors.configured_names {
+            state.set_connector_auth_error(
+                &workspace_id,
+                name,
+                connectors.auth_errors.get(name).map(String::as_str),
+            )?;
+        }
+        let mut mcp_servers = crate::connectors::with_builtin_servers(
+            connectors.servers,
             &state
                 .builtin_connectors(&AgentProvider::CODEX, &workspace_path, None)
                 .await,
         );
-        let mcp = crate::connectors::codex_mcp_config(&mcp_servers);
+        let connector_proxy = crate::connector_proxy::ConnectorProxy::start(
+            state.clone(),
+            &workspace_id,
+            &connectors.oauth_names,
+            &mut mcp_servers,
+        )
+        .await?;
+        let mcp = crate::connectors::codex_mcp_config(&mcp_servers, &connectors.configured_names);
         for override_arg in mcp.overrides {
             command.arg("-c").arg(override_arg);
         }
@@ -722,6 +738,7 @@ impl CodexSession {
             lifecycle_gate: Arc::new(RwLock::new(())),
             last_activity: StdMutex::new(Instant::now()),
             process_group_id,
+            connector_proxy,
             state: state.clone(),
         });
         let pending_session = PendingCodexSession::new(Arc::clone(&session));
@@ -893,6 +910,9 @@ impl CodexSession {
     }
 
     fn terminate_process_tree(&self) {
+        if let Some(proxy) = &self.connector_proxy {
+            proxy.stop();
+        }
         #[cfg(unix)]
         if let Some(process_group_id) = self.process_group_id {
             let _ = kill_process_group(process_group_id);
@@ -1342,6 +1362,9 @@ impl CodexSession {
         // Pairs with activation's SeqCst store/load so an exit concurrent with
         // attachment always schedules on one side of the race.
         self.closed.store(true, Ordering::SeqCst);
+        if let Some(proxy) = &self.connector_proxy {
+            proxy.stop();
+        }
         let pending = std::mem::take(&mut *self.pending.lock().await);
         for (_, tx) in pending {
             let _ = tx.send(Err(DaemonError::Rpc(
@@ -2458,6 +2481,7 @@ mod tests {
             lifecycle_gate: Arc::new(RwLock::new(())),
             last_activity: StdMutex::new(Instant::now()),
             process_group_id: Some(process_group_id),
+            connector_proxy: None,
             state,
         });
         (directory, session, stdout)

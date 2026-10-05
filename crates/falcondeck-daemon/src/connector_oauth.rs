@@ -1,9 +1,9 @@
 //! Daemon-brokered OAuth for remote MCP servers.
 //!
 //! FalconDeck is the OAuth client. After a single browser login, the access
-//! token is stored beside the daemon state and injected as
-//! `Authorization: Bearer` when connectors are materialized for Claude, Codex,
-//! and ACP. Harnesses never run their own `/mcp` login.
+//! token is stored beside the daemon state. Claude and ACP receive a current
+//! Bearer token at launch; long-lived Codex runtimes use a private transport
+//! that refreshes tokens per request. Harnesses never run their own `/mcp` login.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -185,12 +185,59 @@ fn save_refreshed_token(
 /// authorization server supplied a refresh token. Refreshes are serialized so
 /// concurrent provider starts cannot rotate the same credential twice.
 pub async fn refresh_access_token(name: &str) -> Result<Option<String>, String> {
-    if let Some(token) = access_token(name) {
+    refresh_token(name, None).await
+}
+
+/// Refresh a rejected credential once. Another workspace may already have
+/// rotated it, in which case use that token instead of rotating it again.
+pub(crate) async fn refresh_rejected_token(
+    name: &str,
+    rejected_token: &str,
+) -> Result<Option<String>, String> {
+    refresh_token(name, Some(rejected_token)).await
+}
+
+pub(crate) fn reauthentication_message(name: &str) -> String {
+    let label = connector_catalog::get(name).map_or(name, |server| server.name);
+    format!("{label} needs to be reconnected. Open Plugins and choose Reconnect.")
+}
+
+fn discard_rejected_token(name: &str, rejected: &StoredToken) -> Result<(), String> {
+    let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut tokens = read_store();
+    // A browser login can complete while the refresh request is in flight.
+    // Its new grant must survive rejection of the previous one.
+    if tokens.get(name) == Some(rejected) {
+        tokens.remove(name);
+        write_store(&tokens)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn discard_rejected_access_token(name: &str, rejected: &str) -> Result<(), String> {
+    let _guard = store_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let mut tokens = read_store();
+    if tokens
+        .get(name)
+        .is_some_and(|token| token.access_token == rejected)
+    {
+        tokens.remove(name);
+        write_store(&tokens)?;
+    }
+    Ok(())
+}
+
+async fn refresh_token(name: &str, rejected_token: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(token) = access_token(name)
+        && rejected_token != Some(token.as_str())
+    {
         return Ok(Some(token));
     }
 
     let _refresh_guard = refresh_lock().lock().await;
-    if let Some(token) = access_token(name) {
+    if let Some(token) = access_token(name)
+        && rejected_token != Some(token.as_str())
+    {
         return Ok(Some(token));
     }
 
@@ -202,6 +249,9 @@ pub async fn refresh_access_token(name: &str) -> Result<Option<String>, String> 
         return Ok(None);
     };
     let Some(refresh_token) = stored.refresh_token.as_deref() else {
+        if rejected_token.is_some() {
+            discard_rejected_token(name, &stored)?;
+        }
         return Ok(None);
     };
 
@@ -231,8 +281,22 @@ pub async fn refresh_access_token(name: &str) -> Result<Option<String>, String> 
         .map_err(|error| format!("token refresh failed: {error}"))?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("token refresh returned {status}: {body}"));
+        let error: Value = response.json().await.unwrap_or(Value::Null);
+        if matches!(
+            error.get("error").and_then(Value::as_str),
+            Some("invalid_grant" | "invalid_client")
+        ) {
+            discard_rejected_token(name, &stored)?;
+            if let Some(token) = access_token(name) {
+                return Ok(Some(token));
+            }
+            return Err(reauthentication_message(name));
+        }
+        // Provider response bodies can contain credentials. Keep diagnostics
+        // actionable without persisting their raw contents in a banner/log.
+        return Err(format!(
+            "Could not refresh {name} sign-in (HTTP {status}). Try again shortly."
+        ));
     }
     let token: TokenResponse = response
         .json()
@@ -939,6 +1003,86 @@ mod tests {
         assert!(request.contains("client_id=client-id"));
         assert!(request.contains("resource=https%3A%2F%2Fmcp.sentry.dev%2Fmcp"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_rejection_preserves_a_browser_login_completed_in_flight() {
+        let _lock = lock_store_for_test();
+        let directory = tempfile::tempdir().unwrap();
+        set_store_path_for_test(directory.path().join("oauth.json"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let replacement = StoredToken {
+            access_token: "browser-login".into(),
+            refresh_token: Some("new-grant".into()),
+            expires_at: Some(now_epoch_seconds() + 3600),
+            token_endpoint: endpoint.clone(),
+            client_id: "new-client".into(),
+        };
+        let saved = replacement.clone();
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let saved = saved.clone();
+                async move {
+                    save_token("sentry", saved).unwrap();
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"error":"invalid_grant"})),
+                    )
+                }
+            }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        save_token(
+            "sentry",
+            StoredToken {
+                access_token: "expired".into(),
+                refresh_token: Some("rejected-grant".into()),
+                expires_at: Some(1),
+                token_endpoint: endpoint,
+                client_id: "old-client".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            refresh_access_token("sentry").await.unwrap(),
+            Some("browser-login".to_string())
+        );
+        assert_eq!(read_store().get("sentry"), Some(&replacement));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn temporary_refresh_failures_preserve_the_grant_without_exposing_response_bodies() {
+        let _lock = lock_store_for_test();
+        let directory = tempfile::tempdir().unwrap();
+        set_store_path_for_test(directory.path().join("oauth.json"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "private-provider-response",
+                )
+            }),
+        );
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let stored = StoredToken {
+            access_token: "expired".into(),
+            refresh_token: Some("still-valid-grant".into()),
+            expires_at: Some(1),
+            token_endpoint: endpoint,
+            client_id: "client".into(),
+        };
+        save_token("sentry", stored.clone()).unwrap();
+        let error = refresh_access_token("sentry").await.unwrap_err();
+        assert!(error.contains("HTTP 503"));
+        assert!(!error.contains("private-provider-response"));
+        assert_eq!(read_store().get("sentry"), Some(&stored));
+        task.abort();
     }
 
     #[test]

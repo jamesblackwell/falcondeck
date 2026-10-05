@@ -109,6 +109,25 @@ afterEach(() => {
 })
 
 describe('PluginsView', () => {
+  it('offers Reconnect for an installed OAuth connector whose login is unavailable', async () => {
+    const fetchMock = stubFetch()
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/connectors/catalog')) {
+        return new Response(JSON.stringify({
+          servers: [{ ...CATALOG.servers[0], installed: true, connected: false }],
+        }), { status: 200 })
+      }
+      if (url.includes('/api/connectors')) {
+        return new Response(JSON.stringify({ global: {}, workspace: null, merged: [] }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    render(<PluginsView baseUrl="http://127.0.0.1:4123" workspaces={[]} onToast={vi.fn()} />)
+    expect((await screen.findAllByRole('button', { name: 'Reconnect Notion' })).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: 'Connect Notion' })).not.toBeInTheDocument()
+  })
+
   it('defaults to Plugins with a catalog and top-level Skills tab', async () => {
     stubFetch()
     render(

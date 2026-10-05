@@ -1381,13 +1381,19 @@ async fn read_plugin_logo(Query(query): Query<PluginLogoQuery>) -> Response {
     }
 }
 
-async fn connector_oauth_callback(Query(query): Query<OauthCallbackQuery>) -> Response {
+async fn connector_oauth_callback(
+    State(state): State<AppState>,
+    Query(query): Query<OauthCallbackQuery>,
+) -> Response {
     let (status, html) = crate::connector_oauth::complete_authorization(
         query.code.as_deref(),
         query.state.as_deref(),
         query.error.as_deref(),
     )
     .await;
+    if status == 200 {
+        state.reconnect_codex_after_connector_login().await;
+    }
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         [(

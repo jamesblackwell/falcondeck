@@ -22,7 +22,7 @@
 //! Configs are re-read at every spawn/session boundary rather than cached in
 //! `AppState`, so edits apply on the next turn with no daemon restart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -398,6 +398,22 @@ pub fn load_mcp_servers(workspace_path: &str, provider: &str) -> Vec<McpServerCo
 /// synchronous loader so an expired token never reaches a newly spawned
 /// harness.
 pub async fn materialize_mcp_servers(workspace_path: &str, provider: &str) -> Vec<McpServerConfig> {
+    materialize_connectors(workspace_path, provider)
+        .await
+        .servers
+}
+
+pub(crate) struct MaterializedConnectors {
+    pub servers: Vec<McpServerConfig>,
+    pub configured_names: BTreeSet<String>,
+    pub oauth_names: BTreeSet<String>,
+    pub auth_errors: BTreeMap<String, String>,
+}
+
+pub(crate) async fn materialize_connectors(
+    workspace_path: &str,
+    provider: &str,
+) -> MaterializedConnectors {
     let global_path = global_connectors_path();
     let workspace_path = workspace_connectors_path(workspace_path);
     let mut merged = read_connectors_file(&global_path);
@@ -414,13 +430,29 @@ pub async fn materialize_mcp_servers(workspace_path: &str, provider: &str) -> Ve
                         .any(|candidate| candidate.eq_ignore_ascii_case(provider)))
         })
         .map(|(name, _)| name.clone())
-        .collect::<Vec<_>>();
-    for name in oauth_names {
-        if let Err(error) = crate::connector_oauth::refresh_access_token(&name).await {
-            tracing::warn!(server = %name, %error, "failed to refresh OAuth connector");
+        .collect::<BTreeSet<_>>();
+    let mut auth_errors = BTreeMap::new();
+    for name in &oauth_names {
+        match crate::connector_oauth::refresh_access_token(name).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                auth_errors.insert(
+                    name.clone(),
+                    crate::connector_oauth::reauthentication_message(name),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(server = %name, %error, "failed to refresh OAuth connector");
+                auth_errors.insert(name.clone(), error);
+            }
         }
     }
-    load_mcp_servers_from(&global_path, &workspace_path, provider)
+    MaterializedConnectors {
+        configured_names: merged.keys().cloned().collect(),
+        oauth_names,
+        auth_errors,
+        servers: load_mcp_entries(merged, provider),
+    }
 }
 
 fn load_mcp_servers_from(
@@ -432,6 +464,13 @@ fn load_mcp_servers_from(
     // Workspace entries win on name conflicts.
     merged.extend(read_connectors_file(workspace_path));
 
+    load_mcp_entries(merged, provider)
+}
+
+fn load_mcp_entries(
+    merged: BTreeMap<String, ConnectorEntry>,
+    provider: &str,
+) -> Vec<McpServerConfig> {
     merged
         .into_iter()
         .filter_map(|(name, entry)| {
@@ -720,12 +759,27 @@ pub struct CodexMcpConfig {
 /// `-c key=value` config overrides for a Codex spawn.
 #[cfg(test)]
 pub fn codex_config_overrides(servers: &[McpServerConfig]) -> Vec<String> {
-    codex_mcp_config(servers).overrides
+    codex_mcp_config(servers, &BTreeSet::new()).overrides
 }
 
-pub fn codex_mcp_config(servers: &[McpServerConfig]) -> CodexMcpConfig {
+pub fn codex_mcp_config(
+    servers: &[McpServerConfig],
+    configured_names: &BTreeSet<String>,
+) -> CodexMcpConfig {
     let mut overrides = Vec::new();
     let mut inject_env = BTreeMap::new();
+    // Omitting an entry does not remove it from Codex's native configuration.
+    // FalconDeck owns every configured name, including disabled, filtered and
+    // unauthenticated entries; explicitly park those so native OAuth cannot
+    // resurrect a connector we deliberately skipped.
+    for name in configured_names {
+        if !name.contains('=') && !servers.iter().any(|server| server.name == *name) {
+            overrides.push(format!(
+                "mcp_servers.{}.enabled=false",
+                toml_quoted_key(name)
+            ));
+        }
+    }
     for server in servers {
         // Codex consumes these as `-c key=value`, split at the first '='.
         // A '=' inside the (user-controlled) server or env-var name would
@@ -737,15 +791,25 @@ pub fn codex_mcp_config(servers: &[McpServerConfig]) -> CodexMcpConfig {
             );
             continue;
         }
+        if let McpTransport::Stdio { env, .. } = &server.transport
+            && env.keys().any(|name| name.contains('='))
+        {
+            tracing::warn!(
+                server = %server.name,
+                "skipping MCP server for Codex: '=' in env name breaks -c overrides"
+            );
+            overrides.push(format!(
+                "mcp_servers.{}.enabled=false",
+                toml_quoted_key(&server.name)
+            ));
+            continue;
+        }
+        overrides.push(format!(
+            "mcp_servers.{}.enabled=true",
+            toml_quoted_key(&server.name)
+        ));
         match &server.transport {
             McpTransport::Stdio { command, args, env } => {
-                if env.keys().any(|name| name.contains('=')) {
-                    tracing::warn!(
-                        server = %server.name,
-                        "skipping MCP server for Codex: '=' in env name breaks -c overrides"
-                    );
-                    continue;
-                }
                 let key = toml_quoted_key(&server.name);
                 overrides.push(format!(
                     "mcp_servers.{key}.command={}",
@@ -1564,6 +1628,7 @@ mod tests {
         assert_eq!(
             overrides,
             vec![
+                "mcp_servers.\"my server\".enabled=true".to_string(),
                 "mcp_servers.\"my server\".command=\"npx\"".to_string(),
                 "mcp_servers.\"my server\".args=[\"-y\",\"a\\\"b\"]".to_string(),
                 "mcp_servers.\"my server\".env={K=\"v\"}".to_string(),
@@ -1586,10 +1651,11 @@ mod tests {
                 ]),
             },
         }];
-        let config = codex_mcp_config(&servers);
+        let config = codex_mcp_config(&servers, &BTreeSet::new());
         assert_eq!(
             config.overrides,
             vec![
+                "mcp_servers.notion.enabled=true".to_string(),
                 "mcp_servers.notion.url=\"https://mcp.notion.com/mcp\"".to_string(),
                 "mcp_servers.notion.bearer_token_env_var=\"FALCONDECK_MCP_NOTION_TOKEN\""
                     .to_string(),
@@ -1603,6 +1669,60 @@ mod tests {
                 .map(String::as_str),
             Some("secret-token")
         );
+    }
+
+    #[test]
+    fn skipped_connectors_explicitly_override_native_codex_configuration() {
+        let _lock = crate::connector_oauth::lock_store_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        crate::connector_oauth::set_store_path_for_test(dir.path().join("oauth.json"));
+        let path = dir.path().join("connectors.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers":{
+            "sentry":{"url":"https://mcp.sentry.dev/mcp"},
+            "parked":{"command":"parked-bin","enabled":false},
+            "mobbin":{"url":"https://api.mobbin.com/mcp","providers":["claude"]},
+            "active":{"command":"active-bin"}
+        }}"#,
+        )
+        .unwrap();
+        let names = read_connectors_file(&path).into_keys().collect();
+        let servers = load_mcp_servers_from(&path, &dir.path().join("missing.json"), "codex");
+        let config = codex_mcp_config(&servers, &names);
+        for name in ["sentry", "mobbin", "parked"] {
+            assert!(
+                config
+                    .overrides
+                    .contains(&format!("mcp_servers.{name}.enabled=false"))
+            );
+        }
+        assert!(
+            config
+                .overrides
+                .contains(&"mcp_servers.active.enabled=true".to_string())
+        );
+        assert!(config.env.is_empty());
+        assert!(
+            !config
+                .overrides
+                .iter()
+                .any(|value| value.contains("node_repl"))
+        );
+    }
+
+    #[test]
+    fn an_unrepresentable_stdio_environment_cannot_resurrect_a_native_connector() {
+        let server = McpServerConfig {
+            name: "custom".to_string(),
+            transport: McpTransport::Stdio {
+                command: "custom-bin".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::from([("bad=key".to_string(), "value".to_string())]),
+            },
+        };
+        let config = codex_mcp_config(&[server], &BTreeSet::from(["custom".to_string()]));
+        assert_eq!(config.overrides, ["mcp_servers.custom.enabled=false"]);
     }
 
     #[test]

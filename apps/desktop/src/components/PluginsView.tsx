@@ -592,7 +592,9 @@ function PluginRow({
     : server.connected
       ? 'Installed'
       : server.auth === 'oauth'
-        ? 'Connect'
+        ? server.installed
+          ? 'Reconnect'
+          : 'Connect'
         : 'Install'
 
   return (
@@ -620,7 +622,7 @@ function PluginRow({
             onClick={onInstall}
             aria-label={`${actionLabel} ${server.name}`}
           >
-            {busy ? actionLabel : server.auth === 'oauth' ? 'Connect' : 'Install'}
+            {actionLabel}
           </Button>
         )}
       </div>
