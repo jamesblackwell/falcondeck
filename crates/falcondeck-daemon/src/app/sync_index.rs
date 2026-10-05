@@ -1,7 +1,7 @@
 use super::AppState;
 use falcondeck_core::{
-    sync_index::{SyncIndex, SyncThreadPage, WorkspaceIndexCount},
     DaemonSnapshot, ExtensionSnapshot, ThreadStatus, ThreadSummary, WorkspaceKind,
+    sync_index::{SyncIndex, SyncThreadPage, WorkspaceIndexCount},
 };
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -17,8 +17,60 @@ struct FrozenIndex {
     token: String,
     created: Instant,
     threads: Vec<ThreadSummary>,
+    workspaces: BTreeMap<String, FrozenWorkspace>,
     extensions: ExtensionSnapshot,
     bytes: usize,
+    #[cfg(test)]
+    page_order_builds: usize,
+}
+
+#[derive(Default)]
+struct FrozenWorkspace {
+    indices: Vec<usize>,
+    orders: [Option<Vec<usize>>; 3],
+}
+
+impl FrozenIndex {
+    fn workspace_rows(&mut self, workspace: &str, sort: &str) -> (&[ThreadSummary], &[usize]) {
+        let Some(rows) = self.workspaces.get_mut(workspace) else {
+            return (&self.threads, &[]);
+        };
+        let order = match sort {
+            "alphabetical" => 1,
+            "priority" => 2,
+            _ => 0,
+        };
+        let indices = rows.orders[order].get_or_insert_with(|| {
+            #[cfg(test)]
+            {
+                self.page_order_builds += 1;
+            }
+            let mut indices = rows.indices.clone();
+            if order == 1 {
+                // Cache the lowercase key once per row, not per comparison.
+                indices.sort_by_cached_key(|&i| {
+                    (
+                        self.threads[i].title.to_lowercase(),
+                        self.threads[i].id.as_str(),
+                    )
+                });
+            } else {
+                indices.sort_by(|&a, &b| {
+                    let a = &self.threads[a];
+                    let b = &self.threads[b];
+                    let rank = if order == 2 {
+                        priority(a, None).cmp(&priority(b, None))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    };
+                    rank.then_with(|| b.updated_at.cmp(&a.updated_at))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+            }
+            indices
+        });
+        (&self.threads, indices)
+    }
 }
 #[derive(Default)]
 pub(super) struct SyncIndexCache {
@@ -174,16 +226,36 @@ fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, F
         index.snapshot.threads.push(thread.clone());
         bytes += size + 1;
     }
+    let mut workspaces = BTreeMap::<String, FrozenWorkspace>::new();
+    for (i, thread) in threads.iter().enumerate() {
+        workspaces
+            .entry(thread.workspace_id.clone())
+            .or_default()
+            .indices
+            .push(i);
+    }
+    for rows in workspaces.values_mut() {
+        rows.indices.shrink_to_fit();
+    }
+    // Reserve the indices plus all three lazy orders in the cache budget so
+    // subsequent paging cannot grow a retained view beyond its admission size.
+    let order_bytes = threads.len() * 4 * std::mem::size_of::<usize>()
+        + workspaces.len() * std::mem::size_of::<FrozenWorkspace>()
+        + workspaces.keys().map(String::len).sum::<usize>();
     let bytes = serde_json::to_vec(&threads).map_or(CACHE_BYTES, |s| s.len())
-        + serde_json::to_vec(&extensions).map_or(CACHE_BYTES, |s| s.len());
+        + serde_json::to_vec(&extensions).map_or(CACHE_BYTES, |s| s.len())
+        + order_bytes;
     (
         index,
         FrozenIndex {
             token,
             created: Instant::now(),
             threads,
+            workspaces,
             extensions,
             bytes,
+            #[cfg(test)]
+            page_order_builds: 0,
         },
     )
 }
@@ -230,27 +302,13 @@ impl AppState {
         sort: &str,
         limit: usize,
     ) -> Result<SyncThreadPage, String> {
-        let cache = self.inner.sync_indexes.lock().await;
+        let mut cache = self.inner.sync_indexes.lock().await;
         let view = cache
             .entries
-            .iter()
+            .iter_mut()
             .find(|v| v.token == token && v.created.elapsed() < CACHE_TTL)
             .ok_or("sync_index_expired")?;
-        let mut rows: Vec<_> = view
-            .threads
-            .iter()
-            .filter(|t| t.workspace_id == workspace)
-            .collect();
-        rows.sort_by(|a, b| {
-            let order = match sort {
-                "alphabetical" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
-                "priority" => priority(a, None)
-                    .cmp(&priority(b, None))
-                    .then_with(|| b.updated_at.cmp(&a.updated_at)),
-                _ => b.updated_at.cmp(&a.updated_at),
-            };
-            order.then_with(|| a.id.cmp(&b.id))
-        });
+        let (threads, rows) = view.workspace_rows(workspace, sort);
         if cursor > rows.len() {
             return Err("invalid sync page cursor".into());
         }
@@ -261,7 +319,8 @@ impl AppState {
             next_cursor: None,
         };
         let mut bytes = serde_json::to_vec(&page).map_err(|e| e.to_string())?.len() + 20;
-        for thread in rows.iter().skip(cursor).take(limit.clamp(1, 50)) {
+        for &i in rows.iter().skip(cursor).take(limit.clamp(1, 50)) {
+            let thread = &threads[i];
             let size = serde_json::to_vec(thread).map_err(|e| e.to_string())?.len();
             if !page.threads.is_empty() && bytes + size > PAGE_BYTES {
                 break;
@@ -269,7 +328,7 @@ impl AppState {
             if bytes + size + 1 > PAGE_BYTES {
                 return Err("sync row exceeds page budget".into());
             }
-            page.threads.push((*thread).clone());
+            page.threads.push(thread.clone());
             bytes += size + 1;
         }
         let next = cursor + page.threads.len();
@@ -344,16 +403,20 @@ mod tests {
             thread.workspace_id == "workspace-0" || thread.workspace_id == "workspace-39"
         });
         let (index, frozen) = freeze(source.clone(), None);
-        assert!(index
-            .snapshot
-            .threads
-            .iter()
-            .all(|thread| thread.workspace_id != "workspace-39"));
-        assert!(index
-            .snapshot
-            .threads
-            .iter()
-            .any(|thread| thread.workspace_id == "workspace-0"));
+        assert!(
+            index
+                .snapshot
+                .threads
+                .iter()
+                .all(|thread| thread.workspace_id != "workspace-39")
+        );
+        assert!(
+            index
+                .snapshot
+                .threads
+                .iter()
+                .any(|thread| thread.workspace_id == "workspace-0")
+        );
         assert_eq!(index.counts["workspace-39"].total, 50);
         assert_eq!(
             frozen
@@ -377,6 +440,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn frozen_pages_cache_each_sort_and_preserve_ordering_and_scope() {
+        let mut source = fixture();
+        source.threads.truncate(8);
+        for (i, thread) in source.threads.iter_mut().enumerate() {
+            thread.title = ["z", "Alpha", "alpha", "É", "é", "Beta", "beta", "a"][i].into();
+            thread.updated_at += chrono::Duration::seconds((i % 3) as i64);
+            thread.is_pinned = i == 5;
+            thread.status = if i == 6 {
+                ThreadStatus::Running
+            } else {
+                ThreadStatus::Idle
+            };
+        }
+        let (_, mut view) = freeze(source, None);
+        for sort in ["last_updated", "alphabetical", "priority", "unknown"] {
+            let mut expected: Vec<_> = view.threads.iter().collect();
+            expected.sort_by(|a, b| {
+                let order = match sort {
+                    "alphabetical" => a.title.to_lowercase().cmp(&b.title.to_lowercase()),
+                    "priority" => priority(a, None)
+                        .cmp(&priority(b, None))
+                        .then_with(|| b.updated_at.cmp(&a.updated_at)),
+                    _ => b.updated_at.cmp(&a.updated_at),
+                };
+                order.then_with(|| a.id.cmp(&b.id))
+            });
+            let expected: Vec<_> = expected.iter().map(|t| t.id.clone()).collect();
+            for _ in 0..2 {
+                let (threads, indices) = view.workspace_rows("workspace-0", sort);
+                let actual: Vec<_> = indices.iter().map(|&i| threads[i].id.clone()).collect();
+                assert_eq!(actual, expected);
+            }
+        }
+        assert_eq!(view.page_order_builds, 3);
+        assert!(view.workspace_rows("missing", "alphabetical").1.is_empty());
+        assert_eq!(view.page_order_builds, 3);
+    }
+
     #[tokio::test]
     async fn large_library_has_bounded_initial_index_and_complete_frozen_pages() {
         let source = fixture();
@@ -390,11 +492,13 @@ mod tests {
         assert_eq!(index.counts.len(), 40);
         assert_eq!(index.counts.values().map(|v| v.total).sum::<usize>(), 2000);
         assert_eq!(index.model_catalogs.len(), 1);
-        assert!(index
-            .snapshot
-            .threads
-            .iter()
-            .all(|t| t.latest_diff.is_none()));
+        assert!(
+            index
+                .snapshot
+                .threads
+                .iter()
+                .all(|t| t.latest_diff.is_none())
+        );
         let temp = tempfile::tempdir().unwrap();
         let app = AppState::new_with_state_path(
             "test".into(),
@@ -427,6 +531,11 @@ mod tests {
             }
         }
         assert_eq!(ids.len(), 50);
+        assert_eq!(
+            app.inner.sync_indexes.lock().await.entries[0].page_order_builds,
+            1,
+            "paging a frozen workspace must reuse its order instead of sorting it again"
+        );
         // A new view cannot silently change an old page's source.
         let (other, next) = freeze(fixture(), None);
         app.inner.sync_indexes.lock().await.entries.push_back(next);
