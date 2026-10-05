@@ -7,8 +7,11 @@ FalconDeck once, and every agent in every harness can drive native apps on
 that Mac in the background. No second app, no CLI install, no PATH, no
 `cua-driver skills install`.
 
-This plan pins **cua-driver-rs v0.23.2** (released 2026-08-31, tag
-`cua-driver-rs-v0.23.2` in `trycua/cua`). The local
+The current bundle pins **cua-driver-rs v0.33.4** (released 2026-10-05, tag
+`cua-driver-rs-v0.33.4` in `trycua/cua`), with matching release skills and
+SHA256-pinned Mac assets. Plain SemVer releases are stable upstream; GitHub's
+pre-release label keeps the monorepo-wide Latest pointer product-independent.
+The initial verification below used v0.23.2. At that time, the local
 `~/.local/bin/cua-driver` on the dev Mac is 0.2.0 and the skill copies in
 `~/.agents/skills`, `~/.claude/skills` and this repo's `.agents/skills` are
 the old Swift-era skill. None of them should be used as a source.
@@ -212,15 +215,17 @@ FalconDeck.app  (com.falcondeck.desktop, Developer ID signed)
 **Build pipeline**
 
 - `scripts/prepare-computer-use-runtime.mjs`, modelled on
-  `prepare-extension-runtime.mjs`: `CUA_DRIVER_VERSION = "0.23.2"`, pinned
+  `prepare-extension-runtime.mjs`: `CUA_DRIVER_VERSION = "0.33.4"`, pinned
   sha256 per asset from `checksums.txt`; download the per-arch darwin
   tarball for `--target`, extract only `cua-driver`, write
   `apps/desktop/src-tauri/binaries/cua-driver-<triple>`, chmod 755. A
   `--skills` mode downloads `cua-driver-rs-v<ver>-skills.tar.gz`, verifies,
   and refreshes the checked-in
   `crates/falcondeck-daemon/src/agent_context/cua-driver/` (`SKILL.md`,
-  `MACOS.md`, `BROWSER.md`, `RECORDING.md`, `README.md`, plus a `VERSION`
-  file). One script, one tag, no drift.
+  `WORKFLOW.md`, `RUNTIME.md`, `VISUAL.md`, platform guides, `BROWSER.md`,
+  `RECORDING.md`, `EMBEDDING.md`, `README.md`, plus a `VERSION` file).
+  Existing binaries are reused only when `--version` matches the pin.
+  One script, one tag, no drift.
 - `tauri.conf.json`: `externalBin: ["binaries/deno", "binaries/cua-driver"]`;
   `.gitignore`: `binaries/cua-driver-*`; `beforeBuildCommand` and
   `.github/workflows/release-desktop.yml` run the new prepare step with
@@ -319,13 +324,19 @@ general computer-use switch and disables the new control for older daemons.
 Backup imports preserve the receiving host's computer-use settings rather
 than transferring another host's consent.
 
-FalconDeck owns launch policy and lifecycle: its supervised Cua 0.23.2 child
+FalconDeck owns launch policy and lifecycle: its supervised Cua 0.33.4 child
 receives `serve --permission-mode standard --grant existing-profile` only when
 consented. MCP proxies receive the private socket, never the grant. Cua owns
 the CDP implementation, process/endpoint attestation, and typed browser tools;
 no extension, Python daemon, profile copy, or second browser runtime is added.
-Agents read the bundled BROWSER.md, observe the PID/window, use
-`browser_prepare` with `existing_profile`, then bind and operate typed tools.
+Agents read the bundled BROWSER.md and FalconDeck host notes. Unless the user
+names an existing target, they create one normal window in the intended
+existing profile, preserving its cookies and logins, and bind it with
+`get_browser_state`. They use `browser_prepare` with `existing_profile` only
+when setup or consent is required, then bind again and operate typed tools.
+The window, MCP connection, and session label are reused for the browser task.
+This keeps the user's tabs separate and reduces repeated connection prompts;
+Chrome's control banner can still appear across windows in the same profile.
 Preparation can enable the browser's per-instance remote-debugging setting;
 unsupported browser versions or ambiguous setup controls fail closed.
 

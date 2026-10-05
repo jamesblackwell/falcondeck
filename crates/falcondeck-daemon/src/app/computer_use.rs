@@ -29,7 +29,7 @@ use crate::error::DaemonError;
 /// Bundle id FalconDeck.app presents to TCC and to `health_report`.
 pub const HOST_BUNDLE_ID: &str = "com.falcondeck.desktop";
 /// Release pin. Binary and skill pack must stay on this tag.
-pub const PINNED_DRIVER_VERSION: &str = "0.23.2";
+pub const PINNED_DRIVER_VERSION: &str = "0.33.4";
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_INCLUDE: &[&str] = &[

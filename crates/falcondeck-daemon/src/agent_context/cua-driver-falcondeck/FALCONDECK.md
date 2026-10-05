@@ -1,8 +1,54 @@
 # FalconDeck notes for cua-driver
 
-FalconDeck-authored host notes. The sibling `SKILL.md`, `MACOS.md`,
-`BROWSER.md`, `RECORDING.md`, and `README.md` are vendored verbatim from the
-cua-driver release named in `VERSION`; this file is not.
+FalconDeck-authored host notes. The sibling skill files are vendored verbatim
+from the cua-driver release named in `VERSION`; this file is not.
+
+## Browser windows, cookies, and connection reuse
+
+For routine browser work, prefer one dedicated **normal window in the user's
+existing browser profile**, with their signed-in browser consent enabled in
+FalconDeck. A normal window shares that profile's cookies, storage, extensions,
+and site logins. An incognito window or driver-owned isolated profile does not
+share those logins. Honor the user's requested browser, profile, window, or tab;
+when they ask to act on an existing page, use that page.
+
+1. Discover the requested browser and an observed window in the intended
+   profile with `list_apps`, `list_windows`, and `get_window_state`. Never
+   choose a different profile just because its window appears first.
+2. Unless the task names an existing target, create one normal window using
+   the native `invoke_menu` tool on that exact source `(pid, window_id)`, with
+   the observed File → New Window menu path. Compare `list_windows` before and
+   after, inspect the new window, and use its returned id. This is a native
+   menu action and may briefly activate Chrome; focus restoration is
+   best-effort. Do not use incognito, `creates_new_application_instance`,
+   shell launch flags, or global keyboard shortcuts to create this window.
+3. Bind the new window with `get_browser_state`. If binding requires setup or
+   consent, use `browser_prepare` with that exact pid/window and
+   `strategy: {kind: "existing_profile"}`, then bind again. Preparation belongs
+   to cua-driver's approved setup flow; do not toggle browser settings or
+   click consent UI yourself.
+4. Keep that window, the same MCP connection, and one task-specific `session`
+   label for preparation, binding, page actions, and verification. Repeat the
+   label on every tool that accepts it. Re-snapshot for fresh refs rather than
+   starting another session, preparing again, or opening another window for
+   each action. Do not end the session between actions; end it when the browser
+   task is finished and check cleanup results.
+
+Chrome's debugging connection applies to the profile, not just this window.
+Chrome may show its control banner in other windows of the same profile, and
+a genuinely new browser-level connection can require another Chrome consent
+prompt. Window separation protects the user's tabs; retaining the connection
+reduces repeated setup and prompts. It cannot guarantee a banner-free browser.
+The five-minute idle session expiry, transport close, browser restart, or
+revocation can still require preparation and fresh binding. Do not keep a
+session alive artificially or suppress Chrome's indicators.
+
+Keep concurrent tasks on separate windows and separate MCP lifecycles. This
+does not isolate profile-wide state or global focus; avoid concurrent native
+input. Never copy personal cookies/profile files into an isolated instance.
+Use an isolated profile only when the user requests it or signed-out operation
+satisfies the task. If signed-in consent is denied, ask the user to enable it
+instead of silently changing profiles or bypassing the grant.
 
 ## An isolated browser launch may not use the browser the user expects
 

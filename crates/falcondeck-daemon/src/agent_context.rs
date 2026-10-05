@@ -16,9 +16,15 @@ const MCP_SKILL_BODY: &str = include_str!("agent_context/falcondeck-mcp/SKILL.md
 /// Bundled Pi MCP bridge extension body.
 pub const PI_EXTENSION_BODY: &str = include_str!("agent_context/falcondeck-pi-extension.js");
 const CUA_SKILL_BODY: &str = include_str!("agent_context/cua-driver/SKILL.md");
+const CUA_SKILL_WORKFLOW: &str = include_str!("agent_context/cua-driver/WORKFLOW.md");
+const CUA_SKILL_RUNTIME: &str = include_str!("agent_context/cua-driver/RUNTIME.md");
+const CUA_SKILL_VISUAL: &str = include_str!("agent_context/cua-driver/VISUAL.md");
 const CUA_SKILL_MACOS: &str = include_str!("agent_context/cua-driver/MACOS.md");
+const CUA_SKILL_WINDOWS: &str = include_str!("agent_context/cua-driver/WINDOWS.md");
+const CUA_SKILL_LINUX: &str = include_str!("agent_context/cua-driver/LINUX.md");
 const CUA_SKILL_BROWSER: &str = include_str!("agent_context/cua-driver/BROWSER.md");
 const CUA_SKILL_RECORDING: &str = include_str!("agent_context/cua-driver/RECORDING.md");
+const CUA_SKILL_EMBEDDING: &str = include_str!("agent_context/cua-driver/EMBEDDING.md");
 const CUA_SKILL_README: &str = include_str!("agent_context/cua-driver/README.md");
 const CUA_SKILL_VERSION: &str = include_str!("agent_context/cua-driver/VERSION");
 /// FalconDeck-authored host notes staged alongside the vendored cua-driver skill.
@@ -121,9 +127,15 @@ fn stage_skill_file(state_path: &Path, name: &str, body: &str) -> io::Result<Pat
 fn stage_computer_use_skill(state_path: &Path) -> io::Result<PathBuf> {
     let skill_dir = skills_root(state_path).join(COMPUTER_USE_SKILL_NAME);
     stage_named_file(&skill_dir, "SKILL.md", CUA_SKILL_BODY)?;
+    stage_named_file(&skill_dir, "WORKFLOW.md", CUA_SKILL_WORKFLOW)?;
+    stage_named_file(&skill_dir, "RUNTIME.md", CUA_SKILL_RUNTIME)?;
+    stage_named_file(&skill_dir, "VISUAL.md", CUA_SKILL_VISUAL)?;
     stage_named_file(&skill_dir, "MACOS.md", CUA_SKILL_MACOS)?;
+    stage_named_file(&skill_dir, "WINDOWS.md", CUA_SKILL_WINDOWS)?;
+    stage_named_file(&skill_dir, "LINUX.md", CUA_SKILL_LINUX)?;
     stage_named_file(&skill_dir, "BROWSER.md", CUA_SKILL_BROWSER)?;
     stage_named_file(&skill_dir, "RECORDING.md", CUA_SKILL_RECORDING)?;
+    stage_named_file(&skill_dir, "EMBEDDING.md", CUA_SKILL_EMBEDDING)?;
     stage_named_file(&skill_dir, "README.md", CUA_SKILL_README)?;
     stage_named_file(&skill_dir, "VERSION", CUA_SKILL_VERSION)?;
     stage_named_file(&skill_dir, "FALCONDECK.md", CUA_SKILL_FALCONDECK)?;
@@ -179,7 +191,7 @@ pub fn append_instructions(
     }
     if let Some(path) = computer_use_skill {
         text.push_str(&format!(
-            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background without stealing focus. Read {} and the sibling MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, also read BROWSER.md: existing signed-in profiles use browser_prepare with an observed pid/window_id and existing_profile strategy, then browser_bind. This requires the user's separate Settings → Computer use → signed-in browser consent. If denied, ask the user to enable it; never change daemon settings or launch another CDP endpoint to bypass the grant. Do not install a browser extension for this path. The sibling FALCONDECK.md covers host quirks, including why an isolated launch with no pid can pick a browser the user did not ask for.",
+            "\n- The `cua-driver` MCP server can operate apps on this Mac in the background. Read {} and the sibling WORKFLOW.md and MACOS.md first. Use its MCP tools, not the cua-driver CLI. For browser tasks, read BROWSER.md and FALCONDECK.md. Unless the user specifies an existing target, prefer one dedicated normal browser window in their existing profile so cookies and logins are shared; reuse that window, MCP connection, and session label throughout the task. Bind with get_browser_state; use browser_prepare with an observed pid/window_id and existing_profile strategy only when setup or consent is required. Signed-in access requires the user's separate Settings → Computer use consent. If denied, ask the user to enable it; never change settings, launch another CDP endpoint, copy cookies, or install an extension to bypass the grant. Use an isolated profile only when signed-out operation suits the task or the user requests it.",
             path.display()
         ));
     }
@@ -258,6 +270,23 @@ mod tests {
                 .join("FALCONDECK.md")
                 .is_file()
         );
+        let cua_dir = cua_path.parent().expect("dir");
+        let local_links =
+            regex::Regex::new(r"\]\(([\w-]+\.md)(?:#[^)]*)?\)").expect("local Markdown link regex");
+        for entry in std::fs::read_dir(cua_dir).expect("read staged skill") {
+            let path = entry.expect("staged entry").path();
+            if path.extension().is_some_and(|extension| extension == "md") {
+                let body = std::fs::read_to_string(&path).expect("read staged guide");
+                for link in local_links.captures_iter(&body) {
+                    assert!(
+                        cua_dir.join(&link[1]).is_file(),
+                        "{} references unstaged {}",
+                        path.display(),
+                        &link[1]
+                    );
+                }
+            }
+        }
         stage_bundled_skills(&state_path, false).expect("disable cua");
         assert!(!cua_path.exists());
         std::fs::remove_dir_all(&dir).ok();

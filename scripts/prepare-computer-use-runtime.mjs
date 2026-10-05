@@ -4,17 +4,21 @@ import os from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 
-const CUA_DRIVER_VERSION = '0.23.2'
+const CUA_DRIVER_VERSION = '0.33.4'
 const RELEASE_TAG = `cua-driver-rs-v${CUA_DRIVER_VERSION}`
 const RELEASE_BASE = `https://github.com/trycua/cua/releases/download/${RELEASE_TAG}`
-const SKILL_FILES = ['SKILL.md', 'MACOS.md', 'BROWSER.md', 'RECORDING.md', 'README.md']
+const SKILL_FILES = [
+  'SKILL.md', 'WORKFLOW.md', 'RUNTIME.md', 'VISUAL.md',
+  'MACOS.md', 'WINDOWS.md', 'LINUX.md', 'BROWSER.md',
+  'RECORDING.md', 'EMBEDDING.md', 'README.md',
+]
 const ASSET_SHA256 = {
   [`cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-arm64.tar.gz`]:
-    'c606a0410eb1bf59ee81d697f6fbf8b7126b2e9a3f802272a34807b45b6ecd6f',
+    '5c3da8a8e6190f0606207242eddf15f42e8d02c26916f0670cfc66d50f1ca1b4',
   [`cua-driver-rs-${CUA_DRIVER_VERSION}-darwin-x86_64.tar.gz`]:
-    '8017f02f815a801467c47e1a574735921ecf855b6b907b20341ab906cf33a751',
+    '2d3a218b014838c4b00dba87d011f26aeebcf5d405f7eeb34869d63121ee69f7',
   [`cua-driver-rs-v${CUA_DRIVER_VERSION}-skills.tar.gz`]:
-    'c6ad84caad3ae0f9115338c839c7c4e4b44c934f1311e4d445cb2b39c4a5a25e',
+    '5f33bb04b06b5abf4f95266eeb0ed5bbdd020155eb40f737081e6ac5f31b8246',
 }
 
 const repoRoot = process.cwd()
@@ -108,7 +112,7 @@ async function prepareBinary(target) {
     `cua-driver-${target}`,
   )
   fs.mkdirSync(path.dirname(destination), { recursive: true })
-  if (fs.existsSync(destination) && !forceDownload) {
+  if (!forceDownload && binaryVersion(destination) === CUA_DRIVER_VERSION) {
     console.log(`Using existing bundled cua-driver ${CUA_DRIVER_VERSION} for ${target}`)
     return
   }
@@ -125,6 +129,19 @@ async function prepareBinary(target) {
     fs.rmSync(extracted.temporaryDirectory, { recursive: true, force: true })
   }
   console.log(`Prepared bundled cua-driver ${CUA_DRIVER_VERSION} for ${target}`)
+}
+
+function binaryVersion(binary) {
+  if (!fs.existsSync(binary)) return null
+  try {
+    return execFileSync(binary, ['--version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim().match(/^cua-driver (\S+)$/)?.[1] ?? null
+  } catch {
+    return null
+  }
 }
 
 async function prepareSkills() {
