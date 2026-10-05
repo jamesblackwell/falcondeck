@@ -2,9 +2,11 @@
 
 Researched 2026-10-05. Proposal for an experiment; no cloud integration is implemented by this document. Vercel, Cloudflare, and E2B received the detailed documentation review; Daytona received a shorter comparison. Conclusions are based on current provider documentation and FalconDeck source, without provisioning paid resources or benchmarking a live sandbox.
 
+The follow-up [cloud execution and UX comparison](CLOUD-EXECUTION-UX.md) examines BB's Modal implementation, additional open-source references, and the different requirements for remote turns, phone starts and offline automations.
+
 ## Recommendation
 
-Start with **Vercel Sandbox**, implement one configured cloud connection, and use **E2B** as the comparison for the initial technical experiment. Keep **Daytona** on the shortlist, particularly for users wanting its environment and lifecycle options. Add **Cloudflare** after proving the experience, or sooner if we specifically want a Cloudflare-hosted orchestration service.
+Start with **Vercel Sandbox**, implement one configured cloud connection, and use **E2B** as the comparison for the initial technical experiment. Keep **Modal** and **Daytona** on the shortlist: Modal has relevant BB/Open-Inspect implementations to study, while Daytona offers additional environment and lifecycle options. Add **Cloudflare** after proving the experience, or sooner if we specifically want a Cloudflare-hosted orchestration service.
 
 This is a recommendation about FalconDeck's integration effort and intended experience, not a claim that Vercel has the most sandbox customers. Vercel now has persistent sandboxes, custom Linux images, detached commands, and up to 24-hour sessions on paid plans. Older descriptions of it as an ephemeral, short-lived Node/Python environment are no longer an adequate basis for choosing a provider. [Current overview](https://vercel.com/docs/sandbox), [persistence](https://vercel.com/docs/sandbox/concepts/persistent-sandboxes), [limits](https://vercel.com/docs/sandbox/pricing).
 
@@ -98,18 +100,18 @@ Extend the existing composer dropdown:
 ```text
 Project folder
 Isolated copy
-Cloud sandbox
+Cloud copy
 ```
 
 After configuration, the selected chip can read **Cloud · Vercel**. Keep the project and harness/model selectors where they are. Cloud is the execution location; Codex and Claude remain agents. Pin a thread's connection and environment after creation. Changing the default in Settings affects future threads.
 
-Use **Settings → Cloud environments** with one active connection initially:
+Use **Settings → Cloud execution** with one active connection initially:
 
 - Provider selection and provider-specific credentials. Vercel needs token/team/project; E2B needs its project key. Cloudflare later needs a deployment/connect flow.
 - Test connection, resource/runtime defaults, and an agent-auth status.
 - Project setup command and explicitly configured environment variables. Offer advanced region/image settings later rather than making them mandatory for an experiment.
 
-The first selection of Cloud without a connection opens setup and then returns to the composer. The creation summary should say that it starts from current source including uncommitted edits, and show excluded files/size on demand. After Send, show progress in the same thread: preparing source, uploading, starting environment, setup, running. Keep the draft recoverable if provisioning fails.
+The first selection of Cloud copy without a connection opens setup and then returns to the composer. The creation summary should say that it starts from current source including uncommitted edits, and show excluded files/size on demand. After Send, show progress in the same thread: preparing source, uploading, starting environment, setup, running. Keep the draft recoverable if provisioning fails.
 
 The thread header shows provider, running/suspended/expired state, and runtime limit. Follow-up messages resume the same workspace. Add Review changes, Bring back changes, and Stop environment controls. Distinguish interrupting a turn, suspending compute, archiving a conversation, and permanently deleting its retained files. Do not delete native history as an implicit consequence of archival.
 
