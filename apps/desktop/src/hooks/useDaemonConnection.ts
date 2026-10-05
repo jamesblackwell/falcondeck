@@ -30,6 +30,7 @@ const DAEMON_BACKOFF_RESET_MS = 10_000
 const DAEMON_SOCKET_CONNECT_TIMEOUT_MS = 10_000
 const THREAD_PREFETCH_LIMIT = 3
 const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
+const MAX_THREAD_DETAIL_CACHE_ENTRIES = 50
 // A thread the client believes is live but that has gone this long without a
 // single event is a candidate for a stuck spinner: re-check it against the
 // daemon. A missed terminal thread-update strands the composer on Stop and the
@@ -109,6 +110,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   )
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
+  const selectedDetailCacheKeyRef = useRef<string | null>(null)
   const threadDetailPrefetchRef = useRef(new Set<string>())
   const hydrationPollRef = useRef<{ key: string; attempts: number } | null>(null)
   const pendingEventsRef = useRef<EventEnvelope[]>([])
@@ -127,6 +129,34 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const selectedWorkspacePathRef = useRef<string | null>(
     initialSelection?.workspacePath ?? null,
   )
+
+  useLayoutEffect(() => {
+    selectedDetailCacheKeyRef.current = selectedWorkspaceId && selectedThreadId
+      ? threadCacheKey(selectedWorkspaceId, selectedThreadId)
+      : null
+  }, [selectedThreadId, selectedWorkspaceId])
+
+  const cachedThreadDetail = useCallback((key: string) => {
+    const cache = threadDetailCacheRef.current
+    const detail = cache.get(key)
+    if (detail) {
+      cache.delete(key)
+      cache.set(key, detail)
+    }
+    return detail
+  }, [])
+
+  const cacheThreadDetail = useCallback((key: string, detail: ThreadDetail) => {
+    const cache = threadDetailCacheRef.current
+    // Background events update entries without renewing their last visit.
+    cache.set(key, detail)
+    for (const oldest of cache.keys()) {
+      if (cache.size <= MAX_THREAD_DETAIL_CACHE_ENTRIES) break
+      // In-flight speculative reads can finish in a burst while the selected
+      // conversation stays open. Preserve its expanded pages until it is left.
+      if (oldest !== selectedDetailCacheKeyRef.current) cache.delete(oldest)
+    }
+  }, [])
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
@@ -152,7 +182,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     setThreadDetail((c) => {
       const next = applyEventsToThreadDetail(c, events)
       if (next) {
-        threadDetailCacheRef.current.set(
+        cacheThreadDetail(
           threadCacheKey(next.workspace.id, next.thread.id),
           next,
         )
@@ -180,7 +210,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         if (cached) {
           const updated = applyEventsToThreadDetail(cached, groupedEvents)
           if (updated && updated !== cached) {
-            threadDetailCacheRef.current.set(cacheKey, updated)
+            cacheThreadDetail(cacheKey, updated)
           }
         }
       }
@@ -192,7 +222,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       setGitRefreshTrigger((c) => c + 1)
     }
     recordPerformance('falcondeck:event-flush', startedAt, { eventCount: events.length })
-  }, [])
+  }, [cacheThreadDetail])
 
   const clearPendingEvents = useCallback(() => {
     if (eventFrameRef.current !== null) {
@@ -225,15 +255,15 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   useEffect(() => clearPendingEvents, [clearPendingEvents])
 
   // Callers may merge an older page into the selected detail. Mirror every
-  // committed detail back into the switch/prefetch cache so navigating away
-  // and back cannot collapse the transcript to its former tail window.
+  // committed detail back into the switch/prefetch cache so revisiting a
+  // retained conversation preserves its loaded older pages.
   useEffect(() => {
     if (!threadDetail) return
-    threadDetailCacheRef.current.set(
+    cacheThreadDetail(
       threadCacheKey(threadDetail.workspace.id, threadDetail.thread.id),
       threadDetail,
     )
-  }, [threadDetail])
+  }, [cacheThreadDetail, threadDetail])
 
   // Bootstrap daemon connection
   useEffect(() => {
@@ -492,14 +522,14 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
 
     const cachedDetail =
-      threadDetailCacheRef.current.get(threadCacheKey(selectedWorkspaceId, selectedThreadId)) ??
+      cachedThreadDetail(threadCacheKey(selectedWorkspaceId, selectedThreadId)) ??
       null
     if (cachedDetail) {
       setThreadDetail(cachedDetail)
     } else if (threadDetail !== null) {
       setThreadDetail(null)
     }
-  }, [externalWorkspaceIds, selectedThreadId, selectedWorkspaceId, threadDetail])
+  }, [cachedThreadDetail, externalWorkspaceIds, selectedThreadId, selectedWorkspaceId, threadDetail])
    
 
   // Fetch thread detail on selection change
@@ -529,7 +559,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       setThreadDetailError(null)
       return
     }
-    const cachedDetail = threadDetailCacheRef.current.get(cacheKey) ?? null
+    const cachedDetail = cachedThreadDetail(cacheKey) ?? null
     const selectedSummary =
       snapshot?.threads.find((thread) => thread.id === selectedThreadId) ?? null
 
@@ -564,7 +594,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         )
         setThreadDetail((current) => {
           const next = mergeThreadDetailPage(current, detail, 'refresh')
-          threadDetailCacheRef.current.set(cacheKey, next)
+          cacheThreadDetail(cacheKey, next)
           return next
         })
         const poll = hydrationPollRef.current
@@ -600,6 +630,8 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
   }, [
     api,
+    cachedThreadDetail,
+    cacheThreadDetail,
     externalWorkspaceIds,
     selectedThreadId,
     selectedWorkspaceId,
@@ -650,7 +682,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
             limit: THREAD_DETAIL_TAIL_LIMIT,
           })
           .then((detail) => {
-            threadDetailCacheRef.current.set(cacheKey, detail)
+            cacheThreadDetail(cacheKey, detail)
           })
           .catch(() => {})
           .finally(() => {
@@ -666,7 +698,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
     const handle = window.setTimeout(prefetch, THREAD_PREFETCH_FALLBACK_DELAY_MS)
     return () => window.clearTimeout(handle)
-  }, [api, selectedLocalWorkspaceStatus, selectedThreadId, selectedWorkspaceId, snapshot])
+  }, [api, cacheThreadDetail, selectedLocalWorkspaceStatus, selectedThreadId, selectedWorkspaceId, snapshot])
 
   useEffect(() => {
     if (!snapshot) {

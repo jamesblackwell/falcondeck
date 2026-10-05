@@ -166,6 +166,81 @@ describe("conversation presentation reuse", () => {
 });
 
 describe("conversation streaming batches", () => {
+  it("does not rebuild a completed-history index on each streaming frame", () => {
+    let identityReads = 0;
+    let items = longThread();
+    for (const item of items) {
+      const id = item.id;
+      Object.defineProperty(item, "id", {
+        enumerable: true,
+        get() {
+          identityReads += 1;
+          return id;
+        },
+      });
+    }
+    const tail = items.at(-1)!;
+    const tailId = tail.id;
+    const initialText = tail.kind === "assistant_message" ? tail.text : "";
+    identityReads = 0;
+    for (let frame = 0; frame < 20; frame += 1) {
+      const events: EventEnvelope[] = Array.from({ length: 4 }, (_, index) => ({
+        seq: frame * 4 + index + 1,
+        emitted_at: at,
+        workspace_id: "workspace-1",
+        thread_id: "thread-1",
+        event: {
+          type: "text",
+          item_id: tailId,
+          delta: "x",
+          target: "assistant_text",
+          start_offset: initialText.length + frame * 4 + index,
+          end_offset: initialText.length + frame * 4 + index + 1,
+        },
+      }));
+      items = applyConversationEventsToItems(items, events);
+    }
+
+    expect(items.at(-1)).toMatchObject({ text: `${initialText}${"x".repeat(80)}` });
+    // Only resolving and copying the original streaming item reads its id.
+    // Completed items must stay outside per-frame identity lookup work.
+    expect(identityReads).toBe(2);
+  });
+
+  it("resolves earlier items and newly appended tails in the same frame", () => {
+    const items = longThread(4);
+    const appended: ConversationItem = {
+      kind: "assistant_message",
+      id: "appended",
+      text: "New",
+      lifecycle: "streaming",
+      created_at: at,
+    };
+    const bodies: EventEnvelope["event"][] = [
+      { type: "text", item_id: "assistant-3", delta: "!", target: "assistant_text", start_offset: 10, end_offset: 11 },
+      { type: "text", item_id: "assistant-1", delta: "?", target: "assistant_text", start_offset: 10, end_offset: 11 },
+      { type: "conversation-item-added", item: appended },
+      { type: "text", item_id: "appended", delta: " tail", target: "assistant_text", start_offset: 3, end_offset: 8 },
+      { type: "text", item_id: "assistant-3", delta: "!", target: "assistant_text", start_offset: 11, end_offset: 12 },
+    ];
+    const events = bodies.map((event, index): EventEnvelope => ({
+      seq: index + 1,
+      emitted_at: at,
+      workspace_id: "workspace-1",
+      thread_id: "thread-1",
+      event,
+    }));
+
+    const next = applyConversationEventsToItems(items, events);
+
+    expect(next).toHaveLength(5);
+    expect(next[0]).toBe(items[0]);
+    expect(next[1]).toMatchObject({ text: "Response 1?" });
+    expect(next[2]).toBe(items[2]);
+    expect(next[3]).toMatchObject({ text: "Response 3!!" });
+    expect(next[4]).toMatchObject({ text: "New tail" });
+  });
+
   it("applies a token burst to a long thread while retaining untouched item identities", () => {
     const completeItems = longThread();
     const completeTail = completeItems.at(-1)!;

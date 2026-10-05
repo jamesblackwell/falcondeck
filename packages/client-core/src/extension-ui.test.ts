@@ -271,6 +271,99 @@ describe("deriveExtensionPanels", () => {
 });
 
 describe("filterProjectGroupsByExtensions", () => {
+  const redFilter = {
+    key: "example.colors:colors",
+    extensionId: "example.colors",
+    binding: {
+      view: "thread-tags",
+      path: ["tagIds"],
+      operator: "includes_any" as const,
+    },
+    selectedValues: new Set(["red"]),
+  };
+
+  it("reads each projection once when filtering a large session list", () => {
+    const threads = Array.from({ length: 1_000 }, (_, index) => ({
+      id: `thread-${index}`,
+      workspace_id: "workspace-1",
+    })) as ThreadSummary[];
+    let projectionReads = 0;
+    const snapshot: ExtensionSnapshot = {
+      catalog: [],
+      views: threads.map((thread) => ({
+        get extension_id() {
+          projectionReads += 1;
+          return "example.colors";
+        },
+        view_id: "thread-tags",
+        scope: { kind: "thread" as const, id: thread.id },
+        value: { tagIds: ["red"] },
+        updated_at: "2026-08-13T00:00:00Z",
+      })),
+    };
+    const groups: ProjectGroup[] = [
+      {
+        workspace: { id: "workspace-1", path: "/project" } as WorkspaceSummary,
+        threads,
+      },
+    ];
+
+    const filtered = filterProjectGroupsByExtensions(groups, snapshot, [redFilter]);
+
+    expect(filtered[0]?.threads).toEqual(threads);
+    expect(projectionReads).toBe(snapshot.views.length);
+  });
+
+  it("isolates extension, view and scope identities and keeps the first duplicate", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: { id: "workspace-1", path: "/project" } as WorkspaceSummary,
+        threads: [{ id: "plain-thread", workspace_id: "workspace-1" }] as ThreadSummary[],
+        archivedThreads: [{ id: "red-thread", workspace_id: "workspace-1" }] as ThreadSummary[],
+      },
+    ];
+    const snapshot = extensionSnapshot();
+    const source = snapshot.views[0]!;
+    snapshot.views = [
+      { ...source, extension_id: "other.extension", scope: { kind: "thread", id: "plain-thread" } },
+      { ...source, view_id: "other-view", scope: { kind: "thread", id: "plain-thread" } },
+      { ...source, scope: { kind: "workspace", id: "plain-thread" } },
+      { ...source, scope: { kind: "thread", id: "plain-thread" }, value: { tagIds: [] } },
+      { ...source, scope: { kind: "thread", id: "plain-thread" } },
+      source,
+    ];
+
+    const filtered = filterProjectGroupsByExtensions(groups, snapshot, [redFilter]);
+
+    expect(filtered[0]?.threads).toEqual([]);
+    expect(filtered[0]?.archivedThreads?.map((thread) => thread.id)).toEqual(["red-thread"]);
+  });
+
+  it("requires every active filter even when filters share a view", () => {
+    const snapshot = extensionSnapshot();
+    snapshot.views[0]!.value = { tagIds: ["red"], nested: { stages: ["done"] } };
+    const groups: ProjectGroup[] = [{
+      workspace: { id: "workspace-1", path: "/project" } as WorkspaceSummary,
+      threads: [{ id: "red-thread", workspace_id: "workspace-1" }] as ThreadSummary[],
+    }];
+    const stageFilter = {
+      ...redFilter,
+      key: "example.colors:stages",
+      binding: { ...redFilter.binding, path: ["nested", "stages"] },
+      selectedValues: new Set(["done"]),
+    };
+
+    expect(filterProjectGroupsByExtensions(groups, snapshot, [redFilter, stageFilter]))
+      .toHaveLength(1);
+    expect(filterProjectGroupsByExtensions(groups, snapshot, [
+      redFilter,
+      { ...stageFilter, selectedValues: new Set(["running"]) },
+    ])).toEqual([]);
+    expect(filterProjectGroupsByExtensions(groups, snapshot, [
+      { ...redFilter, selectedValues: new Set() },
+    ])).toBe(groups);
+  });
+
   it("matches selected values against bounded thread-scoped projections", () => {
     const groups: ProjectGroup[] = [
       {

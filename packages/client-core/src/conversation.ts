@@ -936,6 +936,10 @@ export function applyConversationEventsToItems(
   let indexByIdentity: Map<string, number> | null = null;
 
   const itemIndex = (id: string, kind: ConversationItem["kind"]) => {
+    // Streaming frames normally touch only the last item. Building keys for
+    // all completed history on every frame wastes CPU and transient memory.
+    const last = next.at(-1);
+    if (last?.id === id && last.kind === kind) return next.length - 1;
     if (!indexByIdentity) {
       indexByIdentity = new Map(
         next.map(

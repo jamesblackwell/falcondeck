@@ -541,18 +541,10 @@ function valueAtPath(value: unknown, path: readonly string[]): unknown {
 }
 
 function threadMatchesFilter(
-  snapshot: ExtensionSnapshot,
-  threadId: string,
+  viewValue: unknown,
   filter: ActiveExtensionThreadFilter,
 ): boolean {
-  const view = snapshot.views.find(
-    (candidate) =>
-      candidate.extension_id === filter.extensionId &&
-      candidate.view_id === filter.binding.view &&
-      candidate.scope?.kind === "thread" &&
-      candidate.scope.id === threadId,
-  );
-  const values = valueAtPath(view?.value, filter.binding.path);
+  const values = valueAtPath(viewValue, filter.binding.path);
   return (
     Array.isArray(values) &&
     values.some(
@@ -568,16 +560,40 @@ export function filterProjectGroupsByExtensions(
 ): ProjectGroup[] {
   const active = filters.filter((filter) => filter.selectedValues.size > 0);
   if (!snapshot || active.length === 0) return groups;
-  return groups.flatMap((group) => {
-    const threads = group.threads.filter((thread) =>
-      active.every((filter) =>
-        threadMatchesFilter(snapshot, thread.id, filter),
-      ),
+  // The view list includes per-thread projections, so searching it for each
+  // sidebar row turns a large filtered session list into quadratic work.
+  // Index only the extension/view pairs used by active filters in one pass.
+  const viewsByExtension = new Map<string, Map<string, Map<string, unknown>>>();
+  const indexedFilters = active.map((filter) => {
+    let views = viewsByExtension.get(filter.extensionId);
+    if (!views) {
+      views = new Map();
+      viewsByExtension.set(filter.extensionId, views);
+    }
+    let valuesByThread = views.get(filter.binding.view);
+    if (!valuesByThread) {
+      valuesByThread = new Map();
+      views.set(filter.binding.view, valuesByThread);
+    }
+    return { filter, valuesByThread };
+  });
+  for (const view of snapshot.views) {
+    const values = viewsByExtension.get(view.extension_id)?.get(view.view_id);
+    if (
+      !values ||
+      view.scope?.kind !== "thread" ||
+      values.has(view.scope.id)
+    ) continue;
+    values.set(view.scope.id, view.value);
+  }
+  const matches = (threadId: string) =>
+    indexedFilters.every(({ filter, valuesByThread }) =>
+      threadMatchesFilter(valuesByThread.get(threadId), filter),
     );
+  return groups.flatMap((group) => {
+    const threads = group.threads.filter((thread) => matches(thread.id));
     const archivedThreads = (group.archivedThreads ?? []).filter((thread) =>
-      active.every((filter) =>
-        threadMatchesFilter(snapshot, thread.id, filter),
-      ),
+      matches(thread.id),
     );
     return threads.length > 0 || archivedThreads.length > 0
       ? [{ ...group, threads, archivedThreads }]

@@ -311,6 +311,120 @@ describe('useDaemonConnection thread restoration', () => {
     })
   })
 
+  it('evicts older transcripts after fifty visits while keeping recently viewed older pages', async () => {
+    const base = daemonSnapshot('ready')
+    const threads = Array.from({ length: 51 }, (_, index) => ({
+      ...base.threads[0], id: `thread-${index + 1}`,
+    }))
+    mocks.snapshot.mockResolvedValue({ ...base, threads })
+    mocks.threadDetail.mockImplementation(async (_workspaceId, threadId) => ({
+      ...hydratedDetail(), thread: threads.find(thread => thread.id === threadId),
+    }))
+    // Keep speculative reads idle so this exercises navigation's retention.
+    vi.stubGlobal('requestIdleCallback', vi.fn(() => 1))
+    const { result, unmount } = renderHook(() => useDaemonConnection())
+    try {
+      await waitFor(() => expect(result.current.threadDetail?.thread.id).toBe('thread-1'))
+      const expanded = {
+        ...result.current.threadDetail!,
+        items: [
+          { ...result.current.threadDetail!.items[0], id: 'older-message', text: 'older page' },
+          ...result.current.threadDetail!.items,
+        ],
+      }
+      act(() => result.current.setThreadDetail(expanded))
+
+      for (let index = 2; index <= 50; index += 1) {
+        await act(async () => result.current.setSelectedThreadId(`thread-${index}`))
+        expect(result.current.threadDetail?.thread.id).toBe(`thread-${index}`)
+      }
+      // Reading an old entry renews it without losing its loaded older pages.
+      mocks.threadDetail.mockClear()
+      act(() => result.current.setSelectedThreadId('thread-1'))
+      expect(result.current.threadDetail?.items[0].id).toBe('older-message')
+      expect(mocks.threadDetail).not.toHaveBeenCalled()
+
+      await act(async () => result.current.setSelectedThreadId('thread-51'))
+      mocks.threadDetail.mockClear()
+      act(() => result.current.setSelectedThreadId('thread-1'))
+      expect(result.current.threadDetail?.items[0].id).toBe('older-message')
+      expect(mocks.threadDetail).not.toHaveBeenCalled()
+
+      // The least recently used visit was released and needs one fresh read.
+      await act(async () => result.current.setSelectedThreadId('thread-2'))
+      expect(mocks.threadDetail).toHaveBeenCalledExactlyOnceWith('workspace-1', 'thread-2', {
+        mode: 'tail', limit: 150,
+      })
+      expect(result.current.threadDetail?.thread.id).toBe('thread-2')
+    } finally {
+      unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('preserves the selected transcript when pending prefetches complete beyond the cache limit', async () => {
+    const base = daemonSnapshot('ready')
+    const threads = Array.from({ length: 61 }, (_, index) => ({
+      ...base.threads[0], id: `thread-${index + 1}`,
+    }))
+    mocks.snapshot.mockResolvedValue({ ...base, threads })
+    const detailFor = (threadId: string): ThreadDetail => ({
+      ...hydratedDetail(), thread: threads.find(thread => thread.id === threadId)!,
+    })
+    const pending = new Map<string, (detail: ThreadDetail) => void>()
+    mocks.threadDetail.mockImplementation((_workspaceId, threadId) =>
+      threadId === 'thread-1' ? Promise.resolve(detailFor(threadId))
+        : new Promise<ThreadDetail>(resolve => pending.set(threadId, resolve)),
+    )
+    const idle = vi.fn(() => 1)
+    vi.stubGlobal('requestIdleCallback', idle)
+    const { result, unmount } = renderHook(() => useDaemonConnection())
+    try {
+      await waitFor(() => expect(result.current.threadDetail?.thread.id).toBe('thread-1'))
+      const expanded = {
+        ...result.current.threadDetail!,
+        items: [
+          { ...result.current.threadDetail!.items[0], id: 'older-message', text: 'older page' },
+          ...result.current.threadDetail!.items,
+        ],
+      }
+      act(() => result.current.setThreadDetail(expanded))
+
+      // Start many speculative reads, then let them finish together while the
+      // selected conversation has not been revisited to renew its LRU rank.
+      for (let index = 1; index < threads.length; index += 3) {
+        act(() => result.current.setSnapshot({
+          ...base,
+          threads: [threads[0], ...threads.slice(index), ...threads.slice(1, index)],
+        }))
+        const callback = idle.mock.calls.at(-1)?.[0] as unknown as (() => void)
+        act(() => callback())
+      }
+      expect(pending.size).toBe(60)
+      await act(async () => {
+        for (const [threadId, resolve] of pending) resolve(detailFor(threadId))
+      })
+      expect(result.current.threadDetail?.items[0].id).toBe('older-message')
+
+      mocks.threadDetail.mockClear()
+      act(() => result.current.setSelectedThreadId('thread-61'))
+      expect(result.current.threadDetail?.thread.id).toBe('thread-61')
+      act(() => result.current.setSelectedThreadId('thread-1'))
+      expect(result.current.threadDetail?.items[0].id).toBe('older-message')
+      expect(mocks.threadDetail).not.toHaveBeenCalled()
+
+      // Prefetch writes are bounded too: the earliest inactive result was
+      // released even though the snapshot still contains the session.
+      act(() => result.current.setSelectedThreadId('thread-2'))
+      expect(mocks.threadDetail).toHaveBeenCalledExactlyOnceWith('workspace-1', 'thread-2', {
+        mode: 'tail', limit: 150,
+      })
+    } finally {
+      unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('corrects a thread left spinning after its terminal update went missing', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {

@@ -412,7 +412,7 @@ describe('buildSidebarRows', () => {
     expect((overflow as any).isExpanded).toBe(true)
   })
 
-  it('extends the visible range just enough to include a hidden selected thread', () => {
+  it('includes a hidden selected thread after the visible window', () => {
     const threads = Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, workspace_id: 'w1' }))
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
@@ -422,10 +422,11 @@ describe('buildSidebarRows', () => {
     )
 
     const threadRows = rows.filter((r) => r.type === 'thread')
-    expect(threadRows).toHaveLength(7) // t0..t6 shown so the selection stays visible
+    expect(threadRows).toHaveLength(6)
+    expect(threadRows.map(row => row.thread.id)).toEqual(['t0', 't1', 't2', 't3', 't4', 't6'])
 
     const overflow = rows.find((r) => r.type === 'overflow')
-    expect((overflow as any).hiddenCount).toBe(1)
+    expect((overflow as any).hiddenCount).toBe(3)
   })
 })
 
@@ -447,7 +448,7 @@ describe('sidebarRowsEqual', () => {
     expect(sidebarRowsEqual(before, after)).toBe(true)
   })
 
-  it('detects a selection that expands the visible window', () => {
+  it('detects a selection that adds a trailing row', () => {
     const manyThreads = [
       {
         workspace: workspace({ id: 'w1', path: '/tmp/project-one' }),

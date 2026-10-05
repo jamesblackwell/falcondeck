@@ -174,17 +174,18 @@ export function buildSidebarRows(
 
     const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
 
-    // Reveal just enough to keep the selected thread visible, without jumping
-    // straight to the full list. Project-pinned chats stay above the window.
+    // Keep an older selected thread visible as one trailing row. Expanding to
+    // its rank can create thousands of cells, including zero-height cells in
+    // collapsed projects. Project-pinned chats stay above the normal window.
     const selectedIndex =
       selectedThreadId != null ? sortedUnpinned.findIndex((t) => t.id === selectedThreadId) : -1
-    const effectiveCount = selectedIndex >= requestedCount ? selectedIndex + 1 : requestedCount
-    const visibleUnpinned = sortedUnpinned.slice(0, effectiveCount)
+    const visibleUnpinned = sortedUnpinned.slice(0, requestedCount)
+    const trailingSelected = selectedIndex >= requestedCount ? sortedUnpinned[selectedIndex] : undefined
     const missing = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0
       : Math.max(remoteCursors[`${group.workspace.id}:${sortMode}`] === undefined ? 0 : 1, (remote?.total ?? 0) - group.threads.length)
     const hiddenCount = Math.max(0, sortedUnpinned.length - visibleUnpinned.length) + missing
     const canCollapse = hiddenCount === 0 && sortedUnpinned.length > VISIBLE_THREAD_LIMIT
-    const visible = [...sortedPinnedInProject, ...visibleUnpinned]
+    const visible = [...sortedPinnedInProject, ...visibleUnpinned, ...(trailingSelected ? [trailingSelected] : [])]
 
     const threadRows: SidebarRow[] = visible.map((thread) => ({
       key: `thread:${thread.id}`,
