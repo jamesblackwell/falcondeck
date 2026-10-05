@@ -60,7 +60,7 @@ character happens to land on the column edge.
 
 ## Measure
 
-Desktop prose fills the transcript column: `--fd-measure` is `none`.
+Desktop prose fills the composer's reading column: `--fd-measure` is `none`.
 
 A narrower measure was tried first (`calc(35 * var(--fd-text-md))`, about 70
 characters) on the reasoning that the 3xl column runs to roughly 90 characters
@@ -68,6 +68,14 @@ per line. It was reverted because the column and the composer are both
 `max-w-3xl` with the same padding, so capping prose left its right edge short
 of the input box directly below it — which reads as a bug, not as typography.
 Alignment with the composer won over line length.
+
+In the Mac app, top-level assistant tables can grow beyond that column, up to
+72rem or the available chat pane width. Prose, code, message actions, and the
+composer retain their existing alignment. Short tables stay at the prose
+width; dense tables use the extra room, and columns scroll horizontally when
+they cannot fit. Tables inside lists, quotes, and user messages stay contained.
+This layout lives in the desktop stylesheet; remote web and mobile keep their
+existing table widths.
 
 To reinstate a book measure, set `--fd-measure` to a length; code blocks,
 diffs, and tables are already exempt and keep the full column either way.

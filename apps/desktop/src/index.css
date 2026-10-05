@@ -68,6 +68,53 @@ body {
   margin: 0;
 }
 
+/* Keep the reading column aligned with the composer, but give assistant rows
+   containing tables the pane's full width. Deferred rows contain paint, so
+   tables must expand inside the row rather than overflow a narrow ancestor. */
+[data-conversation-transcript] {
+  --fd-transcript-gutter: 0.75rem;
+  --fd-transcript-column: calc(48rem - 2 * var(--fd-transcript-gutter));
+  container-type: inline-size;
+  max-width: none;
+}
+
+@media (min-width: 48rem) {
+  [data-conversation-transcript] {
+    --fd-transcript-gutter: 1.5rem;
+  }
+}
+
+[data-conversation-transcript] > * {
+  width: 100%;
+  max-width: var(--fd-transcript-column);
+  margin-inline: auto;
+}
+
+[data-conversation-transcript] > [data-conversation-block-kind="assistant_message"]:has([data-markdown-block="table"]) {
+  --fd-assistant-inset: max(0px, calc((100cqw - var(--fd-transcript-column)) / 2));
+  max-width: none;
+}
+
+[data-conversation-block-kind="assistant_message"] > article > :not([data-message-selectable-content]),
+[data-conversation-block-kind="assistant_message"] > article > [data-message-selectable-content] > .fd-markdown > :not([data-markdown-block="table"], [data-markdown-segment], hr),
+[data-conversation-block-kind="assistant_message"] > article > [data-message-selectable-content] > .fd-markdown > [data-markdown-segment] > :not([data-markdown-block="table"], hr) {
+  margin-inline: var(--fd-assistant-inset);
+}
+
+/* Intrinsic sizing lets short tables keep the reading width while prose-heavy
+   tables grow. The cap and column floor keep wide tables locally scrollable. */
+[data-conversation-block-kind="assistant_message"] > article > [data-message-selectable-content] > .fd-markdown > [data-markdown-block="table"],
+[data-conversation-block-kind="assistant_message"] > article > [data-message-selectable-content] > .fd-markdown > [data-markdown-segment] > [data-markdown-block="table"] {
+  width: fit-content;
+  min-width: min(100%, calc(var(--fd-transcript-column) - 0.5rem));
+  max-width: min(100%, 72rem);
+  margin-inline: auto;
+
+  & > table :is(th, td) {
+    min-width: calc(10 * var(--fd-text-sm));
+  }
+}
+
 /* When the project sidebar is hidden, the main header sits beneath the native
    macOS window controls. Keep its leading content clear of that corner. */
 .desktop-main--sidebar-collapsed > section > [data-tauri-drag-region]:first-child {

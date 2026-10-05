@@ -637,7 +637,10 @@ const markdownComponents = {
      is a distinct object in the transcript, not four naked rows of prose. */
   table({ children }: { children?: React.ReactNode }) {
     return (
-      <div className="mb-3 max-w-full overflow-x-auto rounded-[var(--fd-radius-lg)] border border-border-default last:mb-0">
+      <div
+        data-markdown-block="table"
+        className="mb-3 max-w-full overflow-x-auto rounded-[var(--fd-radius-lg)] border border-border-default last:mb-0"
+      >
         <table className="w-full min-w-48 border-collapse text-[length:var(--fd-text-sm)]">
           {children}
         </table>
@@ -896,7 +899,7 @@ function StreamingMessageContent({
           // Keep the wrapper that directive-bearing messages historically use
           // so first/last block spacing remains unchanged.
           hasDirectives ? (
-            <div key={segment.key}>
+            <div key={segment.key} data-markdown-segment>
               {segment.blocks.map((block) => (
                 <StreamingMarkdownBlock
                   key={block.key}
@@ -943,7 +946,7 @@ export function renderMessageContent(
     <>
       {segments.map((segment, index) =>
         segment.kind === "markdown" ? (
-          <div key={index}>
+          <div key={index} data-markdown-segment>
             {renderMarkdown(
               definitionFooter
                 ? `${segment.text}\n\n${definitionFooter}`
