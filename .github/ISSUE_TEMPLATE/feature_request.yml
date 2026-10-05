@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest an improvement to your FalconDeck workflow.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe your workflow and what is difficult today.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: What would help?
+      description: Describe the behaviour you would like, and any alternatives you have tried.
+    validations:
+      required: true

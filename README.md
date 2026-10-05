@@ -4,13 +4,14 @@
     <img src="assets/brand/logomark-mark-dark.svg" alt="FalconDeck" width="72" />
   </picture>
   <h1>FalconDeck</h1>
-  <p><strong>Use your coding agents on your Mac. Keep them moving from your phone.</strong></p>
-  <p>FalconDeck is a free, open-source app for Codex, Claude Code, OpenCode, and other coding agents. It uses the subscriptions and model access you already have. FalconDeck does not sell another AI plan or lock your sessions into its own service.</p>
+  <p><strong>Your coding agents. A proper Mac app. Keep going from your phone.</strong></p>
+  <p>FalconDeck is a free, open-source workspace for Codex, Claude Code, OpenCode, and other coding agents. Bring the accounts and subscriptions you already use, keep your code in your own folders, and choose the tools that suit your work.</p>
   <p>
     <a href="https://falcondeck.com">Website</a> ·
     <a href="https://github.com/jamesblackwell/falcondeck/releases">Download for Mac</a> ·
     <a href="https://apps.apple.com/app/falcondeck/id6760899257">Download for iPhone and iPad</a> ·
-    <a href="docs/00-architecture-overview.md">Technical overview</a>
+    <a href="docs/GETTING-STARTED.md">Getting started</a> ·
+    <a href="https://github.com/jamesblackwell/falcondeck/discussions">Questions and feedback</a>
   </p>
 </div>
 
@@ -18,12 +19,26 @@
   <img src="assets/readme-header.webp" width="1200" alt="FalconDeck showing coding-agent work on desktop and mobile" />
 </p>
 
-FalconDeck gives coding agents a proper Mac app and keeps the same live sessions available on your phone and in a browser. Start work at your desk, step away, and continue following the agent, answering questions, approving actions, or sending the next instruction.
+Spend less time juggling terminals. FalconDeck brings your projects, agent conversations, tool activity, approvals, and changes into one comfortable Mac workspace. Work independently or alongside your team, keep using your favourite editor, and choose a different agent whenever the task calls for it.
+
+Start work at your desk, then step away and follow the same live session from your iPhone or iPad. Read responses, answer questions, approve actions, or send the next instruction without opening your laptop.
 
 FalconDeck is available for Mac, iPhone, and iPad. The desktop app, mobile app, browser client, relay, and local service are all developed in this repository.
 
+## Get started
+
+1. **[Download for Mac](https://github.com/jamesblackwell/falcondeck/releases/latest).** Choose the Apple Silicon (`aarch64`) or Intel (`x64`) DMG, then drag FalconDeck into Applications.
+2. **Connect your agent and project.** Setup checks your coding tools and helps you choose a project folder. Use your existing Codex, Claude Code, or other agent account.
+3. **Run a first task.** Try: “Explain this project's structure and how to run its tests. Don't change any files.” Follow the response and tool activity in the app.
+4. **Optionally continue on your phone.** [Install the free iPhone and iPad app](https://apps.apple.com/app/falcondeck/id6760899257), then open **Settings → Remote Access → Start Pairing** on your Mac and scan the QR code.
+
+Requires macOS 12 or later and a supported coding agent with its own model access. The Mac app works on its own. For remote access to work hosted on your Mac, keep it awake, online, and running FalconDeck.
+
+See the **[getting-started guide](docs/GETTING-STARTED.md)** for setup, pairing, and common questions.
+
 ## Why use FalconDeck?
 
+- Give your agents a comfortable workspace. Keep projects, conversations, tool activity, approvals, and changes together instead of juggling terminal windows.
 - Use the accounts and subscriptions you already pay for. FalconDeck runs the coding agents installed on your machine rather than reselling access to their models.
 - Keep your Mac and phone in sync. You can follow live work, reply to questions, approve actions, and review changes from either device.
 - Keep what makes each agent useful. FalconDeck works through the agent's existing coding tool, so you keep its login, models, settings, skills, project instructions, and provider-specific features.
@@ -71,16 +86,6 @@ The whole FalconDeck stack is included under the MIT license:
 The hosted FalconDeck relay is free to use. If you would rather own the full path, you can run the relay and web client on your own server. See the [self-hosting guide](docs/SELF-HOSTING.md).
 
 The free iPhone and iPad app is [available on the App Store](https://apps.apple.com/app/falcondeck/id6760899257). Android can be built from the same mobile source.
-
-## Download and get started
-
-FalconDeck is under active development. It is useful today, but you should expect rough edges.
-
-1. Download the [Mac app from GitHub Releases](https://github.com/jamesblackwell/falcondeck/releases/latest). Choose the Apple Silicon (`aarch64`) or Intel (`x64`) DMG for your Mac.
-2. Download [FalconDeck for iPhone and iPad from the App Store](https://apps.apple.com/app/falcondeck/id6760899257).
-3. On your Mac, open **Settings → Remote Access** and scan the pairing QR code with the iOS app. Your phone joins the same live workspace; no FalconDeck account is required.
-
-You can also run from source with the instructions below.
 
 ## How FalconDeck works
 
@@ -145,8 +150,10 @@ The [self-hosting guide](docs/SELF-HOSTING.md) explains how to run the relay, co
 
 FalconDeck is starting with coding agents, but the aim is a simple, open place to follow and direct many kinds of agent work. Contributions to the apps, integrations, infrastructure, design, docs, and testing are welcome.
 
-See the [open issues](https://github.com/jamesblackwell/falcondeck/issues) or start a conversation in [GitHub Discussions](https://github.com/jamesblackwell/falcondeck/discussions).
+Read the [contribution guide](CONTRIBUTING.md), [report a bug](https://github.com/jamesblackwell/falcondeck/issues/new/choose), or share your workflow in [GitHub Discussions](https://github.com/jamesblackwell/falcondeck/discussions).
+
+FalconDeck is early and actively developed, and already used for daily coding work. If it helps you, [star the project on GitHub](https://github.com/jamesblackwell/falcondeck) to help others discover it.
 
 ## License
 
-MIT.
+[MIT](LICENSE). The apps, local service, relay, and self-hosting tools are all included.

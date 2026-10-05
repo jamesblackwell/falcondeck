@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /pair
+Disallow: /qa-prompt
+
+Sitemap: https://falcondeck.com/sitemap.xml

@@ -19,3 +19,15 @@ The site runs at [http://localhost:4175](http://localhost:4175).
 ```bash
 npm run build --workspace falcondeck-site
 ```
+
+The build renders the homepage, privacy policy, and terms to static HTML, then
+hydrates the matching page in the browser. Pairing links still open the client
+pairing screen, including legacy `/?code=…` links. No production rendering server
+is required. `robots.txt`, `sitemap.xml`, and the branded share image are published
+with the bundle.
+
+Check the generated pages after building:
+
+```bash
+node --test apps/site/prerender.test.mjs
+```

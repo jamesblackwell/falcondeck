@@ -1342,6 +1342,19 @@ svg {
   }
 }
 
+.site-faq {
+  padding: 40px var(--site-gutter);
+  border-bottom: 1px solid var(--site-frame-border);
+  color: var(--fd-fg-1);
+}
+
+.site-faq h2 { margin: 0 0 24px; font-size: 24px; }
+.site-faq details { padding: 16px 0; border-top: 1px solid var(--fd-border-1); }
+.site-faq summary { cursor: pointer; font-weight: 550; }
+.site-faq summary:focus-visible { outline: 2px solid var(--fd-accent); outline-offset: 4px; }
+.site-faq p { max-width: 75ch; line-height: 1.65; color: var(--fd-fg-2); }
+.site-faq a { color: var(--fd-accent-strong); }
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

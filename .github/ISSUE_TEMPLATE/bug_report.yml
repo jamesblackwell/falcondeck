@@ -1,0 +1,30 @@
+name: Bug report
+description: Report something that did not work as expected.
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open…\n2. Choose…\n3. Observe…"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: App, operating system, and coding agent
+      description: Include FalconDeck version, macOS/iOS version, and the agent name and version. Say whether you use the hosted relay or your own.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or logs
+      description: Optional. Remove credentials, pairing codes, and private project content before sharing.

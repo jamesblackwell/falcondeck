@@ -249,9 +249,8 @@ informed it. The stable shape is:
   namespaced and daemon-side; bounded non-secret projections flow through
   snapshots and sequenced events so every client stays coherent.
 - **Trust model v1** — local, explicitly installed, listed in settings with
-  their permissions. Signing/marketplace later. The `ee/` split stays
-  orthogonal: extensions are the open ecosystem; `ee/` is our own commercial
-  code.
+  their permissions. Signing/marketplace later. FalconDeck's apps, daemon,
+  relay, and extension host are MIT licensed; there is no enterprise code split.
 
 ## 7. Sequencing
 

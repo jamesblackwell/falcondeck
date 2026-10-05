@@ -11,6 +11,8 @@ const PAIR_URL = '/pair'
 const PAIRING_APP_SCHEME = 'falcondeck'
 const IOS_APP_STORE_URL = 'https://apps.apple.com/app/falcondeck/id6760899257'
 const SELF_HOSTING_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/SELF-HOSTING.md'
+const GETTING_STARTED_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/GETTING-STARTED.md'
+const DISCUSSIONS_URL = `${REPO_URL}/discussions`
 const PRIVACY_URL = '/privacy'
 const TERMS_URL = '/terms'
 const QA_PROMPT_URL = '/qa-prompt'
@@ -32,11 +34,13 @@ function SiteFooter() {
       <div className="site-footer__brand">
         <img src="/logomark-mark-light.svg" alt="" />
         <span>FalconDeck</span>
-        <small>Open-source control plane for the agents you already use.</small>
+        <small>A free, open-source workspace for your coding agents.</small>
       </div>
       <div className="site-footer__links">
         <a href={REPO_URL}>GitHub</a>
         <a href={RELEASES_URL}>Releases</a>
+        <a href={GETTING_STARTED_URL}>Get started</a>
+        <a href={DISCUSSIONS_URL}>Feedback</a>
         <a className="fd-focus" href={IOS_APP_STORE_URL}>Download for iOS</a>
         <a href={PRIVACY_URL}>Privacy</a>
         <a href={TERMS_URL}>Terms</a>
@@ -250,7 +254,7 @@ function DesktopMock() {
         </div>
         <div className="mock-window__title">
           <img src="/logomark-mark-light.svg" alt="" />
-          falcondeck / control plane
+          falcondeck / workspace
         </div>
         <div />
       </div>
@@ -273,7 +277,7 @@ function DesktopMock() {
             <span className="mock-project__count">2</span>
           </div>
 
-          <p className="mock-label mock-label--spaced">Threads</p>
+          <p className="mock-label mock-label--spaced">Tasks</p>
           <Thread title="Add user authentication" meta="Claude · just now" active />
           <Thread title="Fix database migration" meta="Codex · 45 min ago" />
           <Thread title="Rename relay events" meta="OpenCode · 2 h ago" />
@@ -287,7 +291,7 @@ function DesktopMock() {
         <main className="mock-conversation">
           <div className="mock-conversation__header">
             <div>
-              <p className="mock-label">Thread · Claude Sonnet 4.6</p>
+              <p className="mock-label">Task · Claude</p>
               <h3>Add user authentication</h3>
             </div>
             <span className="mock-pill">LIVE</span>
@@ -408,9 +412,9 @@ function PhoneMock() {
   )
 }
 
-export default function App() {
-  const path = window.location.pathname.replace(/\/+$/, '') || '/'
-  const search = new URLSearchParams(window.location.search)
+export default function App({ location = window.location }: { location?: Pick<Location, 'pathname' | 'search'> }) {
+  const path = location.pathname.replace(/\/+$/, '') || '/'
+  const search = new URLSearchParams(location.search)
   const isPairPage = path === PAIR_URL || (path === '/' && Boolean(search.get('code')?.trim()))
   const isLegalPage = path === PRIVACY_URL || path === TERMS_URL
   const isPlaygroundPage = QAPromptPlayground !== null && path === QA_PROMPT_URL
@@ -439,8 +443,8 @@ export default function App() {
         <nav className="site-nav" aria-label="Main navigation">
           <a href="#product">Product</a>
           <a href="#security">Security</a>
-          <a href="#architecture">Architecture</a>
-          <a href={REPO_URL}>Docs</a>
+          <a href="#agents">Agents</a>
+          <a href="#get-started">Get started</a>
         </nav>
         <div className="site-header__actions">
           <a className="btn btn--outline btn--sm fd-focus" href={IOS_APP_STORE_URL}>
@@ -458,15 +462,15 @@ export default function App() {
         <section className="hero" id="top">
           <p className="eyebrow">
             <span className="status-dot" />
-            Open source · any coding agent
+            Free and open source · built for everyday work
           </p>
           <h1>
-            <span>Start on your Mac.</span> <span>Keep going from your phone.</span>
+            <span>Your coding agents.</span> <span>A proper Mac app.</span>
           </h1>
           <p className="hero__lede">
-            Run Codex, Claude Code, OpenCode, and other coding agents against your own code on your Mac.
-            Get the free iPhone and iPad app to follow live work, approve actions, and send the next instruction
-            from anywhere.
+            Bring Codex, Claude Code, OpenCode, and your projects into one comfortable workspace.
+            Keep your existing accounts and favourite editor. When you step away from your Mac,
+            follow the same live work from your iPhone or iPad.
           </p>
           <div className="hero__actions">
             <a className="btn btn--accent fd-focus" href={RELEASES_URL}>
@@ -482,7 +486,7 @@ export default function App() {
           <p className="hero__source">
             <a className="text-link fd-focus" href={REPO_URL}>
               <Github aria-hidden="true" />
-              Read the source
+              Star on GitHub
               <KeyBadge variant="ghost">S</KeyBadge>
             </a>
           </p>
@@ -490,26 +494,26 @@ export default function App() {
         </section>
 
         <section className="features" id="product">
-          <Feature title="Any harness">
-            Run Codex, Claude Code, OpenCode, and other ACP agents with the subscriptions and model access you already
-            have.
+          <Feature title="A calmer workspace">
+            Keep projects, conversations, tool activity, approvals, and changes together.
+            Spend less time juggling terminal windows and more time moving your work forward.
           </Feature>
-          <Feature title="Local-first">
-            Your daemon and native agent storage stay the source of truth. The relay only pairs, replays, and
-            reconnects.
+          <Feature title="Your tools, your choice">
+            Choose the right agent for each task and use the accounts you already have.
+            Your code stays in your folders, and the whole FalconDeck stack is MIT licensed.
           </Feature>
-          <Feature title="In sync">
-            One daemon owns the live turn, so desktop and phone follow the same thread with nothing to catch
-            up.
+          <Feature title="Keep work moving">
+            Step away from your desk without losing the conversation. Read responses, answer questions,
+            approve actions, and send the next instruction from your phone.
           </Feature>
         </section>
 
         <section className="showcase">
           <div className="showcase__caption">
-            <p>FalconDeck desktop · live Claude session</p>
+            <p>One workspace · at your desk or on your phone</p>
             <p className="showcase__status">
               <span className="status-dot" />
-              Daemon online
+              Desktop connected
             </p>
           </div>
           <div className="showcase__stage">
@@ -518,6 +522,25 @@ export default function App() {
             </div>
             <PhoneMock />
           </div>
+        </section>
+
+        <section className="mobile-download" id="get-started" aria-labelledby="get-started-heading">
+          <div>
+            <p className="eyebrow">Start with your Mac</p>
+            <h2 id="get-started-heading">From download to first task.</h2>
+            <p>
+              Connect a project you already work on and use your existing agent account.
+              The Mac app works on its own; pair your phone whenever you want.
+            </p>
+            <a className="text-link fd-focus" href={GETTING_STARTED_URL}>
+              Read the getting-started guide <ChevronRight aria-hidden="true" />
+            </a>
+          </div>
+          <ol className="mobile-download__steps">
+            <li><strong>Install FalconDeck</strong><p>Download the Apple Silicon or Intel DMG and drag the app into Applications. Requires macOS 12 or later.</p></li>
+            <li><strong>Choose your agent and project</strong><p>Setup checks your coding tools and helps you choose a folder. Sign in with the agent account you already use.</p></li>
+            <li><strong>Try a small task</strong><p>Ask your agent to explain the project and how to run its tests. Follow its work and respond to questions in the app.</p></li>
+          </ol>
         </section>
 
         <section className="mobile-download" id="ios" aria-labelledby="ios-heading">
@@ -549,15 +572,24 @@ export default function App() {
           </ol>
         </section>
 
-        <section className="harnesses" id="architecture">
+        <section className="harnesses" id="agents">
           <p className="harnesses__label">Works with</p>
           <div className="harnesses__list">
             <span>Codex</span>
             <span>Claude Code</span>
             <span>OpenCode</span>
             <span>Pi</span>
-            <span className="harnesses__more">+ any ACP harness</span>
+            <span className="harnesses__more">+ other compatible agents</span>
           </div>
+        </section>
+
+        <section className="site-faq" aria-labelledby="faq-heading">
+          <h2 id="faq-heading">A few things to know</h2>
+          <details><summary>Is FalconDeck free?</summary><p>Yes. The Mac app, iPhone and iPad app, and hosted relay are free. Your chosen coding agent uses its own account and model access, so its usual subscription or provider charges still apply.</p></details>
+          <details><summary>Do I need to change editors or move my code?</summary><p>No. Connect your existing project folders and keep using your favourite editor. FalconDeck gives your coding agents a workspace alongside it.</p></details>
+          <details><summary>Does my Mac need to stay on?</summary><p>For work running on your Mac, keep it awake, online, and running FalconDeck. You can also run agents on another machine over SSH for an always-on setup.</p></details>
+          <details><summary>Where does my work live?</summary><p>Your code stays in your folders, and your coding agents own their sessions. Remote session content is end-to-end encrypted between your paired devices. You can use the free hosted relay or run your own.</p></details>
+          <details><summary>How mature is it?</summary><p>FalconDeck is early, actively developed, and already used for daily coding work. Try it on a real project and <a href={DISCUSSIONS_URL}>tell us what would make your workflow better</a>.</p></details>
         </section>
 
         <section className="security" id="security">

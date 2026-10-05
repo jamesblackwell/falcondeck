@@ -25,9 +25,9 @@
     root * /var/www/falcondeck-site
     @app_assets path /assets/*
     header @app_assets Cache-Control "public, max-age=31536000, immutable"
-    @app_html path / /index.html /pair /pair/
+    @app_html path / /index.html /pair /pair/ /privacy /privacy/ /privacy/index.html /terms /terms/ /terms/index.html
     header @app_html Cache-Control "no-store, must-revalidate"
-    try_files {path} /index.html
+    try_files {path} {path}/index.html /index.html
     file_server
   }
 }
@@ -74,9 +74,9 @@
     root * /var/www/falcondeck-site
     @site_assets path /assets/*
     header @site_assets Cache-Control "public, max-age=31536000, immutable"
-    @site_html path / /index.html /pair /pair/
+    @site_html path / /index.html /pair /pair/ /privacy /privacy/ /privacy/index.html /terms /terms/ /terms/index.html
     header @site_html Cache-Control "no-store, must-revalidate"
-    try_files {path} /index.html
+    try_files {path} {path}/index.html /index.html
     file_server
   }
 }
