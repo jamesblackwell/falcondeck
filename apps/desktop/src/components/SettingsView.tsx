@@ -131,6 +131,8 @@ export function SettingsView(props: SettingsViewProps) {
           ) : activeSection === "speech" ? (
             <SpeechSettingsPanel
               baseUrl={props.baseUrl}
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
               onToast={props.onToast}
             />
           ) : activeSection === "computer-use" ? (

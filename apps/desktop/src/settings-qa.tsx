@@ -105,7 +105,12 @@ export function Fixture() {
           ) : section === "computer-use" ? (
             <ComputerUsePanel baseUrl={baseUrl} onToast={() => {}} />
           ) : (
-            <SpeechSettingsPanel baseUrl={baseUrl} onToast={() => {}} />
+            <SpeechSettingsPanel
+              baseUrl={baseUrl}
+              preferences={null}
+              onUpdatePreferences={() => {}}
+              onToast={() => {}}
+            />
           )}
         </div>
       </div>

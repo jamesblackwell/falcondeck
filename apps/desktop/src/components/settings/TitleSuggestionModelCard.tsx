@@ -28,7 +28,7 @@ export function TitleSuggestionModelCard({
   return (
     <SettingsSection
       title="Rename suggestions"
-      description="Model used when you choose Suggest title while renaming a task. FalconDeck sends a short conversation excerpt to OpenRouter using the key in Speech settings."
+      description="Choose the OpenRouter model for Suggest title in the rename dialog. It uses the shared key above and sends a short conversation excerpt only when requested."
       contentClassName="space-y-3"
     >
       <div className="flex flex-wrap items-end gap-3">
