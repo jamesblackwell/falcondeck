@@ -1229,6 +1229,8 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<falcondeck_core::SuggestThreadTitleResponse, DaemonError> {
+        self.ensure_claude_thread_history(workspace_id, thread_id)
+            .await?;
         let prompt = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
@@ -1380,10 +1382,11 @@ impl AppState {
         );
     }
 
-    async fn drop_claude_native_session(&self, workspace_id: &str, thread_id: &str) {
+    pub(super) async fn drop_claude_native_session(&self, workspace_id: &str, thread_id: &str) {
         let _ = self
-            .with_thread_mut(workspace_id, thread_id, |thread| {
-                thread.native_session_id = None;
+            .with_managed_thread_mut(workspace_id, thread_id, |thread| {
+                thread.summary.native_session_id = None;
+                thread.claude_history = None;
             })
             .await;
     }
@@ -2939,6 +2942,7 @@ impl ManagedThread {
             && !is_provisional_thread_title(&summary.title);
         Self {
             summary,
+            claude_history: None,
             items: Vec::new(),
             assistant_items: HashMap::new(),
             reasoning_items: HashMap::new(),
@@ -2972,7 +2976,7 @@ impl ManagedThread {
         thread
     }
 
-    fn replace_items(&mut self, items: Vec<ConversationItem>) {
+    pub(super) fn replace_items(&mut self, items: Vec<ConversationItem>) {
         self.items.clear();
         self.assistant_items.clear();
         self.reasoning_items.clear();

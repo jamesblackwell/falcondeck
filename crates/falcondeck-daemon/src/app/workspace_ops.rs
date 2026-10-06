@@ -450,12 +450,21 @@ pub(super) async fn connect_workspace_internal(
     let agy_skills = skills_for_provider(&merged_skills, AgentProvider::AGY);
 
     let now = Utc::now();
+    let claude_history_sources: HashMap<_, _> = claude_threads
+        .iter()
+        .map(|thread| {
+            (
+                thread.summary.id.clone(),
+                (thread.history_source.clone(), thread.history_version),
+            )
+        })
+        .collect();
     let mut threads = codex_threads;
     threads.extend(claude_threads.into_iter().map(|mut thread| {
         thread.summary.workspace_id = workspace_id.clone();
         crate::codex::HydratedThread {
             summary: thread.summary,
-            items: thread.items,
+            items: Vec::new(),
             title_is_provider_preview: thread.title_is_provider_preview,
         }
     }));
@@ -651,6 +660,29 @@ pub(super) async fn connect_workspace_internal(
                         .collect();
                     managed.pending_handoff_context = state.handoff_context.clone();
                 }
+                if managed.summary.provider == AgentProvider::CLAUDE
+                    && let Some(native_id) = managed.summary.native_session_id.as_ref()
+                {
+                    let cwd = managed.summary.working_directory(&path_string).to_string();
+                    managed.claude_history = Some(
+                        if let Some((source, version)) = claude_history_sources.get(native_id) {
+                            super::claude_history::ClaudeHistoryState::new_discovered(
+                                source.clone(),
+                                native_id.clone(),
+                                cwd,
+                                hydrated_title,
+                                *version,
+                            )
+                        } else {
+                            super::claude_history::ClaudeHistoryState::new(
+                                crate::claude::native_session_source(&cwd, native_id),
+                                native_id.clone(),
+                                cwd,
+                                hydrated_title,
+                            )
+                        },
+                    );
+                }
                 managed
             })
         })
@@ -831,14 +863,40 @@ fn carry_over_live_threads(
             thread.summary.status,
             ThreadStatus::Running | ThreadStatus::WaitingForInput
         );
+        // Preserve the gate and completed empty histories too. An open or
+        // first turn may already be waiting for a native read during connect.
+        // Idle histories whose native file changed become lazy again so an
+        // external Claude session append is visible on the next open.
+        let previous_history = thread.claude_history.as_ref();
+        let rebuilt_history = hydrated
+            .get(&thread_id)
+            .and_then(|rebuilt| rebuilt.claude_history.as_ref());
+        let same_source = previous_history
+            .zip(rebuilt_history)
+            .is_some_and(|(previous, current)| previous.same_source(current));
+        let same_version = previous_history
+            .zip(rebuilt_history)
+            .is_some_and(|(previous, current)| previous.same_version(current));
+        let history_in_use =
+            same_source && previous_history.is_some_and(|history| history.is_in_use());
+        let history_changed =
+            rebuilt_history.is_some_and(|history| history.has_observed_source()) && !same_version;
         let keep_replayed_transcript = hydrated
             .get(&thread_id)
             .is_some_and(|rebuilt| rebuilt.items.is_empty())
-            && !thread.items.is_empty();
+            && !thread.items.is_empty()
+            && (!history_changed || history_in_use);
+        let keep_claude_history = history_in_use
+            || (same_version && previous_history.is_some_and(|history| history.is_loaded()));
+        if (same_version || history_in_use)
+            && let Some(rebuilt) = hydrated.get_mut(&thread_id)
+        {
+            rebuilt.claude_history = thread.claude_history.clone();
+        }
         // Threads opened after the persisted snapshot was captured have no
         // rebuilt counterpart yet, even if their first turn has finished.
         let opened_during_connect = !hydrated.contains_key(&thread_id);
-        if keep_live || keep_replayed_transcript || opened_during_connect {
+        if keep_live || keep_replayed_transcript || keep_claude_history || opened_during_connect {
             // A startup placeholder is empty of queued requests even when
             // disk still has them. The rebuilt copy carries that persist;
             // keeping the live thread must not throw the outbox away.
@@ -938,16 +996,18 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         {
             thread.summary.status = ThreadStatus::Error;
             thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
-            settle_items_as_shutdown_interrupted(
-                &mut thread.items,
-                thread
-                    .summary
-                    .latest_turn_id
-                    .as_deref()
-                    .or(Some(thread.summary.id.as_str())),
-                now,
-                SHUTDOWN_INTERRUPTED_TURN_ERROR,
-            );
+            if !thread.items.is_empty() {
+                settle_items_as_shutdown_interrupted(
+                    &mut thread.items,
+                    thread
+                        .summary
+                        .latest_turn_id
+                        .as_deref()
+                        .or(Some(thread.summary.id.as_str())),
+                    now,
+                    SHUTDOWN_INTERRUPTED_TURN_ERROR,
+                );
+            }
         }
         match session_owners.get(thread.summary.id.as_str()) {
             Some(owner) => {
@@ -1782,7 +1842,7 @@ pub(super) fn thread_attachments_root(
 /// the thread's attachment directory, keeping hydrated transcripts as compact
 /// in memory as live sends. Hydration mints deterministic content-hash ids, so
 /// repeated restarts converge on the same file instead of accumulating copies.
-async fn materialize_hydrated_image_attachments(
+pub(super) async fn materialize_hydrated_image_attachments(
     app: &AppState,
     workspace_id: &str,
     threads: &mut [crate::codex::HydratedThread],
@@ -2879,6 +2939,9 @@ async fn send_turn_with_startup_mode(
     // Keep an ACP transcript-replay gate alive through provider startup. A
     // background session/load that starts during this window will then recheck
     // the Running status and leave the new prompt's accumulators untouched.
+    let _claude_history_guard = app
+        .claude_history_for_admission(&request.workspace_id, &request.thread_id)
+        .await?;
     let _resume_hydration_guard = if request.resume_interrupted {
         prepare_interrupted_resume(app, &request).await?
     } else {
@@ -3596,6 +3659,9 @@ pub(super) async fn compact_thread(
         .take()
         .map(|instructions| instructions.trim().to_string())
         .filter(|instructions| !instructions.is_empty());
+    let _claude_history_guard = app
+        .claude_history_for_admission(&request.workspace_id, &request.thread_id)
+        .await?;
     let thread = app
         .thread_summary(&request.workspace_id, &request.thread_id)
         .await?;
@@ -4947,6 +5013,8 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
+    app.ensure_claude_thread_history(&request.workspace_id, &request.thread_id)
+        .await?;
     if request.refresh_native.unwrap_or(false) {
         app.refresh_codex_thread_history(&request.workspace_id, &request.thread_id)
             .await?;
@@ -5066,6 +5134,8 @@ pub(super) async fn thread_item(
     thread_id: &str,
     item_id: &str,
 ) -> Result<ConversationItem, DaemonError> {
+    app.ensure_claude_thread_history(workspace_id, thread_id)
+        .await?;
     let (item, thread_summary) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -5529,6 +5599,10 @@ pub(crate) fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'stat
         None
     }
 }
+
+#[cfg(test)]
+#[path = "claude_reconnect_tests.rs"]
+mod claude_reconnect_tests;
 
 #[cfg(test)]
 mod tests {
@@ -6323,6 +6397,31 @@ mod tests {
         assert_eq!(
             thread.summary.last_error.as_deref(),
             Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+    }
+
+    #[test]
+    fn lazy_imported_claude_history_stays_empty_after_interrupted_state_merge() {
+        let mut discovered = hydrated_thread("native-session", "Opening prompt");
+        discovered.items.clear();
+        let mut saved = persisted_thread("native-session", Some("native-session"));
+        saved.status = Some(ThreadStatus::Running);
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![discovered],
+            &HashMap::from([("native-session".to_string(), saved)]),
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary.status, ThreadStatus::Error);
+        assert_eq!(
+            merged[0].summary.last_error.as_deref(),
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+        assert!(
+            merged[0].items.is_empty(),
+            "a synthetic receipt must not suppress native history loading"
         );
     }
 

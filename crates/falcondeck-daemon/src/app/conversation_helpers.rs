@@ -1647,6 +1647,13 @@ pub(super) fn provisional_thread_title_from_text(text: &str) -> Option<String> {
 }
 
 pub(super) fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
+    if thread
+        .claude_history
+        .as_ref()
+        .is_some_and(|history| !history.is_loaded())
+    {
+        return false;
+    }
     // Flags first: this runs per pushed item now, and the scans below are
     // linear in a transcript that can hold thousands of them.
     if thread.manual_title

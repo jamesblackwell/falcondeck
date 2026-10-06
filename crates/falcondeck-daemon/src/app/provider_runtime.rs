@@ -384,9 +384,12 @@ impl ProviderRuntime {
                     .await?;
                     if let Err(error) = app.persist_local_state().await {
                         let _ = app
-                            .with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
-                                if thread.native_session_id.as_deref() == Some(new_session_id) {
-                                    thread.native_session_id = None;
+                            .with_managed_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
+                                if thread.summary.native_session_id.as_deref()
+                                    == Some(new_session_id)
+                                {
+                                    thread.summary.native_session_id = None;
+                                    thread.claude_history = None;
                                 }
                             })
                             .await;
@@ -441,11 +444,18 @@ impl ProviderRuntime {
                     Err(error) => {
                         if let Some(new_session_id) = new_session_id.as_deref() {
                             let _ = app
-                                .with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {
-                                    if thread.native_session_id.as_deref() == Some(new_session_id) {
-                                        thread.native_session_id = None;
-                                    }
-                                })
+                                .with_managed_thread_mut(
+                                    spec.workspace_id,
+                                    spec.thread_id,
+                                    |thread| {
+                                        if thread.summary.native_session_id.as_deref()
+                                            == Some(new_session_id)
+                                        {
+                                            thread.summary.native_session_id = None;
+                                            thread.claude_history = None;
+                                        }
+                                    },
+                                )
                                 .await;
                             let _ = app.persist_local_state().await;
                         }

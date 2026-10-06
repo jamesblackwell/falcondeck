@@ -82,6 +82,9 @@ use crate::{
 
 mod acp_threads;
 pub(crate) mod agent_helpers;
+mod claude_history;
+#[cfg(all(test, unix))]
+mod claude_startup_measurement;
 mod computer_use;
 pub(crate) mod conversation_helpers;
 mod extension_events;
@@ -570,6 +573,9 @@ struct ManagedWorkspace {
 
 struct ManagedThread {
     summary: ThreadSummary,
+    /// Native Claude history is read only on opening or admitting a turn.
+    /// The same state owns the gate used by readers and turn admission.
+    claude_history: Option<Arc<claude_history::ClaudeHistoryState>>,
     items: Vec<ConversationItem>,
     assistant_items: HashMap<String, usize>,
     reasoning_items: HashMap<String, usize>,

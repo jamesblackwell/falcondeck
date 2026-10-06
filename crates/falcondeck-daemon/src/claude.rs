@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{BufRead, BufReader, Write as _},
+    io::{BufRead, BufReader, Read, Write as _},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, OnceLock},
@@ -37,7 +37,13 @@ use crate::app::agent_helpers::{
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
 
+mod history;
 mod stream;
+#[cfg(test)]
+pub use history::discover_threads_in;
+pub use history::{
+    DiscoveredClaudeThread, discover_threads, hydrate_native_thread, native_session_source,
+};
 pub(crate) use stream::{
     ClaudeLiveContextUsage, ClaudeNdjsonFramer, ClaudeStreamLine, encode_control_response_error,
     is_resume_startup_failure, live_context_usage, parse_claude_stream_lines, result_is_cancelled,
@@ -50,7 +56,7 @@ pub struct ClaudeBootstrap {
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
     pub capabilities: AgentCapabilitySummary,
-    pub threads: Vec<HydratedClaudeThread>,
+    pub threads: Vec<DiscoveredClaudeThread>,
 }
 
 #[derive(Clone)]
@@ -215,11 +221,9 @@ impl ClaudeRuntime {
         let (account, models) = tokio::join!(read_auth_status(&resolved.executable), list_models());
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
-        // Hydration reads and parses every session file for the workspace —
-        // potentially hundreds of megabytes of JSONL — so it must not run
-        // inline on a runtime worker where it would stall the event pump for
-        // every other streaming thread.
-        let threads = tokio::task::spawn_blocking(move || hydrate_threads(&workspace_path))
+        // Discover sidebar metadata without materializing every transcript.
+        // The native history is read on demand when a thread is opened or sent.
+        let threads = tokio::task::spawn_blocking(move || discover_threads(&workspace_path))
             .await
             .unwrap_or_default();
 
@@ -1511,10 +1515,10 @@ pub fn parse_account_status(value: &Value) -> AccountSummary {
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
-    let root = env::var("HOME")
-        .map(|home| PathBuf::from(home).join(".claude/projects"))
-        .unwrap_or_else(|_| PathBuf::from(".claude/projects"));
+    let root = claude_projects_root();
 
     let mut files = Vec::new();
     let workspace_root = root.join(claude_project_dir_name(workspace_path));
@@ -1551,6 +1555,15 @@ pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
     let mut threads = threads_by_session.into_values().collect::<Vec<_>>();
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
     threads
+}
+
+fn claude_projects_root() -> PathBuf {
+    env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+        .unwrap_or_else(|| PathBuf::from(".claude"))
+        .join("projects")
 }
 
 fn claude_project_dir_name(workspace_path: &str) -> String {
@@ -1749,12 +1762,10 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
 }
 
 fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
-    let file_updated_at = fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .map(DateTime::<Utc>::from);
     let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
+    let metadata = file.metadata().ok()?;
+    let file_updated_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+    let reader = BufReader::new(file.take(metadata.len()));
     let mut session_id = None;
     let mut cwd = None;
     let mut title = None;
@@ -1916,19 +1927,42 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     // marked as a preview so FalconDeck's titler can replace it.
     let provider_title = custom_title.or(ai_title).or(title);
     let title_is_provider_preview = provider_title.is_none();
-    let summary = ThreadSummary {
-        id: session_id.clone(),
-        workspace_id: String::new(),
-        title: provider_title
+    let summary = claude_thread_summary(
+        session_id,
+        provider_title
             .or(first_user_message_title)
             .unwrap_or_else(|| "Claude thread".to_string()),
+        updated_at.or(file_updated_at).unwrap_or(now),
+        last_message_preview,
+    );
+
+    Some(ParsedSessionFile {
+        cwd,
+        thread: HydratedClaudeThread {
+            summary,
+            items,
+            title_is_provider_preview,
+        },
+    })
+}
+
+fn claude_thread_summary(
+    session_id: String,
+    title: String,
+    updated_at: DateTime<Utc>,
+    last_message_preview: Option<String>,
+) -> ThreadSummary {
+    ThreadSummary {
+        id: session_id.clone(),
+        workspace_id: String::new(),
+        title,
         provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
         provider_transport: None,
         handoff_from: None,
         origin: None,
         status: ThreadStatus::Idle,
-        updated_at: updated_at.or(file_updated_at).unwrap_or(now),
+        updated_at,
         last_message_preview,
         latest_turn_id: None,
         latest_plan: None,
@@ -1943,16 +1977,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         goal: None,
         queued_turns: Vec::new(),
         variant: None,
-    };
-
-    Some(ParsedSessionFile {
-        cwd,
-        thread: HydratedClaudeThread {
-            summary,
-            items,
-            title_is_provider_preview,
-        },
-    })
+    }
 }
 
 #[derive(Default)]

@@ -369,7 +369,7 @@ impl AppState {
     ///
     /// ACP threads survive a daemon restart only as persisted summaries —
     /// their items live in the agent's own session store. Codex/Claude
-    /// transcripts are re-read from provider session files at connect; the
+    /// transcripts are read lazily from provider session files; the
     /// ACP equivalent is `session/load`, whose replay flows through the
     /// event pump and repopulates the thread. Called from the thread-detail
     /// read path so a restored thread fills in when opened instead of

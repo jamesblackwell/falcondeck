@@ -63,6 +63,20 @@ FalconDeck Rust backend:
 
 **Session storage**: Claude Code stores sessions at `~/.claude/projects/<project-hash>/`. Sessions persist between invocations and can be resumed by ID.
 
+**Daemon history loading**: Workspace connect discovers summaries from bounded
+native-file windows (1 MiB head and 256 KiB tail), without retaining transcripts
+or materializing images. `CLAUDE_CONFIG_DIR` overrides the default configuration
+directory. Opening a thread, fetching a stored item, requesting a title, or
+admitting a turn/compaction loads its exact history on a blocking worker. One
+thread-owned gate serializes history reads and turn admission through provider
+startup. Native session identity, working directory, and current thread state
+are checked before installing history; live items take precedence over a late
+read. Missing or mismatched history fails admission before appending a prompt.
+Idle loaded histories become lazy again on reconnect when native size or mtime
+changes; running turns and active gates survive reconnect. Bounded discovery can
+miss metadata buried outside its windows; exact hydration enriches native titles
+while preserving FalconDeck-owned titles and saved read/queue state.
+
 **Hook system**: Claude Code has a rich hook system for lifecycle events:
 - `SessionStart` — fires when session begins (enables session ID tracking)
 - `SessionEnd` — fires when session ends
