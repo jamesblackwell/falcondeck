@@ -16,7 +16,7 @@
 </div>
 
 <p align="center">
-  <img src="assets/readme-header.webp" width="1200" alt="FalconDeck showing coding-agent work on desktop and mobile" />
+  <img src="assets/readme-header.webp" width="1200" alt="FalconDeck on a Mac running a Claude task in a project, with the same conversation live on a paired iPhone" />
 </p>
 
 Spend less time juggling terminals. FalconDeck brings your projects, agent conversations, tool activity, approvals, and changes into one comfortable Mac workspace. Work independently or alongside your team, keep using your favourite editor, and choose a different agent whenever the task calls for it.
