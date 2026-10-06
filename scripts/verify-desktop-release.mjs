@@ -20,6 +20,8 @@ const assetNames = new Set(release.assets.map((asset) => asset.name))
 const expectedAssets = [
   `FalconDeck_${version}_aarch64.dmg`,
   `FalconDeck_${version}_x64.dmg`,
+  'FalconDeck_aarch64.dmg',
+  'FalconDeck_x64.dmg',
   'FalconDeck_aarch64.app.tar.gz',
   'FalconDeck_aarch64.app.tar.gz.sig',
   'FalconDeck_x64.app.tar.gz',

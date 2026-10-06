@@ -2,7 +2,16 @@
 
 The public-facing FalconDeck site. It is intentionally separate from the paired remote control client in `apps/remote-web`.
 
-The site links visitors to [GitHub Releases](https://github.com/jamesblackwell/falcondeck/releases) for the Mac app and the [App Store](https://apps.apple.com/app/falcondeck/id6760899257) for the free iPhone and iPad app. The `/pair` page opens existing pairing links and provides the App Store download for new users.
+The Mac download buttons start the Apple Silicon DMG download directly, with a
+separate Intel Mac link below the main button. GitHub hosts the files through
+`releases/latest/download/FalconDeck_{aarch64,x64}.dmg`; visitors stay on the
+site instead of browsing release assets. The desktop release workflow publishes
+these stable filenames as exact copies of the versioned, signed installers, so
+the site follows the latest published release without a rebuild.
+
+The site links to the [App Store](https://apps.apple.com/app/falcondeck/id6760899257)
+for the free iPhone and iPad app. The `/pair` page opens existing pairing links
+and provides the App Store download for new users.
 
 ## Run locally
 

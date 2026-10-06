@@ -8,6 +8,8 @@ const QAPromptPlayground = import.meta.env.DEV ? lazy(() => import('./qa-prompt-
 
 const REPO_URL = 'https://github.com/jamesblackwell/falcondeck'
 const RELEASES_URL = 'https://github.com/jamesblackwell/falcondeck/releases'
+const MAC_APPLE_SILICON_URL = `${RELEASES_URL}/latest/download/FalconDeck_aarch64.dmg`
+const MAC_INTEL_URL = `${RELEASES_URL}/latest/download/FalconDeck_x64.dmg`
 const PAIR_URL = '/pair'
 const PAIRING_APP_SCHEME = 'falcondeck'
 const IOS_APP_STORE_URL = 'https://apps.apple.com/app/falcondeck/id6760899257'
@@ -198,7 +200,7 @@ function useKeyShortcuts(enabled: boolean) {
       if (target && (target.isContentEditable || /^(input|textarea|select)$/i.test(target.tagName))) return
 
       const key = event.key.toLowerCase()
-      if (key === 'd') window.location.href = RELEASES_URL
+      if (key === 'd') window.location.href = MAC_APPLE_SILICON_URL
       else if (key === 's') window.location.href = REPO_URL
     }
 
@@ -452,7 +454,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
             <Smartphone aria-hidden="true" />
             iOS app
           </a>
-          <a className="btn btn--accent btn--sm desktop-download fd-focus" href={RELEASES_URL}>
+          <a className="btn btn--accent btn--sm desktop-download fd-focus" href={MAC_APPLE_SILICON_URL}>
             Download for Mac
             <KeyBadge>D</KeyBadge>
           </a>
@@ -474,7 +476,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
             follow the same live work from your iPhone or iPad.
           </p>
           <div className="hero__actions">
-            <a className="btn btn--accent fd-focus" href={RELEASES_URL}>
+            <a className="btn btn--accent fd-focus" href={MAC_APPLE_SILICON_URL}>
               <Download aria-hidden="true" />
               Download for Mac
               <KeyBadge>D</KeyBadge>
@@ -484,6 +486,10 @@ export default function App({ location = window.location }: { location?: Pick<Lo
               Download on the App Store
             </a>
           </div>
+          <p className="hero__download-options">
+            For Apple silicon (M1 or later).{' '}
+            <a className="text-link fd-focus" href={MAC_INTEL_URL}>Download for Intel Mac</a>
+          </p>
           <p className="hero__source">
             <a className="text-link fd-focus" href={REPO_URL}>
               <Github aria-hidden="true" />

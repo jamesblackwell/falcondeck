@@ -408,6 +408,13 @@ svg {
   margin: 18px 0 0;
 }
 
+.hero__download-options {
+  margin: 12px 0 0;
+  color: var(--fd-fg-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .hero__footnote {
   margin: 26px 0 0;
   color: var(--fd-fg-2);

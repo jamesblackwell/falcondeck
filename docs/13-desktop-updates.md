@@ -15,6 +15,11 @@ This document is the maintainer reference for:
 ## Release model
 
 - The desktop shell and embedded `falcondeck-daemon` ship as one versioned desktop release.
+- The public site downloads the DMG directly through GitHub's stable
+  `releases/latest/download/FalconDeck_{aarch64,x64}.dmg` URLs. Before verifying
+  a draft, `scripts/publish-desktop-downloads.mjs` copies both versioned DMGs to
+  these filenames, checking the download against GitHub's SHA-256 digest.
+  Publishing the release updates the site links without rebuilding the site.
 - The updater checks GitHub Releases on startup after a short delay and then every 4 hours while the app stays open.
 - A new version appears in Options and General settings, with a one-time in-app notice.
 - The user downloads the signed updater archive in General settings. Tauri verifies its signature and replaces the app bundle during installation. Restarting then runs the new app and embedded daemon; active tasks get a confirmation first.
