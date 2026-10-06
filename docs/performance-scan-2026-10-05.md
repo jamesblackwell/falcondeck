@@ -2,7 +2,9 @@
 
 Nine verified fixes cover large session lists, transcript streaming and repair,
 sync paging, native history caches, and relay delivery. All changes are committed
-on `main`; packaged apps and the production relay have not been rebuilt or deployed.
+on `main`. Packaged apps and the production relay had not been rebuilt or deployed
+at the end of this scan. The Mac app was rebuilt and installed in the
+[6 October startup follow-up](installed-startup-performance-2026-10-06.md).
 
 | Path | Before | Fixed behavior and regression evidence |
 | --- | --- | --- |
@@ -74,13 +76,18 @@ including two larger than 32 MiB. Summary-first discovery and shared lazy
 hydration/turn admission now remove eager transcript retention. See the
 [follow-up measurements and regressions](claude-startup-performance-2026-10-06.md).
 
+**Installed Mac startup profiling was completed on 6 October** with 72 native
+workspaces. `372f8da9` adds shared Claude metadata caching and stream-first desktop
+bootstrap. See the [installed measurements](installed-startup-performance-2026-10-06.md)
+for observed CPU/memory, validation and the remaining search-index/catalog work.
+
 1. **Desktop/web casual Chats lists.** The shared sidebar maps every casual
    session into a complex row; ordinary project lists already use bounded
    windows. Confirm the actual casual-session count and profile React commits
    before choosing paging or virtualization.
-2. **Installed-build measurements.** Measure startup, warm reconnect, typing
-   during catch-up, and memory after browsing many sessions on a release Mac
-   build and physical iPhone. Use the throttled/mixed-version scenarios in
+2. **Further installed-build measurements.** Measure warm reconnect, typing
+   during catch-up, memory after browsing many sessions, and physical iPhone
+   startup. Use the throttled/mixed-version scenarios in
    `docs/remote-sync-qa.md`.
 
 Codex startup already obtains summaries through native `thread/list` and leaves

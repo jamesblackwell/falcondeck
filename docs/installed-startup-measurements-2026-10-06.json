@@ -1,0 +1,522 @@
+{
+  "schema": 1,
+  "baseline_commit": "8860330334c3da2f995916d8686899eb89cd101d",
+  "optimization_commit": "372f8da9",
+  "build": "documented make desktop-install; clean88603303 with optimization patch only; local release incremental=true,lto=false,codegen-units=16",
+  "interval_ms": 200,
+  "cpu_timebase_numerator": 125,
+  "cpu_timebase_denominator": 3,
+  "inventory_before": {
+    "workspaces": 72,
+    "thread_summaries": 2703,
+    "native_claude_files_eligible_for_global_fallback": 121,
+    "workspaces_without_encoded_claude_directory": 63,
+    "estimated_bytes_per_global_fallback": 88499814.4
+  },
+  "inventory_after": {
+    "main_pid": 58871,
+    "health_ok": true,
+    "workspaces": 72,
+    "threads": 2710,
+    "restore_phase": "ready",
+    "workspace_status_counts": {
+      "ready": 72
+    },
+    "thread_provider_counts": {
+      "codex": 1279,
+      "claude": 856,
+      "grok": 399,
+      "cursor": 45,
+      "opencode": 102,
+      "myharness": 2,
+      "pi": 15,
+      "agy": 12
+    },
+    "archived_threads": 235
+  },
+  "baseline": {
+    "schema": 1,
+    "main_pid": 92844,
+    "first_observation_age_ms": 50.102333,
+    "last_observation_age_ms": 131333.7055,
+    "owner_sample_count": 645,
+    "launch_elapsed_ms": 48634.363667,
+    "attribution": "Host includes embedded daemon and desktop shell. UI includes verified owner-attributed WebContent processes. CPU is cumulative kernel user+system, converted with mach timebase 125/3 ns/tick. CLI children and helpers are excluded. RSS/footprint sums may include shared pages. Warm filesystem cache, concurrent user/agent work, and sample utility can influence measurements.",
+    "boundaries": {
+      "10": {
+        "actual_sample_age_ms": 9812.69825,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 5766.569,
+          "ui_webcontent": 1006.213,
+          "webkit_gpu": 139.3,
+          "webkit_networking": 197.589
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 213.59375,
+            "footprint_mib": 84.09480285644531
+          },
+          "ui_webcontent": {
+            "rss_mib": 286.078125,
+            "footprint_mib": 181.4077606201172
+          },
+          "webkit_gpu": {
+            "rss_mib": 41.6875,
+            "footprint_mib": 27.282142639160156
+          },
+          "webkit_networking": {
+            "rss_mib": 61.40625,
+            "footprint_mib": 7.563140869140625
+          },
+          "all_verified_processes": {
+            "rss_mib": 602.765625,
+            "footprint_mib": 300.3478469848633
+          }
+        }
+      },
+      "30": {
+        "actual_sample_age_ms": 29979.913666,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 6956.21,
+          "ui_webcontent": 2627.298,
+          "webkit_gpu": 244.428,
+          "webkit_networking": 562.462
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 272.515625,
+            "footprint_mib": 136.6573715209961
+          },
+          "ui_webcontent": {
+            "rss_mib": 598.46875,
+            "footprint_mib": 517.6736602783203
+          },
+          "webkit_gpu": {
+            "rss_mib": 47.0625,
+            "footprint_mib": 142.2042236328125
+          },
+          "webkit_networking": {
+            "rss_mib": 261.515625,
+            "footprint_mib": 22.82892608642578
+          },
+          "all_verified_processes": {
+            "rss_mib": 1179.5625,
+            "footprint_mib": 819.3641815185547
+          }
+        }
+      },
+      "60": {
+        "actual_sample_age_ms": 59938.7925,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 11430.885,
+          "ui_webcontent": 7649.367,
+          "webkit_gpu": 789.447,
+          "webkit_networking": 1310.538
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 771.140625,
+            "footprint_mib": 797.7049789428711
+          },
+          "ui_webcontent": {
+            "rss_mib": 763.953125,
+            "footprint_mib": 669.0489120483398
+          },
+          "webkit_gpu": {
+            "rss_mib": 99.1875,
+            "footprint_mib": 223.34512329101562
+          },
+          "webkit_networking": {
+            "rss_mib": 142.0625,
+            "footprint_mib": 9.688392639160156
+          },
+          "all_verified_processes": {
+            "rss_mib": 1776.34375,
+            "footprint_mib": 1699.7874069213867
+          }
+        }
+      }
+    },
+    "peaks": {
+      "10": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 239.156,
+          "footprint_mib": 147.423
+        },
+        "ui_webcontent": {
+          "rss_mib": 286.078,
+          "footprint_mib": 325.267
+        },
+        "webkit_gpu": {
+          "rss_mib": 41.828,
+          "footprint_mib": 184.626
+        },
+        "webkit_networking": {
+          "rss_mib": 61.469,
+          "footprint_mib": 25.672
+        },
+        "all_verified_processes": {
+          "rss_mib": 626.75,
+          "footprint_mib": 655.301
+        }
+      },
+      "30": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 272.516,
+          "footprint_mib": 147.423
+        },
+        "ui_webcontent": {
+          "rss_mib": 598.469,
+          "footprint_mib": 524.017
+        },
+        "webkit_gpu": {
+          "rss_mib": 47.062,
+          "footprint_mib": 184.626
+        },
+        "webkit_networking": {
+          "rss_mib": 261.516,
+          "footprint_mib": 75.673
+        },
+        "all_verified_processes": {
+          "rss_mib": 1179.562,
+          "footprint_mib": 837.13
+        }
+      },
+      "60": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 970.109,
+          "footprint_mib": 797.705
+        },
+        "ui_webcontent": {
+          "rss_mib": 819.453,
+          "footprint_mib": 710.44
+        },
+        "webkit_gpu": {
+          "rss_mib": 117.844,
+          "footprint_mib": 226.533
+        },
+        "webkit_networking": {
+          "rss_mib": 304.875,
+          "footprint_mib": 75.673
+        },
+        "all_verified_processes": {
+          "rss_mib": 2038.453,
+          "footprint_mib": 1743.022
+        }
+      }
+    },
+    "settled_60_90_seconds": {
+      "samples": 147,
+      "median_memory_mib": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 743.922,
+          "footprint_mib": 824.533
+        },
+        "ui_webcontent": {
+          "rss_mib": 958.531,
+          "footprint_mib": 790.33
+        },
+        "webkit_gpu": {
+          "rss_mib": 75.547,
+          "footprint_mib": 201.751
+        },
+        "webkit_networking": {
+          "rss_mib": 60.688,
+          "footprint_mib": 9.626
+        },
+        "all_verified_processes": {
+          "rss_mib": 1842.344,
+          "footprint_mib": 1828.225
+        }
+      }
+    },
+    "health_ready_age_ms": 1511.6552500000034,
+    "health_workspaces": 72,
+    "stacks": [
+      {
+        "sampling_metadata": {
+          "Date/Time": "2026-10-06 09:06:16.040 +0100",
+          "Launch Time": "2026-10-06 09:06:15.906 +0100",
+          "Physical footprint": "134.6M",
+          "Physical footprint (peak)": "135.4M"
+        },
+        "inclusive_rootmost_category_observations": {
+          "serde_json": 334,
+          "snapshot_projection": 86,
+          "thread_search": 1158,
+          "thread_search_rescan": 1156,
+          "thread_search_user_message_parse": 254,
+          "claude_history_discover_threads": 127,
+          "claude_history_summary_parse": 127,
+          "claude_history_summary_windows": 84
+        },
+        "interpretation": "Call stack observations include blocked threads and overlapping categories. They are attribution evidence, not CPU milliseconds or percentages."
+      },
+      {
+        "sampling_metadata": {
+          "Date/Time": "2026-10-06 09:06:16.786 +0100",
+          "Launch Time": "2026-10-06 09:06:16.698 +0100",
+          "Physical footprint": "186.6M",
+          "Physical footprint (peak)": "302.6M"
+        },
+        "inclusive_rootmost_category_observations": {
+          "javascript_stringify": 7,
+          "javascript_gc": 114,
+          "javascript_json_parse": 14
+        },
+        "interpretation": "Call stack observations include blocked threads and overlapping categories. They are attribution evidence, not CPU milliseconds or percentages."
+      }
+    ]
+  },
+  "optimized": {
+    "schema": 1,
+    "main_pid": 58871,
+    "first_observation_age_ms": 22.857291,
+    "last_observation_age_ms": 392856.145958,
+    "owner_sample_count": 1909,
+    "launch_elapsed_ms": 86968.540126,
+    "attribution": "Host includes embedded daemon and desktop shell. UI includes verified owner-attributed WebContent processes. CPU is cumulative kernel user+system, converted with mach timebase 125/3 ns/tick. CLI children and helpers are excluded. RSS/footprint sums may include shared pages. Warm filesystem cache, concurrent user/agent work, and sample utility can influence measurements.",
+    "boundaries": {
+      "10": {
+        "actual_sample_age_ms": 9810.803375,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 5550.962,
+          "ui_webcontent": 891.33,
+          "webkit_gpu": 132.524,
+          "webkit_networking": 194.991
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 200.09375,
+            "footprint_mib": 78.5479965209961
+          },
+          "ui_webcontent": {
+            "rss_mib": 236.6875,
+            "footprint_mib": 165.70458984375
+          },
+          "webkit_gpu": {
+            "rss_mib": 39.65625,
+            "footprint_mib": 31.98529052734375
+          },
+          "webkit_networking": {
+            "rss_mib": 59.71875,
+            "footprint_mib": 7.860015869140625
+          },
+          "all_verified_processes": {
+            "rss_mib": 536.15625,
+            "footprint_mib": 284.09789276123047
+          }
+        }
+      },
+      "30": {
+        "actual_sample_age_ms": 29790.275833,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 5993.794,
+          "ui_webcontent": 1888.561,
+          "webkit_gpu": 162.44,
+          "webkit_networking": 449.211
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 267.9375,
+            "footprint_mib": 136.9230194091797
+          },
+          "ui_webcontent": {
+            "rss_mib": 377.015625,
+            "footprint_mib": 233.54845428466797
+          },
+          "webkit_gpu": {
+            "rss_mib": 41.90625,
+            "footprint_mib": 28.125961303710938
+          },
+          "webkit_networking": {
+            "rss_mib": 214.640625,
+            "footprint_mib": 7.656982421875
+          },
+          "all_verified_processes": {
+            "rss_mib": 901.5,
+            "footprint_mib": 406.2544174194336
+          }
+        }
+      },
+      "60": {
+        "actual_sample_age_ms": 59928.048666,
+        "cumulative_cpu_ms": {
+          "desktop_host_embedded_daemon": 6735.846,
+          "ui_webcontent": 3637.693,
+          "webkit_gpu": 167.381,
+          "webkit_networking": 1063.977
+        },
+        "memory_mib": {
+          "desktop_host_embedded_daemon": {
+            "rss_mib": 257.609375,
+            "footprint_mib": 110.73551940917969
+          },
+          "ui_webcontent": {
+            "rss_mib": 447.90625,
+            "footprint_mib": 242.36100006103516
+          },
+          "webkit_gpu": {
+            "rss_mib": 41.78125,
+            "footprint_mib": 20.000961303710938
+          },
+          "webkit_networking": {
+            "rss_mib": 267.953125,
+            "footprint_mib": 7.719551086425781
+          },
+          "all_verified_processes": {
+            "rss_mib": 1015.25,
+            "footprint_mib": 380.81703186035156
+          }
+        }
+      }
+    },
+    "peaks": {
+      "10": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 239.266,
+          "footprint_mib": 152.064
+        },
+        "ui_webcontent": {
+          "rss_mib": 236.766,
+          "footprint_mib": 261.501
+        },
+        "webkit_gpu": {
+          "rss_mib": 39.656,
+          "footprint_mib": 154.782
+        },
+        "webkit_networking": {
+          "rss_mib": 59.797,
+          "footprint_mib": 37.766
+        },
+        "all_verified_processes": {
+          "rss_mib": 575.328,
+          "footprint_mib": 595.02
+        }
+      },
+      "30": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 281.219,
+          "footprint_mib": 158.048
+        },
+        "ui_webcontent": {
+          "rss_mib": 377.094,
+          "footprint_mib": 375.048
+        },
+        "webkit_gpu": {
+          "rss_mib": 41.922,
+          "footprint_mib": 154.782
+        },
+        "webkit_networking": {
+          "rss_mib": 214.641,
+          "footprint_mib": 76.141
+        },
+        "all_verified_processes": {
+          "rss_mib": 914.844,
+          "footprint_mib": 744.239
+        }
+      },
+      "60": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 281.219,
+          "footprint_mib": 158.048
+        },
+        "ui_webcontent": {
+          "rss_mib": 447.906,
+          "footprint_mib": 375.048
+        },
+        "webkit_gpu": {
+          "rss_mib": 41.922,
+          "footprint_mib": 154.782
+        },
+        "webkit_networking": {
+          "rss_mib": 277.969,
+          "footprint_mib": 76.141
+        },
+        "all_verified_processes": {
+          "rss_mib": 1032.562,
+          "footprint_mib": 744.239
+        }
+      }
+    },
+    "settled_60_90_seconds": {
+      "samples": 147,
+      "median_memory_mib": {
+        "desktop_host_embedded_daemon": {
+          "rss_mib": 296.688,
+          "footprint_mib": 147.298
+        },
+        "ui_webcontent": {
+          "rss_mib": 495.672,
+          "footprint_mib": 249.767
+        },
+        "webkit_gpu": {
+          "rss_mib": 41.891,
+          "footprint_mib": 22.767
+        },
+        "webkit_networking": {
+          "rss_mib": 271.953,
+          "footprint_mib": 8.001
+        },
+        "all_verified_processes": {
+          "rss_mib": 1106.719,
+          "footprint_mib": 442.083
+        }
+      }
+    },
+    "health_ready_age_ms": 2689.866123999993,
+    "health_workspaces": 72,
+    "stacks": [
+      {
+        "sampling_metadata": {
+          "Date/Time": "2026-10-06 09:11:04.789 +0100",
+          "Launch Time": "2026-10-06 09:11:04.671 +0100",
+          "Physical footprint": "115.7M",
+          "Physical footprint (peak)": "115.8M"
+        },
+        "inclusive_rootmost_category_observations": {
+          "serde_json": 111,
+          "snapshot_projection": 93,
+          "thread_search": 325,
+          "thread_search_rescan": 322,
+          "claude_history_discover_threads": 173,
+          "claude_history_summary_parse": 173
+        },
+        "interpretation": "Call stack observations include blocked threads and overlapping categories. They are attribution evidence, not CPU milliseconds or percentages."
+      },
+      {
+        "sampling_metadata": {
+          "Date/Time": "2026-10-06 09:11:07.201 +0100",
+          "Launch Time": "2026-10-06 09:11:06.961 +0100",
+          "Physical footprint": "170.1M",
+          "Physical footprint (peak)": "238.0M"
+        },
+        "inclusive_rootmost_category_observations": {
+          "javascript_gc": 68,
+          "javascript_stringify": 3,
+          "javascript_json_parse": 6
+        },
+        "interpretation": "Call stack observations include blocked threads and overlapping categories. They are attribution evidence, not CPU milliseconds or percentages."
+      }
+    ]
+  },
+  "validation": {
+    "daemon_library_passed": 1206,
+    "daemon_library_ignored": 4,
+    "claude_tests_passed": 62,
+    "desktop_connection_tests_passed": 17,
+    "desktop_typecheck": "passed",
+    "autoreview": "clean at default P0 threshold",
+    "installed_bundle_signature": "verified deep strict",
+    "installed_binary_sha256": "3aef3bfb12426ce4d50f2fc8541280e3cc72aab636d1d2fcc0183bb2c452f635"
+  },
+  "limitations": [
+    "Single launch per build; active user/agent work continued and selected conversations changed.",
+    "Window geometry differed at later visual checks; not a controlled rendering benchmark.",
+    "Baseline was a warm restart; optimized was first launch of a newly signed install.",
+    "CPU excludes harness/MCP helpers and other children. Embedded daemon is inseparable from desktop host.",
+    "200ms sampling can miss brief peaks. Summed memory may count shared pages.",
+    "Health readiness is HTTP readiness, not restoration or first interactive paint.",
+    "Manual AX checks happened after resume; no precise UI-ready latency was captured."
+  ]
+}
