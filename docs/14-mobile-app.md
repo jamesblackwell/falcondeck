@@ -260,7 +260,8 @@ full plans and diffs are not copied into the offline snapshot.
 ## Push notification content
 
 Completed-turn pushes keep the thread title and show up to 200 characters from
-the latest assistant answer, with whitespace collapsed and an ellipsis for longer
+the latest assistant answer, with Markdown formatting removed, whitespace collapsed,
+and an ellipsis for longer
 replies. Interim commentary, reasoning, and tool output are excluded. If there
 is no answer to preview, the generic completion text remains. Approval, question,
 and error notifications retain their existing copy.

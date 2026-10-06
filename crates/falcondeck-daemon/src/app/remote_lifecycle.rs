@@ -11,6 +11,7 @@ use falcondeck_core::{
         verify_pairing_public_key_bundle,
     },
 };
+use pulldown_cmark::{Event, Options, Parser, TagEnd};
 use serde_json::Value;
 use tokio::{
     sync::mpsc,
@@ -1599,15 +1600,53 @@ fn notification_message_preview(items: &[ConversationItem]) -> Option<String> {
             }
             _ => None,
         })?;
+    notification_markdown_preview(text)
+}
+
+/// Render readable Markdown content before bounding the notification body.
+/// Preserve link labels and code; formatting and link destinations stay out.
+fn notification_markdown_preview(text: &str) -> Option<String> {
     const MAX_PREVIEW_CHARS: usize = 200;
-    // Stream the prefix so long replies do not allocate a full normalized copy.
-    let mut chars = text
-        .split_whitespace()
-        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
-        .filter(|character| !character.is_control());
-    let mut preview: String = chars.by_ref().take(MAX_PREVIEW_CHARS + 1).collect();
-    preview = preview.trim_end().to_string();
-    if preview.chars().count() > MAX_PREVIEW_CHARS || chars.next().is_some() {
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    let mut preview = String::new();
+    let mut count = 0;
+    let mut pending_space = false;
+    'events: for event in Parser::new_ext(text, options) {
+        let content = match event {
+            Event::Text(text) | Event::Code(text) => text,
+            Event::SoftBreak | Event::HardBreak | Event::Rule => " ".into(),
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::CodeBlock
+                | TagEnd::Item
+                | TagEnd::TableCell
+                | TagEnd::TableRow,
+            ) => " ".into(),
+            _ => continue,
+        };
+        for character in content.chars() {
+            if character.is_whitespace() {
+                pending_space = true;
+                continue;
+            }
+            if character.is_control() {
+                continue;
+            }
+            if pending_space && !preview.is_empty() {
+                preview.push(' ');
+                count += 1;
+            }
+            pending_space = false;
+            preview.push(character);
+            count += 1;
+            if count > MAX_PREVIEW_CHARS {
+                break 'events;
+            }
+        }
+    }
+    if count > MAX_PREVIEW_CHARS {
         preview = preview.chars().take(MAX_PREVIEW_CHARS - 1).collect();
         preview = preview.trim_end().to_string();
         preview.push('…');
@@ -1661,6 +1700,59 @@ mod tests {
             notification_message_preview(&items).as_deref(),
             Some("Fixed the bug. All tests pass.")
         );
+    }
+
+    #[test]
+    fn push_preview_strips_markdown_and_preserves_readable_content() {
+        for (markdown, plain) in [
+            (
+                "## Done\n\n**Fixed** the _login_ bug.",
+                "Done Fixed the login bug.",
+            ),
+            (
+                "[View changes](https://example.com/a_(b)) and ![screenshot](image.png)",
+                "View changes and screenshot",
+            ),
+            (
+                "- [x] Fixed\n- Tests pass\n\n> Ready to ship",
+                "Fixed Tests pass Ready to ship",
+            ),
+            (
+                "Use `user_id` and `a * b`.\n\n```rust\nlet x = 1;\n```",
+                "Use user_id and a * b. let x = 1;",
+            ),
+            ("~~Old~~ New &amp; verified", "Old New & verified"),
+            (
+                "**fix**ed and snake_case with 2 * 3",
+                "fixed and snake_case with 2 * 3",
+            ),
+            (
+                "Name | Result\n--- | ---\nLogin | Passed",
+                "Name Result Login Passed",
+            ),
+            ("<b>Done</b> with tests", "Done with tests"),
+            ("---\n\n***", ""),
+        ] {
+            assert_eq!(
+                notification_message_preview(&[push_assistant(markdown, None)]),
+                (!plain.is_empty()).then(|| plain.to_string()),
+                "markdown: {markdown}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_preview_bounds_visible_text_after_removing_markdown() {
+        let visible = "🦅".repeat(200);
+        let markdown = format!("**[{visible}](https://example.com/{})**", "a".repeat(500));
+        assert_eq!(
+            notification_message_preview(&[push_assistant(&markdown, None)]),
+            Some(visible)
+        );
+        let long = format!("**{}**", "🦅".repeat(250));
+        let preview = notification_message_preview(&[push_assistant(&long, None)]).unwrap();
+        assert_eq!(preview.chars().count(), 200);
+        assert!(preview.ends_with('…'));
     }
 
     #[test]
