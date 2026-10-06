@@ -354,6 +354,7 @@ const DEFAULT_COMPUTER_USE_PREFERENCES: NonNullable<
 
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
+  auto_resume_interrupted_sessions: false,
   workspace_order: [],
   hidden_workspace_ids: [],
   workspace_colors: {},
@@ -2255,6 +2256,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       typeof raw.version === "number" && Number.isFinite(raw.version)
         ? raw.version
         : 1,
+    auto_resume_interrupted_sessions: raw.auto_resume_interrupted_sessions === true,
     workspace_order: workspaceOrder,
     hidden_workspace_ids: Array.isArray(raw.hidden_workspace_ids)
       ? [

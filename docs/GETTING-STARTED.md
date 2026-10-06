@@ -48,3 +48,16 @@ No FalconDeck account is required. Your Mac must stay awake, online, and running
 - [Report a reproducible bug](https://github.com/jamesblackwell/falcondeck/issues/new/choose), including your app version, macOS/iOS version, agent, and what happened.
 
 FalconDeck is actively developed and used for daily work. Feedback from real projects helps make the next release better.
+
+## Continuing sessions after restart
+
+New installs automatically continue non-archived sessions interrupted when
+FalconDeck closes. The daemon restores each saved native agent session in the
+background with its existing model and permission settings. Completed sessions
+and sessions stopped by the user remain stopped.
+
+Use **Settings → General → Startup → Automatically continue stopped sessions**
+to change this behaviour. Existing installs retain the startup recovery dialog
+until they opt in; check **Automatically continue stopped sessions when
+FalconDeck starts** and choose **Continue all** to save the setting. A failed
+resume leaves the session's recovery notice available for a manual retry.

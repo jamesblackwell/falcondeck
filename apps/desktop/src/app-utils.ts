@@ -25,12 +25,15 @@ export function stoppedThreadsToOffer({
   threads,
   restorePhase,
   workspaces,
+  autoResumeInterruptedSessions = false,
 }: {
+  autoResumeInterruptedSessions?: boolean
   threads: readonly ThreadSummary[] | undefined
   restorePhase: DaemonRestorePhase | undefined
   workspaces?: readonly WorkspaceSummary[]
 }): ThreadSummary[] | null {
   if (!threads || restorePhase === 'loading_persisted_state') return null
+  if (autoResumeInterruptedSessions) return []
   // Mixed-version development can briefly connect a new desktop to an older
   // daemon. Preserve the old conservative readiness rule in that case.
   if (

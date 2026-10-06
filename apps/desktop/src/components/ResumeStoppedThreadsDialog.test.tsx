@@ -69,10 +69,43 @@ describe("ResumeStoppedThreadsDialog", () => {
     expect(screen.getByText("Relay reconnect")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Continue all" }));
-    expect(onContinueAll).toHaveBeenCalledOnce();
+    expect(onContinueAll).toHaveBeenCalledExactlyOnceWith(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Not now" }));
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("opts into future automatic recovery only when checked", () => {
+    const onContinueAll = vi.fn();
+    render(
+      <ResumeStoppedThreadsDialog
+        threads={[thread()]}
+        onContinueAll={onContinueAll}
+        onDismiss={() => {}}
+      />,
+    );
+    const checkbox = screen.getByRole("checkbox", {
+      name: "Automatically continue stopped sessions when FalconDeck starts",
+    });
+    expect(checkbox).not.toBeChecked();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(onContinueAll).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("does not dismiss an in-progress continuation with Escape", () => {
+    const onDismiss = vi.fn();
+    render(
+      <ResumeStoppedThreadsDialog
+        threads={[thread()]}
+        onContinueAll={() => {}}
+        onDismiss={onDismiss}
+        isContinuing
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(screen.getByRole("checkbox")).toBeDisabled();
   });
 
   it("reads as singular for a lone stopped session", () => {

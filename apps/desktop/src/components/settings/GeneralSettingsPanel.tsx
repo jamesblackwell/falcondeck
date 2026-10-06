@@ -103,6 +103,19 @@ export function GeneralSettingsPanel({
         description="Updates, notifications, and how conversations read. These preferences live in a daemon-owned falcondeck.json so desktop and remote surfaces stay aligned."
       />
 
+      <SettingsSection title="Startup" description="Pick up where your agents left off.">
+        <SettingList>
+          <SwitchRow
+            title="Automatically continue stopped sessions"
+            description="Continue sessions interrupted when FalconDeck closed, using their saved agent and permissions."
+            checked={current.auto_resume_interrupted_sessions === true}
+            onCheckedChange={(enabled) =>
+              onUpdatePreferences({ auto_resume_interrupted_sessions: enabled })
+            }
+          />
+        </SettingList>
+      </SettingsSection>
+
       <SettingsSection
         title="Updates"
         description="FalconDeck checks GitHub Releases on launch and every 4 hours while the app stays open."

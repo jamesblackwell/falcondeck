@@ -395,6 +395,8 @@ export type UtilityModelPreferences = {
 
 export type FalconDeckPreferences = {
   version: number;
+  /** Daemon resumes shutdown-interrupted sessions on startup. Older daemons omit this. */
+  auto_resume_interrupted_sessions?: boolean;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   /** Project ids hidden from the sidebar by default. */
@@ -496,6 +498,7 @@ export type UpdateUtilityModelPreferences = {
 };
 
 export type UpdatePreferencesPayload = {
+  auto_resume_interrupted_sessions?: boolean;
   workspace_order?: string[] | null;
   hidden_workspace_ids?: string[] | null;
   workspace_colors?: Record<string, string> | null;

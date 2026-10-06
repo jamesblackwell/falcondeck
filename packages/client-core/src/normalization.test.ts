@@ -1222,3 +1222,18 @@ describe("harness normalization", () => {
     expect(normalizeHarnessUpgradeJob({ status: "running" })).toBeNull();
   });
 });
+
+describe("automatic session recovery preferences", () => {
+  it("preserves explicit policy and keeps old daemons on manual recovery", () => {
+    expect(
+      normalizePreferences({ auto_resume_interrupted_sessions: true })
+        .auto_resume_interrupted_sessions,
+    ).toBe(true);
+    for (const value of [undefined, false, "true", 1]) {
+      expect(
+        normalizePreferences({ auto_resume_interrupted_sessions: value })
+          .auto_resume_interrupted_sessions,
+      ).toBe(false);
+    }
+  });
+});

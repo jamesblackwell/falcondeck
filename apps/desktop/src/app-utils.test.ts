@@ -250,6 +250,19 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
 }
 
 describe('stoppedThreadsToOffer', () => {
+  it('skips the prompt when the daemon owns automatic recovery', () => {
+    expect(stoppedThreadsToOffer({
+      threads: [thread()],
+      restorePhase: 'hydrating_workspaces',
+      autoResumeInterruptedSessions: true,
+    })).toEqual([])
+    expect(stoppedThreadsToOffer({
+      threads: [thread()],
+      restorePhase: 'loading_persisted_state',
+      autoResumeInterruptedSessions: true,
+    })).toBeNull()
+  })
+
   it('offers unarchived threads the last shutdown stopped', () => {
     expect(
       stoppedThreadsToOffer({

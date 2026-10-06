@@ -3492,6 +3492,8 @@ function AppInner() {
       snapshot
         ? stoppedThreadsToOffer({
             threads: snapshot.threads,
+            autoResumeInterruptedSessions:
+              snapshot.preferences.auto_resume_interrupted_sessions,
             restorePhase: snapshot.restore_phase,
             workspaces: snapshot.workspaces,
           })
@@ -3520,13 +3522,32 @@ function AppInner() {
     [resumePromptThreads, snapshot],
   );
 
-  const handleContinueStoppedThreads = useCallback(async () => {
+  const handleContinueStoppedThreads = useCallback(async (enableAutoResume = false) => {
     const targets = resumePromptThreads ?? [];
     if (targets.length === 0) {
       setResumePromptThreads(null);
       return;
     }
     setIsContinuingStoppedThreads(true);
+    if (enableAutoResume) {
+      try {
+        if (!api) throw new Error(CONNECTION_COPY.notConnected);
+        const preferences = await api.updatePreferences({
+          auto_resume_interrupted_sessions: true,
+        });
+        setSnapshot((current) =>
+          current ? { ...current, preferences } : current,
+        );
+      } catch (error) {
+        setIsContinuingStoppedThreads(false);
+        toast({
+          variant: "danger",
+          title: "Failed to save automatic resume",
+          description: error instanceof Error ? error.message : "Try again.",
+        });
+        return;
+      }
+    }
     const failures: Array<{ title: string; message: string }> = [];
     const succeeded: typeof targets = [];
     // Sequential: a burst of parallel turns would have every agent CLI cold
@@ -6510,8 +6531,8 @@ function AppInner() {
       {resumePromptThreads && resumePromptThreads.length > 0 && !isOnboardingActive ? (
         <ResumeStoppedThreadsDialog
           threads={resumePromptThreads}
-          onContinueAll={() => {
-            void handleContinueStoppedThreads();
+          onContinueAll={(enableAutoResume) => {
+            void handleContinueStoppedThreads(enableAutoResume);
           }}
           onDismiss={handleDismissStoppedThreadsPrompt}
           isPreparing={!areStoppedThreadTargetsReady}

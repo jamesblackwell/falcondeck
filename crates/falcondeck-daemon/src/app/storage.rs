@@ -173,6 +173,11 @@ pub(super) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result
 
 pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreferences {
     let mut preferences = FalconDeckPreferences::default();
+    // Existing preference files retain manual recovery until the user opts in.
+    preferences.auto_resume_interrupted_sessions = value
+        .get("auto_resume_interrupted_sessions")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(version) = value.get("version").and_then(Value::as_u64) {
         preferences.version = version as u32;
     }
@@ -374,6 +379,9 @@ pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
+    if let Some(enabled) = request.auto_resume_interrupted_sessions {
+        preferences.auto_resume_interrupted_sessions = enabled;
+    }
     if let Some(model) = request.title_suggestion_model {
         preferences.title_suggestion_model = normalize_title_suggestion_model(&model);
     }
@@ -1027,6 +1035,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn auto_resume_defaults_on_only_for_new_installs_and_persists_opt_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("falcondeck.json");
+        let mut preferences = load_preferences(&path).await.unwrap();
+        assert!(preferences.auto_resume_interrupted_sessions);
+        assert!(
+            !merge_preferences_from_value(json!({"version": 1})).auto_resume_interrupted_sessions
+        );
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                auto_resume_interrupted_sessions: Some(false),
+                ..Default::default()
+            },
+        );
+        persist_preferences(&path, &preferences).await.unwrap();
+        assert!(
+            !load_preferences(&path).await.unwrap().auto_resume_interrupted_sessions
+        );
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                auto_resume_interrupted_sessions: Some(true),
+                ..Default::default()
+            },
+        );
+        persist_preferences(&path, &preferences).await.unwrap();
+        assert!(load_preferences(&path).await.unwrap().auto_resume_interrupted_sessions);
     }
 
     #[test]

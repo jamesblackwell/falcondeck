@@ -66,6 +66,10 @@ pub struct FalconDeckPreferences {
     /// Schema version for the on-disk preferences file.
     #[serde(default = "default_preferences_version")]
     pub version: u32,
+    /// Continue shutdown-interrupted sessions on startup.
+    /// Missing in old preference files retains manual recovery.
+    #[serde(default)]
+    pub auto_resume_interrupted_sessions: bool,
     /// User-defined order for workspaces in project navigation.
     #[serde(default)]
     pub workspace_order: Vec<String>,
@@ -101,6 +105,7 @@ impl Default for FalconDeckPreferences {
     fn default() -> Self {
         Self {
             version: default_preferences_version(),
+            auto_resume_interrupted_sessions: true,
             workspace_order: Vec::new(),
             hidden_workspace_ids: Vec::new(),
             workspace_colors: BTreeMap::new(),
@@ -600,6 +605,9 @@ pub enum ToolDetailsMode {
 /// Partial preferences update payload accepted by the daemon API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdatePreferencesRequest {
+    /// Optional startup recovery policy update.
+    #[serde(default)]
+    pub auto_resume_interrupted_sessions: Option<bool>,
     /// Optional workspace order update for project navigation.
     #[serde(default)]
     pub workspace_order: Option<Vec<String>>,

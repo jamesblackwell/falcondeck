@@ -104,6 +104,7 @@ mod scheduled_tasks;
 mod speech;
 mod speech_audio;
 mod storage;
+mod startup_resume;
 mod sync_index;
 mod thread_search;
 mod thread_tools;
@@ -419,6 +420,8 @@ struct InnerState {
     /// background. Clients use this phase instead of guessing from workspace
     /// connection statuses.
     restore_phase: StdMutex<DaemonRestorePhase>,
+    /// Serialize automatic continuations without blocking workspace restoration.
+    interrupted_resume_gate: Mutex<()>,
     /// Agent binary name or path per provider id. Providers absent from the map
     /// fall back to their id; see `AppState::provider_bin`.
     provider_bins: HashMap<AgentProvider, String>,
@@ -1068,6 +1071,7 @@ impl AppState {
                     },
                 },
                 restore_phase: StdMutex::new(DaemonRestorePhase::Ready),
+                interrupted_resume_gate: Mutex::new(()),
                 provider_bins,
                 state_path,
                 preferences_path,
@@ -1690,7 +1694,11 @@ impl AppState {
             let app = self.clone();
             tokio::spawn(async move {
                 for workspace in workspaces_to_restore {
-                    app.restore_one_persisted_workspace(workspace).await;
+                    app.restore_one_persisted_workspace(
+                        workspace,
+                        preferences.auto_resume_interrupted_sessions,
+                    )
+                    .await;
                 }
                 app.finish_local_restore();
                 app.emit(
@@ -1727,7 +1735,11 @@ impl AppState {
     /// a lazy ACP provider (Grok) was already usable. Retry the connect in the
     /// background instead, and leave the project Connecting until it succeeds
     /// or fails for a real reason.
-    async fn restore_one_persisted_workspace(&self, workspace: PersistedWorkspaceState) {
+    async fn restore_one_persisted_workspace(
+        &self,
+        workspace: PersistedWorkspaceState,
+        auto_resume: bool,
+    ) {
         let path = workspace.path.clone();
         let result = timeout(
             WORKSPACE_RESTORE_TIMEOUT,
@@ -1742,7 +1754,11 @@ impl AppState {
         .await;
 
         match result {
-            Ok(Ok(_)) => {}
+            Ok(Ok(_)) => {
+                if auto_resume {
+                    self.spawn_interrupted_thread_resume(&workspace).await;
+                }
+            }
             Ok(Err(error)) => {
                 tracing::warn!("failed to restore workspace {path}: {error}");
                 let _ = self
@@ -1759,7 +1775,7 @@ impl AppState {
                 );
                 let app = self.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = app
+                    match app
                         .connect_workspace_internal(
                             ConnectWorkspaceRequest {
                                 path: path.clone(),
@@ -1769,14 +1785,21 @@ impl AppState {
                         )
                         .await
                     {
-                        tracing::warn!("failed to restore workspace {path}: {error}");
-                        let _ = app
-                            .update_workspace_placeholder_status(
-                                &path,
-                                WorkspaceStatus::Disconnected,
-                                Some(error.to_string()),
-                            )
-                            .await;
+                        Ok(_) => {
+                            if auto_resume {
+                                app.spawn_interrupted_thread_resume(&workspace).await;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!("failed to restore workspace {path}: {error}");
+                            let _ = app
+                                .update_workspace_placeholder_status(
+                                    &path,
+                                    WorkspaceStatus::Disconnected,
+                                    Some(error.to_string()),
+                                )
+                                .await;
+                        }
                     }
                 });
             }

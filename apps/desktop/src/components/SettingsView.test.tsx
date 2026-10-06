@@ -53,6 +53,22 @@ describe('SettingsView deep links', () => {
     expect(screen.getByRole('heading', { name: 'Keyboard shortcuts' })).toBeInTheDocument()
   })
 
+  it('exposes the daemon-owned automatic session recovery switch in General', () => {
+    const onUpdatePreferences = vi.fn()
+    render(
+      <SettingsView
+        {...props}
+        initialSection="general"
+        preferences={{ auto_resume_interrupted_sessions: true } as SettingsViewProps['preferences']}
+        onUpdatePreferences={onUpdatePreferences}
+      />,
+    )
+    const toggle = screen.getByRole('switch', { name: 'Automatically continue stopped sessions' })
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+    expect(onUpdatePreferences).toHaveBeenCalledWith({ auto_resume_interrupted_sessions: false })
+  })
+
   it('does not expose a second settings-only automation manager', () => {
     render(<SettingsView {...props} />)
     expect(screen.queryByRole('button', { name: /Automations/ })).not.toBeInTheDocument()

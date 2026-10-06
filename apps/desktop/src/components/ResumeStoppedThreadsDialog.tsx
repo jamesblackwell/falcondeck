@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleStop } from "lucide-react";
 
 import type { ThreadSummary } from "@falcondeck/client-core";
@@ -14,11 +14,12 @@ export function ResumeStoppedThreadsDialog({
   isContinuing = false,
 }: {
   threads: readonly ThreadSummary[];
-  onContinueAll: () => void;
+  onContinueAll: (enableAutoResume: boolean) => void;
   onDismiss: () => void;
   isPreparing?: boolean;
   isContinuing?: boolean;
 }) {
+  const [enableAutoResume, setEnableAutoResume] = useState(false);
   const continueRef = useRef<HTMLButtonElement | null>(null);
   const dismissRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -35,7 +36,7 @@ export function ResumeStoppedThreadsDialog({
     <div
       className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] px-6 backdrop-blur-sm"
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
+        if (event.key === "Escape" && !isContinuing) {
           event.stopPropagation();
           onDismiss();
         }
@@ -82,6 +83,16 @@ export function ResumeStoppedThreadsDialog({
             </li>
           ) : null}
         </ul>
+        <label className="mt-4 flex items-start gap-2 fd-type-supporting text-fg-secondary">
+          <input
+            type="checkbox"
+            className="fd-focus mt-0.5 accent-[var(--fd-accent)]"
+            checked={enableAutoResume}
+            disabled={isContinuing}
+            onChange={(event) => setEnableAutoResume(event.target.checked)}
+          />
+          Automatically continue stopped sessions when FalconDeck starts
+        </label>
         <div className="mt-5 flex justify-end gap-2">
           <Button
             ref={dismissRef}
@@ -95,7 +106,7 @@ export function ResumeStoppedThreadsDialog({
           <Button
             ref={continueRef}
             type="button"
-            onClick={onContinueAll}
+            onClick={() => onContinueAll(enableAutoResume)}
             disabled={isPreparing || isContinuing}
           >
             {isPreparing
