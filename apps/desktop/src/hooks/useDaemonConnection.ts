@@ -442,6 +442,12 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     [selectedWorkspaceId, snapshot?.workspaces],
   )
 
+  // Other threads can update on every streaming frame. Their updates must
+  // not cancel the selected transcript's pending read or hydration timer.
+  const selectedThreadUpdatedAt = snapshot?.threads.find(
+    (thread) => thread.workspace_id === selectedWorkspaceId && thread.id === selectedThreadId,
+  )?.updated_at
+
   // Reconcile selection when snapshot changes
 
   useEffect(() => {
@@ -575,14 +581,11 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       return
     }
     const cachedDetail = cachedThreadDetail(cacheKey) ?? null
-    const selectedSummary =
-      snapshot?.threads.find((thread) => thread.id === selectedThreadId) ?? null
-
     if (cachedDetail) {
       setThreadDetail(cachedDetail)
       if (
         !isHydratingDetail(cachedDetail) &&
-        (!selectedSummary || cachedDetail.thread.updated_at === selectedSummary.updated_at)
+        (!selectedThreadUpdatedAt || cachedDetail.thread.updated_at === selectedThreadUpdatedAt)
       ) {
         return
       }
@@ -652,7 +655,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     selectedThreadId,
     selectedWorkspaceId,
     selectedLocalWorkspaceStatus,
-    snapshot?.threads,
+    selectedThreadUpdatedAt,
     threadDetailRetry,
   ])
    

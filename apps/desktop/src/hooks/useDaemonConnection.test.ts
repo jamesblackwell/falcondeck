@@ -292,6 +292,35 @@ describe('useDaemonConnection thread restoration', () => {
     await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
   })
 
+  it('keeps an in-flight history read when another thread updates', async () => {
+    mocks.initialSnapshot.mockReturnValue(daemonSnapshot('ready'))
+    let resolveDetail!: (detail: ThreadDetail) => void
+    mocks.threadDetail.mockReturnValue(new Promise<ThreadDetail>(resolve => {
+      resolveDetail = resolve
+    }))
+    vi.stubGlobal('requestIdleCallback', vi.fn(() => 1))
+    const { result, unmount } = renderHook(() => useDaemonConnection())
+    try {
+      await waitFor(() => expect(mocks.threadDetail).toHaveBeenCalledTimes(1))
+      for (let index = 0; index < 5; index += 1) {
+        act(() => result.current.setSnapshot({
+          ...daemonSnapshot('ready'),
+          threads: [
+            daemonSnapshot('ready').threads[0],
+            { ...daemonSnapshot('ready').threads[0], id: 'other-thread',
+              updated_at: `2026-08-08T12:00:0${index + 1}Z` },
+          ],
+        }))
+      }
+      await act(async () => resolveDetail(hydratedDetail()))
+      expect(mocks.threadDetail).toHaveBeenCalledTimes(1)
+      expect(result.current.threadDetail?.items).toHaveLength(1)
+    } finally {
+      unmount()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('re-reads a restored thread until its background replay lands', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
@@ -317,6 +346,51 @@ describe('useDaemonConnection thread restoration', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('keeps the hydration retry timer while other threads stream', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    vi.stubGlobal('requestIdleCallback', vi.fn(() => 1))
+    mocks.initialSnapshot.mockReturnValue(daemonSnapshot('ready'))
+    mocks.threadDetail
+      .mockResolvedValueOnce({ ...hydratedDetail(), items: [], is_partial: true })
+      .mockResolvedValue(hydratedDetail())
+    const { result, unmount } = renderHook(() => useDaemonConnection())
+    try {
+      await waitFor(() => expect(result.current.threadDetail?.is_partial).toBe(true))
+      for (let index = 0; index < 8; index += 1) {
+        act(() => result.current.setSnapshot({
+          ...daemonSnapshot('ready'),
+          threads: [
+            daemonSnapshot('ready').threads[0],
+            { ...daemonSnapshot('ready').threads[0], id: 'other-thread',
+              updated_at: `2026-08-08T12:00:0${index + 1}Z` },
+          ],
+        }))
+        await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+      }
+      expect(mocks.threadDetail).toHaveBeenCalledTimes(2)
+      expect(result.current.threadDetail?.items).toHaveLength(1)
+    } finally {
+      unmount()
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes the cached detail when the selected thread timestamp changes', async () => {
+    mocks.initialSnapshot.mockReturnValue(daemonSnapshot('ready'))
+    const { result } = renderHook(() => useDaemonConnection())
+    await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
+    const updated = {
+      ...hydratedDetail(),
+      thread: { ...hydratedDetail().thread, updated_at: '2026-08-08T12:00:01Z' },
+      items: [...hydratedDetail().items, { ...hydratedDetail().items[0], id: 'message-2' }],
+    }
+    mocks.threadDetail.mockResolvedValue(updated)
+    act(() => result.current.setSnapshot({ ...daemonSnapshot('ready'), threads: [updated.thread] }))
+    await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(2))
+    expect(mocks.threadDetail).toHaveBeenCalledTimes(2)
   })
 
   it.each(['visible', 'hidden'] as const)(
