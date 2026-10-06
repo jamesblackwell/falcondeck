@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, type ReactNode } from 'react'
 
 import { Check, ChevronRight, Download, Github, Smartphone } from 'lucide-react'
 import { ProductFeatures } from './ProductFeatures'
+import { Harnesses } from './Harnesses'
 import { ProductShowcase } from './ProductShowcase'
 
 // Internal design playground; dev server only, never in the production bundle.
@@ -273,15 +274,14 @@ export default function App({ location = window.location }: { location?: Pick<Lo
         <section className="hero" id="top">
           <p className="eyebrow">
             <span className="status-dot" />
-            Free and open source · built for everyday work
+            Free and open source
           </p>
           <h1>
             <span>Your coding agents.</span> <span>A proper Mac app.</span>
           </h1>
           <p className="hero__lede">
-            Bring Codex, Claude Code, OpenCode, and your projects into one comfortable workspace.
-            Keep your existing accounts and favourite editor. When you step away from your Mac,
-            follow the same live work from your iPhone or iPad.
+            Every coding agent you use, in one calm workspace, on the accounts you already have.
+            Step away and carry on from your iPhone.
           </p>
           <div className="hero__actions">
             <a className="btn btn--accent fd-focus" href={MAC_APPLE_SILICON_URL}>
@@ -295,35 +295,32 @@ export default function App({ location = window.location }: { location?: Pick<Lo
             </a>
           </div>
           <p className="hero__download-options">
-            For Apple silicon (M1 or later).{' '}
-            <a className="text-link fd-focus" href={MAC_INTEL_URL}>Download for Intel Mac</a>
-          </p>
-          <p className="hero__source">
+            <span>Apple silicon (M1 or later)</span>
+            <span aria-hidden="true">·</span>
+            <a className="text-link fd-focus" href={MAC_INTEL_URL}>Intel Mac</a>
+            <span aria-hidden="true">·</span>
             <a className="text-link fd-focus" href={REPO_URL}>
               <Github aria-hidden="true" />
               Star on GitHub
               <KeyBadge variant="ghost">S</KeyBadge>
             </a>
           </p>
-          <p className="hero__footnote">Mac · iPhone · iPad · free and open source</p>
-        </section>
-
-        <section className="features" id="product">
-          <Feature title="A calmer workspace">
-            Keep projects, conversations, tool activity, approvals, and changes together.
-            Spend less time juggling terminal windows and more time moving your work forward.
-          </Feature>
-          <Feature title="Your tools, your choice">
-            Choose the right agent for each task and use the accounts you already have.
-            Your code stays in your folders, and the whole FalconDeck stack is MIT licensed.
-          </Feature>
-          <Feature title="Keep work moving">
-            Step away from your desk without losing the conversation. Read responses, answer questions,
-            approve actions, and send the next instruction from your phone.
-          </Feature>
+          <Harnesses />
         </section>
 
         <ProductShowcase />
+
+        <section className="features" id="product">
+          <Feature title="A calmer workspace">
+            Projects, conversations, approvals, and diffs in one window instead of a pile of terminals.
+          </Feature>
+          <Feature title="Your tools, your choice">
+            Pick the right agent for each task. Your code stays in your folders, and FalconDeck is MIT licensed.
+          </Feature>
+          <Feature title="Keep work moving">
+            Read replies, answer questions, and approve actions from your phone, live and end-to-end encrypted.
+          </Feature>
+        </section>
 
         <ProductFeatures />
 
@@ -331,18 +328,15 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           <div>
             <p className="eyebrow">Start with your Mac</p>
             <h2 id="get-started-heading">From download to first task.</h2>
-            <p>
-              Connect a project you already work on and use your existing agent account.
-              The Mac app works on its own; pair your phone whenever you want.
-            </p>
+            <p>Open a project you already work on and sign in with your usual agent account. Pairing a phone is optional.</p>
             <a className="text-link fd-focus" href={GETTING_STARTED_URL}>
               Read the getting-started guide <ChevronRight aria-hidden="true" />
             </a>
           </div>
           <ol className="mobile-download__steps">
-            <li><strong>Install FalconDeck</strong><p>Download the Apple Silicon or Intel DMG and drag the app into Applications. Requires macOS 12 or later.</p></li>
-            <li><strong>Choose your agent and project</strong><p>Setup checks your coding tools and helps you choose a folder. Sign in with the agent account you already use.</p></li>
-            <li><strong>Try a small task</strong><p>Ask your agent to explain the project and how to run its tests. Follow its work and respond to questions in the app.</p></li>
+            <li><strong>Install FalconDeck</strong><p>Drag the app into Applications. macOS 12 or later.</p></li>
+            <li><strong>Choose an agent and a project</strong><p>Setup finds your coding tools and helps you pick a folder.</p></li>
+            <li><strong>Try a small task</strong><p>Ask your agent to explain the project and run its tests.</p></li>
           </ol>
         </section>
 
@@ -350,10 +344,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           <div>
             <p className="eyebrow">Available on the App Store</p>
             <h2 id="ios-heading">FalconDeck for iPhone and iPad</h2>
-            <p>
-              Step away from your desk and keep your agents moving. Read responses, review changes,
-              answer questions, and approve actions from the same live session.
-            </p>
+            <p>Read responses, review changes, and approve actions in the same live session, away from your desk.</p>
             <a className="btn btn--accent fd-focus" href={IOS_APP_STORE_URL}>
               <Smartphone aria-hidden="true" />
               Download on the App Store
@@ -361,39 +352,28 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           </div>
           <ol className="mobile-download__steps">
             <li>
-              <strong>Install the Mac and iOS apps</strong>
-              <p>Download FalconDeck for your Mac and get the free app on your iPhone or iPad.</p>
+              <strong>Install both apps</strong>
+              <p>FalconDeck on your Mac, and the free app on your iPhone or iPad.</p>
             </li>
             <li>
               <strong>Pair your device</strong>
-              <p>On your Mac, open Settings → Remote Access. Scan the QR code with the iOS app.</p>
+              <p>On your Mac, open Settings → Remote Access and scan the QR code.</p>
             </li>
             <li>
-              <strong>Continue from anywhere</strong>
-              <p>Your projects and agent work are ready on your phone. No FalconDeck account needed.</p>
+              <strong>Carry on anywhere</strong>
+              <p>Your projects and sessions are on your phone. No FalconDeck account needed.</p>
             </li>
           </ol>
         </section>
 
-        <section className="harnesses" id="agents">
-          <p className="harnesses__label">Works with</p>
-          <div className="harnesses__list">
-            <span>Codex</span>
-            <span>Claude Code</span>
-            <span>OpenCode</span>
-            <span>Pi</span>
-            <span className="harnesses__more">+ other compatible agents</span>
-          </div>
-        </section>
-
         <section className="site-faq" aria-labelledby="faq-heading">
           <h2 id="faq-heading">A few things to know</h2>
-          <details><summary>Is FalconDeck free?</summary><p>Yes. The Mac app, iPhone and iPad app, and hosted relay are free. Your coding agent’s usual subscription or provider charges still apply. Optional OpenRouter features use your own key and are billed by OpenRouter.</p></details>
-          <details><summary>What does OpenRouter power?</summary><p>Optional cloud transcription, voice rewrite, title suggestions, and Read Aloud. Add your own key in Settings → Speech on your Mac. These features send the audio or text needed for the action to the provider. Mac dictation can also use on-device Apple Speech.</p></details>
-          <details><summary>Do I need to change editors or move my code?</summary><p>No. Connect your existing project folders and keep using your favourite editor. FalconDeck gives your coding agents a workspace alongside it.</p></details>
-          <details><summary>Does my Mac need to stay on?</summary><p>For work running on your Mac, keep it awake, online, and running FalconDeck. You can also run agents on another machine over SSH for an always-on setup.</p></details>
-          <details><summary>Where does my work live?</summary><p>Your code stays in your folders, and your coding agents own their sessions. Remote session content is end-to-end encrypted between your paired devices. You can use the free hosted relay or run your own.</p></details>
-          <details><summary>How mature is it?</summary><p>FalconDeck is early, actively developed, and already used for daily coding work. Try it on a real project and <a href={DISCUSSIONS_URL}>tell us what would make your workflow better</a>.</p></details>
+          <details><summary>Is FalconDeck free?</summary><p>Yes. The apps and the hosted relay are free. Your agent’s own subscription still applies, and optional OpenRouter features bill your own key.</p></details>
+          <details><summary>What does OpenRouter power?</summary><p>Optional cloud transcription, voice rewrite, title suggestions, and Read Aloud. Add your key in Settings → Speech on your Mac; only the audio or text for that action is sent. Dictation can also run on-device with Apple Speech.</p></details>
+          <details><summary>Do I need to change editors or move my code?</summary><p>No. Open your existing folders and keep your editor. FalconDeck sits alongside it.</p></details>
+          <details><summary>Does my Mac need to stay on?</summary><p>For work on your Mac, keep it awake and online with FalconDeck running. For an always-on setup, run agents on another machine over SSH.</p></details>
+          <details><summary>Where does my work live?</summary><p>Your code stays in your folders and your agents own their sessions. Remote traffic is end-to-end encrypted between paired devices, through our free relay or your own.</p></details>
+          <details><summary>How mature is it?</summary><p>Early, actively developed, and used for real work every day. Try it on a project and <a href={DISCUSSIONS_URL}>tell us what would help</a>.</p></details>
         </section>
 
         <section className="security" id="security">

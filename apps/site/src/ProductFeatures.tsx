@@ -112,22 +112,22 @@ const essentials = [
   {
     icon: Bell,
     title: 'Know when you’re needed',
-    description: 'Choose notifications for completed work, questions, approvals, and errors on your Mac and phone.',
+    description: 'Notifications for finished work, questions, approvals, and errors, on your Mac and phone.',
   },
   {
     icon: Monitor,
     title: 'Let agents use your computer',
-    description: 'On macOS 14 or later, enable browser and native app tasks with permissions you control.',
+    description: 'Browser and native app tasks on macOS 14 or later, with permissions you control.',
   },
   {
     icon: Plug,
     title: 'Connect your tools',
-    description: 'Bring MCP tools and agent skills, and organise work with built-in Notes and Kanban extensions.',
+    description: 'MCP tools, agent skills, and built-in Notes and Kanban extensions.',
   },
   {
     icon: Palette,
     title: 'Make the workspace yours',
-    description: 'Choose themes, fonts, text sizes, and keyboard shortcuts that suit the way you work.',
+    description: 'Themes, fonts, text sizes, and keyboard shortcuts.',
   },
 ]
 
@@ -137,32 +137,26 @@ export function ProductFeatures() {
       <div className="product-features__intro">
         <p className="eyebrow">Made for daily work</p>
         <h2 id="features-heading">From the first prompt to the final review.</h2>
-        <p>Run your agents, inspect their work, talk through the next step, and keep regular tasks on schedule. All in the same workspace.</p>
+        <p>Run agents, review their work, and keep regular tasks on schedule in one place.</p>
       </div>
       <div className="product-features__grid">
         <FeatureCard label="Projects & agents" title="Work with agents side by side" preview={<AgentPreview />}>
-          Run Codex, Claude Code, OpenCode, and other supported agents across your projects.
-          Keep your existing accounts, choose models, and hand a task to another agent with its context.
+          Run several agents across your projects, pick a model per task, and hand work to another agent with its context.
         </FeatureCard>
         <FeatureCard label="Files & review" title="See what changed and why" preview={<ReviewPreview />}>
-          Browse files, inspect diffs, preview Markdown and media, and open a built-in terminal.
-          Answer questions and review permission requests with the task’s context in view.
+          Browse files, read diffs, preview Markdown and media, and use a built-in terminal. Approvals arrive with the task in view.
         </FeatureCard>
         <FeatureCard label="System-wide dictation" title="Use your voice across your Mac" preview={<DictationPreview />}>
-          Hold a shortcut to dictate into any Mac app. Use on-device Apple Speech or OpenRouter,
-          and rewrite selected text with a spoken instruction.
+          Hold a shortcut to dictate into any app with on-device Apple Speech or OpenRouter. Rewrite selected text by saying how.
         </FeatureCard>
         <FeatureCard label="Text-to-speech" title="Listen to your agent’s replies" preview={<ReadAloudPreview />}>
-          Play responses aloud on your Mac, iPhone, or iPad. Read Aloud uses OpenRouter
-          text-to-speech, with your key configured on your Mac.
+          Hear responses on your Mac, iPhone, or iPad, using OpenRouter text-to-speech with your own key.
         </FeatureCard>
         <FeatureCard label="OpenRouter integration" title="Bring your own key and models" preview={<OpenRouterPreview />}>
-          Choose cloud transcription and voice rewrite models, and request title suggestions.
-          Your OpenRouter key stays in your Mac’s secure credential store. Provider usage is billed to you.
+          Pick models for transcription, voice rewrite, and titles. Your OpenRouter key stays on your Mac, and usage bills to you.
         </FeatureCard>
         <FeatureCard label="Automations" title="Put regular work on a schedule" preview={<AutomationPreview />}>
-          Schedule recurring instructions or a one-off follow-up. Runs appear as normal tasks
-          on your Mac or a configured SSH host while that computer stays awake and online.
+          Schedule recurring instructions or a one-off follow-up. Runs appear as normal tasks on your Mac or an SSH host.
         </FeatureCard>
       </div>
       <ul className="product-features__essentials">

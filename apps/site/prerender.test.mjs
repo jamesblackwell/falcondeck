@@ -34,11 +34,11 @@ test('discovery files have real content and exclude pairing', async () => {
 test('Mac downloads point to installers with a visible Intel alternative', async () => {
   const html = await readFile(new URL('index.html', output), 'utf8')
   const downloads = [...html.matchAll(/<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)]
-    .filter(([, , content]) => /Download for (Mac|Intel Mac)/.test(content))
+    .filter(([, , content]) => /Download for Mac|Intel Mac/.test(content))
   assert.equal(downloads.length, 3)
   for (const [, href, content] of downloads) {
     const arch = content.includes('Intel Mac') ? 'x64' : 'aarch64'
     assert.equal(href, `https://github.com/jamesblackwell/falcondeck/releases/latest/download/FalconDeck_${arch}.dmg`)
   }
-  assert(html.includes('For Apple silicon (M1 or later).'))
+  assert(html.includes('Apple silicon (M1 or later)'))
 })
