@@ -39,6 +39,7 @@ import {
   slashSkillSourceLabel,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
+  type CollaborationModeSummary,
   type ThreadIsolation,
   type AgentProvider,
   type ImageInput,
@@ -69,6 +70,8 @@ import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { InputToolbar } from './InputToolbar'
 import { InlineVoiceRecorder } from './InlineVoiceRecorder'
 import {
+  collaborationModeItems,
+  collaborationModeLabel,
   SANDBOX_DEFAULT_VALUE,
   permissionChipLabel,
   permissionModeItems,
@@ -127,6 +130,9 @@ interface ChatInputProps {
   /** Shows the native /compact command for an existing compactable thread. */
   compactCommandAvailable?: boolean
   selectedPermissionMode?: string | null
+  collaborationModes?: CollaborationModeSummary[]
+  selectedCollaborationMode?: string | null
+  onSelectCollaborationMode?: (mode: string) => void
   selectedSandboxMode?: string | null
   onSelectPermissionMode?: (mode: string | null) => void
   onSelectSandboxMode?: (mode: string | null) => void
@@ -267,6 +273,9 @@ export const ChatInput = memo(function ChatInput({
   capabilities = NO_AGENT_CAPABILITIES,
   compactCommandAvailable = false,
   selectedPermissionMode = null,
+  collaborationModes = [],
+  selectedCollaborationMode = null,
+  onSelectCollaborationMode,
   selectedSandboxMode = null,
   onSelectPermissionMode,
   onSelectSandboxMode,
@@ -317,7 +326,7 @@ export const ChatInput = memo(function ChatInput({
     null,
   )
   const [openSheet, setOpenSheet] = useState<
-    'more' | 'permission' | 'sandbox' | 'voice-provider' | null
+    'more' | 'mode' | 'permission' | 'sandbox' | 'voice-provider' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const inputRef = useRef<TextInput | null>(null)
@@ -577,6 +586,13 @@ export const ChatInput = memo(function ChatInput({
   const providerOptions = providers ?? DEFAULT_PROVIDER_OPTIONS
   const moreItems = useMemo<OptionSheetItem[]>(() => {
     const items: OptionSheetItem[] = []
+    if (onSelectCollaborationMode && collaborationModes.length > 0) {
+      items.push({
+        value: 'mode',
+        label: 'Mode',
+        description: collaborationModeLabel(selectedCollaborationMode, collaborationModes),
+      })
+    }
     if (capabilities.supports_images) {
       if (onPasteImage) {
         items.push({
@@ -617,6 +633,9 @@ export const ChatInput = memo(function ChatInput({
     }
     return items
   }, [
+    collaborationModes,
+    onSelectCollaborationMode,
+    selectedCollaborationMode,
     capabilities.permission_modes,
     capabilities.sandbox_modes,
     capabilities.supports_images,
@@ -641,6 +660,8 @@ export const ChatInput = memo(function ChatInput({
         onTakePhoto?.()
       } else if (value === 'permission') {
         setOpenSheet('permission')
+      } else if (value === 'mode') {
+        setOpenSheet('mode')
       } else if (value === 'sandbox') {
         setOpenSheet('sandbox')
       }
@@ -1013,6 +1034,18 @@ export const ChatInput = memo(function ChatInput({
           }
           onSelect={(value) => {
             onSelectPermissionMode(value)
+            setOpenSheet(null)
+          }}
+          onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
+      {openSheet === 'mode' && onSelectCollaborationMode ? (
+        <OptionSheet
+          title="Mode"
+          items={collaborationModeItems(collaborationModes)}
+          selected={selectedCollaborationMode ?? collaborationModes.find((mode) => mode.mode === 'default')?.id ?? collaborationModes[0]?.id ?? null}
+          onSelect={(value) => {
+            onSelectCollaborationMode(value)
             setOpenSheet(null)
           }}
           onClose={() => setOpenSheet(null)}

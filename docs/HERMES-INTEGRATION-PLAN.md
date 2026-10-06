@@ -171,6 +171,8 @@ Initially use FalconDeck's existing generic ACP cancel/resubmit steering behavio
 
 ## Phase 4: ship the same experience to every client
 
+**Implemented and qualified:** shared mobile modes, permission diffs and exact remote choices, interruptible waiting turns, and background relay recovery. See [client acceptance evidence and limits](HERMES-ACP-QUALIFICATION.md#phase-4-client-and-release-acceptance-results). Existing Hermes configuration and native storage remain unchanged; no installed upgrade or production release was performed.
+
 **Expected effort: one to two days including release checks.**
 
 - Desktop, remote web, and mobile should render Hermes through the existing capability/data-driven agent selector, composer, transcript, and request UI. Keep provider behavior in ingestion/runtime code.
@@ -210,4 +212,4 @@ For unattended/server use, run Hermes on the enrolled FalconDeck daemon host and
 
 Budget approximately **five to nine engineering days** for first-class ACP support if qualification reveals modest fixes. Basic manual configuration takes minutes and was already shown to reach session/catalog discovery on this Mac. External Hermes fixes can extend elapsed time. Full gateway support is separate scope, not a prerequisite for the recommended ACP release.
 
-The next implementation task is Phase 4, guided by the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), while retaining native session ownership and the shared client contract.
+Phases 0–4 are implemented against the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), retaining native session ownership and the shared client contract. Phase 5 is optional follow-up if the omitted native gateway interactions are needed.

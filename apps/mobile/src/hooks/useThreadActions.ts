@@ -208,7 +208,7 @@ export function useThreadActions() {
     async (
       workspaceId: string,
       threadId: string,
-      field: 'permission_mode' | 'sandbox_mode' | 'service_tier',
+      field: 'permission_mode' | 'sandbox_mode' | 'service_tier' | 'collaboration_mode_id',
       mode: string | null,
     ) => {
       const relay = useRelayStore.getState()
@@ -225,6 +225,8 @@ export function useThreadActions() {
             ? e.message
             : field === 'permission_mode'
               ? 'Failed to update permission mode'
+              : field === 'collaboration_mode_id'
+                ? 'Failed to update mode'
               : field === 'service_tier'
                 ? 'Failed to update speed'
                 : 'Failed to update sandbox mode',

@@ -233,9 +233,14 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   same profile/environment as the agent. Existing custom `hermes` entries
   retain their launcher and `HERMES_HOME`. Inventory detects the resolved
   installation but provides no npm latest-version lookup or managed upgrade:
-  update through the existing installation's owner. The tested current source
-  passes live/restart qualification; the older installed 0.14.0 baseline lacks
+  update through the existing installation's owner. Revision `1d6b278` passes
+  live/restart qualification and Mac/paired iOS/browser interaction checks;
+  the older installed 0.14.0 baseline lacks
   live tool completion events. See [qualification and limits](HERMES-ACP-QUALIFICATION.md).
+  Native edit modes appear as **Collaboration mode** on desktop/web and
+  **Add to prompt → Mode** on mobile. They are session choices, separate from
+  FalconDeck's **Permissions** control. No separate reasoning or sandbox
+  inventory is advertised by the qualified Hermes build.
 
 - **Unreal Agent:** Settings → Agents offers `falcondeck-unreal-agent-acp`, a
   FalconDeck-hosted ACP adapter for the one-request `unreal-agent-runner` CLI.

@@ -35,6 +35,7 @@ import {
   workspaceAgentCapabilities,
   threadAgentCapabilities,
   workspaceModels,
+  workspaceCollaborationModes,
   workspaceProviderOptions,
   wasTurnInterruptedByShutdown,
   type AgentProvider,
@@ -209,6 +210,7 @@ export default function HomeScreen() {
     selectedEffort,
     selectedModel,
     selectedPermissionMode,
+    selectedCollaborationMode,
     selectedIsolation,
     selectedProvider,
     selectedSandboxMode,
@@ -222,6 +224,7 @@ export default function HomeScreen() {
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
       selectedPermissionMode: s.selectedPermissionMode,
+      selectedCollaborationMode: s.selectedCollaborationMode,
       selectedIsolation: s.selectedIsolation,
       selectedProvider: s.selectedProvider,
       selectedSandboxMode: s.selectedSandboxMode,
@@ -235,6 +238,7 @@ export default function HomeScreen() {
     setSelectedModel,
     setSelectedEffort,
     setSelectedPermissionMode,
+    setSelectedCollaborationMode,
     setSelectedIsolation,
     setSelectedProvider,
     setSelectedSandboxMode,
@@ -320,6 +324,11 @@ export default function HomeScreen() {
     () => workspaceProviderOptions(workspace),
     [workspace],
   );
+  const collaborationModes = workspaceCollaborationModes(workspace, activeProvider);
+
+  useEffect(() => {
+    setSelectedCollaborationMode(selectedThread?.agent.collaboration_mode_id ?? null);
+  }, [selectedThread?.id, selectedThread?.agent.collaboration_mode_id, setSelectedCollaborationMode]);
   const handoffProviderOptions = useMemo(
     () =>
       selectedThread
@@ -744,6 +753,7 @@ export default function HomeScreen() {
     (provider: AgentProvider) => {
       if (selectedThread) return; // locked
       setSelectedProvider(provider);
+      setSelectedCollaborationMode(null);
       if (workspace) rememberWorkspaceProvider(workspace.path, provider);
       // Swap in the new provider's remembered model/effort/modes rather than
       // resetting; the seed and validity effects clean up anything stale.
@@ -801,6 +811,7 @@ export default function HomeScreen() {
       setSelectedModel,
       setSelectedPermissionMode,
       setSelectedProvider,
+      setSelectedCollaborationMode,
       setSelectedSandboxMode,
       setSelectedServiceTier,
       workspace,
@@ -825,6 +836,24 @@ export default function HomeScreen() {
       }
     },
     [activeProvider, rememberComposerSelection, setSelectedEffort, workspace],
+  );
+
+  const handleCollaborationModeChange = useCallback(
+    (mode: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) {
+        setSelectedCollaborationMode(mode);
+        return;
+      }
+      void setThreadMode(selectedWorkspaceId, selectedThreadId, "collaboration_mode_id", mode)
+        .then(() => {
+          const selection = useSessionStore.getState();
+          if (selection.selectedWorkspaceId === selectedWorkspaceId && selection.selectedThreadId === selectedThreadId) {
+            setSelectedCollaborationMode(mode);
+          }
+        })
+        .catch(() => {});
+    },
+    [selectedWorkspaceId, selectedThreadId, setSelectedCollaborationMode, setThreadMode],
   );
 
   // Local state moves first so the chip responds to the tap; with a thread
@@ -1590,7 +1619,7 @@ export default function HomeScreen() {
               selectedThread ? handoffToProvider : undefined
             }
             handoffDisabledReason={handoffDisabledReason}
-            isRunning={isThreadRunning}
+            isRunning={isThreadRunning || selectedThread?.status === "waiting_for_input"}
             isStopping={isStopping}
             capabilities={capabilities}
             compactCommandAvailable={
@@ -1599,6 +1628,9 @@ export default function HomeScreen() {
               !isThreadRunning
             }
             selectedPermissionMode={selectedPermissionMode}
+            collaborationModes={collaborationModes}
+            selectedCollaborationMode={selectedCollaborationMode}
+            onSelectCollaborationMode={handleCollaborationModeChange}
             selectedSandboxMode={selectedSandboxMode}
             onSelectPermissionMode={handlePermissionModeChange}
             onSelectSandboxMode={handleSandboxModeChange}

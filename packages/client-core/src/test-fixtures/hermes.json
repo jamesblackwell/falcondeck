@@ -1,0 +1,158 @@
+{
+  "provenance": {
+    "source": "1d6b2786e2b2de70a967c66b6a14e2b83bab30e7",
+    "date": "2026-10-06",
+    "notes": "Bounded daemon projection from live Phase 4. IDs, paths, times and account normalized. Permission path restored from recorded ACP diff."
+  },
+  "agent": {
+    "provider": "hermes",
+    "label": "Hermes",
+    "account": {
+      "status": "ready",
+      "label": "Hermes ACP"
+    },
+    "models": [
+      {
+        "id": "openai-codex:gpt-5.6-luna",
+        "label": "ChatGPT or Codex Subscription \u00b7 gpt-5.6-luna",
+        "is_default": true,
+        "default_reasoning_effort": null,
+        "supported_reasoning_efforts": [],
+        "service_tiers": [],
+        "default_service_tier": null
+      }
+    ],
+    "collaboration_modes": [
+      {
+        "id": "default",
+        "label": "Ask before edits",
+        "mode": "default",
+        "model_id": null,
+        "reasoning_effort": null,
+        "is_native": true
+      },
+      {
+        "id": "accept_edits",
+        "label": "Accept edits",
+        "mode": "accept_edits",
+        "model_id": null,
+        "reasoning_effort": null,
+        "is_native": true
+      },
+      {
+        "id": "dont_ask",
+        "label": "Don't ask before edits",
+        "mode": "dont_ask",
+        "model_id": null,
+        "reasoning_effort": null,
+        "is_native": true
+      }
+    ],
+    "skills": [],
+    "capabilities": {
+      "supports_review": false,
+      "supports_goals": false,
+      "supports_images": true,
+      "supports_skills": false,
+      "supports_interrupt": true,
+      "supports_steering": true,
+      "supports_forking": false,
+      "supports_compaction": false,
+      "supports_compaction_instructions": false,
+      "sandbox_modes": [],
+      "permission_modes": [
+        "always-approve",
+        "default"
+      ]
+    }
+  },
+  "request": {
+    "request_id": "hermes-permission",
+    "workspace_id": "hermes-workspace",
+    "thread_id": "hermes-thread",
+    "method": "session/request_permission",
+    "kind": "approval",
+    "approval_decisions": [
+      "allow",
+      "deny"
+    ],
+    "approval_options": [
+      {
+        "option_id": "allow_once",
+        "label": "Allow edit",
+        "decision": "allow"
+      },
+      {
+        "option_id": "deny",
+        "label": "Deny",
+        "decision": "deny"
+      }
+    ],
+    "title": "Approve edit: hermes-allowed.txt",
+    "detail": "edit tool call from Hermes",
+    "command": null,
+    "path": "hermes-allowed.txt",
+    "turn_id": null,
+    "item_id": null,
+    "questions": [],
+    "created_at": "2026-10-06T10:00:00Z"
+  },
+  "thread": {
+    "id": "hermes-thread",
+    "workspace_id": "hermes-workspace",
+    "title": "Hermes fixture",
+    "provider": "hermes",
+    "native_session_id": "native-hermes-session",
+    "provider_transport": "acp",
+    "handoff_from": null,
+    "origin": null,
+    "status": "waiting_for_input",
+    "updated_at": "2026-10-06T10:00:00Z",
+    "last_message_preview": "HERMES_PHASE4_READY",
+    "latest_turn_id": null,
+    "latest_plan": null,
+    "latest_diff": null,
+    "last_tool": null,
+    "last_error": null,
+    "agent": {
+      "model_id": "openai-codex:gpt-5.6-luna",
+      "reasoning_effort": null,
+      "collaboration_mode_id": null,
+      "approval_policy": "on-request",
+      "service_tier": null,
+      "permission_mode": "default",
+      "sandbox_mode": null
+    },
+    "attention": {
+      "level": "approval",
+      "badge_label": "Approval",
+      "unread": true,
+      "pending_approval_count": 1,
+      "pending_question_count": 0,
+      "last_agent_activity_seq": 1,
+      "last_read_seq": 0
+    },
+    "is_archived": false,
+    "is_pinned": false,
+    "is_pinned_in_project": false,
+    "goal": null,
+    "queued_turns": [],
+    "variant": null
+  },
+  "diff": {
+    "kind": "file_change",
+    "id": "acp-diff-toolCallId-6-0",
+    "changes": [
+      {
+        "path": "hermes-allowed.txt",
+        "change_kind": "update",
+        "diff": "@@ -1,1 +1,1 @@\n-before\n+FALCONDECK_EDIT_OK\n",
+        "move_path": null
+      }
+    ],
+    "status": "running",
+    "lifecycle": "running",
+    "created_at": "2026-10-06T10:00:00Z",
+    "completed_at": null
+  }
+}

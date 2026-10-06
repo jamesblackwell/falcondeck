@@ -88,7 +88,7 @@ const RECOMMENDED_AGENTS = [
   {
     id: 'hermes',
     label: 'Hermes',
-    detail: 'Hermes Agent through its native ACP server, with its own memory and skills',
+    detail: 'Native ACP with model selection, edit approvals and Hermes sessions; qualified at 1d6b278',
     command: ['hermes', 'acp'],
     transport: 'acp' as const,
     installCommand: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash',

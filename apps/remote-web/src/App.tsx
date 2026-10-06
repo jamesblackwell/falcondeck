@@ -2957,7 +2957,11 @@ function RemoteApp() {
 
   async function handleStop() {
     if (!selectedWorkspace || !selectedThreadId) return;
-    if (selectedThread?.status !== "running") return;
+    if (
+      selectedThread?.status !== "running" &&
+      selectedThread?.status !== "waiting_for_input"
+    )
+      return;
     setIsStopping(true);
     try {
       await submitQueuedAction(

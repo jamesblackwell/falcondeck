@@ -1435,6 +1435,7 @@ impl AppState {
                             title: title.clone(),
                             kind: kind.clone(),
                             output: output.clone(),
+                            diffs: diffs.clone(),
                         },
                     )
                     .await;
@@ -1475,9 +1476,16 @@ impl AppState {
                     return Ok(());
                 };
                 let remembered = runtime.tool_memory(&call_id).await;
-                let (known_title, kind, known_output) = remembered.map_or_else(
-                    || ("Tool call".to_string(), "other".to_string(), None),
-                    |memory| (memory.title, memory.kind, memory.output),
+                let (known_title, kind, known_output, known_diffs) = remembered.map_or_else(
+                    || {
+                        (
+                            "Tool call".to_string(),
+                            "other".to_string(),
+                            None,
+                            Vec::new(),
+                        )
+                    },
+                    |memory| (memory.title, memory.kind, memory.output, memory.diffs),
                 );
                 let title = title
                     .filter(|value| !value.trim().is_empty())
@@ -1486,6 +1494,9 @@ impl AppState {
                 // field means "unchanged", so a status-only completion must
                 // not erase output streamed by earlier updates.
                 let output = output.or(known_output);
+                // Completion often carries only text/status. Preserve proposed
+                // diffs so their lifecycle follows the tool through resolution.
+                let diffs = if diffs.is_empty() { known_diffs } else { diffs };
                 runtime
                     .remember_tool(
                         &call_id,
@@ -1494,6 +1505,7 @@ impl AppState {
                             title: title.clone(),
                             kind: kind.clone(),
                             output: output.clone(),
+                            diffs: diffs.clone(),
                         },
                     )
                     .await;
@@ -1558,6 +1570,7 @@ impl AppState {
                 request_id,
                 title,
                 detail,
+                path,
                 options,
             } => {
                 let thread_id = runtime.thread_for_session(&session_id).await;
@@ -1656,7 +1669,7 @@ impl AppState {
                     title,
                     detail,
                     command: None,
-                    path: None,
+                    path,
                     turn_id: None,
                     item_id: None,
                     questions: Vec::new(),

@@ -29,6 +29,34 @@ Grok…), so most new harnesses arrive with an ACP mode. Native
 adapters are reserved for harnesses whose extra surface earns the maintenance
 (today: Codex, Claude, and Antigravity).
 
+## Hermes through native ACP
+
+The supported baseline is Hermes source `1d6b278`, ACP SDK 0.9.0 / protocol 1.
+See [live qualification](HERMES-ACP-QUALIFICATION.md). Hermes uses the generic
+model/mode catalogs, transcript items and interactive requests on every client.
+No Hermes selector or permission UI branch is needed. The mobile composer
+exposes native session modes through its existing option sheet and hides a
+reasoning picker when the selected model has no reasoning inventory.
+
+Hermes-specific admission, error handling, session loading and connector
+isolation remain in the ACP runtime/ingestion boundary. Each thread owns an ACP
+process so upstream MCP registration cannot bind a sibling thread's capabilities.
+Native Hermes storage owns history; daemon restart reloads the same ACP handle.
+Replay pruning triggers an authoritative daemon sync and selected-thread detail
+read on paired clients, including pending permission requests.
+
+Standard ACP permission diffs enter the existing file-change projection before
+the request banner. Remembered diffs survive partial tool updates and settle on
+completion, denial or interruption. Exact approval option IDs pass through both
+remote RPC and queued actions; their shared parser must accept every structured
+response variant the core protocol exposes. This integration adds no RPC method,
+capability field, conversation database or Hermes configuration store.
+
+The qualified build advertises images and passes a controlled vision prompt.
+Usage is displayed only when emitted. Native gateway control, managed updates,
+HTTP/SSE MCP, delegation cancellation, and a FalconDeck Hermes skills picker
+remain outside the qualified surface.
+
 ## The seams, and the invariants that keep them clean
 
 1. **`ProviderRuntime` (app/provider_runtime.rs)** — the ONLY place codex /

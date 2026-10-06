@@ -6,8 +6,8 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AgentProvider, InteractiveResponsePayload, ThreadStatus, TurnInputItem, WorkspaceStatus,
-    WorkspaceSummary,
+    AgentProvider, ConversationItem, InteractiveResponsePayload, ThreadStatus, TurnInputItem,
+    WorkspaceStatus, WorkspaceSummary,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -110,6 +110,97 @@ pub(super) async fn fixture() -> (
     .await
     .unwrap();
     (temp, app, runtime, receiver, session)
+}
+
+#[tokio::test]
+async fn permission_diffs_are_reviewable_and_survive_status_only_resolution() {
+    for (choice, expected_status) in [("allow_once", "completed"), ("deny", "failed")] {
+        let (_temp, app, runtime, mut events, session) = fixture().await;
+        let agent = runtime.clone();
+        let prompt = tokio::spawn(async move {
+            agent
+                .prompt(
+                    &session,
+                    vec![json!({"type":"text","text":"diff-permission"})],
+                )
+                .await
+        });
+        let mut replay = HashSet::new();
+        let request_id = loop {
+            let event = timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let id = match &event {
+                AcpEvent::PermissionRequest { request_id, .. } => Some(request_id.clone()),
+                _ => None,
+            };
+            app.apply_acp_event("workspace", &runtime, event, &mut replay)
+                .await
+                .unwrap();
+            if let Some(id) = id {
+                break id;
+            }
+        };
+        {
+            let pending = app.inner.interactive_requests.lock().await;
+            assert_eq!(
+                pending[&("workspace".into(), request_id.clone())]
+                    .request
+                    .path
+                    .as_deref(),
+                Some("hermes-allowed.txt")
+            );
+            let workspaces = app.inner.workspaces.lock().await;
+            assert!(workspaces["workspace"].threads["thread"].items.iter().any(|item| matches!(item,
+                ConversationItem::FileChange { changes, status, .. }
+                    if status == "running" && changes[0].diff.contains("-before\n+FALCONDECK_EDIT_OK"))));
+        }
+        app.dispatch_remote_rpc(
+            "interactive.respond",
+            json!({
+                "workspace_id": "workspace", "request_id": request_id,
+                "response": {"kind": "approval_option", "option_id": choice},
+            }),
+        )
+        .await
+        .unwrap();
+        loop {
+            let event = timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let ended = matches!(event, AcpEvent::TurnEnded { .. });
+            app.apply_acp_event("workspace", &runtime, event, &mut replay)
+                .await
+                .unwrap();
+            if ended {
+                break;
+            }
+        }
+        prompt.await.unwrap().unwrap();
+        let workspaces = app.inner.workspaces.lock().await;
+        let diffs = workspaces["workspace"].threads["thread"]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::FileChange {
+                    changes,
+                    status,
+                    completed_at,
+                    ..
+                } => Some((changes, status, completed_at)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].1, expected_status);
+        assert!(diffs[0].2.is_some());
+        assert!(diffs[0].0[0].diff.contains("+FALCONDECK_EDIT_OK"));
+        drop(workspaces);
+        assert!(app.inner.interactive_requests.lock().await.is_empty());
+        runtime.shutdown().await;
+    }
 }
 
 #[tokio::test]

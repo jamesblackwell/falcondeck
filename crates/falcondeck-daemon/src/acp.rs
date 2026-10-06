@@ -1293,6 +1293,7 @@ pub enum AcpEvent {
         request_id: String,
         title: String,
         detail: Option<String>,
+        path: Option<String>,
         options: Vec<AcpPermissionOption>,
     },
     /// Grok or Cursor asks the user to approve, revise, or abandon an implementation plan.
@@ -1354,6 +1355,7 @@ pub struct AcpToolMemory {
     pub title: String,
     pub kind: String,
     pub output: Option<String>,
+    pub diffs: Vec<AcpDiffContent>,
 }
 
 /// A `diff` content block from an ACP tool call: the agent's report of a
@@ -4548,6 +4550,29 @@ impl AcpRuntime {
             .pointer("/toolCall/kind")
             .and_then(Value::as_str)
             .map(|kind| format!("{} tool call from {}", kind, self.config.label));
+        let tool_call = params.get("toolCall").unwrap_or(&Value::Null);
+        let (_, diffs) = acp_tool_content(tool_call);
+        let path = diffs.first().map(|diff| diff.path.clone()).or_else(|| {
+            tool_call
+                .pointer("/locations/0/path")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+        // Hermes supplies the proposed edit in request_permission rather than
+        // its opening tool_call. Project it before surfacing the approval so
+        // all clients can review the existing file-change item.
+        if !diffs.is_empty()
+            && let Some(call_id) = tool_call.get("toolCallId").and_then(Value::as_str)
+        {
+            let _ = self.events.send(AcpEvent::ToolCallUpdate {
+                session_id: session_id.clone(),
+                call_id: call_id.to_owned(),
+                title: acp_tool_title(tool_call),
+                status: Some("pending".into()),
+                output: None,
+                diffs,
+            });
+        }
         self.permission_requests.lock().await.insert(
             request_id.clone(),
             PendingPermission {
@@ -4561,6 +4586,7 @@ impl AcpRuntime {
             request_id,
             title,
             detail,
+            path,
             options,
         });
     }

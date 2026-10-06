@@ -149,6 +149,7 @@ interface UIState {
   selectedServiceTier: string | null;
   /** null means "no override" — the daemon keeps whatever the thread already has. */
   selectedPermissionMode: string | null;
+  selectedCollaborationMode: string | null;
   selectedSandboxMode: string | null;
   /** Last-used picker choices per workspace path, persisted device-locally. */
   persistedComposerSelections: PersistedComposerState;
@@ -186,6 +187,7 @@ interface UIActions {
   setSelectedEffort: (effort: string | null) => void;
   setSelectedServiceTier: (tier: string | null) => void;
   setSelectedPermissionMode: (mode: string | null) => void;
+  setSelectedCollaborationMode: (mode: string | null) => void;
   setSelectedSandboxMode: (mode: string | null) => void;
   rememberComposerSelection: (
     workspacePath: string,
@@ -231,6 +233,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   selectedEffort: 'medium',
   selectedServiceTier: null,
   selectedPermissionMode: null,
+  selectedCollaborationMode: null,
   selectedSandboxMode: null,
   persistedComposerSelections: parsePersistedComposerState(
     storage.getString(COMPOSER_STATE_STORAGE_KEY) ?? null,
@@ -246,6 +249,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
     set((state) => ({
       conversationKey,
       selectedIsolation: 'project_folder',
+      selectedCollaborationMode: null,
       draft: state.drafts[conversationKey]?.text ?? '',
       attachments: state.attachmentsByConversation[conversationKey] ?? [],
       isSubmitting: Boolean(state.pendingSubmissions[conversationKey]),
@@ -321,6 +325,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setSelectedEffort: (effort) => set({ selectedEffort: effort }),
   setSelectedServiceTier: (tier) => set({ selectedServiceTier: tier }),
   setSelectedPermissionMode: (mode) => set({ selectedPermissionMode: mode }),
+  setSelectedCollaborationMode: (mode) => set({ selectedCollaborationMode: mode }),
   setSelectedSandboxMode: (mode) => set({ selectedSandboxMode: mode }),
   rememberComposerSelection: (workspacePath, provider, patch) =>
     set((state) => {

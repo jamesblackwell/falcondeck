@@ -1,15 +1,19 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   bytesToBase64,
+  decryptJson,
+  encryptJson,
   generateBoxKeyPair,
+  normalizeDaemonSnapshot,
   REMOTE_SESSION_STORAGE_VERSION,
   secretKeyToBase64,
 } from "@falcondeck/client-core";
 
 import App from "./App";
 import { persistRemoteSession } from "./lib/remoteAppUtils";
+import hermes from '../../../packages/client-core/src/test-fixtures/hermes.json';
 
 class TestWebSocket {
   static readonly CONNECTING = 0;
@@ -92,6 +96,57 @@ afterEach(() => {
 });
 
 describe("App", () => {
+  it("recovers a pending Hermes approval after replay pruning and sends its exact choice", async () => {
+    const socket = await renderConnectedSession();
+    const dataKey = new Uint8Array(32).fill(7);
+    vi.mocked(fetch).mockImplementation(async (input) => ({
+      ok: true,
+      json: async () => String(input).includes('/actions')
+        ? { action_id: 'hermes-answer', status: 'completed', result: await encryptJson(dataKey, { ok: true }) }
+        : { ticket: 'test-ticket' },
+    } as Response));
+    const calls = (method: string) => sentRelayMessages(socket).filter(message => message.type === 'rpc-call' && message.method === method);
+    const reply = async (method: string, result: unknown) => {
+      await waitFor(() => expect(calls(method).length).toBeGreaterThan(0));
+      const payload = await encryptJson(dataKey, result);
+      act(() => socket.onmessage?.({ data: JSON.stringify({ type: 'rpc-result', request_id: calls(method).at(-1).request_id, ok: true, result: payload }) }));
+    };
+    const base = normalizeDaemonSnapshot({
+      workspaces: [{ id: 'hermes-workspace', path: '/workspace/hermes', default_provider: 'hermes', agents: [hermes.agent], current_thread_id: 'hermes-thread' }],
+      threads: [{ ...hermes.thread, status: 'idle' }], interactive_requests: [],
+    });
+    sendOnlineSync(socket);
+    await reply('snapshot.current', base);
+    await screen.findByRole('button', { name: 'Hermes fixture' });
+    fireEvent.click(screen.getByRole('button', { name: 'Hermes fixture' }));
+    await reply('thread.detail', { workspace_id: 'hermes-workspace', thread: hermes.thread, items: [] });
+    act(() => socket.onmessage?.({ data: JSON.stringify({
+      type: 'sync', updates: [], next_seq: 40, history_truncated: true,
+      presence: { session_id: 'session-connectivity', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null },
+    }) }));
+    await waitFor(() => expect(calls('snapshot.current')).toHaveLength(2));
+    await reply('snapshot.current', { ...base, threads: [hermes.thread], interactive_requests: [hermes.request] });
+    const allow = await screen.findByRole('button', { name: 'Allow edit' });
+    expect(screen.getAllByText('hermes-allowed.txt').length).toBeGreaterThan(0);
+    await act(async () => { fireEvent.click(allow); });
+    const posts = () => vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input).endsWith('/actions') && init?.method === 'POST' && JSON.parse(init.body as string).action_type === 'interactive.respond');
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    const action = JSON.parse(posts()[0]![1]!.body as string);
+    expect(action.action_type).toBe('interactive.respond');
+    expect(await decryptJson(dataKey, action.payload)).toMatchObject({
+      workspace_id: 'hermes-workspace', request_id: 'hermes-permission',
+      response: { kind: 'approval_option', option_id: 'allow_once' },
+    });
+    await waitFor(() => expect(allow).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generating' }));
+    const stops = () => vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input).endsWith('/actions') && init?.method === 'POST' && JSON.parse(init.body as string).action_type === 'turn.interrupt');
+    await waitFor(() => expect(stops()).toHaveLength(1));
+    const stop = JSON.parse(stops()[0]![1]!.body as string);
+    expect(await decryptJson(dataKey, stop.payload)).toMatchObject({
+      workspace_id: 'hermes-workspace', thread_id: 'hermes-thread',
+    });
+  });
+
   it("mounts on the pairing screen when nothing is stored", () => {
     render(<App />);
     expect(screen.getByLabelText("Alpha notice")).toHaveTextContent(

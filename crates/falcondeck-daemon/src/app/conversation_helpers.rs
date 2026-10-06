@@ -2459,6 +2459,15 @@ pub(super) fn parse_interactive_response_params(
         && let Some(kind) = extract_string(response, &["kind"])
     {
         return match kind.as_str() {
+            "approval_option" => response
+                .get("option_id")
+                .or_else(|| response.get("optionId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(|option_id| InteractiveResponsePayload::ApprovalOption {
+                    option_id: option_id.to_owned(),
+                })
+                .ok_or_else(|| "missing approval option id".to_string()),
             "approval" => match extract_string(response, &["decision"]).as_deref() {
                 Some("allow") => Ok(InteractiveResponsePayload::Approval {
                     decision: ApprovalDecision::Allow,
@@ -2539,6 +2548,34 @@ pub(super) fn parse_interactive_response_params(
 #[cfg(test)]
 mod interactive_response_tests {
     use super::*;
+
+    #[test]
+    fn parses_exact_remote_approval_choices_without_inferring_scope() {
+        for key in ["option_id", "optionId"] {
+            let mut response = serde_json::json!({"kind": "approval_option"});
+            response[key] = serde_json::json!("session:opaque/allow");
+            assert_eq!(
+                parse_interactive_response_params(&serde_json::json!({"response": response}))
+                    .unwrap(),
+                InteractiveResponsePayload::ApprovalOption {
+                    option_id: "session:opaque/allow".into()
+                }
+            );
+        }
+        for id in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(42),
+        ] {
+            assert!(
+                parse_interactive_response_params(
+                    &serde_json::json!({"response": {"kind":"approval_option", "option_id":id}})
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn parses_remote_plan_revision_feedback() {

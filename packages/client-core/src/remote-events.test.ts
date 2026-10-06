@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   captureRelayDisplayFrame,
@@ -11,6 +11,7 @@ import {
   shouldPersistRelayFlushCursor,
   shouldYieldBeforeRelayDisplayFlush,
   shouldYieldRelayDisplayFrame,
+  yieldRelayDisplayFrame,
 } from './remote-events'
 
 const event = {
@@ -114,6 +115,43 @@ describe('shouldYieldBeforeRelayDisplayFlush', () => {
   it('yields before a reconnect dump so cached nav can take a tap', () => {
     expect(shouldYieldBeforeRelayDisplayFlush(2)).toBe(true)
   })
+})
+
+it('lets relay recovery continue when a background browser suspends animation frames', async () => {
+  vi.useFakeTimers()
+  vi.stubGlobal('requestAnimationFrame', vi.fn(() => 7))
+  const cancel = vi.fn()
+  vi.stubGlobal('cancelAnimationFrame', cancel)
+  try {
+    let finished = false
+    const yielding = yieldRelayDisplayFrame().then(() => { finished = true })
+    await vi.advanceTimersByTimeAsync(100)
+    expect(finished).toBe(true)
+    await yielding
+    expect(cancel).toHaveBeenCalledWith(7)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  }
+})
+
+it('keeps normal frame pacing without leaving its fallback timer behind', async () => {
+  vi.useFakeTimers()
+  let paint: FrameRequestCallback | undefined
+  vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+    paint = callback
+    return 7
+  }))
+  try {
+    const yielding = yieldRelayDisplayFrame()
+    paint!(16)
+    await yielding
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  }
 })
 
 describe('relayReplayStillPending', () => {

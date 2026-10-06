@@ -57,9 +57,16 @@ FalconDeck currently works with:
 - [Pi](https://github.com/badlogic/pi-mono)
 - [Grok](https://x.ai)
 - [Cursor](https://cursor.com)
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) through native ACP
 - Other tools that support the Agent Client Protocol (ACP)
 
 Codex, Claude Code, and Antigravity have direct integrations. OpenCode can use its native service or ACP, while Pi, Grok, Cursor, and other compatible agents connect through ACP. Support varies with the features each agent exposes.
+
+Hermes is qualified at source revision `1d6b278` for streaming, native session
+recovery, file-edit approvals, cancellation and vision prompts across the Mac,
+paired iOS and browser clients. Older Hermes 0.14.0 builds miss live tool
+completion events. See [setup and tested limits](docs/HERMES-ACP-QUALIFICATION.md);
+FalconDeck preserves the existing Hermes profile and does not upgrade it automatically.
 
 ## What you can do
 

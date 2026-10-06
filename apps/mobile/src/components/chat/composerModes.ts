@@ -1,4 +1,14 @@
 import type { OptionSheetItem } from '@/components/ui'
+import type { CollaborationModeSummary } from '@falcondeck/client-core'
+
+export function collaborationModeItems(modes: readonly CollaborationModeSummary[]): OptionSheetItem[] {
+  return modes.map((mode) => ({ value: mode.id, label: mode.label }))
+}
+
+export function collaborationModeLabel(selected: string | null, modes: readonly CollaborationModeSummary[]): string {
+  return (modes.find((mode) => mode.id === selected) ??
+    modes.find((mode) => mode.mode === 'default') ?? modes[0])?.label ?? 'Mode'
+}
 
 /** Labels are copied verbatim from the desktop composer so the two clients
     name the same setting the same way. */

@@ -180,6 +180,7 @@ export function useSessionActions() {
           workspace_id: workspace.id,
           provider,
           model_id: ui.selectedModel,
+          collaboration_mode_id: ui.selectedCollaborationMode,
           approval_policy: approvalPolicyForProvider(
             provider,
             ui.selectedPermissionMode,

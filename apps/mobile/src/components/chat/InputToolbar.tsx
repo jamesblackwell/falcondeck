@@ -287,12 +287,14 @@ export const InputToolbar = memo(function InputToolbar({
           />
         ) : null}
 
-        <Chip
-          label={currentEffortLabel}
-          accessibilityLabel="Reasoning effort"
-          disabled={disabled || modelsLoading}
-          onPress={openEffortSheet}
-        />
+        {effortOptions.length > 0 ? (
+          <Chip
+            label={currentEffortLabel}
+            accessibilityLabel="Reasoning effort"
+            disabled={disabled || modelsLoading}
+            onPress={openEffortSheet}
+          />
+        ) : null}
 
         {/* A press-toggle, not a sheet: fast mode is boolean, and the chip's
             fill is its state. Hidden (not greyed) when the model has one

@@ -1,6 +1,6 @@
 # Hermes ACP qualification
 
-Recorded on 2026-10-06 for Phases 0–3 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. Historical qualification is followed by runtime, interaction, native-history, and connector results. Full cross-client release qualification remains in Phase 4.
+Recorded on 2026-10-06 for Phases 0–4 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. Historical qualification is followed by runtime, interaction, native-history, connector, and cross-client results.
 
 ## Baselines and configuration
 
@@ -185,8 +185,66 @@ cargo clippy -p falcondeck-daemon --lib
 
 All focused checks pass: 114 ACP tests, 29 connector tests, 9 lifecycle tests, 2 bridge tests, 13 persistence tests, and 8 conformance tests. Clippy completes with existing warnings. The ACP suite includes seven new production-daemon history/identity regressions using [`hermes_history_agent.mjs`](../crates/falcondeck-daemon/tests/fixtures/hermes_history_agent.mjs), plus the strict runtime reload regression. Its native store is a test fixture outside FalconDeck's state file; production history ownership remains unchanged.
 
+## Phase 4 client and release acceptance results
+
+The installed source was checked again: clean `5a3317693c6ddd84834c4684eb6929ade20f0962`, version 0.14.0. **No installed upgrade was performed.** Qualification used the same supported source `1d6b2786e2b2de70a967c66b6a14e2b83bab30e7`, SDK 0.9.0 / protocol 1, and session model `openai-codex:gpt-5.6-luna`. Only the disposable checkout's managed dependencies were synchronized with its `acp` and `mcp` extras. The private profile copied existing authentication/configuration; its personal MCP servers were disabled only in that copy. Existing Hermes `.env`, `config.yaml`, FalconDeck provider configuration, and the installed checkout were preserved. The user's native session database was neither read directly nor patched.
+
+An isolated daemon/state path, local file-backed relay, test project, temporary Mac app, dedicated paired iOS simulator, and separate browser exercised the real clients. The browser used a same-origin local relay proxy to respect its existing production CSP; production CSP and hosting defaults were not changed. These are development acceptance checks, not an App Store or signed desktop release.
+
+### Demonstrated blockers and fixes
+
+- Mobile had no native session-mode selector and offered a reasoning chip even when Hermes advertised no reasoning levels. Its existing option sheet now uses shared catalog labels and opaque IDs for native modes, carries the choice through `thread.start` / `thread.update`, and clears it between conversations. Models with no reasoning inventory hide that chip. No Hermes-only UI branch was added.
+- Hermes supplies the proposed file diff inside `session/request_permission`; its opening tool event has no diff. The runtime now projects that standard ACP content before the approval banner, supplies the existing request path, and remembers diffs through status-only completion/denial updates. The same file-change item settles rather than leaving a running diff behind.
+- A paired phone's exact `approval_option` response was rejected by the shared remote parameter parser despite being valid in the core protocol. The parser now accepts the existing variant, validates a nonblank ID, and preserves it verbatim. Both direct remote RPC and browser queued actions use this parser; native option validation still runs at the request owner.
+- Mobile showed Send while waiting for permission. The composer now treats `waiting_for_input` as interruptible without showing a thinking indicator. Remote web already rendered Stop, but its handler returned early for that status. Its guard now matches desktop and the composer. Live cancellation on both paired clients clears the request and leaves the proposed file absent.
+- A background browser stayed Connected with no projects after reconnect while successful snapshot RPCs kept retrying. Relay flushing awaited a paint callback indefinitely and therefore held its flush lock. The shared display yield now retains normal frame pacing with a bounded timer fallback and cancels the stalled frame. The stalled-frame regression failed before the fix; the same background browser recovered its project and permission afterward. Browsers can suspend those callbacks in background tabs, as described by [MDN](https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame).
+
+### Live and deterministic evidence
+
+| Case | Result |
+| --- | --- |
+| Current-source conformance, `--json --live --restart --timeout-seconds 90` | All exercised checks pass: 53 models, three edit modes, marker streaming, complete read-tool lifecycle, cancellation, same-process load and restart with 11 replay updates each; no unknown/unhandled updates |
+| Mac desktop | Real Hermes thread, model catalog/selection, native edit-mode changes, streaming, pending request/path, completed/failed file diffs and interruption receipts render through the existing shared UI |
+| Paired iOS | Real model and native edit-mode selection; exact Allow edit creates the expected file; Stop generating cancels a pending edit with no file; subsequent sends remain usable |
+| Paired browser | Real model/mode selection, exact queued Allow edit creates the expected file, and queued Stop generating cancels a waiting edit; transcript/diff/receipt updates arrive through encrypted relay traffic |
+| Full daemon restart | Paired phone loads the same saved native ACP handle, sends a continuation, reads the previously approved file and receives `HERMES_RESTART_OK`; no new native session substitutes for it |
+| Replay pruning with a pending permission | Phone closes before the prompt. Relay retention is reduced to three updates; actual lost sequence 232 advances beyond the phone's last possible cursor 218. On reopening, `sync.index` and `thread.detail` recover the pending choice and diff. Phone approves the exact choice; disk contains `HERMES_PRUNED_APPROVAL` and the request clears |
+| Vision and attachment display | A controlled PNG with a red square and blue circle goes through the real daemon/ACP image input. The working model identifies both correctly; paired phone/browser show the attachment and answer. This is not a camera/photo-picker upload test |
+| Usage and native replay limits | Real `thread-token-usage` projection carries emitted totals/context size. After full daemon reload, Hermes replays the image as `[screenshot]` text and does not reproduce every live diff/approval receipt; native history remains authoritative |
+| Compatibility | Recorded shared projection tolerates additive fields, preserves native/opaque identities, retains older decision-only approvals and blocks unsupported image sends with actionable fallback text. Existing Codex/Claude composer/settings tests pass |
+
+[`client-core Hermes fixture`](../packages/client-core/src/test-fixtures/hermes.json) is a bounded live daemon projection with normalized identities, paths, timestamps and account data. The ACP executable fixture now replays the recorded permission diff and status-only resolution through production runtime/event ingestion and the actual remote dispatcher. Paired-client regressions use real encryption and production recovery/action code, faking only their network boundary. Raw credentials, transcripts, pairing material and test profiles remain private.
+
+Phase 4 focused checks:
+
+```sh
+cargo test -p falcondeck-daemon --lib acp
+cargo test -p falcondeck-daemon --lib connectors::tests
+cargo test -p falcondeck-daemon --lib runtime_health::tests
+cargo test -p falcondeck-daemon --lib interactive_response_tests
+cargo test -p falcondeck-daemon --lib remote_bridge::tests
+cargo test -p falcondeck-daemon --lib agent_binary::tests
+cargo test -p falcondeck-daemon --lib harness_manager::tests
+cargo test -p falcondeck-daemon --test acp_conformance
+cargo test -p falcondeck-relay --test relay_api replay
+cargo check -p falcondeck-daemon --lib
+cargo clippy -p falcondeck-daemon --lib
+npm run test --workspace @falcondeck/client-core -- src/hermes.test.ts src/approval-options.test.ts src/normalization.test.ts src/collaboration.test.ts src/remote-session.test.ts src/remote-events.test.ts
+npm run test --workspace @falcondeck/mobile -- src/components/chat/hermes.test.tsx src/hooks/hermes-actions.test.tsx src/hooks/useRelayConnection.recovery.test.tsx src/hooks/useSessionActions.test.ts src/components/chat/ComposerModelSheet.test.tsx src/components/chat/behavior.test.tsx src/components/chat/components.test.tsx
+npm run test --workspace falcondeck-desktop -- src/components/settings/AgentsPanel.test.tsx src/components/InteractiveRequest.test.tsx src/components/PromptInput.test.tsx src/hooks/useDaemonConnection.test.ts
+npm run test --workspace falcondeck-remote-web -- src/App.test.tsx
+npm run test --workspace @falcondeck/chat-ui -- src/components/interactive-request-card.test.tsx
+npm run typecheck --workspace @falcondeck/client-core
+npm run typecheck --workspace @falcondeck/chat-ui
+npm run typecheck --workspace @falcondeck/mobile
+npm run typecheck --workspace falcondeck-desktop
+npm run typecheck --workspace falcondeck-remote-web
+```
+
+Focused Rust checks pass: 115 ACP, 29 connector, 9 lifecycle, 2 response-parser, 22 remote-dispatch, 9 binary-detection, 27 harness-manager, 8 conformance and 5 replay tests. Clippy completes with existing warnings. Client checks pass: 105 shared-client, 164 mobile, 106 desktop, 7 remote-web and 3 shared request-card tests, plus all five typechecks. An existing mobile extension-hydration reconnect test failed once in a concurrent run; its isolated rerun and repeated combined run pass. The desktop prompt test emits an existing React `act` warning. No unrelated test or adapter refactor was included.
+
 ## Remaining qualification limits
 
-Phase 4 must verify relay reconnect/pruning with pending approvals and real desktop/mobile/remote interaction flows. Optional native session import is deferred. Image block preservation is covered by a production-content test; model image understanding is not qualified. Delegation cancellation was not exercised by the terminal cancellation test.
+Optional native session import, native gateway controls, managed upgrades, HTTP/SSE MCP and a Hermes-native skills picker are deferred. Vision is qualified for the selected model/input path; native camera/photo-picker uploads and reconstruction of original image bytes/diffs from Hermes replay are not. Delegation cancellation was not exercised by the terminal or pending-edit cancellation tests.
 
 Executor failure paths without the verified stderr marker still need an upstream explicit JSON-RPC failure or a separately demonstrated adapter fix. Serialization prevents concurrent provider-error attribution within a Hermes runtime; the HTTP 400 qualification does not establish that all Hermes executor failures are covered. Hermes edit modes remain file-edit policies, not filesystem sandboxes or unrestricted shell modes.

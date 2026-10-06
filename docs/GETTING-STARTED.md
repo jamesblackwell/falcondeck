@@ -19,6 +19,26 @@ FalconDeck and its hosted relay are free. You can use the Mac app on its own.
 
 Your project stays in its existing folder. You can keep using your editor alongside FalconDeck.
 
+## Connect Hermes
+
+Configure your existing Hermes model/provider in a terminal with `hermes model`,
+then choose **Settings → Agents → Hermes** and use `hermes acp`. If Hermes is
+already configured in FalconDeck, keep its launcher and `HERMES_HOME`. Check
+`hermes acp --version` and the source revision before deciding to update;
+FalconDeck does not run an upgrade over an existing installation.
+
+Source revision `1d6b278` is qualified; the older 0.14.0 baseline misses live
+tool completion events. Choose a model your account can actually run: an
+advertised model may still be rejected by its provider. Model choices in
+FalconDeck apply to the session without changing Hermes' saved default.
+
+Choose **Ask before edits** for native edit approvals. On mobile, open
+**Add to prompt → Mode**. Use **Permissions → Ask to approve** when you want
+requests surfaced; **Always approve** answers them on your behalf. The agent
+keeps its native sessions, and paired devices can approve edits or stop an
+active turn, including one waiting for permission. Images require a working
+vision-capable model. See [qualification and limits](HERMES-ACP-QUALIFICATION.md).
+
 ## Connect your iPhone or iPad
 
 1. [Install the free iOS app](https://apps.apple.com/app/falcondeck/id6760899257).

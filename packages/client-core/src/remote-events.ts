@@ -63,7 +63,19 @@ export function shouldYieldBeforeRelayDisplayFlush(batchLength: number) {
 export function yieldRelayDisplayFrame(): Promise<void> {
   return new Promise((resolve) => {
     if (typeof globalThis.requestAnimationFrame === 'function') {
-      globalThis.requestAnimationFrame(() => resolve())
+      // Background browsers can suspend paint callbacks while RPCs still run.
+      // Recovery must release its flush lock even without a visible paint.
+      let frame: number | null = null
+      const fallback = setTimeout(() => {
+        if (frame !== null && typeof globalThis.cancelAnimationFrame === 'function') {
+          globalThis.cancelAnimationFrame(frame)
+        }
+        resolve()
+      }, 50)
+      frame = globalThis.requestAnimationFrame(() => {
+        clearTimeout(fallback)
+        resolve()
+      })
       return
     }
     setTimeout(resolve, 0)

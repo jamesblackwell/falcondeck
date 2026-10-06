@@ -1,4 +1,8 @@
 import { createInterface } from 'node:readline'
+import { readFileSync } from 'node:fs'
+
+const recorded = JSON.parse(readFileSync(new URL('./hermes_acp.json', import.meta.url)))
+const diffPermissions = new Set()
 
 const sessions = new Map()
 const prompts = new Map()
@@ -27,6 +31,10 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', (line)
     const sessionId = permissions.get(m.id)
     const promptId = prompts.get(sessionId)
     if (promptId) {
+      if (diffPermissions.delete(sessionId)) {
+        update(sessionId, { sessionUpdate: 'tool_call_update', toolCallId: 'toolCallId-6',
+          status: m.result?.outcome?.optionId === 'allow_once' ? 'completed' : 'failed' })
+      }
       prompts.delete(sessionId)
       result(promptId, { stopReason: 'end_turn' })
     }
@@ -62,7 +70,14 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', (line)
   } else if (m.method === 'session/prompt') {
     promptCount++
     const text = m.params.prompt.find((b) => b.type === 'text')?.text ?? ''
-    if (text === 'wait' || text === 'permission' || text === 'timeout' || text === 'disconnect') {
+    if (text === 'diff-permission') {
+      prompts.set(sessionId, m.id)
+      diffPermissions.add(sessionId)
+      const id = `permission:${sessionId}`
+      permissions.set(id, sessionId)
+      update(sessionId, { sessionUpdate: 'tool_call', toolCallId: 'toolCallId-6', kind: 'edit', title: 'write_file' })
+      send({ ...recorded.permission, id, params: { ...recorded.permission.params, sessionId } })
+    } else if (text === 'wait' || text === 'permission' || text === 'timeout' || text === 'disconnect') {
       prompts.set(sessionId, m.id)
       update(sessionId, { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'STARTED' } })
       if (text !== 'wait') {

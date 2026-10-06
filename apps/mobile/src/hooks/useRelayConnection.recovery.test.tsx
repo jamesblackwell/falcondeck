@@ -9,6 +9,7 @@ import { assistantMessage, snapshot, snapshotEvent, threadDetail } from '@/test/
 import { cleanup, renderComponent } from '@/test/render'
 import { restoreTestRelaySession } from '@/test/relay-session'
 import { useRelayConnection } from './useRelayConnection'
+import hermes from '../../../../packages/client-core/src/test-fixtures/hermes.json'
 
 // Only the network boundary is fake. RPC encryption, signed bootstrap
 // verification, persistence, sync retry and the hook itself are production code.
@@ -78,6 +79,47 @@ async function advance(ms: number) {
 async function waitFor(assertion: () => void) {
   await act(async () => { await vi.waitFor(assertion) })
 }
+
+it('recovers a pending Hermes approval from the daemon after replay is pruned, then encrypts its exact choice', async () => {
+  const { socket, dataKey } = await connect(new Uint8Array(32).fill(42))
+  const base = normalizeDaemonSnapshot({ ...snapshot(),
+    workspaces: [{ ...snapshot().workspaces[0], id: 'hermes-workspace', default_provider: 'hermes', agents: [hermes.agent] }],
+    threads: [{ ...hermes.thread, status: 'idle' }], interactive_requests: [],
+  })
+  const presence = { session_id: 'session', daemon_connected: true, daemon_rpc_ready: true, last_seen_at: null }
+  const calls = (method: string) => socket.sent.filter((message): message is Extract<RelayClientMessage, { type: 'rpc-call' }> => message.type === 'rpc-call' && message.method === method)
+  const respond = async (method: string, result: unknown) => {
+    await waitFor(() => expect(calls(method).length).toBeGreaterThan(0))
+    socket.receive({ type: 'rpc-result', request_id: calls(method).at(-1)!.request_id, ok: true, error: null, result: await encryptJson(dataKey, result) })
+  }
+  const index = (token: string, recovered: boolean) => ({ token,
+    snapshot: recovered ? { ...base, threads: [hermes.thread], interactive_requests: [hermes.request] } : base,
+    agent_catalogs: [], model_catalogs: [[]], workspace_agents: {}, workspace_models: {}, counts: {},
+  })
+  socket.receive({ type: 'sync', updates: [], next_seq: 11, history_truncated: false, presence })
+  await respond('sync.index', index('before', false))
+  await waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
+  act(() => useSessionStore.getState().selectThread('hermes-workspace', 'hermes-thread'))
+  socket.receive({ type: 'sync', updates: [], next_seq: 40, history_truncated: true, presence })
+  await waitFor(() => expect(calls('sync.index')).toHaveLength(2))
+  await respond('sync.index', index('after', true))
+  await waitFor(() => expect(useSessionStore.getState().snapshot?.interactive_requests[0]?.request_id).toBe('hermes-permission'))
+  await respond('thread.detail', { ...threadDetail(), workspace_id: 'hermes-workspace', thread: hermes.thread, items: [hermes.diff] })
+  await waitFor(() => expect(useSessionStore.getState().threadItems['hermes-thread']?.[0]?.kind).toBe('file_change'))
+  const request = useSessionStore.getState().snapshot!.interactive_requests[0]!
+  expect(request.approval_options?.map(option => option.option_id)).toEqual(['allow_once', 'deny'])
+  expect(useSessionStore.getState().selectedThreadId).toBe('hermes-thread')
+  const answering = useRelayStore.getState()._callRpc('interactive.respond', {
+    workspace_id: request.workspace_id, request_id: request.request_id,
+    response: { kind: 'approval_option', option_id: 'allow_once' },
+  })
+  await waitFor(() => expect(calls('interactive.respond')).toHaveLength(1))
+  expect(await decryptJson(dataKey, calls('interactive.respond')[0]!.params)).toMatchObject({
+    request_id: 'hermes-permission', response: { kind: 'approval_option', option_id: 'allow_once' },
+  })
+  await respond('interactive.respond', { ok: true })
+  await answering
+})
 
 it.each(['snapshot-invalidated', 'history-truncated'] as const)(
   'repairs the open transcript after %s even though the socket and selection stay healthy',
