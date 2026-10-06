@@ -2,18 +2,15 @@
   "packages": [
     {
       "path": "official/thread-tags",
-      "defaultEnabled": true
+      "defaultEnabled": false
     },
     {
       "path": "official/notes",
-      "defaultEnabled": true
+      "defaultEnabled": false
     },
     {
       "path": "official/follow-up-suggestions",
-      "defaultEnabled": true,
-      "defaultGrantedPermissions": [
-        "agent-tools:register"
-      ]
+      "defaultEnabled": false
     }
   ]
 }

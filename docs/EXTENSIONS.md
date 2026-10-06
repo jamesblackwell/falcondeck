@@ -13,8 +13,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 ### Implemented baseline
 
-- bundled catalog and manifest discovery, with Kanban and Notes enabled
-  by default;
+- bundled catalog and manifest discovery, with all official extensions disabled
+  by default on fresh installations;
 - checked-in manifest schema and machine-readable validation diagnostics;
 - daemon-owned enablement, namespaced JSON storage, bounded view projections,
   generic action routing, snapshot fields, sequenced events, HTTP, and relay RPC;
@@ -38,7 +38,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   subscriptions through independently supervised per-extension queues;
 - daemon-owned, denied-by-default `threads:read` grants, summary-only thread
   reduction, local HTTP and relay RPC mutation, and desktop grant controls;
-- the bundled, enabled-by-default Notes panel, using private storage, a
+- the bundled Notes panel, using private storage, a
   declared action, and a trusted React editor — a note list beside a Markdown
   editor — on desktop and remote web;
 - optional host-owned panel icons from a bounded Lucide name allowlist,
@@ -54,8 +54,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   of 1–5 next actions, retired by the daemon at every turn-start boundary,
   derived in `packages/client-core`, and rendered as one compact pill above the
   composer in desktop, remote web, and mobile;
-- the bundled, enabled-by-default Follow-up suggestions extension, granted by
-  catalog policy on first discovery;
+- the bundled Follow-up suggestions extension, enabled and granted explicitly
+  by the user;
 - generic extension-owned Automations through `automations:manage-owned`:
   owner-scoped projections and mutations reuse Agent Control validation,
   persistence, scheduling, dispatch, and run history without exposing another
@@ -202,15 +202,17 @@ extension cannot declare itself trusted or default-enabled in its manifest.
 
 Current policy:
 
-- `falcondeck.thread-tags`: bundled and enabled by default.
-- `falcondeck.notes`: bundled and enabled by default as a personal Markdown
+- `falcondeck.thread-tags`: bundled and disabled by default.
+- `falcondeck.notes`: bundled and disabled by default as a personal Markdown
   notes panel. It requests no permissions. It replaced `falcondeck.scratch-pad`
   in 0.3.0; the daemon moves that id's persisted state across on restore.
-- `falcondeck.follow-up-suggestions`: bundled and enabled by default, and the
-  first package to use a catalog `defaultGrantedPermissions` entry. Its
-  `agent-tools:register` grant is applied once, on first discovery; afterwards
-  the daemon-owned grant set is the only authority, so a revoked permission is
-  never silently re-granted by a later restart or upgrade.
+- `falcondeck.follow-up-suggestions`: bundled and disabled by default. Its
+  `agent-tools:register` permission requires explicit approval when enabling it.
+
+Fresh installations have no enabled extensions or permission grants. Persisted
+enablement and grants from existing installations survive catalog default
+changes; no upgrade silently disables an extension or re-grants a revoked
+permission.
 
 Mini Zen was an unfinished proof extension and is no longer bundled. Upgrades
 remove its managed package files and retired enablement, grants, storage, and
@@ -219,7 +221,7 @@ historical implementation notes below describe that prototype.
 
 `defaultGrantedPermissions` is distribution policy for bundled official
 packages. A manifest cannot claim it, and it never widens what the manifest
-declared.
+declared. No current bundled package uses it.
 
 ## 5. Manifest contract
 
@@ -691,10 +693,9 @@ panel or drawer and marks the presentation as `detail`, so the extension can
 show the complete artifact without owning window layout or navigation. This is
 generic extension infrastructure rather than a host feature tied to one package.
 
-Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
-official extensions stay within baseline capabilities unless the catalog grants
-them a named permission as distribution policy — today only
-`falcondeck.follow-up-suggestions` and only `agent-tools:register`.
+Bundled means distributed by FalconDeck, not unrestricted. All current official
+extensions require explicit enablement, and their declared permissions require
+explicit approval.
 
 ## 11. Installation and enablement
 
@@ -707,6 +708,12 @@ Settings shows source, version, status, requested permissions, current grants,
 grant/revoke controls, enable/disable control, and diagnostics. Disabling
 retains data and grants. Data-removal controls remain planned; uninstalling code
 and deleting data are separate operations.
+
+On desktop, clicking Enable prompts for any declared permissions that have not
+already been granted. Allow and enable saves those grants before activation;
+Cancel leaves the extension disabled. A failed grant keeps it disabled and
+shows the error in the prompt. Extensions with no missing permissions enable
+directly. Existing grants remain editable through the grant/revoke controls.
 
 Enablement is daemon-scoped initially so all paired clients see one coherent
 feature set. Per-workspace enablement may come later without changing packages.
@@ -747,7 +754,8 @@ Canonical starter prompt:
 
 ## 13. First official extension: Kanban
 
-Kanban is bundled and enabled by default. Its durable package id stays
+Kanban is bundled and disabled by default. Enabling it requests thread-summary
+access before the board becomes available. Its durable package id stays
 `falcondeck.thread-tags` so existing installations keep their data. A thread
 with no stage produces no UI clutter. It is both useful and the acceptance
 test for the architecture.
@@ -887,8 +895,8 @@ execution.
 
 ### Phase 4 — Kanban vertical slice
 
-Deliver section 13 using only public SDK facets, enabled by default in the
-official catalog.
+Deliver section 13 using only public SDK facets, bundled in the official
+catalog and enabled explicitly by the user.
 
 Gate:
 

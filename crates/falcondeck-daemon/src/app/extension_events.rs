@@ -360,6 +360,11 @@ mod tests {
             .await
             .expect("extension registry should restore");
 
+        assert!(app.inner.extension_event_queues.lock().unwrap().is_empty());
+        app.update_extension("falcondeck.thread-tags", true)
+            .await
+            .expect("Kanban should enable explicitly");
+
         {
             let queues = app
                 .inner

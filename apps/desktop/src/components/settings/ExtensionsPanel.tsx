@@ -11,6 +11,8 @@ import {
   SettingsPageHeader,
 } from "@falcondeck/ui";
 
+import { ExtensionEnableDialog } from "./ExtensionEnableDialog";
+
 function permissionPresentation(permission: string) {
   if (permission === "threads:read") {
     return {
@@ -57,6 +59,11 @@ export function ExtensionsPanel({
 }) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [enableRequest, setEnableRequest] = useState<{
+    id: string;
+    name: string;
+    permissions: string[];
+  } | null>(null);
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matchingExtensions = useMemo(
@@ -113,6 +120,42 @@ export function ExtensionsPanel({
     }
   };
 
+  const requestToggle = (extension: ExtensionSnapshot["catalog"][number]) => {
+    const missingPermissions = extension.permissions.filter(
+      (permission) => !extension.granted_permissions?.includes(permission),
+    );
+    if (!extension.enabled && missingPermissions.length > 0) {
+      setError(null);
+      setEnableRequest({
+        id: extension.id,
+        name: extension.name,
+        permissions: missingPermissions,
+      });
+      return;
+    }
+    void update(extension.id, !extension.enabled);
+  };
+
+  const allowAndEnable = async () => {
+    if (!enableRequest) return;
+    setPendingKey(`extension:${enableRequest.id}`);
+    setError(null);
+    try {
+      // Approve only the capabilities shown in the prompt, before activation.
+      for (const permission of enableRequest.permissions) {
+        await onSetPermission(enableRequest.id, permission, true);
+      }
+      await onSetEnabled(enableRequest.id, true);
+      setEnableRequest(null);
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Failed to enable extension",
+      );
+    } finally {
+      setPendingKey(null);
+    }
+  };
+
   return (
     <SettingsPage className={chrome === "host" ? "pb-0" : undefined}>
       {chrome === "settings" ? (
@@ -129,7 +172,7 @@ export function ExtensionsPanel({
         onChange={(event) => setQuery(event.target.value)}
         placeholder="Search installed extensions"
       />
-      {error ? (
+      {error && !enableRequest ? (
         <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">
           {error}
         </p>
@@ -262,9 +305,7 @@ export function ExtensionsPanel({
                     size="sm"
                     variant="secondary"
                     disabled={pendingKey !== null}
-                    onClick={() =>
-                      void update(extension.id, !extension.enabled)
-                    }
+                    onClick={() => requestToggle(extension)}
                   >
                     {pendingKey === `extension:${extension.id}` ? (
                       <ActivityDiamond size="sm" />
@@ -290,6 +331,22 @@ export function ExtensionsPanel({
           </p>
         ) : null}
       </div>
+      {enableRequest ? (
+        <ExtensionEnableDialog
+          name={enableRequest.name}
+          permissions={enableRequest.permissions.map((id) => ({
+            id,
+            ...permissionPresentation(id),
+          }))}
+          busy={pendingKey !== null}
+          error={error}
+          onCancel={() => {
+            setEnableRequest(null);
+            setError(null);
+          }}
+          onAllow={() => void allowAndEnable()}
+        />
+      ) : null}
     </SettingsPage>
   );
 }

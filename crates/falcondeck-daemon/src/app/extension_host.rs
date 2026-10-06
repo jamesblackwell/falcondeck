@@ -967,6 +967,9 @@ export default defineExtension({
         app.restore_local_state()
             .await
             .expect("extension registry should restore");
+        app.update_extension("falcondeck.thread-tags", true)
+            .await
+            .expect("Kanban should enable explicitly");
 
         let assign = |thread_id: &str, stage_id: &str| {
             app.invoke_extension_action(

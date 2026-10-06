@@ -1,10 +1,116 @@
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ExtensionSnapshot } from "@falcondeck/client-core";
 
 import { ExtensionsPanel } from "./ExtensionsPanel";
+
+function setupEnablement(permissions = ["threads:read"], granted: string[] = []) {
+  const onSetEnabled = vi.fn().mockResolvedValue(undefined);
+  const onSetPermission = vi.fn().mockResolvedValue(undefined);
+  render(
+    <ExtensionsPanel
+      extensions={{
+        catalog: [{
+          id: "example.reader", name: "Summary reader", version: "1.0.0",
+          source: "bundled", bundled: true, enabled: false, status: "disabled",
+          contributes: { threadMenuActions: [], threadDecorations: [], sidebarFilters: [] },
+          permissions, granted_permissions: granted,
+        }],
+        views: [],
+      }}
+      onSetEnabled={onSetEnabled}
+      onSetPermission={onSetPermission}
+    />,
+  );
+  const enable = screen.getByRole("button", { name: "Enable" });
+  enable.focus();
+  fireEvent.click(enable);
+  return { onSetEnabled, onSetPermission };
+}
+
+describe("extension enablement", () => {
+  it("requests consent and grants missing permissions before enabling", async () => {
+    const { onSetEnabled, onSetPermission } = setupEnablement(
+      ["threads:read", "agent-tools:register"], ["agent-tools:register"],
+    );
+    const dialog = screen.getByRole("dialog", { name: "Enable Summary reader?" });
+    expect(within(dialog).getByText("Read thread summaries")).toBeVisible();
+    expect(within(dialog).queryByText("Offer tools to agents")).not.toBeInTheDocument();
+    expect(onSetPermission).not.toHaveBeenCalled();
+    expect(onSetEnabled).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow and enable" }));
+    await waitFor(() => expect(onSetEnabled).toHaveBeenCalledWith("example.reader", true));
+    expect(onSetPermission).toHaveBeenCalledExactlyOnceWith("example.reader", "threads:read", true);
+    expect(onSetPermission.mock.invocationCallOrder[0]).toBeLessThan(onSetEnabled.mock.invocationCallOrder[0]!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("leaves enablement and grants unchanged when cancelled", () => {
+    const { onSetEnabled, onSetPermission } = setupEnablement();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onSetPermission).not.toHaveBeenCalled();
+    expect(onSetEnabled).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Enable" })).toHaveFocus();
+  });
+
+  it("keeps keyboard focus in the prompt and dismisses with Escape", () => {
+    const { onSetEnabled, onSetPermission } = setupEnablement();
+    const dialog = screen.getByRole("dialog");
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const allow = within(dialog).getByRole("button", { name: "Allow and enable" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Tab", shiftKey: true });
+    expect(allow).toHaveFocus();
+    fireEvent.keyDown(allow, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onSetEnabled).not.toHaveBeenCalled();
+    expect(onSetPermission).not.toHaveBeenCalled();
+  });
+
+  it("waits for all approved grants before activation and keeps the busy prompt open", async () => {
+    const { onSetEnabled, onSetPermission } = setupEnablement(["threads:read", "agent-tools:register"]);
+    let finishGrant!: () => void;
+    onSetPermission.mockImplementationOnce(() => new Promise<void>((resolve) => { finishGrant = resolve; }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Allow and enable" }));
+    expect(dialog).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(dialog).toBeInTheDocument();
+    expect(onSetEnabled).not.toHaveBeenCalled();
+    expect(onSetPermission).toHaveBeenCalledTimes(1);
+
+    await act(async () => finishGrant());
+    await waitFor(() => expect(onSetEnabled).toHaveBeenCalledWith("example.reader", true));
+    expect(onSetPermission).toHaveBeenNthCalledWith(2, "example.reader", "agent-tools:register", true);
+    expect(onSetPermission.mock.invocationCallOrder[1]).toBeLessThan(onSetEnabled.mock.invocationCallOrder[0]!);
+  });
+
+  it("does not enable an extension when a permission grant fails", async () => {
+    const { onSetEnabled, onSetPermission } = setupEnablement(["threads:read", "agent-tools:register"]);
+    onSetPermission.mockRejectedValueOnce(new Error("Could not save permission"));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Allow and enable" }));
+    expect(await within(screen.getByRole("dialog")).findByRole("alert")).toHaveTextContent("Could not save permission");
+    expect(onSetEnabled).not.toHaveBeenCalled();
+    expect(onSetPermission).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { permissions: [] as string[], granted: [] },
+    { permissions: ["threads:read"], granted: ["threads:read"] },
+  ])("enables directly when no permission approval is needed: $permissions/$granted", async ({ permissions, granted }) => {
+    const { onSetEnabled, onSetPermission } = setupEnablement(permissions, granted);
+    await waitFor(() => expect(onSetEnabled).toHaveBeenCalledWith("example.reader", true));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onSetPermission).not.toHaveBeenCalled();
+  });
+});
 
 describe("ExtensionsPanel compatibility fallback", () => {
   it("filters installed extensions and keeps enabled entries first", () => {

@@ -2032,14 +2032,22 @@ mod tests {
             .expect("bundled catalog should load");
 
         let snapshot = registry.snapshot();
+        assert_eq!(snapshot.catalog.len(), 3);
+        assert!(snapshot.catalog.iter().all(|extension| {
+            !extension.enabled
+                && extension.status == ExtensionStatus::Disabled
+                && extension.granted_permissions.is_empty()
+        }));
+        assert!(registry.enabled_packages().is_empty());
+        assert!(registry.agent_tools().is_empty());
         let kanban = snapshot
             .catalog
             .iter()
             .find(|extension| extension.id == "falcondeck.thread-tags")
             .expect("Kanban should be bundled");
-        assert!(kanban.enabled);
+        assert!(!kanban.enabled);
         assert_eq!(kanban.name, "Kanban");
-        assert_eq!(kanban.status, ExtensionStatus::Active);
+        assert_eq!(kanban.status, ExtensionStatus::Disabled);
         assert_eq!(kanban.contributes.panels.len(), 1);
         assert_eq!(kanban.permissions, [THREADS_READ_PERMISSION]);
 
@@ -2048,9 +2056,9 @@ mod tests {
             .iter()
             .find(|extension| extension.id == "falcondeck.notes")
             .expect("Notes should be bundled");
-        assert!(notes.enabled);
+        assert!(!notes.enabled);
         assert_eq!(notes.name, "Notes");
-        assert_eq!(notes.status, ExtensionStatus::Active);
+        assert_eq!(notes.status, ExtensionStatus::Disabled);
         assert_eq!(notes.contributes.panels.len(), 1);
         assert!(notes.permissions.is_empty());
 
@@ -2349,18 +2357,62 @@ mod tests {
     const FOLLOW_UPS_TOOL: &str = "falcondeck_suggest_follow_ups";
 
     #[tokio::test]
-    async fn bundled_follow_ups_is_enabled_and_granted_on_a_fresh_install() {
+    async fn bundled_follow_ups_requires_enablement_and_explicit_grant() {
         let state_dir = tempfile::tempdir().expect("temporary state directory");
         let state_path = state_dir.path().join("state.json");
         let mut registry = ExtensionRegistry::new(&state_path);
         registry.restore().await.expect("registry should restore");
 
-        assert!(registry.is_enabled(FOLLOW_UPS));
-        assert!(registry.has_grant(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
+        assert!(!registry.is_enabled(FOLLOW_UPS));
+        assert!(!registry.permission_granted(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
+        assert!(registry.agent_tools().is_empty());
+        registry.update_enabled(FOLLOW_UPS, true).await.unwrap();
+        assert!(registry.agent_tools().is_empty());
+        registry
+            .update_permission(FOLLOW_UPS, AGENT_TOOLS_PERMISSION, true)
+            .await
+            .unwrap();
         let tools = registry.agent_tools();
         assert_eq!(tools.len(), 1, "only follow-ups publishes a tool today");
         assert_eq!(tools[0].name, FOLLOW_UPS_TOOL);
         assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_ok());
+    }
+
+    #[tokio::test]
+    async fn existing_enablement_grants_and_storage_survive_new_catalog_defaults() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let state_path = state_dir.path().join("state.json");
+        // State saved by a release that enabled bundled packages by default.
+        tokio::fs::write(
+            state_dir.path().join("extensions-state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "enabled": {
+                    "falcondeck.thread-tags": true,
+                    "falcondeck.notes": false,
+                    "falcondeck.follow-up-suggestions": true
+                },
+                "grants": {
+                    "falcondeck.thread-tags": ["threads:read"],
+                    "falcondeck.follow-up-suggestions": ["agent-tools:register"]
+                },
+                "storage": { "falcondeck.notes": { "saved": "keep my notes" } }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.restore().await.unwrap();
+        assert!(registry.is_enabled("falcondeck.thread-tags"));
+        assert!(registry.has_grant("falcondeck.thread-tags", THREADS_READ_PERMISSION));
+        assert!(!registry.is_enabled(NOTES_ID));
+        assert!(registry.is_enabled(FOLLOW_UPS));
+        assert!(registry.has_grant(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
+        assert_eq!(registry.agent_tools().len(), 1);
+        assert_eq!(
+            registry.persisted.storage[NOTES_ID]["saved"],
+            "keep my notes"
+        );
     }
 
     #[tokio::test]
@@ -2369,6 +2421,12 @@ mod tests {
         let state_path = state_dir.path().join("state.json");
         let mut registry = ExtensionRegistry::new(&state_path);
         registry.restore().await.expect("registry should restore");
+        registry.update_enabled(FOLLOW_UPS, true).await.unwrap();
+        registry
+            .update_permission(FOLLOW_UPS, AGENT_TOOLS_PERMISSION, true)
+            .await
+            .unwrap();
+        assert_eq!(registry.agent_tools().len(), 1);
         registry
             .update_permission(FOLLOW_UPS, AGENT_TOOLS_PERMISSION, false)
             .await
@@ -2377,8 +2435,7 @@ mod tests {
         assert!(registry.agent_tools().is_empty());
         assert!(registry.tool_package(FOLLOW_UPS_TOOL).is_err());
 
-        // Catalog policy applies once, on first discovery. A later restart
-        // must not quietly hand back a permission the user took away.
+        // A later restart must not hand back a permission the user took away.
         let mut restored = ExtensionRegistry::new(&state_path);
         restored.restore().await.expect("revocation should restore");
         assert!(!restored.has_grant(FOLLOW_UPS, AGENT_TOOLS_PERMISSION));
@@ -2390,6 +2447,12 @@ mod tests {
         let state_dir = tempfile::tempdir().expect("temporary state directory");
         let mut registry = ExtensionRegistry::new(&state_dir.path().join("state.json"));
         registry.restore().await.expect("registry should restore");
+        registry.update_enabled(FOLLOW_UPS, true).await.unwrap();
+        registry
+            .update_permission(FOLLOW_UPS, AGENT_TOOLS_PERMISSION, true)
+            .await
+            .unwrap();
+        assert_eq!(registry.agent_tools().len(), 1);
         registry
             .update_enabled(FOLLOW_UPS, false)
             .await

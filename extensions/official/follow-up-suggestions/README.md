@@ -1,6 +1,6 @@
 # Follow-up suggestions
 
-Bundled official extension, enabled by default.
+Bundled official extension, disabled by default on fresh installations.
 
 It publishes one agent tool — `suggest-follow-ups` — through the built-in
 `falcondeck-extensions` MCP bridge, as `falcondeck_suggest_follow_ups`. An
@@ -28,8 +28,8 @@ tells harnesses to call it without waiting to be asked.
 
 ## Permissions
 
-`agent-tools:register` — required to publish tools to agent harnesses. Granted
-by default for this bundled package; revoking it removes the tool from the
+`agent-tools:register` — required to publish tools to agent harnesses. Enabling
+the extension prompts for approval; revoking it removes the tool from the
 bridge's catalogue and makes any in-flight call fail immediately.
 
 ## Disabling it
