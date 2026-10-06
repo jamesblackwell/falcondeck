@@ -8,6 +8,8 @@ import { useDaemonConnection } from './useDaemonConnection'
 const mocks = vi.hoisted(() => ({
   detectApiBaseUrl: vi.fn(),
   snapshot: vi.fn(),
+  initialSnapshot: vi.fn(),
+  autoStreamSnapshot: true,
   remoteStatus: vi.fn(),
   threadDetail: vi.fn(),
   eventHandler: null as ((event: EventEnvelope) => void) | null,
@@ -17,6 +19,8 @@ const mocks = vi.hoisted(() => ({
     onmessage: (() => void) | null
     onerror: (() => void) | null
     onclose: (() => void) | null
+    readyState: number
+    emit: (event: EventEnvelope) => void
   }>,
 }))
 
@@ -40,8 +44,24 @@ vi.mock('@falcondeck/client-core', async (importOriginal) => {
           onmessage: null,
           onerror: null,
           onclose: null,
+          readyState: WebSocket.CONNECTING,
+          emit: onEvent,
         }
         mocks.sockets.push(socket)
+        if (mocks.autoStreamSnapshot) {
+          void Promise.resolve().then(() => {
+            socket.readyState = WebSocket.OPEN
+            const current = mocks.sockets.find(candidate => candidate === socket)!
+            current.onopen?.()
+            onEvent({
+              seq: 0,
+              emitted_at: '2026-08-08T12:00:00Z',
+              workspace_id: null,
+              thread_id: null,
+              event: { type: 'snapshot', snapshot: mocks.initialSnapshot() },
+            })
+          })
+        }
         return socket
       },
     }),
@@ -67,6 +87,15 @@ function daemonSnapshot(status: 'connecting' | 'ready'): DaemonSnapshot {
         provider: 'claude',
         title: 'Restored Claude thread',
         updated_at: '2026-08-08T12:00:00Z',
+        attention: {
+          level: 'none',
+          badge_label: null,
+          unread: false,
+          pending_approval_count: 0,
+          pending_question_count: 0,
+          last_agent_activity_seq: 0,
+          last_read_seq: 0,
+        },
       },
     ],
     interactive_requests: [],
@@ -86,10 +115,94 @@ describe('useDaemonConnection thread restoration', () => {
     window.localStorage.clear()
     mocks.detectApiBaseUrl.mockReset().mockResolvedValue('http://127.0.0.1:1234')
     mocks.snapshot.mockReset().mockResolvedValue(daemonSnapshot('connecting'))
+    mocks.initialSnapshot.mockReset().mockReturnValue(daemonSnapshot('connecting'))
+    mocks.autoStreamSnapshot = true
     mocks.remoteStatus.mockReset().mockResolvedValue({ status: 'inactive' })
     mocks.threadDetail.mockReset().mockResolvedValue(hydratedDetail())
     mocks.eventHandler = null
     mocks.sockets = []
+  })
+
+  it('bootstraps once from the stream snapshot without fetching an HTTP snapshot', async () => {
+    mocks.autoStreamSnapshot = false
+    window.localStorage.setItem('falcondeck.desktop.selection', JSON.stringify({
+      workspaceId: 'workspace-1', threadId: 'thread-1', workspacePath: '/repo',
+    }))
+    const { result } = renderHook(() => useDaemonConnection())
+
+    await waitFor(() => expect(mocks.sockets).toHaveLength(1))
+    expect(mocks.snapshot).not.toHaveBeenCalled()
+    expect(result.current.connectionState).toBe('connecting')
+    expect(result.current.snapshot).toBeNull()
+
+    act(() => {
+      mocks.sockets[0].readyState = WebSocket.OPEN
+      mocks.sockets[0].onopen?.()
+    })
+    expect(result.current.connectionState).toBe('connecting')
+    expect(mocks.threadDetail).not.toHaveBeenCalled()
+
+    act(() => mocks.sockets[0].emit({
+      seq: 0,
+      emitted_at: '2026-08-08T12:00:00Z',
+      workspace_id: null,
+      thread_id: null,
+      event: { type: 'snapshot', snapshot: daemonSnapshot('ready') },
+    }))
+
+    await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+    expect(result.current.snapshot?.workspaces[0].status).toBe('ready')
+    await waitFor(() => expect(result.current.threadDetail?.items).toHaveLength(1))
+    expect(mocks.snapshot).not.toHaveBeenCalled()
+  })
+
+  it('reconnects an open socket that never delivers a snapshot and ignores its late callbacks', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5)
+    mocks.autoStreamSnapshot = false
+    const { result, unmount } = renderHook(() => useDaemonConnection())
+    try {
+      await waitFor(() => expect(mocks.sockets).toHaveLength(1))
+      const abandoned = mocks.sockets[0]
+      const lateClose = abandoned.onclose
+      const lateError = abandoned.onerror
+      act(() => {
+        abandoned.readyState = WebSocket.OPEN
+        abandoned.onopen?.()
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+      expect(abandoned.close).toHaveBeenCalledTimes(1)
+      expect(result.current.connectionState).toBe('error')
+      expect(result.current.snapshot).toBeNull()
+
+      mocks.autoStreamSnapshot = true
+      mocks.initialSnapshot.mockReturnValue(daemonSnapshot('ready'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+      expect(mocks.sockets).toHaveLength(2)
+      expect(result.current.connectionState).toBe('ready')
+
+      const stale = daemonSnapshot('ready')
+      stale.threads[0] = { ...stale.threads[0], title: 'Abandoned socket snapshot' }
+      act(() => {
+        abandoned.emit({
+          seq: 0,
+          emitted_at: '2026-08-08T12:00:00Z',
+          workspace_id: null,
+          thread_id: null,
+          event: { type: 'snapshot', snapshot: stale },
+        })
+        lateClose?.()
+        lateError?.()
+      })
+      expect(result.current.snapshot?.threads[0].title).toBe('Restored Claude thread')
+      expect(result.current.connectionState).toBe('ready')
+      expect(mocks.sockets[1].close).not.toHaveBeenCalled()
+      expect(mocks.snapshot).not.toHaveBeenCalled()
+    } finally {
+      unmount()
+      random.mockRestore()
+      vi.useRealTimers()
+    }
   })
 
   it('opens the local daemon even when remote relay status is slow', async () => {
@@ -182,7 +295,7 @@ describe('useDaemonConnection thread restoration', () => {
   it('re-reads a restored thread until its background replay lands', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
-      mocks.snapshot.mockResolvedValue(daemonSnapshot('ready'))
+      mocks.initialSnapshot.mockReturnValue(daemonSnapshot('ready'))
       const replaying = { ...hydratedDetail(), items: [], is_partial: true }
       mocks.threadDetail
         .mockResolvedValueOnce(replaying)
@@ -316,7 +429,7 @@ describe('useDaemonConnection thread restoration', () => {
     const threads = Array.from({ length: 51 }, (_, index) => ({
       ...base.threads[0], id: `thread-${index + 1}`,
     }))
-    mocks.snapshot.mockResolvedValue({ ...base, threads })
+    mocks.initialSnapshot.mockReturnValue({ ...base, threads })
     mocks.threadDetail.mockImplementation(async (_workspaceId, threadId) => ({
       ...hydratedDetail(), thread: threads.find(thread => thread.id === threadId),
     }))
@@ -367,7 +480,7 @@ describe('useDaemonConnection thread restoration', () => {
     const threads = Array.from({ length: 61 }, (_, index) => ({
       ...base.threads[0], id: `thread-${index + 1}`,
     }))
-    mocks.snapshot.mockResolvedValue({ ...base, threads })
+    mocks.initialSnapshot.mockReturnValue({ ...base, threads })
     const detailFor = (threadId: string): ThreadDetail => ({
       ...hydratedDetail(), thread: threads.find(thread => thread.id === threadId)!,
     })
@@ -532,6 +645,8 @@ describe('useDaemonConnection thread restoration', () => {
     })
     expect(queuedFrame).not.toBeNull()
     expect(queuedFallback).not.toBeNull()
+    const abandonedFrame = queuedFrame
+    const abandonedFallback = queuedFallback
 
     const freshSnapshot = daemonSnapshot('ready')
     freshSnapshot.threads[0] = {
@@ -539,7 +654,7 @@ describe('useDaemonConnection thread restoration', () => {
       status: 'running',
       title: 'Fresh reconnect status',
     }
-    mocks.snapshot.mockResolvedValueOnce(freshSnapshot)
+    mocks.initialSnapshot.mockReturnValueOnce(freshSnapshot)
 
     try {
       act(() => mocks.sockets[0]?.onclose?.())
@@ -556,11 +671,28 @@ describe('useDaemonConnection thread restoration', () => {
       expect(cancelFrame).toHaveBeenCalledWith(91)
       expect(clearTimeoutSpy).toHaveBeenCalledWith(93)
 
-      // Even a host that dispatches an already-cancelled callback cannot
-      // replay the old event because the queue was emptied with the frame.
-      act(() => queuedFrame?.(performance.now()))
-      act(() => queuedFallback?.())
+      // A cancelled callback from the dead connection must not flush a new
+      // connection's batch either, even when the host dispatches it late.
+      act(() => mocks.sockets[1].emit({
+        seq: 5,
+        emitted_at: '2026-08-08T12:00:02Z',
+        workspace_id: 'workspace-1',
+        thread_id: 'thread-1',
+        event: {
+          type: 'thread-updated',
+          thread: {
+            ...freshSnapshot.threads[0],
+            updated_at: '2026-08-08T12:00:02Z',
+            title: 'New connection update',
+          },
+        },
+      }))
+      act(() => abandonedFrame?.(performance.now()))
+      act(() => abandonedFallback?.())
       expect(result.current.snapshot?.threads[0]?.title).toBe('Fresh reconnect status')
+      act(() => queuedFrame?.(performance.now()))
+      expect(result.current.snapshot?.threads[0]?.title).toBe('New connection update')
+      expect(mocks.snapshot).not.toHaveBeenCalled()
     } finally {
       setTimeoutSpy.mockRestore()
       requestFrame.mockRestore()

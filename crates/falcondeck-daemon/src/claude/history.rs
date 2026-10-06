@@ -11,6 +11,186 @@ use super::*;
 
 const SUMMARY_HEAD_BYTES: u64 = 1024 * 1024;
 const SUMMARY_TAIL_BYTES: u64 = 256 * 1024;
+const SUMMARY_CACHE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const SUMMARY_CACHE_MAX_ENTRIES: usize = 4096;
+
+type HistoryVersion = (u64, Option<std::time::SystemTime>);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SourceVersion {
+    history: HistoryVersion,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+impl SourceVersion {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            history: (metadata.len(), metadata.modified().ok()),
+            #[cfg(unix)]
+            identity: {
+                use std::os::unix::fs::MetadataExt;
+                (
+                    metadata.dev(),
+                    metadata.ino(),
+                    metadata.ctime(),
+                    metadata.ctime_nsec(),
+                )
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
+struct NativeSummary {
+    cwd: String,
+    thread: DiscoveredClaudeThread,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct SummarySource {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+struct CachedSummary {
+    version: SourceVersion,
+    summary: Option<NativeSummary>,
+    retained_bytes: usize,
+    last_access: u64,
+}
+
+#[derive(Default)]
+struct SummaryCache {
+    entries: HashMap<SummarySource, CachedSummary>,
+    retained_bytes: usize,
+    next_access: u64,
+}
+
+impl SummaryCache {
+    fn next_access(&mut self) -> u64 {
+        self.next_access = self.next_access.saturating_add(1);
+        self.next_access
+    }
+
+    fn remove(&mut self, source: &SummarySource) {
+        if let Some(entry) = self.entries.remove(source) {
+            self.retained_bytes -= entry.retained_bytes;
+        }
+    }
+
+    fn prune_missing_files(&mut self, root: &Path) {
+        self.entries
+            .retain(|source, _| source.root != root || source.path.is_file());
+        self.retained_bytes = self
+            .entries
+            .values()
+            .map(|entry| entry.retained_bytes)
+            .sum();
+    }
+
+    fn get_thread(
+        &mut self,
+        source: &SummarySource,
+        version: SourceVersion,
+        workspace_path: &str,
+    ) -> Option<Option<DiscoveredClaudeThread>> {
+        let entry = self.entries.get(source)?;
+        if entry.version != version || version.history.1.is_none() {
+            self.remove(source);
+            return None;
+        }
+        let last_access = self.next_access();
+        let entry = self.entries.get_mut(source)?;
+        entry.last_access = last_access;
+        Some(thread_for_workspace(&entry.summary, workspace_path))
+    }
+
+    fn insert(
+        &mut self,
+        source: SummarySource,
+        version: SourceVersion,
+        summary: Option<NativeSummary>,
+    ) {
+        self.remove(&source);
+        let retained_bytes = summary_retained_bytes(&source, &summary);
+        if retained_bytes > SUMMARY_CACHE_MAX_BYTES {
+            return;
+        }
+        while self.entries.len() >= SUMMARY_CACHE_MAX_ENTRIES
+            || self.retained_bytes > SUMMARY_CACHE_MAX_BYTES - retained_bytes
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(source, _)| SummarySource {
+                    root: source.root.clone(),
+                    path: source.path.clone(),
+                })
+            else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+        let last_access = self.next_access();
+        self.retained_bytes += retained_bytes;
+        self.entries.insert(
+            source,
+            CachedSummary {
+                version,
+                summary,
+                retained_bytes,
+                last_access,
+            },
+        );
+    }
+}
+
+// This estimates retained metadata from owned string/path capacities and the
+// entry/key structures, not source-file size or an exact allocator heap limit.
+// Native summaries have no conversation items, plans, diffs or queued turns.
+fn summary_retained_bytes(source: &SummarySource, summary: &Option<NativeSummary>) -> usize {
+    let mut bytes = std::mem::size_of::<SummarySource>()
+        + std::mem::size_of::<CachedSummary>()
+        + source.root.capacity()
+        + source.path.capacity();
+    if let Some(summary) = summary {
+        bytes += summary.cwd.capacity()
+            + summary.thread.history_source.capacity()
+            + summary.thread.summary.id.capacity()
+            + summary.thread.summary.title.capacity()
+            + summary
+                .thread
+                .summary
+                .native_session_id
+                .as_ref()
+                .map_or(0, String::capacity)
+            + summary
+                .thread
+                .summary
+                .last_message_preview
+                .as_ref()
+                .map_or(0, String::capacity);
+    }
+    bytes
+}
+
+static SUMMARY_CACHE: OnceLock<std::sync::Mutex<SummaryCache>> = OnceLock::new();
+
+fn summary_cache() -> &'static std::sync::Mutex<SummaryCache> {
+    SUMMARY_CACHE.get_or_init(|| std::sync::Mutex::new(SummaryCache::default()))
+}
+
+fn thread_for_workspace(
+    summary: &Option<NativeSummary>,
+    workspace_path: &str,
+) -> Option<DiscoveredClaudeThread> {
+    summary.as_ref().and_then(|summary| {
+        // Global fallback visits other projects; do not copy their metadata.
+        (summary.cwd == workspace_path).then(|| summary.thread.clone())
+    })
+}
 
 #[derive(Clone)]
 pub struct DiscoveredClaudeThread {
@@ -33,6 +213,10 @@ pub fn discover_threads(workspace_path: &str) -> Vec<DiscoveredClaudeThread> {
 /// An explicit native root keeps tests and alternate hosts independent of
 /// process-global environment variables.
 pub fn discover_threads_in(root: &Path, workspace_path: &str) -> Vec<DiscoveredClaudeThread> {
+    summary_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .prune_missing_files(root);
     let mut files = Vec::new();
     let workspace_root = root.join(claude_project_dir_name(workspace_path));
     if workspace_root.is_dir() {
@@ -42,7 +226,7 @@ pub fn discover_threads_in(root: &Path, workspace_path: &str) -> Vec<DiscoveredC
     }
     let mut threads = HashMap::<String, DiscoveredClaudeThread>::new();
     for path in files {
-        let Some(thread) = discover_thread_from_file(&path, workspace_path) else {
+        let Some(thread) = discover_thread_from_file(root, &path, workspace_path) else {
             continue;
         };
         let id = thread.summary.id.clone();
@@ -84,22 +268,72 @@ pub fn native_session_source(workspace_path: &str, session_id: &str) -> PathBuf 
     expected
 }
 
-fn discover_thread_from_file(path: &Path, workspace_path: &str) -> Option<DiscoveredClaudeThread> {
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
+fn discover_thread_from_file(
+    root: &Path,
+    path: &Path,
+    workspace_path: &str,
+) -> Option<DiscoveredClaudeThread> {
+    let metadata = fs::metadata(path).ok()?;
+    let version = SourceVersion::from_metadata(&metadata);
+    let source = SummarySource {
+        root: root.to_path_buf(),
+        path: path.to_path_buf(),
+    };
+    // Held through a cold parse: concurrent workspace fallbacks share one
+    // bounded read per file. Callers run discovery on a blocking worker.
+    let mut cache = summary_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(thread) = cache.get_thread(&source, version, workspace_path) {
+        return thread;
+    }
+    let (version, summary) = read_native_summary(path).ok()?;
+    let thread = thread_for_workspace(&summary, workspace_path);
+    cache.insert(source, version, summary);
+    thread
+}
+
+fn read_native_summary(path: &Path) -> std::io::Result<(SourceVersion, Option<NativeSummary>)> {
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
     let modified = metadata.modified().ok();
     let file_updated_at = modified.map(DateTime::<Utc>::from);
-    let windows = summary_windows(&mut file, metadata.len()).ok()?;
+    let windows = summary_windows(&mut file, metadata.len())?;
+    #[cfg(test)]
+    {
+        SUMMARY_SOURCE_PARSES.with(|count| count.set(count.get() + 1));
+        SUMMARY_BYTES_READ.with(|count| {
+            count.set(
+                count.get()
+                    + windows
+                        .iter()
+                        .map(|window| window.bytes.len() as u64)
+                        .sum::<u64>()
+                    + u64::from(windows.len() > 1),
+            );
+        });
+    }
     let mut summary = SummaryMetadata::default();
     for window in &windows {
         summary.visit_window(&window.bytes, window.skip_first_line, window.complete_end);
     }
     summary.finish_messages();
+    let version = SourceVersion::from_metadata(&metadata);
+    Ok((
+        version,
+        finish_native_summary(path, summary, file_updated_at, version.history),
+    ))
+}
+
+fn finish_native_summary(
+    path: &Path,
+    summary: SummaryMetadata<'_>,
+    file_updated_at: Option<DateTime<Utc>>,
+    history_version: HistoryVersion,
+) -> Option<NativeSummary> {
     // Never infer cwd from Claude's sanitized project directory: '-' and '/'
     // collide in that encoding, and a fallback scan visits other workspaces.
-    if summary.cwd.as_deref() != Some(workspace_path) {
-        return None;
-    }
+    let cwd = summary.cwd?;
     let session_id = summary.session_id.or_else(|| {
         path.file_stem()
             .and_then(|id| id.to_str())
@@ -114,19 +348,22 @@ fn discover_thread_from_file(path: &Path, workspace_path: &str) -> Option<Discov
     let title = provider_title
         .or(summary.first_prompt_title)
         .unwrap_or_else(|| "Claude thread".to_string());
-    Some(DiscoveredClaudeThread {
-        summary: claude_thread_summary(
-            session_id,
-            title,
-            summary
-                .updated_at
-                .or(file_updated_at)
-                .unwrap_or_else(Utc::now),
-            summary.last_message_preview,
-        ),
-        title_is_provider_preview,
-        history_source: path.to_path_buf(),
-        history_version: (metadata.len(), modified),
+    Some(NativeSummary {
+        cwd,
+        thread: DiscoveredClaudeThread {
+            summary: claude_thread_summary(
+                session_id,
+                title,
+                summary
+                    .updated_at
+                    .or(file_updated_at)
+                    .unwrap_or_else(Utc::now),
+                summary.last_message_preview,
+            ),
+            title_is_provider_preview,
+            history_source: path.to_path_buf(),
+            history_version,
+        },
     })
 }
 
@@ -336,6 +573,8 @@ fn decode_message(line: &[u8]) -> Option<Value> {
 #[cfg(test)]
 thread_local! {
     static MESSAGE_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SUMMARY_SOURCE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SUMMARY_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Default)]
@@ -590,6 +829,237 @@ mod tests {
             writeln!(file, "{entry}").unwrap();
         }
         (dir, path)
+    }
+
+    #[test]
+    fn unchanged_global_fallback_reads_each_native_file_once() {
+        let (dir, path) = fixture(&[user("Opening prompt"), assistant("a1", "Answer")]);
+        SUMMARY_SOURCE_PARSES.with(|count| count.set(0));
+        SUMMARY_BYTES_READ.with(|count| count.set(0));
+        for index in 0..8 {
+            assert!(
+                discover_threads_in(dir.path(), &format!("/missing/project/{index}")).is_empty()
+            );
+        }
+        assert_eq!(SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get), 1);
+        assert_eq!(
+            SUMMARY_BYTES_READ.with(std::cell::Cell::get),
+            path.metadata().unwrap().len()
+        );
+        let thread = discover_threads_in(dir.path(), CWD).remove(0);
+        assert_eq!(thread.summary.native_session_id.as_deref(), Some(SESSION));
+        assert_eq!(SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn discovery_cache_reuses_invalid_files_and_invalidates_changed_metadata() {
+        let (dir, path) = fixture(&[]);
+        fs::write(&path, "{invalid json}\n").unwrap();
+        SUMMARY_SOURCE_PARSES.with(|count| count.set(0));
+        for _ in 0..3 {
+            assert!(discover_threads_in(dir.path(), CWD).is_empty());
+        }
+        assert_eq!(SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get), 1);
+        fs::write(&path, format!("{}\n", user("Newly valid native session"))).unwrap();
+        assert_eq!(discover_threads_in(dir.path(), CWD).len(), 1);
+        assert_eq!(SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get), 2);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"custom-title","customTitle":"Changed title"})
+        )
+        .unwrap();
+        let thread = discover_threads_in(dir.path(), CWD).remove(0);
+        assert_eq!(thread.summary.title, "Changed title");
+        assert_eq!(SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_cache_detects_same_size_replacement_with_preserved_mtime() {
+        let (dir, path) = fixture(&[user("Opening prompt")]);
+        let title = json!({"type":"custom-title","customTitle":"First title"});
+        let contents = format!("{}\n{title}\n", user("Opening prompt"));
+        fs::write(&path, &contents).unwrap();
+        let modified = path.metadata().unwrap().modified().unwrap();
+        assert_eq!(
+            discover_threads_in(dir.path(), CWD)[0].summary.title,
+            "First title"
+        );
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, contents.replace("First title", "Later title")).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(path.metadata().unwrap().len(), contents.len() as u64);
+        assert_eq!(path.metadata().unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            discover_threads_in(dir.path(), CWD)[0].summary.title,
+            "Later title"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_cache_detects_in_place_edit_with_preserved_size_and_mtime() {
+        let (dir, path) = fixture(&[user("Opening prompt")]);
+        let contents = format!(
+            "{}\n{}\n",
+            user("Opening prompt"),
+            json!({"type":"custom-title","customTitle":"First title"})
+        );
+        fs::write(&path, &contents).unwrap();
+        let before = path.metadata().unwrap();
+        assert_eq!(
+            discover_threads_in(dir.path(), CWD)[0].summary.title,
+            "First title"
+        );
+        fs::write(&path, contents.replace("First title", "Later title")).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = path.metadata().unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+        assert_eq!(
+            discover_threads_in(dir.path(), CWD)[0].summary.title,
+            "Later title"
+        );
+    }
+
+    #[test]
+    fn discovery_cache_observes_new_moved_deleted_files_and_separate_roots() {
+        let (dir, path) = fixture(&[user("Opening prompt")]);
+        assert_eq!(discover_threads_in(dir.path(), CWD).len(), 1);
+        let workspace = path.parent().unwrap();
+        let second = workspace.join("44444444-4444-4444-8444-444444444444.jsonl");
+        let mut entry = user("Another session");
+        entry["sessionId"] = json!("44444444-4444-4444-8444-444444444444");
+        fs::write(&second, format!("{entry}\n")).unwrap();
+        assert_eq!(discover_threads_in(dir.path(), CWD).len(), 2);
+        let alternate = dir.path().join("alternate-native-project-name");
+        fs::rename(workspace, &alternate).unwrap();
+        let threads = discover_threads_in(dir.path(), CWD);
+        assert_eq!(threads.len(), 2);
+        assert!(
+            threads
+                .iter()
+                .all(|thread| thread.history_source.parent() == Some(alternate.as_path()))
+        );
+        let cache = summary_cache().lock().unwrap();
+        assert!(
+            !cache
+                .entries
+                .keys()
+                .any(|source| source.root == dir.path() && source.path == path)
+        );
+        drop(cache);
+        fs::remove_file(alternate.join(second.file_name().unwrap())).unwrap();
+        assert_eq!(discover_threads_in(dir.path(), CWD).len(), 1);
+        let (other_root, _) = fixture(&[user("Separate native root")]);
+        assert_eq!(
+            discover_threads_in(other_root.path(), CWD)[0].summary.title,
+            "Separate native root"
+        );
+        assert_eq!(
+            discover_threads_in(dir.path(), CWD)[0].summary.title,
+            "Opening prompt"
+        );
+    }
+
+    #[test]
+    fn summary_cache_bounds_metadata_and_evicts_least_recently_used() {
+        let (dir, path) = fixture(&[user("Opening prompt")]);
+        let (version, summary) = read_native_summary(&path).unwrap();
+        let source = |index| SummarySource {
+            root: dir.path().to_path_buf(),
+            path: dir.path().join(format!("{index}.jsonl")),
+        };
+        let mut cache = SummaryCache::default();
+        for index in 0..SUMMARY_CACHE_MAX_ENTRIES {
+            cache.insert(source(index), version, None);
+        }
+        assert_eq!(cache.entries.len(), SUMMARY_CACHE_MAX_ENTRIES);
+        assert!(cache.retained_bytes <= SUMMARY_CACHE_MAX_BYTES);
+        assert!(
+            cache
+                .get_thread(&source(0), version, CWD)
+                .unwrap()
+                .is_none()
+        );
+        cache.insert(source(SUMMARY_CACHE_MAX_ENTRIES), version, summary.clone());
+        assert!(cache.entries.contains_key(&source(0)));
+        assert!(!cache.entries.contains_key(&source(1)));
+        assert_eq!(cache.entries.len(), SUMMARY_CACHE_MAX_ENTRIES);
+        let mut oversized = summary.unwrap();
+        oversized.thread.summary.title = "x".repeat(SUMMARY_CACHE_MAX_BYTES);
+        let oversized_source = source(SUMMARY_CACHE_MAX_ENTRIES + 1);
+        cache.insert(oversized_source, version, Some(oversized));
+        assert_eq!(cache.entries.len(), SUMMARY_CACHE_MAX_ENTRIES);
+        assert!(cache.retained_bytes <= SUMMARY_CACHE_MAX_BYTES);
+        assert_eq!(
+            cache.retained_bytes,
+            cache
+                .entries
+                .values()
+                .map(|entry| entry.retained_bytes)
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn summary_cache_evicts_metadata_to_stay_within_byte_budget() {
+        let (dir, path) = fixture(&[user("Opening prompt")]);
+        let (version, summary) = read_native_summary(&path).unwrap();
+        let mut summary = summary.unwrap();
+        summary.thread.summary.title = "x".repeat(SUMMARY_CACHE_MAX_BYTES / 3);
+        let source = |index| SummarySource {
+            root: dir.path().to_path_buf(),
+            path: dir.path().join(format!("{index}.jsonl")),
+        };
+        let mut cache = SummaryCache::default();
+        cache.insert(source(0), version, Some(summary.clone()));
+        cache.insert(source(1), version, Some(summary.clone()));
+        cache.get_thread(&source(0), version, CWD).unwrap();
+        cache.insert(source(2), version, Some(summary));
+        assert!(cache.entries.contains_key(&source(0)));
+        assert!(!cache.entries.contains_key(&source(1)));
+        assert!(cache.entries.contains_key(&source(2)));
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.retained_bytes <= SUMMARY_CACHE_MAX_BYTES);
+    }
+
+    #[test]
+    fn concurrent_global_fallbacks_share_one_native_parse() {
+        let (dir, _) = fixture(&[user("Opening prompt")]);
+        let barrier = std::sync::Barrier::new(8);
+        let parses = std::thread::scope(|scope| {
+            let handles = (0..8)
+                .map(|index| {
+                    let barrier = &barrier;
+                    let root = dir.path();
+                    scope.spawn(move || {
+                        SUMMARY_SOURCE_PARSES.with(|count| count.set(0));
+                        barrier.wait();
+                        assert!(discover_threads_in(root, &format!("/missing/{index}")).is_empty());
+                        SUMMARY_SOURCE_PARSES.with(std::cell::Cell::get)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .sum::<usize>()
+        });
+        assert_eq!(parses, 1);
     }
 
     #[test]

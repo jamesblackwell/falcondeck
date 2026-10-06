@@ -121,6 +121,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const snapshotRef = useRef<DaemonSnapshot | null>(null)
   const eventFrameRef = useRef<number | null>(null)
   const eventTimerRef = useRef<number | null>(null)
+  const eventBatchGenerationRef = useRef(0)
   const reconnectAttemptRef = useRef(0)
   // Workspace ids are minted per daemon connect, so a daemon restart
   // invalidates the selected id even though it is the same project on disk.
@@ -161,6 +162,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
   const flushEvents = useCallback(() => {
+    eventBatchGenerationRef.current += 1
     const startedAt = performanceTracingEnabled ? performance.now() : 0
     if (eventFrameRef.current !== null) window.cancelAnimationFrame(eventFrameRef.current)
     if (eventTimerRef.current !== null) window.clearTimeout(eventTimerRef.current)
@@ -225,6 +227,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   }, [cacheThreadDetail])
 
   const clearPendingEvents = useCallback(() => {
+    eventBatchGenerationRef.current += 1
     if (eventFrameRef.current !== null) {
       window.cancelAnimationFrame(eventFrameRef.current)
       eventFrameRef.current = null
@@ -243,13 +246,17 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
     pendingEventsRef.current.push(event)
     if (eventFrameRef.current !== null || eventTimerRef.current !== null) return
+    const generation = eventBatchGenerationRef.current
+    const flushCurrentBatch = () => {
+      if (generation === eventBatchGenerationRef.current) flushEvents()
+    }
     // A queued paint can be suspended when the webview becomes occluded,
     // even before visibilityState changes. Race every paint with a bounded
     // fallback; the winner cancels both so old callbacks cannot steal a batch.
     if (document.visibilityState !== 'hidden') {
-      eventFrameRef.current = window.requestAnimationFrame(flushEvents)
+      eventFrameRef.current = window.requestAnimationFrame(flushCurrentBatch)
     }
-    eventTimerRef.current = window.setTimeout(flushEvents, 50)
+    eventTimerRef.current = window.setTimeout(flushCurrentBatch, 50)
   }, [flushEvents])
 
   useEffect(() => clearPendingEvents, [clearPendingEvents])
@@ -274,6 +281,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     let cancelled = false
 
     const teardownSocket = () => {
+      clearPendingEvents()
       if (backoffResetTimer !== null) {
         window.clearTimeout(backoffResetTimer)
         backoffResetTimer = null
@@ -309,6 +317,8 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
     async function connect() {
       let lastError: unknown = null
+      if (cancelled) return
+      setConnectionState('connecting')
 
       for (let attempt = 0; attempt < DAEMON_BOOTSTRAP_RETRY_COUNT; attempt += 1) {
         const startedAt = performanceTracingEnabled ? performance.now() : 0
@@ -317,50 +327,54 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
           if (cancelled) return
           setBaseUrl(nextBaseUrl)
           const nextApi = createDaemonApiClient(nextBaseUrl)
-          const nextSnapshot = await nextApi.snapshot()
-          if (cancelled) return
-          // A frame-batched event from the socket that just died may still be
-          // queued. It predates this authoritative reconnect snapshot and must
-          // not land afterward, briefly rolling thread status or preferences
-          // backward. The new event socket seeds itself with another snapshot.
-          clearPendingEvents()
-          setSnapshot(nextSnapshot)
-          setConnectionError(null)
-          setConnectionState('ready')
-          recordPerformance('falcondeck:daemon-bootstrap', startedAt, { attempt: attempt + 1 })
-          socket = nextApi.connectEvents(handleEvent)
+          let seeded = false
+          let nextSocket: WebSocket | null = null
+          nextSocket = nextApi.connectEvents((event) => {
+            if (cancelled || !nextSocket || socket !== nextSocket) return
+            if (!seeded) {
+              if (event.event.type !== 'snapshot') return
+              seeded = true
+              // The daemon subscribes before taking this authoritative
+              // snapshot. Fetching another copy over HTTP first duplicated
+              // every summary and catalog at startup and on each reconnect.
+              clearPendingEvents()
+              setSnapshot(event.event.snapshot)
+              setConnectionError(null)
+              setConnectionState('ready')
+              if (connectTimeout !== null) {
+                window.clearTimeout(connectTimeout)
+                connectTimeout = null
+              }
+              // Do not reset backoff for sockets that repeatedly open then
+              // close, or for an open socket that never delivers its snapshot.
+              backoffResetTimer = window.setTimeout(() => {
+                backoffResetTimer = null
+                reconnectAttemptRef.current = 0
+              }, DAEMON_BACKOFF_RESET_MS)
+              recordPerformance('falcondeck:daemon-bootstrap', startedAt, { attempt: attempt + 1 })
+              return
+            }
+            handleEvent(event)
+          })
+          socket = nextSocket
           connectTimeout = window.setTimeout(() => {
-            connectTimeout = null
-            if (!cancelled && socket?.readyState === WebSocket.CONNECTING) {
+            if (!cancelled && socket === nextSocket && !seeded) {
+              connectTimeout = null
               teardownSocket()
               setConnectionState('error')
               setConnectionError(CONNECTION_COPY.lostConnection)
               scheduleReconnect()
             }
           }, DAEMON_SOCKET_CONNECT_TIMEOUT_MS)
-          socket.onopen = () => {
-            if (cancelled) return
-            if (connectTimeout !== null) {
-              window.clearTimeout(connectTimeout)
-              connectTimeout = null
-            }
-            // Resetting backoff immediately would defeat it when the daemon
-            // drops connections right after accepting them; only reset once
-            // the connection has stayed open for a while.
-            backoffResetTimer = window.setTimeout(() => {
-              backoffResetTimer = null
-              reconnectAttemptRef.current = 0
-            }, DAEMON_BACKOFF_RESET_MS)
-          }
           socket.onclose = () => {
-            if (cancelled) return
+            if (cancelled || socket !== nextSocket) return
             teardownSocket()
             setConnectionState('error')
             setConnectionError(CONNECTION_COPY.lostConnection)
             scheduleReconnect()
           }
           socket.onerror = () => {
-            if (cancelled) return
+            if (cancelled || socket !== nextSocket) return
             teardownSocket()
             setConnectionState('error')
             setConnectionError(CONNECTION_COPY.lostConnection)
@@ -542,6 +556,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       setThreadDetail(null)
       return
     }
+    if (connectionState !== 'ready') return
 
     const cacheKey = threadCacheKey(selectedWorkspaceId, selectedThreadId)
     // Startup restoration first publishes persisted thread summaries under a
@@ -630,6 +645,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
   }, [
     api,
+    connectionState,
     cachedThreadDetail,
     cacheThreadDetail,
     externalWorkspaceIds,
@@ -646,7 +662,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   // at once contended with the selected detail and made launch slower on
   // machines with fewer cores.
   useEffect(() => {
-    if (!api || !snapshot || !selectedWorkspaceId) return
+    if (!api || connectionState !== 'ready' || !snapshot || !selectedWorkspaceId) return
     if (selectedLocalWorkspaceStatus === 'connecting') return
 
     const targets = new Map<string, { workspaceId: string; threadId: string }>()
@@ -698,7 +714,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
     const handle = window.setTimeout(prefetch, THREAD_PREFETCH_FALLBACK_DELAY_MS)
     return () => window.clearTimeout(handle)
-  }, [api, cacheThreadDetail, selectedLocalWorkspaceStatus, selectedThreadId, selectedWorkspaceId, snapshot])
+  }, [api, cacheThreadDetail, connectionState, selectedLocalWorkspaceStatus, selectedThreadId, selectedWorkspaceId, snapshot])
 
   useEffect(() => {
     if (!snapshot) {
@@ -744,7 +760,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   // happens to drop and the reconnect snapshot corrects it. Re-check quiet live
   // threads against the daemon so that state cannot outlive the turn.
   useEffect(() => {
-    if (!api) return
+    if (!api || connectionState !== 'ready') return
     const interval = window.setInterval(() => {
       if (reconcilingStatusRef.current) return
       const threads = snapshotRef.current?.threads ?? []
@@ -801,7 +817,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         })
     }, THREAD_STATUS_RECHECK_INTERVAL_MS)
     return () => window.clearInterval(interval)
-  }, [api])
+  }, [api, connectionState])
 
   // Poll remote status
   useEffect(() => {
