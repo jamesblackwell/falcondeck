@@ -1,6 +1,6 @@
 # Hermes Agent integration plan
 
-Research and local verification: 2026-10-06. Phases 0–3 are implemented; see the [qualification report](HERMES-ACP-QUALIFICATION.md) for tested revisions, results, and remaining limits. Phases 4 and 5 remain proposed work.
+Research and local verification: 2026-10-06. Phases 0–4 are implemented; see the [qualification report](HERMES-ACP-QUALIFICATION.md) for tested revisions, results, and remaining limits. Phase 5 gateway qualification is recorded separately; its production runtime remains proposed.
 
 ## Recommendation
 
@@ -187,6 +187,8 @@ Initially use FalconDeck's existing generic ACP cancel/resubmit steering behavio
 
 ## Phase 5: richer Hermes control, only where needed
 
+**Qualification increment implemented:** disposable gateway discovery, live clarification/steering/cancellation, native restart, and transport-boundary checks. The installed source lacks request negotiation; the pinned candidate has verified MCP-scoping and native-to-ACP history blockers. See [gateway qualification](HERMES-GATEWAY-QUALIFICATION.md). No production native transport or installed upgrade is included.
+
 **Separate follow-up: roughly one to two additional weeks, depending on scope.**
 
 The default ACP toolset retains Hermes memory, skills, web/file/terminal tools, and delegation, while excluding messaging delivery, cron management, and interactive clarify UI. Therefore the first release is a coding/task integration, not a complete mirror of Hermes Desktop or its gateway.
@@ -212,4 +214,4 @@ For unattended/server use, run Hermes on the enrolled FalconDeck daemon host and
 
 Budget approximately **five to nine engineering days** for first-class ACP support if qualification reveals modest fixes. Basic manual configuration takes minutes and was already shown to reach session/catalog discovery on this Mac. External Hermes fixes can extend elapsed time. Full gateway support is separate scope, not a prerequisite for the recommended ACP release.
 
-Phases 0–4 are implemented against the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), retaining native session ownership and the shared client contract. Phase 5 is optional follow-up if the omitted native gateway interactions are needed.
+Phases 0–4 are implemented against the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), retaining native session ownership and the shared client contract. Phase 5 gateway qualification is available, with [verified rollout blockers](HERMES-GATEWAY-QUALIFICATION.md#native-rollout-blockers); its native runtime and client controls remain optional follow-up.

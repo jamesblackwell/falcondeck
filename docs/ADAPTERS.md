@@ -55,7 +55,10 @@ capability field, conversation database or Hermes configuration store.
 The qualified build advertises images and passes a controlled vision prompt.
 Usage is displayed only when emitted. Native gateway control, managed updates,
 HTTP/SSE MCP, delegation cancellation, and a FalconDeck Hermes skills picker
-remain outside the qualified surface.
+remain outside the qualified surface. The separate
+[gateway qualification](HERMES-GATEWAY-QUALIFICATION.md) records working native
+interactions and the connector/history blockers that prevent a production
+transport switch.
 
 ## The seams, and the invariants that keep them clean
 
