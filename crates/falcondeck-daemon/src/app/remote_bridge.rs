@@ -595,7 +595,7 @@ impl AppState {
                                     }
                                 }
                             }
-                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id } => {
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id, message_preview } => {
                                 let thread_title = match (&workspace_id, &thread_id) {
                                     (Some(workspace_id), Some(thread_id)) => self
                                         .thread_summary(workspace_id, thread_id)
@@ -611,6 +611,7 @@ impl AppState {
                                         workspace_id,
                                         thread_id,
                                         thread_title,
+                                        message_preview,
                                     },
                                 ).await?;
                             }

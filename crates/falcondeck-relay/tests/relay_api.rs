@@ -3166,6 +3166,7 @@ async fn client_peers_cannot_request_push_notifications() {
             workspace_id: None,
             thread_id: None,
             thread_title: None,
+            message_preview: None,
         },
     )
     .await;

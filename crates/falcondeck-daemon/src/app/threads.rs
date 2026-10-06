@@ -1328,9 +1328,9 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
-        self.dispatch_next_queued_turn(workspace_id, thread_id);
         self.notify_remote_attention("turn-complete", workspace_id, Some(thread_id.to_string()))
             .await;
+        self.dispatch_next_queued_turn(workspace_id, thread_id);
         if saw_agent_output {
             self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id.to_string())
                 .await;
@@ -2272,7 +2272,6 @@ impl AppState {
                 error: final_error.clone(),
             },
         );
-        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         // A user-requested interrupt is not attention-worthy; a finished or
         // failed turn is. The relay only pushes to disconnected devices.
         if !was_interrupted {
@@ -2287,6 +2286,7 @@ impl AppState {
             )
             .await;
         }
+        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         if turn_error.is_none() && saw_agent_output {
             self.maybe_schedule_ai_thread_title(workspace_id, thread_id)
                 .await;
@@ -2686,7 +2686,6 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
-        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         if !was_interrupted {
             self.notify_remote_attention(
                 if turn_error.is_some() {
@@ -2699,6 +2698,7 @@ impl AppState {
             )
             .await;
         }
+        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         if turn_error.is_none() && saw_agent_output {
             self.maybe_schedule_ai_thread_title(workspace_id, thread_id)
                 .await;

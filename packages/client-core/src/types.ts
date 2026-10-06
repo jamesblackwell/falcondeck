@@ -2093,6 +2093,8 @@ export type RelayClientMessage =
       workspace_id?: string | null;
       thread_id?: string | null;
       thread_title?: string | null;
+      /** Reply excerpt visible to the relay and push service. */
+      message_preview?: string | null;
     };
 
 export type SpeechCredentialStatus = {

@@ -2181,6 +2181,7 @@ impl AppState {
                 workspace_id,
                 thread_id,
                 thread_title,
+                message_preview,
             } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
                     return Err(RelayError::Unauthorized(
@@ -2192,6 +2193,7 @@ impl AppState {
                     ("workspace_id", workspace_id.as_deref()),
                     ("thread_id", thread_id.as_deref()),
                     ("thread_title", thread_title.as_deref()),
+                    ("message_preview", message_preview.as_deref()),
                 ] {
                     if let Some(value) = value {
                         validate_bounded_text(
@@ -2208,6 +2210,7 @@ impl AppState {
                     workspace_id,
                     thread_id,
                     thread_title,
+                    message_preview,
                 )
                 .await;
             }
@@ -3027,8 +3030,8 @@ impl AppState {
     }
 
     /// Send an attention push to every active trusted device that has a push
-    /// token and is not currently connected. The thread title is intentionally
-    /// visible to the relay and push service so the OS can render it.
+    /// token and is not currently connected. The title and optional reply
+    /// preview are visible to the relay and push service so the OS can render them.
     async fn dispatch_push_notifications(
         &self,
         session_id: &str,
@@ -3036,6 +3039,7 @@ impl AppState {
         workspace_id: Option<String>,
         thread_id: Option<String>,
         thread_title: Option<String>,
+        message_preview: Option<String>,
     ) {
         let endpoint = self.inner.push_endpoint.clone();
         if endpoint.trim().is_empty() {
@@ -3080,7 +3084,8 @@ impl AppState {
             recipients
         };
 
-        let (title, body) = push_notification_content(&kind, thread_title.as_deref());
+        let (title, body) =
+            push_notification_content(&kind, thread_title.as_deref(), message_preview.as_deref());
         for recipient_chunk in recipients.chunks(EXPO_MAX_MESSAGES_PER_REQUEST) {
             let chunk_recipients = recipient_chunk.to_vec();
             let messages = chunk_recipients
@@ -4527,7 +4532,8 @@ fn validate_bounded_text(
 fn push_notification_content<'a>(
     kind: &str,
     thread_title: Option<&'a str>,
-) -> (&'a str, &'static str) {
+    message_preview: Option<&'a str>,
+) -> (&'a str, &'a str) {
     let title = thread_title
         .map(str::trim)
         .filter(|title| !title.is_empty())
@@ -4535,7 +4541,10 @@ fn push_notification_content<'a>(
     let body = match kind {
         "approval" => "An agent is waiting for your approval",
         "question" => "An agent asked you a question",
-        "turn-complete" => "An agent finished its turn",
+        "turn-complete" => message_preview
+            .map(str::trim)
+            .filter(|preview| !preview.is_empty())
+            .unwrap_or("An agent finished its turn"),
         "turn-error" => "An agent turn failed",
         _ => "An agent needs your attention",
     };
@@ -4728,11 +4737,11 @@ mod tests {
     #[test]
     fn push_notifications_identify_the_thread_and_keep_the_attention_copy() {
         assert_eq!(
-            push_notification_content("turn-complete", Some("Improve push notifications")),
+            push_notification_content("turn-complete", Some("Improve push notifications"), None),
             ("Improve push notifications", "An agent finished its turn")
         );
         assert_eq!(
-            push_notification_content("question", None),
+            push_notification_content("question", None, None),
             ("FalconDeck", "An agent asked you a question")
         );
     }
@@ -4740,13 +4749,49 @@ mod tests {
     #[test]
     fn push_notifications_fall_back_for_blank_titles_and_trim_display_copy() {
         assert_eq!(
-            push_notification_content("approval", Some("   ")),
+            push_notification_content("approval", Some("   "), None),
             ("FalconDeck", "An agent is waiting for your approval")
         );
         assert_eq!(
-            push_notification_content("approval", Some("  Review changes  ")),
+            push_notification_content("approval", Some("  Review changes  "), None),
             ("Review changes", "An agent is waiting for your approval")
         );
+    }
+
+    #[test]
+    fn push_notifications_show_reply_preview_only_for_completed_turns() {
+        assert_eq!(
+            push_notification_content(
+                "turn-complete",
+                Some("Fix login"),
+                Some("  Fixed login and added coverage.  ")
+            ),
+            ("Fix login", "Fixed login and added coverage.")
+        );
+        assert_eq!(
+            push_notification_content("turn-complete", None, Some("   ")),
+            ("FalconDeck", "An agent finished its turn")
+        );
+        assert_eq!(
+            push_notification_content("approval", None, Some("Previous reply")),
+            ("FalconDeck", "An agent is waiting for your approval")
+        );
+    }
+
+    #[test]
+    fn push_notifications_accept_legacy_daemons_without_preview() {
+        let message: falcondeck_core::RelayClientMessage =
+            serde_json::from_value(serde_json::json!({
+                "type": "notify", "kind": "turn-complete", "thread_title": "Fix login"
+            }))
+            .unwrap();
+        assert!(matches!(
+            message,
+            falcondeck_core::RelayClientMessage::Notify {
+                message_preview: None,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -29,7 +29,9 @@ encrypted and pairing keys are authenticated by a secret carried only in the
 desktop QR/link, so even an active relay cannot silently substitute its own
 keys. A relay operator can still observe routing metadata, deny service, and
 control replay availability; self-hosting therefore changes availability and
-metadata trust, but not message-content confidentiality.
+metadata trust, but not message-content confidentiality. System push notifications
+are an explicit exception: the thread title and a bounded assistant reply preview
+are sent as display metadata visible to the relay and push service.
 
 ## Deployment Modes
 

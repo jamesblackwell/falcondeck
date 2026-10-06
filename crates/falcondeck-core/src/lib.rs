@@ -5646,7 +5646,7 @@ pub enum RelayClientMessage {
     },
     /// Ask the relay to push an attention notification to trusted devices
     /// that are not currently connected. Daemon-only; routing identifiers and
-    /// the optional display title are sent as push-service-visible metadata.
+    /// the optional display title and reply preview are push-service-visible metadata.
     Notify {
         /// Attention kind, e.g. `approval` or `question`.
         kind: String,
@@ -5656,6 +5656,10 @@ pub enum RelayClientMessage {
         thread_id: Option<String>,
         /// User-visible thread title shown by the system notification.
         thread_title: Option<String>,
+        /// Short assistant reply excerpt shown for completed turns. Visible to
+        /// the relay and push service, unlike encrypted conversation payloads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_preview: Option<String>,
     },
 }
 

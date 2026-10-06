@@ -1,8 +1,8 @@
 use chrono::Utc;
 use falcondeck_core::{
-    PairingAuthority, PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus,
-    RemotePairingSession, RemoteStatusResponse, StartPairingRequest, StartPairingResponse,
-    StartRemotePairingRequest,
+    AssistantMessagePhase, ContentLifecycle, ConversationItem, PairingAuthority,
+    PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession,
+    RemoteStatusResponse, StartPairingRequest, StartPairingResponse, StartRemotePairingRequest,
     crypto::{
         LocalBoxKeyPair, build_pairing_public_key_bundle, decode_secure_pairing_code,
         encode_secure_pairing_code, generate_data_key, generate_pairing_authority_secret,
@@ -220,10 +220,22 @@ impl AppState {
         }
         let command_tx = { self.inner.remote.lock().await.command_tx.clone() };
         if let Some(command_tx) = command_tx {
+            // Capture before enqueueing: the bridge may process this after
+            // another turn has started. Never hydrate native history for a push.
+            let message_preview = if kind == "turn-complete" {
+                let workspaces = self.inner.workspaces.lock().await;
+                thread_id
+                    .as_deref()
+                    .and_then(|id| workspaces.get(workspace_id)?.threads.get(id))
+                    .and_then(|thread| notification_message_preview(&thread.items))
+            } else {
+                None
+            };
             let _ = command_tx.send(super::RemoteBridgeCommand::NotifyAttention {
                 kind: kind.to_string(),
                 workspace_id: Some(workspace_id.to_string()),
                 thread_id,
+                message_preview,
             });
         }
     }
@@ -1566,9 +1578,124 @@ pub(super) fn current_pairing_for_remote_attempt(
     remote.pairing.clone()
 }
 
+/// Only assistant answers from the latest user turn may become push copy.
+/// Explicit commentary, reasoning, and tool output are never reply previews.
+fn notification_message_preview(items: &[ConversationItem]) -> Option<String> {
+    let text = items
+        .iter()
+        .rev()
+        .take_while(|item| !matches!(item, ConversationItem::UserMessage { .. }))
+        .find_map(|item| match item {
+            ConversationItem::AssistantMessage {
+                text,
+                phase,
+                lifecycle,
+                ..
+            } if *phase != Some(AssistantMessagePhase::Commentary)
+                && *lifecycle == ContentLifecycle::Complete
+                && !text.trim().is_empty() =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })?;
+    const MAX_PREVIEW_CHARS: usize = 200;
+    // Stream the prefix so long replies do not allocate a full normalized copy.
+    let mut chars = text
+        .split_whitespace()
+        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+        .filter(|character| !character.is_control());
+    let mut preview: String = chars.by_ref().take(MAX_PREVIEW_CHARS + 1).collect();
+    preview = preview.trim_end().to_string();
+    if preview.chars().count() > MAX_PREVIEW_CHARS || chars.next().is_some() {
+        preview = preview.chars().take(MAX_PREVIEW_CHARS - 1).collect();
+        preview = preview.trim_end().to_string();
+        preview.push('…');
+    }
+    (!preview.is_empty()).then_some(preview)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push_assistant(text: &str, phase: Option<AssistantMessagePhase>) -> ConversationItem {
+        ConversationItem::AssistantMessage {
+            id: "answer".into(),
+            text: text.into(),
+            phase,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn push_preview_uses_latest_answer_and_ignores_commentary_and_old_turns() {
+        let user = ConversationItem::UserMessage {
+            id: "user".into(),
+            text: "Next task".into(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        };
+        let mut items = vec![push_assistant("Previous answer", None), user];
+        assert_eq!(notification_message_preview(&items), None);
+        items.push(push_assistant(
+            "Working on it",
+            Some(AssistantMessagePhase::Commentary),
+        ));
+        assert_eq!(notification_message_preview(&items), None);
+        items.push(push_assistant(
+            "Fixed the bug.\n All tests pass.",
+            Some(AssistantMessagePhase::FinalAnswer),
+        ));
+        items.push(push_assistant(
+            "More commentary",
+            Some(AssistantMessagePhase::Commentary),
+        ));
+        assert_eq!(
+            notification_message_preview(&items).as_deref(),
+            Some("Fixed the bug. All tests pass.")
+        );
+    }
+
+    #[test]
+    fn push_preview_is_bounded_unicode_safe_and_handles_empty_output() {
+        assert_eq!(
+            notification_message_preview(&[push_assistant(" \n\t", None)]),
+            None
+        );
+        assert_eq!(
+            notification_message_preview(&[push_assistant("Done\n\twith tests\0", None)])
+                .as_deref(),
+            Some("Done with tests")
+        );
+        let preview =
+            notification_message_preview(&[push_assistant(&"🦅".repeat(250), None)]).unwrap();
+        assert_eq!(preview.chars().count(), 200);
+        assert!(preview.ends_with('…'));
+        let exact = "a".repeat(200);
+        assert_eq!(
+            notification_message_preview(&[push_assistant(&exact, None)]),
+            Some(exact)
+        );
+        let word_boundary = notification_message_preview(&[push_assistant(
+            &format!("{} more text", "a".repeat(200)),
+            None,
+        )])
+        .unwrap();
+        assert!(word_boundary.ends_with('…'));
+        assert_eq!(word_boundary.chars().count(), 200);
+        let mut incomplete = push_assistant("Unfinished answer", None);
+        if let ConversationItem::AssistantMessage { lifecycle, .. } = &mut incomplete {
+            *lifecycle = ContentLifecycle::Streaming;
+        }
+        assert_eq!(notification_message_preview(&[incomplete]), None);
+    }
 
     #[tokio::test]
     async fn live_bridge_resets_backoff_before_a_later_socket_disconnect() {

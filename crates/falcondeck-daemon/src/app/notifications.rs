@@ -594,7 +594,6 @@ pub(super) async fn ingest_notification(
                 if retrying {
                     return Ok(());
                 }
-                app.dispatch_next_queued_turn(workspace_id, &thread_id);
                 app.schedule_codex_thread_release_if_idle(workspace_id, &thread_id);
                 // A finished turn means the agent is waiting on the user;
                 // let disconnected devices know. The relay only pushes to
@@ -613,6 +612,7 @@ pub(super) async fn ingest_notification(
                     )
                     .await;
                 }
+                app.dispatch_next_queued_turn(workspace_id, &thread_id);
                 app.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
                     .await;
             }

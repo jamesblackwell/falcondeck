@@ -1001,12 +1001,13 @@ enum RemoteBridgeCommand {
         client_bundles: Vec<PairingPublicKeyBundle>,
         completed: oneshot::Sender<Result<(), String>>,
     },
-    /// Ask the relay to push a generic attention notification to trusted
+    /// Ask the relay to push an attention notification to trusted
     /// devices that are not currently connected.
     NotifyAttention {
         kind: String,
         workspace_id: Option<String>,
         thread_id: Option<String>,
+        message_preview: Option<String>,
     },
 }
 
