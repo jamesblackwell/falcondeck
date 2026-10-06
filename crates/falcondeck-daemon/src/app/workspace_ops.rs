@@ -3335,6 +3335,15 @@ pub(super) async fn update_thread(
         )
         .await?;
     }
+    if let Some(model_id) = request.model_id.as_ref() {
+        super::acp_threads::set_hermes_thread_model(
+            app,
+            &request.workspace_id,
+            &request.thread_id,
+            model_id,
+        )
+        .await?;
+    }
 
     let workspace_summary = {
         let mut workspaces = app.inner.workspaces.lock().await;
@@ -3399,7 +3408,14 @@ pub(super) async fn update_thread(
             thread.summary.last_error = None;
         }
         if let Some(permission_mode) = request.permission_mode.clone() {
-            let next = permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
+            // ACP's default means "ask" in the daemon. Erasing it would
+            // select the permissive fallback again at the next turn start.
+            let is_acp = matches!(
+                ProviderRuntime::for_provider(&thread.summary.provider),
+                ProviderRuntime::Acp(_)
+            );
+            let next =
+                permission_mode.filter(|mode| is_acp || !mode.eq_ignore_ascii_case("default"));
             note_claude_post_plan_permission_mode(thread, next.as_deref());
             thread.summary.agent.permission_mode = next;
         }
@@ -4010,6 +4026,7 @@ async fn discard_unanswerable_interactive_request(
                 thread_id,
                 request_id,
                 Some(InteractiveRequestResolution {
+                    approval_option_id: None,
                     outcome: InteractiveRequestOutcome::Cancelled,
                     resolved_at: Utc::now(),
                 }),
@@ -4031,7 +4048,7 @@ pub(super) async fn respond_to_interactive_request(
     request_id: String,
     response: InteractiveResponsePayload,
 ) -> Result<CommandResponse, DaemonError> {
-    let resolution = InteractiveRequestResolution::from_response(&response, Utc::now());
+    let mut resolution = InteractiveRequestResolution::from_response(&response, Utc::now());
     let pending = {
         let requests = app.inner.interactive_requests.lock().await;
         requests
@@ -4040,6 +4057,21 @@ pub(super) async fn respond_to_interactive_request(
             .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?
     };
     validate_interactive_response(&pending.request, &response)?;
+    if let InteractiveResponsePayload::ApprovalOption { option_id } = &response {
+        let option = pending
+            .request
+            .approval_options
+            .as_ref()
+            .and_then(|options| options.iter().find(|option| &option.option_id == option_id))
+            .expect("validated option");
+        resolution = InteractiveRequestResolution::from_response(
+            &InteractiveResponsePayload::Approval {
+                decision: option.decision.clone(),
+            },
+            Utc::now(),
+        );
+        resolution.approval_option_id = Some(option_id.clone());
+    }
     let request_key = (workspace_id.clone(), request_id.clone());
     // Claude approvals resolve through the hook handler's oneshot; the Codex
     // session must not be touched for them.
@@ -4123,10 +4155,24 @@ pub(super) async fn respond_to_interactive_request(
         });
     }
     if pending.request.method == "session/request_permission" {
-        let InteractiveResponsePayload::Approval { decision } = response else {
-            return Err(DaemonError::BadRequest(
-                "ACP permission requests require an approval response".to_string(),
-            ));
+        let (decision, option_id) = match response {
+            InteractiveResponsePayload::Approval { decision } => (decision, None),
+            InteractiveResponsePayload::ApprovalOption { option_id } => {
+                let decision = pending
+                    .request
+                    .approval_options
+                    .as_ref()
+                    .and_then(|options| options.iter().find(|option| option.option_id == option_id))
+                    .expect("validated option")
+                    .decision
+                    .clone();
+                (decision, Some(option_id))
+            }
+            _ => {
+                return Err(DaemonError::BadRequest(
+                    "ACP permission requests require an approval response".into(),
+                ));
+            }
         };
         if let Err(error) = app
             .respond_acp_permission(
@@ -4134,6 +4180,7 @@ pub(super) async fn respond_to_interactive_request(
                 pending.request.thread_id.as_deref(),
                 &request_id,
                 decision,
+                option_id.as_deref(),
             )
             .await
         {
@@ -4531,6 +4578,22 @@ fn validate_interactive_response(
     response: &InteractiveResponsePayload,
 ) -> Result<(), DaemonError> {
     match (&request.kind, response) {
+        (
+            InteractiveRequestKind::Approval,
+            InteractiveResponsePayload::ApprovalOption { option_id },
+        ) => {
+            if request.method == "session/request_permission"
+                && request.approval_options.as_ref().is_some_and(|options| {
+                    options.iter().any(|option| &option.option_id == option_id)
+                })
+            {
+                Ok(())
+            } else {
+                Err(DaemonError::BadRequest(
+                    "approval option was not offered by the provider".into(),
+                ))
+            }
+        }
         (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
             let supported = if let Some(decisions) = &request.approval_decisions {
                 decisions.contains(decision)
@@ -5666,6 +5729,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             method: "item/tool/requestUserInput".to_string(),
             kind: InteractiveRequestKind::Question,
+            approval_options: None,
             approval_decisions: Some(Vec::new()),
             title: "Answer question".to_string(),
             detail: None,
@@ -5700,6 +5764,7 @@ mod tests {
     fn approval_request(decisions: Option<Vec<ApprovalDecision>>) -> InteractiveRequest {
         InteractiveRequest {
             kind: InteractiveRequestKind::Approval,
+            approval_options: None,
             approval_decisions: decisions,
             title: "Allow tests?".to_string(),
             method: "item/commandExecution/requestApproval".to_string(),
@@ -5710,9 +5775,48 @@ mod tests {
     }
 
     #[test]
+    fn exact_acp_approval_options_validate_opaque_ids_without_guessing_scope() {
+        let mut request = approval_request(Some(vec![ApprovalDecision::AlwaysAllow]));
+        request.method = "session/request_permission".into();
+        request.approval_options = Some(vec![
+            falcondeck_core::InteractiveApprovalOption {
+                option_id: "opaque/session".into(),
+                label: "Always".into(),
+                decision: ApprovalDecision::AlwaysAllow,
+            },
+            falcondeck_core::InteractiveApprovalOption {
+                option_id: "opaque/persistent".into(),
+                label: "Session".into(),
+                decision: ApprovalDecision::AlwaysAllow,
+            },
+        ]);
+        for id in ["opaque/session", "opaque/persistent"] {
+            assert!(
+                validate_interactive_response(
+                    &request,
+                    &InteractiveResponsePayload::ApprovalOption {
+                        option_id: id.into()
+                    }
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_interactive_response(
+                &request,
+                &InteractiveResponsePayload::ApprovalOption {
+                    option_id: "missing".into()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn plan_reviews_only_accept_plan_approval_responses() {
         let request = InteractiveRequest {
             kind: InteractiveRequestKind::PlanApproval,
+            approval_options: None,
             approval_decisions: None,
             title: "Review implementation plan".to_string(),
             method: "x.ai/exit_plan_mode".to_string(),
@@ -6636,6 +6740,32 @@ mod tests {
                     .into_iter()
                     .collect(),
             },
+        );
+    }
+
+    #[tokio::test]
+    async fn acp_explicit_ask_permission_survives_thread_updates() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".into(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.provider = AgentProvider::new("hermes");
+            thread.agent.permission_mode = Some("always-approve".into());
+        })
+        .await
+        .unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "workspace_id":"workspace-1", "thread_id":"thread-1", "permission_mode":"default"
+        }))
+        .unwrap();
+        let handle = update_thread(&app, request).await.unwrap();
+        assert_eq!(
+            handle.thread.agent.permission_mode.as_deref(),
+            Some("default")
         );
     }
 

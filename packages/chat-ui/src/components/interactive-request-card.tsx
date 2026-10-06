@@ -310,7 +310,18 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
           {canRespond && (request.kind === 'approval' || request.kind === 'plan_approval' || currentQuestion) ? (
             <div className="mt-3 flex flex-wrap gap-2">
               {request.kind === 'approval' ? (
-                <>
+                request.approval_options ? request.approval_options.map((option) => (
+                  <Button
+                    key={option.option_id}
+                    type="button"
+                    size="sm"
+                    variant={option.decision === 'allow' ? 'default' : 'secondary'}
+                    disabled={isSubmitting}
+                    onClick={() => void submit({ kind: 'approval_option', option_id: option.option_id })}
+                  >
+                    {option.label}
+                  </Button>
+                )) : <>
                   {approvalDecisions.includes('deny') ? (
                     <Button
                       type="button"
@@ -459,7 +470,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
               )}
             </div>
           ) : null}
-          {request.kind === 'approval' && approvalDecisions.length === 0 ? (
+          {request.kind === 'approval' && (request.approval_options ? request.approval_options.length === 0 : approvalDecisions.length === 0) ? (
             <p role="alert" className="mt-3 text-[length:var(--fd-text-xs)] text-danger">
               This provider did not supply an approval decision.
             </p>

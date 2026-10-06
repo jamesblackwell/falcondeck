@@ -204,6 +204,7 @@ impl AppState {
                     {
                         *resolved = true;
                         *resolution = Some(InteractiveRequestResolution {
+                            approval_option_id: None,
                             outcome: InteractiveRequestOutcome::Cancelled,
                             resolved_at: settled_at,
                         });

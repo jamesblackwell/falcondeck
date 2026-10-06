@@ -32,6 +32,13 @@ export function interactiveResolutionFromResponse(
   response: InteractiveResponsePayload,
   resolvedAt = new Date().toISOString(),
 ): InteractiveRequestResolution {
+  if (response.kind === "approval_option") {
+    return {
+      outcome: "answered",
+      approval_option_id: response.option_id,
+      resolved_at: resolvedAt,
+    };
+  }
   if (response.kind === "question") {
     return { outcome: "answered", resolved_at: resolvedAt };
   }
@@ -159,13 +166,22 @@ export function interactiveRequestEvidencePresentation(
 
 /** User-facing receipt text and semantic tone for a terminal request outcome. */
 export function interactiveRequestReceiptPresentation(
-  request: Pick<InteractiveRequest, "kind" | "title">,
+  request: Pick<InteractiveRequest, "kind" | "title" | "approval_options">,
   resolution: InteractiveRequestResolution | null | undefined,
 ): { label: string; tone: InteractiveRequestReceiptTone } {
   const title =
     request.title.trim().replace(/\?$/, "") ||
     (request.kind === "question" ? "Question" : "Request");
   const approvalSubject = title.replace(/^(?:allow|approve)\s+/i, "");
+  const option = request.approval_options?.find(
+    (option) => option.option_id === resolution?.approval_option_id,
+  );
+  if (option) {
+    return {
+      label: `${option.label}: ${approvalSubject}`,
+      tone: option.decision === "deny" ? "danger" : "success",
+    };
+  }
   switch (resolution?.outcome) {
     case "allowed":
       return { label: `Allowed ${approvalSubject}`, tone: "success" };

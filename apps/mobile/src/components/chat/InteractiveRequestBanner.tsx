@@ -53,6 +53,7 @@ export const InteractiveRequestBanner = memo(function InteractiveRequestBanner({
             ? () => respond("always_allow")
             : undefined
         }
+        onOption={(option_id) => onRespond({ kind: "approval_option", option_id })}
       />
     );
   }

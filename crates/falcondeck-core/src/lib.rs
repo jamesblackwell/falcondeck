@@ -3268,6 +3268,11 @@ pub enum InteractiveResponsePayload {
         /// Decision selected by the user.
         decision: ApprovalDecision,
     },
+    /// Select an exact provider approval option, preserving its grant scope.
+    ApprovalOption {
+        /// Opaque identifier supplied by the provider.
+        option_id: String,
+    },
     /// Response payload for question-style prompts.
     Question {
         /// Answers grouped by question identifier.
@@ -3288,6 +3293,9 @@ pub enum InteractiveResponsePayload {
 pub struct InteractiveRequestResolution {
     /// Outcome visible in conversation history.
     pub outcome: InteractiveRequestOutcome,
+    /// Exact non-sensitive approval choice, used to retain its scope label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_option_id: Option<String>,
     /// Timestamp when FalconDeck observed the resolution.
     pub resolved_at: DateTime<Utc>,
 }
@@ -3329,7 +3337,10 @@ impl InteractiveRequestResolution {
                 ApprovalDecision::Deny => InteractiveRequestOutcome::Denied,
                 ApprovalDecision::AlwaysAllow => InteractiveRequestOutcome::AlwaysAllowed,
             },
-            InteractiveResponsePayload::Question { .. } => InteractiveRequestOutcome::Answered,
+            InteractiveResponsePayload::Question { .. }
+            | InteractiveResponsePayload::ApprovalOption { .. } => {
+                InteractiveRequestOutcome::Answered
+            }
             InteractiveResponsePayload::PlanApproval { outcome, .. } => match outcome {
                 PlanApprovalOutcome::Approved => InteractiveRequestOutcome::PlanApproved,
                 PlanApprovalOutcome::Cancelled => InteractiveRequestOutcome::PlanChangesRequested,
@@ -3338,6 +3349,10 @@ impl InteractiveRequestResolution {
         };
         Self {
             outcome,
+            approval_option_id: match response {
+                InteractiveResponsePayload::ApprovalOption { option_id } => Some(option_id.clone()),
+                _ => None,
+            },
             resolved_at,
         }
     }
@@ -4399,6 +4414,9 @@ pub struct InteractiveRequest {
     /// supported decision and must remain visibly non-actionable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_decisions: Option<Vec<ApprovalDecision>>,
+    /// Provider choices whose opaque identifiers distinguish grant scopes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_options: Option<Vec<InteractiveApprovalOption>>,
     /// Short user-facing title.
     pub title: String,
     /// Optional user-facing detail text.
@@ -4427,6 +4445,17 @@ pub enum InteractiveRequestKind {
     Question,
     /// Provider-authored implementation plan awaiting review.
     PlanApproval,
+}
+
+/// Exact provider approval choice. Labels describe scope; ids remain opaque.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractiveApprovalOption {
+    /// Provider option identifier to echo unchanged.
+    pub option_id: String,
+    /// Provider-authored user-facing label.
+    pub label: String,
+    /// Normalized decision, derived from protocol kind rather than label.
+    pub decision: ApprovalDecision,
 }
 
 /// Single interactive question presented to the user.
@@ -6083,6 +6112,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(legacy.approval_decisions, None);
+        assert_eq!(legacy.approval_options, None);
         assert!(
             serde_json::to_value(&legacy).unwrap()["approval_decisions"].is_null(),
             "legacy capability field should stay omitted"
@@ -6098,6 +6128,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(explicit_empty).unwrap()["approval_decisions"],
             serde_json::json!([])
+        );
+        let mut exact = legacy;
+        exact.approval_options = Some(vec![InteractiveApprovalOption {
+            option_id: "opaque/session".into(),
+            label: "Allow for session".into(),
+            decision: ApprovalDecision::AlwaysAllow,
+        }]);
+        let restored: InteractiveRequest =
+            serde_json::from_value(serde_json::to_value(&exact).unwrap()).unwrap();
+        assert_eq!(restored, exact);
+        let response: InteractiveResponsePayload = serde_json::from_value(
+            serde_json::json!({"kind":"approval_option","option_id":"opaque/session"}),
+        )
+        .unwrap();
+        let resolution = InteractiveRequestResolution::from_response(&response, Utc::now());
+        assert_eq!(
+            resolution.approval_option_id.as_deref(),
+            Some("opaque/session")
         );
     }
 

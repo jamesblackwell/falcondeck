@@ -41,6 +41,8 @@ use crate::app::agent_helpers::attachment_reference_text;
 use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::error::DaemonError;
 
+mod hermes;
+
 /// Largest raw image file embedded inline for an ACP prompt, mirroring the
 /// Claude path's per-image cap.
 const MAX_ACP_IMAGE_BYTES: u64 = 3_500_000;
@@ -813,6 +815,7 @@ pub fn load_acp_provider_configs(state_dir: &Path) -> Vec<AcpProviderConfig> {
 pub struct AcpPermissionOption {
     pub option_id: String,
     pub kind: String,
+    pub name: String,
 }
 
 /// Whether a permission mode means "the user already approved everything".
@@ -1404,6 +1407,12 @@ pub struct AcpRuntime {
     /// session id. This is the legacy ACP mode surface; configOptions are
     /// preferred when an agent implements the stabilized protocol.
     session_modes: Mutex<HashMap<String, SessionModeState>>,
+    /// Last model acknowledged by the adapter, retained when a setter fails.
+    session_models: Mutex<HashMap<String, String>>,
+    session_commands: Mutex<HashMap<String, HashSet<String>>>,
+    /// Hermes reports provider failures on shared stderr without session ids.
+    /// Keep prompts separate until that adapter can attribute its failures.
+    hermes_prompt_gate: Mutex<()>,
     /// Config option ids and categories for each live ACP session.
     session_configurations: Mutex<HashMap<String, AcpSessionConfiguration>>,
     /// Effort ids each session currently accepts. OpenCode publishes these
@@ -2131,6 +2140,9 @@ impl AcpRuntime {
             current_tools: Mutex::new(HashMap::new()),
             stderr_tail: Mutex::new(VecDeque::new()),
             session_modes: Mutex::new(HashMap::new()),
+            session_models: Mutex::new(HashMap::new()),
+            session_commands: Mutex::new(HashMap::new()),
+            hermes_prompt_gate: Mutex::new(()),
             session_configurations: Mutex::new(HashMap::new()),
             session_reasoning_efforts: Mutex::new(HashMap::new()),
             discovered_models: Mutex::new(Vec::new()),
@@ -2458,7 +2470,19 @@ impl AcpRuntime {
     }
 
     async fn capture_session_metadata(&self, session_id: &str, result: &Value) {
-        let parsed = parse_session_metadata(result);
+        if let Some(model) = result
+            .pointer("/models/currentModelId")
+            .and_then(Value::as_str)
+        {
+            self.session_models
+                .lock()
+                .await
+                .insert(session_id.to_owned(), model.to_owned());
+        }
+        let mut parsed = parse_session_metadata(result);
+        if self.is_hermes() {
+            hermes::label_edit_modes(&mut parsed.collaboration_modes);
+        }
         let mut models = self.discovered_models.lock().await;
         if !parsed.models.is_empty() {
             *models = dedupe_models(parsed.models.clone());
@@ -2943,7 +2967,10 @@ impl AcpRuntime {
             .get(session_id)
             .cloned()
             .unwrap_or_default();
-        if let Some(model_id) = model_id {
+        if let Some(model_id) = model_id
+            && (!self.is_hermes()
+                || self.session_model_id(session_id).await.as_deref() != Some(model_id))
+        {
             if let Some(config_id) = configuration.model_config_id.as_deref() {
                 self.set_config_option(session_id, config_id, model_id)
                     .await?;
@@ -2955,6 +2982,10 @@ impl AcpRuntime {
                 )
                 .await?;
             }
+            self.session_models
+                .lock()
+                .await
+                .insert(session_id.to_owned(), model_id.to_owned());
         }
         // OpenCode only publishes its effort option once a model that has
         // reasoning variants is selected, and the set_config_option response
@@ -2991,6 +3022,21 @@ impl AcpRuntime {
             }
         }
         if let Some(collaboration_mode) = collaboration_mode {
+            if self.is_hermes()
+                && self
+                    .session_mode_state(session_id)
+                    .await
+                    .is_none_or(|state| {
+                        !state
+                            .available
+                            .iter()
+                            .any(|mode| mode == collaboration_mode)
+                    })
+            {
+                return Err(DaemonError::BadRequest(format!(
+                    "Hermes did not advertise edit mode '{collaboration_mode}'"
+                )));
+            }
             if let Some(config_id) = configuration.collaboration_config_id.as_deref() {
                 self.set_config_option(session_id, config_id, collaboration_mode)
                     .await?;
@@ -3009,7 +3055,8 @@ impl AcpRuntime {
             if let Some(config_id) = configuration.permission_config_id.as_deref() {
                 self.set_config_option(session_id, config_id, permission_mode)
                     .await?;
-            } else if let Some(state) = self.session_mode_state(session_id).await
+            } else if !self.is_hermes()
+                && let Some(state) = self.session_mode_state(session_id).await
                 && state.available.iter().any(|mode| mode == permission_mode)
                 && state.current.as_deref() != Some(permission_mode)
             {
@@ -3017,6 +3064,41 @@ impl AcpRuntime {
             }
         }
         Ok(())
+    }
+
+    pub async fn session_model_id(&self, session_id: &str) -> Option<String> {
+        self.session_models.lock().await.get(session_id).cloned()
+    }
+
+    pub(crate) fn is_hermes(&self) -> bool {
+        self.config.id.eq_ignore_ascii_case("hermes")
+    }
+
+    pub(crate) async fn is_native_command(&self, session_id: &str, text: &str) -> bool {
+        if !self.is_hermes() {
+            return false;
+        }
+        let Some(command) = text
+            .split_whitespace()
+            .next()
+            .and_then(|word| word.strip_prefix('/'))
+        else {
+            return false;
+        };
+        let commands = self.session_commands.lock().await;
+        hermes::is_command(command.trim_start_matches('/'), commands.get(session_id))
+    }
+
+    pub(crate) fn with_prompt_context(
+        &self,
+        text: String,
+        context: Option<&str>,
+    ) -> Result<String, DaemonError> {
+        if self.is_hermes() {
+            hermes::with_context(text, context)
+        } else {
+            Ok(text)
+        }
     }
 
     async fn register_session(&self, thread_id: &str, session_id: &str) {
@@ -3164,6 +3246,23 @@ impl AcpRuntime {
                 ..SteerQueue::default()
             },
         );
+        let _hermes_guard = if self.is_hermes() {
+            Some(self.hermes_prompt_gate.lock().await)
+        } else {
+            None
+        };
+        if self
+            .steer_queues
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|queue| queue.stopping)
+        {
+            self.steer_queues.lock().await.remove(session_id);
+            self.finish_prompt_segment(session_id, Some("cancelled".into()), None)
+                .await;
+            return Ok("cancelled".into());
+        }
         loop {
             // A detail left over from an earlier prompt must not masquerade
             // as this one's cause.
@@ -3185,7 +3284,7 @@ impl AcpRuntime {
                 let stacked = {
                     let mut queues = self.steer_queues.lock().await;
                     queues.get_mut(session_id).is_some_and(|queue| {
-                        let stacked = !queue.queued.is_empty();
+                        let stacked = queue.stopping || !queue.queued.is_empty();
                         if stacked {
                             queue.cancel_requested = true;
                         }
@@ -3670,6 +3769,32 @@ impl AcpRuntime {
         .await
     }
 
+    pub async fn respond_permission_option(
+        &self,
+        request_id: &str,
+        option_id: &str,
+    ) -> Result<(), DaemonError> {
+        let pending = {
+            let mut requests = self.permission_requests.lock().await;
+            let pending = requests
+                .get(request_id)
+                .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".into()))?;
+            if !pending
+                .options
+                .iter()
+                .any(|option| option.option_id == option_id)
+            {
+                return Err(DaemonError::BadRequest(
+                    "ACP approval option was not offered".into(),
+                ));
+            }
+            requests.remove(request_id).expect("entry checked above")
+        };
+        self.write_message(&json!({"jsonrpc":"2.0", "id":pending.raw_id,
+            "result":{"outcome":{"outcome":"selected","optionId":option_id}}}))
+            .await
+    }
+
     /// Answers a pending Grok `_x.ai/exit_plan_mode` reverse request.
     pub async fn respond_plan_approval(
         &self,
@@ -4123,7 +4248,16 @@ impl AcpRuntime {
                 })
             }
             AcpSessionUpdateKind::AvailableCommandsUpdate => {
-                self.report_unprojected_update(classified, false).await;
+                if let Some(commands) = update.get("availableCommands").and_then(Value::as_array) {
+                    self.session_commands.lock().await.insert(
+                        session_id.to_owned(),
+                        commands
+                            .iter()
+                            .filter_map(|command| command.get("name").and_then(Value::as_str))
+                            .map(str::to_ascii_lowercase)
+                            .collect(),
+                    );
+                }
                 None
             }
             AcpSessionUpdateKind::SessionInfoUpdate => Some(AcpEvent::SessionInfo {
@@ -4262,12 +4396,20 @@ impl AcpRuntime {
         // A request from a session no thread owns (discovery session, or a
         // rolled-back session/load) could never be answered by a user;
         // surfacing it would create an immortal banner while the agent hangs.
-        if self
-            .threads_by_session
+        let stopping = self
+            .steer_queues
             .lock()
             .await
             .get(&session_id)
-            .is_none()
+            .is_some_and(|queue| queue.stopping);
+        if stopping
+            || (self.is_hermes() && !self.prompt_sessions.lock().await.contains(&session_id))
+            || self
+                .threads_by_session
+                .lock()
+                .await
+                .get(&session_id)
+                .is_none()
         {
             let _ = self
                 .write_message(&json!({
@@ -4288,6 +4430,11 @@ impl AcpRuntime {
                     .filter_map(|option| {
                         Some(AcpPermissionOption {
                             option_id: option.get("optionId").and_then(Value::as_str)?.to_string(),
+                            name: option
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Approval choice")
+                                .to_owned(),
                             kind: option
                                 .get("kind")
                                 .and_then(Value::as_str)
@@ -4776,6 +4923,264 @@ mod tests {
         ));
         assert!(pending.await.unwrap().is_err());
         runtime.shutdown().await;
+    }
+
+    async fn hermes_phase2_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes_phase2_agent.mjs");
+        let (events, receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(
+            AcpProviderConfig {
+                id: "hermes".into(),
+                label: "Hermes".into(),
+                command: vec!["node".into(), fixture.to_string_lossy().into_owned()],
+                env: HashMap::new(),
+                transport: ProviderTransport::Acp,
+            },
+            env!("CARGO_MANIFEST_DIR"),
+            events,
+        )
+        .await
+        .unwrap();
+        (runtime, receiver)
+    }
+
+    async fn hermes_phase2_session(runtime: &AcpRuntime, thread: &str) -> String {
+        runtime
+            .ensure_session(
+                thread,
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &crate::connectors::BuiltinConnectors::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hermes_edit_modes_are_independent_of_daemon_permissions() {
+        let (runtime, _) = hermes_phase2_runtime().await;
+        let session = hermes_phase2_session(&runtime, "thread").await;
+        runtime
+            .apply_session_preferences(&session, None, None, Some("accept_edits"), Some("default"))
+            .await
+            .unwrap();
+        assert_eq!(
+            runtime
+                .session_mode_state(&session)
+                .await
+                .unwrap()
+                .current
+                .as_deref(),
+            Some("accept_edits")
+        );
+        assert!(
+            runtime
+                .advertised_collaboration_modes()
+                .await
+                .iter()
+                .all(|mode| mode.label.contains("edit"))
+        );
+        assert!(
+            runtime
+                .advertised_models()
+                .await
+                .iter()
+                .all(|model| model.supported_reasoning_efforts.is_empty())
+        );
+        assert_eq!(
+            runtime.capability_summary().await.permission_modes,
+            vec!["always-approve", "default"]
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_model_rejection_preserves_acknowledged_full_id() {
+        let (runtime, _) = hermes_phase2_runtime().await;
+        let session = hermes_phase2_session(&runtime, "thread").await;
+        let model = "custom:Team Endpoint:model/v1";
+        runtime
+            .apply_session_preferences(&session, Some(model), None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            runtime
+                .apply_session_preferences(&session, Some("invalid:model"), None, None, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            runtime.session_model_id(&session).await.as_deref(),
+            Some(model)
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_serializes_failures_and_routes_exact_options_to_the_owner() {
+        let (runtime, mut events) = hermes_phase2_runtime().await;
+        let first = hermes_phase2_session(&runtime, "first").await;
+        let second = hermes_phase2_session(&runtime, "second").await;
+        let r = runtime.clone();
+        let s = first.clone();
+        let failure = tokio::spawn(async move {
+            r.prompt(&s, vec![json!({"type":"text","text":"error"})])
+                .await
+        });
+        wait_for_message_delta(&mut events, "STARTED").await;
+        let r = runtime.clone();
+        let s = second.clone();
+        let permission = tokio::spawn(async move {
+            r.prompt(&s, vec![json!({"type":"text","text":"permission"})])
+                .await
+        });
+        let request = loop {
+            match next_acp_event(&mut events).await {
+                AcpEvent::TurnEnded {
+                    session_id, error, ..
+                } => {
+                    assert_eq!(session_id, first);
+                    assert!(error.is_some());
+                }
+                AcpEvent::PermissionRequest {
+                    session_id,
+                    request_id,
+                    ..
+                } => {
+                    assert_eq!(session_id, second);
+                    break request_id;
+                }
+                _ => {}
+            }
+        };
+        assert!(failure.await.unwrap().is_err());
+        assert!(
+            runtime
+                .respond_permission_option(&request, "missing")
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .permission_requests
+                .lock()
+                .await
+                .contains_key(&request)
+        );
+        runtime
+            .respond_permission_option(&request, &format!("{second}:d"))
+            .await
+            .unwrap();
+        assert!(permission.await.unwrap().is_ok());
+        let state = runtime.request("probe/state", json!({})).await.unwrap();
+        assert_eq!(
+            state["responses"][0]["result"]["outcome"]["optionId"],
+            format!("{second}:d")
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_queued_prompt_can_be_cancelled_without_executing() {
+        let (runtime, mut events) = hermes_phase2_runtime().await;
+        let first = hermes_phase2_session(&runtime, "first").await;
+        let second = hermes_phase2_session(&runtime, "second").await;
+        let r = runtime.clone();
+        let s = first.clone();
+        let waiting = tokio::spawn(async move {
+            r.prompt(&s, vec![json!({"type":"text","text":"wait"})])
+                .await
+        });
+        wait_for_message_delta(&mut events, "STARTED").await;
+        let r = runtime.clone();
+        let s = second.clone();
+        let queued = tokio::spawn(async move {
+            r.prompt(&s, vec![json!({"type":"text","text":"permission"})])
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            while !runtime.steer_queues.lock().await.contains_key(&second) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        runtime.cancel(&second).await.unwrap();
+        runtime.cancel(&first).await.unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap(), "cancelled");
+        assert_eq!(queued.await.unwrap().unwrap(), "cancelled");
+        let state = runtime.request("probe/state", json!({})).await.unwrap();
+        assert_eq!(state["promptCount"], 1);
+        assert!(runtime.permission_requests.lock().await.is_empty());
+        runtime
+            .prompt(&second, vec![json!({"type":"text","text":"next"})])
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_permission_scope_and_settlement_follow_session_ownership() {
+        for action in ["deny", "cancel", "timeout", "disconnect"] {
+            let (runtime, mut events) = hermes_phase2_runtime().await;
+            let session = hermes_phase2_session(&runtime, "owner").await;
+            let text = match action {
+                "timeout" | "disconnect" => action,
+                _ => "permission",
+            };
+            let r = runtime.clone();
+            let s = session.clone();
+            let prompt = tokio::spawn(async move {
+                r.prompt(&s, vec![json!({"type":"text","text":text})]).await
+            });
+            let request = loop {
+                if let AcpEvent::PermissionRequest {
+                    request_id,
+                    session_id,
+                    ..
+                } = next_acp_event(&mut events).await
+                {
+                    assert_eq!(session_id, session);
+                    break request_id;
+                }
+            };
+            match action {
+                "deny" => runtime
+                    .respond_permission(&request, falcondeck_core::ApprovalDecision::Deny)
+                    .await
+                    .unwrap(),
+                "cancel" => runtime.cancel(&session).await.unwrap(),
+                _ => {}
+            }
+            let result = timeout(Duration::from_secs(5), prompt)
+                .await
+                .unwrap()
+                .unwrap();
+            if action == "disconnect" {
+                assert!(result.is_err());
+            } else {
+                assert!(result.is_ok());
+            }
+            assert!(runtime.permission_requests.lock().await.is_empty());
+            if action != "disconnect" {
+                let state = runtime.request("probe/state", json!({})).await.unwrap();
+                let response = &state["responses"][0]["result"]["outcome"];
+                if action == "deny" {
+                    assert_eq!(response["optionId"], format!("{session}:c"));
+                } else {
+                    assert_eq!(response["outcome"], "cancelled");
+                }
+                runtime
+                    .prompt(&session, vec![json!({"type":"text","text":"next"})])
+                    .await
+                    .unwrap();
+            }
+            runtime.shutdown().await;
+        }
     }
 
     #[tokio::test]
@@ -5705,10 +6110,12 @@ mod tests {
     fn permission_selection_never_substitutes_a_different_semantic_choice() {
         let options = vec![
             AcpPermissionOption {
+                name: "Misleading label".into(),
                 option_id: "once".to_string(),
                 kind: "allow_once".to_string(),
             },
             AcpPermissionOption {
+                name: "Misleading label".into(),
                 option_id: "deny".to_string(),
                 kind: "reject_once".to_string(),
             },

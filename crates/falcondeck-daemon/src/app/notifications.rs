@@ -2774,6 +2774,7 @@ async fn cleanup_abandoned_claude_approval(
             thread_id,
             request_id,
             Some(falcondeck_core::InteractiveRequestResolution {
+                approval_option_id: None,
                 outcome,
                 resolved_at: Utc::now(),
             }),
@@ -2939,6 +2940,7 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         thread_id: Some(thread_id.clone()),
         method: "claude/hooks/pre-tool-use".to_string(),
         kind: InteractiveRequestKind::Approval,
+        approval_options: None,
         approval_decisions: Some(vec![
             ApprovalDecision::Allow,
             ApprovalDecision::Deny,
@@ -3006,6 +3008,7 @@ async fn handle_claude_ask_user_question(
         thread_id: Some(thread_id.clone()),
         method: "claude/hooks/ask-user-question".to_string(),
         kind: InteractiveRequestKind::Question,
+        approval_options: None,
         approval_decisions: Some(Vec::new()),
         title: "Claude has a question".to_string(),
         detail: Some(format!(
@@ -3066,6 +3069,7 @@ async fn handle_claude_exit_plan_mode(
         thread_id: Some(thread_id.clone()),
         method: "claude/hooks/exit-plan-mode".to_string(),
         kind: InteractiveRequestKind::PlanApproval,
+        approval_options: None,
         approval_decisions: Some(Vec::new()),
         title: "Review Claude's plan".to_string(),
         detail: Some(plan),
@@ -3264,6 +3268,7 @@ pub(super) async fn ingest_server_request(
                 thread_id: extract_thread_id(&params),
                 method: method.to_string(),
                 kind: InteractiveRequestKind::Approval,
+                approval_options: None,
                 approval_decisions: Some(codex_approval_decisions(&params)),
                 title: extract_string(&params, &["reason", "title"])
                     .unwrap_or_else(|| approval_title(method)),
@@ -3283,6 +3288,7 @@ pub(super) async fn ingest_server_request(
                 thread_id: extract_thread_id(&params),
                 method: method.to_string(),
                 kind: InteractiveRequestKind::Question,
+                approval_options: None,
                 approval_decisions: Some(Vec::new()),
                 title: extract_string(&params, &["title"])
                     .unwrap_or_else(|| "Answer question".to_string()),

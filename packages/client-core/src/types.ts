@@ -822,6 +822,12 @@ export type InteractiveRequestKind = "approval" | "question" | "plan_approval";
 
 export type ApprovalDecision = "allow" | "deny" | "always_allow";
 
+export type InteractiveApprovalOption = {
+  option_id: string;
+  label: string;
+  decision: ApprovalDecision;
+};
+
 export type PlanApprovalOutcome = "approved" | "cancelled" | "abandoned";
 
 export type InteractiveQuestionOption = {
@@ -846,6 +852,7 @@ export type InteractiveRequest = {
   kind: InteractiveRequestKind;
   /** Exact choices offered by the provider. Missing means legacy allow/deny. */
   approval_decisions?: ApprovalDecision[];
+  approval_options?: InteractiveApprovalOption[];
   title: string;
   detail: string | null;
   command: string | null;
@@ -859,6 +866,7 @@ export type InteractiveRequest = {
 export type ApprovalRequest = InteractiveRequest;
 
 export type InteractiveResponsePayload =
+  | { kind: "approval_option"; option_id: string }
   | {
       kind: "approval";
       decision: ApprovalDecision;
@@ -885,6 +893,7 @@ export type InteractiveRequestOutcome =
   | "cancelled";
 
 export type InteractiveRequestResolution = {
+  approval_option_id?: string;
   outcome: InteractiveRequestOutcome;
   resolved_at: string;
 };

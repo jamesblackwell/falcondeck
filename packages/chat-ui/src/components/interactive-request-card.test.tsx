@@ -29,6 +29,22 @@ function request(overrides: Partial<InteractiveRequest> = {}): InteractiveReques
 }
 
 describe('InteractiveRequestCard elicitation', () => {
+  it('keeps session and persistent approval options distinct by opaque id', async () => {
+    const onRespond = vi.fn(async () => undefined)
+    render(<InteractiveRequestCard request={request({
+      method: 'session/request_permission',
+      approval_options: [
+        { option_id: 'opaque/session', label: 'Allow for session', decision: 'always_allow' },
+        { option_id: 'opaque/persist', label: 'Allow always', decision: 'always_allow' },
+      ],
+    })} onRespond={onRespond} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Allow for session' }))
+    await waitFor(() => expect(onRespond).toHaveBeenCalledWith({ kind: 'approval_option', option_id: 'opaque/session' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow always' }))
+    await waitFor(() => expect(onRespond).toHaveBeenCalledWith({ kind: 'approval_option', option_id: 'opaque/persist' }))
+    expect(screen.queryByRole('button', { name: 'Allow' })).toBeNull()
+  })
+
   it('renders a Cloudflare-style URL prompt as Continue/Cancel with a link', async () => {
     const onRespond = vi.fn(async () => undefined)
     const url = 'https://dash.cloudflare.com/oauth/authorize?client_id=abc'

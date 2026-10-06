@@ -21,6 +21,7 @@ interface ApprovalBannerProps {
   onAllow?: (requestId: string) => void | Promise<void>;
   onDeny?: (requestId: string) => void | Promise<void>;
   onAlways?: (requestId: string) => void | Promise<void>;
+  onOption?: (optionId: string) => void | Promise<void>;
 }
 
 /** Provider payloads sometimes put the full tool input JSON in `detail`, even
@@ -36,6 +37,7 @@ export const ApprovalBanner = memo(function ApprovalBanner({
   onAllow,
   onDeny,
   onAlways,
+  onOption,
 }: ApprovalBannerProps) {
   const { theme } = useUnistyles();
   const [isResponding, setIsResponding] = useState(false);
@@ -131,6 +133,27 @@ export const ApprovalBanner = memo(function ApprovalBanner({
       }
     }
   }, [approval.request_id, onAlways]);
+
+  const handleOption = useCallback(async (optionId: string) => {
+    if (respondingRef.current || !onOption) return;
+    const token = Symbol("approval-option");
+    const requestId = approval.request_id;
+    respondingRef.current = token;
+    setIsResponding(true);
+    setSubmitError(null);
+    try {
+      await onOption(optionId);
+    } catch (error) {
+      if (respondingRef.current === token && requestIdRef.current === requestId) {
+        setSubmitError(error instanceof Error ? error.message : "Approval action failed");
+      }
+    } finally {
+      if (respondingRef.current === token) {
+        respondingRef.current = null;
+        if (requestIdRef.current === requestId) setIsResponding(false);
+      }
+    }
+  }, [approval.request_id, onOption]);
   /* v8 ignore stop */
 
   return (
@@ -191,35 +214,46 @@ export const ApprovalBanner = memo(function ApprovalBanner({
         </Text>
       ) : null}
       <View style={styles.actions}>
-        {onDeny ? (
+        {approval.approval_options ? approval.approval_options.map((option) => (
           <Button
-            variant="ghost"
+            key={option.option_id}
+            variant={option.decision === "allow" ? "default" : "secondary"}
             size="sm"
-            label={elicitation ? "Cancel" : "Deny"}
-            disabled={isResponding}
-            onPress={handleDeny}
+            label={option.label}
+            disabled={isResponding || !onOption}
+            onPress={() => void handleOption(option.option_id)}
           />
-        ) : null}
-        {onAlways ? (
-          <Button
-            variant="secondary"
-            size="sm"
-            label="Always allow"
-            disabled={isResponding}
-            onPress={handleAlways}
-          />
-        ) : null}
-        {onAllow ? (
-          <Button
-            variant="default"
-            size="sm"
-            label={elicitation ? "Continue" : "Allow"}
-            loading={isResponding}
-            onPress={handleAllow}
-          />
-        ) : null}
+        )) : <>
+          {onDeny ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              label={elicitation ? "Cancel" : "Deny"}
+              disabled={isResponding}
+              onPress={handleDeny}
+            />
+          ) : null}
+          {onAlways ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              label="Always allow"
+              disabled={isResponding}
+              onPress={handleAlways}
+            />
+          ) : null}
+          {onAllow ? (
+            <Button
+              variant="default"
+              size="sm"
+              label={elicitation ? "Continue" : "Allow"}
+              loading={isResponding}
+              onPress={handleAllow}
+            />
+          ) : null}
+        </>}
       </View>
-      {!onAllow && !onDeny && !onAlways ? (
+      {(approval.approval_options ? approval.approval_options.length === 0 : !onAllow && !onDeny && !onAlways) ? (
         <Text accessibilityRole="alert" variant="caption" color="danger">
           This provider did not supply an approval decision.
         </Text>

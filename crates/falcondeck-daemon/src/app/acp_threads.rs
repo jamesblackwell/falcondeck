@@ -1367,9 +1367,15 @@ impl AppState {
                         .as_deref()
                         .is_some_and(crate::acp::is_blanket_approval_mode)
                     {
-                        // Prefer the standing grant so the agent stops asking
-                        // for this tool; fall back to a one-shot allow.
-                        let decision = if options.iter().any(|o| o.kind == "allow_always") {
+                        let decision = if runtime.is_hermes() {
+                            // The daemon's full-access choice must not write
+                            // permanent allow patterns into Hermes config.
+                            options
+                                .iter()
+                                .any(|o| o.kind == "allow_once")
+                                .then_some(ApprovalDecision::Allow)
+                        } else if options.iter().any(|o| o.kind == "allow_always") {
+                            // Other adapters retain their standing-grant fallback.
                             Some(ApprovalDecision::AlwaysAllow)
                         } else if options.iter().any(|o| o.kind == "allow_once") {
                             Some(ApprovalDecision::Allow)
@@ -1416,6 +1422,24 @@ impl AppState {
                     thread_id: thread_id.clone(),
                     method: "session/request_permission".to_string(),
                     kind: InteractiveRequestKind::Approval,
+                    approval_options: runtime.is_hermes().then(|| {
+                        options
+                            .iter()
+                            .filter_map(|option| {
+                                let decision = match option.kind.as_str() {
+                                    "allow_once" => ApprovalDecision::Allow,
+                                    "allow_always" => ApprovalDecision::AlwaysAllow,
+                                    "reject_once" | "reject_always" => ApprovalDecision::Deny,
+                                    _ => return None,
+                                };
+                                Some(falcondeck_core::InteractiveApprovalOption {
+                                    option_id: option.option_id.clone(),
+                                    label: option.name.clone(),
+                                    decision,
+                                })
+                            })
+                            .collect()
+                    }),
                     approval_decisions: Some(approval_decisions),
                     title,
                     detail,
@@ -1500,6 +1524,7 @@ impl AppState {
                     thread_id: Some(thread_id.clone()),
                     method,
                     kind: InteractiveRequestKind::PlanApproval,
+                    approval_options: None,
                     approval_decisions: None,
                     title: "Review implementation plan".to_string(),
                     detail: Some(plan_content),
@@ -1575,6 +1600,7 @@ impl AppState {
                     thread_id: Some(thread_id.clone()),
                     method: "cursor/ask_question".to_string(),
                     kind: InteractiveRequestKind::Question,
+                    approval_options: None,
                     approval_decisions: None,
                     title,
                     detail: None,
@@ -1905,6 +1931,7 @@ impl AppState {
         thread_id: Option<&str>,
         request_id: &str,
         decision: ApprovalDecision,
+        option_id: Option<&str>,
     ) -> Result<(), DaemonError> {
         let Some(thread_id) = thread_id else {
             return Err(DaemonError::BadRequest(
@@ -1926,7 +1953,13 @@ impl AppState {
         };
         let runtime = runtime
             .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".to_string()))?;
-        runtime.respond_permission(request_id, decision).await
+        if let Some(option_id) = option_id {
+            runtime
+                .respond_permission_option(request_id, option_id)
+                .await
+        } else {
+            runtime.respond_permission(request_id, decision).await
+        }
     }
 
     /// Answers a pending Grok plan review on the exact runtime that raised it.
@@ -2102,6 +2135,46 @@ fn is_attachment_placeholder_remainder(remainder: &str) -> bool {
     rest.is_empty()
 }
 
+/// Ask Hermes to validate an idle session's model before saving the picker.
+/// Active turns keep their model; queued selections are checked at turn start.
+pub(super) async fn set_hermes_thread_model(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    model_id: &Option<String>,
+) -> Result<(), DaemonError> {
+    let thread = app.thread_summary(workspace_id, thread_id).await?;
+    if thread.provider.as_str() != "hermes"
+        || matches!(
+            thread.status,
+            ThreadStatus::Running | ThreadStatus::WaitingForInput
+        )
+    {
+        return Ok(());
+    }
+    let (Some(model), Some(session)) = (model_id.as_deref(), thread.native_session_id.as_deref())
+    else {
+        return Ok(());
+    };
+    let runtime = app.acp_runtime_for(workspace_id, &thread.provider).await?;
+    let cwd = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".into()))?;
+        thread.working_directory(&workspace.summary.path).to_owned()
+    };
+    let builtin = app
+        .builtin_connectors(&thread.provider, &cwd, Some(thread_id))
+        .await;
+    runtime
+        .ensure_loaded_session(thread_id, session, &cwd, &builtin)
+        .await?;
+    runtime
+        .apply_session_preferences(session, Some(model), None, None, None)
+        .await
+}
+
 /// Applies a permission-mode update to an already-open ACP session.
 ///
 /// The thread summary is FalconDeck's durable record, but ACP agents keep the
@@ -2169,7 +2242,8 @@ pub(super) async fn set_acp_thread_permission_mode(
             .apply_session_preferences(&session_id, None, None, None, Some(desired_mode))
             .await;
     }
-    if let Some(mode_state) = runtime.session_mode_state(&session_id).await
+    if !runtime.is_hermes()
+        && let Some(mode_state) = runtime.session_mode_state(&session_id).await
         && mode_state.available.iter().any(|mode| mode == desired_mode)
     {
         if mode_state.current.as_deref() == Some(desired_mode) {
@@ -2638,10 +2712,10 @@ async fn run_acp_turn_startup(
         .await?;
     }
 
-    // Sessions advertise permission modes (ACP session modes). Surface them
-    // on the workspace agent entry so the composer shows the picker, and
-    // apply the user's selection via session/set_mode before prompting.
-    if let Some(mode_state) = runtime.session_mode_state(&session_id).await
+    // Keep the legacy mode projection for other adapters. Hermes labels
+    // come from captured metadata; projecting bare ids here would erase them.
+    if !runtime.is_hermes()
+        && let Some(mode_state) = runtime.session_mode_state(&session_id).await
         && !mode_state.available.is_empty()
     {
         let modes_changed = {
@@ -2692,11 +2766,27 @@ async fn run_acp_turn_startup(
             &session_id,
             requested_model_id.as_deref(),
             requested_reasoning_effort.as_deref(),
-            requested_collaboration_mode.as_deref(),
+            requested_collaboration_mode
+                .as_deref()
+                .or_else(|| runtime.is_hermes().then_some("default")),
             effective_permission_mode.as_deref(),
         )
         .await
     {
+        if runtime.is_hermes() {
+            let model = runtime.session_model_id(&session_id).await;
+            let mode = runtime
+                .session_mode_state(&session_id)
+                .await
+                .and_then(|state| state.current);
+            app.with_thread_mut(workspace_id, thread_id, |thread| {
+                thread.agent.model_id = model;
+                thread.agent.collaboration_mode_id = mode;
+            })
+            .await?;
+            app.persist_local_state().await?;
+            return Err(error);
+        }
         tracing::warn!(
             provider = %runtime.config.id,
             %error,
@@ -2704,7 +2794,14 @@ async fn run_acp_turn_startup(
         );
     }
 
-    let content = acp_turn_content(&runtime, inputs, selected_skills).await;
+    let content = acp_turn_content(
+        &runtime,
+        &session_id,
+        inputs,
+        selected_skills,
+        agent_context.as_deref(),
+    )
+    .await?;
 
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
@@ -2765,7 +2862,15 @@ pub(super) async fn steer_acp_turn(
             .and_then(|thread| thread.summary.native_session_id.clone())
             .ok_or_else(|| DaemonError::BadRequest("no active ACP session to steer".to_string()))?
     };
-    let content = acp_turn_content(&runtime, inputs, selected_skills).await;
+    let context = app.agent_context_instructions(provider).await;
+    let content = acp_turn_content(
+        &runtime,
+        &session_id,
+        inputs,
+        selected_skills,
+        context.as_deref(),
+    )
+    .await?;
     if runtime.supports_interject() {
         match runtime
             .interject(&session_id, &content.text, content.blocks.clone())
@@ -2795,9 +2900,11 @@ struct AcpTurnContent {
 
 async fn acp_turn_content(
     runtime: &AcpRuntime,
+    session_id: &str,
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
-) -> AcpTurnContent {
+    agent_context: Option<&str>,
+) -> Result<AcpTurnContent, DaemonError> {
     let mut text = inputs
         .iter()
         .filter_map(|input| match input {
@@ -2806,6 +2913,10 @@ async fn acp_turn_content(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let native_command = !inputs
+        .iter()
+        .any(|input| matches!(input, TurnInputItem::Image(_)))
+        && runtime.is_native_command(session_id, &text).await;
     // ACP agents have no native skill surface; fold selected skills into the
     // prompt as file references (as the Claude path does) so a selection is
     // never silently dropped.
@@ -2823,13 +2934,16 @@ async fn acp_turn_content(
                 .or_else(|| Some(falcondeck_skill_name_preamble(&skill.summary.label)))
         })
         .collect::<Vec<_>>();
-    if !skill_preambles.is_empty() {
+    if !native_command && !skill_preambles.is_empty() {
         let preamble = skill_preambles.join("\n");
         text = if text.trim().is_empty() {
             preamble
         } else {
             format!("{preamble}\n\n{text}")
         };
+    }
+    if !native_command {
+        text = runtime.with_prompt_context(text, agent_context)?;
     }
     let mut content = Vec::new();
     if !text.trim().is_empty() {
@@ -2853,11 +2967,15 @@ async fn acp_turn_content(
         }
     }
 
-    AcpTurnContent {
+    Ok(AcpTurnContent {
         text,
         blocks: content,
-    }
+    })
 }
+
+#[cfg(test)]
+#[path = "acp_threads/hermes_tests.rs"]
+mod hermes_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2892,6 +3010,97 @@ mod tests {
         for provider_id in ["grok", "cursor"] {
             assert_process_exit_only_fails_active_turn(provider_id).await;
         }
+    }
+
+    #[tokio::test]
+    async fn hermes_prompt_guidance_preserves_images_commands_and_visible_user_text() {
+        use super::super::harness_user_text::{ProjectedUserText, project_user_text};
+        use falcondeck_core::{ImageInput, TurnInputItem};
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hermes_phase2_agent.mjs");
+        let (sender, _events) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(
+            AcpProviderConfig {
+                id: "hermes".into(),
+                label: "Hermes".into(),
+                command: vec!["node".into(), fixture.to_string_lossy().into_owned()],
+                env: HashMap::new(),
+                transport: ProviderTransport::Acp,
+            },
+            env!("CARGO_MANIFEST_DIR"),
+            sender,
+        )
+        .await
+        .unwrap();
+        let session = runtime
+            .ensure_session(
+                "thread",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &BuiltinConnectors::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let user = TurnInputItem::Text {
+            id: None,
+            text: "Visible user".into(),
+        };
+        let content =
+            super::acp_turn_content(&runtime, &session, &[user], &[], Some("Host guidance"))
+                .await
+                .unwrap();
+        assert_eq!(
+            project_user_text(&content.text),
+            ProjectedUserText::Prompt("Visible user".into())
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !runtime.is_native_command(&session, "/extra").await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for command in ["/model", "/COMPRESS", "/extra argument"] {
+            let content = super::acp_turn_content(
+                &runtime,
+                &session,
+                &[TurnInputItem::Text {
+                    id: None,
+                    text: command.into(),
+                }],
+                &[],
+                Some("Host guidance"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(content.text, command);
+        }
+        use base64::Engine as _;
+        let images = tempdir().unwrap();
+        let path = images.path().join("pixel.png");
+        std::fs::write(&path, base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aA7sAAAAASUVORK5CYII=").unwrap()).unwrap();
+        let content = super::acp_turn_content(
+            &runtime,
+            &session,
+            &[TurnInputItem::Image(ImageInput {
+                id: "image".into(),
+                name: Some("pixel.png".into()),
+                mime_type: Some("image/png".into()),
+                url: path.to_string_lossy().into_owned(),
+                local_path: Some(path.to_string_lossy().into_owned()),
+            })],
+            &[],
+            Some("Host guidance"),
+        )
+        .await
+        .unwrap();
+        assert!(content.text.contains("Host guidance"));
+        assert_eq!(content.blocks.len(), 2);
+        assert_eq!(content.blocks[1]["type"], "image");
+        runtime.shutdown().await;
     }
 
     async fn assert_process_exit_only_fails_active_turn(provider_id: &str) {

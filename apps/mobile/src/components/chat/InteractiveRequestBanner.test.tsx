@@ -267,6 +267,21 @@ describe("InteractiveRequestBanner", () => {
     );
   });
 
+  it("keeps exact approval scopes and option ids on mobile", async () => {
+    const onRespond = vi.fn(async () => undefined);
+    const renderer = renderComponent(<InteractiveRequestBanner request={request({
+      kind: "approval", questions: [],
+      approval_options: [
+        { option_id: "opaque/session", label: "Allow for session", decision: "always_allow" },
+        { option_id: "opaque/persist", label: "Allow always", decision: "always_allow" },
+      ],
+    })} onRespond={onRespond} />);
+    await act(async () => { pressableWithText(renderer, "Allow for session")?.props.onPress(); });
+    expect(onRespond).toHaveBeenCalledWith({ kind: "approval_option", option_id: "opaque/session" });
+    await act(async () => { pressableWithText(renderer, "Allow always")?.props.onPress(); });
+    expect(onRespond).toHaveBeenCalledWith({ kind: "approval_option", option_id: "opaque/persist" });
+  });
+
   it("supports the provider-scoped always-allow approval response", async () => {
     const onRespond = vi.fn(async () => undefined);
     const notificationAsync = vi.spyOn(Haptics, "notificationAsync");

@@ -47,12 +47,7 @@ async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
     ] {
         assert_eq!(status(&report, name), CheckStatus::Pass, "{name}");
     }
-    assert_eq!(
-        report.unhandled_update_kinds,
-        ["available_commands_update".to_string()]
-            .into_iter()
-            .collect()
-    );
+    assert!(report.unhandled_update_kinds.is_empty());
     assert_eq!(
         report.unknown_update_kinds,
         ["provider_extension".to_string()].into_iter().collect()

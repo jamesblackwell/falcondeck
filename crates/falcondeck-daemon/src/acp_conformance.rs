@@ -1464,10 +1464,7 @@ mod tests {
             })
             .cloned()
             .collect::<BTreeSet<_>>();
-        assert_eq!(
-            unhandled,
-            BTreeSet::from(["available_commands_update".to_string()])
-        );
+        assert!(unhandled.is_empty());
         assert_eq!(unknown, BTreeSet::from(["provider_extension".to_string()]));
     }
 

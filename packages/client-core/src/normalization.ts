@@ -28,6 +28,7 @@ import type {
   ScheduledTaskRunSummary,
   ScheduledTaskSummary,
   ImageInput,
+  InteractiveApprovalOption,
   InteractiveRequest,
   InteractiveRequestOutcome,
   ThreadHandle,
@@ -259,6 +260,29 @@ export function normalizeInteractiveRequest(
           ]
         : ["allow" as const, "deny" as const]
       : [];
+  const approval_options = Array.isArray(request.approval_options)
+    ? request.approval_options.flatMap<InteractiveApprovalOption>((entry: unknown) => {
+        if (!entry || typeof entry !== "object") return [];
+        const option = entry as Record<string, unknown>;
+        if (
+          typeof option.option_id !== "string" ||
+          !option.option_id ||
+          typeof option.label !== "string" ||
+          (option.decision !== "allow" &&
+            option.decision !== "deny" &&
+            option.decision !== "always_allow")
+        ) {
+          return [];
+        }
+        return [
+          {
+            option_id: option.option_id,
+            label: option.label,
+            decision: option.decision,
+          },
+        ];
+      })
+    : undefined;
   return {
     request_id: request.request_id,
     workspace_id: request.workspace_id,
@@ -266,6 +290,7 @@ export function normalizeInteractiveRequest(
     method: typeof request.method === "string" ? request.method : "",
     kind: request.kind,
     approval_decisions,
+    approval_options,
     title:
       typeof request.title === "string" && request.title.trim()
         ? request.title
@@ -1090,7 +1115,13 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
         : null;
     const normalizedResolution =
       normalizedOutcome && typeof resolvedAt === "string"
-        ? { outcome: normalizedOutcome, resolved_at: resolvedAt }
+        ? {
+            outcome: normalizedOutcome,
+            resolved_at: resolvedAt,
+            ...(typeof (resolution as { approval_option_id?: unknown }).approval_option_id === "string"
+              ? { approval_option_id: (resolution as { approval_option_id: string }).approval_option_id }
+              : {}),
+          }
         : null;
     return {
       ...item,

@@ -912,6 +912,7 @@ async fn surface_permissions(
             thread_id: Some(thread_id.to_string()),
             method: "opencode/permission".to_string(),
             kind: InteractiveRequestKind::Approval,
+            approval_options: None,
             approval_decisions: Some(vec![
                 ApprovalDecision::Allow,
                 ApprovalDecision::AlwaysAllow,
@@ -1040,6 +1041,7 @@ async fn surface_questions(
             thread_id: Some(thread_id.to_string()),
             method: "opencode/question".to_string(),
             kind: InteractiveRequestKind::Question,
+            approval_options: None,
             approval_decisions: None,
             title: "OpenCode question".to_string(),
             detail: None,

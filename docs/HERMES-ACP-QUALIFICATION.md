@@ -1,6 +1,6 @@
 # Hermes ACP qualification
 
-Recorded on 2026-10-06 for Phases 0 and 1 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. This qualifies the initial integration; it does not complete the later instruction, connector, or cross-client work.
+Recorded on 2026-10-06 for Phases 0–2 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. The historical Phase 0/1 matrix below is followed by Phase 2 runtime and interaction results. Connector identity and full cross-client release qualification remain in Phases 3 and 4.
 
 ## Baselines and configuration
 
@@ -15,7 +15,7 @@ The configured default `openai-codex:gpt-5.4` is advertised but the account reje
 
 All model/tool requests were diagnostic prompts in disposable project folders. For the older installation's edit test the folder was under `/tmp`: its write tool treats macOS's `/private/var/folders` temporary directories as sensitive system paths. The current source accepted the normal macOS temporary directory. Before replacing an existing file, the edit test read its full content to satisfy Hermes' overwrite protection.
 
-## Results
+## Phase 0/1 results
 
 | Behavior | Existing installation | Disposable current source |
 | --- | --- | --- |
@@ -84,8 +84,61 @@ HERMES_HOME="$probe_profile" target/debug/examples/acp_conformance \
 
 The extra focused cases use the same ACP sequence: initialize → session/new → session/set_model → session/set_mode `default` → read/write prompt → answer `allow_once` → deny a second edit with `reject_once` → verify disk contents → invalid model → restore working model → next prompt. Cancellation recovery sends `session/cancel` after a terminal tool starts, then verifies a new text prompt in the same session. Raw wire logs and temporary credential-bearing profiles remain private and are not committed.
 
+## Phase 2 runtime and interaction results
+
+Phase 2 used the same pinned current source (`1d6b2786e2b2de70a967c66b6a14e2b83bab30e7`), ACP SDK 0.9.0, protocol 1, and working session model `openai-codex:gpt-5.6-luna`. The installed source was checked again: clean `5a3317693c6ddd84834c4684eb6929ade20f0962`, `hermes acp --version` 0.14.0. **No installed upgrade was performed.** Tests used a disposable source checkout, project folder, and private Hermes home; native session storage remained Hermes-owned. The source's dependency manager was synchronized with the `acp` and `mcp` extras in that disposable checkout so its dependency generation also worked after process restart. Neither the installed Python environment nor its native session database was patched.
+
+The older installed setter accepts invalid model IDs and rebuilds its agent without retaining injected MCP toolsets. Its missing live tool-completion event is also still present. The pinned October source rejects invalid IDs and retains MCP tools after model changes. An owner-managed update to a revision containing those upstream fixes is needed before relying on that complete behavior in the installed agent; FalconDeck changes cannot repair it. No upgrade was needed to implement or qualify the daemon changes separately.
+
+| Live behavior on the pinned source | Result |
+| --- | --- |
+| Host guidance on a fresh session | Exact guidance marker returned |
+| Invalid model | JSON-RPC rejection; working session and injected MCP tool remain usable |
+| Successful model switch | Switch to `openai-codex:gpt-5.6-sol` and back; injected stdio tool returns `HERMES_PHASE2_MCP_OK` |
+| Native `/compress` | Dispatches without injected prefix; 20 → 12 messages; next prompt obeys host guidance |
+| Process restart after compression | Same ACP handle loads; next prompt obeys freshly supplied guidance |
+| Default edit mode | Pre-execution edit approval denied; existing file unchanged |
+| `accept_edits` and `dont_ask` | File creation completes without edit approval in both modes |
+| Dangerous shell command in all three edit modes | Permission requested and denied; disposable target unchanged |
+| Two simultaneous native sessions | Each edit permission belongs to its calling session; both denials leave files unchanged |
+| Cancel a running terminal tool | `cancelled`, terminal completion update, then a successful marker prompt in the same session |
+| Rebuilt current-source live/restart conformance | All exercised checks pass; 12 replay updates before and after restart; no unknown or unhandled update kinds |
+
+The conformance report still warns about unexercised login, HTTP/SSE MCP transports, and ordinary adapter stderr diagnostics. Image support remains an advertisement rather than a live vision test. The separate stdio MCP test exercises tool execution, rather than treating the transport advertisement as proof.
+
+FalconDeck fixes:
+
+- Full model IDs, including named endpoint IDs, remain opaque. An idle session's model is validated before the picker is saved. A rejected queued/startup choice stops startup and restores the last acknowledged model instead of prompting with a different model. An unchanged Hermes model does not trigger an unnecessary agent rebuild.
+- The native edit picker says “Ask before edits”, “Accept edits”, and “Don't ask before edits”. FalconDeck's permission policy is independent: its explicit `default` survives saving and does not reset the native edit mode. Full access auto-selects only a one-shot allow for Hermes; it never writes standing approval patterns into Hermes configuration. No reasoning setting is invented.
+- Hermes ignores the extra `session/new.instructions` field. Normal prompts therefore receive bounded host guidance in the existing hidden user-text projection wrapper, on every turn and on generic cancel/resubmit steering. Context over 64 KiB fails visibly. Native commands bypass guidance and selected-skill prefixes using the advertised command inventory, with a bounded fallback before that asynchronous inventory arrives. Image-only prompts retain their image blocks. No project instructions, personal memory, or Hermes configuration are rewritten.
+- Additive shared fields carry native approval labels and opaque option IDs through the existing interactive-request queue. Desktop/remote shared cards and mobile buttons return the exact selected ID; receipts retain its scope label. Selection is validated against the offered IDs. Protocol kinds determine allow/deny behavior; English labels do not determine scope. Legacy request/response shapes remain supported.
+- Cancelled/finished Hermes turns reject late permissions. Denial, timeout, cancellation while waiting, and process disconnect settle pending runtime requests and daemon banners. A cancelled prompt waiting behind another thread never executes and leaves its next prompt usable.
+- Hermes prompts are serialized within each workspace runtime because its provider-failure stderr lacks a session identifier. The two-session native test verifies callback routing; deterministic daemon tests additionally verify serialized error ownership and queue cancellation. Other ACP providers retain their existing prompt concurrency. Generic cancel/resubmit steering remains the chosen path; Hermes `/steer` is not substituted.
+
+[`hermes_phase2_agent.mjs`](../crates/falcondeck-daemon/tests/fixtures/hermes_phase2_agent.mjs) deliberately supplies opaque IDs, multiple standing-grant options, and misleading labels to test exact selection through production runtime and daemon handlers. It also exercises rejected models, mode independence, timeout/disconnect/cancel settlement, late requests, and two-thread failure routing. Shared-client tests verify exact-option normalization, legacy requests, receipts, and web/mobile submission.
+
+Phase 2 focused checks:
+
+```sh
+cargo test -p falcondeck-core --lib interactive
+cargo test -p falcondeck-daemon --lib acp
+cargo test -p falcondeck-daemon --lib interactive
+cargo test -p falcondeck-daemon --test acp_conformance
+cargo clippy -p falcondeck-daemon --lib
+npm run test --workspace @falcondeck/client-core -- src/approval-options.test.ts src/interactive-request.test.ts src/normalization.test.ts
+npm run test --workspace @falcondeck/chat-ui -- src/components/interactive-request-card.test.tsx
+npm run test --workspace @falcondeck/mobile -- src/components/chat/InteractiveRequestBanner.test.tsx
+npm run typecheck --workspace @falcondeck/client-core
+npm run typecheck --workspace @falcondeck/chat-ui
+npm run typecheck --workspace @falcondeck/mobile
+npm run typecheck --workspace falcondeck-desktop
+npm run typecheck --workspace falcondeck-remote-web
+```
+
+All focused checks pass: 3 core interactive tests, 106 daemon ACP tests, 9 daemon interactive tests, 8 conformance tests, 79 shared-client tests, 3 shared web-card tests, 16 mobile banner tests, and all five typechecks. Clippy completes with existing warnings. The current-source executable was rebuilt and its `--json --live --restart --timeout-seconds 90` qualification repeated after command discovery became consumed runtime metadata. Private raw logs and credential-bearing disposable profiles are excluded from git.
+
 ## Remaining qualification limits
 
-Later phases must verify instruction delivery, connector execution and isolation, compression, two simultaneous threads, cross-client approval/reconnect behavior, image understanding, and import/discovery of existing native sessions. Hermes edit modes are not filesystem sandbox or shell permission modes.
+Phases 3 and 4 must verify per-thread connector identity and same-named connector isolation, warm runtime retirement and full daemon restart recovery, long replay deduplication, import/discovery of existing native sessions, relay reconnect/pruning with pending approvals, and real desktop/mobile/remote interaction flows. Basic compressed-session reload above does not complete those phases. Image block preservation is covered by a production-content test; model image understanding is not qualified. Delegation cancellation was not exercised by the terminal cancellation test.
 
-Concurrent provider errors without a session identifier remain an upstream protocol limitation: the daemon deliberately does not attach one shared stderr line to multiple sessions. Executor failure paths without the verified stderr marker also need an upstream explicit JSON-RPC failure or a separately demonstrated adapter fix. The HTTP 400 tests do not imply that all Hermes error paths are covered. Detection and setup are ready; these remaining limits are not a claim of completed first-class support.
+Executor failure paths without the verified stderr marker still need an upstream explicit JSON-RPC failure or a separately demonstrated adapter fix. Serialization prevents concurrent provider-error attribution within a Hermes runtime; the HTTP 400 qualification does not establish that all Hermes executor failures are covered. Hermes edit modes remain file-edit policies, not filesystem sandboxes or unrestricted shell modes.

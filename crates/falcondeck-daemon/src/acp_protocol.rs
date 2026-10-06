@@ -81,8 +81,9 @@ impl<'a> AcpSessionUpdateKind<'a> {
             | Self::SessionInfoUpdate
             | Self::UsageUpdate
             | Self::UserMessageChunk => AcpUpdateDisposition::Projected,
-            Self::ConfigOptionUpdate | Self::CurrentModeUpdate => AcpUpdateDisposition::Consumed,
-            Self::AvailableCommandsUpdate => AcpUpdateDisposition::KnownUnhandled,
+            Self::ConfigOptionUpdate | Self::CurrentModeUpdate | Self::AvailableCommandsUpdate => {
+                AcpUpdateDisposition::Consumed
+            }
             Self::Unknown(_) => AcpUpdateDisposition::Unknown,
         }
     }
@@ -104,6 +105,10 @@ mod tests {
         );
         assert_eq!(
             AcpSessionUpdateKind::classify("config_option_update").disposition(),
+            AcpUpdateDisposition::Consumed
+        );
+        assert_eq!(
+            AcpSessionUpdateKind::classify("available_commands_update").disposition(),
             AcpUpdateDisposition::Consumed
         );
         assert_eq!(

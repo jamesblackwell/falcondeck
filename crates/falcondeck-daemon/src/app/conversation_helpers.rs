@@ -1992,6 +1992,7 @@ pub(super) fn mcp_elicitation_interactive_request(
             thread_id: elicitation_thread_id(params),
             method,
             kind: InteractiveRequestKind::Approval,
+            approval_options: None,
             approval_decisions: Some(vec![ApprovalDecision::Allow, ApprovalDecision::Deny]),
             title,
             detail: message,
@@ -2020,6 +2021,7 @@ pub(super) fn mcp_elicitation_interactive_request(
         thread_id: elicitation_thread_id(params),
         method,
         kind: InteractiveRequestKind::Question,
+        approval_options: None,
         approval_decisions: Some(Vec::new()),
         title,
         detail: message,
@@ -2157,8 +2159,9 @@ pub(super) fn mcp_elicitation_rpc_result(
             "action": "accept",
             "content": elicitation_content_from_answers(answers, params),
         })),
-        InteractiveResponsePayload::PlanApproval { .. } => {
-            Err("elicitation does not accept a plan response".to_string())
+        InteractiveResponsePayload::PlanApproval { .. }
+        | InteractiveResponsePayload::ApprovalOption { .. } => {
+            Err("elicitation does not accept this response kind".to_string())
         }
     }
 }
