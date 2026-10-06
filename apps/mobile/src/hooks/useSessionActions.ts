@@ -297,7 +297,7 @@ export function useSessionActions() {
 
     ui.setIsSubmitting(true, submittedKey);
     // Empty the composer in the same tick as the tap. The optimistic copy goes
-    // into the transcript below, so text left in the input for the length of a
+    // into the transcript or queue below, so text left in the input for a
     // relay round trip reads as the message having been typed twice. The
     // submitted text lives in the in-flight record until the turn settles, so a
     // failure — or a process death mid-request — still gives it back.
@@ -319,6 +319,18 @@ export function useSessionActions() {
       inputs,
       new Date().toISOString(),
     );
+    const expectQueued =
+      activeThread?.status === "running" ||
+      activeThread?.status === "waiting_for_input";
+    const queuedText = submittedDraft.trim();
+    const queuedTurn = {
+      id: userItemId,
+      preview: Array.from(queuedText.slice(0, 280)).slice(0, 140).join(""),
+      text: queuedText,
+      attachment_count: submittedAttachments.length,
+      queued_at: optimisticItem.created_at,
+    };
+    const knownQueuedIds = activeThread?.queued_turns.map((turn) => turn.id) ?? [];
     let activeThreadId = session.selectedThreadId;
     let pendingConversationKey = submittedKey;
     if (!activeThreadId) {
@@ -326,6 +338,8 @@ export function useSessionActions() {
         conversationKey: submittedKey,
         item: optimisticItem,
       });
+    } else if (expectQueued && !override?.resumeInterrupted) {
+      useSessionStore.getState().addPendingQueuedTurn(activeThreadId, queuedTurn, knownQueuedIds);
     }
     try {
       if (!activeThreadId) {
@@ -351,10 +365,7 @@ export function useSessionActions() {
         null;
       // Show the message in the transcript before the relay round-trip; the
       // daemon echoes it under the same id, replacing this copy in place. A
-      // send to a busy thread lands in the queue UI instead, so skip it there.
-      const expectQueued =
-        activeThread?.status === "running" ||
-        activeThread?.status === "waiting_for_input";
+      // send to a busy thread already has a pending row in the queue UI.
       if (!expectQueued && !override?.resumeInterrupted) {
         useSessionStore
           .getState()
@@ -393,9 +404,16 @@ export function useSessionActions() {
       // The thread turned busy between our status check and the daemon's:
       // the send was queued, so the optimistic transcript copy comes out.
       if (sendResponse?.message === "queued") {
+        if (!expectQueued) {
+          useSessionStore.getState().addPendingQueuedTurn(activeThreadId, queuedTurn, knownQueuedIds);
+        }
         useSessionStore
           .getState()
           .removeLocalThreadItem(activeThreadId, userItemId);
+      } else if (expectQueued && !override?.resumeInterrupted) {
+        const currentSession = useSessionStore.getState();
+        currentSession.removePendingQueuedTurn(activeThreadId, userItemId);
+        currentSession.upsertLocalThreadItem(activeThreadId, optimisticItem);
       }
       // Accepted (or queued): the composer is already empty, and the recovery
       // copy is no longer needed.
@@ -408,6 +426,7 @@ export function useSessionActions() {
       // The message never reached the daemon; drop the optimistic copy and
       // put the text back into the composer.
       if (activeThreadId) {
+        useSessionStore.getState().removePendingQueuedTurn(activeThreadId, userItemId);
         useSessionStore
           .getState()
           .removeLocalThreadItem(activeThreadId, userItemId);

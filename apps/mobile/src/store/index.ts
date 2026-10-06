@@ -11,6 +11,7 @@ export {
   useGroups,
   useSelectedWorkspace,
   useSelectedThread,
+  useSelectedQueuedTurns,
   useSelectedThreadHistory,
   useSelectedThreadDetailError,
   useConversationItems,

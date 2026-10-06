@@ -42,7 +42,6 @@ import {
   type ConversationPresentation,
   type ConversationRenderBlock,
   type InteractiveResponsePayload,
-  type QueuedTurnSummary,
 } from "@falcondeck/client-core";
 import { useOperationalNoticeStore } from "@/store/operational-notice-store";
 import { useShallow } from "zustand/react/shallow";
@@ -53,6 +52,7 @@ import {
   useRelayStore,
   useSessionStore,
   useSelectedThread,
+  useSelectedQueuedTurns,
   useSelectedThreadDetailError,
   useSelectedThreadHistory,
   useConversationItems,
@@ -120,7 +120,6 @@ import { READING_MAX_WIDTH, useTabletLayout } from "@/hooks/useTabletLayout";
 import { AnimationVisibility } from '@/components/ui/AnimationVisibility';
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
-const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = [];
 
 export default function HomeScreen() {
   const isFocused = useIsFocused();
@@ -355,7 +354,7 @@ export default function HomeScreen() {
     capabilities,
     attachments,
   );
-  const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
+  const queuedTurns = useSelectedQueuedTurns();
   const composerSuggestionOffer = useMemo(() => {
     const offer = deriveComposerSuggestions(
       extensionSnapshot,

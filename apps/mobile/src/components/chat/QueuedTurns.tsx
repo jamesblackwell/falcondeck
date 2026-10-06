@@ -5,6 +5,7 @@ import { Image } from 'expo-image'
 import { CornerDownRight, Paperclip, Trash2 } from 'lucide-react-native'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
+import type { MobileQueuedTurn } from '@/lib/queued-turns'
 
 import {
   ActivityDiamond,
@@ -73,7 +74,7 @@ function useAttachmentPreview(
 }
 
 interface QueuedTurnRowProps {
-  queued: QueuedTurnSummary
+  queued: MobileQueuedTurn
   canSteer: boolean
   isPending: boolean
   isFirst: boolean
@@ -96,7 +97,7 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
   const { theme } = useUnistyles()
   const label = queuedTurnLabel(queued)
   const attachmentCount = queued.attachment_count ?? 0
-  const previewUrl = useAttachmentPreview(queued.id, attachmentCount > 0, getAttachmentPreview)
+  const previewUrl = useAttachmentPreview(queued.id, attachmentCount > 0 && !queued.pending, getAttachmentPreview)
 
   return (
     <View style={[styles.row, isFirst ? null : styles.rowDivided, isPending ? styles.rowPending : null]}>
@@ -180,7 +181,7 @@ const QueuedTurnRow = memo(function QueuedTurnRow({
 })
 
 interface QueuedTurnsProps {
-  queuedTurns: QueuedTurnSummary[]
+  queuedTurns: MobileQueuedTurn[]
   /** From the agent's capability summary; steering is disabled, not hidden. */
   canSteer: boolean
   onRemove: (queuedId: string) => Promise<void>
@@ -264,7 +265,7 @@ export const QueuedTurns = memo(function QueuedTurns({
             key={queued.id}
             queued={queued}
             canSteer={canSteer}
-            isPending={pendingIds.has(queued.id)}
+            isPending={queued.pending === true || pendingIds.has(queued.id)}
             isFirst={index === 0}
             getAttachmentPreview={getAttachmentPreview}
             onOpenActions={() => setOpenId(queued.id)}

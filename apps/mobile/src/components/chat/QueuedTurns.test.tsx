@@ -94,6 +94,26 @@ describe('QueuedTurns', () => {
     expect(textOf(r)).toContain('Then run the tests')
   })
 
+  it('shows a pending send immediately with actions and daemon attachment reads disabled', async () => {
+    const getAttachmentPreview = vi.fn(async () => 'data:image/png;base64,AAAA')
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[{ ...queued({ attachment_count: 1 }), pending: true }]}
+        canSteer
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={noop}
+        getAttachmentPreview={getAttachmentPreview}
+      />,
+    )
+    await act(async () => {})
+    expect(textOf(r)).toContain('Also update the changelog')
+    expect(chipsOf(r)[0]!.props.disabled).toBe(true)
+    expect(findButton(r, 'Steer queued message: Also update the changelog').props.disabled).toBe(true)
+    expect(findButton(r, 'Remove queued message: Also update the changelog').props.disabled).toBe(true)
+    expect(getAttachmentPreview).not.toHaveBeenCalled()
+  })
+
   it('shows the attachment count only when there are attachments', () => {
     const without = renderComponent(
       <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={noop} onSteer={noop} onEdit={noop} />,

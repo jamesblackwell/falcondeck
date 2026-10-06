@@ -36,6 +36,12 @@ import {
 
 import { clearMobileSessionCache, persistMobileSessionCache } from '@/storage/mobile-session-cache';
 import { conversationItemBytes } from '@/lib/conversation-item-size';
+import {
+  reconcilePendingQueuedTurns,
+  type MobileQueuedTurn,
+  type PendingQueuedTurn,
+  type PendingQueuedTurns,
+} from '@/lib/queued-turns';
 
 import { useUIStore } from './ui-store';
 
@@ -105,6 +111,7 @@ interface SessionState {
   /** Per-thread tail-load failures, so a flaky network shows an explicit
    * error instead of a false "No messages yet" empty state. */
   threadDetailErrors: Record<string, string>;
+  pendingQueuedTurns: PendingQueuedTurns;
 }
 
 const MAX_RETAINED_THREADS = 5;
@@ -172,6 +179,8 @@ interface SessionActions {
   upsertLocalThreadItem: (threadId: string, item: ConversationItem) => void;
   /** Removes a client-local item again (send failed or was queued). */
   removeLocalThreadItem: (threadId: string, itemId: string) => void;
+  addPendingQueuedTurn: (threadId: string, turn: MobileQueuedTurn, knownQueuedIds: string[]) => void;
+  removePendingQueuedTurn: (threadId: string, turnId: string) => void;
   reconcileSelection: () => void;
   reset: (options?: { preserveCache?: boolean; preserveSelection?: boolean }) => void;
 }
@@ -186,6 +195,7 @@ const initialState: SessionState = {
   threadHistory: {},
   threadDetail: null,
   threadDetailErrors: {},
+  pendingQueuedTurns: {},
 };
 
 const EMPTY_ITEMS: ConversationItem[] = [];
@@ -871,6 +881,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     threadHistory: nextThreadHistory,
     threadDetail: reconciledThreadDetail,
     threadDetailErrors: nextThreadDetailErrors,
+    pendingQueuedTurns: reconcilePendingQueuedTurns(state.pendingQueuedTurns, nextSnapshot, nextThreadItems),
     selectedWorkspaceId: nextSelection.workspaceId,
     selectedThreadId: nextSelection.threadId,
   };
@@ -947,6 +958,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       threadHistory,
       threadDetail: null,
       threadDetailErrors: {},
+      pendingQueuedTurns: reconcilePendingQueuedTurns(get().pendingQueuedTurns, snapshot, threadItems),
     }));
     persistStateCache(get());
   },
@@ -989,8 +1001,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   applyThreadHandle: (handle) => {
-    set((state) => ({
-      snapshot: state.snapshot
+    set((state) => {
+      const snapshot = state.snapshot
         ? {
             ...state.snapshot,
             workspaces: state.snapshot.workspaces.map((workspace) =>
@@ -1001,8 +1013,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
               ...state.snapshot.threads.filter((thread) => thread.id !== handle.thread.id),
             ],
           }
-        : state.snapshot,
-    }));
+        : state.snapshot;
+      return {
+        snapshot,
+        pendingQueuedTurns: reconcilePendingQueuedTurns(state.pendingQueuedTurns, snapshot, state.threadItems),
+      };
+    });
     persistStateCache(get());
   },
 
@@ -1016,13 +1032,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (thread.is_archived && !existing.is_archived) {
         return dropArchivedThread(state, thread.id) ?? state;
       }
+      const snapshot = {
+        ...state.snapshot,
+        threads: state.snapshot.threads.map((entry) => entry.id === thread.id ? thread : entry),
+      };
       return {
-        snapshot: {
-          ...state.snapshot,
-          threads: state.snapshot.threads.map((entry) =>
-            entry.id === thread.id ? thread : entry,
-          ),
-        },
+        snapshot,
+        pendingQueuedTurns: reconcilePendingQueuedTurns(state.pendingQueuedTurns, snapshot, state.threadItems),
         threadDetail:
           state.threadDetail?.thread.id === thread.id
             ? { ...state.threadDetail, thread }
@@ -1084,11 +1100,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         isPartial: mergedDetail.is_partial,
       });
       const isSelectedThread = state.selectedThreadId === threadId;
+      const threadItems = { ...state.threadItems, [threadId]: mergedItems };
 
       return retainThreadHistories({
         ...state,
         threadDetail: isSelectedThread ? mergedDetail : state.threadDetail,
-        threadItems: { ...state.threadItems, [threadId]: mergedItems },
+        threadItems,
+        pendingQueuedTurns: reconcilePendingQueuedTurns(state.pendingQueuedTurns, state.snapshot, threadItems),
         threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
         threadDetailErrors: state.threadDetailErrors[threadId]
           ? Object.fromEntries(
@@ -1121,6 +1139,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   upsertLocalThreadItem: (threadId, item) => {
     set((state) => {
       const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS;
+      // A busy send may have been dispatched or steered before its response
+      // reaches us. Do not replace its confirmed echo with a pending copy.
+      if (item.kind === 'user_message' && item.pending && existingItems.some((entry) =>
+        entry.kind === 'user_message' && entry.id === item.id && !entry.pending,
+      )) return state;
       const mergedItems = upsertConversationItem(existingItems, item);
       const nextHistory = historyStateForItems(
         mergedItems,
@@ -1145,6 +1168,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   removeLocalThreadItem: (threadId, itemId) => {
     set((state) => {
       const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS;
+      if (!existingItems.some((item) => item.id === itemId && item.kind === 'user_message' && item.pending)) return state;
       const mergedItems = removeConversationItem(existingItems, itemId);
       if (mergedItems === existingItems) return state;
       const nextHistory = historyStateForItems(
@@ -1161,6 +1185,32 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       };
     });
     persistStateCache(get());
+  },
+
+  addPendingQueuedTurn: (threadId, turn, knownQueuedIds) => {
+    set((state) => {
+      const pending = state.pendingQueuedTurns[threadId] ?? [];
+      if (pending.some((entry) => entry.turn.id === turn.id)) return state;
+      return {
+        pendingQueuedTurns: reconcilePendingQueuedTurns({
+          ...state.pendingQueuedTurns,
+          [threadId]: [...pending, { turn: { ...turn, pending: true }, knownQueuedIds }],
+        }, state.snapshot, state.threadItems),
+      };
+    });
+  },
+
+  removePendingQueuedTurn: (threadId, turnId) => {
+    set((state) => {
+      const pending = state.pendingQueuedTurns[threadId];
+      if (!pending) return state;
+      const remaining = pending.filter((entry) => entry.turn.id !== turnId);
+      if (remaining.length === pending.length) return state;
+      const pendingQueuedTurns = { ...state.pendingQueuedTurns };
+      if (remaining.length > 0) pendingQueuedTurns[threadId] = remaining;
+      else delete pendingQueuedTurns[threadId];
+      return { pendingQueuedTurns };
+    });
   },
 
   reconcileSelection: () => {
@@ -1203,6 +1253,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       threadDetailErrors: preserveCache
         ? previous.threadDetailErrors
         : initialState.threadDetailErrors,
+      pendingQueuedTurns: preserveCache ? previous.pendingQueuedTurns : initialState.pendingQueuedTurns,
       selectedWorkspaceId: options?.preserveSelection
         ? previous.selectedWorkspaceId
         : initialState.selectedWorkspaceId,
@@ -1241,6 +1292,8 @@ useSessionStore.subscribe((state, previous) => {
 
 const EMPTY_WORKSPACES: DaemonSnapshot['workspaces'] = [];
 const EMPTY_THREADS: DaemonSnapshot['threads'] = [];
+const EMPTY_QUEUED_TURNS: ThreadSummary['queued_turns'] = [];
+const EMPTY_PENDING_QUEUED_TURNS: PendingQueuedTurn[] = [];
 
 /* v8 ignore start */
 export function useGroups() {
@@ -1271,6 +1324,15 @@ export function useSelectedThread() {
       s.selectedThreadId,
     ),
   );
+}
+
+export function useSelectedQueuedTurns(): MobileQueuedTurn[] {
+  const thread = useSelectedThread();
+  const queued = thread?.queued_turns ?? EMPTY_QUEUED_TURNS;
+  const pending = useSessionStore((state) =>
+    thread ? state.pendingQueuedTurns[thread.id] ?? EMPTY_PENDING_QUEUED_TURNS : EMPTY_PENDING_QUEUED_TURNS,
+  );
+  return useMemo(() => pending.length > 0 ? [...queued, ...pending.map((entry) => entry.turn)] : queued, [pending, queued]);
 }
 
 export function useSelectedThreadHistory(options?: { pause?: boolean }) {
