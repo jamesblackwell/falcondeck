@@ -911,18 +911,22 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
         pick_cheap_model(parsed.models.iter().map(|model| model.id.as_str())).map(str::to_string);
     if options.live {
         match (cheap_model.as_deref(), parsed.model_config_id()) {
-            (Some(model), Some(config_id)) => {
-                match adapter
-                    .request(
+            (Some(model), config_id) => {
+                let (method, params) = match config_id {
+                    Some(config_id) => (
                         "session/set_config_option",
                         json!({
                             "sessionId": session_id,
                             "configId": config_id,
                             "value": model,
                         }),
-                    )
-                    .await
-                {
+                    ),
+                    None => (
+                        "session/set_model",
+                        json!({ "sessionId": session_id, "modelId": model }),
+                    ),
+                };
+                match adapter.request(method, params).await {
                     Ok(_) => {
                         report.push("Live model", CheckStatus::Pass, format!("selected {model}"))
                     }
@@ -933,11 +937,6 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
                     ),
                 }
             }
-            (Some(model), None) => report.push(
-                "Live model",
-                CheckStatus::Pass,
-                format!("{model} advertised; adapter has no model config option"),
-            ),
             (None, _) => report.push(
                 "Live model",
                 CheckStatus::Warning,

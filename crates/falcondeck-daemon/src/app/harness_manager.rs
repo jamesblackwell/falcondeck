@@ -167,6 +167,16 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         builtin: false,
     },
     KnownHarness {
+        id: "hermes",
+        label: "Hermes",
+        bin: "hermes",
+        npm_package: None,
+        // Source and packaged installs have different update owners.
+        upgrade_command: None,
+        auth_probe: None,
+        builtin: false,
+    },
+    KnownHarness {
         id: "unreal",
         label: "Unreal Agent",
         bin: "unreal-agent-runner",
@@ -914,7 +924,16 @@ struct AuthProbeResult {
 }
 
 async fn probe_binary_version(executable: &str) -> Result<Option<String>, ProbeFailure> {
-    let output = run_with_timeout(executable, &["--version"]).await?;
+    let args: &[&str] = if Path::new(executable)
+        .file_name()
+        .is_some_and(|name| name == "hermes")
+    {
+        // The ACP entry point avoids the general CLI's banners/update notices.
+        &["acp", "--version"]
+    } else {
+        &["--version"]
+    };
+    let output = run_with_timeout(executable, args).await?;
     if !output.success {
         return Err(ProbeFailure::Rejected);
     }
@@ -1269,7 +1288,15 @@ async fn probe_remote_harnesses(
 /// can take seconds to start, and repeating them per loop iteration would
 /// blow the PROBE_TIMEOUT budget on hosts with several harnesses installed.
 fn remote_probe_script() -> String {
-    let mut script = String::from("set -- ");
+    let mut script = String::from(
+        r#"fd_version() {
+  case "$1" in
+    hermes|*/hermes) "$1" acp --version ;;
+    *) "$1" --version ;;
+  esac
+}
+set -- "#,
+    );
     for harness in KNOWN_HARNESSES {
         script.push_str(harness.bin);
         script.push(' ');
@@ -1277,10 +1304,18 @@ fn remote_probe_script() -> String {
     script.push_str(
         r#"
 for bin do
-  p=$(command -v "$bin" 2>/dev/null) || p="$HOME/go/bin/$bin"
+  p=$(command -v "$bin" 2>/dev/null) || p=""
+  if [ ! -f "$p" ]; then
+    for candidate in "$HOME/.local/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.opencode/bin/$bin" /opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin
+    do
+      [ -f "$candidate" ] || continue
+      p="$candidate"
+      break
+    done
+  fi
   [ -f "$p" ] || continue
   echo "FD_BIN:$bin:$p"
-  v=$("$p" --version 2>&1 | head -n 1)
+  v=$(fd_version "$p" 2>&1 | head -n 1)
   echo "FD_VER:$bin:$v"
   seen="$p"
   for candidate in "$HOME/.local/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.opencode/bin/$bin" /opt/homebrew/bin/$bin /usr/local/bin/$bin /usr/bin/$bin
@@ -1288,7 +1323,7 @@ for bin do
     [ -f "$candidate" ] || continue
     case " $seen " in *" $candidate "*) continue ;; esac
     seen="$seen $candidate"
-    av=$("$candidate" --version 2>&1 | head -n 1 | tr ':' ' ')
+    av=$(fd_version "$candidate" 2>&1 | head -n 1 | tr ':' ' ')
     echo "FD_ALT:$bin:$av:$candidate"
   done
 done
@@ -1399,6 +1434,82 @@ mod tests {
         .unwrap();
         let error = run_local_upgrade(&command).await.unwrap_err();
         assert!(error.contains("exit code 23: update failed"), "{error}");
+    }
+
+    #[test]
+    fn hermes_inventory_does_not_claim_managed_updates_or_authentication() {
+        let hermes = KNOWN_HARNESSES
+            .iter()
+            .find(|harness| harness.id == "hermes")
+            .unwrap();
+        let summary = hermes.summary();
+        assert_eq!(summary.kind, HarnessKind::Detected);
+        assert_eq!(summary.upgrade_command, None);
+        assert_eq!(summary.latest_version, None);
+        assert_eq!(summary.auth_verdict, HarnessAuthVerdict::Unsupported);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hermes_version_probe_uses_acp_in_a_path_with_spaces() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let install = directory.path().join("Hermes install");
+        std::fs::create_dir(&install).unwrap();
+        let binary = install.join("hermes");
+        std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = acp ] && [ \"$2\" = --version ] || exit 23\nprintf '0.14.0\\n'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            probe_binary_version(binary.to_str().unwrap())
+                .await
+                .unwrap(),
+            Some("0.14.0".to_string())
+        );
+    }
+
+    #[test]
+    fn remote_hermes_probe_uses_the_same_acp_version_entry_point() {
+        let script = remote_probe_script();
+        assert!(script.contains("hermes|*/hermes) \"$1\" acp --version"));
+        assert!(script.contains("v=$(fd_version \"$p\""));
+        assert!(script.contains("av=$(fd_version \"$candidate\""));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_hermes_probe_finds_user_launcher_without_login_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let install = home.path().join(".local/bin");
+        std::fs::create_dir_all(&install).unwrap();
+        let binary = install.join("hermes");
+        std::fs::write(&binary, "#!/bin/sh\n[ \"$1\" = acp ] && [ \"$2\" = --version ] || exit 23\nprintf '0.14.0\\n'\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = remote_probe_script();
+        // Exercise the real inventory loop, without probing other installed
+        // agents or running their authentication commands on the test host.
+        let inventory = script.split("\nif command -v").next().unwrap().replace(
+            "for bin do",
+            "for bin do\n  [ \"$bin\" = hermes ] || continue",
+        );
+        let output = tokio::process::Command::new("/bin/sh")
+            .args(["-c", &inventory])
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            stdout.contains(&format!("FD_BIN:hermes:{}", binary.display())),
+            "{stdout}"
+        );
+        assert!(stdout.contains("FD_VER:hermes:0.14.0"), "{stdout}");
     }
 
     #[test]

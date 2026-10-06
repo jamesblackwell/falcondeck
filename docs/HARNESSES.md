@@ -22,7 +22,7 @@ An overview is a list of `HarnessSummary` entries for one host:
 | `id` / `label` / `kind` | Identity; `kind` is `builtin` (codex, claude), `acp` (providers.json entry), or `detected` (known CLI found on the machine) |
 | `bin` / `resolved_path` / `installed` | Binary name and canonical path (npm symlinks resolve into `node_modules`) |
 | `extra_installs` | Other copies of the same CLI on this host that FalconDeck is not using (path, version, install source). Dual native+npm installs are common; Upgrade always targets `resolved_path` |
-| `version` | Parsed from `<bin> --version` (first `x.y` token) |
+| `version` | Parsed from `<bin> --version` (first `x.y` token); Hermes launchers use `acp --version` |
 | `latest_version` / `update_available` | Populated only by an explicit refresh with update checks enabled |
 | `install_source` | Best-effort classification: npm / homebrew / cargo / local / unknown |
 | `upgrade_command` | Present only for curated, managed harnesses |
@@ -31,7 +31,7 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, agy, opencode, pi, grok, cursor, and unreal. Each entry declares its npm
+   claude, agy, opencode, pi, grok, cursor, hermes, and unreal. Each entry declares its npm
    package (for latest-version lookups), upgrade command, and optional auth
    probe. Adding a harness means adding one struct — the panel, RPC, and
    per-host probing pick it up automatically. Cursor, Antigravity, and Grok ship via
@@ -212,6 +212,15 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   upgraded CLI without an app reload.
 
 ## Client notes
+
+- **Hermes:** Settings → Agents offers its native `hermes acp` command.
+  Configure the model/provider in a terminal with `hermes model`, using the
+  same profile/environment as the agent. Existing custom `hermes` entries
+  retain their launcher and `HERMES_HOME`. Inventory detects the resolved
+  installation but provides no npm latest-version lookup or managed upgrade:
+  update through the existing installation's owner. The tested current source
+  passes live/restart qualification; the older installed 0.14.0 baseline lacks
+  live tool completion events. See [qualification and limits](HERMES-ACP-QUALIFICATION.md).
 
 - **Unreal Agent:** Settings → Agents offers `falcondeck-unreal-agent-acp`, a
   FalconDeck-hosted ACP adapter for the one-request `unreal-agent-runner` CLI.

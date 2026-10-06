@@ -1,0 +1,360 @@
+{
+  "provenance": {
+    "date": "2026-10-06",
+    "source": "1d6b2786e2b2de70a967c66b6a14e2b83bab30e7",
+    "sdk": "0.9.0",
+    "redactions": "Session, message and tool IDs and local paths normalized. Model catalog bounded to two observed entries. Images only advertised, not exercised."
+  },
+  "initialize": {
+    "agentCapabilities": {
+      "loadSession": true,
+      "promptCapabilities": {
+        "image": true
+      },
+      "sessionCapabilities": {
+        "fork": {},
+        "list": {},
+        "resume": {}
+      }
+    },
+    "agentInfo": {
+      "name": "hermes-agent",
+      "version": "unknown"
+    },
+    "authMethods": [
+      {
+        "description": "Authenticate Hermes using the currently configured openai-codex runtime credentials.",
+        "id": "openai-codex",
+        "name": "openai-codex runtime credentials"
+      },
+      {
+        "args": [
+          "--setup"
+        ],
+        "description": "Open Hermes' interactive model/provider setup in a terminal. Use this when Hermes has not been configured on this machine yet.",
+        "id": "hermes-setup",
+        "name": "Configure Hermes provider",
+        "type": "terminal"
+      }
+    ],
+    "protocolVersion": 1
+  },
+  "session": {
+    "models": {
+      "availableModels": [
+        {
+          "description": "Provider: ChatGPT or Codex Subscription \u2022 current",
+          "modelId": "openai-codex:gpt-5.4",
+          "name": "ChatGPT or Codex Subscription \u00b7 gpt-5.4"
+        },
+        {
+          "description": "Provider: ChatGPT or Codex Subscription",
+          "modelId": "openai-codex:gpt-5.6-luna",
+          "name": "ChatGPT or Codex Subscription \u00b7 gpt-5.6-luna"
+        }
+      ],
+      "currentModelId": "openai-codex:gpt-5.4"
+    },
+    "modes": {
+      "availableModes": [
+        {
+          "description": "Ask before edits.",
+          "id": "default",
+          "name": "Default"
+        },
+        {
+          "description": "Auto-allow workspace and temp-dir edits; still asks for sensitive paths.",
+          "id": "accept_edits",
+          "name": "Accept Edits"
+        },
+        {
+          "description": "Auto-allow file edits for this session except sensitive paths.",
+          "id": "dont_ask",
+          "name": "Don't Ask"
+        }
+      ],
+      "currentModeId": "default"
+    },
+    "sessionId": "fixture-session-1"
+  },
+  "updates": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": {
+            "text": "F",
+            "type": "text"
+          },
+          "messageId": "messageId-1",
+          "sessionUpdate": "agent_message_chunk"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": {
+            "text": "**Planning file-reading implementation**",
+            "type": "text"
+          },
+          "messageId": "messageId-2",
+          "sessionUpdate": "agent_thought_chunk"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "kind": "read",
+          "locations": [
+            {
+              "path": ".falcondeck-acp-probe.txt"
+            }
+          ],
+          "title": "read_file: .falcondeck-acp-probe.txt",
+          "toolCallId": "toolCallId-3",
+          "sessionUpdate": "tool_call"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": [
+            {
+              "content": {
+                "text": "Read .falcondeck-acp-probe.txt \u2014 1 total lines\n\n```\n1|FalconDeck ACP conformance fixture\n```",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "kind": "read",
+          "status": "completed",
+          "toolCallId": "toolCallId-3",
+          "sessionUpdate": "tool_call_update"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "size": 272000,
+          "used": 9670,
+          "sessionUpdate": "usage_update"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "_meta": {
+            "hermes": {
+              "sessionProvenance": {
+                "acpSessionId": "fixture-session-1",
+                "currentHermesSessionId": "fixture-session-1",
+                "rootHermesSessionId": "fixture-session-1",
+                "parentHermesSessionId": null,
+                "sessionKind": "root",
+                "compressionDepth": 0
+              }
+            }
+          },
+          "title": "Reply exactly FALCONDECK_ACP_TEXT_OK. Do not\u2026",
+          "updatedAt": "2026-10-06T06:53:11.547532+00:00",
+          "sessionUpdate": "session_info_update"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": {
+            "text": "Reply exactly FALCONDECK_ACP_TEXT_OK. Do not use tools.",
+            "type": "text"
+          },
+          "sessionUpdate": "user_message_chunk"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": [
+            {
+              "content": {
+                "text": "Preparing write to hermes-allowed.txt. Approval prompt shows the diff.",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "kind": "edit",
+          "locations": [
+            {
+              "path": "hermes-allowed.txt"
+            }
+          ],
+          "title": "write_file: hermes-allowed.txt",
+          "toolCallId": "toolCallId-4",
+          "sessionUpdate": "tool_call"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": [
+            {
+              "content": {
+                "text": "\u2705 write_file completed for `hermes-allowed.txt`\nFiles: `/tmp/hermes-qualification`",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "kind": "edit",
+          "status": "completed",
+          "toolCallId": "toolCallId-4",
+          "sessionUpdate": "tool_call_update"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": [
+            {
+              "content": {
+                "text": "Preparing write to hermes-denied.txt. Approval prompt shows the diff.",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "kind": "edit",
+          "locations": [
+            {
+              "path": "hermes-denied.txt"
+            }
+          ],
+          "title": "write_file: hermes-denied.txt",
+          "toolCallId": "toolCallId-5",
+          "sessionUpdate": "tool_call"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "fixture-session-1",
+        "update": {
+          "content": [
+            {
+              "content": {
+                "text": "write_file failed for hermes-denied.txt: Edit approval denied by ACP client; file was not modified.",
+                "type": "text"
+              },
+              "type": "content"
+            }
+          ],
+          "kind": "edit",
+          "status": "failed",
+          "toolCallId": "toolCallId-5",
+          "sessionUpdate": "tool_call_update"
+        }
+      }
+    }
+  ],
+  "permission": {
+    "jsonrpc": "2.0",
+    "id": 0,
+    "method": "session/request_permission",
+    "params": {
+      "options": [
+        {
+          "kind": "allow_once",
+          "name": "Allow edit",
+          "optionId": "allow_once"
+        },
+        {
+          "kind": "reject_once",
+          "name": "Deny",
+          "optionId": "deny"
+        }
+      ],
+      "sessionId": "fixture-session-1",
+      "toolCall": {
+        "content": [
+          {
+            "newText": "FALCONDECK_EDIT_OK\n",
+            "oldText": "before\n",
+            "path": "hermes-allowed.txt",
+            "type": "diff"
+          }
+        ],
+        "kind": "edit",
+        "rawInput": {
+          "tool": "write_file",
+          "arguments": {
+            "content": "FALCONDECK_EDIT_OK\n",
+            "path": "hermes-allowed.txt"
+          }
+        },
+        "status": "pending",
+        "title": "Approve edit: hermes-allowed.txt",
+        "toolCallId": "toolCallId-6"
+      }
+    }
+  },
+  "model_error": {
+    "code": -32602,
+    "message": "Invalid params",
+    "data": {
+      "details": "`nonexistent-provider:falcondeck-invalid-model` doesn't look like a OpenAI Codex model and isn't in its listing, so it was not accepted. If it belongs to another configured provider, switch with `--provider <slug>` (or select it from the `/model` picker)."
+    }
+  },
+  "empty_error_response": {
+    "stopReason": "end_turn"
+  },
+  "prose_error_text": "ChatGPT or Codex Subscription rejected the request and retrying won't help. Pick another model with /model, or check the details in `/tmp/hermes-qualification`.\n\nProvider said: HTTP 400: {\"detail\":\"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.\"}",
+  "stderr_error": "2026-10-06 07:53:42 [ERROR] agent.conversation_loop: Non-retryable client error: Error code: 400 - unsupported model",
+  "missing_credentials_error": {
+    "code": -32603,
+    "message": "Internal error",
+    "data": {
+      "details": "Hermes is not connected to any AI provider yet. Run `hermes model` to pick one (the free Nous tier needs no API key), type `/login` in chat, or add a key with `hermes auth add <provider>`. (Advanced: put an API key such as OPENROUTER_API_KEY in /tmp/hermes-empty-profile/.env.)"
+    }
+  }
+}

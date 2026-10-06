@@ -68,6 +68,18 @@ async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
 /// `--live` would put the check that catches a silently empty picker behind a
 /// token cost, which is what stops such a check from being run.
 #[tokio::test]
+async fn live_probe_selects_legacy_model_before_prompting() {
+    let cwd = tempfile::tempdir().expect("temporary workspace should be created");
+    let report =
+        run_probe(&options("legacy-model", cwd.path().to_path_buf()).with_live_checks(true)).await;
+
+    assert_eq!(status(&report, "Text streaming"), CheckStatus::Pass);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "Live model" && check.detail == "selected fixture:gpt-5.6-luna"
+    }));
+}
+
+#[tokio::test]
 async fn handshake_probe_discovers_the_catalog_without_prompting() {
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("normal", cwd.path().to_path_buf())).await;

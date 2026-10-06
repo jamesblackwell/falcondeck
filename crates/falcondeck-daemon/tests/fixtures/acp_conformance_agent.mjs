@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline'
+import { readFileSync } from 'node:fs'
 
 const scenario = process.argv[2] ?? 'normal'
 const sessionId = 'fixture-session-1'
@@ -6,6 +7,7 @@ let promptCount = 0
 let permissionPromptId = null
 let planPromptId = null
 let cancelPromptId = null
+let modelSelected = false
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -116,6 +118,12 @@ input.on('line', (line) => {
     process.stderr.write('fixture adapter diagnostic\n')
     result(message.id, {
       sessionId,
+      ...(scenario === 'legacy-model' ? {
+        models: {
+          currentModelId: 'retired-default',
+          availableModels: [{ modelId: 'fixture:gpt-5.6-luna', name: 'Luna' }],
+        },
+      } : {}),
       modes: {
         currentModeId: 'safe',
         availableModes: [{ id: 'safe', name: 'Safe' }],
@@ -130,7 +138,21 @@ input.on('line', (line) => {
     return
   }
 
+  if (message.method === 'session/set_model') {
+    if (message.params?.modelId !== 'fixture:gpt-5.6-luna') {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'invalid modelId' } })
+      return
+    }
+    modelSelected = true
+    result(message.id, {})
+    return
+  }
+
   if (message.method === 'session/prompt') {
+    if (scenario === 'legacy-model' && !modelSelected) {
+      send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: 'legacy model was not selected' } })
+      return
+    }
     promptCount += 1
     if (scenario === 'startup-banner' || scenario === 'empty-turn') {
       result(message.id, { stopReason: 'end_turn' })
@@ -146,6 +168,18 @@ input.on('line', (line) => {
       process.stderr.write(
         'timestamp=2026-06-27T15:45:21.351Z level=ERROR message="stream error" providerID=zai-coding-plan error.error="AI_APICallError: Authentication Failed"\n',
       )
+      return
+    }
+    if (scenario === 'hermes-empty-error' || scenario === 'hermes-prose-error') {
+      const recorded = JSON.parse(readFileSync(new URL('./hermes_acp.json', import.meta.url), 'utf8'))
+      if (scenario === 'hermes-prose-error') {
+        update({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: recorded.prose_error_text },
+        })
+      }
+      result(message.id, recorded.empty_error_response)
+      process.stderr.write(`${recorded.stderr_error}\n`)
       return
     }
     if (scenario === 'steer') {

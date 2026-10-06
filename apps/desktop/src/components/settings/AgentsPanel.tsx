@@ -86,6 +86,15 @@ const RECOMMENDED_AGENTS = [
       'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
   },
   {
+    id: 'hermes',
+    label: 'Hermes',
+    detail: 'Hermes Agent through its native ACP server, with its own memory and skills',
+    command: ['hermes', 'acp'],
+    transport: 'acp' as const,
+    installCommand: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash',
+    setupCommand: 'hermes model',
+  },
+  {
     id: 'unreal',
     label: 'Unreal Agent',
     detail: 'JSONL runner through FalconDeck’s ACP adapter; text and full-access tools (Go 1.27+)',
@@ -232,6 +241,11 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                   {!isConfigured ? (
                     <p className="mt-1 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
                       {agent.installCommand}
+                    </p>
+                  ) : null}
+                  {agent.setupCommand ? (
+                    <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-muted">
+                      Set up your model in a terminal using the same profile: <code>{agent.setupCommand}</code>
                     </p>
                   ) : null}
                 </div>

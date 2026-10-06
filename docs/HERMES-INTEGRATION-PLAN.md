@@ -1,6 +1,6 @@
 # Hermes Agent integration plan
 
-Research and local verification: 2026-10-06. This is a proposed implementation, not a shipped Hermes integration.
+Research and local verification: 2026-10-06. Phases 0 and 1 are implemented; see the [qualification report](HERMES-ACP-QUALIFICATION.md) for tested revisions, results, and remaining limits. Later phases remain proposed work.
 
 ## Recommendation
 
@@ -42,7 +42,7 @@ The executable predates the current checkout; rerun the current-source conforman
 
 1. Install Hermes on the machine running the FalconDeck daemon, using its [official installation instructions](https://hermes-agent.nousresearch.com/docs/). This Mac already has it.
 2. Run `hermes model` to configure its provider and model if needed. Run `hermes acp --check` to verify the adapter. If that fails because the ACP extra is missing, follow the installation-specific command in [Hermes' ACP guide](https://hermes-agent.nousresearch.com/docs/user-guide/features/acp).
-3. Open **Settings → Agents → Add custom agent**. Set agent ID to `hermes`, label to `Hermes`, and command to `hermes acp`. If desktop PATH discovery fails on this Mac, use `/Users/James/.local/bin/hermes acp`.
+3. Open **Settings → Agents → Recommended → Hermes → Configure**. This adds `hermes acp` with ACP transport. An existing custom `hermes` configuration remains unchanged. For a custom launcher/profile, use the existing entry; if desktop PATH discovery fails on this Mac, use `/Users/James/.local/bin/hermes acp`.
 4. Start a new task in the selected project folder and choose Hermes. Let FalconDeck launch the ACP process; there is no separately running Hermes server to manage.
 5. Paired mobile and remote-web clients operate that same daemon and thread. Hermes is installed on the daemon host, not on the phone.
 
@@ -82,6 +82,8 @@ FalconDeck owns task metadata, provider/session mappings, process supervision, u
 
 ## Phase 0: qualify the integration
 
+**Completed:** installed and disposable current-source baselines, current-source live/restart probes, controlled edits/denial, error cases, production-parser fixtures, and verified blocker fixes. Results and explicit limitations are in the [qualification report](HERMES-ACP-QUALIFICATION.md).
+
 **Expected effort: half to one day.** Treat this as the first implementation task, before advertising support.
 
 - Record the installed executable, actual revision, ACP SDK/protocol version, and configured profile. Qualify a current supported Hermes installation as well as the existing older installation where practical. Do not silently upgrade a user's agent to run the experiment.
@@ -106,6 +108,8 @@ Live mode spends model tokens and runs controlled commands. Use developer creden
 **Exit:** a recorded compatibility matrix separates verified behavior, unsupported behavior, and upstream issues. Stop treating advertised capabilities as completed tests.
 
 ## Phase 1: make Hermes discoverable
+
+**Completed:** recommended ACP card, preservation of existing entries, terminal setup guidance, local/SSH detection with concise version probing, and detection-only update ownership. No Hermes upgrade was performed.
 
 **Expected effort: half to one day.**
 
@@ -202,4 +206,4 @@ For unattended/server use, run Hermes on the enrolled FalconDeck daemon host and
 
 Budget approximately **five to nine engineering days** for first-class ACP support if qualification reveals modest fixes. Basic manual configuration takes minutes and was already shown to reach session/catalog discovery on this Mac. External Hermes fixes can extend elapsed time. Full gateway support is separate scope, not a prerequisite for the recommended ACP release.
 
-The next concrete implementation task is Phase 0 plus the recommended-agent/detection slice. Proceed to deeper adapter work only from the compatibility findings, while retaining native session ownership and the shared client contract.
+The next implementation task is Phase 2, guided by the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), while retaining native session ownership and the shared client contract.

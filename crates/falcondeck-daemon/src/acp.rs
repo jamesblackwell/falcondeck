@@ -996,6 +996,19 @@ fn opencode_stderr_error_summary(line: &str) -> Option<String> {
     }
 }
 
+fn hermes_stderr_error_summary(line: &str) -> Option<String> {
+    // Both qualified Hermes revisions return end_turn for a provider 400.
+    // Do not classify assistant prose or ordinary tool errors as failures.
+    if !line.contains("[ERROR]") {
+        return None;
+    }
+    let (_, detail) = line.split_once("Non-retryable client error:")?;
+    Some(truncate_diagnostic(
+        detail.trim(),
+        OPENCODE_STDERR_DIAGNOSTIC_LIMIT,
+    ))
+}
+
 fn json_u64_field(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(|entry| {
         entry
@@ -1091,7 +1104,9 @@ fn bundle_cancelled_acp_prompt(interrupted: &[Vec<Value>], steering: Vec<Value>)
     bundled
 }
 
-fn empty_acp_prompt_diagnostic(
+fn acp_prompt_failure_diagnostic(
+    provider_label: &str,
+    had_output: bool,
     stop_reason: &str,
     response: &Value,
     stderr: Option<&str>,
@@ -1106,13 +1121,21 @@ fn empty_acp_prompt_diagnostic(
     let total = usage
         .and_then(|value| json_u64_field(value, "totalTokens"))
         .unwrap_or(0);
-    let mut message = format!(
-        "OpenCode ACP completed with stopReason={stop_reason} but emitted no assistant content. Prompt usage was input={input}, output={output}, total={total}."
-    );
+    let mut message = if had_output {
+        format!(
+            "{provider_label} ACP reported a provider failure despite stopReason={stop_reason}."
+        )
+    } else {
+        format!(
+            "{provider_label} ACP completed with stopReason={stop_reason} but emitted no assistant content. Prompt usage was input={input}, output={output}, total={total}."
+        )
+    };
     if let Some(stderr) = stderr.map(str::trim).filter(|text| !text.is_empty()) {
-        message.push_str(&format!(" OpenCode stderr reported: {stderr}."));
+        message.push_str(&format!(" {provider_label} stderr reported: {stderr}."));
     }
-    message.push_str(" The model returned no text to render.");
+    if !had_output {
+        message.push_str(" The model returned no text to render.");
+    }
     message
 }
 
@@ -3227,26 +3250,38 @@ impl AcpRuntime {
                 .lock()
                 .await
                 .contains(session_id);
-            let empty_diagnostic =
-                if !had_output && is_successful_empty_prompt_stop_reason(&stop_reason) {
-                    self.wait_for_prompt_stderr(session_id).await;
-                    let stderr = self.prompt_stderr_errors.lock().await.remove(session_id);
-                    let is_opencode = self.config.id.eq_ignore_ascii_case("opencode");
-                    if stderr.is_some()
-                        || (is_opencode && prompt_usage_indicates_no_model_tokens(&response))
-                    {
-                        Some(empty_acp_prompt_diagnostic(
-                            &stop_reason,
-                            &response,
-                            stderr.as_deref(),
-                        ))
-                    } else {
-                        None
-                    }
+            let is_hermes = self.config.id.eq_ignore_ascii_case("hermes");
+            let empty_diagnostic = if (!had_output || is_hermes)
+                && is_successful_empty_prompt_stop_reason(&stop_reason)
+            {
+                self.wait_for_prompt_stderr(session_id).await;
+                let stderr = self.prompt_stderr_errors.lock().await.remove(session_id);
+                let is_opencode = self.config.id.eq_ignore_ascii_case("opencode");
+                if stderr.is_some()
+                    || (is_opencode && prompt_usage_indicates_no_model_tokens(&response))
+                {
+                    Some(acp_prompt_failure_diagnostic(
+                        &self.config.label,
+                        had_output,
+                        &stop_reason,
+                        &response,
+                        stderr.as_deref(),
+                    ))
                 } else {
-                    self.prompt_stderr_errors.lock().await.remove(session_id);
                     None
-                };
+                }
+            } else {
+                self.prompt_stderr_errors.lock().await.remove(session_id);
+                None
+            };
+            if is_hermes && let Some(detail) = empty_diagnostic.as_ref() {
+                // The prompt task derives thread status from this Result;
+                // an error event alone would still let it stamp Idle.
+                self.steer_queues.lock().await.remove(session_id);
+                self.finish_prompt_segment(session_id, None, Some(detail.clone()))
+                    .await;
+                return Err(DaemonError::Rpc(detail.clone()));
+            }
             // Shift the queue regardless of the stop reason: a steer that
             // raced with normal completion is still delivered, as a follow-up
             // prompt in the same turn.
@@ -3823,7 +3858,13 @@ impl AcpRuntime {
     }
 
     async fn record_prompt_stderr_line(&self, line: &str) {
-        let Some(summary) = opencode_stderr_error_summary(line) else {
+        let is_hermes = self.config.id.eq_ignore_ascii_case("hermes");
+        let summary = if is_hermes {
+            hermes_stderr_error_summary(line)
+        } else {
+            opencode_stderr_error_summary(line)
+        };
+        let Some(summary) = summary else {
             return;
         };
         let sessions = self
@@ -3833,7 +3874,9 @@ impl AcpRuntime {
             .iter()
             .cloned()
             .collect::<Vec<_>>();
-        if sessions.is_empty() {
+        // Hermes' provider log has no session ID. Never attribute a shared
+        // process error to an unrelated concurrent prompt.
+        if sessions.is_empty() || (is_hermes && sessions.len() != 1) {
             return;
         }
         let mut errors = self.prompt_stderr_errors.lock().await;
@@ -4657,7 +4700,11 @@ mod tests {
         let fixture =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
         let config = AcpProviderConfig {
-            id: format!("{scenario}-fixture"),
+            id: if scenario.starts_with("hermes-") {
+                "hermes".to_string()
+            } else {
+                format!("{scenario}-fixture")
+            },
             label: format!("{scenario} fixture"),
             command: vec![
                 "node".to_string(),
@@ -5158,6 +5205,171 @@ mod tests {
         assert!(
             diagnostic.contains("Authentication Failed"),
             "diagnostic should carry the stderr cause: {diagnostic}"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_provider_errors_fail_empty_and_prose_end_turns() {
+        for scenario in ["hermes-empty-error", "hermes-prose-error"] {
+            let (runtime, mut events) = fixture_runtime(scenario).await;
+            let session_id = runtime
+                .ensure_session(
+                    "hermes-error-thread",
+                    None,
+                    env!("CARGO_MANIFEST_DIR"),
+                    None,
+                    &Default::default(),
+                    None,
+                    None,
+                )
+                .await
+                .expect("fixture session should start");
+            let failure = runtime
+                .prompt(&session_id, vec![json!({"type":"text","text":"hello"})])
+                .await
+                .expect_err("provider rejection must also fail the prompt task");
+            assert!(failure.to_string().contains("unsupported model"));
+            let ended = timeout(Duration::from_secs(5), async {
+                loop {
+                    if let AcpEvent::TurnEnded {
+                        error,
+                        had_output,
+                        stop_reason,
+                        ..
+                    } = next_acp_event(&mut events).await
+                    {
+                        assert_eq!(stop_reason, None);
+                        return (error, had_output);
+                    }
+                }
+            })
+            .await
+            .expect("turn-ended should arrive");
+            assert_eq!(ended.1, scenario == "hermes-prose-error");
+            let diagnostic = ended
+                .0
+                .expect("Hermes provider rejection must fail the turn");
+            assert!(diagnostic.contains("unsupported model"), "{diagnostic}");
+            assert!(!diagnostic.contains("OpenCode"), "{diagnostic}");
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn hermes_stderr_is_not_assigned_to_concurrent_prompts() {
+        let (runtime, _events) = fixture_runtime("hermes-empty-error").await;
+        runtime
+            .prompt_sessions
+            .lock()
+            .await
+            .extend(["one".to_string(), "two".to_string()]);
+        runtime
+            .record_prompt_stderr_line("[ERROR] root: Non-retryable client error: rejected")
+            .await;
+        assert!(runtime.prompt_stderr_errors.lock().await.is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn recorded_hermes_wire_projects_through_the_runtime() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/hermes_acp.json")).unwrap();
+        let parsed = parse_session_metadata(&fixture["session"]);
+        assert!(
+            parsed
+                .models
+                .iter()
+                .any(|model| model.id == "openai-codex:gpt-5.6-luna")
+        );
+        assert_eq!(parsed.collaboration_modes.len(), 3);
+        assert!(parsed.permission_modes.is_empty());
+        assert_eq!(
+            fixture["initialize"]["agentCapabilities"]["promptCapabilities"]["image"],
+            true
+        );
+
+        let (runtime, mut events) = fixture_runtime("startup-banner").await;
+        let session_id = runtime
+            .ensure_session(
+                "hermes-recorded-thread",
+                None,
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(session_id, "fixture-session-1");
+        runtime
+            .replay_sessions
+            .lock()
+            .await
+            .insert(session_id.clone());
+        for message in fixture["updates"].as_array().unwrap() {
+            runtime.handle_message(message.clone()).await;
+        }
+        runtime.handle_message(fixture["permission"].clone()).await;
+        let mut saw_text = false;
+        let mut saw_read_completion = false;
+        let mut saw_edit_completion = false;
+        let mut saw_denied_edit = false;
+        let mut saw_history = false;
+        let mut saw_usage = false;
+        let mut saw_permission = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                AcpEvent::MessageDelta { message_id, .. } => {
+                    assert!(message_id.is_some());
+                    saw_text = true;
+                }
+                AcpEvent::ToolCallUpdate { status, output, .. } => {
+                    let output = output.unwrap_or_default();
+                    saw_read_completion |= status.as_deref() == Some("completed")
+                        && output.contains("conformance fixture");
+                    saw_edit_completion |= status.as_deref() == Some("completed")
+                        && output.contains("write_file completed");
+                    saw_denied_edit |= status.as_deref() == Some("failed")
+                        && output.contains("Edit approval denied");
+                }
+                AcpEvent::UserMessageDelta { text, .. } => {
+                    saw_history = text.contains("FALCONDECK_ACP_TEXT_OK")
+                }
+                AcpEvent::Usage { used, size, .. } => saw_usage = used > 0 && size > used,
+                AcpEvent::PermissionRequest { options, .. } => {
+                    assert_eq!(
+                        options
+                            .iter()
+                            .map(|option| (option.option_id.as_str(), option.kind.as_str()))
+                            .collect::<Vec<_>>(),
+                        vec![("allow_once", "allow_once"), ("deny", "reject_once")]
+                    );
+                    saw_permission = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_text
+                && saw_read_completion
+                && saw_edit_completion
+                && saw_denied_edit
+                && saw_history
+                && saw_usage
+                && saw_permission
+        );
+        assert!(hermes_stderr_error_summary(fixture["stderr_error"].as_str().unwrap()).is_some());
+        assert!(
+            rpc_error_data_text(&fixture["model_error"]["data"])
+                .unwrap()
+                .contains("was not accepted")
+        );
+        assert!(
+            rpc_error_data_text(&fixture["missing_credentials_error"]["data"])
+                .unwrap()
+                .contains("hermes model")
         );
         runtime.shutdown().await;
     }

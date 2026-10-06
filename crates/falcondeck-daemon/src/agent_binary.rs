@@ -495,6 +495,39 @@ mod tests {
     }
 
     #[test]
+    fn hermes_launcher_is_available_in_standard_gui_search_locations() {
+        assert!(
+            known_location_paths("hermes")
+                .iter()
+                .any(|path| path.ends_with(".local/bin/hermes"))
+        );
+        let path = build_preferred_command_path(
+            Path::new("/usr/bin/node"),
+            Some(OsString::from("/Users/example")),
+            Some(OsString::from("/usr/bin:/bin")),
+        )
+        .unwrap();
+        assert!(
+            std::env::split_paths(&path).any(|path| path == Path::new("/Users/example/.local/bin"))
+        );
+    }
+
+    #[test]
+    fn explicit_hermes_path_with_spaces_is_preserved() {
+        let directory = tempfile::tempdir().unwrap();
+        let install = directory.path().join("Hermes profile");
+        std::fs::create_dir(&install).unwrap();
+        let binary = install.join("hermes");
+        std::fs::write(&binary, "fixture").unwrap();
+        let resolution = super::resolve_agent_binary("hermes", binary.to_str().unwrap());
+        assert_eq!(resolution.source, super::BinaryResolutionSource::Configured);
+        assert_eq!(
+            Path::new(&resolution.executable),
+            binary.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn preferred_command_path_prioritizes_executable_parent() {
         let path = build_preferred_command_path(
             Path::new("/opt/homebrew/bin/codex"),

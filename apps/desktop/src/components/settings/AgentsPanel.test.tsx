@@ -10,6 +10,61 @@ describe('AgentsPanel recommended agents', () => {
     vi.unstubAllGlobals()
   })
 
+  it('configures Hermes through native ACP without replacing other providers', async () => {
+    const existing = { pi: { label: 'My Pi', command: ['/opt/bin/pi-acp'], env: { PI_HOME: '/tmp/pi' } } }
+    const hermes = { label: 'Hermes', command: ['hermes', 'acp'], transport: 'acp' }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...emptyOverview, providers: existing })))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        revision: 'revision-1',
+        providers: { ...existing, hermes },
+        resolved: [{ id: 'hermes', ...hermes, binary_found: true, reserved: false }],
+      })))
+    vi.stubGlobal('fetch', fetchMock)
+    const onToast = vi.fn()
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure Hermes' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: { ...existing, hermes },
+      expected_revision: 'revision-0',
+    })
+    expect(onToast).toHaveBeenCalledWith({
+      variant: 'success', title: 'Hermes configured',
+      description: 'FalconDeck will run hermes acp on this host.',
+    })
+  })
+
+  it('recognizes a custom Hermes installation and preserves its command and profile', async () => {
+    const hermes = {
+      label: 'My Hermes', command: ['/custom path/hermes-acp'],
+      env: { HERMES_HOME: '/tmp/hermes-profile' }, transport: 'acp',
+    }
+    const configured = {
+      revision: 'revision-7', providers: { hermes },
+      resolved: [{ id: 'hermes', ...hermes, binary_found: false, reserved: false }],
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(configured)))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(configured)))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+    expect(await screen.findByRole('button', { name: 'Configured' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Configure Hermes' })).not.toBeInTheDocument()
+    expect(screen.getByText('hermes model')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Configure Pi' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string).providers.hermes).toEqual(hermes)
+  })
+
   it('configures Unreal Agent through the bundled ACP adapter', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(emptyOverview), { status: 200 }))
@@ -309,7 +364,7 @@ describe('AgentsPanel recommended agents', () => {
     })
   })
 
-  it.each(['codex', 'claude', 'agy', 'cursor', 'opencode', 'pi'])(
+  it.each(['codex', 'claude', 'agy', 'cursor', 'opencode', 'pi', 'hermes'])(
     'does not let the generic form shadow the %s integration',
     async (reservedId) => {
       vi.stubGlobal(
