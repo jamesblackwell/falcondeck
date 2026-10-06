@@ -68,18 +68,17 @@ The report-only commit skips autoreview; every code commit has a clean review.
 
 ## Remaining priorities
 
-1. **Claude startup hydration.** Startup still parses complete transcripts and
-   retains them in managed threads. A local metadata-only inventory found 143
-   Claude JSONL files totaling 448.7 MiB, including two larger than 32 MiB.
-   Lazy hydration needs a summary parser and a gate shared by transcript reads
-   and first-turn admission so a late disk read cannot overwrite live messages.
-   The bounded cache fix removes redundant copies; it does not remove this eager
-   hydration contract.
-2. **Desktop/web casual Chats lists.** The shared sidebar maps every casual
+**Claude startup hydration was completed on 6 October** in `1ddb7e85`.
+The original local inventory found 143 Claude JSONL files totaling 448.7 MiB,
+including two larger than 32 MiB. Summary-first discovery and shared lazy
+hydration/turn admission now remove eager transcript retention. See the
+[follow-up measurements and regressions](claude-startup-performance-2026-10-06.md).
+
+1. **Desktop/web casual Chats lists.** The shared sidebar maps every casual
    session into a complex row; ordinary project lists already use bounded
    windows. Confirm the actual casual-session count and profile React commits
    before choosing paging or virtualization.
-3. **Installed-build measurements.** Measure startup, warm reconnect, typing
+2. **Installed-build measurements.** Measure startup, warm reconnect, typing
    during catch-up, and memory after browsing many sessions on a release Mac
    build and physical iPhone. Use the throttled/mixed-version scenarios in
    `docs/remote-sync-qa.md`.

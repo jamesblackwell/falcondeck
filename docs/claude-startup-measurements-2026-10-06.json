@@ -1,0 +1,474 @@
+{
+  "date": "2026-10-06",
+  "code_commit": "1ddb7e85",
+  "eager_base_commit": "dd1b7c1f",
+  "environment": {
+    "architecture": "arm64",
+    "os": "macOS",
+    "rustc": "1.98.0",
+    "physical_memory_bytes": 51539607552,
+    "profile": "release opt-level=3, thin LTO, codegen-units=1"
+  },
+  "method": {
+    "runs_per_scenario": 3,
+    "fresh_process": true,
+    "filesystem_cache": "warm",
+    "agents": "fake local CLIs; child environment cleared",
+    "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+    "rss_scope": "process lifetime high-water mark"
+  },
+  "scenarios": {
+    "eager-default": [
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.5803750000000001,
+          "resources": {
+            "peak_rss_bytes": 265175040,
+            "system_cpu_ms": 0.1419999999999959,
+            "user_cpu_ms": 0.03599999999994452
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 1503.79025,
+          "resources": {
+            "peak_rss_bytes": 264962048,
+            "system_cpu_ms": 154.53900000000002,
+            "user_cpu_ms": 511.51599999999996
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.047292,
+          "resources": {
+            "peak_rss_bytes": 269680640,
+            "system_cpu_ms": 0.018000000000000682,
+            "user_cpu_ms": 0.031000000000062755
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 677.650042,
+          "resources": {
+            "peak_rss_bytes": 269467648,
+            "system_cpu_ms": 95.25,
+            "user_cpu_ms": 557.2460000000001
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.063958,
+          "resources": {
+            "peak_rss_bytes": 265076736,
+            "system_cpu_ms": 0.030000000000001137,
+            "user_cpu_ms": 0.03500000000002501
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 614.295167,
+          "resources": {
+            "peak_rss_bytes": 264863744,
+            "system_cpu_ms": 82.87700000000001,
+            "user_cpu_ms": 508.861
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 2000
+          }
+        }
+      }
+    ],
+    "lazy-default": [
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.508791,
+          "resources": {
+            "peak_rss_bytes": 41959424,
+            "system_cpu_ms": 0.19300000000001205,
+            "user_cpu_ms": 0.3340000000000032
+          },
+          "retained_history": {
+            "items": 40,
+            "message_text_bytes": 81920,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 1242.024875,
+          "resources": {
+            "peak_rss_bytes": 41435136,
+            "system_cpu_ms": 139.62400000000002,
+            "user_cpu_ms": 165.464
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 2000
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.405875,
+          "resources": {
+            "peak_rss_bytes": 40550400,
+            "system_cpu_ms": 0.08300000000000551,
+            "user_cpu_ms": 0.3170000000000073
+          },
+          "retained_history": {
+            "items": 40,
+            "message_text_bytes": 81920,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 242.207125,
+          "resources": {
+            "peak_rss_bytes": 39927808,
+            "system_cpu_ms": 62.086,
+            "user_cpu_ms": 156.466
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 2000
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 40,
+          "sessions": 2000,
+          "source_bytes": 184072890
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.4295,
+          "resources": {
+            "peak_rss_bytes": 39452672,
+            "system_cpu_ms": 0.08699999999999619,
+            "user_cpu_ms": 0.3429999999999893
+          },
+          "retained_history": {
+            "items": 40,
+            "message_text_bytes": 81920,
+            "threads": 2000
+          },
+          "returned_items": 40
+        },
+        "startup": {
+          "elapsed_ms": 238.91799999999998,
+          "resources": {
+            "peak_rss_bytes": 38895616,
+            "system_cpu_ms": 60.879000000000005,
+            "user_cpu_ms": 157.03
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 2000
+          }
+        }
+      }
+    ],
+    "eager-long": [
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 1.1019999999999999,
+          "resources": {
+            "peak_rss_bytes": 256573440,
+            "system_cpu_ms": 0.43900000000000006,
+            "user_cpu_ms": 0.38999999999998636
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 739.512,
+          "resources": {
+            "peak_rss_bytes": 251576320,
+            "system_cpu_ms": 52.855000000000004,
+            "user_cpu_ms": 495.662
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.693125,
+          "resources": {
+            "peak_rss_bytes": 254066688,
+            "system_cpu_ms": 0.2980000000000018,
+            "user_cpu_ms": 0.3990000000000009
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 567.38575,
+          "resources": {
+            "peak_rss_bytes": 249397248,
+            "system_cpu_ms": 44.897,
+            "user_cpu_ms": 498.132
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 0.642542,
+          "resources": {
+            "peak_rss_bytes": 250920960,
+            "system_cpu_ms": 0.26500000000000057,
+            "user_cpu_ms": 0.37899999999996226
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 571.530917,
+          "resources": {
+            "peak_rss_bytes": 246300672,
+            "system_cpu_ms": 46.987,
+            "user_cpu_ms": 498.352
+          },
+          "retained_history": {
+            "items": 80000,
+            "message_text_bytes": 163840000,
+            "threads": 50
+          }
+        }
+      }
+    ],
+    "lazy-long": [
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 14.230958,
+          "resources": {
+            "peak_rss_bytes": 31522816,
+            "system_cpu_ms": 1.833000000000002,
+            "user_cpu_ms": 11.375999999999998
+          },
+          "retained_history": {
+            "items": 1600,
+            "message_text_bytes": 3276800,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 171.962625,
+          "resources": {
+            "peak_rss_bytes": 18448384,
+            "system_cpu_ms": 21.08,
+            "user_cpu_ms": 48.190999999999995
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 50
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 13.090417,
+          "resources": {
+            "peak_rss_bytes": 30375936,
+            "system_cpu_ms": 1.4350000000000005,
+            "user_cpu_ms": 10.742000000000004
+          },
+          "retained_history": {
+            "items": 1600,
+            "message_text_bytes": 3276800,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 79.54491700000001,
+          "resources": {
+            "peak_rss_bytes": 18743296,
+            "system_cpu_ms": 10.805,
+            "user_cpu_ms": 47.419
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 50
+          }
+        }
+      },
+      {
+        "cpu_scope": "daemon process including all threads; fake CLI children excluded",
+        "fixture": {
+          "message_text_bytes": 2048,
+          "messages_per_session": 1600,
+          "sessions": 50,
+          "source_bytes": 184442240
+        },
+        "rss_scope": "process lifetime high-water mark measured before reporting allocations",
+        "selected_detail": {
+          "elapsed_ms": 12.226792,
+          "resources": {
+            "peak_rss_bytes": 30851072,
+            "system_cpu_ms": 1.3249999999999993,
+            "user_cpu_ms": 10.339000000000006
+          },
+          "retained_history": {
+            "items": 1600,
+            "message_text_bytes": 3276800,
+            "threads": 50
+          },
+          "returned_items": 1600
+        },
+        "startup": {
+          "elapsed_ms": 76.89433299999999,
+          "resources": {
+            "peak_rss_bytes": 18563072,
+            "system_cpu_ms": 9.456999999999999,
+            "user_cpu_ms": 44.739999999999995
+          },
+          "retained_history": {
+            "items": 0,
+            "message_text_bytes": 0,
+            "threads": 50
+          }
+        }
+      }
+    ]
+  }
+}
