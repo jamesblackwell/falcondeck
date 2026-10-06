@@ -40,6 +40,7 @@ export interface PushNotificationData {
 }
 
 export type NotificationDestinationHandler = () => void
+export type NotificationDestinationSelector = (data: unknown) => boolean | Promise<boolean>
 
 /**
  * User preference for agent-attention pushes. Defaults to enabled so paired
@@ -219,29 +220,36 @@ export async function clearPushToken(
   })
 }
 
-/**
- * Route a notification tap to the referenced workspace/thread using the same
- * selection actions the sidebar uses. Returns true when a selection was made.
- */
-export function handleNotificationTapData(data: unknown): boolean {
-  if (typeof data !== 'object' || data === null) return false
+/** Validate routing metadata and reject pushes from an earlier pairing. */
+export function notificationDestinationFromData(data: unknown): PushNotificationData | null {
+  if (typeof data !== 'object' || data === null) return null
   const { sessionId, workspaceId, threadId } = data as PushNotificationData
   if (typeof sessionId === 'string') {
     const activeSessionId = getJson<{ sessionId?: unknown }>('relay.session')?.sessionId
-    if (activeSessionId !== sessionId) return false
+    if (activeSessionId !== sessionId) return null
   }
+  const workspace = typeof workspaceId === 'string' && workspaceId.trim() ? workspaceId : undefined
+  const thread = typeof threadId === 'string' && threadId.trim() ? threadId : undefined
+  return workspace || thread ? { sessionId, workspaceId: workspace, threadId: thread } : null
+}
+
+/** Select a destination already available in the local snapshot. */
+export function handleNotificationTapData(data: unknown): boolean {
+  const destination = notificationDestinationFromData(data)
+  if (!destination) return false
+  const { workspaceId, threadId } = destination
   const session = useSessionStore.getState()
 
   if (typeof workspaceId === 'string' && typeof threadId === 'string') {
     const owner = session.snapshot?.threads.find((thread) => thread.id === threadId)
-    if (session.snapshot && owner?.workspace_id !== workspaceId) return false
+    if (session.snapshot && (owner?.workspace_id !== workspaceId || owner.is_archived)) return false
     session.selectThread(workspaceId, threadId)
     return true
   }
   if (typeof threadId === 'string') {
     // No workspace in the payload — resolve it from the snapshot if we can.
     const owner = session.snapshot?.threads.find((thread) => thread.id === threadId)
-    if (owner) {
+    if (owner && !owner.is_archived) {
       session.selectThread(owner.workspace_id, threadId)
       return true
     }
@@ -286,20 +294,46 @@ function wasResponseAlreadyHandled(response: Notifications.NotificationResponse)
   return !!identifier && getJson<string>(PUSH_LAST_HANDLED_RESPONSE_KEY) === identifier
 }
 
+let responseGeneration = 0
+let liveResponseGeneration = 0
+let pendingResponseIdentifier: string | null = null
+
+function processNotificationResponse(
+  response: Notifications.NotificationResponse,
+  openDestination: NotificationDestinationHandler | undefined,
+  selectDestination: NotificationDestinationSelector,
+): void | Promise<void> {
+  const identifier = responseIdentifier(response)
+  if (wasResponseAlreadyHandled(response) || (identifier && identifier === pendingResponseIdentifier)) return
+  const generation = ++responseGeneration
+  pendingResponseIdentifier = identifier
+  const finish = (selected: boolean) => {
+    // A resolver may be waiting for reconnection. Only the newest tap owns
+    // navigation and the persisted handled-response marker.
+    if (generation !== responseGeneration) return
+    pendingResponseIdentifier = null
+    rememberHandledResponse(response)
+    if (selected) openDestination?.()
+  }
+  const selected = selectDestination(dataFromResponse(response))
+  if (typeof selected === 'boolean') return finish(selected)
+  return selected.then(finish)
+}
+
 /**
  * Subscribe to notification taps. Returns the subscription (or null when the
  * native module is unavailable) — callers must remove it on cleanup.
  */
 export function addNotificationResponseListener(
   openDestination?: NotificationDestinationHandler,
+  selectDestination: NotificationDestinationSelector = handleNotificationTapData,
 ): { remove: () => void } | null {
   try {
     return Notifications.addNotificationResponseReceivedListener((response) => {
+      liveResponseGeneration += 1
       try {
-        rememberHandledResponse(response)
-        if (handleNotificationTapData(dataFromResponse(response))) {
-          openDestination?.()
-        }
+        const processing = processNotificationResponse(response, openDestination, selectDestination)
+        processing?.catch((error) => console.warn('Failed to handle notification tap', error))
       } catch (error) {
         console.warn('Failed to handle notification tap', error)
       }
@@ -315,6 +349,9 @@ let initialResponseProcessed = false
 /** Test-only: allow re-running the cold-start tap handling. */
 export function __resetInitialNotificationResponseForTests(): void {
   initialResponseProcessed = false
+  responseGeneration = 0
+  liveResponseGeneration = 0
+  pendingResponseIdentifier = null
 }
 
 /**
@@ -324,16 +361,19 @@ export function __resetInitialNotificationResponseForTests(): void {
  */
 export async function processInitialNotificationResponse(
   openDestination?: NotificationDestinationHandler,
+  selectDestination: NotificationDestinationSelector = handleNotificationTapData,
 ): Promise<void> {
   if (initialResponseProcessed) return
   initialResponseProcessed = true
+  const liveGeneration = liveResponseGeneration
   try {
     const response = await Notifications.getLastNotificationResponseAsync()
-    if (!response || wasResponseAlreadyHandled(response)) return
-    rememberHandledResponse(response)
-    if (handleNotificationTapData(dataFromResponse(response))) {
-      openDestination?.()
-    }
+    // A live tap delivered during native lookup is newer than the response
+    // that lookup captured. Do not let the older launch select over it.
+    if (liveGeneration !== liveResponseGeneration || !response || wasResponseAlreadyHandled(response)) return
+    const generation = responseGeneration + 1
+    await processNotificationResponse(response, openDestination, selectDestination)
+    if (generation !== responseGeneration || liveGeneration !== liveResponseGeneration) return
     // Where the installed SDK supports it, also clear the stored response so
     // even an identifier-less response cannot replay on the next cold start.
     const clearLastResponse = (

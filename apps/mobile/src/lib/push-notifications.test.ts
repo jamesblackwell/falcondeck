@@ -20,6 +20,8 @@ import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
 import { getJson, setJson } from '@/storage/mmkv'
 import { useSessionStore } from '@/store/session-store'
+import { snapshot, snapshotEvent, thread } from '@/test/factories'
+import { createNotificationRouter } from './notification-routing'
 import {
   __resetInitialNotificationResponseForTests,
   addNotificationResponseListener,
@@ -427,6 +429,84 @@ describe('push-notifications', () => {
   })
 
   describe('notification response listeners', () => {
+    it('opens a cold-start destination after it arrives from the daemon instead of losing the tap', async () => {
+      const selectThread = vi.fn()
+      const openDestination = vi.fn()
+      useSessionStore.setState({ selectThread, snapshot: snapshot() })
+      __setLastResponse(tapResponse({ workspaceId: 'workspace-1', threadId: 'new-thread' }))
+
+      const notificationRouter = createNotificationRouter()
+      const processing = processInitialNotificationResponse(openDestination, notificationRouter.select)
+      await Promise.resolve()
+      expect(getJson('push.lastHandledNotificationResponse')).toBeNull()
+      expect(__getLastResponse()).not.toBeNull()
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+        threads: [thread(), thread({ id: 'new-thread' })],
+      })))
+      await processing
+
+      expect(selectThread).toHaveBeenCalledWith('workspace-1', 'new-thread')
+      expect(openDestination).toHaveBeenCalledOnce()
+      notificationRouter.dispose()
+    })
+
+    it('navigates only for the latest tap when asynchronous destination reads finish out of order', async () => {
+      const resolvers: Array<(selected: boolean) => void> = []
+      const selectDestination = vi.fn(() => new Promise<boolean>(resolve => { resolvers.push(resolve) }))
+      const openDestination = vi.fn()
+      const subscription = addNotificationResponseListener(openDestination, selectDestination)
+      __emitResponse(tapResponse({ workspaceId: 'w1', threadId: 'old-thread' }, 'old-notification'))
+      __emitResponse(tapResponse({ workspaceId: 'w1', threadId: 'new-thread' }, 'new-notification'))
+
+      resolvers[1](true)
+      await Promise.resolve()
+      resolvers[0](true)
+      await Promise.resolve()
+      expect(openDestination).toHaveBeenCalledOnce()
+      expect(getJson('push.lastHandledNotificationResponse')).toBe('new-notification')
+      subscription!.remove()
+    })
+
+    it('dedupes a live response while routing is pending and after it completes', async () => {
+      let resolveSelection!: (selected: boolean) => void
+      const selectDestination = vi.fn(() => new Promise<boolean>(resolve => { resolveSelection = resolve }))
+      const openDestination = vi.fn()
+      const subscription = addNotificationResponseListener(openDestination, selectDestination)
+      const response = tapResponse({ workspaceId: 'w1', threadId: 't1' })
+      __emitResponse(response)
+      __emitResponse(response)
+      expect(selectDestination).toHaveBeenCalledOnce()
+      expect(getJson('push.lastHandledNotificationResponse')).toBeNull()
+
+      resolveSelection(true)
+      await Promise.resolve()
+      __emitResponse(response)
+      expect(selectDestination).toHaveBeenCalledOnce()
+      expect(openDestination).toHaveBeenCalledOnce()
+      subscription!.remove()
+    })
+
+    it('keeps a newer live tap when an older launch-response lookup completes late', async () => {
+      let resolveLookup!: (response: ReturnType<typeof tapResponse>) => void
+      vi.spyOn(Notifications, 'getLastNotificationResponseAsync').mockReturnValue(
+        new Promise((resolve) => { resolveLookup = resolve }) as never,
+      )
+      const selectThread = vi.fn()
+      const openDestination = vi.fn()
+      useSessionStore.setState({ selectThread })
+      const subscription = addNotificationResponseListener(openDestination)
+      const processing = processInitialNotificationResponse(openDestination)
+
+      __emitResponse(tapResponse({ workspaceId: 'w1', threadId: 'new-thread' }, 'new-notification'))
+      resolveLookup(tapResponse({ workspaceId: 'w1', threadId: 'old-thread' }, 'old-notification'))
+      await processing
+
+      expect(selectThread).toHaveBeenCalledTimes(1)
+      expect(selectThread).toHaveBeenLastCalledWith('w1', 'new-thread')
+      expect(openDestination).toHaveBeenCalledOnce()
+      subscription!.remove()
+    })
+
     it('routes taps delivered to the response listener', () => {
       const selectThread = vi.fn()
       const openDestination = vi.fn()

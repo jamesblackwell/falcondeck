@@ -6,6 +6,7 @@ import { cleanup, renderComponent } from '@/test/render'
 const mocks = vi.hoisted(() => ({
   restore: vi.fn(), hydrate: vi.fn(), load: vi.fn(), connect: vi.fn(),
   initialNotification: vi.fn(), schedule: vi.fn(), cancel: vi.fn(), reset: vi.fn(),
+  selectNotification: vi.fn(), disposeNotifications: vi.fn(),
   selected: null as string | null,
 }))
 vi.mock('@/theme/unistyles', () => ({}))
@@ -22,6 +23,9 @@ vi.mock('@/hooks/useRelayConnection', () => ({ useRelayConnection: () => mocks.c
 vi.mock('@/lib/push-notifications', () => ({
   configureForegroundNotificationHandler: vi.fn(), ensureAndroidNotificationChannel: vi.fn(),
   addNotificationResponseListener: vi.fn(), processInitialNotificationResponse: mocks.initialNotification,
+}))
+vi.mock('@/lib/notification-routing', () => ({
+  createNotificationRouter: () => ({ select: mocks.selectNotification, dispose: mocks.disposeNotifications }),
 }))
 vi.mock('@/storage/mobile-session-cache', () => ({ clearMobileSessionCache: vi.fn(), loadMobileSessionCache: mocks.load }))
 vi.mock('@/store', () => ({
@@ -49,7 +53,7 @@ it('waits for deferred cache restoration before connecting with the last convers
   expect(mocks.initialNotification).not.toHaveBeenCalled()
   await act(async () => { mocks.schedule.mock.calls[0][0]() })
   expect(mocks.connect).toHaveBeenCalledWith('last-thread')
-  expect(mocks.initialNotification).toHaveBeenCalled()
+  expect(mocks.initialNotification).toHaveBeenCalledWith(expect.any(Function), mocks.selectNotification)
 })
 
 it.each([true, false])('connects without a cache after restoration (authenticated: %s)', async (restored) => {

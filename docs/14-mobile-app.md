@@ -269,3 +269,9 @@ and error notifications retain their existing copy.
 Notification titles and reply previews are visible to the relay and Expo/OS push
 services, unlike the encrypted conversation stream. This requires updated daemon
 and relay binaries; existing mobile builds can display the new body unchanged.
+
+Notification taps wait for missing destinations to sync. If the thread is absent
+from the offline cache or compact index, the phone resolves its summary through
+`thread.detail` after reconnecting. Newer taps and deliberate sidebar selections
+cancel older pending destinations; launch-response lookup cannot override a newer
+live tap. A response is marked handled only once routing finishes.

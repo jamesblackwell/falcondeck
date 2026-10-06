@@ -16,6 +16,7 @@ import {
   ensureAndroidNotificationChannel,
   processInitialNotificationResponse,
 } from '@/lib/push-notifications'
+import { createNotificationRouter } from '@/lib/notification-routing'
 import { clearMobileSessionCache, loadMobileSessionCache } from '@/storage/mobile-session-cache'
 import { useRelayStore, useSessionStore } from '@/store'
 import {
@@ -46,10 +47,12 @@ export default function RootLayout() {
   const sessionRestoredRef = useRef(false)
   const { rt } = useUnistyles()
   const router = useRouter()
+  const routerRef = useRef(router)
+  routerRef.current = router
 
   const openNotificationDestination = useCallback(() => {
-    router.navigate('/(app)')
-  }, [router])
+    routerRef.current.navigate('/(app)')
+  }, [])
 
   useEffect(() => {
     // Only after stores hydrate — a tap handled earlier would have its
@@ -58,17 +61,13 @@ export default function RootLayout() {
     // notification response, which processInitialNotificationResponse below
     // picks up (deduped, so already-handled taps are not replayed).
     if (!isReady || !isHydrated) return
-    const subscription = addNotificationResponseListener(openNotificationDestination)
+    const notificationRouter = createNotificationRouter()
+    const subscription = addNotificationResponseListener(openNotificationDestination, notificationRouter.select)
+    void processInitialNotificationResponse(openNotificationDestination, notificationRouter.select)
     return () => {
       subscription?.remove()
+      notificationRouter.dispose()
     }
-  }, [isReady, isHydrated, openNotificationDestination])
-
-  useEffect(() => {
-    // Only after stores hydrate — otherwise cache restoration would clobber
-    // the workspace/thread selection made from the launching notification.
-    if (!isReady || !isHydrated) return
-    void processInitialNotificationResponse(openNotificationDestination)
   }, [isReady, isHydrated, openNotificationDestination])
 
   useEffect(() => {
