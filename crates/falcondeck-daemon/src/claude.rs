@@ -37,6 +37,7 @@ use crate::app::agent_helpers::{
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
 
+mod auth_cache;
 mod history;
 mod stream;
 #[cfg(test)]
@@ -218,7 +219,10 @@ impl ClaudeRuntime {
         let resolved = resolve_agent_binary("claude", &claude_bin);
         let runtime = Self::for_workspace(workspace_path.clone(), claude_bin);
 
-        let (account, models) = tokio::join!(read_auth_status(&resolved.executable), list_models());
+        let (account, models) = tokio::join!(
+            auth_cache::startup_auth_status(&resolved.executable),
+            list_models()
+        );
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
         // Discover sidebar metadata without materializing every transcript.
@@ -761,7 +765,10 @@ impl ClaudeRuntime {
 
     pub async fn provider_metadata(&self) -> ClaudeProviderMetadata {
         let resolved = resolve_agent_binary("claude", &self.claude_bin);
-        let (account, models) = tokio::join!(read_auth_status(&resolved.executable), list_models());
+        let (account, models) = tokio::join!(
+            auth_cache::refresh_auth_status(&resolved.executable),
+            list_models()
+        );
         ClaudeProviderMetadata {
             account,
             models,

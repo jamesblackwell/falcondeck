@@ -112,6 +112,7 @@ mod threads;
 mod title_suggestions;
 mod utility_model;
 mod workspace_ops;
+mod workspace_restore;
 
 use agent_helpers::*;
 use conversation_helpers::*;
@@ -1693,13 +1694,11 @@ impl AppState {
         if !workspaces_to_restore.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {
-                for workspace in workspaces_to_restore {
-                    app.restore_one_persisted_workspace(
-                        workspace,
-                        preferences.auto_resume_interrupted_sessions,
-                    )
-                    .await;
-                }
+                app.restore_workspaces(
+                    workspaces_to_restore,
+                    preferences.auto_resume_interrupted_sessions,
+                )
+                .await;
                 app.finish_local_restore();
                 app.emit(
                     None,

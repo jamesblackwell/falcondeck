@@ -359,54 +359,94 @@ pub(super) async fn connect_workspace_internal(
                 .cloned()
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
         };
-        let threads = session.workspace_threads().await?;
-        Ok::<_, DaemonError>((session, agent, threads))
-    }
-    .await;
-    let (codex_session, codex_account, codex_models, codex_collaboration_modes, codex_threads) =
-        match codex_bootstrap {
-            Ok((session, agent, threads)) => {
-                app.clear_operational_condition(&workspace_id, "codex_bootstrap");
-                app.clear_operational_condition(&workspace_id, "codex_connection");
-                (
-                    Some(session),
-                    agent.account,
-                    agent.models,
-                    agent.collaboration_modes,
-                    threads,
-                )
-            }
-            Err(error) => {
-                // Degrading to a Claude-only workspace is only useful when
-                // Claude is actually installed; with no working provider at
-                // all, surface the connect failure as before.
-                let claude_resolved = app.resolve_provider_binary(&AgentProvider::CLAUDE);
-                if !Path::new(&claude_resolved.executable).is_file() {
-                    claude_task.abort();
-                    agy_task.abort();
-                    return Err(error);
-                }
-                let message = error.to_string();
-                tracing::warn!("codex bootstrap failed for {path_string}: {message}");
-                let _ = app.upsert_operational_condition(
-                    workspace_id.clone(),
-                    "codex_bootstrap",
-                    falcondeck_core::ServiceLevel::Warning,
-                    message,
-                    Some("codex-bootstrap".to_string()),
-                );
-                (
-                    None,
-                    falcondeck_core::AccountSummary {
-                        status: falcondeck_core::AccountStatus::Unknown,
-                        label: "Codex unavailable".to_string(),
-                    },
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
+        let candidates = persisted_workspace_ref
+            .map(|workspace| saved_codex_subagent_lookup_ids(&workspace.thread_states))
+            .unwrap_or_default();
+        let discover_subagents = async {
+            if persisted_workspace_ref.is_some_and(|workspace| {
+                workspace.thread_states.iter().any(|thread| {
+                    thread
+                        .provider
+                        .as_ref()
+                        .is_none_or(|provider| *provider == AgentProvider::CODEX)
+                })
+            }) {
+                session.subagent_thread_ids(&candidates).await
+            } else {
+                HashSet::new()
             }
         };
+        // These are independent read-only catalogs. The RPC transport correlates
+        // responses by id, so a slow native scan need not delay the other reads.
+        let (threads, skills, subagents) = tokio::join!(
+            session.workspace_threads(),
+            load_codex_provider_skills(app, &session),
+            discover_subagents,
+        );
+        Ok::<_, DaemonError>((
+            session,
+            agent,
+            threads?,
+            skills.unwrap_or_default(),
+            subagents,
+        ))
+    }
+    .await;
+    let (
+        _codex_session,
+        codex_account,
+        codex_models,
+        codex_collaboration_modes,
+        codex_threads,
+        codex_provider_skills,
+        subagent_thread_ids,
+    ) = match codex_bootstrap {
+        Ok((session, agent, threads, skills, subagents)) => {
+            app.clear_operational_condition(&workspace_id, "codex_bootstrap");
+            app.clear_operational_condition(&workspace_id, "codex_connection");
+            (
+                Some(session),
+                agent.account,
+                agent.models,
+                agent.collaboration_modes,
+                threads,
+                skills,
+                subagents,
+            )
+        }
+        Err(error) => {
+            // Degrading to a Claude-only workspace is only useful when
+            // Claude is actually installed; with no working provider at
+            // all, surface the connect failure as before.
+            let claude_resolved = app.resolve_provider_binary(&AgentProvider::CLAUDE);
+            if !Path::new(&claude_resolved.executable).is_file() {
+                claude_task.abort();
+                agy_task.abort();
+                return Err(error);
+            }
+            let message = error.to_string();
+            tracing::warn!("codex bootstrap failed for {path_string}: {message}");
+            let _ = app.upsert_operational_condition(
+                workspace_id.clone(),
+                "codex_bootstrap",
+                falcondeck_core::ServiceLevel::Warning,
+                message,
+                Some("codex-bootstrap".to_string()),
+            );
+            (
+                None,
+                falcondeck_core::AccountSummary {
+                    status: falcondeck_core::AccountStatus::Unknown,
+                    label: "Codex unavailable".to_string(),
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                HashSet::new(),
+            )
+        }
+    };
     let ClaudeBootstrap {
         runtime: claude_runtime,
         account: claude_account,
@@ -432,12 +472,6 @@ pub(super) async fn connect_workspace_internal(
         tokio::task::spawn_blocking(move || discover_file_backed_skills(&skill_path))
             .await
             .unwrap_or_default();
-    let codex_provider_skills = match codex_session.as_ref() {
-        Some(session) => load_codex_provider_skills(app, session)
-            .await
-            .unwrap_or_default(),
-        None => Vec::new(),
-    };
     let merged_skills = merge_skills(
         file_backed_skills
             .into_iter()
@@ -477,16 +511,6 @@ pub(super) async fn connect_workspace_internal(
         }
     }));
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
-    let subagent_thread_ids = if let Some(session) = codex_session.as_ref()
-        && persisted_workspace_ref.is_some_and(|workspace| !workspace.thread_states.is_empty())
-    {
-        let candidates = persisted_workspace_ref
-            .map(|workspace| saved_codex_subagent_lookup_ids(&workspace.thread_states))
-            .unwrap_or_default();
-        session.subagent_thread_ids(&candidates).await
-    } else {
-        HashSet::new()
-    };
     let persisted_thread_states = persisted_workspace_ref
         .map(|workspace| {
             workspace
@@ -4634,7 +4658,7 @@ pub(super) async fn load_codex_provider_skills(
     session: &CodexSession,
 ) -> Result<Vec<SkillSummary>, DaemonError> {
     let value = session
-        .send_request("skills/list", json!({ "limit": 200 }))
+        .send_control_request("skills/list", json!({ "limit": 200 }))
         .await
         .unwrap_or(Value::Null);
     Ok(parse_codex_provider_skills(&value))

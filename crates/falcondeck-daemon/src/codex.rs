@@ -802,26 +802,7 @@ impl CodexSession {
                 warn!("Codex skill roots unavailable: {error}");
             }
 
-            let account_value = session
-                .send_control_request("account/read", json!({}))
-                .await?;
-            let account = parse_account(&account_value);
-            let models_value = session
-                .send_control_request("model/list", json!({}))
-                .await?;
-            let models = parse_models(&models_value);
-            // Experimental and absent from some older app-server releases, so
-            // mode discovery must not make the otherwise-stable bootstrap fail.
-            let collaboration_modes = match session
-                .send_control_request("collaborationMode/list", json!({}))
-                .await
-            {
-                Ok(value) => parse_collaboration_modes(&value),
-                Err(error) => {
-                    warn!("Codex collaboration modes unavailable: {error}");
-                    Vec::new()
-                }
-            };
+            let metadata = session.provider_metadata().await?;
             // The list already contains everything the sidebar and snapshots
             // need. Transcripts are resumed lazily when a thread is opened;
             // eagerly issuing 100 sequential thread/read calls made daemon
@@ -832,7 +813,12 @@ impl CodexSession {
                 Vec::new()
             };
 
-            Ok::<_, DaemonError>((account, models, collaboration_modes, threads))
+            Ok::<_, DaemonError>((
+                metadata.account,
+                metadata.models,
+                metadata.collaboration_modes,
+                threads,
+            ))
         }
         .await;
 
@@ -866,6 +852,7 @@ impl CodexSession {
                 "thread/list",
                 json!({
                     "limit": 100,
+                    "cwd": self.workspace_path,
                     "sourceKinds": ["cli", "vscode", "appServer", "unknown"]
                 }),
             )
@@ -878,16 +865,21 @@ impl CodexSession {
     }
 
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
-        let account_value = self.send_control_request("account/read", json!({})).await?;
-        let models_value = self.send_control_request("model/list", json!({})).await?;
-        let collaboration_modes = self
-            .send_control_request("collaborationMode/list", json!({}))
-            .await
-            .map(|value| parse_collaboration_modes(&value))
-            .unwrap_or_default();
+        let (account_value, models_value, modes_value) = tokio::join!(
+            self.send_control_request("account/read", json!({})),
+            self.send_control_request("model/list", json!({})),
+            self.send_control_request("collaborationMode/list", json!({})),
+        );
+        let collaboration_modes = match modes_value {
+            Ok(value) => parse_collaboration_modes(&value),
+            Err(error) => {
+                warn!("Codex collaboration modes unavailable: {error}");
+                Vec::new()
+            }
+        };
         Ok(CodexProviderMetadata {
-            account: parse_account(&account_value),
-            models: parse_models(&models_value),
+            account: parse_account(&account_value?),
+            models: parse_models(&models_value?),
             collaboration_modes,
         })
     }
@@ -2490,6 +2482,82 @@ mod tests {
             state,
         });
         (directory, session, stdout)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_requests_overlap_and_accept_out_of_order_responses() {
+        let (_directory, session, stdout) = piped_test_session("cat");
+        let responder = Arc::clone(&session);
+        let server = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let mut requests = Vec::new();
+            // With sequential admission this blocks before any response is sent.
+            for _ in 0..3 {
+                let line = lines.next_line().await.unwrap().unwrap();
+                requests.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+            for request in requests.into_iter().rev() {
+                let result = match request["method"].as_str().unwrap() {
+                    "account/read" => Ok(json!({"account": {"type": "chatgpt"}})),
+                    "model/list" => Ok(json!({"data": [{"id": "test-model"}]})),
+                    "collaborationMode/list" => Err(DaemonError::Rpc("unsupported".into())),
+                    method => panic!("unexpected metadata request {method}"),
+                };
+                responder
+                    .pending
+                    .lock()
+                    .await
+                    .remove(&request["id"].as_u64().unwrap())
+                    .unwrap()
+                    .send(result)
+                    .unwrap();
+            }
+        });
+        let metadata = timeout(Duration::from_secs(2), session.provider_metadata())
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(metadata.account.status, AccountStatus::Ready);
+        assert_eq!(metadata.models[0].id, "test-model");
+        assert!(metadata.collaboration_modes.is_empty());
+        session.shutdown().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_discovery_filters_at_the_native_server() {
+        let (_directory, session, stdout) = piped_test_session("cat");
+        let responder = Arc::clone(&session);
+        let server = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let request: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["method"], "thread/list");
+            assert_eq!(request["params"]["cwd"], responder.workspace_path());
+            assert_eq!(
+                request["params"]["sourceKinds"],
+                json!(["cli", "vscode", "appServer", "unknown"])
+            );
+            responder
+                .pending
+                .lock()
+                .await
+                .remove(&request["id"].as_u64().unwrap())
+                .unwrap()
+                .send(Ok(json!({"data": []})))
+                .unwrap();
+        });
+        assert!(
+            timeout(Duration::from_secs(2), session.workspace_threads())
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        server.await.unwrap();
+        session.shutdown().await.unwrap();
     }
 
     #[cfg(unix)]
