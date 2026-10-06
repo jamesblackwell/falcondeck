@@ -853,7 +853,7 @@ svg {
 }
 
 .mock-enter {
-  animation: mock-enter 320ms var(--fd-ease-default, ease) both;
+  animation: mock-enter 320ms var(--fd-ease-default, ease) backwards;
 }
 
 @keyframes mock-enter {
@@ -1097,7 +1097,7 @@ svg {
   height: 6px;
   border-radius: var(--fd-radius-full);
   background: var(--fd-info);
-  animation: mock-enter 320ms ease both;
+  animation: mock-enter 320ms ease backwards;
 }
 
 .mock-sidebar__footer {
@@ -1178,10 +1178,27 @@ svg {
   padding: 18px 26px 14px;
 }
 
+.mock-viewport {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
 /* Older turns scroll away under the header like a real chat. */
-.mock-main__transcript[data-scrolled],
-.mock-phone__body[data-scrolled] {
-  mask-image: linear-gradient(to bottom, transparent 0, #000 32px);
+.mock-viewport::after {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 32px;
+  background: linear-gradient(var(--fd-bg-0), transparent);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mock-viewport[data-scrolled]::after {
+  opacity: 1;
 }
 
 .mock-empty {
@@ -1245,7 +1262,7 @@ svg {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
-  animation: mock-enter 240ms ease both;
+  animation: mock-enter 240ms ease backwards;
 }
 
 .mock-work__diff {
@@ -1426,7 +1443,7 @@ svg {
   color: var(--fd-fg-3);
   font-size: 10.5px;
   font-weight: 400;
-  animation: mock-enter 240ms ease both;
+  animation: mock-enter 240ms ease backwards;
 }
 
 .mock-files__tabs .mock-files__branch {
@@ -1477,7 +1494,7 @@ svg {
 }
 
 .mock-tree__row--fresh {
-  animation: mock-enter 320ms ease both;
+  animation: mock-enter 320ms ease backwards;
   background: var(--fd-accent-dim, rgba(52, 211, 153, 0.07));
   transition: none;
 }

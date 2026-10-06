@@ -210,11 +210,13 @@ function Viewport({ className, children }: { className: string; children: ReactN
     const node = ref.current
     if (!node) return
     node.scrollTop = node.scrollHeight
-    node.toggleAttribute('data-scrolled', node.scrollTop > 0)
+    node.parentElement?.toggleAttribute('data-scrolled', node.scrollTop > 0)
   })
   return (
-    <div ref={ref} className={className}>
-      {children}
+    <div className="mock-viewport">
+      <div ref={ref} className={className}>
+        {children}
+      </div>
     </div>
   )
 }
