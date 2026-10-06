@@ -46,7 +46,6 @@ import {
   filterProjectGroupsByExtensions,
   isThreadSortMode,
   isWorkspaceColorId,
-  sortProjectGroupThreads,
   THREAD_SORT_OPTIONS,
   THREAD_TAGS_EXTENSION_ID,
 } from "@falcondeck/client-core";
@@ -275,15 +274,12 @@ export const SidebarView = memo(function SidebarView({
   );
   const displayGroups = useMemo(
     () =>
-      sortProjectGroupThreads(
-        filterProjectGroupsByExtensions(
-          groups,
-          extensionSnapshot,
-          activeExtensionFilters,
-        ),
-        sortMode,
+      filterProjectGroupsByExtensions(
+        groups,
+        extensionSnapshot,
+        activeExtensionFilters,
       ),
-    [activeExtensionFilters, extensionSnapshot, groups, sortMode],
+    [activeExtensionFilters, extensionSnapshot, groups],
   );
   const hiddenWorkspaceIdSet = useMemo(
     () => new Set(hiddenWorkspaceIds),

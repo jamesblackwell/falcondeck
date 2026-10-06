@@ -4,12 +4,12 @@ import {
   deriveConversationPresentation,
   normalizePreferences,
   reuseConversationPresentation,
-  threadForSelection,
   type ConversationPresentation,
   type ConversationRenderBlock,
 } from '@falcondeck/client-core'
 
 import { useConversationItems, useSessionStore } from '@/store'
+import { selectedThreadForState } from '@/store/session-store'
 
 export function useConversationPresentation(options?: {
   pause?: boolean
@@ -23,12 +23,8 @@ export function useConversationPresentation(options?: {
   // settled; without this, iOS briefly claims the session already "Worked"
   // while the thought nested inside it is still streaming.
   const isStreaming = useSessionStore((s) => {
-    const live =
-      threadForSelection(
-        s.snapshot?.threads ?? [],
-        s.selectedWorkspaceId,
-        s.selectedThreadId,
-      )?.status === 'running'
+    if (pause && frozenStreaming.current !== null) return frozenStreaming.current
+    const live = selectedThreadForState(s)?.status === 'running'
     if (!pause) {
       frozenStreaming.current = live
       return live

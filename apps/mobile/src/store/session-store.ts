@@ -783,10 +783,10 @@ function persistStateCache(state: SessionState) {
 
 /**
  * Cache persistence for paths that run inside a tap or an RPC continuation
- * (thread selection, detail merges). The full-cache stringify + MMKV write is
- * heavy enough to delay the screen transition those paths are about to
- * trigger, and it is crash-recovery bookkeeping only — so it never writes in
- * the caller's frame. The write always waits a full throttle window, landing
+ * (selection, handles and summaries, detail merges, optimistic messages). The
+ * full-cache stringify + MMKV write can delay the screen transition these
+ * paths are about to trigger. This crash-recovery bookkeeping never writes
+ * in the caller's frame. The write always waits a full throttle window, landing
  * after the navigation/render burst and coalescing with any event-driven
  * trailing write already scheduled.
  */
@@ -1019,7 +1019,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         pendingQueuedTurns: reconcilePendingQueuedTurns(state.pendingQueuedTurns, snapshot, state.threadItems),
       };
     });
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   applyThreadSummary: (thread) => {
@@ -1045,7 +1045,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             : state.threadDetail,
       };
     });
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   archiveThreadLocally: (threadId) => {
@@ -1162,7 +1162,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       touchHistory(threadId);
       return retainThreadHistories(next);
     });
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   removeLocalThreadItem: (threadId, itemId) => {
@@ -1184,7 +1184,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
             : state.threadDetail,
       };
     });
-    persistStateCache(get());
+    schedulePersistStateCache();
   },
 
   addPendingQueuedTurn: (threadId, turn, knownQueuedIds) => {
@@ -1295,6 +1295,28 @@ const EMPTY_THREADS: DaemonSnapshot['threads'] = [];
 const EMPTY_QUEUED_TURNS: ThreadSummary['queued_turns'] = [];
 const EMPTY_PENDING_QUEUED_TURNS: PendingQueuedTurn[] = [];
 
+const selectedThreadCache = new WeakMap<DaemonSnapshot['threads'], {
+  workspaceId: string;
+  threadId: string;
+  thread: ThreadSummary | null;
+}>();
+
+/** Share one catalog search across the transcript's independent subscriptions.
+ * Keep only the last selection per immutable catalog, including misses, so
+ * older thread visits do not accumulate entries or cross workspace boundaries. */
+export function selectedThreadForState(
+  state: Pick<SessionState, 'snapshot' | 'selectedWorkspaceId' | 'selectedThreadId'>,
+): ThreadSummary | null {
+  const { selectedWorkspaceId: workspaceId, selectedThreadId: threadId } = state;
+  if (!workspaceId || !threadId) return null;
+  const threads = state.snapshot?.threads ?? EMPTY_THREADS;
+  const cached = selectedThreadCache.get(threads);
+  if (cached?.workspaceId === workspaceId && cached.threadId === threadId) return cached.thread;
+  const thread = threadForSelection(threads, workspaceId, threadId);
+  selectedThreadCache.set(threads, { workspaceId, threadId, thread });
+  return thread;
+}
+
 /* v8 ignore start */
 export function useGroups() {
   // Narrow, shallow subscriptions: conversation-item events change the store
@@ -1317,13 +1339,7 @@ export function useSelectedWorkspace() {
 }
 
 export function useSelectedThread() {
-  return useSessionStore((s) =>
-    threadForSelection(
-      s.snapshot?.threads ?? EMPTY_THREADS,
-      s.selectedWorkspaceId,
-      s.selectedThreadId,
-    ),
-  );
+  return useSessionStore(selectedThreadForState);
 }
 
 export function useSelectedQueuedTurns(): MobileQueuedTurn[] {
@@ -1339,14 +1355,11 @@ export function useSelectedThreadHistory(options?: { pause?: boolean }) {
   const pause = options?.pause === true;
   const frozenHistory = useRef<ThreadHistoryState | null>(null);
   return useSessionStore((s) => {
+    if (pause && frozenHistory.current !== null) return frozenHistory.current;
     const selectedThreadId = s.selectedThreadId;
     const live = (
       !selectedThreadId ||
-      !threadForSelection(
-        s.snapshot?.threads ?? EMPTY_THREADS,
-        s.selectedWorkspaceId,
-        selectedThreadId,
-      )
+      !selectedThreadForState(s)
     )
       ? EMPTY_HISTORY
       : (s.threadHistory[selectedThreadId] ?? EMPTY_HISTORY);
@@ -1366,11 +1379,7 @@ export function useSelectedThreadDetailError() {
 }
 
 function selectLiveConversationItems(state: SessionStore): ConversationItem[] {
-  const selectedThread = threadForSelection(
-    state.snapshot?.threads ?? EMPTY_THREADS,
-    state.selectedWorkspaceId,
-    state.selectedThreadId,
-  );
+  const selectedThread = selectedThreadForState(state);
   if (!selectedThread) return EMPTY_ITEMS;
   if (
     state.threadDetail &&
@@ -1397,6 +1406,7 @@ export function useConversationItems(options?: { pause?: boolean }) {
   const frozenItems = useRef<ConversationItem[] | null>(null);
   const selectedItems = useSessionStore(
     useShallow((s) => {
+      if (pause && frozenItems.current !== null) return frozenItems.current;
       const live = selectLiveConversationItems(s);
       if (!pause) {
         frozenItems.current = live;
@@ -1411,7 +1421,10 @@ export function useConversationItems(options?: { pause?: boolean }) {
       ? state.pendingNewThreadItem.item
       : null,
   );
-  return selectedItems.length > 0 || !pendingNewThreadItem ? selectedItems : [pendingNewThreadItem];
+  return useMemo(
+    () => selectedItems.length > 0 || !pendingNewThreadItem ? selectedItems : [pendingNewThreadItem],
+    [selectedItems, pendingNewThreadItem],
+  );
 }
 
 /** Subscribes to a primitive, so transcript rows reading it only re-render

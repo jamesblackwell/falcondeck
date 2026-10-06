@@ -159,10 +159,13 @@ export function useSessionActions() {
   const handoffPendingRef = useRef(false);
   const [handoffPending, setHandoffPending] = useState(false);
 
-  const startThread = useCallback(async () => {
+  const startThread = useCallback(async (selection?: {
+    session: ReturnType<typeof useSessionStore.getState>;
+    ui: ReturnType<typeof useUIStore.getState>;
+  }) => {
     const relay = useRelayStore.getState();
-    const session = useSessionStore.getState();
-    const ui = useUIStore.getState();
+    const session = selection?.session ?? useSessionStore.getState();
+    const ui = selection?.ui ?? useUIStore.getState();
     const workspace = session.snapshot?.workspaces.find(
       (entry) => entry.id === session.selectedWorkspaceId,
     );
@@ -303,7 +306,20 @@ export function useSessionActions() {
     // failure — or a process death mid-request — still gives it back.
     // An override never touched the composer, so there is nothing to empty and
     // nothing to hand back on failure.
-    if (!override) ui.beginSubmission(submittedKey, submittedDraft);
+    const threadStart = session.selectedThreadId ? null : { session, ui };
+    const sendCrypto = relay._getSessionCrypto();
+    const sendSessionId = relay.sessionId;
+    const recovery = override ? null : ui.stageSubmission(submittedKey, submittedDraft);
+    let discardSubmission = false;
+    const contextChanged = new Error("Connection changed before the message was sent. Please try again.");
+    const requireCurrentSendContext = () => {
+      const current = useRelayStore.getState();
+      if (current.sessionId !== sendSessionId || (recovery && !recovery.isCurrent())) {
+        discardSubmission = true;
+        throw contextChanged;
+      }
+      if (current._getSessionCrypto() !== sendCrypto) throw contextChanged;
+    };
 
     // Fresh per attempt: a retried send must not reuse an id the daemon may
     // already have committed a user item under.
@@ -340,10 +356,17 @@ export function useSessionActions() {
       });
     } else if (expectQueued && !override?.resumeInterrupted) {
       useSessionStore.getState().addPendingQueuedTurn(activeThreadId, queuedTurn, knownQueuedIds);
+    } else if (!override?.resumeInterrupted) {
+      useSessionStore.getState().upsertLocalThreadItem(activeThreadId, optimisticItem);
     }
     try {
+      // Publish the empty composer and optimistic row before recovery or RPC
+      // encryption can occupy the JS thread. Recovery still precedes dispatch.
+      await nextPaint();
+      requireCurrentSendContext();
+      recovery?.persist();
       if (!activeThreadId) {
-        const handle = await startThread();
+        const handle = await startThread(threadStart!);
         activeThreadId = handle.thread.id;
         const branchKey = draftKeyFor(handle.workspace.id, handle.thread.id);
         // The send now belongs to the thread the daemon created, so recovery
@@ -366,7 +389,7 @@ export function useSessionActions() {
       // Show the message in the transcript before the relay round-trip; the
       // daemon echoes it under the same id, replacing this copy in place. A
       // send to a busy thread already has a pending row in the queue UI.
-      if (!expectQueued && !override?.resumeInterrupted) {
+      if (threadStart && !expectQueued && !override?.resumeInterrupted) {
         useSessionStore
           .getState()
           .upsertLocalThreadItem(activeThreadId, optimisticItem);
@@ -374,7 +397,8 @@ export function useSessionActions() {
       }
       // Paint the emptied composer before the (potentially multi-megabyte)
       // turn payload is encrypted and serialised below.
-      await nextPaint();
+      if (threadStart) await nextPaint();
+      requireCurrentSendContext();
       const sendResponse = await relay._callRpc<{
         ok: boolean;
         message?: string | null;
@@ -432,13 +456,14 @@ export function useSessionActions() {
           .removeLocalThreadItem(activeThreadId, userItemId);
       }
       ui.clearPendingNewThreadItem(userItemId);
-      if (!override) {
+      if (!override && !discardSubmission) {
         ui.restoreFailedSubmission(
           restoreKey,
           submittedDraft,
           submittedAttachments,
         );
       }
+      if (discardSubmission) return;
       if (!isRelayTransportError(e)) {
         relay._setError(
           e instanceof Error ? e.message : "Failed to send message",
@@ -447,9 +472,10 @@ export function useSessionActions() {
       triggerMessageFailedHaptic();
     } finally {
       ui.clearPendingNewThreadItem(userItemId);
-      ui.endSubmission(submittedKey);
-      ui.endSubmission(pendingConversationKey);
-      ui.setIsSubmitting(false, pendingConversationKey);
+      if (!discardSubmission) {
+        ui.endSubmission(pendingConversationKey);
+        ui.setIsSubmitting(false, pendingConversationKey);
+      }
     }
   }, [startThread]);
 

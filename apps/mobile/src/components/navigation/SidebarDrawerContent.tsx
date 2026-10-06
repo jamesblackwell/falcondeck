@@ -94,14 +94,15 @@ export function SidebarDrawerContent({
 
   const handleSelectThread = useCallback(
     (wId: string, tId: string) => {
+      const { selectedWorkspaceId, selectedThreadId, selectThread } = useSessionStore.getState();
       if (selectedWorkspaceId !== wId || selectedThreadId !== tId) {
         triggerThreadSelectionHaptic();
       }
-      useSessionStore.getState().selectThread(wId, tId);
+      selectThread(wId, tId);
       router.navigate("/(app)");
       handleClose();
     },
-    [handleClose, router, selectedThreadId, selectedWorkspaceId],
+    [handleClose, router],
   );
 
   const handleNewThread = useCallback(
@@ -109,14 +110,15 @@ export function SidebarDrawerContent({
       // The composer seed effect reacts to this selection change and applies
       // the workspace's remembered provider/model/effort/modes, so nothing is
       // inherited from the previously viewed thread.
+      const { selectedWorkspaceId, selectedThreadId, selectNewThread } = useSessionStore.getState();
       if (selectedWorkspaceId !== wId || selectedThreadId !== null) {
         triggerThreadSelectionHaptic();
       }
-      useSessionStore.getState().selectNewThread(wId);
+      selectNewThread(wId);
       router.navigate("/(app)");
       handleClose();
     },
-    [handleClose, router, selectedThreadId, selectedWorkspaceId],
+    [handleClose, router],
   );
 
   const handleNewChat = useCallback(async () => {

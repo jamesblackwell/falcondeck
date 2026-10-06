@@ -4,10 +4,11 @@ import { draftKeyFor } from '@falcondeck/client-core'
 import { storage } from '@/storage/mmkv'
 import {
   decryptSessionValue,
+  encryptSessionValue,
   setSessionStorageEncryptionKey,
 } from '@/storage/session-encrypted-storage'
 
-import { flushStoredDrafts, useUIStore } from './ui-store'
+import { clearEncryptedComposerPersistence, flushStoredDrafts, hydrateEncryptedComposerPersistence, useUIStore } from './ui-store'
 
 const DRAFTS_STORAGE_KEY = 'falcondeck.mobile.composer-drafts.v1'
 
@@ -390,5 +391,91 @@ describe('ui-store', () => {
     })
     useUIStore.getState().beginSubmission(draftKeyFor('w1', 't1'), 'Ship it')
     expect(useUIStore.getState().inFlightSubmissions[draftKeyFor('w1', 't1')]?.text).toBe('Ship it')
+  })
+})
+
+
+describe('staged submission recovery', () => {
+  const IN_FLIGHT_STORAGE_KEY = 'falcondeck.mobile.composer-in-flight.v1'
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    clearEncryptedComposerPersistence()
+    setSessionStorageEncryptionKey(new Uint8Array(32).fill(11))
+    useUIStore.getState().setConversation('w1', 't1')
+  })
+
+  it('recovers the submitted text without duplicating a stale debounced prefix after an interrupted checkpoint', () => {
+    const ui = useUIStore.getState()
+    ui.setDraft('Ship')
+    ui.setDraft('Ship this complete message')
+    const recovery = ui.stageSubmission('w1:t1', 'Ship this complete message')
+    const setStored = storage.set.bind(storage)
+    const write = vi.spyOn(storage, 'set').mockImplementation((key, value) => {
+      if (key === DRAFTS_STORAGE_KEY) throw new Error('interrupted after journal')
+      setStored(key, value)
+    })
+    recovery.persist()
+    expect(JSON.stringify(decryptedStorage(DRAFTS_STORAGE_KEY))).toContain('Ship')
+    write.mockRestore()
+    hydrateEncryptedComposerPersistence()
+    expect(useUIStore.getState().draft).toBe('Ship this complete message')
+  })
+
+  it('keeps newer typing when the latest draft checkpoint completed before process death', () => {
+    const ui = useUIStore.getState()
+    ui.setDraft('Sent text')
+    ui.stageSubmission('w1:t1', 'Sent text')
+    ui.setDraft('New typing')
+    flushStoredDrafts()
+    hydrateEncryptedComposerPersistence()
+    expect(useUIStore.getState().draft).toBe('Sent text\n\nNew typing')
+  })
+
+  it('preserves each concurrent submission across different durable draft snapshots', () => {
+    const ui = useUIStore.getState()
+    ui.setDraft('First send')
+    ui.beginSubmission('w1:t1', 'First send')
+    ui.setComposerForConversation('w1:t1', 'New first draft', [])
+    ui.setComposerForConversation('w1:t2', 'Second prefix', [])
+    const recovery = ui.stageSubmission('w1:t2', 'Second complete send')
+    const setStored = storage.set.bind(storage)
+    const write = vi.spyOn(storage, 'set').mockImplementation((key, value) => {
+      if (key === DRAFTS_STORAGE_KEY) throw new Error('interrupted after journal')
+      setStored(key, value)
+    })
+    recovery.persist()
+    write.mockRestore()
+    hydrateEncryptedComposerPersistence()
+    expect(useUIStore.getState().drafts['w1:t1']?.text).toBe('First send\n\nNew first draft')
+    expect(useUIStore.getState().drafts['w1:t2']?.text).toBe('Second complete send')
+  })
+
+  it('retains recovery metadata when a staged new-thread submission is moved', () => {
+    const ui = useUIStore.getState()
+    ui.setConversation('w1', null)
+    ui.setDraft('New thread text')
+    ui.stageSubmission('w1:new', 'New thread text').persist()
+    const nonce = useUIStore.getState().inFlightSubmissions['w1:new']?.supersededDraftsNonce
+    ui.moveSubmission('w1:new', 'w1:created')
+    expect(useUIStore.getState().inFlightSubmissions['w1:created']?.supersededDraftsNonce).toBe(nonce)
+  })
+
+  it('still reads legacy encrypted in-flight journals without checkpoint metadata', () => {
+    const ui = useUIStore.getState()
+    ui.setDraft('New typing')
+    storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(encryptSessionValue({ 'w1:t1': { text: 'Legacy send', updatedAt: 1 } })))
+    hydrateEncryptedComposerPersistence()
+    expect(useUIStore.getState().draft).toBe('Legacy send\n\nNew typing')
+  })
+
+  it('does not write captured drafts after encryption persistence is cleared', () => {
+    const ui = useUIStore.getState()
+    ui.setDraft('Old secret')
+    const recovery = ui.stageSubmission('w1:t1', 'Old secret')
+    clearEncryptedComposerPersistence()
+    expect(recovery.isCurrent()).toBe(false)
+    recovery.persist()
+    expect(storage.getString(DRAFTS_STORAGE_KEY)).toBeUndefined()
+    expect(storage.getString(IN_FLIGHT_STORAGE_KEY)).toBeUndefined()
   })
 })

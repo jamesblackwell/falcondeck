@@ -1,3 +1,4 @@
+import { AppState } from 'react-native';
 import { create } from 'zustand';
 
 import {
@@ -31,10 +32,24 @@ const COMPOSER_STATE_STORAGE_KEY = 'falcondeck.mobile.composer-selections.v1';
 // and this is what stands in for it if the process dies mid-request.
 const IN_FLIGHT_STORAGE_KEY = 'falcondeck.mobile.composer-in-flight.v1';
 
+type InFlightSubmissions = Record<string, ComposerDrafts[string] & {
+  // Identifies the durable draft snapshot replaced by this send. A crash
+  // between the journal and draft writes must not recover its stale prefix.
+  supersededDraftsNonce?: string | null;
+}>;
+
+let storedDraftsNonce: string | null = null;
+let pendingStoredInFlight: InFlightSubmissions | null = null;
+let composerPersistenceGeneration = 0;
+
 function writeStoredDrafts(drafts: ComposerDrafts) {
+  if (pendingStoredInFlight !== null) writeStoredInFlight(pendingStoredInFlight);
   try {
     const encrypted = encryptSessionValue(drafts);
-    if (encrypted) storage.set(DRAFTS_STORAGE_KEY, JSON.stringify(encrypted));
+    if (encrypted) {
+      storage.set(DRAFTS_STORAGE_KEY, JSON.stringify(encrypted));
+      storedDraftsNonce = encrypted.nonce;
+    }
   } catch {
     // Ignore storage failures and keep the in-memory drafts authoritative.
   }
@@ -61,8 +76,15 @@ export function flushStoredDrafts() {
   }
   const pending = pendingStoredDrafts;
   pendingStoredDrafts = null;
+  if (pendingStoredInFlight !== null) writeStoredInFlight(pendingStoredInFlight);
   if (pending !== null) writeStoredDrafts(pending);
 }
+
+// A frame callback may never run after iOS suspends the app. Save the staged
+// send in that case too, before background timers stop.
+AppState.addEventListener('change', (status) => {
+  if (status !== 'active') flushStoredDrafts();
+});
 
 function scheduleStoredDraftsWrite(drafts: ComposerDrafts) {
   // Each call supersedes the queued value — only the newest matters.
@@ -87,7 +109,8 @@ function writeStoredDraftsNow(drafts: ComposerDrafts) {
   writeStoredDrafts(drafts);
 }
 
-function writeStoredInFlight(inFlight: ComposerDrafts) {
+function writeStoredInFlight(inFlight: InFlightSubmissions) {
+  pendingStoredInFlight = null;
   try {
     const encrypted = encryptSessionValue(inFlight)
     if (encrypted) storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(encrypted))
@@ -132,7 +155,7 @@ interface UIState {
   /** In-flight sends keyed by their owning conversation. */
   pendingSubmissions: Record<string, true>;
   /** Text of each in-flight send, held until its turn is accepted or fails. */
-  inFlightSubmissions: ComposerDrafts;
+  inFlightSubmissions: InFlightSubmissions;
   /** First user message while a new thread is still being created. */
   pendingNewThreadItem: {
     conversationKey: string;
@@ -170,7 +193,12 @@ interface UIActions {
     patch: Partial<PersistedComposerSelection>,
   ) => void;
   rememberWorkspaceProvider: (workspacePath: string, provider: AgentProvider) => void;
-  /** Empties the composer into the in-flight record as a send starts. */
+  /** Clears immediately; its checkpoint persists recovery before dispatch. */
+  stageSubmission: (conversationKey: string, submittedDraft: string) => {
+    isCurrent: () => boolean;
+    persist: () => void;
+  };
+  /** Synchronous recovery checkpoint for callers without a paint yield. */
   beginSubmission: (conversationKey: string, submittedDraft: string) => void;
   /** Follows a send onto the thread the daemon just created for it. */
   moveSubmission: (fromConversationKey: string, toConversationKey: string) => void;
@@ -316,32 +344,55 @@ export const useUIStore = create<UIStore>((set, get) => ({
       writePersistedComposerState(persistedComposerSelections);
       return { persistedComposerSelections };
     }),
-  beginSubmission: (conversationKey, submittedDraft) => {
-    // Settle any in-flight draft burst first so the persisted drafts key and
-    // the in-flight record are written in logical order for crash recovery.
-    flushStoredDrafts();
+  stageSubmission: (conversationKey, submittedDraft) => {
+    const generation = composerPersistenceGeneration;
     set((state) => {
-      const inFlightSubmissions = upsertComposerDraft(
+      const inserted = upsertComposerDraft(
         state.inFlightSubmissions,
         conversationKey,
         submittedDraft,
       );
-      if (inFlightSubmissions !== state.inFlightSubmissions) {
-        writeStoredInFlight(inFlightSubmissions);
-      }
-      return { inFlightSubmissions };
+      const inFlightSubmissions: InFlightSubmissions = inserted[conversationKey]
+        ? { ...inserted, [conversationKey]: {
+            ...inserted[conversationKey],
+            supersededDraftsNonce: storedDraftsNonce,
+          } }
+        : inserted;
+      const drafts = upsertComposerDraft(state.drafts, conversationKey, '');
+      const attachmentsByConversation = { ...state.attachmentsByConversation };
+      delete attachmentsByConversation[conversationKey];
+      // Replace the pre-send burst without encrypting either collection in
+      // the tap handler. Any intervening draft write saves the journal first.
+      pendingStoredInFlight = inFlightSubmissions;
+      pendingStoredDrafts = drafts;
+      if (draftPersistTimer !== null) clearTimeout(draftPersistTimer);
+      draftPersistTimer = setTimeout(flushStoredDrafts, DRAFT_PERSIST_DEBOUNCE_MS);
+      return {
+        drafts,
+        inFlightSubmissions,
+        attachmentsByConversation,
+        ...(state.conversationKey === conversationKey ? { draft: '', attachments: [] } : {}),
+      };
     });
-    get().setComposerForConversation(conversationKey, '', []);
+    return {
+      isCurrent: () => generation === composerPersistenceGeneration,
+      persist: () => {
+        if (generation === composerPersistenceGeneration) flushStoredDrafts();
+      },
+    };
+  },
+  beginSubmission: (conversationKey, submittedDraft) => {
+    get().stageSubmission(conversationKey, submittedDraft).persist();
   },
   moveSubmission: (fromConversationKey, toConversationKey) =>
     set((state) => {
       const moved = state.inFlightSubmissions[fromConversationKey];
       if (!moved) return state;
-      const inFlightSubmissions = upsertComposerDraft(
-        upsertComposerDraft(state.inFlightSubmissions, fromConversationKey, ''),
-        toConversationKey,
-        moved.text,
-      );
+      const inFlightSubmissions: InFlightSubmissions = {
+        ...state.inFlightSubmissions,
+        [toConversationKey]: moved,
+      };
+      delete inFlightSubmissions[fromConversationKey];
       writeStoredInFlight(inFlightSubmissions);
       return { inFlightSubmissions };
     }),
@@ -378,16 +429,31 @@ export const useUIStore = create<UIStore>((set, get) => ({
   clearDraft: () => get().setDraft(''),
 }));
 
-function readEncryptedDrafts(key: string): ComposerDrafts {
+function readEncryptedDrafts(key: string): InFlightSubmissions {
   const raw = storage.getString(key)
   if (!raw) return {}
   try {
-    const value = decryptSessionValue(JSON.parse(raw))
+    const envelope = JSON.parse(raw);
+    const value = decryptSessionValue(envelope)
     if (value === null) {
       storage.delete(key)
       return {}
     }
-    return parseComposerDrafts(JSON.stringify(value))
+    if (key === DRAFTS_STORAGE_KEY) {
+      storedDraftsNonce = typeof envelope.nonce === 'string' ? envelope.nonce : null;
+    }
+    const drafts: InFlightSubmissions = parseComposerDrafts(JSON.stringify(value));
+    if (key === IN_FLIGHT_STORAGE_KEY && typeof value === 'object' && value !== null) {
+      for (const [conversationKey, draft] of Object.entries(drafts)) {
+        const stored = (value as Record<string, unknown>)[conversationKey];
+        if (typeof stored !== 'object' || stored === null || !('supersededDraftsNonce' in stored)) {
+          continue;
+        }
+        const nonce = stored.supersededDraftsNonce;
+        if (typeof nonce === 'string' || nonce === null) draft.supersededDraftsNonce = nonce;
+      }
+    }
+    return drafts;
   } catch {
     storage.delete(key)
     return {}
@@ -396,15 +462,21 @@ function readEncryptedDrafts(key: string): ComposerDrafts {
 
 /** Called only after relay restore has installed the session data key. */
 export function hydrateEncryptedComposerPersistence(): void {
+  const storedDrafts = readEncryptedDrafts(DRAFTS_STORAGE_KEY);
   const storedInFlight = readEncryptedDrafts(IN_FLIGHT_STORAGE_KEY)
   const drafts = Object.entries(storedInFlight).reduce(
-    (current, [conversationKey, { text }]) =>
+    (current, [conversationKey, { text, supersededDraftsNonce }]) =>
       upsertComposerDraft(
         current,
         conversationKey,
-        mergeFailedComposerDraft(text, current[conversationKey]?.text ?? ''),
+        mergeFailedComposerDraft(
+          text,
+          supersededDraftsNonce !== undefined && supersededDraftsNonce === storedDraftsNonce
+            ? ''
+            : current[conversationKey]?.text ?? '',
+        ),
       ),
-    readEncryptedDrafts(DRAFTS_STORAGE_KEY),
+    storedDrafts,
   )
   if (Object.keys(storedInFlight).length > 0) {
     writeStoredDraftsNow(drafts)
@@ -418,10 +490,20 @@ export function hydrateEncryptedComposerPersistence(): void {
 }
 
 export function clearEncryptedComposerPersistence(): void {
+  composerPersistenceGeneration += 1;
+  storedDraftsNonce = null;
+  pendingStoredInFlight = null;
   if (draftPersistTimer !== null) clearTimeout(draftPersistTimer)
   draftPersistTimer = null
   pendingStoredDrafts = null
   storage.delete(DRAFTS_STORAGE_KEY)
   storage.delete(IN_FLIGHT_STORAGE_KEY)
-  useUIStore.setState({ drafts: {}, draft: '', inFlightSubmissions: {} })
+  useUIStore.setState({
+    drafts: {},
+    draft: '',
+    inFlightSubmissions: {},
+    pendingSubmissions: {},
+    isSubmitting: false,
+    pendingNewThreadItem: null,
+  })
 }

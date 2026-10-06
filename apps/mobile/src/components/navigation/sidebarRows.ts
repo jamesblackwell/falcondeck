@@ -10,6 +10,61 @@ import {
 export const VISIBLE_THREAD_LIMIT = 5
 export const SHOW_MORE_STEP = 10
 
+type SortedProjectThreads = {
+  pinnedInProject: ThreadSummary[]
+  unpinned: ThreadSummary[]
+  unpinnedIndexes: Map<string, number>
+}
+
+type ThreadDerivation = {
+  partitions: ReturnType<typeof partitionSidebarThreads>
+  attention: ReturnType<typeof summarizeThreadAttention>
+  sorts: Map<ThreadSortMode, SortedProjectThreads>
+}
+
+// Session summaries and their arrays are immutable. A selection, collapse or
+// another project's update can reuse these derivations without scanning every
+// task again. Weak keys release caches with the snapshots that owned them, and
+// each array has at most the three supported sort modes.
+const threadDerivations = new WeakMap<readonly ThreadSummary[], ThreadDerivation>()
+
+function deriveThreads(threads: readonly ThreadSummary[]): ThreadDerivation {
+  let derived = threadDerivations.get(threads)
+  if (!derived) {
+    derived = {
+      partitions: partitionSidebarThreads(threads),
+      attention: summarizeThreadAttention(threads),
+      sorts: new Map(),
+    }
+    threadDerivations.set(threads, derived)
+  }
+  return derived
+}
+
+function sortedProjectThreads(
+  derived: ThreadDerivation,
+  sortMode: ThreadSortMode,
+): SortedProjectThreads {
+  let sorted = derived.sorts.get(sortMode)
+  if (!sorted) {
+    const compare = compareThreads(sortMode)
+    const pinnedInProject = [...derived.partitions.pinnedInProject].sort(compare)
+    const unpinned = [...derived.partitions.unpinned].sort(compare)
+    const unpinnedIndexes = new Map<string, number>()
+    for (let index = 0; index < unpinned.length; index += 1) {
+      const id = unpinned[index].id
+      if (!unpinnedIndexes.has(id)) unpinnedIndexes.set(id, index)
+    }
+    sorted = {
+      pinnedInProject,
+      unpinned,
+      unpinnedIndexes,
+    }
+    derived.sorts.set(sortMode, sorted)
+  }
+  return sorted
+}
+
 export type SidebarRow =
   | {
       key: string
@@ -100,8 +155,7 @@ export function buildSidebarRows(
   const projectGroups = groups.filter((group) => group.workspace.kind !== 'casual')
   const pinnedRows: SidebarRow[] = pinnedGroups
     .flatMap((group) =>
-      group.threads
-        .filter((thread) => thread.is_pinned)
+      deriveThreads(group.threads).partitions.globallyPinned
         .map((thread) => ({
           key: `pinned:${group.workspace.id}:${thread.id}`,
           type: 'thread' as const,
@@ -114,8 +168,8 @@ export function buildSidebarRows(
 
   const chatRows: SidebarRow[] = chatGroups
     .flatMap((group) =>
-      group.threads
-        .filter((thread) => !thread.is_pinned)
+      [...deriveThreads(group.threads).partitions.pinnedInProject,
+        ...deriveThreads(group.threads).partitions.unpinned]
         .map((thread) => ({
           key: `chat:${group.workspace.id}:${thread.id}`,
           type: 'thread' as const,
@@ -155,7 +209,8 @@ export function buildSidebarRows(
       group.workspace.path.split('/').pop() || group.workspace.path || 'Workspace'
     const isOpen = !collapsedWorkspaces.has(group.workspace.id)
 
-    const attention = summarizeThreadAttention(group.threads)
+    const derived = deriveThreads(group.threads)
+    const attention = derived.attention
     const remote = remoteCounts[group.workspace.id]
     const workspaceRow: SidebarRow = {
       key: `workspace:${group.workspace.id}`,
@@ -168,9 +223,11 @@ export function buildSidebarRows(
       unreadTone: attention.unreadTone,
     }
 
-    const { pinnedInProject, unpinned } = partitionSidebarThreads(group.threads)
-    const sortedPinnedInProject = [...pinnedInProject].sort(compare)
-    const sortedUnpinned = [...unpinned].sort(compare)
+    const {
+      pinnedInProject: sortedPinnedInProject,
+      unpinned: sortedUnpinned,
+      unpinnedIndexes,
+    } = sortedProjectThreads(derived, sortMode)
 
     const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
 
@@ -178,7 +235,7 @@ export function buildSidebarRows(
     // its rank can create thousands of cells, including zero-height cells in
     // collapsed projects. Project-pinned chats stay above the normal window.
     const selectedIndex =
-      selectedThreadId != null ? sortedUnpinned.findIndex((t) => t.id === selectedThreadId) : -1
+      selectedThreadId != null ? unpinnedIndexes.get(selectedThreadId) ?? -1 : -1
     const visibleUnpinned = sortedUnpinned.slice(0, requestedCount)
     const trailingSelected = selectedIndex >= requestedCount ? sortedUnpinned[selectedIndex] : undefined
     const missing = remoteCursors[`${group.workspace.id}:${sortMode}`] === null ? 0

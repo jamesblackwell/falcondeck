@@ -5,14 +5,18 @@ import { act } from 'react-test-renderer'
 import { cleanup, renderComponent } from '@/test/render'
 import { useRelayStore, useSessionStore } from '@/store'
 
-const mocks = vi.hoisted(() => ({
-  navigate: vi.fn(),
-  sidebarProps: null as Record<string, (...args: unknown[]) => unknown> | null,
-}))
+const mocks = vi.hoisted(() => {
+  const navigate = vi.fn()
+  return {
+    navigate,
+    router: { navigate },
+    sidebarProps: null as Record<string, (...args: unknown[]) => unknown> | null,
+  }
+})
 
 vi.mock('expo-router', () => ({
   usePathname: () => '/',
-  useRouter: () => ({ navigate: mocks.navigate }),
+  useRouter: () => mocks.router,
 }))
 
 vi.mock('@react-navigation/drawer', () => ({
@@ -43,6 +47,20 @@ afterEach(() => {
 })
 
 describe('SidebarDrawerContent', () => {
+  it('keeps selection actions stable so selecting one task does not invalidate every row', () => {
+    renderComponent(<SidebarDrawerContent navigation={{ dispatch: vi.fn() } as never} />)
+    const select = mocks.sidebarProps!.onSelectThread
+    const create = mocks.sidebarProps!.onNewThread
+    act(() => { select('workspace-1', 'thread-1') })
+    expect(mocks.sidebarProps!.onSelectThread).toBe(select)
+    expect(mocks.sidebarProps!.onNewThread).toBe(create)
+    act(() => { create('workspace-2') })
+    expect(mocks.sidebarProps!.onSelectThread).toBe(select)
+    expect(mocks.sidebarProps!.onNewThread).toBe(create)
+    expect(useSessionStore.getState().selectedWorkspaceId).toBe('workspace-2')
+    expect(useSessionStore.getState().selectedThreadId).toBeNull()
+  })
+
   it('opens Activity and dismisses the drawer', () => {
     const dispatch = vi.fn()
     renderComponent(<SidebarDrawerContent navigation={{ dispatch } as never} />)

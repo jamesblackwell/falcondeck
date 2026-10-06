@@ -2,10 +2,10 @@ import React from 'react'
 import { act } from 'react-test-renderer'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, renderComponent } from '@/test/render'
-import { snapshot, thread, threadUpdatedEvent } from '@/test/factories'
+import { snapshot, thread, threadUpdatedEvent, workspace } from '@/test/factories'
 import { useSessionStore, useRelayStore } from '@/store'
 
-const mocks = vi.hoisted(() => ({ buildRows: vi.fn(), buildGroups: vi.fn(), status: 'closed', permanent: false }))
+const mocks = vi.hoisted(() => ({ buildRows: vi.fn(), buildGroups: vi.fn(), sortGroups: vi.fn(), status: 'closed', permanent: false }))
 vi.mock('expo-router', () => ({ usePathname: () => '/', useRouter: () => ({ navigate: () => {} }) }))
 vi.mock('@react-navigation/drawer', () => ({ useDrawerStatus: () => mocks.status }))
 vi.mock('@/hooks/useTabletLayout', () => ({ useTabletLayout: () => ({ hasPermanentSidebar: mocks.permanent }) }))
@@ -19,10 +19,17 @@ vi.mock('./sidebarRows', async (importOriginal) => {
 })
 vi.mock('@falcondeck/client-core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@falcondeck/client-core')>()
-  return { ...actual, buildProjectGroups: (...args: Parameters<typeof actual.buildProjectGroups>) => {
-    mocks.buildGroups()
-    return actual.buildProjectGroups(...args)
-  } }
+  return {
+    ...actual,
+    buildProjectGroups: (...args: Parameters<typeof actual.buildProjectGroups>) => {
+      mocks.buildGroups()
+      return actual.buildProjectGroups(...args)
+    },
+    sortProjectGroupThreads: (...args: Parameters<typeof actual.sortProjectGroupThreads>) => {
+      mocks.sortGroups()
+      return actual.sortProjectGroupThreads(...args)
+    },
+  }
 })
 import { SidebarDrawerContent } from './SidebarDrawerContent'
 
@@ -48,6 +55,29 @@ function setup() {
   return base
 }
 const drawer = () => <SidebarDrawerContent navigation={{ dispatch: () => {} } as never} />
+
+it('opens a large sidebar without sorting the inventory before row derivation sorts it', () => {
+  setup()
+  mocks.status = 'open'
+  const workspaces = Array.from({ length: 72 }, (_, index) => workspace({ id: `w${index}`, path: `/tmp/p${index}` }))
+  const threads = workspaces.flatMap((item, index) => Array.from({ length: index < 46 ? 38 : 37 }, (_, threadIndex) =>
+    thread({ id: `${item.id}-t${threadIndex}`, workspace_id: item.id }),
+  ))
+  useSessionStore.setState({ snapshot: snapshot({
+    workspaces,
+    threads,
+    sync_index: {
+      token: 'large-index',
+      counts: {},
+      cursors: Object.fromEntries(workspaces.map(item => [`${item.id}:last_updated`, null])),
+      touched_threads: {}, touched_views: {}, catalog_touched: false, extensions_loaded: true,
+    },
+  }) })
+  renderComponent(drawer())
+  expect(mocks.buildGroups).toHaveBeenCalledTimes(1)
+  expect(mocks.buildRows).toHaveBeenCalledTimes(1)
+  expect(mocks.sortGroups).not.toHaveBeenCalled()
+})
 
 it('does no group or row rebuilds behind a closed drawer, then catches up when opened', async () => {
   const base = setup()
