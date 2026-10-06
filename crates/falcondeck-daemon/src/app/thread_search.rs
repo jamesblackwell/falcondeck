@@ -24,7 +24,46 @@ use std::{
 
 use falcondeck_core::{ThreadMessageMatch, ThreadMessagePosition};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+mod file_cache;
+mod message_parser;
+use file_cache::{EmptyFileCache, SourceFingerprint};
+use message_parser::MessageValue;
+
+#[cfg(test)]
+mod cache_tests;
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_READS: std::cell::Cell<(usize, u64)> = const { std::cell::Cell::new((0, 0)) };
+    // Deterministically inject a concurrent source edit or read error.
+    static SOURCE_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce() -> std::io::Result<()>>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct CountedSource<'a>(&'a mut File);
+
+#[cfg(test)]
+impl Read for CountedSource<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.0.read(buffer)?;
+        SOURCE_READS.with(|reads| {
+            let (opens, bytes) = reads.get();
+            reads.set((opens, bytes + count as u64));
+        });
+        if let Some(hook) = SOURCE_READ_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook()?;
+        }
+        Ok(count)
+    }
+}
+
+#[cfg(test)]
+impl Seek for CountedSource<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(position)
+    }
+}
 
 /// Ceiling on bytes read forward while looking for the opening messages.
 const HEAD_BUDGET_BYTES: u64 = 4 * 1024 * 1024;
@@ -69,6 +108,10 @@ impl SessionExcerpt {
 pub(crate) struct ThreadSearchIndex {
     /// Excerpts by native session id, which is the join key to threads.
     pub sessions: HashMap<String, SessionExcerpt>,
+    /// Successfully scanned files without searchable excerpts. Old indexes
+    /// omit this field and continue reusing their positive excerpt entries.
+    #[serde(default)]
+    empty_files: EmptyFileCache,
 }
 
 /// A thread the caller wants searched, reduced to what matching needs.
@@ -156,6 +199,7 @@ pub(crate) fn rescan_roots(roots: &[PathBuf], previous: &ThreadSearchIndex) -> T
     }
 
     let mut sessions = HashMap::with_capacity(files.len());
+    let mut empty_files = EmptyFileCache::new();
     for path in files {
         let Ok(metadata) = std::fs::metadata(&path) else {
             continue;
@@ -165,10 +209,15 @@ pub(crate) fn rescan_roots(roots: &[PathBuf], previous: &ThreadSearchIndex) -> T
             continue;
         }
         let modified = modified_ms(&metadata);
+        let fingerprint = SourceFingerprint::from_metadata(&metadata);
 
         let Some(session_id) = session_id_for(&path) else {
             continue;
         };
+        if previous.empty_files.is_current(&path, fingerprint) {
+            empty_files.insert(path, fingerprint);
+            continue;
+        }
         if let Some(existing) = previous.sessions.get(&session_id)
             && existing.path == path
             && existing.is_current(modified, size)
@@ -177,11 +226,20 @@ pub(crate) fn rescan_roots(roots: &[PathBuf], previous: &ThreadSearchIndex) -> T
             continue;
         }
 
-        if let Some(excerpt) = excerpt_from_file(&path, size, modified) {
-            sessions.insert(session_id, excerpt);
+        if let Ok(scanned) = excerpt_from_file(&path) {
+            if let Some(excerpt) = scanned.excerpt {
+                sessions.insert(session_id, excerpt);
+            } else if let Some(fingerprint) = scanned.empty_fingerprint {
+                empty_files.insert(path, fingerprint);
+            }
         }
     }
-    ThreadSearchIndex { sessions }
+    // Rebuild only from the current inventory, dropping deleted/moved files
+    // and cache entries belonging to roots that are no longer scanned.
+    ThreadSearchIndex {
+        sessions,
+        empty_files,
+    }
 }
 
 /// Claude names its files after the session id; Codex embeds it in a
@@ -208,10 +266,39 @@ fn session_id_for(path: &Path) -> Option<String> {
     Some(stem.to_string())
 }
 
-fn excerpt_from_file(path: &Path, size: u64, modified_ms: u64) -> Option<SessionExcerpt> {
-    let mut file = File::open(path).ok()?;
-    let opening = read_opening(&mut file, size);
-    let recent = read_recent(&mut file, size);
+struct ScannedFile {
+    excerpt: Option<SessionExcerpt>,
+    empty_fingerprint: Option<SourceFingerprint>,
+}
+
+fn excerpt_from_file(path: &Path) -> std::io::Result<ScannedFile> {
+    let mut file = File::open(path)?;
+    #[cfg(test)]
+    SOURCE_READS.with(|reads| {
+        let (opens, bytes) = reads.get();
+        reads.set((opens + 1, bytes));
+    });
+    let metadata = file.metadata()?;
+    let fingerprint = SourceFingerprint::from_metadata(&metadata);
+    // Read the opened descriptor's size, rather than an earlier path stat.
+    // Atomic replacement can occur between enumeration and open.
+    let size = metadata.len();
+    if size > MAX_FILE_BYTES {
+        return Ok(ScannedFile {
+            excerpt: None,
+            empty_fingerprint: None,
+        });
+    }
+    let (opening, recent) = {
+        #[cfg(test)]
+        let mut reader = CountedSource(&mut file);
+        #[cfg(not(test))]
+        let mut reader = &mut file;
+        (
+            read_opening(&mut reader, size)?,
+            read_recent(&mut reader, size)?,
+        )
+    };
     let recent = if recent.is_empty() {
         last_messages(&opening)
     } else {
@@ -219,15 +306,23 @@ fn excerpt_from_file(path: &Path, size: u64, modified_ms: u64) -> Option<Session
     };
 
     if opening.is_empty() && recent.is_empty() {
-        return None;
+        // Never persist a false negative from a file changing under the read.
+        let unchanged = SourceFingerprint::from_metadata(&file.metadata()?) == fingerprint;
+        return Ok(ScannedFile {
+            excerpt: None,
+            empty_fingerprint: unchanged.then_some(fingerprint),
+        });
     }
 
-    Some(SessionExcerpt {
-        path: path.to_path_buf(),
-        modified_ms,
-        size,
-        opening: opening.into_iter().take(MESSAGES_PER_END).collect(),
-        recent,
+    Ok(ScannedFile {
+        excerpt: Some(SessionExcerpt {
+            path: path.to_path_buf(),
+            modified_ms: modified_ms(&metadata),
+            size,
+            opening: opening.into_iter().take(MESSAGES_PER_END).collect(),
+            recent,
+        }),
+        empty_fingerprint: None,
     })
 }
 
@@ -235,15 +330,19 @@ fn excerpt_from_file(path: &Path, size: u64, modified_ms: u64) -> Option<Session
 /// than a fixed byte window: transcripts routinely carry single lines larger
 /// than any sane window (pasted context, inlined images), and a window that
 /// lands mid-line yields nothing at all.
-fn read_opening(file: &mut File, size: u64) -> Vec<String> {
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return Vec::new();
-    }
+fn read_opening(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<String>> {
+    file.seek(SeekFrom::Start(0))?;
     let budget = HEAD_BUDGET_BYTES.min(size);
     let reader = std::io::BufReader::new(file.take(budget));
     let mut messages = Vec::new();
     for line in reader.lines() {
-        let Ok(line) = line else { break };
+        let line = match line {
+            Ok(line) => line,
+            // A byte budget can split a UTF-8 character in the final record.
+            // Preserve the existing boundary behavior without masking I/O errors.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => break,
+            Err(error) => return Err(error),
+        };
         if let Some(text) = user_message_text_from_line(&line, messages.last()) {
             messages.push(text);
             if messages.len() >= MESSAGES_PER_END {
@@ -251,28 +350,24 @@ fn read_opening(file: &mut File, size: u64) -> Vec<String> {
             }
         }
     }
-    messages
+    Ok(messages)
 }
 
 /// Reads backward from EOF, doubling the window until user messages appear. A
 /// single agentic turn can bury the last prompt under megabytes of tool output,
 /// so a fixed tail is empty exactly on the busiest threads.
-fn read_recent(file: &mut File, size: u64) -> Vec<String> {
+fn read_recent(file: &mut (impl Read + Seek), size: u64) -> std::io::Result<Vec<String>> {
     let mut window = TAIL_BYTES;
     loop {
         let start = size.saturating_sub(window);
-        if file.seek(SeekFrom::Start(start)).is_err() {
-            return Vec::new();
-        }
+        file.seek(SeekFrom::Start(start))?;
         let mut buffer = Vec::new();
-        if file.take(window).read_to_end(&mut buffer).is_err() {
-            return Vec::new();
-        }
+        file.take(window).read_to_end(&mut buffer)?;
         let text = String::from_utf8_lossy(&buffer);
         // Seeking into the file almost always lands mid-line; drop that piece.
         let messages = user_messages(&text, true, start > 0);
         if !messages.is_empty() || start == 0 || window >= TAIL_BUDGET_BYTES {
-            return last_messages(&messages);
+            return Ok(last_messages(&messages));
         }
         window = window.saturating_mul(2);
     }
@@ -292,7 +387,7 @@ fn user_message_text_from_line(line: &str, previous: Option<&String>) -> Option<
     if line.is_empty() || !line.starts_with('{') {
         return None;
     }
-    let value = serde_json::from_str::<Value>(line).ok()?;
+    let value = serde_json::from_str::<MessageValue>(line).ok()?;
     let text = user_message_text(&value)?;
     // One turn can be recorded twice (event plus response item); the copies
     // land next to each other, so comparing neighbours is enough.
@@ -323,13 +418,13 @@ fn user_messages(text: &str, complete_tail: bool, skip_first_line: bool) -> Vec<
 /// Pulls the operator's own words out of one transcript line, or `None` when
 /// the line is anything else: assistant output, tool results, or the context
 /// blocks harnesses inject as if the user had typed them.
-fn user_message_text(value: &Value) -> Option<String> {
-    let kind = value.get("type").and_then(Value::as_str)?;
+fn user_message_text(value: &MessageValue<'_>) -> Option<String> {
+    let kind = value.get("type").and_then(MessageValue::as_str)?;
     match kind {
         // Claude Code and Grok transcripts share this envelope.
         "user" => {
-            if value.get("isSidechain").and_then(Value::as_bool) == Some(true)
-                || value.get("isMeta").and_then(Value::as_bool) == Some(true)
+            if value.get("isSidechain").and_then(MessageValue::as_bool) == Some(true)
+                || value.get("isMeta").and_then(MessageValue::as_bool) == Some(true)
             {
                 return None;
             }
@@ -345,10 +440,10 @@ fn user_message_text(value: &Value) -> Option<String> {
             for block in content.as_array()? {
                 // Tool results ride the same "user" envelope; only real typed
                 // text blocks belong in a search index.
-                if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+                if block.get("type").and_then(MessageValue::as_str) == Some("tool_result") {
                     return None;
                 }
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                if let Some(text) = block.get("text").and_then(MessageValue::as_str) {
                     parts.push(text);
                 }
             }
@@ -359,24 +454,24 @@ fn user_message_text(value: &Value) -> Option<String> {
         // response item, so both are read and duplicates dropped later.
         "event_msg" => {
             let payload = value.get("payload")?;
-            if payload.get("type").and_then(Value::as_str) != Some("user_message") {
+            if payload.get("type").and_then(MessageValue::as_str) != Some("user_message") {
                 return None;
             }
-            clean_message(payload.get("message").and_then(Value::as_str)?)
+            clean_message(payload.get("message").and_then(MessageValue::as_str)?)
         }
         "response_item" => {
             let payload = value.get("payload")?;
-            if payload.get("type").and_then(Value::as_str) != Some("message")
-                || payload.get("role").and_then(Value::as_str) != Some("user")
+            if payload.get("type").and_then(MessageValue::as_str) != Some("message")
+                || payload.get("role").and_then(MessageValue::as_str) != Some("user")
             {
                 return None;
             }
             let mut parts = Vec::new();
             for block in payload.get("content")?.as_array()? {
-                if block.get("type").and_then(Value::as_str) != Some("input_text") {
+                if block.get("type").and_then(MessageValue::as_str) != Some("input_text") {
                     continue;
                 }
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                if let Some(text) = block.get("text").and_then(MessageValue::as_str) {
                     parts.push(text);
                 }
             }
@@ -639,9 +734,10 @@ mod tests {
         lines.push(claude_line("and the last prompt"));
         std::fs::write(&path, lines.join("\n")).expect("write");
 
-        let metadata = std::fs::metadata(&path).expect("metadata");
-        let excerpt =
-            excerpt_from_file(&path, metadata.len(), modified_ms(&metadata)).expect("excerpt");
+        let excerpt = excerpt_from_file(&path)
+            .expect("read")
+            .excerpt
+            .expect("excerpt");
         assert_eq!(
             excerpt.opening.first().map(String::as_str),
             Some("index the first prompt")
@@ -675,7 +771,10 @@ mod tests {
                 recent: vec!["the waveform is still clipped".to_string()],
             },
         );
-        let index = ThreadSearchIndex { sessions };
+        let index = ThreadSearchIndex {
+            sessions,
+            ..ThreadSearchIndex::default()
+        };
         let threads = vec![
             SearchableThread {
                 thread_id: "thread-b".to_string(),
@@ -718,7 +817,7 @@ mod tests {
             }
         })
         .to_string();
-        let value = serde_json::from_str::<Value>(&line).expect("json");
+        let value = serde_json::from_str::<MessageValue>(&line).expect("json");
         assert_eq!(
             user_message_text(&value).as_deref(),
             Some("what is causing this prompt to be restricted?")
@@ -735,7 +834,7 @@ mod tests {
             }],
         })
         .to_string();
-        let value = serde_json::from_str::<Value>(&line).expect("json");
+        let value = serde_json::from_str::<MessageValue>(&line).expect("json");
         assert_eq!(
             user_message_text(&value).as_deref(),
             Some("why does steering fail?")

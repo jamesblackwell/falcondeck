@@ -162,14 +162,18 @@ JSON parsing, snapshot projection and Claude discovery. Stack observation counts
 include blocked threads and overlapping frames; they are attribution evidence,
 not CPU percentages.
 
-The next strongest search-index issue is unchanged files yielding no user
-excerpt. `thread_search::rescan_roots` caches only successful excerpts, so empty,
+The strongest search-index issue identified here was unchanged files yielding no
+user excerpt. At the time of this capture, `thread_search::rescan_roots` cached
+only successful excerpts, so empty,
 tool-only and metadata-only files are reopened on subsequent scans/startups. The
 metadata audit found approximately 703 MiB across eligible unchanged paths absent
 from the existing index. Its parser also allocates full JSON values for discarded
 tool/image records and retries overlapping tail windows. Cache fingerprints for
 successful empty scans and preserve invalidation when a prompt is appended;
-verify source-read counts before optimizing the parser.
+verify source-read counts before optimizing the parser. This follow-up is now
+implemented and validated in the
+[thread-search optimization report](thread-search-startup-performance-2026-10-06.md);
+the installed measurements above predate that change.
 
 Workspace catalogs accounted for approximately 6.73 MB of the 9.62 MB compact
 snapshot: agent catalogs/skills about 4.79 MB, workspace skills 1.46 MB, models

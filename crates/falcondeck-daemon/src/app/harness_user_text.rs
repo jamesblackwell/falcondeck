@@ -361,6 +361,12 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
         SkillPreambleStrip::Stripped(rest) => rest,
     };
 
+    // Plain prompts cannot contain a tag. Avoid formatting every tag marker
+    // before taking the common path during history/search projection.
+    if !source.contains('<') && !starts_with_hidden_prefix(source) {
+        return ProjectedUserText::Prompt(source.to_string());
+    }
+
     if HARNESS_BLOCK_TAGS
         .iter()
         .copied()
@@ -376,10 +382,6 @@ pub(crate) fn project_user_text(text: &str) -> ProjectedUserText {
         } else {
             ProjectedUserText::Prompt(query.to_string())
         };
-    }
-
-    if !source.contains('<') && !starts_with_hidden_prefix(source) {
-        return ProjectedUserText::Prompt(source.to_string());
     }
 
     let remainder = strip_tagged_blocks(source, &HARNESS_BLOCK_TAGS);
@@ -448,6 +450,30 @@ pub(crate) fn conversation_item_from_projected_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_prompt_path_preserves_prefix_and_preamble_handling() {
+        assert_eq!(
+            project_user_text("  fix login 😀  "),
+            ProjectedUserText::Prompt("fix login 😀".to_string())
+        );
+        for prefix in HIDDEN_PREFIXES {
+            assert_eq!(project_user_text(prefix), ProjectedUserText::Hidden);
+        }
+        let preamble = falcondeck_skill_name_preamble("Review");
+        assert_eq!(
+            project_user_text(&format!("{preamble}\n fix login")),
+            ProjectedUserText::Prompt("fix login".to_string())
+        );
+        assert_eq!(
+            project_user_text("<user_query>unfinished"),
+            ProjectedUserText::Incomplete
+        );
+        assert_eq!(
+            project_user_text("<user_query>wrapped prompt</user_query>"),
+            ProjectedUserText::Prompt("wrapped prompt".to_string())
+        );
+    }
 
     #[test]
     fn handoff_context_rides_in_the_first_text_input_and_projects_out() {
