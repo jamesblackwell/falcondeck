@@ -2971,6 +2971,12 @@ async fn send_turn_with_startup_mode(
     } else {
         None
     };
+    let _hermes_history_guard = if request.resume_interrupted {
+        None
+    } else {
+        app.hermes_history_for_admission(&request.workspace_id, &request.thread_id)
+            .await?
+    };
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
 

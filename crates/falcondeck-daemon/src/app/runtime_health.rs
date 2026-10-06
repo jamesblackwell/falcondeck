@@ -5,7 +5,8 @@
 //! period, and it stops the process only when nothing that provider owns is
 //! live or queued. Codex keeps MCP subprocesses beneath its workspace
 //! app-server; ACP agents (Grok, Cursor, Gemini) keep one process per
-//! workspace shared by every thread; native OpenCode keeps an
+//! workspace shared by every thread (Hermes uses thread-owned processes);
+//! native OpenCode keeps an
 //! `opencode serve`. Claude and agy spawn a CLI per turn and need no timer.
 //!
 //! Grace periods differ because restart costs differ, not because the
@@ -19,7 +20,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::{acp::AcpRuntime, codex::CodexSession, error::DaemonError, opencode::OpenCodeRuntime};
 
-use super::{AppState, ManagedThread};
+use super::{AppState, ManagedThread, acp_threads::AcpRuntimeKey};
 
 const CODEX_WARM_IDLE_GRACE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Restarting an ACP agent costs more than reconnecting Codex: process spawn,
@@ -320,15 +321,15 @@ impl AppState {
     /// The next use spawns a fresh process and resumes each thread with
     /// `session/load`, which is the same recovery the daemon already performs
     /// after a restart.
-    pub(crate) fn schedule_acp_idle_retirement(
+    pub(super) fn schedule_acp_idle_retirement(
         &self,
         workspace_id: &str,
-        provider: &AgentProvider,
+        key: &AcpRuntimeKey,
         runtime: Arc<AcpRuntime>,
     ) {
         let app = self.clone();
         let workspace_id = workspace_id.to_string();
-        let provider = provider.clone();
+        let key = key.clone();
         tokio::spawn(async move {
             loop {
                 if app.is_shutting_down() || runtime.is_closed() {
@@ -343,7 +344,7 @@ impl AppState {
                     continue;
                 }
                 match app
-                    .retire_acp_runtime_if_idle(&workspace_id, &provider, &runtime)
+                    .retire_acp_runtime_if_idle(&workspace_id, &key, &runtime)
                     .await
                 {
                     IdleRetirement::Retired | IdleRetirement::Stale => return,
@@ -360,7 +361,7 @@ impl AppState {
     async fn retire_acp_runtime_if_idle(
         &self,
         workspace_id: &str,
-        provider: &AgentProvider,
+        key: &AcpRuntimeKey,
         runtime: &Arc<AcpRuntime>,
     ) -> IdleRetirement {
         // Exclusive acquisition means every request that already resolved
@@ -380,7 +381,7 @@ impl AppState {
         // nothing, so only a runtime actually holding sessions opts out.
         if runtime.has_sessions().await && !runtime.supports_load_session().await {
             tracing::debug!(
-                provider = %provider,
+                provider = %key.provider,
                 workspace_id = %workspace_id,
                 "keeping warm ACP runtime: the agent cannot resume its sessions"
             );
@@ -399,27 +400,29 @@ impl AppState {
             };
             if !workspace
                 .acp_runtimes
-                .get(provider)
+                .get(key)
                 .is_some_and(|attached| Arc::ptr_eq(attached, runtime))
             {
                 return IdleRetirement::Stale;
             }
-            let has_live_work = workspace
-                .threads
-                .values()
-                .any(|thread| thread_keeps_runtime_live(thread, provider));
+            let has_live_work = workspace.threads.values().any(|thread| {
+                key.thread_id
+                    .as_ref()
+                    .is_none_or(|id| &thread.summary.id == id)
+                    && thread_keeps_runtime_live(thread, &key.provider)
+            });
             let grace = warm_grace(runtime.served_prompt(), ACP_WARM_IDLE_GRACE);
             if !should_retire(runtime.idle_for(), grace, has_live_work) {
                 return IdleRetirement::Busy;
             }
-            workspace.acp_runtimes.remove(provider)
+            workspace.acp_runtimes.remove(key)
         };
 
         let Some(runtime) = removed else {
             return IdleRetirement::Stale;
         };
         tracing::info!(
-            provider = %provider,
+            provider = %key.provider,
             workspace_id = %workspace_id,
             idle_seconds = runtime.idle_for().as_secs(),
             served_prompt = runtime.served_prompt(),

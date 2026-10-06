@@ -65,7 +65,10 @@ impl AppState {
             let mut gates = self.inner.acp_runtime_gates.lock().await;
             Arc::clone(
                 gates
-                    .entry((workspace_id.to_string(), provider))
+                    .entry((
+                        workspace_id.to_string(),
+                        super::acp_threads::AcpRuntimeKey::new(&provider, None),
+                    ))
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
             )
         };

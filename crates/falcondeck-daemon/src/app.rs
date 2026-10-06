@@ -172,8 +172,8 @@ pub struct AppState {
     inner: Arc<InnerState>,
 }
 
-/// Keyed `(workspace_id, provider)` startup locks for ACP agent processes.
-type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
+/// Startup locks for shared workspace or thread-owned ACP processes.
+type AcpRuntimeGates = HashMap<(String, acp_threads::AcpRuntimeKey), Arc<Mutex<()>>>;
 type AcpHydrationGates = HashMap<(String, String), Arc<Mutex<()>>>;
 type CodexRuntimeGates = HashMap<String, Arc<Mutex<()>>>;
 type WorkspaceConnectGates = HashMap<String, Arc<Mutex<()>>>;
@@ -570,8 +570,8 @@ struct ManagedWorkspace {
     claude_runtime: Option<Arc<ClaudeRuntime>>,
     agy_runtime: Option<Arc<AgyRuntime>>,
     opencode_runtime: Option<Arc<crate::opencode::OpenCodeRuntime>>,
-    /// Live ACP agent processes keyed by provider id, started lazily on use.
-    acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
+    /// Live ACP agent processes, shared by provider except thread-owned Hermes.
+    acp_runtimes: HashMap<acp_threads::AcpRuntimeKey, Arc<crate::acp::AcpRuntime>>,
     threads: HashMap<String, ManagedThread>,
 }
 
@@ -2497,10 +2497,9 @@ impl AppState {
                         || agent.provider == AgentProvider::CLAUDE
                         || agent.provider == AgentProvider::AGY
                         || fresh_acp_ids.contains(&agent.provider)
-                        || workspace
-                            .acp_runtimes
-                            .get(&agent.provider)
-                            .is_some_and(|runtime| !runtime.is_closed())
+                        || workspace.acp_runtimes.values().any(|runtime| {
+                            runtime.provider == agent.provider && !runtime.is_closed()
+                        })
                 });
                 for agent in &fresh_acp_agents {
                     if !summary

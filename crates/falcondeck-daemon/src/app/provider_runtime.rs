@@ -811,7 +811,9 @@ impl ProviderRuntime {
                         .interrupt(&session_id)
                         .await;
                 }
-                let runtime = app.acp_runtime_for(workspace_id, provider).await?;
+                let runtime = app
+                    .acp_runtime_for_thread(workspace_id, provider, Some(thread_id))
+                    .await?;
                 // A thread that never opened a session has nothing to cancel.
                 if let Some(session_id) = {
                     let workspaces = app.inner.workspaces.lock().await;

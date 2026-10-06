@@ -1,6 +1,6 @@
 # Hermes ACP qualification
 
-Recorded on 2026-10-06 for Phases 0–2 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. The historical Phase 0/1 matrix below is followed by Phase 2 runtime and interaction results. Connector identity and full cross-client release qualification remain in Phases 3 and 4.
+Recorded on 2026-10-06 for Phases 0–3 of [the integration plan](HERMES-INTEGRATION-PLAN.md). Hermes is discoverable through native ACP. Historical qualification is followed by runtime, interaction, native-history, and connector results. Full cross-client release qualification remains in Phase 4.
 
 ## Baselines and configuration
 
@@ -137,8 +137,56 @@ npm run typecheck --workspace falcondeck-remote-web
 
 All focused checks pass: 3 core interactive tests, 106 daemon ACP tests, 9 daemon interactive tests, 8 conformance tests, 79 shared-client tests, 3 shared web-card tests, 16 mobile banner tests, and all five typechecks. Clippy completes with existing warnings. The current-source executable was rebuilt and its `--json --live --restart --timeout-seconds 90` qualification repeated after command discovery became consumed runtime metadata. Private raw logs and credential-bearing disposable profiles are excluded from git.
 
+## Phase 3 native history and connector results
+
+The installed launcher/source was checked again: clean `5a3317693c6ddd84834c4684eb6929ade20f0962`, `hermes acp --version` 0.14.0. **No installed upgrade was performed.** The same supported source `1d6b2786e2b2de70a967c66b6a14e2b83bab30e7`, ACP SDK 0.9.0, and `openai-codex:gpt-5.6-luna` ran in a disposable checkout/home. Its dependency manager was synchronized with `acp` and `mcp` extras only in that checkout. Existing Hermes configuration and native storage were not patched or replaced. The older installation still needs its owner's update for the upstream model/MCP/tool-completion fixes described above; upgrading it was unnecessary for this implementation and qualification.
+
+### Demonstrated blockers and fixes
+
+- Normal turn startup previously omitted the persisted session ID whenever transcript items existed. After warm process replacement this could start a blank conversation and overwrite its resume identity. Hermes now always attaches the saved ACP handle, uses strict `session/load`, and reports failure without substituting `session/new`. The regression reproduced the old fallback returning a fresh fixture ID after a rejected load.
+- Hydration previously waited for the first replayed item before clearing stream accumulators and settling history. Hermes now waits for an acknowledgment on the ordered event channel after the complete load response. Long replay finishes before settlement or a following prompt. A restored thread sent directly without opening its detail first loads native history before the new user message is admitted.
+- ID-less replay duplicated content when a warm process was replaced. Hermes reload suppresses only replayed conversation content if the daemon already has its projection; metadata still flows. A full daemon restart rebuilds history from native storage. Replayed repeated user text is preserved rather than mistaken for an echo of the newly submitted message.
+- A live same-process probe called the same-named stdio connector in native sessions A and B with different identity/capability markers. B's actual tool call returned A's marker. The pinned source registers MCP servers by name into its process/profile registry, which is not ACP-session scoped. Serializing prompts did not isolate the connected server. FalconDeck now gives each Hermes thread its own ACP process and thread-bound built-in connector context; other adapters retain their shared workspace process. Metadata-only discovery supplies no injected MCP servers, preventing a workspace-bound discovery connection from claiming the name first.
+- Re-registering a changed connector on a warm Hermes process also retained its old connection. At turn admission, FalconDeck compares the current materialized user connectors with the existing launch snapshot. A change replaces only that thread's process and reloads the same native handle. Built-in capability tokens are excluded from that comparison because freshly issuing a token is not a user configuration change. No second connector configuration store was added.
+
+### Qualification matrix
+
+| Case | Evidence and result |
+| --- | --- |
+| Current-source live/restart conformance | Exit 0: streaming, file-read tool lifecycle, cancellation, same-process load and cross-process restart pass; all observed update kinds handled |
+| Warm process replacement | Deterministic daemon fixture removes/shuts down the cached owner, then continues the exact native handle with no duplicate user, assistant, or tool items; lifecycle guard tests also pass |
+| Full daemon restart | An isolated real daemon, private state path and Hermes home restore the same handle, recall a prior marker, and execute the injected stdio tool |
+| Long replay | 600 native turns / 1,800 user, assistant and tool items, including identical repeated user text, are fully applied and settled before hydration returns; the next turn produces exactly one additional item of each kind |
+| Direct send after restore | Production admission path restores old user/tool/assistant content before appending the new user message |
+| Compression then restart | Live `/compress`, process reload and full daemon restart retain the ACP handle and prior context; deterministic additive `_meta.hermes.sessionProvenance` rotates the internal head without changing the saved handle |
+| Failed reload | Visible error on turn startup and background opening, unchanged native handle, no continuation prompt and no fresh replacement session; a later successful history load clears the restore error |
+| Same-name connector concurrency | Two live thread-owned processes simultaneously call `identity`: A returns `A\|CAP_A\|1`, B returns `B\|CAP_B\|1`; actual stdio call traces confirm the results |
+| Connector edits | Live replacement/load uses revision 2 while the other process retains revision 1. Real daemon edits apply on the next turn without changing the native handle; deterministic checks keep an active sibling runtime untouched |
+| Model selection and MCP | New sessions switch from the saved default to the working provider-qualified model and still execute their injected stdio tools; the same setter works after load |
+| Built-in thread/capability identity | Concurrent real daemon turns call `falcondeck_rename_thread` and change only their own titles. Deterministic daemon-issued capabilities remain bound to their thread even when the request body names another thread, including after connector refresh/load |
+| HTTP/SSE and computer use | Existing negotiated transport filtering and built-in injection tests pass. Hermes still advertises neither HTTP nor SSE. No live HTTP/SSE or computer-use action was exercised |
+
+The real daemon test enabled and granted the bundled follow-up extension only in its disposable state so the existing extensions bridge was injected. Existing extension enablement/grants and computer-use consent were preserved. Tests used a diagnostic user connector plus the built-in bridge; they did not execute users' real connectors. Raw transcripts, capability-bearing logs, and copied credentials stayed private and are excluded from git.
+
+Thread isolation increases the number of warm Hermes processes: one per used thread, plus an optional composer discovery process. Existing retirement bounds remain 20 minutes after a served prompt and 2 minutes for discovery-only processes; an unrelated active Hermes thread no longer pins another thread's process. All processes keep the selected `HERMES_HOME`, so memory, learned skills, and native sessions remain Hermes-owned. No native SQLite reader/writer, import UI, Hermes skill catalog, or FalconDeck conversation database was introduced. Optional import through ACP `session/list` remains separate work.
+
+Phase 3 focused checks:
+
+```sh
+cargo test -p falcondeck-daemon --lib acp
+cargo test -p falcondeck-daemon --lib connectors::tests
+cargo test -p falcondeck-daemon --lib runtime_health::tests
+cargo test -p falcondeck-daemon --lib extension_bridge
+cargo test -p falcondeck-daemon --lib persisted
+cargo test -p falcondeck-daemon --test acp_conformance
+cargo check -p falcondeck-daemon --lib
+cargo clippy -p falcondeck-daemon --lib
+```
+
+All focused checks pass: 114 ACP tests, 29 connector tests, 9 lifecycle tests, 2 bridge tests, 13 persistence tests, and 8 conformance tests. Clippy completes with existing warnings. The ACP suite includes seven new production-daemon history/identity regressions using [`hermes_history_agent.mjs`](../crates/falcondeck-daemon/tests/fixtures/hermes_history_agent.mjs), plus the strict runtime reload regression. Its native store is a test fixture outside FalconDeck's state file; production history ownership remains unchanged.
+
 ## Remaining qualification limits
 
-Phases 3 and 4 must verify per-thread connector identity and same-named connector isolation, warm runtime retirement and full daemon restart recovery, long replay deduplication, import/discovery of existing native sessions, relay reconnect/pruning with pending approvals, and real desktop/mobile/remote interaction flows. Basic compressed-session reload above does not complete those phases. Image block preservation is covered by a production-content test; model image understanding is not qualified. Delegation cancellation was not exercised by the terminal cancellation test.
+Phase 4 must verify relay reconnect/pruning with pending approvals and real desktop/mobile/remote interaction flows. Optional native session import is deferred. Image block preservation is covered by a production-content test; model image understanding is not qualified. Delegation cancellation was not exercised by the terminal cancellation test.
 
 Executor failure paths without the verified stderr marker still need an upstream explicit JSON-RPC failure or a separately demonstrated adapter fix. Serialization prevents concurrent provider-error attribution within a Hermes runtime; the HTTP 400 qualification does not establish that all Hermes executor failures are covered. Hermes edit modes remain file-edit policies, not filesystem sandboxes or unrestricted shell modes.

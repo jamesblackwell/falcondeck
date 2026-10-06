@@ -22,7 +22,7 @@ use crate::{
     connectors::BuiltinConnectors,
 };
 
-async fn fixture() -> (
+pub(super) async fn fixture() -> (
     TempDir,
     AppState,
     Arc<AcpRuntime>,
@@ -93,7 +93,10 @@ async fn fixture() -> (
             claude_runtime: None,
             agy_runtime: None,
             opencode_runtime: None,
-            acp_runtimes: HashMap::from([(provider.clone(), runtime.clone())]),
+            acp_runtimes: HashMap::from([(
+                super::AcpRuntimeKey::new(&provider, Some("thread")),
+                runtime.clone(),
+            )]),
             threads: HashMap::new(),
         },
     );

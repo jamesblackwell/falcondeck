@@ -1261,6 +1261,8 @@ pub enum AcpEvent {
     /// The `session/load` request settled (either way); replayed history for
     /// this session has been fully enqueued and later events are live again.
     ReplayFinished { session_id: String },
+    /// Ordered acknowledgment that the app has applied every earlier event.
+    DrainBarrier { acknowledgment: oneshot::Sender<()> },
     /// A tool call started or was announced.
     ToolCall {
         session_id: String,
@@ -1468,6 +1470,8 @@ pub struct AcpRuntime {
     /// Sessions whose `session/load` replay is in flight. Replay history is
     /// not a prompt but must still project as conversation items.
     replay_sessions: Mutex<HashSet<String>>,
+    /// Reload a retired process without replaying a transcript already shown.
+    suppressed_replay_sessions: Mutex<HashSet<String>>,
     closed: AtomicBool,
     /// When this process last exchanged a message with the daemon. Read by
     /// the idle-retirement timer in `app::runtime_health`.
@@ -2161,6 +2165,7 @@ impl AcpRuntime {
             prompt_output_sessions: Mutex::new(HashSet::new()),
             turn_outcomes: Mutex::new(HashMap::new()),
             replay_sessions: Mutex::new(HashSet::new()),
+            suppressed_replay_sessions: Mutex::new(HashSet::new()),
             closed: AtomicBool::new(false),
             activity: crate::activity::ActivityClock::new(),
             served_prompt: AtomicBool::new(false),
@@ -2417,14 +2422,23 @@ impl AcpRuntime {
         if self.metadata_discovered.load(Ordering::Acquire) {
             return Ok(());
         }
-        let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::with_builtin_servers(
-                crate::connectors::materialize_mcp_servers(&self.workspace_path, &self.config.id)
+        let mcp_servers = if self.is_hermes() {
+            // Discovery must not register workspace-scoped MCP connections
+            // before a Hermes conversation supplies its thread identity.
+            json!([])
+        } else {
+            crate::connectors::acp_mcp_servers(
+                &crate::connectors::with_builtin_servers(
+                    crate::connectors::materialize_mcp_servers(
+                        &self.workspace_path,
+                        &self.config.id,
+                    )
                     .await,
-                builtin,
-            ),
-            self.supports_http_mcp().await,
-        );
+                    builtin,
+                ),
+                self.supports_http_mcp().await,
+            )
+        };
         let result = self
             .request_with_timeout(
                 "session/new",
@@ -2646,7 +2660,8 @@ impl AcpRuntime {
     /// `session/load` — the agent replays the conversation through
     /// `session/update` notifications, which repopulates the (empty after
     /// restart) in-memory thread history. If the persisted session is truly
-    /// unavailable, the serialized caller falls back to a fresh session.
+    /// unavailable, other adapters may fall back to a fresh session. Hermes
+    /// retains its saved handle and reports the failed reload.
     #[allow(clippy::too_many_arguments)]
     pub async fn ensure_session(
         &self,
@@ -2661,7 +2676,18 @@ impl AcpRuntime {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
+            if self.is_hermes() && known_native_session.is_some_and(|native| native != existing) {
+                return Err(DaemonError::BadRequest(
+                    "Hermes live session differs from its saved ACP handle".into(),
+                ));
+            }
             return Ok(existing.clone());
+        }
+        if self.is_hermes() && known_native_session.is_some() && !self.supports_load_session().await
+        {
+            return Err(DaemonError::Process(
+                "Hermes cannot reload the saved ACP session".into(),
+            ));
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
             &crate::connectors::with_builtin_servers(
@@ -2678,11 +2704,14 @@ impl AcpRuntime {
             && self.supports_load_session().await
         {
             match self
-                .load_session_locked(thread_id, native_session, cwd, builtin)
+                .load_session_locked(thread_id, native_session, cwd, builtin, true)
                 .await
             {
                 Ok(()) => return Ok(native_session.to_string()),
                 Err(error) => {
+                    if self.is_hermes() {
+                        return Err(error);
+                    }
                     tracing::info!(
                         provider = %self.config.id,
                         %error,
@@ -2735,7 +2764,7 @@ impl AcpRuntime {
         if self.sessions.lock().await.contains_key(thread_id) {
             return Ok(());
         }
-        self.load_session_locked(thread_id, native_session, cwd, builtin)
+        self.load_session_locked(thread_id, native_session, cwd, builtin, true)
             .await
     }
 
@@ -2753,6 +2782,30 @@ impl AcpRuntime {
         cwd: &str,
         builtin: &crate::connectors::BuiltinConnectors,
     ) -> Result<String, DaemonError> {
+        self.ensure_loaded_session_inner(thread_id, native_session, cwd, builtin, true)
+            .await
+    }
+
+    /// Attach the native handle while retaining an already-projected history.
+    pub async fn ensure_loaded_session_preserving_history(
+        &self,
+        thread_id: &str,
+        native_session: &str,
+        cwd: &str,
+        builtin: &crate::connectors::BuiltinConnectors,
+    ) -> Result<String, DaemonError> {
+        self.ensure_loaded_session_inner(thread_id, native_session, cwd, builtin, false)
+            .await
+    }
+
+    async fn ensure_loaded_session_inner(
+        &self,
+        thread_id: &str,
+        native_session: &str,
+        cwd: &str,
+        builtin: &crate::connectors::BuiltinConnectors,
+        replay_history: bool,
+    ) -> Result<String, DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
         if let Some(existing) = self.sessions.lock().await.get(thread_id).cloned() {
@@ -2764,7 +2817,7 @@ impl AcpRuntime {
                 )))
             };
         }
-        self.load_session_locked(thread_id, native_session, cwd, builtin)
+        self.load_session_locked(thread_id, native_session, cwd, builtin, replay_history)
             .await?;
         Ok(native_session.to_string())
     }
@@ -2775,6 +2828,7 @@ impl AcpRuntime {
         native_session: &str,
         cwd: &str,
         builtin: &crate::connectors::BuiltinConnectors,
+        replay_history: bool,
     ) -> Result<(), DaemonError> {
         if !self.supports_load_session().await {
             return Err(DaemonError::Process(format!(
@@ -2795,10 +2849,9 @@ impl AcpRuntime {
         // session→thread mapping must exist before the request goes out
         // or the event pump drops the entire replayed history.
         //
-        // RepoPrompt suppresses that replay because it persists its own
-        // transcript. FalconDeck has no conversation DB: ingesting replay
-        // is how a restored thread gets its items back. The app layer
-        // skips load when items already exist so this does not duplicate.
+        // FalconDeck has no conversation DB: full replay restores history
+        // after daemon restart. Hermes also reloads retired processes when
+        // the projection is still present, suppressing only content replay.
         self.register_session(thread_id, native_session).await;
         // Bracket the replay on the ordered event channel. The read loop
         // handles every replayed notification before it resolves this
@@ -2812,6 +2865,12 @@ impl AcpRuntime {
             .lock()
             .await
             .insert(native_session.to_string());
+        if !replay_history {
+            self.suppressed_replay_sessions
+                .lock()
+                .await
+                .insert(native_session.to_owned());
+        }
         let loaded = self
             .request_with_timeout(
                 "session/load",
@@ -2824,6 +2883,10 @@ impl AcpRuntime {
             )
             .await;
         self.replay_sessions.lock().await.remove(native_session);
+        self.suppressed_replay_sessions
+            .lock()
+            .await
+            .remove(native_session);
         let _ = self.events.send(AcpEvent::ReplayFinished {
             session_id: native_session.to_string(),
         });
@@ -2846,6 +2909,20 @@ impl AcpRuntime {
                 .entry(thread_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(()))),
         )
+    }
+
+    /// Await the ordered pump instead of guessing whether replay has landed.
+    pub async fn drain_events(&self) -> Result<(), DaemonError> {
+        let (acknowledgment, applied) = oneshot::channel();
+        self.events
+            .send(AcpEvent::DrainBarrier { acknowledgment })
+            .map_err(|_| DaemonError::Process("ACP event pump is closed".into()))?;
+        tokio::time::timeout(ACP_SESSION_START_TIMEOUT, applied)
+            .await
+            .map_err(|_| DaemonError::Process("ACP history projection timed out".into()))?
+            .map_err(|_| {
+                DaemonError::Process("ACP event pump stopped before applying history".into())
+            })
     }
 
     /// The ACP session id currently registered for a thread, if any.
@@ -4129,6 +4206,23 @@ impl AcpRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let classified = AcpSessionUpdateKind::classify(kind);
+        if self
+            .suppressed_replay_sessions
+            .lock()
+            .await
+            .contains(session_id)
+            && matches!(
+                classified,
+                AcpSessionUpdateKind::AgentMessageChunk
+                    | AcpSessionUpdateKind::AgentThoughtChunk
+                    | AcpSessionUpdateKind::UserMessageChunk
+                    | AcpSessionUpdateKind::ToolCall
+                    | AcpSessionUpdateKind::ToolCallUpdate
+                    | AcpSessionUpdateKind::Plan
+            )
+        {
+            return;
+        }
         let event = match classified {
             AcpSessionUpdateKind::AgentMessageChunk => update
                 .get("content")
@@ -5440,6 +5534,46 @@ mod tests {
         assert!(error.to_string().contains("fixture session is unavailable"));
         assert_eq!(runtime.session_for_thread("thread-load").await, None);
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn hermes_normal_reload_never_replaces_an_unavailable_native_session() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(
+            AcpProviderConfig {
+                id: "hermes".into(),
+                label: "Hermes".into(),
+                command: vec![
+                    "node".into(),
+                    fixture.to_string_lossy().into_owned(),
+                    "load-failure".into(),
+                ],
+                env: HashMap::new(),
+                transport: ProviderTransport::Acp,
+            },
+            env!("CARGO_MANIFEST_DIR"),
+            events,
+        )
+        .await
+        .unwrap();
+        let result = runtime
+            .ensure_session(
+                "thread",
+                Some("missing-native-session"),
+                env!("CARGO_MANIFEST_DIR"),
+                None,
+                &Default::default(),
+                None,
+                None,
+            )
+            .await;
+        runtime.shutdown().await;
+        assert!(
+            result.is_err(),
+            "Hermes must report lost native context rather than substitute a new session: {result:?}"
+        );
     }
 
     #[tokio::test]

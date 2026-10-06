@@ -1,6 +1,6 @@
 # Hermes Agent integration plan
 
-Research and local verification: 2026-10-06. Phases 0, 1, and 2 are implemented; see the [qualification report](HERMES-ACP-QUALIFICATION.md) for tested revisions, results, and remaining limits. Phases 3–5 remain proposed work.
+Research and local verification: 2026-10-06. Phases 0–3 are implemented; see the [qualification report](HERMES-ACP-QUALIFICATION.md) for tested revisions, results, and remaining limits. Phases 4 and 5 remain proposed work.
 
 ## Recommendation
 
@@ -154,6 +154,8 @@ Initially use FalconDeck's existing generic ACP cancel/resubmit steering behavio
 
 ## Phase 3: preserve native history and connector identity
 
+**Completed:** strict native-handle continuation, ordered long-history replay, recovery after process replacement and daemon restart, compression identity preservation, and thread-owned Hermes processes for MCP isolation. Live same-name connector calls, connector edits, model selection, and built-in thread-bound bridge calls pass against the pinned baseline. Native session import remains an optional enhancement outside this increment. See the [qualification report](HERMES-ACP-QUALIFICATION.md).
+
 **Expected effort: one to two days.**
 
 - Persist the normal FalconDeck thread-to-ACP-session mapping. Rehydrate using `session/load`, with replay routing registered before awaiting its response. Test warm-runtime retirement, daemon restart, long transcript replay, and no duplicate user/tool messages.
@@ -208,4 +210,4 @@ For unattended/server use, run Hermes on the enrolled FalconDeck daemon host and
 
 Budget approximately **five to nine engineering days** for first-class ACP support if qualification reveals modest fixes. Basic manual configuration takes minutes and was already shown to reach session/catalog discovery on this Mac. External Hermes fixes can extend elapsed time. Full gateway support is separate scope, not a prerequisite for the recommended ACP release.
 
-The next implementation task is Phase 3, guided by the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), while retaining native session ownership and the shared client contract.
+The next implementation task is Phase 4, guided by the [recorded compatibility findings](HERMES-ACP-QUALIFICATION.md), while retaining native session ownership and the shared client contract.

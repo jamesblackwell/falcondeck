@@ -42,6 +42,59 @@ struct AcpToolItem<'a> {
     output: Option<&'a str>,
 }
 
+/// Hermes' MCP registry is process-wide. Other adapters keep their shared
+/// workspace process; Hermes conversations require a thread-owned process.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct AcpRuntimeKey {
+    pub(super) provider: AgentProvider,
+    pub(super) thread_id: Option<String>,
+}
+
+impl AcpRuntimeKey {
+    pub(super) fn new(provider: &AgentProvider, thread_id: Option<&str>) -> Self {
+        Self {
+            provider: provider.clone(),
+            thread_id: thread_id
+                .filter(|_| provider.as_str() == "hermes")
+                .map(str::to_owned),
+        }
+    }
+}
+
+fn has_hermes_transcript(items: &[ConversationItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(
+            item,
+            ConversationItem::AssistantMessage { .. }
+                | ConversationItem::Reasoning { .. }
+                | ConversationItem::ToolCall { .. }
+                | ConversationItem::FileChange { .. }
+                | ConversationItem::Plan { .. }
+        )
+    }) || items
+        .iter()
+        .filter(|item| matches!(item, ConversationItem::UserMessage { .. }))
+        .count()
+        > 1
+}
+
+fn user_connector_snapshot(encoded: &str) -> Result<Value, DaemonError> {
+    let mut servers: Vec<Value> = serde_json::from_str(encoded)?;
+    // Built-in capabilities are issued at spawn and remain bound to the same
+    // thread. Comparing freshly issued tokens would restart every turn.
+    servers.retain(|server| {
+        !matches!(
+            server.get("name").and_then(Value::as_str),
+            Some(
+                crate::connectors::BUILTIN_CONNECTOR_NAME
+                    | crate::connectors::BUILTIN_EXTENSIONS_CONNECTOR_NAME
+                    | crate::connectors::BUILTIN_COMPUTER_USE_CONNECTOR_NAME
+            )
+        )
+    });
+    Ok(Value::Array(servers))
+}
+
 fn acp_metadata_updated_at(
     current: chrono::DateTime<Utc>,
     replay: bool,
@@ -55,6 +108,7 @@ fn acp_metadata_updated_at(
 /// discovery requests are individually bounded, but a start can still wedge
 /// on shared daemon locks; past this the composer stops waiting.
 const PROVIDER_HYDRATION_DEADLINE: Duration = Duration::from_secs(90);
+const HERMES_HISTORY_RESTORE_ERROR_PREFIX: &str = "Could not restore Hermes history: ";
 
 impl AppState {
     /// Re-reads `providers.json` so provider edits apply without a daemon
@@ -402,12 +456,34 @@ impl AppState {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "ACP thread hydration finished"
                 ),
-                Err(error) => tracing::info!(
-                    thread = %thread_id,
-                    %error,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "ACP thread hydration failed; transcript stays empty until next attempt"
-                ),
+                Err(error) => {
+                    tracing::info!(
+                        thread = %thread_id,
+                        %error,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "ACP thread hydration failed; transcript stays empty until next attempt"
+                    );
+                    if app
+                        .thread_provider(&workspace_id, &thread_id)
+                        .await
+                        .is_ok_and(|provider| provider.as_str() == "hermes")
+                    {
+                        let message = format!("{HERMES_HISTORY_RESTORE_ERROR_PREFIX}{error}");
+                        if let Ok(thread) = app
+                            .upsert_thread(&workspace_id, &thread_id, |thread| {
+                                thread.status = ThreadStatus::Error;
+                                thread.last_error = Some(message);
+                            })
+                            .await
+                        {
+                            app.emit(
+                                Some(workspace_id.clone()),
+                                Some(thread_id.clone()),
+                                UnifiedEvent::ThreadUpdated { thread },
+                            );
+                        }
+                    }
+                }
             }
 
             // This set tracks in-flight hydration, not permanent attempts.
@@ -449,6 +525,51 @@ impl AppState {
             .entry((workspace_id.to_string(), thread_id.to_string()))
             .or_default()
             .clone()
+    }
+
+    /// Wait for any in-flight history projection before admitting a new user
+    /// item. Empty idle Hermes placeholders also need a native load.
+    pub(super) async fn hermes_history_for_admission(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, DaemonError> {
+        let needs_history = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .is_some_and(|thread| {
+                thread.summary.provider.as_str() == "hermes"
+                    && thread.summary.native_session_id.is_some()
+                    && !matches!(
+                        thread.summary.status,
+                        ThreadStatus::Running | ThreadStatus::WaitingForInput
+                    )
+            });
+        if !needs_history {
+            return Ok(None);
+        }
+        let guard = self
+            .acp_hydration_gate(workspace_id, thread_id)
+            .await
+            .lock_owned()
+            .await;
+        let empty = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .is_some_and(|thread| thread.items.is_empty());
+        if empty {
+            self.hydrate_acp_thread(workspace_id, thread_id, false)
+                .await?;
+        }
+        Ok(Some(guard))
     }
 
     async fn hydrate_acp_thread(
@@ -495,7 +616,9 @@ impl AppState {
             };
         }
 
-        let runtime = self.acp_runtime_for(workspace_id, &provider).await?;
+        let runtime = self
+            .acp_runtime_for_thread(workspace_id, &provider, Some(thread_id))
+            .await?;
         let mapped_session = runtime.session_for_thread(thread_id).await;
         if item_count > 0 {
             if !exact_resume {
@@ -519,6 +642,22 @@ impl AppState {
                     return Err(DaemonError::BadRequest(format!(
                         "cannot safely continue: the live ACP session is {existing}, not the persisted session {native_session}"
                     )));
+                }
+                None if runtime.is_hermes() => {
+                    let builtin = self
+                        .builtin_connectors(&provider, &cwd, Some(thread_id))
+                        .await;
+                    runtime
+                        .ensure_loaded_session_preserving_history(
+                            thread_id,
+                            &native_session,
+                            &cwd,
+                            &builtin,
+                        )
+                        .await?;
+                    runtime.drain_events().await?;
+                    runtime.end_turn(&native_session).await;
+                    return Ok(item_count);
                 }
                 None => {
                     return Err(DaemonError::BadRequest(
@@ -561,11 +700,20 @@ impl AppState {
         }
 
         // session/load returns after the read loop has queued every replay
-        // notification. Give the ordered event pump a chance to apply the
-        // first item before settling the restored turn.
-        let item_count = self
-            .wait_for_acp_replay_items(workspace_id, thread_id)
-            .await;
+        // notification. Hermes waits for the whole ordered projection before
+        // settling; other adapters retain their existing first-item wait.
+        let item_count = if runtime.is_hermes() {
+            runtime.drain_events().await?;
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.threads.get(thread_id))
+                .map(|thread| thread.items.len())
+                .unwrap_or(0)
+        } else {
+            self.wait_for_acp_replay_items(workspace_id, thread_id)
+                .await
+        };
         if item_count == 0 {
             tracing::info!(
                 provider = %provider,
@@ -575,9 +723,13 @@ impl AppState {
             );
         }
         runtime.end_turn(&native_session).await;
+        let restored_after_error = runtime.is_hermes()
+            && prior_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with(HERMES_HISTORY_RESTORE_ERROR_PREFIX));
         let settlement = if prior_error.as_deref() == Some(super::SHUTDOWN_INTERRUPTED_TURN_ERROR) {
             ToolSettlement::Interrupted
-        } else if prior_error.is_some() {
+        } else if prior_error.is_some() && !restored_after_error {
             ToolSettlement::Failed
         } else {
             ToolSettlement::Completed
@@ -587,9 +739,26 @@ impl AppState {
             thread_id,
             Utc::now(),
             settlement,
-            prior_error.as_deref(),
+            if restored_after_error {
+                None
+            } else {
+                prior_error.as_deref()
+            },
         )
         .await;
+        if restored_after_error {
+            let thread = self
+                .upsert_thread(workspace_id, thread_id, |thread| {
+                    thread.status = ThreadStatus::Idle;
+                    thread.last_error = None;
+                })
+                .await?;
+            self.emit(
+                Some(workspace_id.to_owned()),
+                Some(thread_id.to_owned()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
         Ok(item_count)
     }
 
@@ -619,11 +788,22 @@ impl AppState {
         workspace_id: &str,
         provider: &AgentProvider,
     ) -> Result<Arc<AcpRuntime>, DaemonError> {
+        self.acp_runtime_for_thread(workspace_id, provider, None)
+            .await
+    }
+
+    pub(super) async fn acp_runtime_for_thread(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        thread_id: Option<&str>,
+    ) -> Result<Arc<AcpRuntime>, DaemonError> {
+        let key = AcpRuntimeKey::new(provider, thread_id);
         let cached = {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
                 .get(workspace_id)
-                .and_then(|workspace| workspace.acp_runtimes.get(provider))
+                .and_then(|workspace| workspace.acp_runtimes.get(&key))
                 .filter(|runtime| !runtime.is_closed())
                 .map(Arc::clone)
         };
@@ -639,7 +819,7 @@ impl AppState {
             let mut gates = self.inner.acp_runtime_gates.lock().await;
             Arc::clone(
                 gates
-                    .entry((workspace_id.to_string(), provider.clone()))
+                    .entry((workspace_id.to_string(), key.clone()))
                     .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
             )
         };
@@ -652,7 +832,7 @@ impl AppState {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
                 .get(workspace_id)
-                .and_then(|workspace| workspace.acp_runtimes.get(provider))
+                .and_then(|workspace| workspace.acp_runtimes.get(&key))
                 .filter(|runtime| !runtime.is_closed())
                 .map(Arc::clone)
         };
@@ -698,8 +878,20 @@ impl AppState {
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
         };
 
+        let cwd = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| {
+                    key.thread_id
+                        .as_deref()
+                        .and_then(|id| workspace.threads.get(id))
+                })
+                .map(|thread| thread.summary.working_directory(&workspace_path).to_owned())
+                .unwrap_or_else(|| workspace_path.clone())
+        };
         let builtin = self
-            .builtin_connectors(provider, &workspace_path, None)
+            .builtin_connectors(provider, &cwd, key.thread_id.as_deref())
             .await;
         let servers = crate::connectors::with_builtin_servers(
             crate::connectors::materialize_mcp_servers(&workspace_path, provider.as_str()).await,
@@ -719,10 +911,14 @@ impl AppState {
             "FALCONDECK_CONTROL_PROVIDER".to_string(),
             provider.to_string(),
         );
-        config.env.insert(
-            "FALCONDECK_CONTROL_WORKSPACE".to_string(),
-            workspace_path.clone(),
-        );
+        config
+            .env
+            .insert("FALCONDECK_CONTROL_WORKSPACE".to_string(), cwd.clone());
+        if let Some(thread_id) = key.thread_id.as_ref() {
+            config
+                .env
+                .insert("FALCONDECK_CONTROL_THREAD".to_string(), thread_id.clone());
+        }
         config.env.insert(
             "FALCONDECK_MCP_SERVERS".to_string(),
             crate::connectors::mcp_servers_env_json(&servers),
@@ -772,7 +968,7 @@ impl AppState {
                 Some(workspace) => {
                     workspace
                         .acp_runtimes
-                        .insert(provider.clone(), Arc::clone(&runtime));
+                        .insert(key.clone(), Arc::clone(&runtime));
                     true
                 }
                 None => false,
@@ -789,7 +985,7 @@ impl AppState {
                     runtime.command_markers(),
                 );
             }
-            self.schedule_acp_idle_retirement(workspace_id, provider, Arc::clone(&runtime));
+            self.schedule_acp_idle_retirement(workspace_id, &key, Arc::clone(&runtime));
         }
         self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
             .await;
@@ -950,8 +1146,8 @@ impl AppState {
     }
 
     /// Replaces an unresponsive ACP process before retrying turn startup.
-    /// A runtime is shared by every thread for this provider/workspace, so do
-    /// not recycle it while that would interrupt a different live turn.
+    /// Shared adapters must not interrupt another live turn. Hermes owns just
+    /// this thread, so another Hermes conversation does not veto its restart.
     async fn restart_acp_runtime_for_turn_start(
         &self,
         workspace_id: &str,
@@ -959,13 +1155,15 @@ impl AppState {
         provider: &AgentProvider,
         stalled_runtime: &Arc<AcpRuntime>,
     ) -> Result<Option<Arc<AcpRuntime>>, DaemonError> {
+        let key = AcpRuntimeKey::new(provider, Some(thread_id));
         let runtime_to_shutdown = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get_mut(workspace_id)
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
             let other_turn_is_active = workspace.threads.values().any(|thread| {
-                thread.summary.id != thread_id
+                key.thread_id.is_none()
+                    && thread.summary.id != thread_id
                     && thread.summary.provider == *provider
                     && matches!(
                         thread.summary.status,
@@ -977,17 +1175,26 @@ impl AppState {
             }
             let is_current = workspace
                 .acp_runtimes
-                .get(provider)
+                .get(&key)
                 .is_some_and(|runtime| Arc::ptr_eq(runtime, stalled_runtime));
             is_current
-                .then(|| workspace.acp_runtimes.remove(provider))
+                .then(|| workspace.acp_runtimes.remove(&key))
                 .flatten()
         };
 
         if let Some(runtime) = runtime_to_shutdown {
+            if let (Some(state_dir), Some(child_pid)) = (self.state_dir(), runtime.child_pid()) {
+                crate::agent_orphans::forget(
+                    &state_dir,
+                    crate::agent_orphans::ACP_REGISTRY_FILE,
+                    child_pid,
+                );
+            }
             runtime.shutdown().await;
         }
-        self.acp_runtime_for(workspace_id, provider).await.map(Some)
+        self.acp_runtime_for_thread(workspace_id, provider, Some(thread_id))
+            .await
+            .map(Some)
     }
 
     /// Consumes runtime events and applies them to daemon state.
@@ -1019,6 +1226,9 @@ impl AppState {
         replaying_sessions: &mut HashSet<String>,
     ) -> Result<(), DaemonError> {
         match event {
+            AcpEvent::DrainBarrier { acknowledgment } => {
+                let _ = acknowledgment.send(());
+            }
             AcpEvent::ReplayStarted { session_id } => {
                 replaying_sessions.insert(session_id);
             }
@@ -1088,7 +1298,9 @@ impl AppState {
                                 latest_user_message_contains_echo(&thread.items, prompt)
                             })
                     };
-                    if is_submitted_message_echo {
+                    if is_submitted_message_echo
+                        && !(runtime.is_hermes() && replaying_sessions.contains(&session_id))
+                    {
                         return Ok(());
                     }
                 }
@@ -1947,7 +2159,11 @@ impl AppState {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
                 .get(workspace_id)
-                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .and_then(|workspace| {
+                    workspace
+                        .acp_runtimes
+                        .get(&AcpRuntimeKey::new(&provider, Some(thread_id)))
+                })
                 .filter(|runtime| !runtime.is_closed())
                 .map(Arc::clone)
         };
@@ -1981,7 +2197,11 @@ impl AppState {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
                 .get(workspace_id)
-                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .and_then(|workspace| {
+                    workspace
+                        .acp_runtimes
+                        .get(&AcpRuntimeKey::new(&provider, Some(thread_id)))
+                })
                 .filter(|runtime| !runtime.is_closed())
                 .map(Arc::clone)
         };
@@ -2010,7 +2230,11 @@ impl AppState {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
                 .get(workspace_id)
-                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .and_then(|workspace| {
+                    workspace
+                        .acp_runtimes
+                        .get(&AcpRuntimeKey::new(&provider, Some(thread_id)))
+                })
                 .filter(|runtime| !runtime.is_closed())
                 .map(Arc::clone)
         };
@@ -2156,7 +2380,9 @@ pub(super) async fn set_hermes_thread_model(
     else {
         return Ok(());
     };
-    let runtime = app.acp_runtime_for(workspace_id, &thread.provider).await?;
+    let runtime = app
+        .acp_runtime_for_thread(workspace_id, &thread.provider, Some(thread_id))
+        .await?;
     let cwd = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -2168,7 +2394,7 @@ pub(super) async fn set_hermes_thread_model(
         .builtin_connectors(&thread.provider, &cwd, Some(thread_id))
         .await;
     runtime
-        .ensure_loaded_session(thread_id, session, &cwd, &builtin)
+        .ensure_loaded_session_preserving_history(thread_id, session, &cwd, &builtin)
         .await?;
     runtime
         .apply_session_preferences(session, Some(model), None, None, None)
@@ -2217,7 +2443,9 @@ pub(super) async fn set_acp_thread_permission_mode(
         return Ok(());
     };
 
-    let runtime = app.acp_runtime_for(workspace_id, &provider).await?;
+    let runtime = app
+        .acp_runtime_for_thread(workspace_id, &provider, Some(thread_id))
+        .await?;
     let available_modes = runtime.capability_summary().await.permission_modes;
     let Some(desired_mode) = requested_mode
         .as_deref()
@@ -2494,7 +2722,10 @@ async fn run_acp_turn_startup(
     selected_skills: &[ResolvedSelectedSkill],
     resume_interrupted: bool,
 ) -> Result<(), DaemonError> {
-    let mut runtime = match app.acp_runtime_for(workspace_id, provider).await {
+    let mut runtime = match app
+        .acp_runtime_for_thread(workspace_id, provider, Some(thread_id))
+        .await
+    {
         Ok(runtime) => runtime,
         Err(DaemonError::AcpRequestTimeout { ref method, .. }) if method == "initialize" => {
             let label = app
@@ -2518,18 +2749,17 @@ async fn run_acp_turn_startup(
                     true,
                 )
                 .await;
-            app.acp_runtime_for(workspace_id, provider).await?
+            app.acp_runtime_for_thread(workspace_id, provider, Some(thread_id))
+                .await?
         }
         Err(error) => return Err(error),
     };
-    // A native session id persisted from a previous daemon run lets the agent
-    // resume via session/load instead of starting from a blank session. Normal
-    // sends only offer it when the in-memory history is empty because load
-    // replays the whole conversation. Explicit interrupted recovery already
-    // performed a strict preflight and must retain the id even after replay
-    // populated the thread.
+    // Hermes always reloads the durable handle after process replacement.
+    // Suppress content replay when this daemon already holds its projection;
+    // other adapters retain their existing resume policy.
     let (
         known_native_session,
+        history_projected,
         requested_model_id,
         requested_reasoning_effort,
         requested_collaboration_mode,
@@ -2541,8 +2771,11 @@ async fn run_acp_turn_startup(
         let thread = workspace.and_then(|workspace| workspace.threads.get(thread_id));
         (
             thread
-                .filter(|thread| resume_interrupted || thread.items.is_empty())
+                .filter(|thread| {
+                    runtime.is_hermes() || resume_interrupted || thread.items.is_empty()
+                })
                 .and_then(|thread| thread.summary.native_session_id.clone()),
+            thread.is_some_and(|thread| has_hermes_transcript(&thread.items)),
             thread.and_then(|thread| thread.summary.agent.model_id.clone()),
             thread.and_then(|thread| thread.summary.agent.reasoning_effort.clone()),
             thread.and_then(|thread| thread.summary.agent.collaboration_mode_id.clone()),
@@ -2556,11 +2789,48 @@ async fn run_acp_turn_startup(
             },
         )
     };
+    if runtime.is_hermes()
+        && let Some(spawned) = runtime.config.env.get("FALCONDECK_MCP_SERVERS")
+    {
+        let servers =
+            crate::connectors::materialize_mcp_servers(runtime.workspace_path(), provider.as_str())
+                .await;
+        let current = crate::connectors::mcp_servers_env_json(&servers);
+        if user_connector_snapshot(spawned)? != user_connector_snapshot(&current)? {
+            // Hermes registers MCP servers once per process/name. Replacing
+            // the owning process is required for changed credentials/config;
+            // session/load below keeps the native conversation intact.
+            let owner = Arc::clone(&runtime);
+            let _exclusive = owner.retirement_guard().await;
+            runtime = app
+                .restart_acp_runtime_for_turn_start(workspace_id, thread_id, provider, &owner)
+                .await?
+                .ok_or_else(|| {
+                    DaemonError::Process(
+                        "cannot refresh Hermes connectors while another turn is active".into(),
+                    )
+                })?;
+        }
+    }
     let builtin = app
         .builtin_connectors(provider, &cwd, Some(thread_id))
         .await;
     let agent_context = app.agent_context_instructions(provider).await;
-    let first_start = if resume_interrupted {
+    let needs_load =
+        runtime.session_for_thread(thread_id).await.is_none() && known_native_session.is_some();
+    let first_start = if runtime.is_hermes()
+        && let Some(native_session) = known_native_session.as_deref()
+    {
+        if history_projected {
+            runtime
+                .ensure_loaded_session_preserving_history(thread_id, native_session, &cwd, &builtin)
+                .await
+        } else {
+            runtime
+                .ensure_loaded_session(thread_id, native_session, &cwd, &builtin)
+                .await
+        }
+    } else if resume_interrupted {
         let native_session = known_native_session.as_deref().ok_or_else(|| {
             DaemonError::BadRequest(
                 "cannot safely continue because FalconDeck has no durable native session id"
@@ -2642,6 +2912,20 @@ async fn run_acp_turn_startup(
         }
         Err(error) => return Err(error),
     };
+    if runtime.is_hermes() && needs_load {
+        runtime.drain_events().await?;
+        runtime.end_turn(&session_id).await;
+        if !history_projected {
+            app.settle_turn_items_with_error(
+                workspace_id,
+                thread_id,
+                Utc::now(),
+                ToolSettlement::Completed,
+                None,
+            )
+            .await;
+        }
+    }
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.native_session_id = Some(session_id.clone());
     })
@@ -2853,7 +3137,9 @@ pub(super) async fn steer_acp_turn(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
-    let runtime = app.acp_runtime_for(workspace_id, provider).await?;
+    let runtime = app
+        .acp_runtime_for_thread(workspace_id, provider, Some(thread_id))
+        .await?;
     let session_id = {
         let workspaces = app.inner.workspaces.lock().await;
         workspaces
@@ -2976,6 +3262,9 @@ async fn acp_turn_content(
 #[cfg(test)]
 #[path = "acp_threads/hermes_tests.rs"]
 mod hermes_tests;
+
+#[cfg(test)]
+mod hermes_history_tests;
 
 #[cfg(test)]
 mod tests {
