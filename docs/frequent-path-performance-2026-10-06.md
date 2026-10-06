@@ -1,6 +1,6 @@
 # Frequent-path performance — 6 October 2026
 
-Four further fixes target repeated streaming and compact-sync work. They
+Five further fixes target repeated streaming and compact-sync work. They
 preserve the existing event/RPC contracts and native history ownership.
 
 | Path and synthetic fixture | Before | After |
@@ -10,6 +10,7 @@ preserve the existing event/RPC contracts and native history ownership.
 | Compact workspace projection, 72 workspaces with repeated skills | 53,281 allocations requesting 11,680,900 bytes | 1,081 allocations requesting 94,660 bytes |
 | Freezing 2,000 already-projected compact rows | 14,010 allocations requesting 4,687,558 bytes for a second projection | Ownership transfer; no second projection allocations |
 | Mobile open fence, 100 appends after 1,000 code lines | 4,524,850 characters reparsed; Node p95 3.377 ms | No canonical-parser input during those appends; p95 0.046 ms |
+| Mobile list, 100 appends after 1,000 items | 6,034,450 characters reparsed; Node p95 33.363 ms | 51,450 characters reparsed; p95 0.364 ms |
 
 Allocation figures count requested alloc/realloc bytes, not retained memory or
 RSS. Coalescer figures are nine-run release medians with input creation excluded;
@@ -57,6 +58,17 @@ completed messages use the canonical parser. Character-by-character AST parity
 tests cover those boundaries, escaped info strings, Unicode and line endings.
 Prior ASTs remain immutable.
 
+Long lists now reparse only their growing final item while retaining settled
+items. The combined list keeps its original ordered start and derives spread
+from retained item boundaries and the canonical tail. This distinguishes blank
+lines between items from spread within the changing item. Partial/empty markers,
+indentation, nested containers, definitions and unsupported context use the full
+parser. Character and chunk parity tests cover list endings, task markers,
+Unicode positions, lazy continuations, tables, HTML and fences. An independent
+seeded differential run also matched 15,103 incremental updates against the
+full parser. The regression checks parsed-character cost and immutable settled
+item identity rather than machine-dependent timing.
+
 Moving work to Rust helps when it is independent of client presentation and can
 be done once for every consumer: provider normalization, sync projection,
 sorting/paging, payload sizing and stream coalescing already fit that boundary.
@@ -74,20 +86,26 @@ Rust candidate, especially for legacy/full snapshot clients.
 
 ## Validation and remaining candidates
 
-Validation used committed `main` at `f98be613` plus only these changes in an
-isolated checkout, excluding other agents' ongoing edits:
+The first four fixes were validated against committed `main` at `f98be613` and
+committed as `48eb53d0`. The list fix was validated against that commit. Both
+used isolated checkouts containing only the relevant changes, excluding other
+agents' ongoing edits:
 
 - Daemon library: **1,271 passed, five ignored**.
-- Mobile full suite: **1,298 passed**; mobile typecheck passed.
-- Focused mobile parser/renderer: **69 passed**.
+- Mobile full suite: **1,298 passed** for the first four fixes; **1,330 passed**
+  with the list regressions. Mobile typecheck passed for both.
+- Focused mobile parser/renderer: **69 passed** initially; **101 passed** with
+  the list regressions.
 - Production daemon check: `cargo check -p falcondeck-daemon`.
 - Repo review command:
   `.agents/skills/autoreview/scripts/autoreview --engine codex --mode local`.
 
-The next measured client issue is long streaming lists: 100 appends after 1,000
-lines reparsed 6.03 MB with roughly 35–38 ms Node p95. List spread, nested
-containers and partial markers require an item-aware append strategy. Settled
-conversation projection also rebuilds historical wrappers before reusing their
+The initial list full-suite run had one extension-reconnect timing failure in
+an unchanged hook test. That test passed with the focused parser/renderer run
+(114 tests), and the subsequent full run passed all 1,330 tests without changing
+the hook or its test.
+
+Settled conversation projection still rebuilds historical wrappers before reusing their
 identities; the 5,000-message audit measured 3.11 ms p95 for derivation/reuse,
 but the usual 150-item tail was 0.17 ms.
 
@@ -101,4 +119,6 @@ revocation. Full snapshot catalog repetition remains as identified in the
 Local reproduction sources/results remain under
 `/tmp/falcondeck-coalescer-measurement`, `/tmp/falcondeck-hotpaths-20261006`,
 `/tmp/falcondeck-rust-sync-audit`, and `/tmp/falcondeck-markdown-after.mjs`.
+The list benchmark and differential harness are
+`/tmp/falcondeck-markdown-list-after.mjs` and `/tmp/falcondeck-list-fuzz.ts`.
 All fixtures are synthetic; no native transcript data was committed.
