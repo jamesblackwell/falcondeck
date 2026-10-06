@@ -1472,7 +1472,7 @@ describe("PromptInput", () => {
       );
     });
 
-    it("adjusts reasoning effort with left and right on the effort row", async () => {
+    it("adjusts reasoning effort with left and right from any row", async () => {
       const onEffortChange = vi.fn();
       renderWithMenuShortcut({
         selectedModelId: "opus",
@@ -1494,11 +1494,11 @@ describe("PromptInput", () => {
       fireEvent.keyDown(document, { key: "ArrowRight" });
       expect(onEffortChange).toHaveBeenCalledWith("high");
 
-      // Left/Right only steer effort while that row is highlighted.
+      // The same shortcut works after moving back to a model row.
       onEffortChange.mockClear();
       fireEvent.keyDown(document, { key: "ArrowDown" });
       fireEvent.keyDown(document, { key: "ArrowRight" });
-      expect(onEffortChange).not.toHaveBeenCalled();
+      expect(onEffortChange).toHaveBeenCalledWith("high");
     });
 
     it("returns focus to the draft after closing a shortcut-opened menu", async () => {

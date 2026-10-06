@@ -29,6 +29,7 @@ import {
 } from "../lib/starred-models";
 
 import {
+  Kbd,
   MenuHeader,
   Select,
   SelectContent,
@@ -363,9 +364,29 @@ export function ModelMenu({
   useEffect(() => {
     if (!open) return;
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.defaultPrevented || rows.length === 0) return;
+      if (event.defaultPrevented || event.isComposing) return;
       const inTextField = event.target instanceof HTMLInputElement;
+      const pickerShortcut =
+        panel === "model" &&
+        !inTextField &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.shiftKey;
+      if (
+        pickerShortcut &&
+        event.key.toLowerCase() === "f" &&
+        showFastRow &&
+        fastTier !== null &&
+        onFastActiveChange
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) onFastActiveChange(!isFastOn);
+        return;
+      }
       const moveActive = (offset: 1 | -1) => {
+        if (rows.length === 0) return;
         event.preventDefault();
         setActiveIndex((current) => {
           const index = Math.min(current, rows.length - 1);
@@ -376,17 +397,18 @@ export function ModelMenu({
       if (event.key === "ArrowUp") return moveActive(-1);
       if (
         (event.key === "ArrowRight" || event.key === "ArrowLeft") &&
-        activeRow?.kind === "effort" &&
-        !inTextField
+        pickerShortcut &&
+        reasoningOptions.length > 0
       ) {
-        // Left/Right walks the effort chips in place, matching how the row reads.
+        // Effort shortcuts work from any row without moving the model highlight.
         event.preventDefault();
+        event.stopPropagation();
         const offset = event.key === "ArrowRight" ? 1 : -1;
         const current = reasoningOptions.indexOf(selectedEffort ?? "");
         const next =
           reasoningOptions[
             Math.min(
-              Math.max((current < 0 ? 0 : current) + offset, 0),
+              Math.max(current < 0 ? 0 : current + offset, 0),
               reasoningOptions.length - 1,
             )
           ];
@@ -594,14 +616,17 @@ export function ModelMenu({
 
               {reasoningOptions.length > 0 ? (
                 <>
-                  <p className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-                    Reasoning effort
-                  </p>
+                  <MenuHeader
+                    label="Reasoning effort"
+                    shortcut={["←", "→"]}
+                    className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2"
+                  />
                   <div
                     id={`${menuId}-effort`}
                     data-row-id="effort"
                     role="radiogroup"
                     aria-label="Reasoning effort"
+                    aria-keyshortcuts="ArrowLeft ArrowRight"
                     onMouseEnter={() => activateRow("effort")}
                     className={cn(
                       "flex items-center gap-1 rounded-[var(--fd-radius-md)] p-1 transition-colors",
@@ -634,53 +659,59 @@ export function ModelMenu({
 
               {showFastRow && onFastActiveChange ? (
                 <div className="border-t border-border-subtle pt-1">
-                  <button
-                    id={`${menuId}-fast`}
-                    data-row-id="fast"
-                    type="button"
-                    role="menuitemcheckbox"
-                    aria-checked={isFastOn}
-                    aria-label="Fast mode"
-                    disabled={fastTier === null}
-                    title={
+                  <Tooltip
+                    label={
                       fastTier === null
                         ? "This model has one speed"
                         : fastTier.description ||
                           `Run on the ${fastTier.name} tier`
                     }
-                    onMouseEnter={() => activateRow("fast")}
-                    onClick={() => onFastActiveChange(!isFastOn)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
-                      activeRow?.kind === "fast" && "bg-interactive-hover",
-                    )}
+                    shortcut={fastTier === null ? undefined : ["F"]}
                   >
-                    {/* The bolt fills in when the tier is on, so state survives without color. */}
-                    <Zap
-                      aria-hidden="true"
+                    <button
+                      id={`${menuId}-fast`}
+                      data-row-id="fast"
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={isFastOn}
+                      aria-label="Fast mode"
+                      aria-keyshortcuts={fastTier === null ? undefined : "f"}
+                      disabled={fastTier === null}
+                      onMouseEnter={() => activateRow("fast")}
+                      onClick={() => onFastActiveChange(!isFastOn)}
                       className={cn(
-                        "h-3.5 w-3.5 shrink-0",
-                        isFastOn ? "text-accent" : "text-fg-muted",
+                        "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
+                        activeRow?.kind === "fast" && "bg-interactive-hover",
                       )}
-                      fill={isFastOn ? "currentColor" : "none"}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">
-                        {fastTier?.name ?? "Fast"} mode
-                      </span>
-                      {fastTier?.description ? (
-                        <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-                          {fastTier.description}
-                        </span>
-                      ) : null}
-                    </span>
-                    {isFastOn ? (
-                      <Check
+                    >
+                      {/* The bolt fills in when the tier is on, so state survives without color. */}
+                      <Zap
                         aria-hidden="true"
-                        className="h-3.5 w-3.5 shrink-0"
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0",
+                          isFastOn ? "text-accent" : "text-fg-muted",
+                        )}
+                        fill={isFastOn ? "currentColor" : "none"}
                       />
-                    ) : null}
-                  </button>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">
+                          {fastTier?.name ?? "Fast"} mode
+                        </span>
+                        {fastTier?.description ? (
+                          <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                            {fastTier.description}
+                          </span>
+                        ) : null}
+                      </span>
+                      {isFastOn ? (
+                        <Check
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 shrink-0"
+                        />
+                      ) : null}
+                      <Kbd aria-hidden="true">F</Kbd>
+                    </button>
+                  </Tooltip>
                 </div>
               ) : null}
               {canHandoff ? (
