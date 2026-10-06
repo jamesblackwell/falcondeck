@@ -1,7 +1,8 @@
 import { lazy, Suspense, useEffect, type ReactNode } from 'react'
 
-import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Smartphone, Zap } from 'lucide-react'
+import { Check, ChevronRight, Download, Github, Smartphone } from 'lucide-react'
 import { ProductFeatures } from './ProductFeatures'
+import { ProductShowcase } from './ProductShowcase'
 
 // Internal design playground; dev server only, never in the production bundle.
 const QAPromptPlayground = import.meta.env.DEV ? lazy(() => import('./qa-prompt-playground')) : null
@@ -222,199 +223,6 @@ function Feature({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-function Thread({ title, meta, active }: { title: string; meta: string; active?: boolean }) {
-  return (
-    <div className={active ? 'mock-thread mock-thread--active' : 'mock-thread'}>
-      <CircleDot aria-hidden="true" />
-      <span>
-        <strong>{title}</strong>
-        <small>{meta}</small>
-      </span>
-    </div>
-  )
-}
-
-function ToolRow({ label, file, state }: { label: string; file: string; state: 'done' | 'running' }) {
-  return (
-    <div className={state === 'running' ? 'mock-tool mock-tool--running' : 'mock-tool'}>
-      {state === 'running' ? <Zap aria-hidden="true" /> : <Check aria-hidden="true" />}
-      <span>
-        {label} <code>{file}</code>
-      </span>
-      <small>{state}</small>
-    </div>
-  )
-}
-
-function DesktopMock() {
-  return (
-    <div className="mock-window">
-      <div className="mock-window__bar">
-        <div className="mock-window__dots" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
-        <div className="mock-window__title">
-          <img src="/logomark-mark-light.svg" alt="" />
-          falcondeck / workspace
-        </div>
-        <div />
-      </div>
-
-      <div className="mock-window__body">
-        <aside className="mock-sidebar">
-          <div className="mock-sidebar__workspace">
-            <span className="mock-avatar">F</span>
-            <span>
-              <strong>FalconDeck</strong>
-              <small>local workspace</small>
-            </span>
-            <ChevronRight aria-hidden="true" />
-          </div>
-
-          <p className="mock-label">Workspaces</p>
-          <div className="mock-project">
-            <span className="mock-project__mark">⌘</span>
-            <span>falcondeck</span>
-            <span className="mock-project__count">2</span>
-          </div>
-
-          <p className="mock-label mock-label--spaced">Tasks</p>
-          <Thread title="Add user authentication" meta="Claude · just now" active />
-          <Thread title="Fix database migration" meta="Codex · 45 min ago" />
-          <Thread title="Rename relay events" meta="OpenCode · 2 h ago" />
-
-          <div className="mock-sidebar__footer">
-            <span className="status-dot" />
-            <span>2 agents connected</span>
-          </div>
-        </aside>
-
-        <main className="mock-conversation">
-          <div className="mock-conversation__header">
-            <div>
-              <p className="mock-label">Task · Claude</p>
-              <h3>Add user authentication</h3>
-            </div>
-            <span className="mock-pill">LIVE</span>
-          </div>
-
-          <div className="mock-message mock-message--user">
-            Add JWT authentication to the Express API. Use bcrypt for password hashing.
-          </div>
-          <div className="mock-message mock-message--agent">
-            I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
-          </div>
-
-          <div className="mock-tools">
-            <ToolRow label="Read" file="src/server.ts" state="done" />
-            <ToolRow label="Edit" file="src/middleware/auth.ts" state="done" />
-            <ToolRow label="Run" file="npm test" state="running" />
-          </div>
-
-          <div className="mock-composer">
-            <span>Ask Claude to continue…</span>
-            <span className="mock-composer__send">↑</span>
-          </div>
-        </main>
-
-        <aside className="mock-inspector">
-          <p className="mock-label">Session</p>
-          <div className="mock-inspector__state">
-            <span className="status-dot" />
-            <span>
-              <strong>Desktop online</strong>
-              <small>encrypted connection</small>
-            </span>
-          </div>
-
-          <div className="mock-inspector__row">
-            <span>Provider</span>
-            <strong>Claude</strong>
-          </div>
-          <div className="mock-inspector__row">
-            <span>Permission mode</span>
-            <strong>On request</strong>
-          </div>
-
-          <div className="mock-inspector__divider" />
-
-          <p className="mock-label">Workspace</p>
-          <div className="mock-inspector__path">
-            <Code2 aria-hidden="true" />
-            <code>~/Sites/falcondeck</code>
-          </div>
-
-          <div className="mock-diff">
-            <span>
-              <i className="mock-diff__bar mock-diff__bar--add" />
-              <strong>+42</strong>
-            </span>
-            <span>
-              <i className="mock-diff__bar mock-diff__bar--del" />
-              <strong>-8</strong>
-            </span>
-          </div>
-          <small className="mock-diff__caption">working tree</small>
-        </aside>
-      </div>
-    </div>
-  )
-}
-
-function PhoneMock() {
-  return (
-    <div className="mock-phone">
-      <div className="mock-phone__screen">
-        <div className="mock-phone__status">
-          <span>9:41</span>
-          <span className="mock-phone__paired">
-            <span className="status-dot" />
-            paired
-          </span>
-        </div>
-
-        <div className="mock-phone__header">
-          <ChevronLeft aria-hidden="true" />
-          <span>
-            <strong>Add user authentication</strong>
-            <small>falcondeck · Claude</small>
-          </span>
-          <span className="mock-pill mock-pill--sm">LIVE</span>
-        </div>
-
-        <div className="mock-phone__body">
-          <div className="mock-message mock-message--user">Add JWT authentication to the Express API.</div>
-          <div className="mock-message mock-message--agent">
-            I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
-          </div>
-          <div className="mock-tools">
-            <div className="mock-tool">
-              <Check aria-hidden="true" />
-              <span>
-                Edit <code>auth.ts</code>
-              </span>
-            </div>
-            <div className="mock-tool mock-tool--running">
-              <Zap aria-hidden="true" />
-              <span>
-                Run <code>npm test</code>
-              </span>
-              <small>running</small>
-            </div>
-          </div>
-        </div>
-
-        <div className="mock-phone__composer">
-          <span>Reply from your phone…</span>
-          <span className="mock-composer__send">↑</span>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function App({ location = window.location }: { location?: Pick<Location, 'pathname' | 'search'> }) {
   const path = location.pathname.replace(/\/+$/, '') || '/'
   const search = new URLSearchParams(location.search)
@@ -515,21 +323,7 @@ export default function App({ location = window.location }: { location?: Pick<Lo
           </Feature>
         </section>
 
-        <section className="showcase">
-          <div className="showcase__caption">
-            <p>One workspace · at your desk or on your phone</p>
-            <p className="showcase__status">
-              <span className="status-dot" />
-              Desktop connected
-            </p>
-          </div>
-          <div className="showcase__stage">
-            <div className="showcase__desktop">
-              <DesktopMock />
-            </div>
-            <PhoneMock />
-          </div>
-        </section>
+        <ProductShowcase />
 
         <ProductFeatures />
 
