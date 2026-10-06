@@ -105,6 +105,7 @@ mod speech;
 mod speech_audio;
 mod storage;
 mod startup_resume;
+mod snapshot_projection;
 mod sync_index;
 mod thread_search;
 mod thread_tools;
@@ -218,153 +219,8 @@ impl std::ops::Deref for CachedEnvelope {
 /// a time. Keep this short enough that streaming still feels immediate.
 pub(crate) const EVENT_COALESCE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// What a pending event supersedes, when it supersedes anything.
-#[derive(PartialEq, Eq)]
-enum CoalesceKey {
-    ThreadSummary(Option<String>),
-    ConversationItem(Option<String>, String),
-    TextDelta(Option<String>, Option<String>, String, TextDeltaTarget),
-}
-
-/// Collapses replaceable updates from a running turn before a client transport
-/// writes them. Terminal updates and unrelated events are never delayed.
-#[derive(Default)]
-pub(crate) struct EventCoalescer {
-    // Hold the broadcast's Arc so a pending event retains its cached JSON.
-    pending: Vec<(CoalesceKey, Arc<CachedEnvelope>)>,
-}
-
-impl EventCoalescer {
-    fn supersedes(event: &EventEnvelope) -> Option<CoalesceKey> {
-        match &event.event {
-            UnifiedEvent::ThreadUpdated { .. } => {
-                Some(CoalesceKey::ThreadSummary(event.thread_id.clone()))
-            }
-            UnifiedEvent::ConversationItemUpdated { item } => Some(CoalesceKey::ConversationItem(
-                event.thread_id.clone(),
-                conversation_item_id(item).to_string(),
-            )),
-            _ => None,
-        }
-    }
-
-    fn may_be_held(event: &EventEnvelope) -> bool {
-        match &event.event {
-            UnifiedEvent::ThreadUpdated { thread } => {
-                matches!(thread.status, ThreadStatus::Running)
-            }
-            UnifiedEvent::ConversationItemUpdated { item } => is_streaming_item(item),
-            _ => false,
-        }
-    }
-
-    fn text_delta_key(event: &EventEnvelope) -> Option<CoalesceKey> {
-        let UnifiedEvent::Text {
-            item_id, target, ..
-        } = &event.event
-        else {
-            return None;
-        };
-        Some(CoalesceKey::TextDelta(
-            event.workspace_id.clone(),
-            event.thread_id.clone(),
-            item_id.clone(),
-            *target,
-        ))
-    }
-
-    fn merge_contiguous_text_deltas(
-        previous: &CachedEnvelope,
-        next: &CachedEnvelope,
-    ) -> Option<Arc<CachedEnvelope>> {
-        let UnifiedEvent::Text {
-            delta: previous_delta,
-            start_offset: previous_start,
-            end_offset: previous_end,
-            ..
-        } = &previous.envelope.event
-        else {
-            return None;
-        };
-        let UnifiedEvent::Text {
-            delta: next_delta,
-            start_offset: next_start,
-            end_offset: next_end,
-            ..
-        } = &next.envelope.event
-        else {
-            return None;
-        };
-        if previous_start.is_none()
-            || previous_end.is_none()
-            || next_start.is_none()
-            || next_end.is_none()
-            || previous_end != next_start
-        {
-            return None;
-        }
-
-        let mut envelope = next.envelope.clone();
-        let UnifiedEvent::Text {
-            delta,
-            start_offset,
-            end_offset,
-            ..
-        } = &mut envelope.event
-        else {
-            unreachable!("text delta envelope changed while merging")
-        };
-        *delta = format!("{previous_delta}{next_delta}");
-        *start_offset = *previous_start;
-        *end_offset = *next_end;
-        Some(Arc::new(CachedEnvelope::new(envelope)))
-    }
-
-    /// Accept an event and return every event that must be written now.
-    pub(crate) fn push(&mut self, event: Arc<CachedEnvelope>) -> Vec<Arc<CachedEnvelope>> {
-        if let Some(key) = Self::text_delta_key(&event) {
-            if let Some(index) = self
-                .pending
-                .iter()
-                .rposition(|(pending_key, _)| pending_key == &key)
-            {
-                if let Some(merged) =
-                    Self::merge_contiguous_text_deltas(&self.pending[index].1, &event)
-                {
-                    self.pending[index] = (key, merged);
-                    return Vec::new();
-                }
-            }
-            self.pending.push((key, event));
-            return Vec::new();
-        }
-
-        let key = Self::supersedes(&event);
-        if let Some(key) = &key {
-            // A newer complete replacement makes every held predecessor
-            // redundant, including when this update is terminal.
-            self.pending.retain(|(pending_key, _)| pending_key != key);
-        }
-
-        if Self::may_be_held(&event) {
-            self.pending
-                .push((key.expect("holdable events have a coalesce key"), event));
-            return Vec::new();
-        }
-
-        let mut outgoing = self.drain();
-        outgoing.push(event);
-        outgoing
-    }
-
-    pub(crate) fn drain(&mut self) -> Vec<Arc<CachedEnvelope>> {
-        self.pending.drain(..).map(|(_, event)| event).collect()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-}
+mod event_coalescer;
+pub(crate) use event_coalescer::EventCoalescer;
 
 fn is_streaming_item(item: &ConversationItem) -> bool {
     let lifecycle = match item {
@@ -2491,7 +2347,7 @@ impl AppState {
         let mut workspace_list = workspaces
             .values()
             .map(|workspace| {
-                let mut summary = workspace.summary.clone();
+                let mut summary = snapshot_projection::workspace(&workspace.summary, compact);
                 summary.agents.retain(|agent| {
                     agent.provider == AgentProvider::CODEX
                         || agent.provider == AgentProvider::CLAUDE
@@ -2507,7 +2363,7 @@ impl AppState {
                         .iter()
                         .any(|existing| existing.provider == agent.provider)
                     {
-                        summary.agents.push(agent.clone());
+                        summary.agents.push(snapshot_projection::agent(agent, !compact));
                     }
                 }
                 summary

@@ -130,13 +130,9 @@ fn priority(thread: &ThreadSummary, selected: Option<&str>) -> u8 {
 
 fn freeze(mut snapshot: DaemonSnapshot, selected: Option<&str>) -> (SyncIndex, FrozenIndex) {
     let token = uuid::Uuid::new_v4().to_string();
-    let threads: Vec<_> = snapshot
-        .threads
-        .iter()
-        .filter(|t| !t.is_archived)
-        .map(row)
-        .collect();
-    snapshot.threads.clear();
+    // snapshot_projection(true) already filtered and projected these rows.
+    // Transfer its buffer instead of copying every row a second time.
+    let threads = std::mem::take(&mut snapshot.threads);
     let extensions = std::mem::take(&mut snapshot.extensions);
     let mut index = SyncIndex {
         token: token.clone(),
@@ -355,6 +351,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // Test sources contain full summaries, unlike the production compact input.
+    fn freeze_fixture(
+        mut snapshot: DaemonSnapshot,
+        selected: Option<&str>,
+    ) -> (SyncIndex, FrozenIndex) {
+        snapshot.threads = snapshot
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_archived)
+            .map(row)
+            .collect();
+        freeze(snapshot, selected)
+    }
+
+    #[test]
+    fn freezing_projected_rows_keeps_the_owned_buffer() {
+        let mut source = fixture();
+        source.threads = source.threads.iter().map(row).collect();
+        let buffer = source.threads.as_ptr();
+        let title = source.threads[0].title.as_ptr();
+        let expected = serde_json::to_vec(&source.threads).unwrap();
+        let (_, frozen) = freeze(source, None);
+        assert_eq!(
+            frozen.threads.as_ptr(),
+            buffer,
+            "compact rows must not be projected twice"
+        );
+        assert_eq!(frozen.threads[0].title.as_ptr(), title);
+        assert_eq!(serde_json::to_vec(&frozen.threads).unwrap(), expected);
+    }
+
     #[tokio::test]
     async fn blocked_snapshot_metadata_does_not_block_thread_reads_or_updates() {
         let temp = tempfile::tempdir().unwrap();
@@ -402,7 +429,7 @@ mod tests {
         source.threads.retain(|thread| {
             thread.workspace_id == "workspace-0" || thread.workspace_id == "workspace-39"
         });
-        let (index, frozen) = freeze(source.clone(), None);
+        let (index, frozen) = freeze_fixture(source.clone(), None);
         assert!(
             index
                 .snapshot
@@ -427,7 +454,7 @@ mod tests {
             50
         );
 
-        let (selected, _) = freeze(source, Some("thread-1999"));
+        let (selected, _) = freeze_fixture(source, Some("thread-1999"));
         assert_eq!(selected.snapshot.threads[0].id, "thread-1999");
         assert_eq!(
             selected
@@ -454,7 +481,7 @@ mod tests {
                 ThreadStatus::Idle
             };
         }
-        let (_, mut view) = freeze(source, None);
+        let (_, mut view) = freeze_fixture(source, None);
         for sort in ["last_updated", "alphabetical", "priority", "unknown"] {
             let mut expected: Vec<_> = view.threads.iter().collect();
             expected.sort_by(|a, b| {
@@ -483,7 +510,7 @@ mod tests {
     async fn large_library_has_bounded_initial_index_and_complete_frozen_pages() {
         let source = fixture();
         let full_size = serde_json::to_vec(&source).unwrap().len();
-        let (index, frozen) = freeze(source, Some("thread-1999"));
+        let (index, frozen) = freeze_fixture(source, Some("thread-1999"));
         let bytes = serde_json::to_vec(&index).unwrap().len();
         assert!(bytes <= INDEX_BYTES, "index is {bytes} bytes");
         eprintln!("compact fixture: {bytes} initial JSON bytes, {full_size} full JSON bytes");
@@ -537,7 +564,7 @@ mod tests {
             "paging a frozen workspace must reuse its order instead of sorting it again"
         );
         // A new view cannot silently change an old page's source.
-        let (other, next) = freeze(fixture(), None);
+        let (other, next) = freeze_fixture(fixture(), None);
         app.inner.sync_indexes.lock().await.entries.push_back(next);
         assert_ne!(index.token, other.token);
         assert_eq!(
