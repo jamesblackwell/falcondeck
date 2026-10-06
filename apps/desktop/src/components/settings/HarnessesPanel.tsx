@@ -25,8 +25,10 @@ import { CheckCircle2, Download, RefreshCw, Terminal } from 'lucide-react'
 import { falconDeckHttpError } from '../../connection-copy'
 import type { HostView } from '../../hosts'
 import { HarnessInstallPaths } from '../HarnessInstallPaths'
+import { HarnessSignIn } from '../HarnessSignIn'
 import {
   harnessHasDivergentInstall,
+  harnessNeedsRepair,
   upgradeFinishedDescription,
 } from '../harness-install'
 
@@ -68,6 +70,8 @@ function harnessStatusLabel(harness: HarnessSummary): {
   if (!harness.installed) {
     return { label: 'Not installed', variant: 'default' }
   }
+  if (harnessNeedsRepair(harness)) return { label: 'Needs repair', variant: 'danger' }
+  if (harness.auth_verdict === 'unauthenticated') return { label: 'Sign-in required', variant: 'warning' }
   if (harness.update_available === true) {
     return { label: harness.latest_version ? `Out of date · Latest v${harness.latest_version}` : 'Out of date', variant: 'warning' }
   }
@@ -239,6 +243,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
               variant: 'success',
               title: `${job.label} upgraded`,
               description: upgradeFinishedDescription({
+                harnessId: job.harness_id,
                 hostLabel: hostLabel(job.host),
                 targetSource: activeJob.targetSource,
                 unusedInstallCount: activeJob.unusedInstallCount,
@@ -330,7 +335,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
 
   const harnesses = overview?.harnesses ?? []
   const upgradeable = harnesses.filter(
-    (harness) => harness.installed && harness.upgrade_command && harness.update_available !== false,
+    (harness) => harness.installed && harness.upgrade_command && (harnessNeedsRepair(harness) || harness.update_available !== false),
   )
   const isBusy = activeJob != null || isStarting || queue.length > 0
 
@@ -443,6 +448,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                         ) : null}
                       </div>
                       <HarnessInstallPaths harness={harness} />
+                      {harness.failure ? <p className="mt-1 text-xs text-warning">{harness.failure}</p> : null}
+                      {(harness.id === 'claude' || harness.id === 'codex') && harness.install_source === 'npm' ? (
+                        <p className="mt-1 text-xs text-fg-muted">Installs a standalone copy for your account. The shared npm install stays unchanged.</p>
+                      ) : null}
                       {harness.account_status ? (
                         <p className="mt-0.5 truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                           {harness.account_status}
@@ -464,10 +473,11 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                         {harness.installed && harness.update_available === true ? (
                           <Download className="h-4 w-4" />
                         ) : null}
-                        {harness.installed ? 'Upgrade' : 'Install'}
+                        {harnessNeedsRepair(harness) ? 'Repair' : harness.installed ? 'Upgrade' : 'Install'}
                       </Button>
                     ) : null}
                   </div>
+                  <HarnessSignIn harness={harness} hostLabel={hostLabel(overview.host)} busy={!baseUrl || isRefreshing || isBusy} onCheck={() => void fetchOverview(hostKey, true)} />
                   {jobForThisHarness && jobLog.length > 0 ? (
                     <details className="mt-2">
                       <summary className="fd-focus cursor-pointer text-xs text-fg-muted">Upgrade details</summary>

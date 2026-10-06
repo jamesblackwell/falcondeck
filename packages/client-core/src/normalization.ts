@@ -2444,7 +2444,7 @@ export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
       : [],
     installed,
     install_state:
-      raw.install_state === "installed" || raw.install_state === "missing"
+      raw.install_state === "installed" || raw.install_state === "missing" || raw.install_state === "broken"
         ? raw.install_state
         : installed
           ? "installed"
@@ -2476,7 +2476,7 @@ export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
     )
       ? (raw.provider_usage_state as HarnessSummary["provider_usage_state"])
       : USAGE_CAPABLE_HARNESSES.has(id)
-        ? installed
+        ? installed && raw.install_state !== "broken"
           ? "supported"
           : "unavailable"
         : "unsupported",

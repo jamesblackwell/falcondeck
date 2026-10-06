@@ -63,6 +63,14 @@ describe('HarnessesPanel', () => {
     vi.useRealTimers()
   })
 
+  it('offers repair without confusing a broken CLI with a signed-out account', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ host: 'local', harnesses: [{ ...overview.harnesses[0], install_state: 'broken', auth_verdict: 'unavailable', account_status: null, version: null, update_available: false, failure: 'Codex could not run. Repair the installation, then check again.' }] })))
+    render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={[]} onToast={vi.fn()} />)
+    expect(await screen.findByText('Needs repair')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Repair' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Copy sign-in command' })).toBeNull()
+  })
+
   it('renders install status, versions, and auth lines', async () => {
     vi.stubGlobal(
       'fetch',

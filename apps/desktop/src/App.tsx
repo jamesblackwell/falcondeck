@@ -6384,6 +6384,13 @@ function AppInner() {
                 sendDisabledReason: selectedWorkspace
                   ? (attachmentSendBlockReason ?? sendBlockReason ?? undefined)
                   : undefined,
+                sendDisabledAction: sendBlockReason && !attachmentSendBlockReason &&
+                  (activeProvider === "codex" || activeProvider === "claude") && selectedWorkspace?.status !== "connecting"
+                  ? { label: "Set up agent", onClick: () => {
+                      handleOpenSettings();
+                      setSettingsSection("harnesses");
+                    } }
+                  : undefined,
                 // A project still booting is an expected wait, not a warning.
                 sendDisabledReasonTone:
                   !attachmentSendBlockReason &&

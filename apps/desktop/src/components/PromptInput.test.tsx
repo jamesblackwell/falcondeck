@@ -511,6 +511,13 @@ describe("PromptInput", () => {
     expect(onPickImages).not.toHaveBeenCalled();
   });
 
+  it('keeps agent setup available while sending is blocked', () => {
+    const onClick = vi.fn();
+    render(<PromptInput {...promptInputProps} sendDisabled sendDisabledReason="Codex is signed out." sendDisabledAction={{ label: 'Set up agent', onClick }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Set up agent' }));
+    expect(onClick).toHaveBeenCalledOnce();
+  });
+
   it("collapses back to the single-line height when the value is cleared externally", () => {
     let mockScrollHeight = 180;
 

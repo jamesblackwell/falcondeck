@@ -26,7 +26,8 @@ import {
   RefreshCw,
   Terminal,
 } from "lucide-react";
-import { upgradeFinishedDescription } from "./harness-install";
+import { harnessNeedsRepair, upgradeFinishedDescription } from "./harness-install";
+import { HarnessSignIn } from "./HarnessSignIn";
 import { ONBOARDING_STEP_INDEX, ONBOARDING_STEPS } from "./onboarding-steps";
 import { inspectBackupFile, executeImportBackup } from "../backup-service";
 import {
@@ -80,7 +81,7 @@ function onboardingStepFromId(id: string | null): number | null {
 type ActiveJob = {
   jobId: string;
   harnessId: string;
-  action: "install" | "update";
+  action: "install" | "update" | "repair";
   targetSource: string | null;
   unusedInstallCount: number;
 };
@@ -89,9 +90,11 @@ type MacNotificationPermission = "default" | "denied" | "granted" | "unsupported
 
 function harnessStatus(harness: HarnessSummary): {
   label: string;
-  variant: "success" | "warning" | "default";
+  variant: "success" | "warning" | "danger" | "default";
 } {
   if (!harness.installed) return { label: "Not installed", variant: "default" };
+  if (harnessNeedsRepair(harness)) return { label: "Needs repair", variant: "danger" };
+  if (harness.auth_verdict === 'unauthenticated') return { label: "Sign-in required", variant: "warning" };
   if (harness.update_available === true)
     return { label: "Update available", variant: "warning" };
   return { label: "Installed", variant: "success" };
@@ -213,10 +216,11 @@ export function OnboardingWizard({
             job.status === "completed"
               ? {
                   variant: "success",
-                  title: `${job.label} ${activeJob.action === "update" ? "updated" : "installed"}`,
+                  title: `${job.label} ${activeJob.action === "update" ? "updated" : activeJob.action === "repair" ? "repaired" : "installed"}`,
                   description:
-                    activeJob.action === "update"
+                    activeJob.action !== "install"
                       ? upgradeFinishedDescription({
+                          harnessId: job.harness_id,
                           hostLabel: "This Mac",
                           targetSource: activeJob.targetSource,
                           unusedInstallCount: activeJob.unusedInstallCount,
@@ -265,14 +269,14 @@ export function OnboardingWizard({
         setActiveJob({
           jobId,
           harnessId: harness.id,
-          action: harness.installed ? "update" : "install",
+          action: harnessNeedsRepair(harness) ? "repair" : harness.installed ? "update" : "install",
           targetSource: harness.install_source ?? null,
           unusedInstallCount: harness.extra_installs?.length ?? 0,
         });
       } catch (error) {
         onToast({
           variant: "danger",
-          title: `Could not start ${harness.label} ${harness.installed ? "update" : "install"}`,
+          title: `Could not start ${harness.label} ${harnessNeedsRepair(harness) ? "repair" : harness.installed ? "update" : "install"}`,
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {
@@ -315,7 +319,7 @@ export function OnboardingWizard({
   }, []);
 
   const installedCount =
-    overview?.harnesses.filter((harness) => harness.installed).length ?? 0;
+    overview?.harnesses.filter((harness) => harness.installed && !harnessNeedsRepair(harness)).length ?? 0;
   const isLastStep = step === STEPS.length - 1;
   const isPrimaryAgent = (harness: HarnessSummary) =>
     harness.installed || harness.id === "codex" || harness.id === "claude";
@@ -478,7 +482,7 @@ export function OnboardingWizard({
                         className="rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3"
                       >
                         <div className="flex items-center gap-3">
-                          {harness.installed ? (
+                          {harness.installed && !harnessNeedsRepair(harness) ? (
                             <CheckCircle2
                               aria-hidden="true"
                               className="h-4 w-4 shrink-0 text-success"
@@ -515,14 +519,18 @@ export function OnboardingWizard({
                                 {harness.account_status}
                               </p>
                             ) : null}
+                            {harness.failure ? <p className="mt-1 text-xs text-warning">{harness.failure}</p> : null}
+                            {(harness.id === 'claude' || harness.id === 'codex') && harness.install_source === 'npm' ? (
+                              <p className="mt-1 text-xs text-fg-muted">Installs a standalone copy for your account. The shared npm install stays unchanged.</p>
+                            ) : null}
                             {jobForThis || startingThis ? (
                               <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
                                 <ActivityDiamond size="sm" tone="current" />{" "}
-                                {startingThis ? "Starting…" : activeJob?.action === "update" ? "Updating…" : "Installing…"}
+                                {startingThis ? "Starting…" : activeJob?.action === "update" ? "Updating…" : activeJob?.action === "repair" ? "Repairing…" : "Installing…"}
                               </p>
                             ) : null}
                           </div>
-                          {harness.upgrade_command && (!harness.installed || harness.update_available === true) ? (
+                          {harness.upgrade_command && (!harness.installed || harnessNeedsRepair(harness) || harness.update_available === true) ? (
                             <Button
                               size="sm"
                               variant={harness.installed ? "secondary" : "default"}
@@ -535,10 +543,11 @@ export function OnboardingWizard({
                               harness.update_available === true ? (
                                 <Download className="h-4 w-4" />
                               ) : null}
-                              {harness.installed ? "Update" : "Install"}
+                              {harnessNeedsRepair(harness) ? "Repair" : harness.installed ? "Update" : "Install"}
                             </Button>
                           ) : null}
                         </div>
+                        <HarnessSignIn harness={harness} hostLabel="this Mac" busy={!api || isProbing || startingHarnessId != null || activeJob != null} onCheck={() => void probeHarnesses()} />
                         {jobForThis && jobLog.length > 0 ? (
                           <pre className="mt-2 max-h-32 overflow-y-auto rounded-[var(--fd-radius-md)] bg-surface-2 p-2 font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
                             {jobLog.join("\n")}

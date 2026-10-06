@@ -95,8 +95,9 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     // select a stale /usr/local installation ahead of the user's active
     // Homebrew or standalone CLI. Prefer the standard user/macOS locations
     // in that environment; terminal-launched daemons still honor PATH first.
-    let prefer_known_locations =
-        cfg!(target_os = "macos") && env::var_os("__CFBundleIdentifier").is_some();
+    let prefer_known_locations = cfg!(target_os = "macos")
+        && (env::var_os("__CFBundleIdentifier").is_some()
+            || env::current_exe().is_ok_and(|path| is_packaged_macos_executable(&path)));
     if prefer_known_locations
         && let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics)
     {
@@ -142,6 +143,20 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
         source: BinaryResolutionSource::Unknown,
         diagnostics,
     }
+}
+
+fn is_packaged_macos_executable(path: &Path) -> bool {
+    let Some(macos) = path.parent() else {
+        return false;
+    };
+    let Some(contents) = macos.parent() else {
+        return false;
+    };
+    macos.file_name().is_some_and(|name| name == "MacOS")
+        && contents.file_name().is_some_and(|name| name == "Contents")
+        && contents
+            .parent()
+            .is_some_and(|bundle| bundle.extension().is_some_and(|ext| ext == "app"))
 }
 
 pub fn missing_binary_message(
@@ -492,6 +507,19 @@ mod tests {
                 || path.to_string_lossy().contains(".local/bin/claude")),
             "expected ~/.local/bin/claude among {paths:?}"
         );
+    }
+
+    #[test]
+    fn packaged_binary_detection_does_not_require_launch_environment_markers() {
+        assert!(super::is_packaged_macos_executable(Path::new(
+            "/Applications/FalconDeck.app/Contents/MacOS/falcondeck-desktop"
+        )));
+        assert!(!super::is_packaged_macos_executable(Path::new(
+            "/usr/local/bin/falcondeck-daemon"
+        )));
+        assert!(!super::is_packaged_macos_executable(Path::new(
+            "/tmp/app/Contents/MacOS/falcondeck-desktop"
+        )));
     }
 
     #[test]

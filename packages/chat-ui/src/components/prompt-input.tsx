@@ -204,6 +204,8 @@ export type PromptInputProps = {
   sendDisabled?: boolean;
   /** Visible explanation when content exists but the host cannot send it. */
   sendDisabledReason?: string;
+  /** Recovery action owned by the host, such as opening agent setup. */
+  sendDisabledAction?: { label: string; onClick: () => void };
   /**
    * Expected, self-resolving waits (a project still booting) read as quiet
    * status; anything the user must act on keeps the warning tone.
@@ -319,6 +321,7 @@ export const PromptInput = memo(function PromptInput({
   disabled = false,
   sendDisabled = false,
   sendDisabledReason,
+  sendDisabledAction,
   sendDisabledReasonTone = "warning",
   contextNotice,
   isRunning = false,
@@ -1136,6 +1139,11 @@ export const PromptInput = memo(function PromptInput({
                 )}
               >
                 {sendDisabledReason}
+                {sendDisabledAction ? (
+                  <button type="button" className="fd-focus ml-2 underline" onClick={sendDisabledAction.onClick}>
+                    {sendDisabledAction.label}
+                  </button>
+                ) : null}
               </p>
             ) : null}
 

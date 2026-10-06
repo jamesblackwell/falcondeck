@@ -3597,6 +3597,8 @@ pub enum HarnessKind {
 pub enum HarnessInstallState {
     /// The executable resolved to a file.
     Installed,
+    /// The executable exists, but could not start or failed its version check.
+    Broken,
     /// The executable could not be found.
     #[default]
     Missing,

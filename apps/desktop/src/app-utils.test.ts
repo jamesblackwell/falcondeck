@@ -113,7 +113,7 @@ describe('workspaceSendBlockReason', () => {
         }),
         'codex',
       ),
-    ).toBe('Codex needs authentication in this project before you can send messages.')
+    ).toBe('Codex is signed out. Open agent setup to sign in before sending messages.')
   })
 
   it('lets a lazy ACP catalog send while the rest of the project is still reconnecting', () => {

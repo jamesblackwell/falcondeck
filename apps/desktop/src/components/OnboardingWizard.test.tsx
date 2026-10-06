@@ -71,6 +71,22 @@ function renderWizard(overrides: Partial<Parameters<typeof OnboardingWizard>[0]>
   return props
 }
 
+describe('fresh-account tool setup', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('offers Repair for an existing Codex launcher that cannot run', async () => {
+    const upgrade = vi.fn().mockResolvedValue('repair-job')
+    const api = createDaemonApiClient('http://127.0.0.1:4317')
+    vi.spyOn(api, 'refreshHarnesses').mockResolvedValue({ host: 'local', harnesses: [{ ...overview.harnesses[0], install_state: 'broken', auth_verdict: 'unavailable', version: null, update_available: false, failure: 'Codex could not run. Repair the installation, then check again.' }] } as Awaited<ReturnType<typeof api.refreshHarnesses>>)
+    vi.spyOn(api, 'upgradeHarness').mockImplementation(upgrade)
+    vi.spyOn(api, 'harnessUpgradeJob').mockImplementation(() => new Promise(() => {}))
+    renderWizard({ api, initialStep: ONBOARDING_STEP_INDEX.tools })
+    expect(await screen.findByText('Needs repair')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copy sign-in command' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Repair' }))
+    await waitFor(() => expect(upgrade).toHaveBeenCalledWith('codex'))
+  })
+})
+
 describe('onboarding flag helpers', () => {
   beforeEach(() => {
     window.localStorage.clear()

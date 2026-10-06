@@ -232,7 +232,7 @@ export type WorkspaceAgentSummary = {
 
 /** How FalconDeck knows about a coding harness (agent CLI). */
 export type HarnessKind = "builtin" | "acp" | "detected";
-export type HarnessInstallState = "installed" | "missing";
+export type HarnessInstallState = "installed" | "missing" | "broken";
 export type HarnessExecutableSource =
   "configured" | "path" | "known_location" | "login_shell" | "unknown";
 export type HarnessVersionState =

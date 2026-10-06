@@ -1183,6 +1183,14 @@ describe("harness normalization", () => {
     expect(missing?.provider_usage_state).toBe("unavailable");
   });
 
+  it("preserves a broken installation instead of treating it as ready", () => {
+    const harness = normalizeHarnessSummary({ id: 'codex', bin: 'codex', installed: true, install_state: 'broken', auth_verdict: 'unavailable', provider_usage_state: 'unavailable' });
+    expect(harness?.installed).toBe(true);
+    expect(harness?.install_state).toBe('broken');
+    expect(harness?.auth_verdict).toBe('unavailable');
+    expect(harness?.provider_usage_state).toBe('unavailable');
+  });
+
   it("drops malformed harness entries and falls back to defaults", () => {
     const normalized = normalizeHarnessesOverview({
       host: "  ",

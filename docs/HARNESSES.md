@@ -21,7 +21,8 @@ An overview is a list of `HarnessSummary` entries for one host:
 | --- | --- |
 | `id` / `label` / `kind` | Identity; `kind` is `builtin` (codex, claude), `acp` (providers.json entry), or `detected` (known CLI found on the machine) |
 | `bin` / `resolved_path` / `installed` | Binary name and canonical path (npm symlinks resolve into `node_modules`) |
-| `extra_installs` | Other copies of the same CLI on this host that FalconDeck is not using (path, version, install source). Dual native+npm installs are common; Upgrade always targets `resolved_path` |
+| `extra_installs` | Other copies of the same CLI on this host that FalconDeck is not using (path, version, install source). Dual native+npm installs are common; Codex and Claude npm upgrades migrate to a per-user native install |
+| `install_state` | `missing`, `installed`, or `broken`. `installed` remains an existence flag; a launcher that fails its version check needs Repair before sign-in |
 | `version` | Parsed from `<bin> --version` (first `x.y` token); Hermes launchers use `acp --version` |
 | `latest_version` / `update_available` | Populated only by an explicit refresh with update checks enabled |
 | `install_source` | Best-effort classification: npm / homebrew / cargo / local / unknown |
@@ -157,7 +158,12 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   prefer standard user/Homebrew locations before their inherited GUI PATH so
   stale `/usr/local` installs do not mask active Apple Silicon installs.
   Version and auth probes run concurrently per harness, each capped at 15s,
-  and only when the binary exists.
+  and only when the binary exists. A failed launch or nonzero version exit is
+  reported as `broken`, separately from an unauthenticated working CLI. Probe
+  failures use sanitized messages rather than exposing raw CLI output.
+  The desktop passes default binary names to the daemon instead of pinning a
+  shared install path at startup, so a newly installed user copy takes effect
+  without restarting the app. Explicit binary overrides remain unchanged.
 - **SSH hosts:** one BatchMode `ssh` invocation batches every bin probe
   (`command -v`, `--version`, auth) using `FD_BIN:` / `FD_VER:` /
   `FD_AUTH:` / `FD_MISSING:` markers parsed with `splitn(3, ':')` so paths
@@ -189,9 +195,18 @@ implementation is `crates/falcondeck-daemon/src/app/provider_usage.rs`.
   Packaged macOS prefers `~/.local/bin/claude` (native) over Homebrew npm;
   running `npm install -g` would report success while the probed binary
   stayed stale. Native → `claude update` (falling back to `install.sh`);
-  npm → `npm install -g @anthropic-ai/claude-code@latest`; Homebrew cask →
+  npm → the native per-user installer, leaving the shared npm package untouched;
+  Homebrew cask →
   `brew upgrade --cask`. Remote upgrades classify `command -v claude`
   (following one symlink) the same way.
+- Codex installs and repairs also use its native installer. Local Codex/Claude
+  jobs verify that the selected CLI can run after installation before reporting
+  success. Repair does not require write access to another account's npm prefix.
+- Onboarding and Settings offer a copyable, shell-quoted sign-in command for the
+  resolved Codex/Claude binary and a **Check sign-in** action. A successful local
+  check refreshes metadata for open projects waiting on authentication, retaining
+  their existing processes and active turns. The blocked composer links directly
+  to agent setup.
 - Antigravity upgrades the resolved `agy` binary with `agy update`, locally
   and over SSH. Its bootstrap script exits without changing existing installs,
   so it is used only when AGY is missing. Bootstrap downloads use curl's

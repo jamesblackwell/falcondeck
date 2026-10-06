@@ -138,7 +138,7 @@ export function workspaceSendBlockReason(
     if (provider === 'agy') {
       return 'Antigravity is logged out. Run `agy` in a terminal to sign in before sending messages.'
     }
-    return `${workspaceProviderLabel(workspace, provider)} needs authentication in this project before you can send messages.`
+    return `${workspaceProviderLabel(workspace, provider)} is signed out. Open agent setup to sign in before sending messages.`
   }
 
   return null

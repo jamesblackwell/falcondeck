@@ -14,7 +14,7 @@ use std::{
 
 use base64::Engine as _;
 use falcondeck_core::DEFAULT_DAEMON_PORT;
-use falcondeck_daemon::{resolve_agent_binary, spawn_embedded, DaemonConfig, EmbeddedDaemonHandle};
+use falcondeck_daemon::{spawn_embedded, DaemonConfig, EmbeddedDaemonHandle};
 use serde::Serialize;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -452,51 +452,17 @@ fn ensure_dev_daemon() -> Result<String, String> {
 }
 
 fn resolve_agent_bin(bin_name: &str, override_var: &str) -> String {
-    if let Ok(configured) = env::var(override_var) {
-        return resolve_agent_binary(bin_name, &configured).executable;
-    }
-
-    if !cfg!(debug_assertions) {
-        if let Some(preferred) = preferred_packaged_agent_bin(bin_name) {
-            return preferred;
-        }
-    }
-
-    resolve_agent_binary(bin_name, bin_name).executable
+    agent_bin_reference(bin_name, env::var(override_var).ok().as_deref())
 }
 
-fn preferred_packaged_agent_bin(bin_name: &str) -> Option<String> {
-    let mut candidates = Vec::new();
-
-    if let Ok(home) = env::var("HOME") {
-        let home = PathBuf::from(home);
-        candidates.push(home.join(".local/bin").join(bin_name));
-        candidates.push(home.join(".cargo/bin").join(bin_name));
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        #[cfg(target_arch = "aarch64")]
-        candidates.push(PathBuf::from("/opt/homebrew/bin").join(bin_name));
-        candidates.push(PathBuf::from("/usr/local/bin").join(bin_name));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        candidates.push(PathBuf::from("/usr/local/bin").join(bin_name));
-        candidates.push(PathBuf::from("/usr/bin").join(bin_name));
-    }
-
-    // Keep the stable symlink (for example ~/.local/bin/codex). Resolving it
-    // here pins the embedded daemon to one release until the app restarts.
-    first_existing_agent_bin(candidates)
-}
-
-fn first_existing_agent_bin(candidates: impl IntoIterator<Item = PathBuf>) -> Option<String> {
-    candidates
-        .into_iter()
-        .find(|path| path.is_file())
-        .map(|path| path.display().to_string())
+fn agent_bin_reference(bin_name: &str, configured: Option<&str>) -> String {
+    // Resolve defaults in the daemon when used, so a fresh-account repair can
+    // replace a broken shared install with a user install without restarting.
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(bin_name)
+        .to_string()
 }
 
 fn normalize_existing_path(path: &Path) -> Option<String> {
@@ -1733,8 +1699,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        active_thread_warning_message, decode_file_url, dev_daemon_command_matches, expand_tilde,
-        first_existing_agent_bin, is_safe_external_url, parse_local_path_input,
+        active_thread_warning_message, agent_bin_reference, decode_file_url,
+        dev_daemon_command_matches, expand_tilde, is_safe_external_url, parse_local_path_input,
         path_is_within_roots, quit_warning_message, resolve_existing_local_path,
     };
     use std::{env, fs};
@@ -1755,10 +1721,20 @@ mod tests {
         ));
         symlink(env::current_exe().unwrap(), &link).unwrap();
         assert_eq!(
-            first_existing_agent_bin([link.clone()]),
-            Some(link.display().to_string())
+            agent_bin_reference("codex", Some(link.to_str().unwrap())),
+            link.display().to_string()
         );
         fs::remove_file(link).unwrap();
+    }
+
+    #[test]
+    fn default_agent_reference_can_pick_up_a_new_user_install() {
+        assert_eq!(agent_bin_reference("codex", None), "codex");
+        assert_eq!(agent_bin_reference("claude", Some("  ")), "claude");
+        assert_eq!(
+            agent_bin_reference("codex", Some("/custom/codex")),
+            "/custom/codex"
+        );
     }
 
     #[test]
