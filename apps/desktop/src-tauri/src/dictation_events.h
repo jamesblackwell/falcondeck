@@ -21,6 +21,7 @@ typedef NS_ENUM(int32_t, FDEventKind) {
   FDEventAudioRecorded = 10,
   FDEventRewriteSelection = 12,
   FDEventRewriteInstruction = 13,
+  FDEventCleanupTranscript = 14,
 };
 
 #endif

@@ -74,6 +74,8 @@ export type DictationSettings = {
   // How long recordings stay on this computer so a failed or wrong transcript
   // can be retried with another model. Zero deletes them immediately.
   historyRetentionHours: number;
+  // Lightly edit ordinary dictation with the rewrite model before insertion.
+  autoCleanupEnabled: boolean;
   // Select text, hold this shortcut, and speak how to edit it. Uses the same
   // transcription engine, then OpenRouter to rewrite.
   rewriteEnabled: boolean;
@@ -132,6 +134,7 @@ export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   repasteShortcutEnabled: true,
   fallbackModel: DEFAULT_FALLBACK_MODEL,
   historyRetentionHours: DEFAULT_HISTORY_RETENTION_HOURS,
+  autoCleanupEnabled: false,
   rewriteEnabled: false,
   rewriteShortcut: "right_option",
   rewriteModel: DEFAULT_REWRITE_MODEL,
@@ -214,6 +217,7 @@ export function normalizeDictationSettings(value: unknown): DictationSettings {
     historyRetentionHours: normalizeRetentionHours(
       candidate.historyRetentionHours,
     ),
+    autoCleanupEnabled: candidate.autoCleanupEnabled === true,
     rewriteEnabled:
       typeof candidate.rewriteEnabled === "boolean"
         ? candidate.rewriteEnabled
@@ -307,6 +311,7 @@ export function useDesktopDictation(baseUrl: string | null): void {
           enabled: settings.enabled && providerReady,
           rewriteEnabled:
             settings.rewriteEnabled && Boolean(baseUrl) && !shortcutsCollide,
+          autoCleanupEnabled: settings.autoCleanupEnabled && Boolean(baseUrl),
           daemonUrl: baseUrl,
         },
       }).catch(() => {

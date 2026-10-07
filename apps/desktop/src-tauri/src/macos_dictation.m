@@ -499,6 +499,7 @@ static CGKeyCode FDCopyVirtualKeyCode(void) {
 }
 @property(nonatomic) BOOL enabled;
 @property(nonatomic) BOOL rewriteEnabled;
+@property(nonatomic) BOOL autoCleanupEnabled;
 @property(nonatomic) BOOL modifierDown;
 @property(nonatomic) BOOL rewriteModifierDown;
 @property(nonatomic) BOOL modifierUsedInChord;
@@ -733,7 +734,8 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
            inputDeviceID:(NSString *)inputDeviceID
         retainRecordings:(BOOL)retainRecordings
           rewriteEnabled:(BOOL)rewriteEnabled
-         rewriteShortcut:(FDHotkey)rewriteShortcut {
+         rewriteShortcut:(FDHotkey)rewriteShortcut
+      autoCleanupEnabled:(BOOL)autoCleanupEnabled {
   self.retainRecordings = retainRecordings;
   BOOL shouldResetModifier =
       self.enabled != enabled || !FDHotkeysEqual(self.shortcut, shortcut);
@@ -746,6 +748,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.provider = provider;
   self.inputDeviceID = inputDeviceID.length > 0 ? inputDeviceID : nil;
   self.rewriteEnabled = rewriteEnabled;
+  self.autoCleanupEnabled = autoCleanupEnabled;
   self.rewriteShortcut = rewriteShortcut;
   if (shouldResetModifier && !self.recording && !self.stopping) {
     self.modifierDown = NO;
@@ -1505,6 +1508,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
         FDEmit(FDEventRewriteInstruction, text);
         return;
       }
+      if (self.autoCleanupEnabled) {
+        FDEmit(FDEventCleanupTranscript, text);
+        return;
+      }
       if (![self pasteText:text]) {
         // Carries the transcript so the overlay can offer a clipboard copy.
         FDEmit(FDEventPasteFailed, text);
@@ -2135,6 +2142,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)markLastRecordingCompleted {
+  if (!self.retainRecordings && self.recordingURL) {
+    [[NSFileManager defaultManager] removeItemAtURL:self.recordingURL error:nil];
+  }
   [self setRetainedRecordingURL:nil provider:0];
   [self clearRewriteSession];
 }
@@ -2272,7 +2282,7 @@ void fd_dictation_configure(bool enabled, const char *shortcut,
                             int32_t activation_mode, int32_t provider,
                             const char *input_device_id,
                             bool retain_recordings, bool rewrite_enabled,
-                            const char *rewrite_shortcut) {
+                            const char *rewrite_shortcut, bool auto_cleanup_enabled) {
   NSString *inputDeviceID = input_device_id
       ? [NSString stringWithUTF8String:input_device_id]
       : nil;
@@ -2293,7 +2303,8 @@ void fd_dictation_configure(bool enabled, const char *shortcut,
            inputDeviceID:inputDeviceID
         retainRecordings:retain_recordings
           rewriteEnabled:rewrite_enabled
-         rewriteShortcut:parsedRewrite];
+         rewriteShortcut:parsedRewrite
+      autoCleanupEnabled:auto_cleanup_enabled];
   });
 }
 

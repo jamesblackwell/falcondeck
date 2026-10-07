@@ -81,6 +81,15 @@ describe("DictationSetup voice rewrite", () => {
     ).toBeNull()
   })
 
+  it("enables automatic cleanup independently of the rewrite shortcut", () => {
+    render(<DictationSetup baseUrl={null} onToast={() => {}} />);
+    const cleanup = screen.getByRole("switch", { name: "Automatically clean up transcriptions" });
+    expect(cleanup).toHaveAttribute("aria-checked", "false");
+    fireEvent.click(cleanup);
+    expect(readDictationSettings().autoCleanupEnabled).toBe(true);
+    expect(readDictationSettings().rewriteEnabled).toBe(false);
+  });
+
   it("lists gpt-oss-120b as a rewrite model", () => {
     render(<DictationSetup baseUrl={null} onToast={() => {}} />);
     expect(

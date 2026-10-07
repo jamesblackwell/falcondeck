@@ -572,6 +572,17 @@ export function DictationSetup({
             </div>
           ) : null}
 
+          <SettingList>
+            <SwitchRow
+              title="Automatically clean up transcriptions"
+              description="Uses the rewrite model below to fix obvious transcription errors, numbers, and names such as FalconDeck and QuizGecko, with natural punctuation and paragraph breaks before pasting. Needs an OpenRouter key, including with Apple Speech. If cleanup fails, the original transcript is pasted."
+              checked={settings.autoCleanupEnabled}
+              onCheckedChange={(autoCleanupEnabled) =>
+                updateSettings({ autoCleanupEnabled })
+              }
+            />
+          </SettingList>
+
           <div className="space-y-5 border-t border-border-subtle pt-5">
             <SpeechCredentialField
               baseUrl={baseUrl}

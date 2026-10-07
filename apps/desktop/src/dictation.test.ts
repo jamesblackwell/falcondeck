@@ -43,6 +43,13 @@ describe("dictation settings", () => {
     expect(readDictationSettings().rewriteShortcut).toBe("F13");
   });
 
+  it("keeps automatic cleanup opt-in for existing settings", () => {
+    expect(normalizeDictationSettings({ rewriteEnabled: true }).autoCleanupEnabled).toBe(false);
+    expect(normalizeDictationSettings({ autoCleanupEnabled: "true" }).autoCleanupEnabled).toBe(false);
+    writeDictationSettings({ ...DEFAULT_DICTATION_SETTINGS, autoCleanupEnabled: true });
+    expect(readDictationSettings().autoCleanupEnabled).toBe(true);
+  });
+
   it("persists normalized settings", () => {
     writeDictationSettings({
       ...DEFAULT_DICTATION_SETTINGS,
